@@ -132,35 +132,22 @@ OWNER_GATEWAY_ACCESS_MODE = True
 # dashboard fitFixedGrid JS) so it is a twin of the owner's WT.
 WEBTERM_STATUS_ROWS = 1
 
-# #672: the FIXED client grid a FOREIGN-STREAM tab's browser xterm is force-fit
-# to, DISTINCT from the owner grid above. WHY it must be bigger: an owner box is
-# pinned window-size manual + default-size 176x50 (cli_tmux_provisioning), so the
-# owner grid (176x51) == the window and the -f ignore-size webterm client shows
-# it whole. A foreign-stream box's window is NOT pinned to 176x50 -- it is sized
-# by the STREAM developer's OWN client (David works at 305x57 -> window 305x56;
-# list-clients shows his 305x57 client WITHOUT ignore-size). The owner's webterm
-# client, if forced to the small 176x51 owner grid and attached -f ignore-size,
-# is SMALLER than that window, so tmux gives it a cursor-following CROP that
-# clips everything below the cursor -- the CC I/U/gk statusline footer + agent
-# strip (the #672 bug). Forcing the stream-tab grid >= the stream window makes
-# the owner client contain the whole window (footer visible); -f ignore-size is
-# KEPT so the stream developer's own window is never resized (the #648
-# no-degradation invariant, mirrored -- proven live: an ignore-size client
-# bigger than the window leaves the window untouched, a NON-ignore-size one
-# grows it). TRADE-OFF: this is a GENEROUS fixed grid (>= David's 305x57); a
-# stream dev in a SMALLER terminal gets a harmless cosmetic dark border on that
-# monitoring tab (everything visible) rather than a crop -- a strict improvement
-# toward "the owner sees the footer". All current owner-dashboard streams live
-# on the same UNPINNED subdev VPS, so no pinned box is dark-bordered in practice
-# (an owner-classified box like spinbike-vps/#656 is NOT a stream tab, gets no
-# override, and stays on the 176x51 owner grid -- verify its kind stays "owner"
-# if it is ever pinned differently). BUMP this if a stream developer starts
-# working in a terminal larger than it.
-# SCOPE: _tab_sessions runs for EVERY profile, and the david/marek self-gateways
-# (cli_webterm_profiles) mark every entry kind=="stream", so their OWN dashboards
-# also render at this grid. That is intended + harmless: -f ignore-size keeps
-# their own window un-resized, and a client >= the window shows it whole.
-WEBTERM_STREAM_TERM_GRID = (320, 64)
+# #672 REWORK (owner ruling 2026-08-25): there is NO per-stream grid any more.
+# The original #672 gave a FOREIGN-STREAM tab its own LARGER browser grid
+# (WEBTERM_STREAM_TERM_GRID 320x64) so the owner's -f ignore-size client was >=
+# the stream window and tmux never cropped the footer. But the owner's browser
+# viewport is FIXED (his lowest-res notebook, PWA zoom 100%), so a larger grid =
+# the font-fit shrinks it = micro fonts on the m1..m6 tabs (unusable; owner:
+# "nie je ani jeden dovod aby boli tmuxi a windows v nich rozdielne, vsetky
+# musia maximalne vyhovovat mne"). REVERSED: EVERY tab renders at the ONE owner
+# canonical grid (_webterm_term_grid() = 176x51). The foreign-stream footer crop
+# is instead solved on the TMUX side by the fleet-wide `window-size manual` +
+# `default-size 176x50` pin (cli_tmux_provisioning.apply_tmux_history_limit, on
+# EVERY box incl. subdev), which pins every window to the owner size regardless
+# of any client -- so the owner's 176x51 -f ignore-size client shows every
+# window whole (footer included) and David/Marek get the owner's size (a
+# harmless cosmetic dark border, which the owner explicitly wants; this reverses
+# the #648 "never degrade David" invariant by owner decree).
 
 WEBTERM_INVENTORY_PATH = CLAUDE_DIR / "webterm-inventory.json"
 # The dashboard index the gateway serves at `/` for an authed session.
@@ -686,15 +673,12 @@ def _tab_sessions(inventory, preserve_order=False):
     an EXCLUSIVE owner-defined tab list already dictates the exact order (#661)."""
     tabs = []
     for e in inventory:
+        # #672 REWORK (owner ruling 2026-08-25): NO per-tab grid override -- every
+        # tab renders at the ONE owner canonical grid (CFG.term_cols/term_rows =
+        # _webterm_term_grid()); the foreign-stream footer crop is solved on the
+        # tmux side (window-size manual pin), not by a bigger browser grid.
         t = {"id": e["id"], "alias": _short_alias(e),
              "title": e.get("label") or e["id"]}
-        # #672: a FOREIGN-STREAM tab carries its own larger fixed grid so the
-        # owner's -f ignore-size webterm client is >= the stream developer's
-        # window (whose size the owner box never pins) and tmux shows it whole,
-        # footer included. Owner tabs carry no override -> the JS getter falls
-        # back to the global 176x51 grid. See WEBTERM_STREAM_TERM_GRID.
-        if e.get("kind") == "stream":
-            t["tcols"], t["trows"] = WEBTERM_STREAM_TERM_GRID
         tabs.append(t)
     if not preserve_order:
         tabs.sort(key=lambda t: _tab_order_key(t["alias"]))
@@ -1012,14 +996,11 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 #frames { position: relative; flex: 1 1 auto; }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
-/* #671/#674: the ? help overlay (#655) is removed together with the ? button
-   (owner: keep only fullscreen). The ONLY persistent hint is now this one quiet,
-   readable footer line carrying the verified clipboard combos — muted Campbell
-   grey (#767676) at a readable 12px (never the old 11px micro-text). It stays in
-   the flex column, so the terminal keeps the rest of the height. */
-#clip-hint { flex: 0 0 auto; padding: 4px 12px; color: #767676;
-  background: #0C0C0C; border-top: 1px solid #2b2b2b;
-  font-size: 12px; line-height: 1.4; text-align: center; }
+/* #671 REWORK (owner ruling 2026-08-25, verbatim "znova si napchal text na copy
+   paste ktory zerie spodnu cast !!!!! nic take som nechcel, potrebujem hlavne
+   pracovnu plochu nie tvoje blbe vysvetlivky"): the copy/paste footer hint strip
+   is removed entirely so the terminal reclaims the height. The select/copy/paste
+   FUNCTIONALITY (attachClipboard) stays; only the visible strip is gone. */
 </style>
 </head>
 <body>
@@ -1028,40 +1009,12 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="clip-hint">Označ text myšou = skopíruje sa &middot; vložiť <b>Ctrl+Shift+V</b> (nie Ctrl+V)</div>
 <script>
 const CFG = @@CFG_JSON@@;
-// #672: make CFG.term_cols/term_rows PER-TAB. A foreign-stream tab carries its
-// own larger grid (s.tcols/s.trows -- WEBTERM_STREAM_TERM_GRID) because its tmux
-// window is sized by the stream developer's own client, not the owner's fixed
-// 176x50; the owner's -f ignore-size webterm client must be >= that window or
-// tmux crops the CC statusline footer (see the WEBTERM_STREAM_TERM_GRID comment
-// in cli_webterm.py + the #672 design comment). These getters return the CURRENT
-// tab's override (or the owner base when none) so fitFixedGrid/fillFixedGrid read
-// CFG.term_cols/term_rows UNCHANGED -- the grid FILL algorithm is untouched. Only
-// the ACTIVE (visible) tab is ever fit (activate() sets `current` then fits it;
-// a hidden tab has 0-size and its fit no-ops), so keying on `current` is correct.
-(function () {
-  var baseCols = CFG.term_cols, baseRows = CFG.term_rows;
-  // try/catch: `current` is a `let` declared below, so a getter somehow read
-  // before it initialises (it never is -- every read is via fitFixedGrid, all
-  // after activate()) would hit its TDZ; falling back to the owner base then is
-  // correct and can never throw. An out-of-range index likewise falls back.
-  Object.defineProperty(CFG, 'term_cols', {
-    configurable: true,
-    get: function () {
-      try { var s = CFG.sessions[current]; return (s && s.tcols) || baseCols; }
-      catch (e) { return baseCols; }
-    }
-  });
-  Object.defineProperty(CFG, 'term_rows', {
-    configurable: true,
-    get: function () {
-      try { var s = CFG.sessions[current]; return (s && s.trows) || baseRows; }
-      catch (e) { return baseRows; }
-    }
-  });
-})();
+// #672 REWORK (owner ruling 2026-08-25): ONE canonical grid for every tab, so
+// CFG.term_cols/term_rows are a plain constant (no per-tab defineProperty
+// getter). fitFixedGrid/fillFixedGrid read them unchanged; the foreign-stream
+// footer crop is solved on the tmux side (window-size manual pin), not here.
 // #643: the Campbell palette (single source of truth) + a Cascadia-ish system
 // monospace stack (no external font fetch — CSP/Cloudflare-Access safe). Applied
 // to each terminal via `term.options.theme` on the same-origin `window.term`
@@ -1272,17 +1225,10 @@ function fitFixedGrid(win) {
   const doc = win.document;
   if (!term.__wtClamped) {                      // clamp resize -> defeat ttyd's FitAddon
     const real = term.resize.bind(term);
-    // #672: read the per-CURRENT-tab grid LIVE on every clamped resize, NOT a
-    // value captured at install time. A tab's ttyd can connect LATE (preloaded)
-    // while `current` has already moved to a DIFFERENT-grid tab, so this clamp
-    // may be installed with the wrong tab as `current`; reading CFG.term_cols/
-    // term_rows (the per-current-tab getter) at call time means the resize still
-    // resolves to the RIGHT grid once THIS tab is `current` (activate() shows
-    // only the current tab, so a clamped resize of a visible terminal always
-    // sees its own grid) -- never a sticky wrong grid that would re-crop it (the
-    // #672 race the getter alone did not close). A hidden tab may resize
-    // transiently to another grid; it is corrected the moment it is shown.
-    term.resize = () => real(CFG.term_cols, CFG.term_rows);
+    // #672 REWORK: one canonical grid for every tab, so the clamp re-pins to the
+    // fixed (cols, rows) captured at fitFixedGrid entry (the single owner grid) --
+    // no per-current-tab getter, no per-tab race to close.
+    term.resize = () => real(cols, rows);
     term.__wtClamped = true;
   }
   try { term.resize(cols, rows); } catch (e) { return false; }
@@ -1499,17 +1445,10 @@ document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
 // #674: the prev/next cycle arrows and the ? help toggle are removed (owner: keep
 // only fullscreen); tab switching stays via tab clicks + Ctrl+Alt+1..9 (onHotkey).
-// #671 HONESTY (mirrors the #585 Ctrl+W isSecureContext honesty below): the
-// mouse-select copy bridge writes navigator.clipboard, which exists ONLY in a
-// secure context (HTTPS). Over the plain-HTTP tailnet the copy bridge is inert,
-// so the footer must NOT promise mouse-copy there — rewrite it to the honest
-// message (paste via Ctrl+Shift+V is a native browser paste and still works).
-(function () {
-  const ch = document.getElementById('clip-hint');
-  if (ch && !(window.isSecureContext && navigator.clipboard)) {
-    ch.textContent = 'Vložiť: Ctrl+Shift+V (nie Ctrl+V) · kopírovanie myšou vyžaduje HTTPS';
-  }
-})();
+// #671 REWORK (owner ruling 2026-08-25): the copy/paste footer hint strip + its
+// isSecureContext honesty-rewrite are removed entirely (owner: "potrebujem hlavne
+// pracovnu plochu nie tvoje blbe vysvetlivky"). The copy bridge (attachClipboard)
+// stays; only the visible hint is gone.
 // #585(b): Ctrl+W is readline delete-word in the terminal but the browser
 // consumes it as close-tab (a reserved shortcut a normal window cannot
 // preventDefault). Layer 1 — a beforeunload confirm armed WHILE a terminal is
