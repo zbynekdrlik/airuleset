@@ -239,7 +239,7 @@
     "tests/test_question_prune.py": 678,
     "tests/test_release_gap.py": 817,
     "tests/test_replay_backlog_marker_corpus.py": 60,
-    "tests/test_replay_design_gate_commit_corpus.py": 173,
+    "tests/test_replay_design_gate_commit_corpus.py": 183,
     "tests/test_reply_grace.py": 648,
     "tests/test_report_reconcile.py": 525,
     "tests/test_review_dispatch_authority.py": 119,

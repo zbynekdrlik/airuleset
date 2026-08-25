@@ -58,8 +58,9 @@ import design_gate as dg                                    # noqa: E402
 # hook honors its `[no-design: reason]` / bare `[no-design]` bypass tag
 # BEFORE extracting refs (pass resp. block regardless of refs), so the FIRST
 # commit subject ever to carry the tag would break CI retroactively. Exclude
-# that single class here; the bypass path itself stays unit-tested in
-# tests/test_design_gate.py. (#683 run-3 hardening.)
+# that single class here; the bypass path itself stays tested in
+# tests/test_block_commit_without_design.py (TestBypass: bare tag rejected
+# rc 2, reasoned tag honored rc 0 + audit-logged). (#683 run-3 hardening.)
 _BYPASS_TAG_RE = re.compile(r"\[no-design\b")
 
 

@@ -74,9 +74,19 @@ class TestScratchHomeCarriesGitTrust(TestCase):
                             "scratch HOME has no .gitconfig — in a container "
                             "CI every hook git call dies dubious-ownership "
                             "and the gate silently fail-opens")
-            body = cfg.read_text(encoding="utf-8")
-            self.assertIn("safe", body)
-            self.assertIn(str(replay.ROOT), body)
+            # Read it back the way git itself parses it (review 🔵: a
+            # substring check would pass a semantically broken config).
+            r = subprocess.run(
+                ["git", "config", "--file", str(cfg),
+                 "--get-all", "safe.directory"],
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.returncode, 0,
+                             "git cannot parse the scratch .gitconfig: "
+                             + (r.stderr or ""))
+            self.assertIn(str(replay.ROOT), r.stdout.splitlines(),
+                          "safe.directory does not name ROOT — the hook's "
+                          "git calls would still die dubious-ownership in "
+                          "a container CI")
             self.assertTrue((home / ".claude").is_dir(),
                             "marker-state isolation dir must still exist")
         finally:
@@ -91,8 +101,8 @@ class TestBypassTaggedSubjectsAreExcluded(TestCase):
     `[no-design]` bypass tag is honored BEFORE ref extraction (pass resp.
     block regardless of refs), so the FIRST such commit subject would break
     CI retroactively. That single non-deterministic class is excluded from
-    the corpus; the bypass path itself stays unit-tested in
-    tests/test_design_gate.py."""
+    the corpus; the bypass path itself stays tested in
+    tests/test_block_commit_without_design.py (TestBypass)."""
 
     def test_replayable_predicate(self):
         self.assertFalse(replay._replayable("fix: x [no-design: reason] (#5)"))
