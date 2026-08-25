@@ -1122,7 +1122,10 @@ def _release_recheck_flagged(rows, cwd=None, now=None, self_login=None,
     ambiguous, never proof of a missed re-check), or a member beyond
     OPS_WAIT_STALE_MAX_FETCHES is left UNTAGGED. The primary mechanism is the
     session DUTY (#699 doctrine) + the job-20 backstop, so the tag only ever
-    UNDER-flags. Makes NO release-train / "landed" claim (that stays the #698
+    UNDER-flags — barring a total tz/zoneinfo failure, where the shared
+    `working_time` helper degrades to a flat weekend-inclusive span (the #570
+    stale! baseline's own accepted fallback; benign here — a re-check nudge, not
+    an accusation). Makes NO release-train / "landed" claim (that stays the #698
     proof-only clause) — only "re-check overdue"."""
     now = time.time() if now is None else now
     if self_login is None and ages_fn is None:
