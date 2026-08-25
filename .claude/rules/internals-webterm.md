@@ -56,3 +56,30 @@ which auto-load when you read `cli_webterm.py`):
   (dev1 owner lane; subdev lane sockety: `webterm-<lane>-gateway.sock`).
 - Cross-account izolácia sa overuje NEGATÍVNE: cudzí účet dostane
   "Couldn't connect" + `ls /run/user/<uid>` Permission denied (0700 runtime dir).
+
+## ttyd/gateway bind invariant — loopback or UNIX socket, NEVER 0.0.0.0 (#681)
+
+- **THE INVARIANT.** Every webterm ttyd (owner replica AND each lane) and the
+  same-origin gateway binds LOOPBACK `127.0.0.1` (password mode) or a mode-0700
+  UNIX-domain socket in the account's `/run/user/<uid>` runtime dir (Access mode,
+  #663) — NEVER a wildcard / interface-any bind (`0.0.0.0`, `::`). A wildcard bind
+  exposes an unauthenticated, WRITABLE terminal on every interface incl. the
+  tailnet. The real spawn sites: `WEBTERM_TTYD_BIND = "127.0.0.1"` (cli_webterm.py),
+  `_LAUNCH_TEMPLATE` (`exec ttyd -p … -i 127.0.0.1 …`) and `_LAUNCH_TEMPLATE_SOCKET`
+  (`exec ttyd -i "$SOCK" …`); the gateway `--bind` argparse help says "never 0.0.0.0"
+  and `main()` fail-closes to exactly one of `--bind` (validated tailscale IP) / `--socket`.
+- **MITIGATION IN CODE (#681).** `_reject_wildcard_bind(bind, where)` (cli_webterm.py)
+  fails closed — a wildcard/empty bind at the two TCP-render chokepoints
+  (`render_webterm_launch_script` password branch + `_render_webterm_gateway_unit`)
+  raises `ValueError` instead of rendering a live exposure. Locked by
+  `tests/test_webterm_ttyd_wildcard_bind_681.py` (scans every rendered spawn
+  argv/unit for a wildcard + asserts the guard raises). The UNIX-socket path is not
+  a TCP interface and needs no guard.
+- **TEST HARNESS = loopback too, never 0.0.0.0.** To live-verify webterm in Playwright
+  MCP, bind the throwaway ttyd LOOPBACK `-i 127.0.0.1` and navigate
+  `http://127.0.0.1:<port>/`. Playwright MCP DOES reach 127.0.0.1 on dev1 —
+  EMPIRICALLY confirmed #681 (a loopback ttyd rendered its marker in the browser)
+  AND #657; this SUPERSEDES the earlier #661 harness claim ("Playwright MCP can't
+  reach the host 127.0.0.1 → bind 0.0.0.0"), which a review agent literally executed
+  → an unauthenticated writable terminal on the tailnet, killed by hand (#671). The
+  `internals-tests.md` #661/#657 harness bullets now agree on loopback-only.
