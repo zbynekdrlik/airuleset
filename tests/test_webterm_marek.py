@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_webterm as w  # noqa: E402
 import cli_webterm_marek as mk  # noqa: E402
+import cli_webterm_lane as lane  # noqa: E402  (#665 shared provisioner shutil/subprocess seam)
 import cli_webterm_profiles as p  # noqa: E402
 import cli_webterm_access as access  # noqa: E402
 import cli_webterm_tunnel as tun  # noqa: E402
@@ -218,7 +219,7 @@ class TestMarekPrerequisiteGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with m.patch.dict(os.environ, {"HOME": tmp}), \
                     m.patch.object(fw, "_whoami", lambda: mk.MAREK_GATEWAY_USER), \
-                    m.patch.object(mk.shutil, "which", return_value=None):
+                    m.patch.object(lane.shutil, "which", return_value=None):
                 ok, reason = mk.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("prerequisites missing", reason)
@@ -232,7 +233,7 @@ class TestMarekPrerequisiteGate(unittest.TestCase):
             os.chmod(ttyd, 0o755)
             with m.patch.dict(os.environ, {"HOME": str(home)}), \
                     m.patch.object(fw, "_whoami", lambda: mk.MAREK_GATEWAY_USER), \
-                    m.patch.object(mk.shutil, "which", return_value=None):
+                    m.patch.object(lane.shutil, "which", return_value=None):
                 ok, reason = mk.prerequisites_ready()
         self.assertTrue(ok, reason)
 
@@ -301,12 +302,12 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             self._isolate(st, tmp)
             st.enter_context(m.patch.object(fw, "_whoami",
                                             lambda: mk.MAREK_GATEWAY_USER))
-            st.enter_context(m.patch.object(mk.shutil, "which",
+            st.enter_context(m.patch.object(lane.shutil, "which",
                                             return_value="/usr/bin/ttyd"))
             st.enter_context(m.patch.object(
                 fw, "_run_systemctl",
                 lambda args: (calls.append(args), (0, "", ""))[1]))
-            st.enter_context(m.patch.object(mk.subprocess, "run",
+            st.enter_context(m.patch.object(lane.subprocess, "run",
                                             return_value=None))
             ok = mk.setup_webterm_marek_service()
         self.assertTrue(ok)

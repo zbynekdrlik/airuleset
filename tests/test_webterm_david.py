@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_webterm as w  # noqa: E402
 import cli_webterm_david as d  # noqa: E402
+import cli_webterm_lane as lane  # noqa: E402  (#665 shared provisioner shutil/subprocess seam)
 import cli_webterm_profiles as p  # noqa: E402
 import cli_webterm_tunnel as tun  # noqa: E402
 import cli_filedrop_watchdog as fw  # noqa: E402
@@ -101,7 +102,7 @@ class TestDavidPrerequisiteGate(unittest.TestCase):
 
     def test_no_op_when_key_or_ttyd_missing(self):
         with m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
-                m.patch.object(d.shutil, "which", return_value=None):
+                m.patch.object(lane.shutil, "which", return_value=None):
             ok, reason = d.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("prerequisites missing", reason)
@@ -122,7 +123,7 @@ class TestDavidPrerequisiteGate(unittest.TestCase):
             key.write_text("dummy", encoding="utf-8")
             with m.patch.dict(os.environ, {"HOME": str(home)}), \
                     m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
-                    m.patch.object(d.shutil, "which", return_value=None), \
+                    m.patch.object(lane.shutil, "which", return_value=None), \
                     m.patch.object(p, "WEBTERM_DAVID_IDENTITY", str(key)):
                 ok, reason = d.prerequisites_ready()
         self.assertTrue(ok, reason)
@@ -138,7 +139,7 @@ class TestDavidPrerequisiteGate(unittest.TestCase):
             key.write_text("dummy", encoding="utf-8")
             with m.patch.dict(os.environ, {"HOME": str(home)}), \
                     m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
-                    m.patch.object(d.shutil, "which", return_value=None), \
+                    m.patch.object(lane.shutil, "which", return_value=None), \
                     m.patch.object(p, "WEBTERM_DAVID_IDENTITY", str(key)):
                 ok, reason = d.prerequisites_ready()
         self.assertFalse(ok)
@@ -246,13 +247,13 @@ class TestDavidArtifactsWrite(unittest.TestCase):
             self._isolate(st, tmp)
             st.enter_context(m.patch.object(fw, "_whoami",
                                             lambda: p.DAVID_GATEWAY_USER))
-            st.enter_context(m.patch.object(d.shutil, "which",
+            st.enter_context(m.patch.object(lane.shutil, "which",
                                             return_value="/usr/bin/ttyd"))
             st.enter_context(m.patch.object(
                 p, "WEBTERM_DAVID_IDENTITY", str(Path(tmp) / "webterm_david_ed25519")))
             st.enter_context(m.patch.object(
                 fw, "_run_systemctl", lambda args: (calls.append(args), (0, "", ""))[1]))
-            st.enter_context(m.patch.object(d.subprocess, "run",
+            st.enter_context(m.patch.object(lane.subprocess, "run",
                                             return_value=None))
             ok = d.setup_webterm_david_service()
         self.assertTrue(ok)

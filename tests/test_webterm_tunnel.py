@@ -16,6 +16,7 @@ from unittest import mock as m
 
 import cli_webterm_david as dv
 import cli_webterm_marek as mk
+import cli_webterm_lane as lane  # #665 shared provisioner (shutil seam)
 import cli_webterm_tunnel as tun
 
 
@@ -119,10 +120,10 @@ class _DavidTunnelIsolate:
         }
         for name, val in pt.items():
             stack.enter_context(m.patch.object(dv, name, val))
-        # dv.shutil.which resolves the bin in setup_webterm_david_tunnel; tun.shutil.which
-        # is the shared helper's bin-present check — patch BOTH so the test is
-        # deterministic regardless of whether the box happens to have cloudflared.
-        stack.enter_context(m.patch.object(dv.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
+        # #665: lane.shutil.which resolves the bin in the shared setup_tunnel;
+        # tun.shutil.which is the shared helper's bin-present check — patch BOTH so
+        # the test is deterministic regardless of whether the box has cloudflared.
+        stack.enter_context(m.patch.object(lane.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
         stack.enter_context(m.patch.object(tun.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
         import cli_filedrop_watchdog as fw
         self.sysctl = []
@@ -172,7 +173,7 @@ class _MarekTunnelIsolate:
         }
         for name, val in pt.items():
             stack.enter_context(m.patch.object(mk, name, val))
-        stack.enter_context(m.patch.object(mk.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
+        stack.enter_context(m.patch.object(lane.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
         stack.enter_context(m.patch.object(tun.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
         import cli_filedrop_watchdog as fw
         self.sysctl = []
