@@ -979,6 +979,41 @@ class TestTransportModeMainGuard(unittest.TestCase):
                     "--dash-index", "x", "--trust-access-header", ACCESS_HEADER])
 
 
+class TestWildcardBindMainGuard681(unittest.TestCase):
+    """#681: main() is FAIL-CLOSED on a wildcard TCP --bind too. The help text said
+    'never 0.0.0.0' but nothing enforced it; combined with --trust-access-header (a
+    client-forgeable identity header) a wildcard --bind would serve an effectively
+    unauthenticated terminal on every interface from ONE hand-typed command — the
+    #671 exposure class. Auth + exactly-one-transport are satisfied here so the new
+    wildcard check is what fires (a p.error → SystemExit, before any bind/serve)."""
+
+    def _wildcard_refused(self, bind):
+        with self.assertRaises(SystemExit):
+            g.main(["--bind", bind, "--dash-index", "x",
+                    "--trust-access-header", ACCESS_HEADER])
+
+    def test_ipv4_wildcard_refused(self):
+        self._wildcard_refused("0.0.0.0")
+
+    def test_ipv6_wildcard_refused(self):
+        self._wildcard_refused("::")
+
+    def test_ipv6_wildcard_zero_refused(self):
+        self._wildcard_refused("::0")
+
+    def test_legacy_shorthand_zero_refused(self):
+        self._wildcard_refused("0")
+
+    def test_bind_wildcard_predicate(self):
+        # Direct predicate coverage: every interface-any form is a wildcard; a real
+        # interface (loopback / tailscale IP / IPv6 loopback) is not.
+        for bad in ("0.0.0.0", "::", "::0", "0:0:0:0:0:0:0:0",
+                    "0", "0.0", "0.0.0", "", "*", None):
+            self.assertTrue(g._bind_is_wildcard(bad), "wildcard: %r" % bad)
+        for good in ("127.0.0.1", "100.104.8.125", "::1"):
+            self.assertFalse(g._bind_is_wildcard(good), "real iface: %r" % good)
+
+
 class TestAccessModeRoutes(unittest.TestCase):
     """Integration over real sockets — Access-mode routing: with the trusted
     header the dashboard/proxy are served; without it, fail-closed 403 (never a

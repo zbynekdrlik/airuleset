@@ -39,11 +39,13 @@ inventár + dashboard + unit; (2) CONNECT (`python3 cli_webterm.py webterm-conne
 <id>`) validuje id proti allowlistu a execne ssh/tmux. Žiadny `import airuleset`
 na connect ceste.
 """
+import ipaddress
 import json
 import os
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -1686,21 +1688,53 @@ exec ttyd -i "$SOCK" -b %(base_path)s -a -W \\
 
 
 # #681: a webterm ttyd/gateway TCP bind is loopback (127.0.0.1) or a validated
-# tailscale IP — NEVER a wildcard / interface-any bind (0.0.0.0, ::, "", "*"), which
-# would expose an unauthenticated writable terminal on EVERY interface incl. the
-# tailnet. The #661 harness doc wrongly told a review agent to `ttyd -i 0.0.0.0` and
-# it was executed (#671); the production render path has always bound loopback / a
-# #663 UNIX socket, so this is a FAIL-CLOSED regression guard on the single TCP-bind
-# chokepoint (the UNIX-socket path is not a TCP interface and needs no guard). Keep
-# the wildcard set in sync with tests/test_webterm_ttyd_wildcard_bind_681.py.
-_WILDCARD_BINDS = frozenset({"", "0.0.0.0", "::", "0:0:0:0:0:0:0:0", "*"})
+# tailscale IP — NEVER a wildcard / interface-any bind, which would expose an
+# unauthenticated writable terminal on EVERY interface incl. the tailnet. The #661
+# harness doc wrongly told a review agent to `ttyd -i 0.0.0.0` and it was executed
+# (#671); the production render path has always bound loopback / a #663 UNIX socket,
+# so this is a FAIL-CLOSED regression guard on the single TCP-bind chokepoint (the
+# UNIX-socket path is not a TCP interface and needs no guard). `_bind_is_wildcard`
+# resolves EVERY interface-any spelling (0.0.0.0, ::, ::0, 0:0:0:0:0:0:0:0, and the
+# legacy IPv4 shorthands 0 / 0.0 / 0.0.0 / leading-zeros that inet_aton maps to
+# 0.0.0.0) via the stdlib, so a future edit cannot slip a wildcard past it (#681
+# review). The non-parseable sentinels "" / "*" are covered explicitly.
+_WILDCARD_SENTINELS = frozenset({"", "*"})
+
+
+def _inet_all_zero(b):
+    """True iff `b` parses as an IPv4 literal whose 32-bit value is 0 — catches the
+    legacy shorthands 0 / 0.0 / 0.0.0 / 0.0.0.0 (and leading-zero forms) that
+    inet_aton maps to 0.0.0.0. A non-IPv4 string (an IPv6 literal or a hostname) is a
+    handled, expected non-match, not an error to log."""
+    try:
+        return socket.inet_aton(b) == b"\x00\x00\x00\x00"
+    except OSError:
+        return False
+
+
+def _bind_is_wildcard(bind):
+    """True iff `bind` is an interface-any / unspecified / empty bind. Parses via
+    ipaddress (catches 0.0.0.0, ::, ::0, 0:0:0:0:0:0:0:0) and inet_aton (the legacy
+    IPv4 shorthands). A real interface (127.0.0.1, a 100.64/10 tailscale IP, ::1) is
+    False."""
+    if bind is None:
+        return True
+    b = str(bind).strip()
+    if b in _WILDCARD_SENTINELS:
+        return True
+    try:
+        return bool(ipaddress.ip_address(b).is_unspecified) or _inet_all_zero(b)
+    except ValueError:
+        # Not an ipaddress literal — an expected, handled case (a shorthand like
+        # "0", or a hostname); defer to the inet_aton shorthand check.
+        return _inet_all_zero(b)
 
 
 def _reject_wildcard_bind(bind, where):
     """Return `bind` unchanged if it is a real loopback/tailscale interface; raise
-    ValueError (fail closed) on a wildcard / interface-any / empty bind. `where`
+    ValueError (fail closed) on any wildcard / interface-any / empty bind. `where`
     names the call site for the error message. #681 security invariant."""
-    if bind is None or str(bind).strip() in _WILDCARD_BINDS:
+    if _bind_is_wildcard(bind):
         raise ValueError(
             "webterm %s: refusing interface-any bind %r — ttyd/gateway must bind "
             "loopback (127.0.0.1) or a validated tailscale IP, never 0.0.0.0 "

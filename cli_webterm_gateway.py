@@ -67,8 +67,10 @@ whose WireGuard layer is the encryption boundary (the same tailnet-only model
 import argparse
 import asyncio
 import hmac
+import ipaddress
 import os
 import secrets
+import socket
 import string
 import subprocess
 import sys
@@ -995,6 +997,35 @@ async def _main_async(args):
         await server.serve_forever()
 
 
+def _bind_is_wildcard(bind):
+    """#681: True iff a TCP `--bind` is an interface-any / unspecified / empty bind
+    (0.0.0.0, ::, ::0, 0:0:0:0:0:0:0:0, the legacy shorthands 0/0.0/0.0.0, "", "*").
+    Resolved via the stdlib so no wildcard spelling slips past. A real interface
+    (loopback, a tailscale IP, ::1) is False. Kept LOCAL — this module is deliberately
+    standalone (no cli_webterm import) so it stays runnable as a bare gateway.
+    Mirrors cli_webterm._bind_is_wildcard."""
+    if bind is None:
+        return True
+    b = str(bind).strip()
+    if b in ("", "*"):
+        return True
+    try:
+        return bool(ipaddress.ip_address(b).is_unspecified) or _inet_all_zero(b)
+    except ValueError:
+        # Not an ipaddress literal (a shorthand like "0", or a hostname) — an
+        # expected, handled case; defer to the inet_aton shorthand check.
+        return _inet_all_zero(b)
+
+
+def _inet_all_zero(b):
+    """True iff `b` parses as an IPv4 literal equal to 0.0.0.0 (0 / 0.0 / 0.0.0 /
+    leading-zero forms). A non-IPv4 string is a handled non-match, not an error."""
+    try:
+        return socket.inet_aton(b) == b"\x00\x00\x00\x00"
+    except OSError:
+        return False
+
+
 def main(argv):
     p = argparse.ArgumentParser(description="airuleset webterm same-origin gateway")
     p.add_argument("--bind", default=None, help="tailscale IP to bind (never 0.0.0.0)")
@@ -1039,6 +1070,16 @@ def main(argv):
     if bool(args.bind) == bool(args.socket):
         p.error("exactly one of --bind (TCP) or --socket (UNIX-domain, #663) "
                 "is required")
+    # #681: a TCP --bind is loopback or a validated tailscale IP — NEVER a wildcard /
+    # interface-any address. The help text said "never 0.0.0.0" but nothing enforced
+    # it; combined with --trust-access-header (a client-forgeable identity header),
+    # `--bind 0.0.0.0` would serve an effectively-unauthenticated terminal on every
+    # interface from one hand-typed command — exactly the #671 exposure class this
+    # ticket exists to prevent. Fail closed. (--socket UNIX mode is unaffected.)
+    if args.bind and _bind_is_wildcard(args.bind):
+        p.error("--bind must be a specific interface (loopback 127.0.0.1 or a "
+                "validated tailscale IP), never a wildcard / interface-any address "
+                "like 0.0.0.0 (#681 security invariant)")
     # #663-review NOTE (latent combos, not rejected because airuleset NEVER renders
     # them): the two SANCTIONED shapes are password+TCP (owner tailnet fallback:
     # --cred + --bind/--port + --ttyd-host/--ttyd-port) and Access+UNIX (every live
