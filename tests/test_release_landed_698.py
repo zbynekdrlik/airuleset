@@ -23,9 +23,11 @@ tickets hung in W long after their release landed (owner hard-fail escalation,
      standard ❓ channel (no new alarm class); None/empty degrades to the
      pre-#698 wording;
   6. the orchestrator wires the escalation through the SHARED #616 per-repo
-     release-state cache, only in the nudge branch, fails safe on an
-     undetermined fetch, and never shells out (no auto-unlabel is even
-     structurally possible);
+     release-state cache, only in the nudge branch, only for full/branch-merge
+     authority (a fork-no-merge box's origin is the FORK — frozen branches
+     could read drained forever), fails safe on an undetermined fetch, and
+     spawns no subprocess of its own (no auto-unlabel is even structurally
+     possible);
   7. `goal_lane_sweep` threads `release_state_fetch` into the ops-wait rider.
 """
 
@@ -84,6 +86,11 @@ class FetchParsesTitle(unittest.TestCase):
         self.assertEqual(by_num[41]["title"], "release 2.180 stage-3 gated tail")
         self.assertEqual(by_num[43]["title"], "klient nepotvrdil formulár")
 
+    def test_title_with_embedded_tab_is_preserved(self):
+        # a tab INSIDE a title must not truncate it (the join, review 🔵)
+        out = "41\t2026-01-01T00:00:00Z\taction-only\tops-wait\tv2.1\ttail\n"
+        self.assertEqual(self._fetch(out)[0]["title"], "v2.1\ttail")
+
     def test_degraded_4_field_line_yields_empty_title(self):
         out = "41\t2026-01-01T00:00:00Z\taction-only\tops-wait\n"
         members = self._fetch(out)
@@ -102,13 +109,28 @@ class ReleaseShapedNumbers(unittest.TestCase):
             _mem(3, "čaká na vydanie novej verzie"),
             _mem(4, "hotové, čaká na nasadenie na PROD"),
             _mem(5, "v2.181 deploy tail"),
+            _mem(6, "deploy visí na schválení pipeline"),   # deploy arm alone
+            _mem(9, "čaká na v2.181"),                      # v-prefix arm alone
         ]
-        self.assertEqual(owr._release_shaped_numbers(members), [1, 2, 3, 4, 5])
+        self.assertEqual(owr._release_shaped_numbers(members),
+                         [1, 2, 3, 4, 5, 6, 9])
 
     def test_client_wait_titles_not_flagged(self):
         members = [
             _mem(7, "klient nepotvrdil objednávkový formulár"),
             _mem(8, "objednávky sa nesynchronizujú do Money"),
+        ]
+        self.assertEqual(owr._release_shaped_numbers(members), [])
+
+    def test_bare_decimals_dates_amounts_ips_not_flagged(self):
+        # review 🟡: the bare `\d+\.\d+` arm was DROPPED — dates, amounts and
+        # IPs must never read as a release reference; a bare version without a
+        # keyword/v-prefix is the documented FN boundary (generic clause).
+        members = [
+            _mem(11, "stretnutie 19.8. s klientom"),
+            _mem(12, "zľava 2.5 percenta pre klienta"),
+            _mem(13, "IP 10.77.9.165 nedostupná"),
+            _mem(14, "čaká na 2.181"),
         ]
         self.assertEqual(owr._release_shaped_numbers(members), [])
 
@@ -118,8 +140,11 @@ class ReleaseShapedNumbers(unittest.TestCase):
         self.assertEqual(owr._release_shaped_numbers([41, 43]), [])
 
     def test_malformed_and_missing_title_tolerated(self):
+        # incl. a bool "number" (int subclass) — excluded, mirroring the bool
+        # guard in `_release_train_drained` (review 🔵)
         members = [None, "x", {"number": 9}, {"number": 10, "title": 5},
-                   {"title": "release 2.1"}, True]
+                   {"title": "release v2.1"}, True,
+                   {"number": True, "title": "release v2.1"}]
         self.assertEqual(owr._release_shaped_numbers(members), [])
 
     def test_empty_and_none_input(self):
@@ -200,6 +225,27 @@ class FetchCarriesTrainKey(unittest.TestCase):
         self.assertIsNone(self._fetch(compare=(0, "0", ""),
                                       staging=(1, "", "error connecting")))
 
+    def test_drained_but_deploy_still_running_is_in_flight(self):
+        # review 🟡 (both reviewers): right after the staging->main release PR
+        # merges, ahead is already 0 while the push-triggered deploy still
+        # runs — the drained verdict must carry the MEASURED in_flight, never
+        # a fabricated False, so the escalation stays suppressed mid-deploy.
+        rstate = self._fetch(
+            compare=(0, "0", ""), staging=(0, "staging", ""),
+            prs={}, runs={"in_progress": [
+                {"status": "in_progress", "event": "push",
+                 "headBranch": "main", "name": "Deploy"}]})
+        self.assertEqual(rstate,
+                         {"ahead": 0, "in_flight": True, "train": True})
+        self.assertFalse(owr._release_train_drained(rstate))
+
+    def test_drained_but_open_release_pr_is_in_flight(self):
+        rstate = self._fetch(compare=(0, "0", ""), staging=(0, "staging", ""),
+                             prs={"main": [{"number": 9}]})
+        self.assertEqual(rstate,
+                         {"ahead": 0, "in_flight": True, "train": True})
+        self.assertFalse(owr._release_train_drained(rstate))
+
     def test_gap_but_no_staging_train_false(self):
         self.assertEqual(
             self._fetch(compare=(0, "9", ""),
@@ -248,6 +294,17 @@ class NudgeCarriesReleaseLandedClause(unittest.TestCase):
     def test_threshold_constant(self):
         self.assertEqual(owr.RELEASE_LANDED_OWNER_ASK_N, 5)
 
+    def test_landed_members_render_numerically_sorted(self):
+        members = [_mem(50, "release v2.1"), _mem(7, "release v2.1")]
+        seen = {"50": float(NOW), "7": float(NOW)}
+        t = owr._nudge_text(0, members, NOW, seen, release_landed=[50, 7])
+        self.assertIn("#7 #50", t.split("RELEASE LANDOL", 1)[1])
+
+    def test_bool_landed_member_is_dropped(self):
+        t = owr._nudge_text(0, self.MEMBERS, NOW, self.SEEN,
+                            release_landed=[True])
+        self.assertNotIn("RELEASE LANDOL", t)
+
 
 # --------------------------------------------------------------------------- #
 # 6. Orchestrator — escalation end-to-end, fail-safe, no shell-out.
@@ -290,11 +347,17 @@ class OrchestratorEscalation(_OrchBase):
     def _due(self):
         return {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
 
+    def _auth(self, value="full"):
+        # hermetic: pin the authority the escalation guard resolves — never
+        # the test box's real user mapping
+        return m.patch("airuleset.resolve_authority", return_value=value)
+
     def test_drained_train_escalates_the_nudge(self):
         wrecs, tmux = self._due(), self._tmux()
-        logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
-                         release_state_fetch=lambda cwd: dict(DRAINED),
-                         handled=set(), state={})
+        with self._auth():
+            logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                             release_state_fetch=lambda cwd: dict(DRAINED),
+                             handled=set(), state={})
         self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
         typed = "".join(tmux.typed_texts())
         self.assertIn("RELEASE LANDOL", typed)
@@ -302,9 +365,10 @@ class OrchestratorEscalation(_OrchBase):
 
     def test_undetermined_state_falls_back_to_generic(self):
         wrecs, tmux = self._due(), self._tmux()
-        logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
-                         release_state_fetch=lambda cwd: None,
-                         handled=set(), state={})
+        with self._auth():
+            logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                             release_state_fetch=lambda cwd: None,
+                             handled=set(), state={})
         self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
         typed = "".join(tmux.typed_texts())
         self.assertNotIn("RELEASE LANDOL", typed)   # never a false claim
@@ -312,11 +376,51 @@ class OrchestratorEscalation(_OrchBase):
 
     def test_not_drained_falls_back_to_generic(self):
         wrecs, tmux = self._due(), self._tmux()
-        self._run(wrecs, lambda cwd: list(self.REL), tmux,
-                  release_state_fetch=lambda cwd: {"ahead": 4,
-                                                   "in_flight": False,
-                                                   "train": True},
-                  handled=set(), state={})
+        with self._auth():
+            self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                      release_state_fetch=lambda cwd: {"ahead": 4,
+                                                       "in_flight": False,
+                                                       "train": True},
+                      handled=set(), state={})
+        self.assertNotIn("RELEASE LANDOL", "".join(tmux.typed_texts()))
+
+    def test_fork_no_merge_authority_suppresses_escalation(self):
+        # review 🟡: on a fork-no-merge box the origin slug is the FORK —
+        # frozen fork branches could read "train drained" forever, so the
+        # escalation (and its fetch) must never run there.
+        calls = []
+        wrecs, tmux = self._due(), self._tmux()
+
+        def fetch_state(cwd):
+            calls.append(cwd)
+            return dict(DRAINED)
+
+        with self._auth("fork-no-merge"):
+            logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                             release_state_fetch=fetch_state,
+                             handled=set(), state={})
+        self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
+        self.assertNotIn("RELEASE LANDOL", "".join(tmux.typed_texts()))
+        self.assertEqual(calls, [])   # the fork's state is never even read
+
+    def test_branch_merge_authority_escalates(self):
+        # branch-merge stream boxes (the incident population) push to the
+        # CANONICAL repo — origin is upstream, the escalation must run
+        wrecs, tmux = self._due(), self._tmux()
+        with self._auth("branch-merge"):
+            self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                      release_state_fetch=lambda cwd: dict(DRAINED),
+                      handled=set(), state={})
+        self.assertIn("RELEASE LANDOL", "".join(tmux.typed_texts()))
+
+    def test_unresolvable_authority_suppresses_escalation(self):
+        wrecs, tmux = self._due(), self._tmux()
+        with m.patch("airuleset.resolve_authority",
+                     side_effect=RuntimeError("no registry")):
+            logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                             release_state_fetch=lambda cwd: dict(DRAINED),
+                             handled=set(), state={})
+        self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
         self.assertNotIn("RELEASE LANDOL", "".join(tmux.typed_texts()))
 
     def test_unwired_seam_keeps_pre_698_behavior(self):
@@ -344,17 +448,22 @@ class OrchestratorEscalation(_OrchBase):
         # cache) so BOTH job-20 consumers share ONE gh read per repo per TTL
         state = {}
         wrecs, tmux = self._due(), self._tmux()
-        self._run(wrecs, lambda cwd: list(self.REL), tmux,
-                  release_state_fetch=lambda cwd: dict(DRAINED),
-                  handled=set(), state=state)
+        with self._auth():
+            self._run(wrecs, lambda cwd: list(self.REL), tmux,
+                      release_state_fetch=lambda cwd: dict(DRAINED),
+                      handled=set(), state=state)
         self.assertIn(self.CWD, state.get("release_state_cache", {}))
 
-    def test_escalation_never_shells_out(self):
-        # the rider only ever CHANGES the nudge wording — no gh subprocess, so
-        # an auto-unlabel is structurally impossible from this code path
+    def test_escalation_spawns_no_subprocess_of_its_own(self):
+        # the rider changes only the nudge WORDING; every I/O rides the
+        # injected seams (in PRODUCTION the wired seam itself runs read-only
+        # gh queries — this locks that the rider adds no subprocess beyond
+        # them, and no label-mutating command exists anywhere on the path, so
+        # an auto-unlabel is structurally impossible)
         wrecs, tmux = self._due(), self._tmux()
         with m.patch("subprocess.run",
-                     side_effect=AssertionError("no subprocess allowed")):
+                     side_effect=AssertionError("no subprocess allowed")), \
+                self._auth():
             logs = self._run(wrecs, lambda cwd: list(self.REL), tmux,
                              release_state_fetch=lambda cwd: dict(DRAINED),
                              handled=set(), state={})

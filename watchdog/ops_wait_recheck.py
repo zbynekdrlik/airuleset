@@ -137,10 +137,18 @@ deployed-state doctrine and clear `ops-wait` WITH evidence TODAY", naming the
 members; above RELEASE_LANDED_OWNER_ASK_N members it additionally instructs the
 SESSION to summarise to the owner via the standard ❓ channel (never a new alarm
 class, #546/#688 — the session pings, the watchdog never does). HONEST
-BOUNDARY: cross-repo release waits, 2-branch repos, and a member whose release
-reference lives only in a COMMENT (the #550 T1 machine-readable-park reopen
-trigger) stay on the generic clause — an undetermined/unproven read SUPPRESSES
-the escalation, never invents it. The supervisor stays the ONLY one clearing
+BOUNDARY: 2-branch repos (`train` False), fork-no-merge boxes (origin = the
+FORK, whose frozen branches could read drained forever — authority-guarded in
+the orchestrator), and a member whose release reference lives only in a
+COMMENT (the #550 T1 machine-readable-park reopen trigger) stay on the generic
+clause; a CROSS-REPO release wait cannot be verified here — a release-shaped
+member IS still named when the LOCAL train drains, and that case is carried by
+the clause's own "iný/cudzí release" honesty branch, not by suppression; a
+repo with a PERPETUAL integration gap (continuous merges) is escalated only in
+its drained windows — the deliberate cost of never claiming an unproven
+"landed" (per-event refinements are a tracked follow-up). An undetermined/
+unproven read SUPPRESSES the escalation, never invents it. The supervisor
+stays the ONLY one clearing
 `ops-wait` with evidence; this changes the nudge WORDING only — cadence, counts
 and labels are untouched (the #547/#552/#570/#636 pattern).
 """
@@ -317,16 +325,21 @@ def _gk_handoff_numbers(members):
 # a new alarm class — the session pings, the watchdog never does, #546/#688).
 RELEASE_LANDED_OWNER_ASK_N = 5
 
-# #698 — a release-SHAPED title: a version (`2.180`, `v0.1.52`), a `stage-N`
-# token, or a release keyword (release/vydanie/nasadenie/deploy). Exactly the
-# ticket-body heuristic, scoped to the TITLE (the only member text the fetch
-# carries — a comment-only reference is the documented #550 T1 boundary). A
-# false positive is SAFE (the escalated clause demands evidence and offers the
-# "wait still holds — write why" branch); a false negative degrades to the
-# generic clause (pre-#698 behavior).
+# #698 — a release-SHAPED title: a release keyword (release/vydanie/
+# nasadenie/deploy), a `stage-N` token, or a v-PREFIXED version (`v2.181`).
+# The ticket-body heuristic scoped to the TITLE (the only member text the
+# fetch carries — a comment-only reference is the documented #550 T1
+# boundary), NARROWED by adversarial review: a bare `\d+\.\d+` arm matched
+# dates ("19.8."), amounts ("2.5"), and IPs — a false-positive class far
+# wider than the accepted keyword one — and every live true positive carries
+# a keyword or v-prefix anyway, so the bare-decimal arm is dropped (a bare
+# "čaká na 2.181" title is the documented FN boundary -> generic clause). A
+# remaining keyword false positive is SAFE (the escalated clause demands
+# evidence and offers the "wait still holds — write why" branch); a false
+# negative degrades to the generic clause (pre-#698 behavior).
 _RELEASE_SHAPED_RX = re.compile(
     r"(?i)(?:\breleas|\bvydan|\bnasaden|\bdeploy|\bstage-\d+\b|"
-    r"\bv?\d+\.\d+(?:\.\d+)*\b)")
+    r"\bv\d+\.\d+(?:\.\d+)*\b)")
 
 
 def _release_shaped_numbers(members):
@@ -334,10 +347,12 @@ def _release_shaped_numbers(members):
     stage token (#698) — only the dict shape carries a title, so a legacy int
     list (or a member without one) yields an EMPTY list: no escalation, the
     safe/unchanged direction, exactly like `_stale_numbers`. A malformed
-    element is dropped (never raises)."""
+    element is dropped (never raises); a bool "number" (an `int` subclass)
+    is excluded, mirroring `_release_train_drained`'s own bool guard."""
     return [m["number"] for m in (members or [])
-            if isinstance(m, dict) and not isinstance(m, bool)
+            if isinstance(m, dict)
             and isinstance(m.get("number"), int)
+            and not isinstance(m.get("number"), bool)
             and isinstance(m.get("title"), str)
             and _RELEASE_SHAPED_RX.search(m["title"])]
 
@@ -692,7 +707,8 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
         clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
     if w_pos:
         clauses.append(_W_CLAUSE % _members_line_aged(w_members, w_seen, now))
-        landed = [n for n in (release_landed or []) if isinstance(n, int)]
+        landed = [n for n in (release_landed or [])
+                  if isinstance(n, int) and not isinstance(n, bool)]
         if landed:
             clause = _W_RELEASE_LANDED_CLAUSE % " ".join(
                 "#%d" % n for n in sorted(landed))
@@ -753,8 +769,9 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     and sends nothing.
 
     `ops_wait_fetch(cwd)` is the injected W seam (network call kept out of run_once
-    unit tests, exactly like `backlog_fetch`): returns the parked W numbers
-    (`list[int]`), or None when unmeasurable — None fails safe to `skip`. It is
+    unit tests, exactly like `backlog_fetch`): returns the parked W member
+    dicts (`{number, stale, gk_handoff, title}` — legacy bare ints accepted),
+    or None when unmeasurable — None fails safe to `skip`. It is
     read through `_cached_ops_wait` (per-repo TTL cache) so the gh subprocess
     fires at most once per repo per TTL, never every sweep per pane (#547 review).
 
@@ -857,16 +874,28 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # TTL across BOTH job-20 consumers, never a parallel query). Undetermined
     # (None) / not a PROVEN drained train / seam not wired -> `landed` None ->
     # the generic W clause (pre-#698 wording): the escalated "release LANDOL"
-    # claim only ever rides a proven drained train.
+    # claim only ever rides a proven drained train. AUTHORITY guard (#698
+    # review): the fetch resolves the repo from the checkout's ORIGIN slug —
+    # on a fork-no-merge box origin is the FORK, whose frozen develop/staging/
+    # main can read "train drained" FOREVER, a persistent false claim no
+    # upstream release can correct. So the escalation runs only for full /
+    # branch-merge authority (origin = the canonical repo there); fork-no-merge
+    # and an unresolvable authority fail safe to the generic wording.
     rel_shaped = _release_shaped_numbers(members)
     rstate = None
     if rel_shaped and release_state_fetch is not None:
-        from watchdog import release_gap
         try:
-            rstate = release_gap._cached_release_state(
-                cwd, release_state_fetch, state, now)
+            import airuleset
+            authority = airuleset.resolve_authority(cwd)
         except Exception:
-            rstate = None
+            authority = None
+        if authority in ("full", "branch-merge"):
+            from watchdog import release_gap
+            try:
+                rstate = release_gap._cached_release_state(
+                    cwd, release_state_fetch, state, now)
+            except Exception:
+                rstate = None
     landed = rel_shaped if _release_train_drained(rstate) else None
     text = _nudge_text(i_count, members, now, new_rec["w_seen"],
                        i_members=i_members, release_landed=landed)

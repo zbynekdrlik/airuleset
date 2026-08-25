@@ -4351,20 +4351,23 @@ def _watchdog_release_state_fetch(cwd):
     F2): a compare 404 (no integration branch) OR a MISSING `staging` branch
     (review F6 — the distinctive 3-branch marker; a stray/legacy `develop` on a
     2-branch repo must not nudge and must never read as a drained TRAIN, #698 —
-    so staging is verified on the DRAINED path too, one extra cached gh call)
+    so staging AND the in-flight PR/run state are verified on the DRAINED path
+    too, extra cached gh calls per drained train repo per TTL)
     both resolve to "no release train". A NON-404 error stays None (transient
     -> fail-TTL retry) — since #698 that includes a transient staging error on
     the drained path (previously the ahead==0 verdict short-circuited before
     staging).
 
-    When there IS a real gap on a real release repo, in-flight is TRUE iff an open
+    On a PROVEN train (staging exists) — gap AND drained alike (#698 review
+    fix: the drained verdict must never fabricate `in_flight` False while a
+    just-merged release's deploy still runs) — in-flight is TRUE iff an open
     release PR (base staging OR prod, server-side `--base`-filtered so a busy
     repo's older release PR is never truncated out of a default-30 window —
     review F1) exists, OR a genuine deploy/release workflow is running
     (`_release_train_run_in_flight`, event-filtered). Branch names default
     develop/staging/main, env-overridable (AIRULESET_RELEASE_*), read at call
-    time (#574). Timeouts are kept tight (git 5s, each gh 15s); only a real gap
-    with no release in flight reaches the extra PR/run calls (rare + cached)."""
+    time (#574). Timeouts are kept tight (git 5s, each gh 15s); the PR/run
+    calls run once per proven-train repo per TTL (cached)."""
     import subprocess
     import json
     integ = os.environ.get("AIRULESET_RELEASE_INTEGRATION_BRANCH", "develop")
@@ -4407,11 +4410,12 @@ def _watchdog_release_state_fetch(cwd):
     # `staging` branch — checked on the DRAINED path too, because the job-20
     # release-landed escalation may only ever claim "train drained" for a
     # PROVEN train (a 2-branch repo with a stray `develop` == prod must read
-    # `train` False, never silently pass as drained). Costs one extra cached gh
-    # call per drained repo per TTL; a transient staging error now also defers
-    # the drained verdict for one fail-TTL (None) instead of guessing the
-    # train shape. Missing staging -> not a release repo (with a gap, that
-    # stays the clean "no gap" the F6 review demanded).
+    # `train` False, never silently pass as drained). Costs extra cached gh
+    # calls on the drained path (staging here, the in-flight checks below); a
+    # transient staging error now also defers the drained verdict for one
+    # fail-TTL (None) instead of guessing the train shape. Missing staging ->
+    # not a release repo (with a gap, that stays the clean "no gap" the F6
+    # review demanded).
     try:
         r = subprocess.run(
             ["gh", "api", "repos/%s/branches/%s" % (repo, staging), "--jq", ".name"],
@@ -4421,10 +4425,16 @@ def _watchdog_release_state_fetch(cwd):
     if r.returncode != 0 and not _gh_not_found(r.stderr):
         return None
     train = r.returncode == 0
-    if ahead <= 0 or not train:
-        return {"ahead": 0, "in_flight": False, "train": train}
+    if not train:
+        return {"ahead": 0, "in_flight": False, "train": False}
     # (3) in-flight: an open release PR whose base is staging or prod, queried
     # server-side per base (review F1 — never a truncated default-limit window).
+    # #698 review fix: MEASURED for the DRAINED (ahead 0) verdict too, not only
+    # the gap — right after a staging->prod release PR merges, `ahead` is
+    # already 0 while the push-triggered deploy still runs, and the
+    # release-landed escalation must never claim "no release PR / deploy
+    # running" it never checked (2-4 extra cached gh calls per drained train
+    # repo per TTL, same trade the staging gate above already accepted).
     in_flight = False
     for base in (staging, prod):
         try:
@@ -4464,7 +4474,8 @@ def _watchdog_release_state_fetch(cwd):
             if isinstance(page, list):
                 runs.extend(page)
         in_flight = _release_train_run_in_flight(runs, staging, prod)
-    return {"ahead": ahead, "in_flight": in_flight, "train": True}
+    return {"ahead": ahead if ahead > 0 else 0, "in_flight": in_flight,
+            "train": True}
 
 
 def _watchdog_vault_purge():
@@ -4743,6 +4754,9 @@ def cmd_watchdog(args):
                     # nudge-branch one), but through `release_gap.
                     # _cached_release_state` (per-repo TTL cache) so the gh calls
                     # fire at most once per repo per TTL, never every 60s sweep.
+                    # #698: the SAME seam also feeds the ops-wait rider's
+                    # release-landed escalation (nudge-branch-only, shared
+                    # cache) — TWO job-20 consumers, one fetch.
                     release_state_fetch=_watchdog_release_state_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
