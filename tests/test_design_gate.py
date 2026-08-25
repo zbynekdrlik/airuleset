@@ -352,6 +352,51 @@ class TestIssueRefs(unittest.TestCase):
         # ISSUE_REF_RE never anchors on "GH-", so this is not a gap either.
         self.assertEqual(dg.issue_refs("see GH-122 for context"), [])
 
+    # ----------------------------------------------------------------- #
+    # #692 -- all-digit CSS hex colours in a commit message must not be
+    # read as issue refs. The live incident (#691 worker): a commit body
+    # mentioning the colour hash-3-3-3-3-3-3 was extracted as issue
+    # 333333, which -- being nonexistent -- fails the #206 closed-issue
+    # narrowing toward STILL REQUIRED and hard-blocks the commit.
+    # ISSUE_REF_RE caps the digit run at 5 (refs 1..99999): a 6-digit RGB
+    # or 8-digit RGBA all-digit colour stops matching, while every
+    # plausible real ref (fleet max is 4 digits) keeps matching.
+    # ----------------------------------------------------------------- #
+
+    def test_all_digit_hex_colour_rgb_is_not_a_ref(self):
+        # The exact live false positive (#691 block message named 333333).
+        self.assertEqual(dg.issue_refs("recolor the tab bar to #333333"), [])
+
+    def test_all_digit_hex_colour_rgba_is_not_a_ref(self):
+        # 8-digit all-digit RGBA -- same class, one digit-length over RGB.
+        self.assertEqual(dg.issue_refs("overlay uses #33333380"), [])
+
+    def test_six_digit_run_is_not_partially_matched(self):
+        # Backtracking must not carve a bogus 12345 out of a 6-digit run:
+        # every shorter candidate fails the trailing \b against the next
+        # digit, so the whole token is skipped -- not truncated.
+        self.assertEqual(dg.issue_refs("token #123456 in prose"), [])
+
+    def test_hex_colour_with_letters_stays_unmatched(self):
+        # Was ALREADY safe pre-#692 (\b cannot sit between a digit and a
+        # following hex LETTER) -- locked so a future regex edit that
+        # drops the \b cannot silently regress this half of the family.
+        self.assertEqual(dg.issue_refs("accent is #3B78FF today"), [])
+
+    def test_real_ref_survives_next_to_hex_colours(self):
+        # The #691 worker's real shape: genuine [#691] tag alongside two
+        # colours -- the colour must vanish, the real ref must remain
+        # (the gate must not develop a bypass while losing the colour).
+        self.assertEqual(
+            dg.issue_refs(
+                "style: use #3B78FF and #333333 for the tab bar [#691]"),
+            [691])
+
+    def test_five_digit_ref_still_matches(self):
+        # Upper bound of the cap: 99999 is a plausible (if distant) issue
+        # number and MUST keep matching -- the cap only drops 6+ digits.
+        self.assertEqual(dg.issue_refs("prep for #99999"), [99999])
+
 
 # --------------------------------------------------------------------------- #
 # marker I/O
