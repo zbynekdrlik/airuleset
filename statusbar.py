@@ -140,7 +140,10 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
     follow one to read/unlink its target). Per-`$HOME` directory, so there is
     NO cross-user concern (unlike the #687 shared dedup store). An UNPARSEABLE
     entry is deliberately LEFT (no readable root/ts to judge; rare, low-harm,
-    overwritten on the next refresh of that cwd)."""
+    overwritten on the next refresh of that cwd). Accepted residual: a live root
+    that is temporarily INACCESSIBLE (EACCES / an unmounted volume) reads as
+    missing via `os.path.exists` and gets swept — low-harm, the entry is
+    recreated on that cwd's next refresh."""
     removed = []
     now = time.time() if now is None else now
     d = cache_dir(home)

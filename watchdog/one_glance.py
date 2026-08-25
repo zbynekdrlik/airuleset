@@ -367,7 +367,10 @@ StuckOwnerAlert = namedtuple("StuckOwnerAlert", "alert streak alerted")
 def stuck_owner_alert_decision(*, verdict, streak, max_streak, already_alerted):
     """#662 -- decide whether a structurally-confirmed STUCK supervisor session
     has been stuck long enough (the bounded keystroke lane-nudge recovery
-    provably failed) to warrant ONE un-suppressed owner alert.
+    provably failed) to warrant ONE per-episode alert record. (#688: that record
+    is now MACHINE-CHANNEL only -- `stuckalert:` was owner-ruled spam and added
+    to SUPPRESSED_ALERT_PREFIXES, so send() drops the Discord PING and keeps the
+    journal + `suppressed` delivery-log line; this decider is unchanged.)
 
     Fires ONLY on the actionable ``stuck`` verdict; ANY other verdict RESETS
     the episode (streak 0, alerted False) -- a session that recovered

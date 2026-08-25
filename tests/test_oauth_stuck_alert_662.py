@@ -22,8 +22,10 @@ These lock the fix (RED against the pre-#662 tree):
   * the swallow is REAL (apierr-giveup suppressed); at #662 both NEW alert
     namespaces (`oauthblock:` / `stuckalert:`) were un-suppressed. #676 (owner
     ruling 2026-08-24) then REVERSED oauthblock — a 401 OAuth-revoke is normal
-    subscription-switching, not an incident — so `oauthblock:` is now
-    owner-suppressed (POSTs nothing), while `stuckalert:` stays un-suppressed;
+    subscription-switching, not an incident — and #688 (owner ruling 2026-08-25)
+    REVERSED stuckalert too — the structural `stuck` verdict is a heuristic that
+    fires on many non-human-needed states. BOTH are now owner-suppressed (POST
+    nothing, machine-channel only); `acctblock:` is the one un-suppressed class;
   * `compose_oauth_block_alert` / `compose_stuck_owner_alert` exist + name
     the session and the human action (/login, coverage outage);
   * job 1 still EMITS the oauthblock send at escalation for a 401-revoked

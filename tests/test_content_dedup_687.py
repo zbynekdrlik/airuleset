@@ -29,6 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import notify                                             # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SEND_HOOK = ROOT / "hooks" / "notify-discord-send.sh"
 
@@ -175,6 +177,50 @@ class TestContentDedupClaim(unittest.TestCase):
         mode = os.stat(self.store).st_mode & 0o7777
         self.assertEqual(mode & 0o1000, 0o1000, "store must be sticky")
         self.assertEqual(mode & 0o0002, 0o0002, "store must be world-writable")
+
+
+class TestDedupKeyUsesUnqualifiedRepo(unittest.TestCase):
+    """#687 review 🔴: the dedup key's project component MUST be the UNQUALIFIED
+    origin repo name, never the stream-qualified `$PROJECT` label — else the four
+    david1–4 accounts (odoo-erp-david2 vs -david3) never share a key and the
+    cross-account incident this fixes is uncoalescable. Content-lock on the shell
+    gate (the collision is cross-UNIX-USER, not cheaply reproducible in-process).
+    Owner is already shared (resolve_owner redirects david1–4 → david)."""
+
+    def _dedup_gate(self):
+        src = SEND_HOOK.read_text()
+        i = src.index("--content-dedup-claim")
+        start = src.rfind("if [ \"$EMOJI\" = \"✅\" ]", 0, i)
+        return src[start:i + 400]
+
+    def test_dedup_gate_keys_on_the_unqualified_repo_name(self):
+        gate = self._dedup_gate()
+        self.assertIn("--repo-name", gate,
+                      "the dedup gate must resolve the UNQUALIFIED repo name")
+        self.assertIn('--project "$DEDUP_REPO"', gate,
+                      "content-dedup-claim must be given the unqualified repo, "
+                      "not the stream-qualified $PROJECT label")
+        self.assertNotIn('--project "$PROJECT"', gate,
+                         "must NOT pass the stream-qualified $PROJECT to the claim")
+
+    def test_content_dedup_claim_coalesces_same_repo_regardless_of_caller(self):
+        # Two calls for the SAME (redirected owner, unqualified repo, text) —
+        # what david1-4 produce once the gate passes the unqualified name —
+        # MUST coalesce; a stream-qualified project would NOT (the differing-
+        # project control proves exactly why the gate must pass the unqualified
+        # name).
+        store = Path(tempfile.mkdtemp(prefix="airuleset-cd687u-"))
+        self.addCleanup(shutil.rmtree, store, True)
+
+        def claim(project):
+            return notify.content_dedup_claim(
+                "bounce done", owner="david", project=project,
+                now=1_000_000.0, window_s=120, store_dir=str(store))
+        self.assertEqual((claim("odoo-erp"), claim("odoo-erp")), ("claim", "dup"),
+                         "same unqualified repo + owner + text must coalesce")
+        self.assertEqual((claim("odoo-erp-david2"), claim("odoo-erp-david3")),
+                         ("claim", "claim"),
+                         "differing stream-qualified projects do NOT coalesce")
 
 
 if __name__ == "__main__":

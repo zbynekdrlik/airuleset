@@ -2681,10 +2681,12 @@ def content_dedup_claim(text, owner=None, project=None, now=None,
         return "dup"              # already claimed in this window
     except OSError:
         return "claim"            # any other error (EACCES, ...) → fail OPEN
-    try:
-        os.write(fd, b"1")
-    finally:
-        os.close(fd)
+    # The O_EXCL create IS the claim — the marker's CONTENT is never read (dedup
+    # keys on the file's EXISTENCE), so no write is needed, and a mid-write
+    # failure can never turn a successful claim into a raised exception (this
+    # keeps the function fail-safe by construction for a direct Python caller too,
+    # not only the shell caller's `|| echo claim`; #687 review 🔵).
+    os.close(fd)
     return "claim"
 
 

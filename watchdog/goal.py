@@ -2600,12 +2600,13 @@ GOAL_LANE_WNT_MAX_DEFERS = 3
 # env-overridable floor, no longer a hardcoded 1536).
 GOAL_LANE_LOWMEM_SURFACE_STREAK = 5
 # #662 -- consecutive one-glance `stuck` sweeps (armed /goal + 0 workers +
-# backlog + idle over GOAL_LANE_IDLE_S) before the ONE un-suppressed owner
-# alert fires (deduped once per episode). By then the session has stayed dark
-# for that whole window WITHOUT reviving (the bounded lane-nudge keystroke
-# recovery ran what it could and did not bring it back); combined with
-# one_glance's own 15-min idle floor the owner learns of a coverage OUTAGE
-# ~20 min after a session goes dark, not the 9,5h montalu6 never. A fresh
+# backlog + idle over GOAL_LANE_IDLE_S) before the ONE per-episode alert record
+# fires (deduped once per episode). #688: that record is now MACHINE-CHANNEL
+# only (journal + `suppressed` delivery-log line) -- `stuckalert:` was owner-
+# ruled spam and added to SUPPRESSED_ALERT_PREFIXES, so send() drops the Discord
+# PING. By then the session has stayed dark for that whole window WITHOUT
+# reviving (the bounded lane-nudge keystroke recovery ran what it could and did
+# not bring it back). A fresh
 # episode (any non-stuck decider verdict, or a definite goal-clear) resets the
 # streak, so a transient lull never alarms. THE DEFAULT; the effective value is
 # read at CALL time by `_stuck_alert_streak()` so a malformed env value can
