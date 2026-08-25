@@ -59,6 +59,21 @@ class TestShortTargetAlias(unittest.TestCase):
         # marek is an owner account (not in any alias family) -> its own name.
         self.assertEqual(cli_aliases.short_target_alias("marek", "subdev"), "marek")
 
+    def test_forestshop_box_alias_is_fs(self):
+        # #661 rework (owner DOPLNENIE 2026-08-25): Marek's forestshop VPS tab,
+        # handled like the owner's spinbike `sb` -> box-keyed "fs" at the single
+        # alias source (#592), regardless of the unix account, so the webterm
+        # tab (lane id "forestshop") and the box's tmux WINDOW name (hostname
+        # "forestshop-dev") agree for BOTH accounts.
+        self.assertEqual(cli_aliases.short_target_alias("admin", "forestshop"), "fs")
+        self.assertEqual(cli_aliases.short_target_alias("admin", "forestshop-dev"), "fs")
+        self.assertEqual(cli_aliases.short_target_alias("stepan", "forestshop-dev"), "fs")
+        # The FLEET inventory ids (admin-forestshop-dev / stepan-forestshop-dev)
+        # keep their user-derived aliases — box_name's first segment is not
+        # "forestshop" there, so nothing else in the fleet shifts.
+        self.assertEqual(
+            cli_aliases.short_target_alias("admin", "admin-forestshop-dev"), "admin")
+
 
 if __name__ == "__main__":
     unittest.main()

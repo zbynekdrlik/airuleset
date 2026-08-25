@@ -79,10 +79,49 @@ class TestLaneRegeneratesFromLiveRender(unittest.TestCase):
             written = (base / "dash" / "index.html").read_text(encoding="utf-8")
             self.assertEqual(written, sentinel)          # regenerated from live render
             rd.assert_called_once()                       # exactly one live render call
-            # The lane render is UNFILTERED — the lane write omits `human`
-            # ENTIRELY (default None), never a domain filter (owner-gateway path).
+            # A lane WITHOUT a `dashboard_human` (david — its scoped inventory
+            # ids differ from the policy dict's fleet ids) renders UNFILTERED:
+            # the write omits `human` ENTIRELY (default None). (#661 rework: a
+            # lane that DOES declare one consumes the policy — the test below.)
             _args, kwargs = rd.call_args
             self.assertNotIn("human", kwargs)
+
+    def test_dashboard_human_lane_renders_through_the_domain_policy(self):
+        # #661 rework: marek's spec declares dashboard_human="marek", so his
+        # lane dash is rendered through the owner-defined per-domain tab list
+        # (order + exclusivity), while the connect allowlist (inventory JSON)
+        # stays his full physically-scoped set.
+        sentinel = "<!-- SENTINEL-661-HUMAN-RENDER -->\n"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            base = Path(tmp)
+            spec = types.SimpleNamespace(
+                dash_dir=base / "dash",
+                dash_index=base / "dash" / "index.html",
+                profile="marek",
+                inventory_path=base / "inv.json",
+                launch_path=base / "launch.sh",
+                ttyd_sock_basename="webterm-marek-ttyd.sock",
+                ttyd_service_dest=base / "sys" / "ttyd.service",
+                gateway_service_dest=base / "sys" / "gateway.service",
+                retire_credential_path=None,
+                dashboard_human="marek",
+            )
+            st.enter_context(m.patch.object(w, "CLAUDE_DIR", base / ".claude"))
+            st.enter_context(m.patch.object(
+                w, "webterm_inventory", return_value=_inv(["marek-subdev"])))
+            rd = st.enter_context(m.patch.object(
+                w, "render_dashboard_html", return_value=sentinel))
+            st.enter_context(m.patch.object(
+                w, "render_webterm_launch_script", return_value="#!/bin/sh\n"))
+            st.enter_context(m.patch.object(pwa, "write_pwa_assets"))
+            st.enter_context(m.patch.object(lane, "render_ttyd_unit", return_value="[unit]\n"))
+            st.enter_context(m.patch.object(lane, "render_gateway_unit", return_value="[unit]\n"))
+
+            lane.write_artifacts(spec)
+
+            rd.assert_called_once()
+            _args, kwargs = rd.call_args
+            self.assertEqual(kwargs.get("human"), "marek")
 
 
 class TestSetupServiceRegeneratesBeforeRestart(unittest.TestCase):
