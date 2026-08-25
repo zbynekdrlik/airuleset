@@ -47,7 +47,7 @@
   done'
   ```
 
-  **Cancelling a waiter you launched: kill it by ITS PID or a unique token in its own body (the run-id), never a broad pattern** — these recipe bodies are byte-identical on every stream, so `pkill -f "sleep 60"` is fleet-wide friendly-fire on a shared box (#701; full scoped-kill doctrine: `verify-launched-work-liveness`).
+  **Cancelling a waiter: by ITS PID or a run-id-scoped pattern, never `pkill -f "sleep 60"`** — identical bodies fleet-wide, friendly-fire (#701).
 
   **Recovery is not optional.** The notification linkage may not survive a compaction boundary: across compaction the OS process usually keeps running but the session's task-handle registry is dropped and recreated (anthropics/claude-code **#29193**, "has repro"). The two issues this rule used to cite described the OPPOSITE failure mode and were wrong — the archaeology is in the playbook, not here. Either way no notification arrives, so on your NEXT turn re-derive from the DURABLE resource (`gh run view <id>` again) rather than trusting that silence means nothing happened, and relaunch ONE fresh waiter if the old one is gone. Never sit on a blind indefinite wait, and never fall back to chunked foreground polling once a long wait is already the right call.
 
