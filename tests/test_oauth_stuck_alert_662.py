@@ -22,8 +22,10 @@ These lock the fix (RED against the pre-#662 tree):
   * the swallow is REAL (apierr-giveup suppressed); at #662 both NEW alert
     namespaces (`oauthblock:` / `stuckalert:`) were un-suppressed. #676 (owner
     ruling 2026-08-24) then REVERSED oauthblock — a 401 OAuth-revoke is normal
-    subscription-switching, not an incident — so `oauthblock:` is now
-    owner-suppressed (POSTs nothing), while `stuckalert:` stays un-suppressed;
+    subscription-switching, not an incident — and #688 (owner ruling 2026-08-25)
+    REVERSED stuckalert too — the structural `stuck` verdict is a heuristic that
+    fires on many non-human-needed states. BOTH are now owner-suppressed (POST
+    nothing, machine-channel only); `acctblock:` is the one un-suppressed class;
   * `compose_oauth_block_alert` / `compose_stuck_owner_alert` exist + name
     the session and the human action (/login, coverage outage);
   * job 1 still EMITS the oauthblock send at escalation for a 401-revoked
@@ -113,18 +115,21 @@ class SuppressionContrast(unittest.TestCase):
             notify._suppressed_alert_class("oauthblock:key:hash:123"),
             "oauthblock is now owner-suppressed (#676) — must NOT ping")
 
-    def test_stuckalert_is_not_suppressed(self):
-        self.assertIsNone(
+    def test_stuckalert_is_suppressed_688(self):
+        # #688 (owner ruling 2026-08-25) OVERTURNED #662/#676's "stuckalert stays
+        # un-suppressed" — the structural frozen-goal alarm is spam too.
+        self.assertEqual(
             notify._suppressed_alert_class("stuckalert:sid:123"),
-            "stuckalert is the structural-stuck escape valve — must POST "
-            "(#676 objected ONLY to the oauth class)")
+            "structural-stuck (#688)",
+            "#688: stuckalert is now owner-suppressed (machine-channel only)")
 
     def test_new_namespaces_have_no_prefix_collision(self):
-        # boundary-matched: oauthblock resolves to its OWN class (#676), never
-        # accidentally to api-error/usage/…; stuckalert stays un-suppressed.
+        # boundary-matched: each resolves to its OWN class, never accidentally to
+        # api-error/usage/…; #688 added stuckalert to the suppressed set.
         self.assertEqual(
             notify._suppressed_alert_class("oauthblock:x:y:1"), "oauth-revoke (#676)")
-        self.assertIsNone(notify._suppressed_alert_class("stuckalert:s:2"))
+        self.assertEqual(
+            notify._suppressed_alert_class("stuckalert:s:2"), "structural-stuck (#688)")
 
 
 class NeedsInteractiveLoginPredicate(unittest.TestCase):
@@ -182,10 +187,11 @@ class SuppressionThroughSend(unittest.TestCase):
         self.assertEqual(r, "suppressed")
         self.assertEqual(self.posts, [])
 
-    def test_stuckalert_posts(self):
+    def test_stuckalert_suppressed_688(self):
+        # #688: the structural-stuck alarm is now owner-suppressed — POSTs nothing.
         r = notify.send("body", dedup_key="stuckalert:s:1")
-        self.assertEqual(r, "sent")
-        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(r, "suppressed")
+        self.assertEqual(self.posts, [])
 
 
 class ComposeHelpers(unittest.TestCase):
@@ -475,6 +481,22 @@ class SweepStuckOwnerAlert(unittest.TestCase):
         keys = self._alerts(sends)
         self.assertEqual(len(set(keys)), len(keys), "no dup keys: %r" % keys)
         self.assertEqual(len(keys), 1, "exactly one alert per episode: %r" % keys)
+
+    def test_suppressed_send_latches_the_episode_688(self):
+        # #688: stuckalert is now #546-owner-suppressed, so in production
+        # notify.send() returns "suppressed" (machine-channel only, no Discord
+        # ping). A "suppressed" status IS a delivered decision (delivery-log +
+        # journal), so the episode MUST latch on it — exactly once, never
+        # re-firing the send() every sweep. RED on the pre-#688 latch set (which
+        # lacked "suppressed" → the else "send FAILED, will retry" branch →
+        # re-fires each sweep).
+        sends, _s, _sid = self._run(
+            self._stuck(goal.GOAL_LANE_STUCK_ALERT_STREAK + 3),
+            send_result="suppressed")
+        self.assertEqual(len(self._alerts(sends)), 1,
+                         "a suppressed (machine-channel) send must LATCH the "
+                         "episode exactly once, never re-fire each sweep: %r"
+                         % sends)
 
 
 if __name__ == "__main__":

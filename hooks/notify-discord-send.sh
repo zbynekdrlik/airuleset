@@ -314,6 +314,31 @@ if [ "${PROJECT_UNRESOLVED:-0}" = "1" ]; then
     _delivery_log "unresolved-project" "no-cwd-or-origin"
 fi
 
+# #687: cross-session (cross-USER) content dedup for the ✅ ping ONLY. Four
+# david sessions (SEPARATE unix accounts) delivered the identical ✅ (bounce
+# resolved) as four Discord messages. Coalesce an identical payload across
+# sessions within a short window via a shared sticky /tmp claim store — the
+# FIRST sender delivers, the rest are deduped (logged, never silent — #135).
+# NEVER for ❓ (the question flow is unchanged — gated on ✅), never in dry-run
+# (a preview claims nothing), never the Python run-card path (its own dedup).
+# The dedup key's project component MUST be the UNQUALIFIED origin repo name
+# (`--repo-name`), NEVER the stream-qualified `$PROJECT` label: `$PROJECT` is
+# `project_label_for` → `stream_qualified` = repo + `-<unix-user>`, so the four
+# david1–4 accounts would carry DIFFERENT keys (odoo-erp-david2 vs -david3) and
+# never coalesce — the exact incident this fixes (#687 review 🔴). The owner
+# (`--owner-name` = resolve_owner) already redirects david1–4 → `david`, so with
+# the unqualified repo name the key is identical across all four accounts.
+if [ "$EMOJI" = "✅" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
+    DEDUP_REPO=$(python3 "$AIRULESET_PY" notify --repo-name --cwd "$CWD" 2>/dev/null || echo "")
+    CDEDUP=$(printf '%s' "$TEXT" | python3 "$AIRULESET_PY" notify \
+                 --content-dedup-claim --owner-name "$PRIMARY_OWNER" \
+                 --project "$DEDUP_REPO" 2>/dev/null || echo claim)
+    if [ "$CDEDUP" = "dup" ]; then
+        _delivery_log "deduped" "cross-session-content"
+        exit 0
+    fi
+fi
+
 emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
 for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them
     [ -n "$T" ] || continue

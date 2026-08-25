@@ -35,6 +35,11 @@ class _HomeIsolated(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-pwiring-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".claude").mkdir(parents=True, exist_ok=True)
+        # #687: per-test ✅ content-dedup store — TestSendHookProjectRouting's
+        # send-hook tests send the IDENTICAL ✅ ("hotovo") which the cross-session
+        # dedup would coalesce under a shared store. Dual-runner (setUp runs under
+        # both pytest and `unittest discover`).
+        self.cdedup = self.home / "content-dedup"
 
     @property
     def log(self):
@@ -53,7 +58,7 @@ class _HomeIsolated(unittest.TestCase):
 class TestRunCardPassesProject(unittest.TestCase):
 
     def _args(self, **over):
-        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                     repo_name=False, newest_card=False, backfill_digest=False,
                     provision_question_thread=False, provision_project_thread=False,
                     project_label=False, record_question=False,
@@ -138,7 +143,7 @@ class TestApiErrorPassesProject(unittest.TestCase):
 
     def _args(self, **over):
         base = dict(api_error=True, run_card=False, autopilot_done=False,
-                    mention_prefix=False, repo_name=False, newest_card=False,
+                    mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                     backfill_digest=False, provision_question_thread=False,
                     provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False,
@@ -222,7 +227,8 @@ class TestSendHookProjectRouting(_HomeIsolated):
     def _run(self, emoji, cwd, curl_path):
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": emoji,
               "ND_TEXT": "hotovo", "ND_CWD": cwd,
-              "AIRULESET_NOTIFY_OWNER": "zbynek", "PATH": curl_path}
+              "AIRULESET_NOTIFY_OWNER": "zbynek", "PATH": curl_path,
+              "AIRULESET_CONTENT_DEDUP_DIR": str(self.cdedup)}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         return subprocess.run(["bash", str(SEND_HOOK)], input="",
                               capture_output=True, text=True, env=env)
@@ -326,7 +332,7 @@ class TestApiErrorHookRetiredNoOp(unittest.TestCase):
 class TestAutopilotDonePassesProject(unittest.TestCase):
 
     def _args(self, **over):
-        base = dict(run_card=False, autopilot_done=True, mention_prefix=False,
+        base = dict(run_card=False, autopilot_done=True, mention_prefix=False, content_dedup_claim=False,
                     repo_name=False, newest_card=False, backfill_digest=False,
                     provision_question_thread=False, provision_project_thread=False,
                     project_label=False, record_question=False,

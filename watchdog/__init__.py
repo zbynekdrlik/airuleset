@@ -1578,10 +1578,11 @@ def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
     survived every one of the `max_nudges` `continue`s is NOT self-healing (the
     #602 rotation resumes on nudge #1); it is a PERSISTENT non-self-healing AUTH
     block, exactly the acctblock class. So for that class ONLY, ALSO fire ONE
-    un-suppressed `oauthblock:` alert (keyed OUTSIDE the apierr family, exactly
-    like `acctblock:`) naming the session (`loc`). The montalu6 9,5h silent
-    outage was precisely this alarm not existing -- the give-up ping being the
-    sole signal, and it being swallowed. Returns log lines."""
+    `oauthblock:` alert naming the session (`loc`). #676 (owner ruling
+    2026-08-24) then owner-suppressed `oauthblock:` (a 401 revoke is normal
+    subscription-switching, not an incident), so this alert is now MACHINE-
+    CHANNEL only: send() drops the Discord PING and keeps the journal +
+    `suppressed` delivery-log line. Returns log lines."""
     logs = []
     body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
             "stále nepohlo — treba zásah. (Skúšam ďalej, interval sa "
@@ -1595,8 +1596,9 @@ def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
         send_fn(compose_oauth_block_alert(project, loc, max_nudges), owner=owner,
                 dedup_key="oauthblock:%s:%s:%s" % (key, err_hash, fs),
                 dry_run=dry_run)
-        logs.append("oauthblock owner ALERTED %s [%s] — persistent /login-needed "
-                    "auth block, self-heal failed after %d nudges (un-suppressed)"
+        logs.append("oauthblock machine-channel record %s [%s] — persistent "
+                    "/login-needed auth block, self-heal failed after %d nudges "
+                    "(owner-suppressed #676; journal + delivery-log, no PING)"
                     % (project, key, max_nudges))
     return logs
 
@@ -1986,8 +1988,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           widening interval (#175), with a one-shot #546-suppressed "gave up"
           ping. EXCEPTION (#662, see `_apierr_escalation_ping`): a persistent
           interactive-`/login` block that survived every `continue` ALSO fires
-          ONE un-suppressed `oauthblock:` alert; a dark pane the nudge can't
-          reach is backstopped by the lane-sweep `stuckalert:` rider (job 20).
+          an `oauthblock:` alert, and a dark pane the nudge can't reach is
+          backstopped by the lane-sweep `stuckalert:` rider (job 20) — but BOTH
+          of those classes are now MACHINE-CHANNEL only (owner-suppressed:
+          oauthblock #676, stuckalert #688; journal + `suppressed` delivery-log
+          line, no Discord PING). `acctblock:` is the one un-suppressed class.
           #176: a pane idle at `❯` but holding a FOREIGN DRAFT is genuinely idle,
           not busy — `_classify_boundary` tells it apart from a real foreground
           turn, and delivery goes through `deliver_with_stash` (never a raw
@@ -3202,8 +3207,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     if entry.get("escalated") and not prev_escalated:
                         logs.append("escalate %s [%s] — still stuck after %d nudges, "
                                      "backing off (keeps retrying)" % (project, key, max_nudges))
-                        # #175 give-up ping (suppressed) + #662 un-suppressed
-                        # oauthblock valve for a persistent /login-needed block.
+                        # #175 give-up ping + the #662 oauthblock valve for a
+                        # persistent /login-needed block — BOTH machine-channel
+                        # only now (#546/#676 owner-suppressed; no Discord PING).
                         logs += _apierr_escalation_ping(
                             send_fn, project, pid, run, key, err_hash, fs,
                             err_text, owner, max_nudges, dry_run)

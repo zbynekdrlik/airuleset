@@ -126,19 +126,24 @@ class TestOAuthblockIsSuppressed(_HomeIsolated):
 
 
 class TestStuckalertUntouched(_HomeIsolated):
-    """(b) the owner objected ONLY to oauth — stuckalert must keep delivering."""
+    """#676 was scoped to oauth ALONE; #688 (owner ruling 2026-08-25) then
+    OVERTURNED the "stuckalert stays un-suppressed" scoping — the structural
+    frozen-goal alarm is spam too, suppressed the same way. See
+    test_stuck_alert_suppression_688.py for the full #688 lock; these two are the
+    #676 assertions inverted (justified in-place per the deliberate-invariant-
+    overturn convention)."""
 
-    def test_stuckalert_is_not_suppressed(self):
-        self.assertIsNone(
+    def test_stuckalert_is_now_suppressed_688(self):
+        self.assertEqual(
             notify._suppressed_alert_class("stuckalert:sid:123"),
-            "stuckalert is the structural-stuck escape valve — must NOT be "
-            "suppressed by #676 (owner objected only to the oauth class)")
+            "structural-stuck (#688)",
+            "#688: the structural-stuck alarm is owner-ruled spam — now suppressed")
 
-    def test_stuckalert_still_delivers_when_configured(self):
+    def test_stuckalert_no_longer_delivers_688(self):
         self._write_env()
         r = notify.send("⛔ /goal ZAMRZLA", dedup_key="stuckalert:s:1")
-        self.assertEqual(r, "sent", "stuckalert must still POST")
-        self.assertEqual(len(self.posts), 1, "stuckalert must reach Discord")
+        self.assertEqual(r, "suppressed", "#688: stuckalert must NOT POST")
+        self.assertEqual(self.posts, [], "#688: stuckalert must reach nothing")
 
     def test_acctblock_still_delivers(self):
         # the genuine one-shot account-block alarm (needs a human) is ALSO

@@ -55,6 +55,16 @@ _DEDUP_NAME_MAX = 180
 # documented "content-stable key swallowed by the 14-day TTL" trap).
 AUTO_DEDUP_WINDOW_S = 300
 
+# #687: cross-session (cross-USER) content dedup for the ✅ device ping. The ✅
+# SHELL send path (notify-discord-send.sh, kind=shell) never routes through
+# send()/_dedup_claim, and david1–4 are SEPARATE unix accounts (own $HOME), so
+# a fleet-wide ✅ (a bounce resolved) is announced N times. A SHARED sticky /tmp
+# store (not per-$HOME) coalesces an identical payload across users within the
+# window. The window is short (coalesce a near-simultaneous fleet event), and it
+# rides the FILENAME's time-bucket so there are no mtime races.
+CONTENT_DEDUP_DIRNAME = "airuleset-notify-content-dedup"
+CONTENT_DEDUP_WINDOW_S = 120
+
 # Stream personas whose tmux session name has NO Discord identity of its own
 # (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap/miva1 (#300)
 # route to zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
@@ -1287,9 +1297,14 @@ def compose_stuck_owner_alert(project, loc, sweeps):
     (armed /goal + 0 workers + backlog waiting + idle over threshold) held for
     `sweeps` consecutive ~1-min sweeps — long enough that the session did NOT
     revive despite the bounded keystroke lane-nudge recovery (a dead /
-    login-dialog-covered session a `continue` cannot bring back). A real
-    coverage OUTAGE the owner must see. Keyed `stuckalert:` (OUTSIDE the #546
-    apierr family) so it always POSTs. No @mention here — send() prepends it."""
+    login-dialog-covered session a `continue` cannot bring back). Keyed
+    `stuckalert:`. #688 (owner ruling 2026-08-25) added that key to
+    `SUPPRESSED_ALERT_PREFIXES` — the structural `stuck` verdict is a heuristic
+    that fires on many non-human-needed states, so this body is still COMPOSED
+    and passed to send(), but send() suppresses the Discord PING (the machine
+    channel keeps the signal — watchdog journal + the `suppressed` delivery-log
+    line; the keystroke auto-recovery is untouched), exactly like the sibling
+    `oauthblock:` alarm (#676). No @mention here — send() prepends it."""
     proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
     where = _clean(loc) or "?"
     return ("⛔ **%s** — /goal slučka ZAMRZLA: %d× po sebe (~1 min/kontrola) "
@@ -2571,6 +2586,110 @@ def _auto_dedup_key(body, owner, now=None, window_s=None):
     return "auto:%s:%s:%d" % (owner or "-", digest, int(now // window))
 
 
+def _content_dedup_store_dir(store_dir=None):
+    """The SHARED cross-user content-dedup store (#687). NOT under $HOME —
+    david1–4 are separate accounts, so the store must be reachable by all box
+    tenants; a per-$HOME store would not coalesce across them. Overridable by
+    `store_dir` (tests) or `$AIRULESET_CONTENT_DEDUP_DIR`."""
+    return (store_dir or os.environ.get("AIRULESET_CONTENT_DEDUP_DIR")
+            or os.path.join(tempfile.gettempdir(), CONTENT_DEDUP_DIRNAME))
+
+
+def _content_dedup_key(text, owner, project, now, window_s):
+    """`content#<owner>#<project>#<sha16(normalized_text)>#<time-bucket>` — the
+    bucket lives in the KEY (like `_auto_dedup_key`) so a marker from a previous
+    window has a DIFFERENT filename and never collides (no mtime races). `#`
+    separators survive filename sanitisation and cannot occur in a username /
+    repo name / hex / int (#141 collision-safe by construction)."""
+    norm = " ".join(str(text or "").split()).lower()
+    digest = hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:16]
+    return "content#%s#%s#%s#%d" % (owner or "-", project or "-", digest,
+                                    int(now // window_s))
+
+
+def _content_dedup_filename(key):
+    safe = re.sub(r"[^A-Za-z0-9._#-]", "_", key)
+    if len(safe.encode("utf-8")) > _DEDUP_NAME_MAX:
+        safe = "content#" + hashlib.sha256(
+            key.encode("utf-8", "replace")).hexdigest()
+    return safe
+
+
+def _content_dedup_sweep(d, now, window_s):
+    """Best-effort reclaim of markers older than 2 windows (their bucket is long
+    past). Under the sticky store dir only the marker's OWN creator can unlink
+    it — a foreign tenant's EPERM is skipped, never fatal."""
+    cutoff = now - 2 * window_s
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith("content"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            if os.path.getmtime(p) < cutoff:
+                os.unlink(p)
+        except OSError:
+            continue
+
+
+def content_dedup_claim(text, owner=None, project=None, now=None,
+                        window_s=None, store_dir=None):
+    """#687: cross-session (cross-USER) content dedup for the ✅ device ping.
+
+    Returns "claim" (this caller is the FIRST to send this payload in the
+    window — DELIVER) or "dup" (an identical payload was already claimed in the
+    window — SUPPRESS). Atomic first-writer-wins via `os.open(O_CREAT|O_EXCL|
+    O_NOFOLLOW)` in a SHARED sticky /tmp store, so it coalesces across the four
+    separate `david` unix accounts on subdev, not only across one user's tmux
+    sessions.
+
+    FAIL-OPEN: any error creating/claiming (a mis-permissioned store, a full
+    disk, a hostile 0700 dir) returns "claim" — a duplicate ping is strictly
+    better than a lost one. Security: the store is 0o1777 (world-writable +
+    STICKY, so a tenant cannot delete/rename another's marker), markers are
+    O_NOFOLLOW (no symlink-target write) and 0o644 (all tenants read to detect
+    the EEXIST claim). Accepted LOW-severity residual: a hostile same-box tenant
+    could pre-create a marker to suppress another's ✅ (worst case one missed,
+    recoverable ping) — same-box tenants are the owner's own accounts."""
+    now = time.time() if now is None else now
+    window_s = window_s or CONTENT_DEDUP_WINDOW_S
+    d = _content_dedup_store_dir(store_dir)
+    try:
+        os.makedirs(d, exist_ok=True)
+        # Force world-writable + sticky, umask-proof (os.makedirs masks the
+        # write bits). A foreign-owned existing store (david1 created it, david2
+        # runs now) EPERMs here but is ALREADY 0o1777, so writes still work; a
+        # genuine perm problem fails-open at the O_EXCL open below. Best-effort,
+        # silent by design (this is the ✅ hot path). # airuleset:script-ok
+        # best-effort chmod on a shared store; EPERM is expected + handled downstream
+        try:
+            os.chmod(d, 0o1777)
+        except OSError:
+            pass
+    except OSError:
+        return "claim"            # cannot stand up the store → fail OPEN
+    _content_dedup_sweep(d, now, window_s)
+    path = os.path.join(d, _content_dedup_filename(
+        _content_dedup_key(text, owner, project, now, window_s)))
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                     0o644)
+    except FileExistsError:
+        return "dup"              # already claimed in this window
+    except OSError:
+        return "claim"            # any other error (EACCES, ...) → fail OPEN
+    # The O_EXCL create IS the claim — the marker's CONTENT is never read (dedup
+    # keys on the file's EXISTENCE), so no write is needed, and a mid-write
+    # failure can never turn a successful claim into a raised exception (this
+    # keeps the function fail-safe by construction for a direct Python caller too,
+    # not only the shell caller's `|| echo claim`; #687 review 🔵).
+    os.close(fd)
+    return "claim"
+
+
 SUPPRESSED_ALERT_PREFIXES = (
     ("apierr", "api-error"),             # watchdog job 1 (stall / busy / giveup / stashabort)
     ("sesslimit", "session-limit"),      # watchdog job 6 (5h limit / giveup / resume)
@@ -2583,9 +2702,20 @@ SUPPRESSED_ALERT_PREFIXES = (
     # the Claude project + its watchers, not an incident. Same #546 audience
     # split: no Discord PING, the machine channel keeps the signal (watchdog
     # journal + the `suppressed` delivery-log line). The watchdog's job stays
-    # the silent auto-resume (#675 owns the work-resume half). `acctblock:`
-    # (genuine account-block, needs a human) + `stuckalert:` stay un-suppressed.
+    # the silent auto-resume (#675 owns the work-resume half).
     ("oauthblock", "oauth-revoke (#676)"),  # watchdog job 1 escalation (#662 alarm — owner-ruled spam)
+    # #688 (2026-08-25 owner ruling): #662's `stuckalert:` frozen-goal alarm
+    # (goal_lane_sweep -> _lane_stuck_owner_alert) is SPAM too — the structural
+    # `stuck` verdict (armed /goal + 0 workers + backlog + idle over threshold)
+    # is a HEURISTIC that fires on many states that do NOT need a human
+    # (transient idle, an owner-stopped session, a #676-normal oauth-revoke), so
+    # it cannot clear the "genuinely needs a human" bar. Same #546 audience split
+    # as #676 above: no Discord PING, the machine channel keeps the signal
+    # (watchdog journal + the `suppressed` delivery-log line). Auto-recovery (the
+    # lane keystroke nudge, send_verified) never routes through send(), so it is
+    # untouched. `acctblock:` (genuine account-block, needs a human) is the ONE
+    # escalation class that stays un-suppressed.
+    ("stuckalert", "structural-stuck (#688)"),  # goal_lane_sweep frozen-goal alarm (#662 — owner-ruled spam)
 )
 
 
