@@ -415,8 +415,11 @@ def lane_giveup_cause_decision(*, workable, user_waiting, ops_wait, gk,
       * ``stall``             -- workable > 0 yet the lanes stayed empty: the
         one genuinely-suspect class (a coverage gap on THIS box).
       * ``unknown``           -- the partition is unreadable (workable None)
-        or the cache is stale (`age_s` None / over `max_age_s`): classified
-        HONESTLY as can't-tell, never guessed toward any other class.
+        or the cache age is outside the trusted ``[0, max_age_s)`` window
+        (`age_s` None, stale at/over the bound, or NEGATIVE -- a future ts
+        from clock skew / a corrupt entry; mirrors the #618 reader's own
+        ``0 <= age < max`` bound for the SAME cache): classified HONESTLY
+        as can't-tell, never guessed toward any other class.
 
     `detail` always names the raw counts + cache age ("-" for an absent
     bucket -- e.g. `gk` on a full-authority entry), so the journal verdict is
@@ -431,7 +434,7 @@ def lane_giveup_cause_decision(*, workable, user_waiting, ops_wait, gk,
         _w(workable), _w(user_waiting), _w(ops_wait), _w(gk),
         ("%dm" % (age_s // 60)) if isinstance(age_s, (int, float)) else "-")
     if not isinstance(workable, int) or not isinstance(age_s, (int, float)) \
-            or age_s > max_age_s:
+            or not (0 <= age_s < max_age_s):
         return LaneGiveupCause("unknown", detail)
     if workable > 0:
         return LaneGiveupCause("stall", detail)

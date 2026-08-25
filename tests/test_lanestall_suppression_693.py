@@ -162,6 +162,10 @@ class TestLaneGiveupCauseDecision(unittest.TestCase):
         d = self._dec(workable=0, user_waiting=0, ops_wait=0, gk=3)
         self.assertEqual(d.cause, "parked")
 
+    def test_parked_on_ops_wait_only(self):
+        d = self._dec(workable=0, user_waiting=0, ops_wait=2, gk=None)
+        self.assertEqual(d.cause, "parked")
+
     def test_genuine_stall(self):
         d = self._dec(workable=7, user_waiting=1, ops_wait=0, gk=0)
         self.assertEqual(d.cause, "stall")
@@ -176,6 +180,27 @@ class TestLaneGiveupCauseDecision(unittest.TestCase):
 
     def test_unknown_on_stale_cache(self):
         d = self._dec(workable=0, user_waiting=0, ops_wait=0, gk=0,
+                      age_s=901, max_age_s=900)
+        self.assertEqual(d.cause, "unknown")
+
+    def test_unknown_at_exact_max_age_boundary(self):
+        # Inclusive-stale at the bound — mirrors the #618 reader's own
+        # `0 <= age < max` window for the SAME cache (review 🟡).
+        d = self._dec(workable=0, user_waiting=0, ops_wait=0, gk=0,
+                      age_s=900, max_age_s=900)
+        self.assertEqual(d.cause, "unknown")
+
+    def test_unknown_on_negative_age_future_ts(self):
+        # A future ts (clock skew / corrupt entry) must classify HONESTLY as
+        # unknown, never confidently (review 🟡).
+        d = self._dec(workable=0, user_waiting=0, ops_wait=0, gk=0, age_s=-5)
+        self.assertEqual(d.cause, "unknown")
+
+    def test_stale_cache_with_workable_is_unknown_never_stall(self):
+        # Guard-order lock (review 🔵): staleness must be checked BEFORE the
+        # stall branch — a stale workable>0 is unknown, never a confident
+        # stall verdict off untrusted counts.
+        d = self._dec(workable=5, user_waiting=0, ops_wait=0, gk=0,
                       age_s=901, max_age_s=900)
         self.assertEqual(d.cause, "unknown")
 

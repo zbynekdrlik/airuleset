@@ -2387,11 +2387,12 @@ GOAL_LANE_LIVE_CONVO_S = 3 * 60
 # classic shape: the stash slot is occupied by the user's OWN parked
 # draft, which no janitor provenance will ever clear) is the repo's
 # known bounded-consecutive-occurrence class: without a bound, the
-# give-up ping is structurally unreachable (the nudge counter only
+# give-up branch is structurally unreachable (the nudge counter only
 # advances on SUCCESS), so a permanently-aborting lane would silently
 # retry -- and for keystroke-bearing abort shapes, retype -- forever.
-# Past this many consecutive aborts the existing give-up branch fires
-# its one-shot ping and stops attempting; the counter clears on any
+# Past this many consecutive aborts the existing give-up branch writes
+# its one-shot record (#693: a classified machine-channel verdict) and
+# stops attempting; the counter clears on any
 # successful delivery and on the session-active idle reset.
 GOAL_LANE_MAX_STASH_ABORTS = 5
 
@@ -2416,7 +2417,7 @@ GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
 # (`WORKING_RESPONDED_BACKOFF_SCHEDULE_S`, `_gkreq_reping_due`) -- an explicit
 # tuple of widening intervals, `min(n-1, len-1)` indexing, holding at the cap
 # stage forever. The refusal itself is NEVER weakened: deliver_with_stash
-# still refuses the live draft, the give-up ping is still reached (just over
+# still refuses the live draft, the give-up record is still reached (just over
 # elapsed time, not once per sweep), and the park clears on any successful
 # delivery and on the session-active idle reset.
 GOAL_LANE_STASH_ABORT_BACKOFF_S = (120, 300, 900, 1800)
@@ -2892,9 +2893,10 @@ def _lane_count_giveup_reset(rec):
     Pre-#620 the reset (`_lane_idle_reset`) cleared `ln` on a BACKLOG CHANGE
     (`backlog_n != lnbk`, #530), but a busy-solo box churns its backlog inline
     (33->25 as it solves tickets), so `ln` was wiped between EVERY nudge -> the
-    MAX_NUDGES give-up owner ping was never reached (all nudges logged (1/2)).
+    MAX_NUDGES give-up (then an owner ping; a machine-channel record since
+    #693) was never reached (all nudges logged (1/2)).
     Keying the reset on lane APPEARANCE lets consecutive INEFFECTIVE empty-lane
-    nudges (workers stays 0) advance `ln` monotonically to the give-up ping. The
+    nudges (workers stays 0) advance `ln` monotonically to the give-up record. The
     shared `lpinged` latch clears too, unless a stash-abort give-up is still
     latched, so a future give-up can re-escalate. The stash-abort streak
     (`lna`/`lnpark`) is NOT touched here: it self-heals via the #479 park + the
@@ -3493,7 +3495,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                 # A recognized own draft that will not submit-verify is a
                 # genuinely wedged pane -- advance the SAME consecutive-abort
                 # streak + backoff park the foreign stash-abort uses, so it
-                # still reaches the give-up ping ("look at the session")
+                # still reaches the give-up record (#693: classified verdict)
                 # instead of retrying silently forever (#442-review F2). The
                 # own draft is NEVER backspaced/retyped -- it is left in place.
                 rec["lna"] = rec.get("lna", 0) + 1
@@ -3516,7 +3518,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
             # advance the consecutive-abort streak, so a permanently-
-            # aborting lane eventually reaches the give-up ping above
+            # aborting lane eventually reaches the give-up record above
             # (#442-review F2) instead of retrying silently forever.
             rec["lna"] = rec.get("lna", 0) + 1
             # #479 -- park the NEXT attempt for a widening window instead of
@@ -3544,7 +3546,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             # Unverified submit -- transient, retried next sweep, and it must
             # NOT consume the ln/llast budget (a refused attempt is not a
             # nudge). It DOES advance the consecutive-abort streak, so a
-            # permanently-unverified lane still reaches the give-up ping above
+            # permanently-unverified lane still reaches the give-up record above
             # -- the SAME escalation shape the stash-abort branch uses
             # (#442-review F2).
             rec["lna"] = rec.get("lna", 0) + 1
