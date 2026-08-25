@@ -57,7 +57,7 @@
     "tests/conftest.py": 187,
     "tests/test_acceptance_queued_622.py": 246,
     "tests/test_account_limit_backoff.py": 283,
-    "tests/test_airuleset.py": 15250,
+    "tests/test_airuleset.py": 15269,
     "tests/test_alert_class_suppression_546.py": 166,
     "tests/test_architecture_first_414.py": 120,
     "tests/test_ask_before_assuming.py": 46,
