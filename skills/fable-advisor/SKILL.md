@@ -1,6 +1,6 @@
 ---
 name: fable-advisor
-description: One-shot Fable ADVISOR consult for a genuinely HARD decision — the master session (any model) grounds the problem into a tight digest, checks the budget gate, dispatches ONE Fable call (digest in → decision out) and hands execution to an Opus 4.8 worker. Load when a hard design fork / root-cause dead-end / safety-critical verdict needs top-tier judgment WITHOUT re-grounding the whole problem on Fable.
+description: One-shot Fable ADVISOR consult for a genuinely HARD decision — the master session (any model) grounds the problem into a tight digest, checks the budget gate, dispatches ONE Fable call (digest in → decision out) and hands execution to a worker at the tier the judgment-content test picks (gated Fable for judgment-content work; the pinned Opus 4.8 worker for routine execution or gate CLOSED). Load when a hard design fork / root-cause dead-end / safety-critical verdict needs top-tier judgment WITHOUT re-grounding the whole problem on Fable.
 ---
 
 # Fable Advisor — digest in, decision out, execution elsewhere
@@ -21,8 +21,11 @@ ARMED `/goal` from implementing on ANY model, #54).
 Complex/cross-cutting architecture or design synthesis; a root cause that
 resisted a first Opus-4.8-tier attempt; adversarial verify of a
 safety-critical change; a session CIRCLING (≥2 laps on the same decision
-without progress). When unsure whether it is hard → it is NOT; stay at your
-current tier and do not consult.
+without progress). NB (2026-08-25): this bar gates only the EXTRA mid-task
+advisor call — the dispatch-time model SELECTOR is the wider
+judgment-content test (`model-awareness.md`), whose tie-break runs TOWARD
+Fable (unsure → it qualifies); do not read this consult bar as the tiering
+boundary.
 
 ## Protocol
 
@@ -55,24 +58,30 @@ current tier and do not consult.
    prompt = the digest + the question + "Return ONLY the decision with a
    short rationale — do not read the repository, do not execute anything."
 
-4. **Execute via an Opus 4.8 worker.** The master receives the decision,
-   records it durably (ticket comment — `durable-decisions-to-tickets.md`),
-   and dispatches execution on the Opus 4.8 tier — the repo's two pinned
-   definitions are `agents/autopilot-worker.md` and
-   `agents/ticket-validator.md` (`model: claude-opus-4-8` frontmatter); a
-   `subagent-driven-development` implementer or other ad-hoc execution
-   dispatch has NO repo pin and inherits the session's model — from a
-   worker that is 4.8, from a Fable main it stays Fable, so prefer the
-   pinned worker for issue-shaped execution (never sonnet for anything
-   complex). The master reviews the worker's diff — that is the oversight
-   role.
+4. **Execute via a worker at the tier the judgment-content test picks
+   (2026-08-25).** The master receives the decision, records it durably
+   (ticket comment — `durable-decisions-to-tickets.md`), and dispatches
+   execution: judgment-content work — and ANY substantive airuleset task —
+   runs gated `model: "fable"`; routine settled execution (or gate CLOSED)
+   runs the Opus 4.8 tier via the repo's two pinned definitions,
+   `agents/autopilot-worker.md` and `agents/ticket-validator.md`
+   (`model: claude-opus-4-8` frontmatter). A `subagent-driven-development`
+   implementer or other ad-hoc execution dispatch has NO repo pin and
+   inherits the session's model — from a worker that is 4.8, from a Fable
+   main it stays Fable, so prefer the pinned worker for routine
+   issue-shaped execution (never sonnet for anything complex). The master
+   reviews the worker's diff — that is the oversight role.
 
 ## Anti-patterns (all rewordings)
 
 - Consulting Fable as a long-lived WORKER or letting it ground itself by
   reading the repo → the exact 2026-07-01 burn. Digest in, decision out.
-- Escalating routine work ("this feature is non-trivial") → routine
-  execution stays Opus 4.8; the HARD criteria above are the whole list.
+- Escalating genuinely MECHANICAL work (a CI poll, a lookup, a
+  format-only transform) to Fable → those stay sonnet/haiku; and routine
+  settled execution with zero design decisions stays Opus 4.8. (Since
+  2026-08-25 "non-trivial" IS a valid Fable reason — the judgment-content
+  test — so this anti-pattern is about the mechanical floor, not about
+  keeping Fable rare.)
 - Skipping the gate because "it's just one call" → every automatic Fable
   dispatch is gated, no exceptions.
 - Re-asking the advisor per sub-question → ONE consult per hard fork; new
@@ -85,7 +94,7 @@ Moved VERBATIM from `modules/core/model-awareness.md` (#92 item 2): the always-o
 
 ### The lineup and what each tier costs
 
-**CURRENT lineup (2026-08-14 refinement of 2026-08-13): Fable 5** (`claude-fable-5[1m]`, the `fable` alias — Anthropic's Mythos-class tier, the most intelligent generally-available Claude; a first-class subagent `model` value) **is the managed MAIN default AND (budget-gated) the escalation tier for genuinely HARD judgment ONLY; Opus 4.8** (`claude-opus-4-8`) **is the default for execution AND ordinary judgment/review + the gate-CLOSED tier; Sonnet 5** (`sonnet`) is the LIGHT / mechanical tier (CI polling, log/grep sweeps, read-only lookups — never anything complex); **Haiku 4.5** (`haiku`) for the most trivial reads. **Opus 5** (`claude-opus-5`, and the bare `opus` alias that resolves to it) is **BANNED since 2026-08-13** — the user's directive, driven by widespread community dissatisfaction with Opus 5 ("intenet je plny obrovskej nespokojnosti s opus 5"). Historical record of its era (2026-07-25 → 2026-08-13, when it WAS the default main + judgment tier): measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF the price (https://www.anthropic.com/news/claude-opus-5), and it shipped thinking ON by default (a change from 4.8, where it was opt-in) — Fable 5 cannot disable thinking at all, so its output tokens are structurally higher for the same task. Pricing per Mtok in/out (official pricing page, 2026-07-25): Fable 5 $10/$50 · Opus 5 $5/$25 (cache read $0.50, cache write $6.25 5-min / $10 1-hour) · Sonnet 5 $2/$10 · Haiku 4.5 $1/$5; ALL current models ship the 1M context window at standard pricing. (Literalism behavior holds across the family — the top tiers are concise, grounded, honest, and need less anti-slop frontend prompting.)
+**CURRENT lineup (2026-08-25 revision — the model ids, pricing and Opus 5 ban below are unchanged from 2026-08-14; the ESCALATION BOUNDARY moved, see the 2026-08-25 section): Fable 5** (`claude-fable-5[1m]`, the `fable` alias — Anthropic's Mythos-class tier, the most intelligent generally-available Claude; a first-class subagent `model` value) **is the managed MAIN default AND (budget-gated) the tier for every subagent task with real judgment/design content — majority-of-subagents on the airuleset repo; Opus 4.8** (`claude-opus-4-8`) **is the routine-execution + gate-CLOSED fallback tier; Sonnet 5** (`sonnet`) is the LIGHT / mechanical tier (CI polling, log/grep sweeps, read-only lookups — never anything complex); **Haiku 4.5** (`haiku`) for the most trivial reads. **Opus 5** (`claude-opus-5`, and the bare `opus` alias that resolves to it) is **BANNED since 2026-08-13** — the user's directive, driven by widespread community dissatisfaction with Opus 5 ("intenet je plny obrovskej nespokojnosti s opus 5"). Historical record of its era (2026-07-25 → 2026-08-13, when it WAS the default main + judgment tier): measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF the price (https://www.anthropic.com/news/claude-opus-5), and it shipped thinking ON by default (a change from 4.8, where it was opt-in) — Fable 5 cannot disable thinking at all, so its output tokens are structurally higher for the same task. Pricing per Mtok in/out (official pricing page, 2026-07-25): Fable 5 $10/$50 · Opus 5 $5/$25 (cache read $0.50, cache write $6.25 5-min / $10 1-hour) · Sonnet 5 $2/$10 · Haiku 4.5 $1/$5; ALL current models ship the 1M context window at standard pricing. (Literalism behavior holds across the family — the top tiers are concise, grounded, honest, and need less anti-slop frontend prompting.)
 
 ### Why Opus 5 WAS the recommended MAIN default (2026-07-25 rewrite — superseded 2026-08-13)
 
@@ -93,11 +102,15 @@ Honest history: earlier in 2026 the user ran Fable 5 as MAIN by hand — a delib
 
 ### Why every automatic escalation is budget-gated
 
-History that shapes this policy: the 2026-07-01 Fable-everywhere mode burned tokens brutally and kept tripping the usage limits mid-work — the user reverted it 2026-07-02 (reverted the 2026-07-01 policy). What made the 2026-07-03 middle tier safe where Fable-everywhere was not: (1) only the HARD subset escalated (routine work stayed on the cheaper tiers), and (2) every automatic escalation is BUDGET-GATED — `airuleset.py fable-gate` checks the Fable weekly + shared weekly windows from the watchdog's usage cache and closes automatic Fable once headroom runs out (default gate 80%, env `AIRULESET_FABLE_GATE_PCT`), so the limit-trip-stops-work failure cannot repeat. The 2026-08-13 policy read the gate as guarding the DEFAULT judgment layer (every judgment dispatch); the **2026-08-14 refinement RETIRES that reading** and returns the gate to guarding the HARD-only Fable escalation — only genuinely HARD (design-heavy) judgment escalates to Fable, routine judgment/review runs Opus 4.8, and Sonnet 5 carries light/mechanical work, with Opus 4.8 as the CLOSED fallback. The gate keeps the (now rarer) HARD Fable escalations affordable. (The 5-hour session window intentionally does NOT gate — only the weekly windows do; don't 'fix' that.)
+History that shapes this policy: the 2026-07-01 Fable-everywhere mode burned tokens brutally and kept tripping the usage limits mid-work — the user reverted it 2026-07-02 (reverted the 2026-07-01 policy). What made the 2026-07-03 middle tier safe where Fable-everywhere was not: (1) only the HARD subset escalated (routine work stayed on the cheaper tiers), and (2) every automatic escalation is BUDGET-GATED — `airuleset.py fable-gate` checks the Fable weekly + shared weekly windows from the watchdog's usage cache and closes automatic Fable once headroom runs out (default gate 80% in that era — raised to 90% by the 2026-08-25 revision below; env `AIRULESET_FABLE_GATE_PCT`), so the limit-trip-stops-work failure cannot repeat. The 2026-08-13 policy read the gate as guarding the DEFAULT judgment layer (every judgment dispatch); the **2026-08-14 refinement RETIRES that reading** and returns the gate to guarding the HARD-only Fable escalation — only genuinely HARD (design-heavy) judgment escalates to Fable, routine judgment/review runs Opus 4.8, and Sonnet 5 carries light/mechanical work, with Opus 4.8 as the CLOSED fallback — a reading itself superseded 2026-08-25 (the judgment-content boundary, see that section below; the gate mechanics are unchanged). (The 5-hour session window intentionally does NOT gate — only the weekly windows do; don't 'fix' that.)
 
 ### 2026-08-14 — Fable narrowed back to HARD-only after the inherited-Fable burn (#455)
 
 The 2026-08-13 policy's "gated Fable is the DEFAULT judgment layer" reading, combined with a model-less-dispatch gap (an `Agent`/`Explore`/`general-purpose` dispatch that omits `model` INHERITS the caller's model, and the managed MAIN default is Fable), meant essentially every subagent — including purely mechanical CI pollers — ran on Fable. The gk box ate its 5h Fable limit in ~30 minutes: live evidence showed `general-purpose` CI-poll agents at 300–430k tokens EACH on inherited Fable. User directive 2026-08-14 (verbatim in `model-awareness.md`): *"len tazke ulohy isli na fable ostatok na opus4.8 a moze byt aj sonnet 5 vyuzivany"*, clarified that the MAIN agent stays Fable (they need the model that talks to them highly intelligent) but the SUBAGENTS should be "spravne rozhodnuty" — the burn started only "po dnesnych zmenach v pouzivani modelov" (#440). The refinement: Fable ONLY for genuinely HARD (design-heavy) work through the gate; Opus 4.8 the default for execution AND ordinary judgment/review; Sonnet 5 rehabilitated for light/mechanical work; a HARD RULE that no subagent is ever dispatched model-less from a Fable main. The Opus-5 ban and the gate mechanics are unchanged.
+
+### 2026-08-25 — boundary moved: judgment-content Fable + airuleset Fable-majority (#690)
+
+Owner directive (verbatim): *"ale ja by som chcel aby sa fable pouzival nie len na super tazke subagenticke ulohy, lebo som ho v principe nevidel zapnuteho za celu zivotnost vsetkych subdevs nikde subagenta s fable, chcem aby sa ta hranica posunula aby sa pouzival fable ovela viac, cize napr na 50% subagentickych uloh a plus tu na airuleset chcem aby sa majoritne pouzival fable lebo chyby ktotre tu robi opus mi extremne zeru cas a degraduju celu flotilu"*. The 2026-08-14 HARD-only bar was NEVER crossed in practice — zero Fable subagents across the subdevs' whole lifetime, because the taxonomy's height plus its "when unsure → it is NOT hard" tie-break resolved every real ticket's uncertainty to Opus 4.8 (and execution was categorically excluded from Fable), while the budget gate sat OPEN (reading at revision time: fable=43% weekly=66% < 80%). ACTIVE policy since 2026-08-25: **Fable runs every subagent task with real judgment/design content** — non-trivial implementation, review of a non-trivial change, hard debug, plan/design/synthesis; tie-break REVERSED (unsure → it QUALIFIES); the owner's ≈50% of subagent tasks is a calibration target, never a counter — **and on the airuleset repo Fable is the MAJORITY subagent tier outright** (Opus mistakes there degrade the whole fleet). Opus 4.8 = the routine-execution + gate-CLOSED fallback; Sonnet light and the Opus 5 ban unchanged. The gate STAYS on every automatic Fable dispatch, with the default threshold raised **80→90** (`FABLE_GATE_PCT`, `watchdog/usage.py`): the 43%-fable baseline was main-session-only usage, so the new dispatch load projects the fable weekly into the 60–90% band, where an 80% gate would flip CLOSED mid-week and silently re-create the zero-Fable dead letter; 90% keeps the policy live while preserving fail-safe CLOSED on a missing/stale cache, a 10% reserve for the owner's own interactive Fable main, and the hard stop before a 100% weekly trip (the 2026-07-01 incident class). A DISPATCHED, fresh-context Fable worker is now a sanctioned shape; Fable as a long-lived MAIN implementer stays banned (`block-main-implementation.sh`).
 
 ### Why the CIRCLING valve keys on behavior, not on rumors
 

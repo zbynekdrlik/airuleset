@@ -28,15 +28,16 @@ import os
 import sys
 
 def cmd_fable_gate(args):
-    """Budget gate for the AUTOMATIC Fable judgment layer (model-tiering policy
-    2026-08-13 — Opus 5 banned; the gate now guards the DEFAULT judgment tier):
-    exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
-    (< threshold, default 80% / AIRULESET_FABLE_GATE_PCT), exit 1 + `CLOSED ...`
-    otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn). The
-    orchestrator / autopilot supervisor runs this ONCE per judgment task/batch
-    before dispatching `model: fable`; CLOSED → the same work runs on
-    claude-opus-4-8 (agent-definition frontmatter / Workflow opts.model full id /
-    inheritance — never the banned bare alias)."""
+    """Budget gate guarding EVERY automatic Fable dispatch (model-tiering
+    policy 2026-08-25, #690 — the judgment-content tier + the airuleset
+    Fable-majority; Opus 5 stays banned): exit 0 + `OPEN ...` when the Fable
+    weekly + shared weekly windows have headroom (< threshold, default 90% /
+    AIRULESET_FABLE_GATE_PCT — raised from 80 by #690), exit 1 + `CLOSED ...`
+    otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn).
+    The orchestrator / autopilot supervisor runs this ONCE per qualifying
+    task/batch before dispatching `model: fable`; CLOSED → the same work runs
+    on claude-opus-4-8 (agent-definition frontmatter / Workflow opts.model
+    full id / inheritance — never the banned bare alias)."""
     from watchdog import fable_gate
     ok, reason = fable_gate(threshold=getattr(args, "threshold", None))
     print(("OPEN " if ok else "CLOSED ") + reason)
