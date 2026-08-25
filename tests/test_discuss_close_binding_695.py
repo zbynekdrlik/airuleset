@@ -198,6 +198,18 @@ class TestHookBinding(_HookBase):
                           user="newlevel")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_sig_and_approval_bypass_do_not_waive_binding(self):
+        # Independence pin (#695/#696 adversarial reviews — the #609 mutant
+        # class): the sibling bypasses must NOT waive the binding. Without
+        # this fixture the mutant `if not bind_bypassed and not
+        # approval_bypassed:` survives the whole suite, because every other
+        # bypass fixture carries either all bypass markers or none.
+        cmd = ("python3 -c '" + MESSAGE_POST + "'  # airuleset:discuss-sig-ok "
+               "airuleset:discuss-approval-ok interny post, binding chyba")
+        r = self.run_hook(command=cmd)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Discuss-ticket", r.stderr)
+
     def test_binding_does_not_waive_signature(self):
         # A bound but UNSIGNED post must still trip the #609 signature gate.
         unsigned = ('models.execute_kw(db,uid,key,"discuss.channel",'
@@ -280,7 +292,9 @@ class TestJob20OrchestratorWiring(unittest.TestCase):
         with m.patch.object(owr, "_repo_name_resolver",
                             lambda cwd: "odoo-erp"):
             self._run(tmux, wrecs)
-        typed = " ".join(tmux.typed_texts())
+        # "".join — the fake tmux types in CHUNKS that split mid-word, so a
+        # space-join would break a token at a chunk boundary.
+        typed = "".join(tmux.typed_texts())
         self.assertIn("DISCUSS-AUDIT", typed)
 
     def test_due_nudge_elsewhere_has_no_discuss_clause(self):
@@ -289,7 +303,7 @@ class TestJob20OrchestratorWiring(unittest.TestCase):
         with m.patch.object(owr, "_repo_name_resolver",
                             lambda cwd: "airuleset"):
             self._run(tmux, wrecs)
-        typed = " ".join(tmux.typed_texts())
+        typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed)      # the nudge itself delivered
         self.assertNotIn("DISCUSS-AUDIT", typed)
 

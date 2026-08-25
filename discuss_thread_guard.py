@@ -453,7 +453,10 @@ APPROVAL_BYPASS_MARKER = "airuleset:discuss-approval-ok"
 # marker pass in exactly that shape, defeating the falsifiable-claim requirement
 # -- never a bare assertion). `re.escape` keeps the pattern linear regardless of
 # input size.
-_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[^\S\r\n]+\S")
+# `[ \t]` (not the earlier `[^\S\r\n]`): an exotic Unicode line separator
+# (U+2028, NEL, VT) must not satisfy the same-line claim -- tightened in one
+# sweep with the #696 `_ARTIFACT_RE` sibling (over-block direction).
+_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[ \t]+\S")
 
 ApprovalViolation = namedtuple("ApprovalViolation", "number")
 
@@ -599,24 +602,33 @@ ARTIFACT_MARKER_WORD = "airuleset:artifact-verified"
 
 # `airuleset:artifact-verified <ref>`: the marker word then SAME-LINE
 # horizontal whitespace then at least one non-whitespace char -- a real,
-# non-empty reference on the marker's OWN line (`[^\S\r\n]`, the #628
-# review-MAJOR lesson: a `\s+\S` spanning the newline would let a bare
-# reference-less marker pass whenever the call follows on the next line).
-_ARTIFACT_RE = re.compile(re.escape(ARTIFACT_MARKER_WORD) + r"[^\S\r\n]+\S")
+# non-empty reference on the marker's OWN line (the #628 review-MAJOR lesson:
+# a `\s+\S` spanning the newline would let a bare reference-less marker pass
+# whenever the call follows on the next line). `[ \t]` -- not `[^\S\r\n]` --
+# so an exotic Unicode line separator (U+2028, NEL, VT) can never satisfy the
+# same-line claim either (#696 review 🔵; over-block direction: a marker
+# separated from its ref by an nbsp fails and gets retyped).
+_ARTIFACT_RE = re.compile(re.escape(ARTIFACT_MARKER_WORD) + r"[ \t]+\S")
 
 # The ticket's Slovak future-promise patterns. Word-bounded (`\b` is
 # unicode-aware in py3, so Slovak diacritics form real boundaries):
 #   od zajtra          -- also NOT inside "hod zajtra" (\b before `od`)
-#   zajtrajš           -- stem covers zajtrajší/zajtrajšieho/... declensions
-#   bude (pri|v|obsahovať) -- the trailing \b keeps "bude viac" out (`v` must
-#                            end at a boundary)
-#   v ďalšom (e-maile|reporte)  -- `e-?maile` covers the unhyphenated form
-#   od budúc           -- stem covers budúceho/budúcej/budúcich
-#   čoskoro, pripravujeme
-# `\s+` between words tolerates a hard-wrapped body.
+#   zajtraj[šs]        -- stem covers zajtrajší/zajtrajšieho/... declensions
+#   bude (pri|v|obsahova[ťt]) -- the trailing \b keeps "bude viac" out (`v`
+#                            must end at a boundary)
+#   v [ďd]al[šs]om (e-maile|reporte)  -- `e-?maile` covers the unhyphenated form
+#   od bud[úu]c        -- stem covers budúceho/budúcej/budúcich
+#   [čc]oskoro, pripravujeme
+# `\s+` between words tolerates a hard-wrapped body. The diacritic letters are
+# TWO-CHAR CLASSES (š|s, ť|t, ď|d, ú|u, č|c) because this fleet demonstrably
+# writes ASCII-transliterated Slovak too (the owner's own verbatim #696 ruling
+# is diacritic-less) -- a transliteration is the SAME listed phrase, not a
+# rephrasing, and over-fire is the documented safe direction (#514; both #696
+# adversarial reviewers flagged the diacritic-only stems as the asymmetric
+# gap while `(?i)` case-folding was handled).
 _PROMISE_RE = re.compile(
-    r"(?i)\b(?:od\s+zajtra\b|zajtrajš|bude\s+(?:pri|v|obsahovať)\b|"
-    r"v\s+ďalšom\s+(?:e-?maile|reporte)\b|od\s+budúc|čoskoro\b|"
+    r"(?i)\b(?:od\s+zajtra\b|zajtraj[šs]|bude\s+(?:pri|v|obsahova[ťt])\b|"
+    r"v\s+[ďd]al[šs]om\s+(?:e-?maile|reporte)\b|od\s+bud[úu]c|[čc]oskoro\b|"
     r"pripravujeme\b)")
 
 PromiseViolation = namedtuple("PromiseViolation", "number matched")

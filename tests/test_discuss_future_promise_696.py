@@ -75,6 +75,19 @@ class TestPromisePatterns(unittest.TestCase):
         self.assertTrue(self._hits("Od zajtra to uvidíte"))
         self.assertTrue(self._hits("ČOSKORO to uvidíte"))
 
+    def test_ascii_transliterated_slovak_fires(self):
+        # Both adversarial reviewers: this fleet demonstrably writes
+        # diacritic-less Slovak (the owner's own #696 ruling is ASCII), and a
+        # transliteration is the SAME listed phrase, not a rephrasing — the
+        # stems fold the diacritic letters into two-char classes.
+        for body in ("Od zajtrajsieho ranneho e-mailu dostanete kody",
+                     "coskoro to uvidite v systeme",
+                     "v dalsom reporte pribudne kod",
+                     "v dalsom emaile pribudne kod",
+                     "plati to od buduceho tyzdna",
+                     "report bude obsahovat kody"):
+            self.assertTrue(self._hits(body), body)
+
     def test_past_tense_and_neutral_bodies_do_not_fire(self):
         for body in ("e-mail už obsahoval kód dodávateľa",
                      "včera odišiel report s kódmi, obsah sme overili",
@@ -169,6 +182,19 @@ class TestHookPromise(_HookBase):
             command="python3 -c '"
             + PAST_MP.replace("ZbynekAI 2", "ZbynekAI 5") + self.OK_TAIL)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_all_sibling_bypasses_do_not_waive_promise(self):
+        # Independence pin (#695/#696 adversarial reviews): name/sig/approval/
+        # bind bypasses never waive the promise gate — its ONLY escape is the
+        # artifact-verified evidence marker. Without this fixture a mutant
+        # gating the promise check under any `if not *_bypassed:` survives.
+        cmd = ("python3 -c '" + PROMISE_MP + "'  # airuleset:discuss-name-ok "
+               "airuleset:discuss-sig-ok airuleset:discuss-approval-ok "
+               "airuleset:discuss-bind-ok interny post")
+        r = self.run_hook(command=cmd, user="montalu2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("airuleset:artifact-verified", r.stderr)
+        self.assertIn("#696", r.stderr)
 
     def test_non_stream_user_promise_passes(self):
         r = self.run_hook(command="python3 -c '" + PROMISE_MP + "'",

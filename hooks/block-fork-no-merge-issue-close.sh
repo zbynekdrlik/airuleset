@@ -107,11 +107,14 @@ fi
 # the move — #627 STEP-0).
 #
 # Recognition = a line-anchored `Discuss-thread: <channel-id>` marker on the
-# ticket; the close is blocked until a `Discuss-closed: <msg-id>` (note posted,
-# last ticket) OR `Discuss-defer: <reason>` (deferred to the last ticket)
-# disposition is ALSO present. The pure decision is in discuss_close_guard.py
-# (network-free, unit-tested); this shell part only detects the issue + repo,
-# fetches the ticket text, and pipes it to the module.
+# ticket OR (#695) a `discuss.channel_<N>` deep-URL token in the ticket text
+# (the #657-mandated form — so a ticket whose stream forgot the manual mark
+# still binds, the montalu5 hole); the close is blocked until a
+# `Discuss-closed: <msg-id>` (note posted, last ticket) OR
+# `Discuss-defer: <reason>` (deferred to the last ticket) disposition is ALSO
+# present. The pure decision is in discuss_close_guard.py (network-free,
+# unit-tested); this shell part only detects the issue + repo, fetches the
+# ticket text, and pipes it to the module.
 #
 # EVERY `gh issue close <N>` in the command is checked, not just the first — a
 # compound that batch-closes the sibling tickets of one thread (the likely
@@ -195,7 +198,8 @@ if [ "$_d_run_gate" = "1" ]; then
                 cat >&2 <<MSG
 
 🚫 BLOCKED: this ticket has a bound Odoo Discuss thread (a Discuss-thread: line
-on the ticket) but carries no closing-note evidence — closing it now would leave
+OR a discuss.channel_<N> deep URL on the ticket — the URL alone binds, #695)
+but carries no closing-note evidence — closing it now would leave
 the client thread with our message (or their question) as the LAST message, then
 silence (airuleset #627, owner directive 2026-08-22).
 

@@ -148,7 +148,9 @@ pv = g.evaluate_message_post_promise(content, user)
 if pv:
     print("HITPROMISE")
     print(pv.number)
-    print(" | ".join(pv.matched))
+    # a hard-wrapped phrase can carry a real newline (`\s+` spans it) -- keep
+    # the MATCHED echo on ONE protocol line (bash reads it with sed -n 3p)
+    print(" | ".join(p.replace("\n", " ") for p in pv.matched))
     sys.exit(0)
 # nothing blocked -- surface a bypass for logging.
 if name_bypassed:

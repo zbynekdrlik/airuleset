@@ -40,8 +40,9 @@ untouched by a cross-stream move.
 
 WHAT THE GATE ACTUALLY KEYS ON (precise — the channel id is NOT consumed by
 the code). This decision is PER TICKET: `is_thread_bound(text) and not
-has_disposition(text)`. The gate reads only whether the `Discuss-thread:`
-marker is PRESENT (a binding exists) and whether a disposition is present — it
+has_disposition(text)`. The gate reads only whether a binding signal is
+PRESENT (the `Discuss-thread:` marker OR, #695, the deep-URL token —
+`_DEEP_URL_RE`) and whether a disposition is present — it
 never parses, groups, or compares the channel-id VALUE. The channel id inside
 the marker is the HUMAN-READABLE correlation key: it lets a reviewer / the
 owner see at a glance which tickets belong to the same thread and validate a
