@@ -836,8 +836,11 @@ def _read_box_u(entry, run, timeout_s):
             return None
     target = "%s@%s" % (entry.get("user"), entry.get("host"))
     remote_cmd = "python3 -c " + shlex.quote(_U_READER_SNIPPET)
-    argv = _ssh_read_prefix(entry) + [target, remote_cmd]
     try:
+        # #703: the prefix build is INSIDE the guard — host_key_check_opts
+        # RAISES on a present-but-empty `host_keys` pin (fail-closed, #669), and
+        # that must omit ONE box (no dot), never kill the whole map.
+        argv = _ssh_read_prefix(entry) + [target, remote_cmd]
         r = run(argv, capture_output=True, text=True, timeout=timeout_s)
     except Exception:                       # timeout / OSError / sshpass absent
         return None
@@ -1319,7 +1322,8 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     shared note, cli_webterm_lane.render_lane_unit_note) to correct every OTHER now-false
     tailnet/password claim in the shared template header, so a human reading the
     installed Access-mode unit is never misled. #677: the owner unit ALSO always
-    carries `--u-collect` (the U-dot data channel is owner-only; david/marek units
+    carries `--u-collect` (the CROSS-TENANT U-dot data channel is owner-only;
+    #703: david/marek units carry the per-tenant `--u-lane` instead and
     omit it), so `access_mode=False` is BYTE-IDENTICAL to the pre-#635 render EXCEPT
     for that single injected flag."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")

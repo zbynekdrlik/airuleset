@@ -335,6 +335,22 @@ class TestReadPrefixHostKeys703(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=no", joined)
         self.assertIn("UserKnownHostsFile=/dev/null", joined)
 
+    def test_empty_pin_omits_one_box_never_kills_the_whole_map(self):
+        # host_key_check_opts RAISES on a present-but-empty pin (#669
+        # fail-closed); that must omit ONE box, not error the whole collect.
+        entries = [
+            {"id": "bad", "local": False, "host": "h1", "user": "u",
+             "identity": "~/.x", "host_keys": []},
+            {"id": "good", "local": False, "host": "h2", "user": "u",
+             "identity": "~/.x"},
+        ]
+
+        def fake_run(argv, **k):
+            return types.SimpleNamespace(returncode=0, stdout="4\n", stderr="")
+
+        out = w.collect_fleet_u(entries, run=fake_run)
+        self.assertEqual(out, {"good": 4})   # bad omitted, good still read
+
 
 _RE_CFG = re.compile(r"const CFG = (\{.*?\});")
 
