@@ -228,7 +228,14 @@ def write_artifacts(spec):
     # #703: every lane dashboard polls its OWN gateway's /u-status -- that
     # gateway serves the PER-TENANT scoped map (--u-lane in the unit rendered
     # below), so enabling the poll here leaks nothing cross-tenant; both lanes
-    # get the U-dot automatically at every deploy (#684 parity).
+    # get the U-dot POLL automatically at every deploy (#684 parity). A given
+    # box shows its dot only where the scoped reader can actually run: a `local`
+    # entry always (a direct cache read), an ssh entry where its dedicated key
+    # runs the fixed reader snippet -- NOT under a `restrict,command="tmux ..."`
+    # forced-command key (the #661 go-live shape recommended for owner-account
+    # targets), which would block the BatchMode reader -> that box is omitted,
+    # dot off (fail-safe direction, never a stale nonzero). Verify the live dot
+    # on the real marek/david deploy where an ssh target's key shape matters.
     render_kwargs["lane_u_status"] = True
     spec.dash_index.write_text(
         w.render_dashboard_html(inv, **render_kwargs), encoding="utf-8")

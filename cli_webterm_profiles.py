@@ -339,7 +339,11 @@ def u_tenant_entries(profile):
     The result is therefore always a SUBSET of the lane's existing connect
     allowlist (same entries, same dedicated identities, minus the
     owner-account ones) — per-tenant U collection grants a lane account ZERO
-    new reach."""
+    new reach. ("Zero new reach" is w.r.t. the lane's EXISTING connect
+    capability: the U read uses the same identity-vs-sshpass decision as
+    ``_ssh_interactive_prefix`` — with no ``IdentitiesOnly=yes`` it may also
+    offer the account's own default/agent keys, exactly as the connect path
+    already does, so a lane account still reaches only what it already could.)"""
     return [e for e in profile_inventory(profile, [])
             if e.get("u_tenant") is True
             and (e.get("local") or e.get("identity"))]

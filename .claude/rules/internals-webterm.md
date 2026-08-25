@@ -381,6 +381,16 @@ The david/marek lanes now have their own U-dot (owner ruling 2026-08-25) without
   `framework`/`knižnic`/why-none-fits token). Posting a rich free-form design comment that fails
   the classifier 3× costs a round-trip each — read the regexes once, then write ONE consolidated
   comment carrying every marker.
+- **A per-tenant lane feature that reuses the #680 host-key pin (marek's forestshop is pinned)
+  raises the cadence of the `cli_remote` "shared deterministic pin file" race (review 🔵).** The
+  scoped `webterm-u-collect --lane` collector is a NORMAL-exit process (returns 0, not
+  `os.execvp` like the webterm connect leg), so its atexit unlinks the shared deterministic
+  `_pinned_known_hosts_path` — and the gateway now respawns it every ~60–90 s while a lane
+  dashboard is open, so a concurrent interactive forestshop tab connect can find its pin file
+  unlinked mid-connect. It stays the documented narrow/LOUD/self-healing race (a
+  `StrictHostKeyChecking=yes` miss = a visible rc-255 the connect retry heals; NEVER a silent
+  TOFU downgrade — a missing pin file refuses, it does not fall back to `=no`), only more often.
+  Known residual, acceptable as-is.
 
 ### #694 webterm — the dashboard template lives in `cli_webterm_dash_template.py`, NOT inline
 

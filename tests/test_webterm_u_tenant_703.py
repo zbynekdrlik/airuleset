@@ -212,7 +212,11 @@ class TestScopedCollector703(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, \
                 m.patch.object(w, "CLAUDE_DIR", Path(tmp)), \
+                m.patch.object(w, "_box_u_count", return_value=0), \
                 m.patch.object(w.subprocess, "run", fake_run):
+            # patch _box_u_count so marek's `local` entry does NOT read the test
+            # runner's real ~/.claude/tickets-status (hermetic; assertion below
+            # is about ssh targets, which a local entry never contacts anyway).
             rc = w.cmd_webterm_u_collect(["--lane", "marek"])
         self.assertEqual(rc, 0)
         self.assertTrue(calls)                              # non-vacuous
@@ -282,9 +286,30 @@ class TestGatewayLaneWiring703(unittest.TestCase):
                 "--trust-access-header", "H", "--ttyd-socket", "/tmp/t.sock"]
         with self.assertRaises(SystemExit):
             gw.main(base + ["--u-collect", "--u-lane", "marek"])
-        for bad in ("../evil", "Marek", "a/b", "", "-x"):
+        # "_x" is a real value argparse ACCEPTS, so it hits the charset gate's
+        # first-char rule inside main() (not just argparse's own "-x" rejection).
+        for bad in ("../evil", "Marek", "a/b", "", "-x", "_x"):
             with self.assertRaises(SystemExit):
                 gw.main(base + ["--u-lane", bad])
+
+    def test_valid_lane_profile_reaches_serve(self):
+        # Positive control (provenance): a VALID --u-lane passes ALL of main()'s
+        # validation and reaches asyncio.run(_main_async(...)) -- proving the
+        # fail-closed SystemExits above reject BAD values specifically, not every
+        # --u-lane. Without this, an over-eager guard rejecting everything would
+        # pass the fail-closed test vacuously.
+        base = ["--socket", "/tmp/x.sock", "--dash-index", "/tmp/i.html",
+                "--trust-access-header", "H", "--ttyd-socket", "/tmp/t.sock"]
+        served = []
+
+        def fake_run(coro):
+            served.append(1)
+            coro.close()                     # never awaited -> close cleanly
+
+        with m.patch.object(gw.asyncio, "run", fake_run):
+            rc = gw.main(base + ["--u-lane", "marek"])
+        self.assertEqual(served, [1])        # reached serve, no SystemExit
+        self.assertEqual(rc, 0)
 
     def test_lane_path_drift_lock_between_gateway_and_cli(self):
         # The standalone gateway duplicates the path formula (it deliberately
@@ -293,6 +318,8 @@ class TestGatewayLaneWiring703(unittest.TestCase):
         # test, never re-derive).
         g = gw._lane_u_status_path("x")
         c = w.webterm_lane_u_status_path("x")
+        self.assertEqual(g, c)              # strictly stronger: ties the FULL
+        #                                     path incl. the home-root derivation
         self.assertEqual(g.name, c.name)
         self.assertEqual(g.parent.name, ".claude")
         self.assertEqual(c.parent.name, ".claude")
