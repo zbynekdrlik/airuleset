@@ -254,7 +254,7 @@
     "tests/test_runtime_deps.py": 251,
     "tests/test_schedule_wakeup_loop_only.py": 66,
     "tests/test_scope_gate.py": 1503,
-    "tests/test_scoped_waiter_kill_701.py": 255,
+    "tests/test_scoped_waiter_kill_701.py": 336,
     "tests/test_send_verified.py": 323,
     "tests/test_send_verified_adoption.py": 797,
     "tests/test_served_compact_boundary.py": 228,

@@ -251,5 +251,86 @@ class TestHookAllowsScopedAndUnrelated(TestCase):
         self.assertEqual(r.returncode, 0)
 
 
+class TestHookReviewHardening(TestCase):
+    """Pass-2 fresh-context review findings, fixed in-branch (#701).
+
+    (1) 🔴 the bypass marker was a whole-raw-command substring check, so a
+    heredoc doc body or an unrelated segment QUOTING the marker disarmed a
+    real chained kill — now the marker only lifts the block when it sits on
+    the flagged segment/line itself; (2) 🟡 ``/usr/bin/pkill`` bypassed the
+    exact-token binary match — now basename-compared; (3) 🟡 the composite
+    ``kill $(pgrep -f "sleep 60")`` / ``pgrep -f "sleep 60" | xargs kill``
+    shapes had the identical blast radius but were never classified — now
+    the generic-pattern check covers a pgrep that FEEDS a kill (read-only
+    pgrep alone stays untouched).
+    """
+
+    def assertBlocked(self, cmd):
+        r = run_hook(cmd)
+        self.assertEqual(
+            r.returncode, 2, f"expected BLOCK for: {cmd}\nstderr={r.stderr}"
+        )
+
+    def assertAllowed(self, cmd):
+        r = run_hook(cmd)
+        self.assertEqual(
+            r.returncode, 0, f"expected ALLOW for: {cmd}\nstderr={r.stderr}"
+        )
+
+    # -- 🔴 bypass marker scoping --------------------------------------
+    def test_marker_in_heredoc_doc_body_does_not_disarm_a_real_kill(self):
+        self.assertBlocked(
+            "cat > note.md <<'EOF'\n"
+            "Use the bypass: append # airuleset:pkill-ok <reason>\n"
+            "EOF\n"
+            'pkill -f "sleep 60"'
+        )
+
+    def test_marker_in_unrelated_segment_does_not_disarm_a_real_kill(self):
+        self.assertBlocked(
+            'git commit -m "note: airuleset:pkill-ok marker exists" '
+            '&& pkill -f "sleep 60"'
+        )
+
+    def test_marker_on_the_kill_segment_itself_still_bypasses(self):
+        self.assertAllowed(
+            'echo cleanup && pkill -f "sleep 60" # airuleset:pkill-ok single-user box'
+        )
+
+    # -- 🟡 absolute-path binaries -------------------------------------
+    def test_absolute_path_pkill_still_blocked(self):
+        self.assertBlocked('/usr/bin/pkill -f "sleep 60"')
+
+    def test_absolute_path_killall_still_blocked(self):
+        self.assertBlocked("/usr/bin/killall sleep")
+
+    # -- 🟡 composite pgrep-feeds-kill shapes --------------------------
+    def test_kill_command_substitution_of_generic_pgrep_blocked(self):
+        self.assertBlocked('kill $(pgrep -f "sleep 60")')
+
+    def test_kill_dash9_command_substitution_blocked(self):
+        self.assertBlocked('kill -9 $(pgrep -f "sleep 3300")')
+
+    def test_generic_pgrep_piped_to_xargs_kill_blocked(self):
+        self.assertBlocked('pgrep -f "sleep 60" | xargs kill')
+
+    def test_kill_backtick_generic_pgrep_blocked(self):
+        self.assertBlocked('kill `pgrep -f "sleep 60"`')
+
+    def test_scoped_pgrep_kill_composite_allowed(self):
+        self.assertAllowed('kill $(pgrep -u "$USER" -f "gh run view 17234567890")')
+
+    def test_plain_read_only_pgrep_still_allowed(self):
+        # pgrep that feeds NOTHING stays read-only and untouched — the
+        # doctrine's own "find + READ the listing first" step.
+        self.assertAllowed('pgrep -f "sleep 60"')
+        self.assertAllowed('pgrep -u "$USER" -a -f "sleep 60"')
+
+    def test_composite_with_marker_on_its_line_allowed(self):
+        self.assertAllowed(
+            'pgrep -f "sleep 60" | xargs kill # airuleset:pkill-ok single-user box'
+        )
+
+
 if __name__ == "__main__":
     main()
