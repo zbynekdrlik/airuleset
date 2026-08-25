@@ -10,7 +10,7 @@ Centralized management of Claude Code rules, skills, and hooks shared across mul
 
 One line each — the full internals of every service live in the per-area
 `.claude/rules/internals-<area>.md` files (`watchdog`/`hooks`/`notify`/`filedrop`/
-`cli`/`tests`/`scripts`/`statusbar`/`skills-modules`/`burn`), each auto-loading the
+`cli`/`tests`/`scripts`/`statusbar`/`skills-modules`/`burn`/`webterm`), each auto-loading the
 moment you touch that area's files (`paths:` frontmatter), so they cost nothing in
 a session that never goes near them. `.claude/rules/airuleset-internals.md` is now a
 small always-on ROUTER; the deep archive is the on-demand
