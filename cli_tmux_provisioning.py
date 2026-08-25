@@ -190,8 +190,27 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # the owner's window stays 176x50 (full) at every attach + window-switch from both
 # sides. `default-size 176x50` unchanged. The `set-option -gu window-size`
 # live-unset the first reopen added is REMOVED (it forced a running server to
-# `latest`, the opposite of the invariant); window-size is NEVER live-SET (the
-# #236 snap-resize / #241 3.4-crash hazard stays banned -- conf-only, restart).
+# `latest`, the opposite of the invariant).
+#
+# #685 (2026-08-25) then REVISED the "window-size is NEVER live-SET" half of
+# that doctrine: a conf-only pin provably never reaches a server started
+# BEFORE it (a tmux server reads the conf once, at start, and agentic fleet
+# boxes never restart tmux -- restarting would kill live Claude sessions), so
+# dev2's pre-v0.1.43 server still ran `latest`, David's 305x57 client sized
+# the codex-bridge window to 305x56, and the owner's 176x51 `-f ignore-size`
+# webterm client cropped the bottom rows (the invisible CC footer). The
+# `ignore-size` bridge only stops the webterm from SHRINKING a window; it
+# cannot fix one already LARGER than the owner's viewport. So
+# `converge_tmux_window_geometry` (below) now LIVE-converges a running server
+# -- set `window-size manual` + `default-size 176x50` when they differ, plus
+# a per-window resize to 176x50 -- VERSION-GATED on the same >= 3.5 probe as
+# the conf line (fails CLOSED: a 3.4/unprobeable box gets NO live geometry
+# call, so the #241 conf-crash and the dev1 3.4 format-expansion segfault
+# classes stay impossible), strictly idempotent, and proven safe live with
+# the exact command sequence on montalu1-6@subdev + dev1 (supervisor) and
+# dev2/fleet (this ticket) -- sessions untouched, no restarts, never a
+# keystroke. The #236 "snap-resize" is no longer a hazard but the owner-ruled
+# DESIRED convergence itself (#672: one fixed size for everyone).
 # The browser's OWN appearance at the fixed grid (no dark area, no giant grid) is
 # solved on the BROWSER side: the dashboard forces each ttyd xterm to the owner's
 # fixed 176x51 client grid and font-scales it to fill the viewport (cli_webterm),
@@ -674,6 +693,107 @@ def _tmux_supports_window_size_manual(run):
     return ver is not None and ver >= _MIN_WINDOW_SIZE_MANUAL_VERSION
 
 
+def converge_tmux_window_geometry(run=None, default_size=TMUX_DEFAULT_SIZE,
+                                   supports_manual=None):
+    """#685: LIVE-converge a RUNNING tmux server to the owner's fixed-size
+    invariant (#672 / #613 REOPEN-2): set `window-size manual` +
+    `default-size 176x50` when they differ, and resize every window not
+    already at 176x50 (dedup by window id -- grouped sessions list a shared
+    window once per session). A tmux server reads the conf ONLY at start and
+    agentic fleet boxes never restart tmux, so the conf-only pin never
+    reached a server started before it -- live dev2 (2026-08-25):
+    `window-size latest`, codex-bridge at 305x56 from David's 305x57 client,
+    the owner's 176x51 `-f ignore-size` webterm client cropping the bottom
+    rows (the invisible CC footer).
+
+    SAFETY -- why this does not resurrect the #236/#241 hazards: it is
+    VERSION-GATED on the same probe as the conf line
+    (`_tmux_supports_window_size_manual`, >= 3.5, fails CLOSED), so the #241
+    tmux-3.4 conf-parse crash and the dev1 3.4 format-expansion segfault
+    classes can never be reached; the #236 "snap-resize" is no longer a
+    hazard but the owner-ruled DESIRED end state, and the exact live
+    sequence was proven safe on tmux 3.7b (supervisor's montalu1-6@subdev +
+    dev1 applies; this ticket's dev2/fleet convergence) -- sessions
+    untouched, NO server restart/kill, NEVER a keystroke into any pane.
+    This function is the ONE sanctioned site for the raw per-window
+    geometry subcommands (TestTmuxWindowSizeNoResize counts the literals).
+
+    Strictly IDEMPOTENT: reads the server state first and mutates only what
+    differs; a converged server gets read-only calls and an empty return; a
+    dead socket / unreadable state returns [] (the conf written by
+    apply_tmux_history_limit covers the next server start). Every call is
+    independently guarded -- a failure is logged, never raised. Returns the
+    list of MUTATING argvs actually applied (the caller's log line).
+
+    `supports_manual=None` self-probes via `run`; `apply_tmux_history_limit`
+    passes its own already-probed bool so `tmux -V` stays a single call."""
+    runner = run or _default_tmux_run
+    if supports_manual is None:
+        supports_manual = _tmux_supports_window_size_manual(runner)
+    if not supports_manual:
+        return []
+    applied = []
+
+    def _read(argv):
+        try:
+            result = runner(argv)
+        except Exception:
+            return None
+        if result is None or getattr(result, "returncode", 1):
+            return None
+        return getattr(result, "stdout", None) or ""
+
+    def _mutate(argv):
+        try:
+            result = runner(argv)
+        except Exception as e:
+            print(f"  tmux geometry converge skipped (non-fatal): {e}",
+                  file=sys.stderr)
+            return
+        if result is not None and getattr(result, "returncode", 0):
+            stderr = (getattr(result, "stderr", "") or "").strip()
+            print(f"  tmux geometry converge skipped (rc): "
+                  f"{stderr or 'no server running?'}", file=sys.stderr)
+            return
+        applied.append(argv)
+
+    state = _read(["tmux", "show-options", "-g", "window-size"])
+    if state is None:
+        return []  # no server running -- the conf covers the next start
+    if state.strip() != f"window-size {TMUX_WINDOW_SIZE}":
+        _mutate(["tmux", "set-option", "-g", "window-size",
+                 TMUX_WINDOW_SIZE])
+    cur_default = _read(["tmux", "show-options", "-g", "default-size"])
+    if (cur_default is not None
+            and cur_default.strip() != f"default-size {default_size}"):
+        _mutate(["tmux", "set-option", "-g", "default-size", default_size])
+    try:
+        cols, rows = (int(v) for v in default_size.split("x"))
+    except ValueError:
+        return applied
+    listing = _read(["tmux", "list-windows", "-a", "-F",
+                     "#{window_id} #{window_width} #{window_height}"])
+    if listing is None:
+        return applied
+    seen = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        wid, w, h = parts
+        if wid in seen:
+            continue
+        seen.add(wid)
+        try:
+            w, h = int(w), int(h)
+        except ValueError:
+            continue
+        if (w, h) != (cols, rows):
+            _mutate(["tmux", "resize-window", "-t", wid,
+                     "-x", str(cols), "-y", str(rows)])
+    return applied
+
+
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
                               default_size: str = TMUX_DEFAULT_SIZE,
                               run=None) -> bool:
@@ -686,14 +806,20 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     any stale global destroy-unattached (#591 self-heal; the conf no longer
     carries a destroy-unattached line at all) AND aggressive-resize (#613 self-
     heal -- #584's connect live-set `aggressive-resize on` globally, the Ctrl+B W
-    blackening; the conf never carried it) on a running server. window-size is
-    CONF-ONLY -- NEVER live-applied (no `-g`/`-gu` window-size call): a live SET
-    is the #236 snap-resize / #241 3.4-crash hazard, and the first reopen's live
-    `-gu window-size` (forcing a running server to `latest`) is REMOVED because it
-    undid the invariant; a box still running that `latest` server is bridged by
-    the webterm clone's `-f ignore-size` until its next restart. The `tmux -V`
-    version probe (`_tmux_supports_window_size_manual`) decides ONLY the conf
-    content, fails closed. See the module-level comment above
+    blackening; the conf never carried it) on a running server. window-size
+    lands in the conf (version-gated) AND -- since #685 -- is LIVE-converged on
+    a running >= 3.5 server via `converge_tmux_window_geometry`, called at the
+    end with the same probed bool (so `tmux -V` stays a single call): a
+    conf-only pin never reaches a server started before it, and the webterm
+    clone's `-f ignore-size` bridge only stops the webterm from SHRINKING a
+    window -- it cannot fix one already LARGER than the owner's viewport (dev2
+    codex-bridge 305x56 -> the CC footer cropped below the owner's 176x51
+    client, #685). The first reopen's live `-gu window-size` (forcing a running
+    server to `latest`) stays REMOVED; a 3.4/unprobeable box gets NO live
+    geometry call at all (fails closed -- the #241 crash / dev1 segfault
+    classes stay impossible). The `tmux -V` version probe
+    (`_tmux_supports_window_size_manual`) decides the conf content AND gates
+    the live convergence. See the module-level comment above
     `render_tmux_history_block` for the full incident history.
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
@@ -733,15 +859,15 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     destroy anything. The webterm clone self-cleans PER-SESSION instead
     (cli_webterm's `client-attached` hook), so the base is never swept.
 
-    default-size is DELIBERATELY CONF-ONLY -- never live-applied via a
-    real tmux subprocess call, in any code path. It lands in the conf
-    file above, so it takes effect for the NEXT server/session/window --
-    existing attached sessions simply keep tmux's factory default
-    (`80x24`) until that server is next restarted, mirroring the
-    identical, already-accepted trade-off this ticket made for a
-    per-window resize call itself. See TestTmuxWindowSizeRemoved for the
-    lock, and TestTmuxWindowSizeNoResize for the separate, unrelated
-    per-window-resize / format-expansion-query lock.
+    default-size is never in the STATIC `live_argvs` list below; it lands
+    in the conf file above (next server/session/window), and -- since #685
+    -- the gated `converge_tmux_window_geometry` step additionally live-sets
+    it (idempotently, only when it differs) on a running >= 3.5 server, as
+    part of the same convergence that fixes each window's live size. On a
+    gate-CLOSED (3.4/unprobeable) box it stays conf-only exactly as before.
+    See TestTmuxWindowSizeRemoved for the fail-closed lock, and
+    TestTmuxWindowSizeNoResize for the only-sanctioned-site lock on the raw
+    per-window geometry subcommands.
 
     #267: the three `TMUX_SCROLLBACK_KEYBINDS` (Shift+PgUp/PgDn) are ALSO
     live-applied, unlike default-size -- a `bind-key` call only registers
@@ -836,15 +962,17 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         # self-heal UNSETs so calls[1..3] (history-limit + the two self-heals)
         # keep their positions; mouse is calls[4].
         ["tmux", "set-option", "-g", "mouse", "on"],
-        # #613 REOPEN-2: window-size is NEVER live-applied (no `-gu`/`-g` call).
-        # The first reopen live-UNSET it (`set-option -gu window-size`) to force a
-        # running server to `latest`; that is the OPPOSITE of the owner's restored
-        # fixed-size invariant, so it is REMOVED. `window-size manual` is CONF-ONLY
-        # (version-gated above), taking effect at the next server start; a box
-        # still RUNNING the first-reopen `latest` server is bridged immediately by
-        # the webterm clone's `-f ignore-size` (cli_webterm), never by a live
-        # window-size flip -- a live SET carries the #236 snap-resize / #241 3.4
-        # crash hazard, and a live UNSET-to-latest would undo the invariant.
+        # #613 REOPEN-2 / #685: window-size is never in THIS static list. The
+        # first reopen live-UNSET it (`set-option -gu window-size`) to force a
+        # running server to `latest`; that is the OPPOSITE of the owner's
+        # restored fixed-size invariant, so it stays REMOVED. The conf line is
+        # version-gated above, and #685's `converge_tmux_window_geometry` --
+        # invoked AFTER this loop with the same probed bool -- is the ONE
+        # sanctioned live path for window-size: it SETS `manual` (never
+        # `latest`) and converges each window's live size, idempotently,
+        # state-read-first, on >= 3.5 only. It lives outside this list because
+        # its calls are CONDITIONAL on the server's current state, while every
+        # entry here fires unconditionally.
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
@@ -881,6 +1009,18 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
             # call is independently guarded so one failure never skips
             # the rest (#267).
             print(f"  tmux live-apply skipped (non-fatal): {e}", file=sys.stderr)
+
+    # #685: LIVE-converge the running server's window geometry (version-gated,
+    # idempotent, state-read-first -- see converge_tmux_window_geometry's
+    # docstring). The probed bool is passed through so `tmux -V` stays a
+    # single call; on a gate-CLOSED or server-less box this is a no-op.
+    converged = converge_tmux_window_geometry(
+        run=runner, default_size=default_size,
+        supports_manual=window_size_manual)
+    if converged:
+        print(f"  tmux geometry converged live: {len(converged)} change(s) "
+              f"(window-size {TMUX_WINDOW_SIZE} + windows -> {default_size},"
+              " #685)")
 
     return changed
 

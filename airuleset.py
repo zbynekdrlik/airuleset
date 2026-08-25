@@ -464,6 +464,7 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     render_tmux_history_block,
     _clean_tmux_block_spans,
     _default_tmux_run,
+    converge_tmux_window_geometry,
     apply_tmux_history_limit,
     STREAM_TMUX_WINDOW_MARK_START,
     STREAM_TMUX_WINDOW_MARK_END,
@@ -1037,9 +1038,9 @@ def cmd_install(args):
     # every window to default-size so no client resizes another's window; the
     # browser's OWN appearance is solved on the browser side). history-limit is
     # live-applied to any RUNNING tmux server (#235's proven-safe scope);
-    # window-size + default-size are conf-only and take effect for the next
-    # server/session (see apply_tmux_history_limit's own docstring, and the
-    # module-level comment above render_tmux_history_block, for the full history).
+    # window-size + default-size land in the conf AND (#685) are live-CONVERGED
+    # on a running >= 3.5 server, since a conf-only pin never reaches a server
+    # started before it (apply_tmux_history_limit's docstring has the history).
     try:
         tmux_changed = apply_tmux_history_limit()
         _ws = ("window-size manual (tmux>=3.5 only)"
