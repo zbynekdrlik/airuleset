@@ -393,3 +393,49 @@ def stuck_owner_alert_decision(*, verdict, streak, max_streak, already_alerted):
     if streak >= max_streak:
         return StuckOwnerAlert(True, streak, True)
     return StuckOwnerAlert(False, streak, False)
+
+
+LaneGiveupCause = namedtuple("LaneGiveupCause", "cause detail")
+
+
+def lane_giveup_cause_decision(*, workable, user_waiting, ops_wait, gk,
+                               age_s, max_age_s):
+    """#693 -- classify WHY the lanes stayed empty at the lane-nudge give-up,
+    from the tickets-status partition (the SAME counts the footer renders).
+    PURE (facts in / verdict out, mutation-lockable like the deciders above);
+    the thin orchestrator `goal._lane_giveup_cause` resolves the facts.
+
+    Causes (owner ruling, #693 ROZHODNUTÉ -- (a)/(b) are NORMAL states, never
+    an alarm; (c) is an airuleset-bug signal that stays machine-channel too):
+
+      * ``backlog-exhausted`` -- workable == 0 and no parked buckets: the
+        session simply ran out of dispatchable work.
+      * ``parked``            -- workable == 0 but U/W/gk > 0: everything
+        open is waiting on the owner / a third party / the gatekeeper.
+      * ``stall``             -- workable > 0 yet the lanes stayed empty: the
+        one genuinely-suspect class (a coverage gap on THIS box).
+      * ``unknown``           -- the partition is unreadable (workable None)
+        or the cache is stale (`age_s` None / over `max_age_s`): classified
+        HONESTLY as can't-tell, never guessed toward any other class.
+
+    `detail` always names the raw counts + cache age ("-" for an absent
+    bucket -- e.g. `gk` on a full-authority entry), so the journal verdict is
+    self-describing. A None parked bucket counts 0 toward the parked SUM but
+    renders as "-", keeping the sum honest for the entries the cache writer
+    produces (open + user_waiting/ops_wait are written together; gk only on
+    reduced authority)."""
+    def _w(v):
+        return "-" if v is None else str(v)
+
+    detail = "workable=%s U=%s W=%s gk=%s age=%s" % (
+        _w(workable), _w(user_waiting), _w(ops_wait), _w(gk),
+        ("%dm" % (age_s // 60)) if isinstance(age_s, (int, float)) else "-")
+    if not isinstance(workable, int) or not isinstance(age_s, (int, float)) \
+            or age_s > max_age_s:
+        return LaneGiveupCause("unknown", detail)
+    if workable > 0:
+        return LaneGiveupCause("stall", detail)
+    parked = sum(v for v in (user_waiting, ops_wait, gk) if isinstance(v, int))
+    if parked > 0:
+        return LaneGiveupCause("parked", detail)
+    return LaneGiveupCause("backlog-exhausted", detail)
