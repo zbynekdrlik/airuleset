@@ -7,6 +7,8 @@
 
 **BANNED (all rewordings and semantic equivalents):** asking the user to `scp` / `sftp` / `rsync` a file to the box, offering them scp command lines, asking for their SSH key so THEY can push a file, "pošli mi to cez scp / nahraj to na server cez terminál". The user provides files through a browser URL — never through a terminal transfer they must compose themselves. **A credential is NOT a file** — see below, `upload` is the wrong tool for it.
 
+**No-tailscale box or client → a PUBLIC HTTPS URL, still never ssh -L (#664).** On a box with no tailscale (spinbike-vps) or when the *client* has no tailscale (David's laptop → david1/2@subdev), the tailscale/LAN URLs above are unreachable. `upload` (and `secret request`/`secret show`) then fall back — channel order **tailscale → public-TLS** — to ONE simple public URL `https://drop-<box>.newlevel.media/<token>/`, a loopback endpoint fronted by the box's existing Cloudflare tunnel (mandatory TLS at the edge, the one-shot token unchanged; David's is additionally behind Cloudflare Access = double protection). It is AUTO-used on a no-tailscale box, or force it with `--public`. **NEVER hand-write ssh -L / PowerShell tunnel instructions** — that is the banned gymnastics this replaces. Go-live per box is a one-time `airuleset.py drop-gateway --apply` (+ a DNS CNAME); until then `--public` simply keeps the private URLs.
+
 #### Receiving CREDENTIALS FROM the User — `secret request`/`secret exec`, NEVER `upload` or chat
 
 **A password, API key, token, PAT, or connection string is a CREDENTIAL, not a file — `upload` above is the wrong channel for it, and pasting it into chat is worse.** When the user needs to give you a credential:
