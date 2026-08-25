@@ -60,7 +60,10 @@ def _bash_pretooluse_hooks():
         for h in entry.get("hooks", []):
             cmd = h.get("command", "")
             if "airuleset/hooks/" in cmd:
-                names.append(cmd.split("airuleset/hooks/")[-1].strip())
+                # first whitespace-delimited token only, so a future command
+                # carrying trailing args (none do today) resolves to the bare
+                # hook filename rather than "<name>.sh --arg".
+                names.append(cmd.split("airuleset/hooks/")[-1].split()[0])
     return names
 
 
