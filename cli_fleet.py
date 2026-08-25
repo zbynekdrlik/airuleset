@@ -198,6 +198,37 @@ REMOTE_HOSTS = [
         "host": "forestshop-dev.newlevel.media",
         "user": "admin",
         "repo_path": "~/devel/airuleset",
+        # #679: pinned PUBLIC ssh host keys for this public-DNS target. Same
+        # public-internet threat class as spinbike-vps (#669) and WORSE: this
+        # entry carries no `identity`, so the deploy loop takes the no-identity
+        # `sshpass -p newlevel` branch -- under StrictHostKeyChecking=no a MITM
+        # on the path to forestshop-dev.newlevel.media (or a DNS hijack) would
+        # get ANY host key accepted AND receive the fleet-shared password. The
+        # pin verifies the host key STRICTLY (cli_remote.host_key_check_opts),
+        # so a MITM's key fails BEFORE any auth -- the password can never be
+        # handed over. PUBLIC key material -- safe to commit, exactly like
+        # cli_owner_keys.OWNER_PUBKEYS. Each line is `<type> <base64>` WITHOUT
+        # the address; cli_remote materializes them into a known_hosts file
+        # keyed to `host` (the DNS name ssh connects by -- CheckHostIP defaults
+        # to no, so no HostKeyAlias is needed). Captured on dev1 (the maintainer
+        # box) with auth-less `ssh-keyscan`, cross-verified byte-for-byte
+        # against dev1's existing authenticated-deploy known_hosts entries (the
+        # DNS-name line + the raw-IP 178.105.89.168 lines) AND one authenticated
+        # `ssh admin@forestshop-dev.newlevel.media` connection over the
+        # documented default-key path (rc 0, hostname forestshop-dev, repo
+        # present); ed25519 fingerprint
+        # SHA256:sP+uKY/5B+85xQoNUs+RfJ5SwMozoQWUWNi/EouGZI8. Both this and the
+        # stepan@ entry below are the SAME physical box, so they carry the SAME
+        # pin. A genuine host-key rotation will hard-fail the deploy LOUDLY
+        # until these are re-captured + re-committed -- the intended fail-safe
+        # direction. (An `identity` to leave the shared-password branch is a
+        # separate decision the ticket explicitly defers -- pinning alone fully
+        # closes the exposure this ticket names.)
+        "host_keys": [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF0hQYw2+OticG0PVhzzDeJzghERkK7g+WkqpDihlbiI",
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHpFPlgqeS8+KP2L9KrlVSKqezEK19l8IgdDCubJPxISCF8L4X7TO/TkOkBXoYVKPgaLyEV2rva6zlihdef4h9o=",
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCM20xevli5Jj4pdx3m0lQs7m81ZMY6+b20kIwrtM1hLjbEV9JOW7G2P15zcCEeHwtkqn36BSERbkKVX9tf8aXy7TD+Wh80o70cUhh77r2janngtCGkHNWbag/Q9mvOrIos6f1BQjkMlH77g6O5Fav5ZaOADzKPlyP9EqYc++ZIrGkaoqeJUirFGVVY7OhdF5Zx2g4UUfEv92SxvAB9W6mWVabotoFdEh2qlY0iX8o7uL0vTim63E82E1dxU2QkYH6mtMimn8rU1oNfg3IM5N2ZzIar3U6XwlcQmNkNm7Xjj2Fl95F1r6s4V363b3UrnDeK+qf1EtJMv9bOILDIJgqGDU+OQBEfvA/Y9jfeaC4LxO4JeniRcgJVIH8gyPhmOUJ7/RSp/R+7394KXo1ueKv1DVZKN0V99GLmUUwHjT8Eh6tg+Ma5tOoj81jHrRyJ07qYOC34ERvfTeH6bctKmCA73wsTXTbOVq6lPL9X6w/Disnfu6EBLPFLSiwFEHbNnLk=",
+        ],
     },
     {
         # stepan@forestshop-dev -- StepanDK's own isolated dev account on
@@ -213,6 +244,15 @@ REMOTE_HOSTS = [
         "host": "forestshop-dev.newlevel.media",
         "user": "stepan",
         "repo_path": "~/devel/airuleset",
+        # #679: same physical box as admin@forestshop-dev above -> the SAME
+        # committed PUBLIC host-key pin (see that entry for the full provenance
+        # + rationale). Both accounts connect by the same DNS name, so
+        # cli_remote materializes ONE shared known_hosts pin for both.
+        "host_keys": [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF0hQYw2+OticG0PVhzzDeJzghERkK7g+WkqpDihlbiI",
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHpFPlgqeS8+KP2L9KrlVSKqezEK19l8IgdDCubJPxISCF8L4X7TO/TkOkBXoYVKPgaLyEV2rva6zlihdef4h9o=",
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCM20xevli5Jj4pdx3m0lQs7m81ZMY6+b20kIwrtM1hLjbEV9JOW7G2P15zcCEeHwtkqn36BSERbkKVX9tf8aXy7TD+Wh80o70cUhh77r2janngtCGkHNWbag/Q9mvOrIos6f1BQjkMlH77g6O5Fav5ZaOADzKPlyP9EqYc++ZIrGkaoqeJUirFGVVY7OhdF5Zx2g4UUfEv92SxvAB9W6mWVabotoFdEh2qlY0iX8o7uL0vTim63E82E1dxU2QkYH6mtMimn8rU1oNfg3IM5N2ZzIar3U6XwlcQmNkNm7Xjj2Fl95F1r6s4V363b3UrnDeK+qf1EtJMv9bOILDIJgqGDU+OQBEfvA/Y9jfeaC4LxO4JeniRcgJVIH8gyPhmOUJ7/RSp/R+7394KXo1ueKv1DVZKN0V99GLmUUwHjT8Eh6tg+Ma5tOoj81jHrRyJ07qYOC34ERvfTeH6bctKmCA73wsTXTbOVq6lPL9X6w/Disnfu6EBLPFLSiwFEHbNnLk=",
+        ],
     },
     {
         # SpinBike Hetzner VPS (airuleset#408, 2026-08-12): no tailscale --

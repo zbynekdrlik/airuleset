@@ -578,15 +578,40 @@ def _unlink_quiet(path):
         pass
 
 
+def _pinned_known_hosts_path(content):
+    """A DETERMINISTIC, CONTENT-ADDRESSED path for a materialized pin file
+    (#680): the filename is a hash of the exact file CONTENT, so every process
+    that pins the same host to the same keys computes the SAME path -- the file
+    count is bounded to O(#distinct pins), never one-per-connect. This is what
+    makes the atexit-less ssh legs safe: a PINNED webterm connect child ends in
+    `os.execvp`, so Python's atexit cleanup never runs there; a RANDOM
+    `mkstemp` name leaked one `/tmp/arpin-known-hosts-*` file per pinned
+    connect, whereas a deterministic name is simply re-used (re-written
+    idempotently) by the next connect."""
+    import hashlib
+    import tempfile
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
+    return os.path.join(tempfile.gettempdir(), "arpin-known-hosts-%s" % digest)
+
+
 def _materialize_pinned_known_hosts(addr, host_keys):
     """Write `host_keys` (each a `<type> <base64>` known_hosts line WITHOUT the
     address) as a known_hosts file keyed to `addr`, and return its path. The
     source of truth is the committed constant; this only MATERIALIZES it for
     ssh, so the pin is re-enforced fresh every push with no persistent drift.
-    Process-cached per `(addr, normalized keys)` and unlinked atexit. RAISES
-    (never returns None, never a `=no` fallback) when the pin is empty or the
-    file cannot be written -- a pinned host must fail LOUD, never silently
-    downgrade to TOFU (script-failure-policy)."""
+    The path is DETERMINISTIC + content-addressed (#680, via
+    `_pinned_known_hosts_path`) so the file count is bounded to O(#distinct
+    pins) even on the atexit-less `os.execvp` webterm leg; the normal-exit legs
+    (push/burn/onboard) additionally unlink it atexit. Process-cached per
+    `(addr, normalized keys)`. RAISES (never returns None, never a `=no`
+    fallback) when the pin is empty or the file cannot be written -- a pinned
+    host must fail LOUD, never silently downgrade to TOFU
+    (script-failure-policy). (A narrow, LOUD, self-healing cross-process race
+    remains: a normal-exit leg's atexit could unlink the shared deterministic
+    file while a concurrent webterm connect is mid-handshake -> ssh fails
+    visibly with rc 255, never a silent downgrade, and each caller
+    re-materializes right before its own ssh, so a retry self-heals. Public
+    key material only.)"""
     import atexit
     import tempfile
     norm = tuple(k.strip() for k in host_keys if k and k.strip())
@@ -600,9 +625,23 @@ def _materialize_pinned_known_hosts(addr, host_keys):
     if cached and os.path.exists(cached):
         return cached
     lines = "".join("%s %s\n" % (addr, k) for k in norm)
-    fd, path = tempfile.mkstemp(prefix="arpin-known-hosts-")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(lines)
+    path = _pinned_known_hosts_path(lines)
+    # Write atomically (temp + os.replace) into the deterministic path: a
+    # concurrent reader never sees a partial file, and os.replace atomically
+    # overwrites any stale file OR pre-planted symlink at that path (it renames
+    # OVER the link, never through it). Rewrite unconditionally on first
+    # materialize in this process (the in-process cache above already skips a
+    # repeat within one process) so a stale/tampered file is always replaced by
+    # the committed source of truth.
+    fd, tmp = tempfile.mkstemp(prefix=".arpin-tmp-",
+                               dir=os.path.dirname(path) or None)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(lines)
+        os.replace(tmp, path)
+    except BaseException:
+        _unlink_quiet(tmp)
+        raise
     _PINNED_KNOWN_HOSTS_FILES[cache_key] = path
     atexit.register(_unlink_quiet, path)
     return path
@@ -618,8 +657,9 @@ def host_key_check_opts(remote):
     `StrictHostKeyChecking=no` posture. Called at every PUSH-PATH ssh leg (the
     deploy loop AND the shared secret-delivery loop), so the pin covers the whole
     push-path surface and no such leg can silently copy the old =no default for a
-    pinned host. (#669 review 🟡-2: OTHER ssh consumers -- webterm/burn/onboard --
-    are NOT yet pinned; tracked separately.) Fail-closed: a host whose `host_keys`
+    pinned host. (#680 extended the same pin to the OTHER ssh consumers --
+    webterm/burn/onboard -- so every spinbike leg is now pinned, not just the
+    push path.) Fail-closed: a host whose `host_keys`
     is PRESENT but empty/blank RAISES (never a =no fallback) -- only an ABSENT
     `host_keys` is treated as an unpinned tailscale/subdev host."""
     if remote.get("host_keys") is None:      # absent (or explicit None) = unpinned

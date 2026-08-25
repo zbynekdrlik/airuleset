@@ -163,10 +163,10 @@ class TestRealFleetPinScope(unittest.TestCase):
         # Regression: a private tailscale target (100.64/10) must NEVER be
         # pinned — pinning is for public-internet-reachable hosts only, and a
         # tailscale host has no committed pin. (This deliberately does NOT
-        # forbid pinning OTHER public-IP hosts in a follow-up — #669 review
-        # 🟡-1: forestshop-dev is the same threat class and is tracked to be
-        # pinned separately; the earlier blanket "only spinbike may ever be
-        # pinned" assertion cemented that gap and was removed.)
+        # forbid pinning OTHER public-IP hosts: spinbike (#669) and
+        # forestshop-dev (#679) are both public and both pinned; the earlier
+        # blanket "only spinbike may ever be pinned" assertion cemented that
+        # gap and was removed.)
         for h in airuleset.REMOTE_HOSTS:
             if h.get("host", "").startswith("100."):
                 self.assertIsNone(
@@ -176,13 +176,17 @@ class TestRealFleetPinScope(unittest.TestCase):
                 self.assertEqual(cli_remote.host_key_check_opts(h),
                                  ["-o", "StrictHostKeyChecking=no"])
 
-    def test_spinbike_is_the_only_currently_pinned_host(self):
-        # Documents CURRENT fleet state (not a forbid-future assertion): today
-        # only spinbike-vps carries a committed pin. A NEW pin (e.g. the
-        # forestshop-dev follow-up) updates this expected set.
+    def test_currently_pinned_hosts_are_the_public_internet_targets(self):
+        # Documents CURRENT fleet state (not a forbid-future assertion): the
+        # committed pins are exactly the public-internet-reachable targets --
+        # spinbike-vps (raw public IP, #669) and both forestshop-dev accounts
+        # (public DNS, shared-password branch, #679). A NEW public target's pin
+        # updates this expected set.
         pinned = sorted(h["name"] for h in airuleset.REMOTE_HOSTS
                         if h.get("host_keys"))
-        self.assertEqual(pinned, ["spinbike-vps"])
+        self.assertEqual(
+            pinned,
+            ["admin@forestshop-dev", "spinbike-vps", "stepan@forestshop-dev"])
 
 
 class TestSecretDeliveryLegPinsPinnedHost(unittest.TestCase):
