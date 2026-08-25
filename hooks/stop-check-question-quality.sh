@@ -306,10 +306,11 @@ fi
 # ("chcem to poslať klientovi") — nothing signals Discuss, so it is
 # indistinguishable from an ordinary e-mail/other send; the closing-message arm
 # still catches an "uzavieracej správy" phrasing (reviewer-A thread-word-
-# dependency FN); (2) a thread named only by its INTERNAL channel number in
-# quotes ("„vlákno 250"") — accepted as a specific identifier, though #632
-# prefers the human name (the create-time gate #596 + prose enforce that
-# separately); (3) intent SPLIT ACROSS LINES, or a posting phrased with the
+# dependency FN); (2) a thread named only by its INTERNAL channel number
+# ("„vlákno 250"", a bare "Vlákno: 288", or the #697-accepted deep URL
+# discuss.channel_<N> with no human name next to it) — accepted as a specific
+# identifier, though #632 prefers the human name (the create-time gate #596 +
+# prose enforce that separately); (3) intent SPLIT ACROSS LINES, or a posting phrased with the
 # locative "vo vlákne" rather than "do vlákna"; (4) a `Vlákno:` line placed
 # ABOVE the "Otázka —" head, which the head-anchored $BLOCK extraction drops —
 # the standard compose ordering puts the name AFTER the briefing, so it is
@@ -337,6 +338,32 @@ if [ -z "$VIOLATION" ]; then
     # alone let the fix instruction's own remedy defeat the check (reviewer-A
     # DODGE-1).
     THREAD_NAMED_RX='[„“"][^„”“"]{0,60}[0-9][[:space:]]*[”“"]'
+    # #697 — two MORE satisfying-evidence forms, aligned with the #657 doctrine
+    # (owner-facing thread references carry name + deep URL). Both only ADD
+    # acceptance (a block can only stop firing, never start), so the false-
+    # BLOCK risk is zero and the analyzed direction is under-block:
+    #   (a) the machine-exact deep URL discuss.channel_<N> — the #657 canonical
+    #       identifier; it cannot appear by accident, and it is MORE specific
+    #       than a human name (a block carrying only it was over-blocked);
+    #   (b) an explicit `Vlákno:` marker LINE whose value carries a digit (the
+    #       stream-number suffix of the #632 „<name> <N>" form) within 60
+    #       chars, with no `#` before the digit — so the natural unquoted
+    #       `Vlákno: Tabula objednavok 1` passes while DODGE-1 stays dead
+    #       (a digit-less generic label still blocks; the digit is the SAME
+    #       discriminator THREAD_NAMED_RX already uses) and a ticket-ref
+    #       `Vlákno: pozri ticket #650` still blocks (the [^#] exclusion).
+    THREAD_DEEPURL_RX='discuss\.channel_[0-9]+'
+    #       Reviewer 🔵-1: `\**` also admitted around the colon so the bold
+    #       markdown variants (`**Vlákno:**`, `**Vlákno**:`) pass too.
+    #       Reviewer 🔵-2/-3 residuals (probed, accepted — same word-family
+    #       class as the list above): an INCIDENTAL digit in a generic label
+    #       ("Vlákno: výrobné vlákno (odpoviem do 2 dní)") satisfies the digit
+    #       discriminator — identical weakness to THREAD_NAMED_RX's „…do 2
+    #       dní"; and evidence is PRESENCE-checked, not bound to the TARGET
+    #       thread (a different thread's deep URL elsewhere in the block
+    #       satisfies) — semantic binding is beyond a word-family heuristic,
+    #       and the quoted-name form always shared this property.
+    THREAD_VLAKNO_RX='^[[:space:]]*\**[[:space:]]*vl[áa]kno[[:space:]]*\**[[:space:]]*:[^#]{0,60}[0-9]'
     intent=""
     if LC_ALL=C.UTF-8 grep -qiE "$CLOSING_RX" <<<"$BLOCK"; then
         intent=1
@@ -345,7 +372,9 @@ if [ -z "$VIOLATION" ]; then
         intent=1
     fi
     if [ -n "$intent" ] \
-        && ! LC_ALL=C.UTF-8 grep -qiE "$THREAD_NAMED_RX" <<<"$BLOCK"; then
+        && ! LC_ALL=C.UTF-8 grep -qiE "$THREAD_NAMED_RX" <<<"$BLOCK" \
+        && ! LC_ALL=C.UTF-8 grep -qiE "$THREAD_DEEPURL_RX" <<<"$BLOCK" \
+        && ! LC_ALL=C.UTF-8 grep -qiE "$THREAD_VLAKNO_RX" <<<"$BLOCK"; then
         VIOLATION="thread"
     fi
 fi
@@ -365,7 +394,7 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
         reference)
             REASON="Your ❓ block references an OLD question by allusion (\"pýtal som sa skôr\" / \"ako som spomínal\" / \"jediné otvorené rozhodnutie je X\") instead of restating it. If a conversation happened since it was last asked, this is a NEW ask — write the FULL self-contained block again (briefing + options + decision); the away user cannot see your history. A byte-identical VERBATIM repeat of the SAME still-blocked question is fine and does not hit this check.${TEMPLATE}" ;;
         thread)
-            REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-discuss-xmlrpc/handover-compose.md (#632/#650)." ;;
+            REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — a per #657 pridaj aj deep URL …/odoo/discuss?active_id=discuss.channel_<N> (samotný deep URL tiež stačí) — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-discuss-xmlrpc/handover-compose.md (#632/#650/#697)." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
