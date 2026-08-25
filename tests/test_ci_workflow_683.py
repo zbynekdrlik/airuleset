@@ -146,3 +146,15 @@ class TestArgsGeneratorMapping(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCheckoutFetchDepth(unittest.TestCase):
+    def test_checkout_fetches_full_history(self):
+        # tests/test_rules_ab_experiment.py replays REAL historical commit
+        # pairs (e.g. #88's 8a298b3/501c4be) straight from git history, so a
+        # shallow checkout (actions/checkout's fetch-depth: 1 default) fails
+        # it with "is not a commit" — the second-ever main run died exactly
+        # there. The checkout step must pin fetch-depth: 0 (full history).
+        self.assertIn("fetch-depth: 0", _wf_text(),
+                      "actions/checkout must set fetch-depth: 0 — history-"
+                      "replaying tests need the full clone (#683 run 2 failure)")
