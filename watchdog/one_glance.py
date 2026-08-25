@@ -355,7 +355,11 @@ def lane_low_mem_surface_decision(*, backlog, min_backlog,
 # routed a PERSISTENT structural stuck to an OWNER alert. This PURE decider
 # (facts in / verdict out, mutation-lockable in isolation like its two siblings
 # above) is the wire: the thin orchestrator `goal._lane_stuck_owner_alert`
-# consumes it and fires ONE un-suppressed `stuckalert:` alert per episode.
+# consumes it and records ONE `stuckalert:` signal per episode. #688 (owner
+# ruling 2026-08-25) then added `stuckalert:` to SUPPRESSED_ALERT_PREFIXES —
+# the structural `stuck` verdict is a heuristic that fires on many
+# non-human-needed states, so the send() drops the Discord PING and keeps only
+# the machine-channel signal (journal + `suppressed` delivery-log line).
 
 StuckOwnerAlert = namedtuple("StuckOwnerAlert", "alert streak alerted")
 

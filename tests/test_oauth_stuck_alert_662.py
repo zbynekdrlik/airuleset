@@ -113,18 +113,21 @@ class SuppressionContrast(unittest.TestCase):
             notify._suppressed_alert_class("oauthblock:key:hash:123"),
             "oauthblock is now owner-suppressed (#676) — must NOT ping")
 
-    def test_stuckalert_is_not_suppressed(self):
-        self.assertIsNone(
+    def test_stuckalert_is_suppressed_688(self):
+        # #688 (owner ruling 2026-08-25) OVERTURNED #662/#676's "stuckalert stays
+        # un-suppressed" — the structural frozen-goal alarm is spam too.
+        self.assertEqual(
             notify._suppressed_alert_class("stuckalert:sid:123"),
-            "stuckalert is the structural-stuck escape valve — must POST "
-            "(#676 objected ONLY to the oauth class)")
+            "structural-stuck (#688)",
+            "#688: stuckalert is now owner-suppressed (machine-channel only)")
 
     def test_new_namespaces_have_no_prefix_collision(self):
-        # boundary-matched: oauthblock resolves to its OWN class (#676), never
-        # accidentally to api-error/usage/…; stuckalert stays un-suppressed.
+        # boundary-matched: each resolves to its OWN class, never accidentally to
+        # api-error/usage/…; #688 added stuckalert to the suppressed set.
         self.assertEqual(
             notify._suppressed_alert_class("oauthblock:x:y:1"), "oauth-revoke (#676)")
-        self.assertIsNone(notify._suppressed_alert_class("stuckalert:s:2"))
+        self.assertEqual(
+            notify._suppressed_alert_class("stuckalert:s:2"), "structural-stuck (#688)")
 
 
 class NeedsInteractiveLoginPredicate(unittest.TestCase):
@@ -182,10 +185,11 @@ class SuppressionThroughSend(unittest.TestCase):
         self.assertEqual(r, "suppressed")
         self.assertEqual(self.posts, [])
 
-    def test_stuckalert_posts(self):
+    def test_stuckalert_suppressed_688(self):
+        # #688: the structural-stuck alarm is now owner-suppressed — POSTs nothing.
         r = notify.send("body", dedup_key="stuckalert:s:1")
-        self.assertEqual(r, "sent")
-        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(r, "suppressed")
+        self.assertEqual(self.posts, [])
 
 
 class ComposeHelpers(unittest.TestCase):

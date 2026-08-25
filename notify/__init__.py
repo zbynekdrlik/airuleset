@@ -1287,9 +1287,14 @@ def compose_stuck_owner_alert(project, loc, sweeps):
     (armed /goal + 0 workers + backlog waiting + idle over threshold) held for
     `sweeps` consecutive ~1-min sweeps — long enough that the session did NOT
     revive despite the bounded keystroke lane-nudge recovery (a dead /
-    login-dialog-covered session a `continue` cannot bring back). A real
-    coverage OUTAGE the owner must see. Keyed `stuckalert:` (OUTSIDE the #546
-    apierr family) so it always POSTs. No @mention here — send() prepends it."""
+    login-dialog-covered session a `continue` cannot bring back). Keyed
+    `stuckalert:`. #688 (owner ruling 2026-08-25) added that key to
+    `SUPPRESSED_ALERT_PREFIXES` — the structural `stuck` verdict is a heuristic
+    that fires on many non-human-needed states, so this body is still COMPOSED
+    and passed to send(), but send() suppresses the Discord PING (the machine
+    channel keeps the signal — watchdog journal + the `suppressed` delivery-log
+    line; the keystroke auto-recovery is untouched), exactly like the sibling
+    `oauthblock:` alarm (#676). No @mention here — send() prepends it."""
     proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
     where = _clean(loc) or "?"
     return ("⛔ **%s** — /goal slučka ZAMRZLA: %d× po sebe (~1 min/kontrola) "
@@ -2583,9 +2588,20 @@ SUPPRESSED_ALERT_PREFIXES = (
     # the Claude project + its watchers, not an incident. Same #546 audience
     # split: no Discord PING, the machine channel keeps the signal (watchdog
     # journal + the `suppressed` delivery-log line). The watchdog's job stays
-    # the silent auto-resume (#675 owns the work-resume half). `acctblock:`
-    # (genuine account-block, needs a human) + `stuckalert:` stay un-suppressed.
+    # the silent auto-resume (#675 owns the work-resume half).
     ("oauthblock", "oauth-revoke (#676)"),  # watchdog job 1 escalation (#662 alarm — owner-ruled spam)
+    # #688 (2026-08-25 owner ruling): #662's `stuckalert:` frozen-goal alarm
+    # (goal_lane_sweep -> _lane_stuck_owner_alert) is SPAM too — the structural
+    # `stuck` verdict (armed /goal + 0 workers + backlog + idle over threshold)
+    # is a HEURISTIC that fires on many states that do NOT need a human
+    # (transient idle, an owner-stopped session, a #676-normal oauth-revoke), so
+    # it cannot clear the "genuinely needs a human" bar. Same #546 audience split
+    # as #676 above: no Discord PING, the machine channel keeps the signal
+    # (watchdog journal + the `suppressed` delivery-log line). Auto-recovery (the
+    # lane keystroke nudge, send_verified) never routes through send(), so it is
+    # untouched. `acctblock:` (genuine account-block, needs a human) is the ONE
+    # escalation class that stays un-suppressed.
+    ("stuckalert", "structural-stuck (#688)"),  # goal_lane_sweep frozen-goal alarm (#662 — owner-ruled spam)
 )
 
 

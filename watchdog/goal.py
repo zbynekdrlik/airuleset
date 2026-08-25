@@ -3567,10 +3567,14 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
     9,5h outage: the lane KEYSTROKE nudge above tries to RECOVER a stuck pane
     (bounded GOAL_LANE_MAX_NUDGES); when the pane stays `stuck` across
     `_stuck_alert_streak()` sweeps the session has NOT revived (a dead /
-    login-dialog-covered session a `continue` cannot bring back) -- a real
-    coverage OUTAGE the owner must see. Fires ONE un-suppressed alert per
-    episode (dedup_key `stuckalert:` -- OUTSIDE the #546 apierr family, exactly
-    like `acctblock:`), reusing the ALREADY-cached `glance` (ZERO new fetch).
+    login-dialog-covered session a `continue` cannot bring back). Records ONE
+    per-episode signal (dedup_key `stuckalert:`), reusing the ALREADY-cached
+    `glance` (ZERO new fetch). #688 (owner ruling 2026-08-25) added `stuckalert:`
+    to `SUPPRESSED_ALERT_PREFIXES`: the structural `stuck` verdict is a heuristic
+    that fires on many non-human-needed states, so the send() drops the Discord
+    PING and keeps only the machine-channel signal (this journal line + the
+    `suppressed` delivery-log line) -- the #546/#676 audience split. `acctblock:`
+    is the one escalation class that still POSTs.
     Episode state (`soa` streak, `soalert` fired-flag, `soa_ts` anchor) rides
     the goal_lane `rec` (#531-reaped -- NO new namespace). `dry_run` mutates NO
     persisted state (#516). Returns log lines only when the alert fires (the
@@ -3578,10 +3582,11 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
     silent accumulation adds no per-sweep noise).
 
     LATCH DISCIPLINE (#134/#551): `soalert` is set True ONLY on a real delivery
-    (`send_fn` present AND the send returned a delivered status), so a `no-config`
-    / `error` send RETRIES next sweep instead of permanently consuming the one
-    per-episode alert with nothing on the phone; a `send_fn is None` (test /
-    degraded call) never latches nor claims an ALERTED line.
+    (`send_fn` present AND the send returned a delivered status -- which since
+    #688 INCLUDES "suppressed", a machine-channel delivery: send() logged it but
+    dropped the PING), so a `no-config` / `error` send RETRIES next sweep instead
+    of permanently consuming the one per-episode record with no trace; a
+    `send_fn is None` (test / degraded call) never latches nor claims a line.
 
     Accepted residuals (documented, not gaps): a session whose heartbeat file is
     ABSENT reads `warming` forever (never `stuck`) so Fix B cannot fire for a
@@ -3616,14 +3621,19 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
                      owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
                      dedup_key="stuckalert:%s:%d" % (sid, anchor),
                      dry_run=dry_run)
-    if status in (None, "sent", "dedup", "dry-run"):   # delivered / already-claimed
+    # "suppressed" is a DELIVERED decision (#688: stuckalert is now #546-owner-
+    # suppressed, so send() POSTs nothing but records the machine-channel signal
+    # -- the journal line here + the `suppressed` delivery-log line). It MUST
+    # latch the episode exactly like "sent"/"dedup"/"dry-run", or the send()
+    # re-fires every sweep and never records the episode as handled (#134/#551).
+    if status in (None, "sent", "dedup", "dry-run", "suppressed"):   # delivered / already-claimed
         rec["soalert"] = True
-        # #662 defense-in-depth: a stuck box that DID consume its 2 lane nudges
-        # also fires the un-suppressed lanestall: give-up ping -- deliberately
-        # NOT cross-deduped (two independent detectors, both naming the same
-        # session; the owner acts once), never a dup bug.
-        return ["one-glance %s -> STUCK owner ALERTED (%d sweeps, session did "
-                "not revive) [stuckalert:%s:%d]" % (loc, dec.streak, sid, anchor)]
+        # #688: this is now a machine-channel record, not a Discord ping (the
+        # send()-layer suppression drops the PING); the journal line is the
+        # per-episode signal the owner-facing alarm used to be.
+        return ["one-glance %s -> STUCK episode recorded (%d sweeps, session did "
+                "not revive; machine-channel per #688) [stuckalert:%s:%d]"
+                % (loc, dec.streak, sid, anchor)]
     return ["one-glance %s -> STUCK owner alert send FAILED (%s) -- will retry "
             "next sweep [stuckalert:%s:%d]" % (loc, status, sid, anchor)]
 
