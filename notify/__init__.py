@@ -2716,6 +2716,30 @@ SUPPRESSED_ALERT_PREFIXES = (
     # untouched. `acctblock:` (genuine account-block, needs a human) is the ONE
     # escalation class that stays un-suppressed.
     ("stuckalert", "structural-stuck (#688)"),  # goal_lane_sweep frozen-goal alarm (#662 — owner-ruled spam)
+    # #704 (2026-08-25 owner ruling, GENERAL): "an idle/stall/no-work/session-stojí
+    # state NEVER owner-pings" — the phone keeps ONLY ❓ question / ✅ final done /
+    # per-ticket run-card / acctblock / job-35 dead-fleet. These airuleset-OWNED
+    # STATE/STALL heuristic verdicts are the direct siblings of the family already
+    # suppressed above: each is a "loop/lane/session died/stalled/idle" heuristic
+    # with its OWN auto-recovery (goal_dark_watch re-arm, the lane/working nudge,
+    # resume) that NEVER routes through send(), so suppression at the chokepoint
+    # leaves recovery byte-identical (the #546/#688 architectural fact). The
+    # machine channel keeps the verdict (watchdog journal + the `suppressed`
+    # delivery-log line); job-35 covers a genuinely DEAD box. Measurement:
+    # issue #704. DELIBERATELY NOT suppressed here: `waiting:` (it relays the
+    # ACTUAL ❓ question text — a real question, kept), plus operational classes
+    # (net-drift / owner-decision-digest / conformance / janitor-stuck / gk* /
+    # dorphan / disk-headroom) left to a needs-user-decision follow-up.
+    ("goal-dark", "goal-loop-died (#704)"),          # goal.py::goal_dark_watch (auto-re-arm)
+    ("goalarm-expired", "goal-autoarm-failed (#704)"),  # goal.py::goal_sweep
+    ("stuck-main", "structural-stuck-main (#704)"),  # repo_health.py::stuck_main_sweep (open/recover)
+    ("delivery-stall", "structural-delivery-stall (#704)"),  # repo_health.py::delivery_stall_watch
+    ("inputdead", "session-input-wedge (#704)"),     # discord_replies.py (resume-recovery)
+    ("pwedge", "prompt-wedge (#704)"),               # wedge.py (pwedge / -backlog / -submit-giveup)
+    ("busypane", "working-stall-busypane (#704)"),   # __init__.py job 4 (visí na ⏳ WORKING)
+    ("long-turn", "long-turn (#704)"),               # long_turn.py (over-fires on long CI waits)
+    ("workingstall-giveup", "working-stall-giveup (#704)"),  # __init__.py job 4 escalate
+    ("textcall-giveup", "textcall-stall-giveup (#704)"),     # __init__.py job 4 escalate
 )
 
 

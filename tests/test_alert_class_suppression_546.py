@@ -89,7 +89,12 @@ PRESERVED_KEYS = [
     "camera-box#42",                  # per-ticket run-card
     "bounce:repo:9",                  # cross-stream bounce (directive: unchanged)
     "gkreq:repo:8",                   # gatekeeper request (unchanged)
-    "busypane:key:777",               # job 4 working-stall (NOT api-error)
+    # `busypane:` was preserved here under #546 (job-4 working-stall, distinct
+    # from the api-error class) — #704 (2026-08-25 owner ruling) REVERSES that:
+    # a "visí na ⏳ WORKING, zaseknuto" verdict is a session-stall heuristic and
+    # is now #546-suppressed. Its suppression is locked in
+    # tests/test_state_stall_suppression_704.py; removed from PRESERVED here so
+    # this control matches the current denylist (invert-with-justification, #688).
     "acctblock:sid:888",             # genuine one-shot alarm (deliberately kept)
     "conformance-hb:box:1",           # fleet-death alarm (job 35)
 ]
