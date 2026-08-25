@@ -1,0 +1,75 @@
+name: CI
+
+# #683 — the repo's first GitHub Actions workflow. Makes the fleet-wide
+# "main CI green" proof (gh run list -b main == success) satisfiable for
+# airuleset. Mirrors the local integration gate: ruff, size_ratchet, and the
+# HERMETIC subset of the pytest suite. Runs in a pinned `python:3.12`
+# container so the CI environment is reproducible and IDENTICAL to where the
+# hermetic subset was empirically measured (see the #683 design comment).
+#
+# wip refs (refs/autopilot-wip/*) deliberately do NOT trigger this — they are
+# durability backups, not integration. The `pull_request` trigger runs this on
+# a dev→main PR (a PR that adds a workflow runs that new workflow on the PR),
+# so it gates BEFORE main when a PR is opened; the push-to-main run is the
+# backstop when a branch is merged without a PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      # The FULL python:3.12 image (buildpack-deps base) deliberately, NOT
+      # -slim: actions/checkout uses git when present and many tests need a
+      # real .git; the full image ships git (and apt for the jq step below).
+      image: python:3.12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install jq (hooks under test parse their payload with jq)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq jq
+          jq --version
+
+      - name: Install Python test tooling
+        run: pip install --no-input pytest==8.3.2 ruff==0.16.2
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Size ratchet (growth-only cap on file/function size)
+        run: python3 scripts/size_ratchet.py --check
+
+      - name: Pytest — hermetic subset
+        run: |
+          # Write args to a file FIRST so a failing generator fails the step
+          # (a `mapfile < <(...)` process substitution swallows the child's
+          # exit code — an unreadable deny-list would otherwise pass silently
+          # into an empty selection). Under `set -eo pipefail` the redirect
+          # command fails loudly if the generator exits non-zero.
+          python3 scripts/ci_pytest_args.py .github/box-bound-tests.txt > pytest-selection.args
+          mapfile -t ARGS < pytest-selection.args
+          printf 'pytest selection arg: %s\n' "${ARGS[@]}"
+          python3 -m pytest tests/ "${ARGS[@]}" \
+            -p no:cacheprovider -o addopts="" -q --junitxml=junit.xml
+
+      - name: Collected-count guard (a no-op test job is banned)
+        run: python3 scripts/ci_assert_collected.py junit.xml 5000

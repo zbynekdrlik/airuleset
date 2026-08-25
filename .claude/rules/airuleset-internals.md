@@ -40,6 +40,7 @@ Pôvodný 973 KB monolit bol rozbitý (#482) — dotyk súboru už neinjektuje ~
 - `statusbar.py` → `.claude/rules/internals-statusbar.md`
 - `airuleset.py` (install/push/plugins) → `.claude/rules/internals-cli.md`
 - `skills/** agents/** profiles/** modules/** rules/**` → `.claude/rules/internals-skills-modules.md`
+- `.github/** scripts/ci_*.py tests/test_ci_*.py` → `.claude/rules/internals-ci.md`
 - **hlbší archív / staré lekcie (on-demand, grep):** `.claude/rules-reference/internals-archive.md`
 
 **Playbook (nová lekcia po tickete):** pridaj ju do príslušného `internals-<area>.md` (nie do archívu, nie sem). Keď ten súbor prekročí ~50 KB ratchet strop, presuň jeho najstaršie lekcie do archívu a nechaj inline len tie aktuálne.
