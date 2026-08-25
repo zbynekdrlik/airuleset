@@ -186,7 +186,7 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
                          dry_run=False, git_run=None, delivery_probe=None,
                          owner_by_sid=None, project_by_sid=None,
                          stall=None, work_fresh=None, min_undelivered=None,
-                         reping=None):
+                         reping=None, authority=None):
     """Job 24 — see the section comment.
 
     Gated on `delivery_probe` (the "wired = on" convention of jobs 8/11/16):
@@ -201,6 +201,19 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
     the same repo pings again on its own."""
     if delivery_probe is None:
         return []
+    # #667 — the develop->main delivery-stall metric is a full-authority /
+    # gatekeeper concern. On a reduced-authority (fork-no-merge / branch-merge)
+    # sub-dev box the session owner cannot merge the integration branch to main
+    # (the gatekeeper's release pipeline), and its own work reaching the
+    # integration branch is a REVIEW-PENDING state, not a delivery stall — so
+    # never ping the session owner from here; the full-authority gk/owner box
+    # evaluates the same repos and pings whoever can actually release. A
+    # missing `authority` (a direct caller / test) owns the whole metric — the
+    # SAME "no scoping = own everything" convention make_owned_closed_filter
+    # uses — so every existing caller stays byte-identical (#134: log, never
+    # silence).
+    if authority not in (None, "full"):
+        return ["delivery-stall skip:reduced-authority (%s)" % authority]
     if stall is None:
         try:
             stall = int(os.environ.get("AIRULESET_DELIVERY_STALL_S",

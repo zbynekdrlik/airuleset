@@ -358,5 +358,59 @@ class TestRunOnceWiring(unittest.TestCase):
         self.assertIn("_watchdog_delivery_probe", src)
 
 
+class TestAuthorityRouting(_Base):
+    """#667 — the develop->main delivery-stall alert is a full-authority /
+    gatekeeper metric. A reduced-authority (fork-no-merge / branch-merge)
+    sub-dev box must NEVER ping its session owner about it: that owner cannot
+    merge the integration branch to main (the gatekeeper's release pipeline),
+    and its own work reaching the integration branch is a review-pending
+    state, not a delivery stall. david1/2@subdev got the exact spam."""
+
+    def stalled(self):
+        return self.repo(name="odoo-erp", base_ts=NOW - 47 * DAY,
+                         work_ts=NOW - 1800, undelivered=6)
+
+    def test_a_fork_no_merge_box_never_pings_the_session_owner(self):
+        r = self.stalled()
+        logs = self.watch([r], authority="fork-no-merge")
+        self.assertEqual(self.sent, [])
+        self.assertTrue(any("skip:reduced-authority" in ln for ln in logs), logs)
+        # the detection state is NOT seeded on a suppressed box
+        self.assertFalse(self.state.get("delivery_stall"))
+
+    def test_a_branch_merge_box_is_also_suppressed(self):
+        r = self.stalled()
+        self.watch([r], authority="branch-merge")
+        self.assertEqual(self.sent, [])
+
+    def test_a_full_authority_box_still_pings_the_owner_who_can_act(self):
+        r = self.stalled()
+        wd.delivery_stall_watch(NOW, None, self.state, {"sid": str(r)},
+                                send_fn=self.send,
+                                delivery_probe=lambda *a: None,
+                                owner_by_sid={"sid": "zbynek"},
+                                authority="full")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0]["owner"], "zbynek")
+
+    def test_the_default_is_full_so_direct_callers_are_unchanged(self):
+        """No `authority` kwarg -> pre-fix behaviour (own the whole metric),
+        the same 'no scoping = own everything' convention make_owned_closed_
+        filter uses. The existing suite drives the job this way throughout."""
+        r = self.stalled()
+        self.watch([r])
+        self.assertEqual(len(self.sent), 1)
+
+
+class TestAuthorityWiring(unittest.TestCase):
+
+    def test_run_once_passes_the_box_authority_into_the_watch(self):
+        src = Path(wd.__file__).read_text()
+        i = src.index("delivery_stall_watch(now, run, state, cwd_by_sid")
+        call = src[i:i + 600]
+        self.assertIn("authority=_box_authority()", call,
+                      "run_once must pass this box's authority into job 24")
+
+
 if __name__ == "__main__":
     unittest.main()

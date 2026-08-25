@@ -34,6 +34,7 @@ rule (def-time defaults -> move + re-export). ``run_once`` (still in
 above run_once's def.
 """
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -154,6 +155,12 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         else:
             idle = now - _safe_mtime(pf)
             marker, cwd = "✅", ""              # no transcript → trust the recorded ✅
+        # #668: recover the reliable cwd notify-discord-pending.sh recorded in the
+        # sibling file when the transcript yields none — so this backstop (the real
+        # deliverer on a subdev box where idle_prompt is unreliable) resolves the
+        # true project label instead of shipping the banned decorative "unknown".
+        if not cwd:
+            cwd = _read_pending_cwd(sid, pending_prefix)
 
         # Deliver ONLY while the session's CURRENT last marker is still ✅. If it
         # re-fired (a background task re-invoked it → ⏳), asked ❓, hit an api-error,
@@ -163,6 +170,7 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         if marker != "✅":
             if not dry_run:
                 _safe_unlink(pf)
+                _safe_unlink(_pending_cwd_path(sid, pending_prefix))   # #668 litter
             logs.append("cleared non-✅ sid=%s (now %r)" % (sid[:8], marker))
             continue
         if idle < done_grace:
@@ -170,20 +178,34 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         if idle > max_stale:
             if not dry_run:
                 _safe_unlink(pf)
+                _safe_unlink(_pending_cwd_path(sid, pending_prefix))   # #668 litter
             logs.append("cleared stale ✅ sid=%s idle=%dh" % (sid[:8], int(idle // 3600)))
             continue
         if cwd and bg_check(cwd):
             continue                            # bg monitor alive → ✅ likely intermediate, defer
         if not dry_run:
             _safe_unlink(pf)                    # claim first so a concurrent idle hook can't double-send
-        project = watchdog.project_label(cwd) if cwd else "unknown"
+            _safe_unlink(_pending_cwd_path(sid, pending_prefix))       # #668 consume the sibling too
+        # #668: NEVER decorate with the meaningless "unknown" — resolve the label
+        # or ship none (mirrors notify-discord-send.sh's own drop-unknown rule).
+        project = watchdog.project_label(cwd) if cwd else ""
         owner = (owner_by_sid.get(sid)
                  or (owner_by_cwd.get(cwd) if cwd else None)
                  or ("" if ambiguous else account_owner)
                  or None)
-        send_fn("✅ **%s** — hotovo\n> %s" % (project, text[:250]),
-                owner=owner, dedup_key="done:%s" % sid, dry_run=dry_run)
-        logs.append("delivered ✅ sid=%s [%s] idle=%dm" % (sid[:8], project, int(idle // 60)))
+        if project:
+            msg = "✅ **%s** — hotovo\n> %s" % (project, text[:250])
+        else:
+            msg = "✅ hotovo\n> %s" % text[:250]
+        status = send_fn(msg, owner=owner, dedup_key="done:%s" % sid, dry_run=dry_run)
+        # #668: record the delivery on the SAME LASTOK the shell idle hook dedups
+        # on, so a later /goal re-poke re-recording the identical ✅ pings once
+        # TOTAL across BOTH deliverers. Only on a real (or already-)delivery, never
+        # a transient failure — the idle hook's confirm-gated LASTOK, mirrored.
+        if not dry_run and status in ("sent", "dedup"):
+            _write_ok_lastok(sid, content, pending_prefix)
+        logs.append("delivered ✅ sid=%s [%s] idle=%dm"
+                    % (sid[:8], project or "-", int(idle // 60)))
     return logs
 
 
@@ -199,6 +221,46 @@ def _safe_unlink(path):
         os.unlink(path)
     except OSError:
         pass
+
+
+def _pending_cwd_path(sid, pending_prefix):
+    """The cwd sibling notify-discord-pending.sh records next to a ✅ (#668)."""
+    return pending_prefix + "cwd-" + sid
+
+
+def _lastok_path(sid, pending_prefix):
+    """The /tmp/claude-discord-lastok-<sid> the shell idle hook dedups the ✅ on.
+    Job 5 writes the SAME path on a delivery so a later /goal re-poke re-recording
+    the identical ✅ pings once TOTAL across both deliverers (#668). Derived from
+    pending_prefix (…pending- -> …lastok-) so a test override of pending_prefix
+    keeps the two paths consistent."""
+    suffix = "pending-"
+    base = (pending_prefix[:-len(suffix)]
+            if pending_prefix.endswith(suffix) else pending_prefix)
+    return base + "lastok-" + sid
+
+
+def _read_pending_cwd(sid, pending_prefix):
+    try:
+        with open(_pending_cwd_path(sid, pending_prefix)) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _ok_fingerprint(content):
+    """sha1(content)[:16] — byte-identical to the shell idle hook's
+    `printf '%s' "$BODY" | sha1sum | tr -cd 0-9a-fA-F | cut -c1-16` over the SAME
+    recorded ✅ line, so both deliverers agree on one dedup key (#668)."""
+    return hashlib.sha1(content.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _write_ok_lastok(sid, content, pending_prefix):
+    try:
+        with open(_lastok_path(sid, pending_prefix), "w") as f:
+            f.write(_ok_fingerprint(content))
+    except OSError:
+        return
 
 
 # --------------------------------------------------------------------------- #

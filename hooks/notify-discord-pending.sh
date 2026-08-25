@@ -41,6 +41,11 @@ SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 PENDING="/tmp/claude-discord-pending-${SID}"
+# #668: the ✅ RECORD-time cwd, carried to the idle DELIVERY. The idle hook
+# otherwise re-derives the project from its OWN (possibly empty) event cwd and
+# mislabels the ping "unknown"; a sibling file keeps the pending line format
+# untouched, and emit() always overwrites it, so a stale value cannot deliver.
+PENDING_CWD="/tmp/claude-discord-pending-cwd-${SID}"
 # Last-pinged ❓ content for this session — the dedup state. Cleared by
 # clear-question-dedup.sh (UserPromptSubmit) whenever the user actually types.
 LASTQ="/tmp/claude-discord-lastq-${SID}"
@@ -158,6 +163,14 @@ emit() {
     # jq slices by CODEPOINTS so multi-byte Slovak never gets chopped mid-char.
     local c
     c=$(strip_md "$2" | jq -Rrs 'rtrimstr("\n") | .[0:250]')
+    # #668: record the reliable Stop-time cwd so the idle delivery resolves the
+    # real project even when the idle event carries none. Sibling FIRST, trigger
+    # (the pending) LAST — a hook killed between the two must never pair a FRESH
+    # pending with a STALE sibling from a previous ✅ (a wrong label). Guarded +
+    # brace-grouped so a foreign-owned stale /tmp file can't leak "Permission
+    # denied" to stderr or abort the ✅ branch under `set -e` (#492), which would
+    # skip the CARDCHK boundary write below.
+    { printf '%s' "$CWD" > "$PENDING_CWD"; } 2>/dev/null || true
     printf '%s %s' "$1" "$c" > "$PENDING"
 }
 
@@ -462,7 +475,7 @@ send_q() {
 # NB: 'ž' via ALTERNATION, never a bracket class — grep splits a multibyte
 # char inside [] (the same class of bug as the LC_ALL=C awk octal gotcha).
 if printf '%s\n' "$MSG" | grep -qiE '❓.*(vlož|vloz|pastni|paste).*/goal'; then
-    rm -f "$PENDING" 2>/dev/null || true
+    rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
     # No phone ping (the watchdog auto-arm types the /goal itself), but this IS
     # a ❓ turn — leave a trace so it is never a silent path either (#466).
     _pending_log "suppressed" "arm-question" "$(_qhash "$MSG")"
@@ -479,7 +492,7 @@ if [ -n "$ASKED_LINE" ]; then
     # along when the marker is bare) — never the ⏳ continuation below it.
     C=$(printf '%s' "$ASKED_LINE" | sed -E 's/.*❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:[[:space:]]*//I')
     N=$(printf '%s\n' "$MSG" | grep -inE '❓[[:space:]]*\**[[:space:]]*ASKED[[:space:]]*\**[[:space:]]*:' | tail -1 | cut -d: -f1)
-    rm -f "$PENDING" 2>/dev/null || true
+    rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
     send_q "$C" "$(extract_block "${N:-0}")"
 elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓'; then
     # ❓ NEEDS YOU on the last line, genuinely blocked on the user → fire the device
@@ -491,14 +504,14 @@ elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*❓';
     # Payload = the whole question block ending at the marker (extract_block).
     C=$(printf '%s' "$LAST_LINE" | sed -E 's/.*❓[[:space:]]*//')
     N=$(printf '%s\n' "$MSG" | grep -nvE '^[[:space:]]*$' | tail -1 | cut -d: -f1)
-    rm -f "$PENDING" 2>/dev/null || true
+    rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
     send_q "$C" "$(extract_block "${N:-0}")"
 elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*⏳'; then
     # ⏳ WORKING is the last line → still going (even if a "✅ DONE:" appears
     # earlier in the turn, e.g. autopilot "merged #5 … now ⏳ working #6"). Clear
     # any stale pending so nothing fires while Claude keeps working. Same
     # line-START anchoring as the ❓ branch — a ⏳ mid-sentence is prose.
-    rm -f "$PENDING" 2>/dev/null || true
+    rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
 elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'; then
     # Fully-done state. A per-ticket/per-batch ✅ DONE inside an autopilot
     # loop must not queue a SECOND idle ping when the sanctioned per-ticket
@@ -514,7 +527,7 @@ elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:sp
     # through, exactly as it did before the guard existed.
     if goal_armed && card_delivered_since_last_boundary; then
         SUPPRESSED=1
-        rm -f "$PENDING" 2>/dev/null || true
+        rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
     else
         SUPPRESSED=0
         # Prefer an explicit "✅ DONE: <outcome>" line; else the report's
@@ -542,7 +555,7 @@ elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:sp
     : "$SUPPRESSED"
 else
     # No marker → nothing to notify. Clear any stale pending.
-    rm -f "$PENDING" 2>/dev/null || true
+    rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
 fi
 
 # Fail-loud backstop (#466): a ❓ NEEDS YOU / ❓ ASKED marker present in the turn

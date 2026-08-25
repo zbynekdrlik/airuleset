@@ -25,6 +25,10 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 
 rm -f "/tmp/claude-discord-lastq-${SID}" 2>/dev/null || true
+# #668: the ✅ idle-ping dedup (LASTOK) follows the SAME rule as the ❓ dedup —
+# a real user prompt means the conversation moved on, so a later identical ✅ is
+# a fresh completion and must re-ping even if byte-identical.
+rm -f "/tmp/claude-discord-lastok-${SID}" 2>/dev/null || true
 
 # Presence marker: a REAL user prompt means the user is AT the terminal right
 # now. stop-check-question-quality.sh reads its mtime and skips the phone-shape
