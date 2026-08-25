@@ -41,6 +41,10 @@ def _render():
 
 
 def _rule(html, selector_re):
+    # Same extraction pattern as test_webterm_per_human_tabs: expects exactly
+    # one space before `{` and clips at the first `}` (so a `}`-containing
+    # comment inside a block would truncate it). Both failure modes turn a
+    # test RED, never falsely green — acceptable for locking literal values.
     m = re.search(selector_re + r" \{[^}]*\}", html)
     return m.group(0) if m else None
 
@@ -67,7 +71,15 @@ class TestActiveTabDistinctBackground(unittest.TestCase):
         def bg(rule):
             m = re.search(r"background: (#[0-9A-Fa-f]{6})", rule)
             self.assertIsNotNone(m, "no background colour in rule: %s" % rule)
-            return int(m.group(1)[1:], 16)
+            r, g, b = (int(m.group(1)[i:i + 2], 16) for i in (1, 3, 5))
+            # The int-compare below is a brightness proxy that is only sound
+            # on ACHROMATIC greys (r == g == b) — the tab ramp is a grey ramp
+            # by design (#691: restrained neutral chrome, chroma confined to
+            # the accent bar). Assert that precondition so a future chromatic
+            # background can't silently game the ordering check.
+            self.assertEqual(r, g, "tab background must stay an achromatic grey: %s" % m.group(1))
+            self.assertEqual(g, b, "tab background must stay an achromatic grey: %s" % m.group(1))
+            return r
 
         # Strictly increasing luminance ramp: inactive < hover < active — the
         # "active = lifted/brightest" direction, and hover can never reach the
