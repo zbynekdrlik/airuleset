@@ -13073,7 +13073,7 @@ class TestBlockHistoryRewriteHook(TestCase):
                'explaining it" ; git push --force origin main')
         r = self._run(cmd)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("force", r.stdout.lower())
+        self.assertIn("force", (r.stdout + r.stderr).lower())
 
     def test_assignment_prefix_does_not_defeat_detection(self):
         # a leading `VAR=val` token before the real git command must not

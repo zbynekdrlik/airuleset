@@ -14,6 +14,14 @@ try: print(json.load(sys.stdin).get("tool_input",{}).get("command","") or "")
 except Exception: pass' 2>/dev/null || echo "")
 [ -z "$INPUT" ] && INPUT="$PAYLOAD"
 
+# #682: Claude Code surfaces ONLY stderr to the model on a PreToolUse deny
+# (exit 2); stdout is invisible (transcript-only). Every explanation this
+# hook prints is a block reason or a diagnostic warning -- it has no
+# machine-readable stdout contract -- so route all of fd1 to stderr, and
+# the model reads WHY the call was blocked instead of "No stderr output".
+# Command substitutions capture their own stdout and are unaffected.
+exec 1>&2
+
 # Only act on REAL `git push` commands. Strip quoted substrings FIRST so a
 # command that merely CONTAINS the words "git push" inside a commit message,
 # echo string, or file path does NOT falsely trigger the lint (that bug wrongly
