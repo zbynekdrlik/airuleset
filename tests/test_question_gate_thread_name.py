@@ -287,6 +287,110 @@ class TestCheck6ImplementedInHook(unittest.TestCase):
         self.assertIn("Accepted residuals", self.h)
 
 
+# --------------------------------------------------------------------------- #
+# #697 — satisfying-evidence forms aligned with the #657 doctrine (owner-facing
+# thread references carry name + deep URL `discuss.channel_<N>`). Check 6's
+# ONLY accepted evidence was the QUOTED „name N" form (THREAD_NAMED_RX), so a
+# fully-specific approval block identifying its target by the machine-exact
+# deep URL, or by an explicit `Vlákno: <name> <N>` line without typographic
+# quotes, was over-blocked (live-probed 2026-08-25, montalu1 follow-up). The
+# new forms only ADD acceptance — every blocking fixture above must KEEP
+# blocking (no-name, DODGE-1, and the ticket-ref dodge below).
+# --------------------------------------------------------------------------- #
+
+# Target named ONLY by the #657 deep URL — no quoted name, no `Vlákno:` line —
+# must PASS (RED before the #697 fix: Check 6 blocked it).
+DEEP_URL_ONLY = (
+    "**Otázka — projekt montalu (Odoo ERP pre klienta montalu):** Pripravil "
+    "som klientovi odpoveď a chcem ju poslať do existujúceho vlákna "
+    "https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288 "
+    "na PROD. Schváliš odoslanie tejto správy?\n"
+    "\n"
+    "• Poslať teraz (odporúčam) — klient dostane odpoveď hneď\n"
+    "• Počkať a ešte upraviť znenie — pomalšie, ale istejšie\n"
+    "\n"
+    "❓ NEEDS YOU: mám poslať túto správu klientovi do vlákna "
+    "discuss.channel_288?\n"
+)
+
+# Target named on an explicit `Vlákno:` line carrying the stream-number digit,
+# but WITHOUT typographic quotes (the natural way a model writes the label) —
+# must PASS (RED before the #697 fix). No quotes and no deep URL anywhere, so
+# this can only pass via the `Vlákno:`+digit form (mutation discipline).
+VLAKNO_UNQUOTED = (
+    "**Otázka — projekt montalu (Odoo ERP pre klienta montalu):** Pripravil "
+    "som klientovi odpoveď do existujúceho vlákna na PROD a chcem ju poslať. "
+    "Schváliš odoslanie tejto správy?\n"
+    "\n"
+    "Vlákno: Tabula objednavok 1 (pod IT-support, montalu PROD)\n"
+    "\n"
+    "• Poslať teraz (odporúčam) — klient dostane odpoveď hneď\n"
+    "• Počkať a ešte upraviť znenie — pomalšie, ale istejšie\n"
+    "\n"
+    "❓ NEEDS YOU: mám poslať túto správu klientovi do toho vlákna?\n"
+)
+
+# DODGE (forward guard, pins the `[^#]` hardening of the Vlákno: form): a
+# `Vlákno:` line whose only digits are a ticket reference (`#650`) is NOT a
+# thread name — must keep BLOCKING.
+TICKET_REF_DODGE = (
+    "**Otázka — projekt montalu (Odoo ERP pre klienta montalu):** Pripravil "
+    "som klientovi odpoveď a chcem ju poslať do výrobného vlákna na PROD.\n"
+    "\n"
+    "Vlákno: pozri ticket #650\n"
+    "\n"
+    "• Poslať teraz (odporúčam) — hneď\n"
+    "• Počkať — pomalšie\n"
+    "\n"
+    "❓ NEEDS YOU: mám poslať správu klientovi do výrobného vlákna?\n"
+)
+
+
+class TestEvidenceFormsAlignedWith657(_HookCase):
+    """#697: the deep URL and the digit-bearing `Vlákno:` line are satisfying
+    evidence; a digit-less or ticket-ref label still is not."""
+
+    def test_deep_url_only_passes(self):
+        r = self._run(DEEP_URL_ONLY)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(
+            self._blocked(r),
+            "a client-posting question naming its target by the #657 deep URL "
+            "(discuss.channel_<N>) was wrongly blocked: %s" % self._reason(r))
+
+    def test_unquoted_vlakno_line_with_stream_number_passes(self):
+        r = self._run(VLAKNO_UNQUOTED)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(
+            self._blocked(r),
+            "a client-posting question with an unquoted 'Vlákno: <name> <N>' "
+            "line was wrongly blocked: %s" % self._reason(r))
+
+    def test_ticket_ref_digits_do_not_satisfy(self):
+        r = self._run(TICKET_REF_DODGE)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(
+            self._blocked(r),
+            "a 'Vlákno: pozri ticket #650' label (digits only in a ticket "
+            "ref) defeated the check: %s" % r.stdout)
+        self.assertIn("Vlákno", self._reason(r))
+
+
+class TestCheck697EvidenceRxWired(unittest.TestCase):
+    """Content-lock: the two #697 evidence regexes exist as operative
+    variables in Check 6 (not just prose), same convention as the #650
+    locks above."""
+
+    def setUp(self):
+        self.h = HOOK.read_text(encoding="utf-8")
+
+    def test_evidence_rx_present(self):
+        self.assertIn("THREAD_DEEPURL_RX", self.h)
+        self.assertIn("THREAD_VLAKNO_RX", self.h)
+        # the machine-exact deep-URL stem (the #657 form) is in the regex
+        self.assertIn("discuss\\.channel_[0-9]+", self.h)
+
+
 class TestHandoverComposeNotesHookEnforcement(unittest.TestCase):
     """The prose rule (#632) is now hook-enforced at the ❓ approval-question
     surface — keep prose↔hook in sync the way #596/#609/#628 lines do."""
