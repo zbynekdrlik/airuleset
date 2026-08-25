@@ -634,12 +634,14 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(function () {});
 }
-// #677: the per-tab U dot. Poll the gateway's /u-status (the aggregated per-box U
-// map) and toggle a tab's .has-u iff its target box currently has U > 0 -- a
-// navigation hint that a question/approval is waiting on the owner there. Read
-// LIVE (never a build-time value); a fetch failure leaves the current dots
-// untouched (graceful). The gateway fire-and-forgets a fresh collect on a stale
-// read, so a short burst after load catches it, then a steady minutes cadence.
+// #677 + #691 rework: the per-tab U indicator. Poll the gateway's /u-status
+// (the aggregated per-box U map) and toggle a tab's .has-u iff its target box
+// currently has U > 0 -- a navigation hint that a question/approval is waiting
+// on the owner there. .has-u recolours the tab's left ▸ arrow red (see
+// .tab.has-u .ico; the #677 corner dot was retired in #691). Read LIVE (never a
+// build-time value); a fetch failure leaves the current arrow colours untouched
+// (graceful). The gateway fire-and-forgets a fresh collect on a stale read, so a
+// short burst after load catches it, then a steady minutes cadence.
 function applyUStatus(map) {
   document.querySelectorAll('.tab').forEach((t) => {
     const s = CFG.sessions[+t.dataset.idx];
