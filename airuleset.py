@@ -4219,15 +4219,17 @@ def _watchdog_ops_wait_fetch(cwd):
             return None   # a malformed line -> undetermined, never a partial set
         # `--ops-wait` always prints the FULL 5-field form (reason_fn is always
         # given), so field 3 IS the reason column (`ops-wait`/`acceptance` +
-        # optional ` gk-handoff!` (#636) + optional ` stale!`). Require >=5 fields
-        # so a hypothetical degraded 4-field line (title at index 3) can never be
-        # misread as a flag (#570 review nit); anything shorter -> no flag.
+        # optional ` gk-handoff!` (#636) + optional ` stale!` + optional
+        # ` recheck!` (#699)). Require >=5 fields so a hypothetical degraded
+        # 4-field line (title at index 3) can never be misread as a flag (#570
+        # review nit); anything shorter -> no flag.
         reason = parts[3] if len(parts) >= 5 else ""
         # #698: the TITLE (field 4, tab-joined in case a title itself carries a
         # tab) feeds the job-20 release-shaped detection — zero new gh calls.
         title = "\t".join(parts[4:]) if len(parts) >= 5 else ""
         members.append({"number": num, "stale": "stale!" in reason,
                         "gk_handoff": "gk-handoff!" in reason,
+                        "release_recheck": "recheck!" in reason,
                         "title": title})
     return members
 
@@ -5337,6 +5339,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _stream_self_login as _stream_self_login,
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
+    _release_recheck_flagged as _release_recheck_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,

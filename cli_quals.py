@@ -1085,6 +1085,74 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
     return flagged
 
 
+# #699 — RELEASE-parked W freshness: the TIGHT hourly cadence, distinct from the
+# 24h `stale!` third-party-reminder window. Owner ruled (2026-08-25) that a
+# release-parked ops-wait member must be deployed-state re-checked (#588) by the
+# OWNING session at EVERY work cycle, min 1x/hour — never left to the daily job-20
+# backstop — because releases land ~5x/day and a day-latency unpark means "cely
+# den stojime". This tag SURFACES which release-parked members are OVERDUE for
+# that re-check. It makes NO "landed" claim (that stays the #698 proof-only
+# train-drained clause) — only "a re-check is overdue".
+RELEASE_RECHECK_MAX_S = 3600
+# The release-SHAPED title regex — kept BYTE-IDENTICAL to
+# `watchdog.ops_wait_recheck._RELEASE_SHAPED_RX` (#698, live-probed) so the tag
+# and the job-20 nudge classify the SAME titles (a drift-lock test asserts the two
+# `.pattern`s equal). Duplicated, not imported, to keep cli_quals free of a
+# watchdog import; the release-shaped token set never varies between the two.
+_RELEASE_RECHECK_TITLE_RX = re.compile(
+    r"(?i)(?:\breleas|\bvydan|\bnasaden|\bdeploy|\bstage-\d+\b|"
+    r"\bv\d+\.\d+(?:\.\d+)*\b)")
+
+
+def _release_recheck_flagged(rows, cwd=None, now=None, self_login=None,
+                             ages_fn=None):
+    """The set of RELEASE-parked ops-wait (W) member numbers to tag `recheck!`
+    (#699) — a RELEASE-shaped member (TITLE names a release/version/stage,
+    `_RELEASE_RECHECK_TITLE_RX`) the OWNING session has NOT re-checked within
+    RELEASE_RECHECK_MAX_S (1h of WORKING time, #607 — weekend-excluded via
+    `working_time.working_deadline_passed`). Freshness = the newest OWN comment
+    age, the SAME `_issue_comment_ages` evidence `_stale_ops_wait_flagged` reads
+    (share the `ages_fn` seam at the call site → one gh fetch per member for both
+    tags).
+
+    Never a false accusation (the #539/#570 fail-safe bias, STRICTER than
+    `_stale_ops_wait_flagged` — NO any-comment fallback): a gh failure / unusable
+    read (ages_fn → None), a non-release title, NO own comment at all (own_ts None
+    — the session's re-check evidence is an OWN comment, so its absence is
+    ambiguous, never proof of a missed re-check), or a member beyond
+    OPS_WAIT_STALE_MAX_FETCHES is left UNTAGGED. The primary mechanism is the
+    session DUTY (#699 doctrine) + the job-20 backstop, so the tag only ever
+    UNDER-flags — barring a total tz/zoneinfo failure, where the shared
+    `working_time` helper degrades to a flat weekend-inclusive span (the #570
+    stale! baseline's own accepted fallback; benign here — a re-check nudge, not
+    an accusation). Makes NO release-train / "landed" claim (that stays the #698
+    proof-only clause) — only "re-check overdue"."""
+    now = time.time() if now is None else now
+    if self_login is None and ages_fn is None:
+        self_login = _stream_self_login()
+    ages = ages_fn or (lambda n: _issue_comment_ages(n, self_login, now, cwd))
+    flagged = set()
+    for number in sorted(rows)[:OPS_WAIT_STALE_MAX_FETCHES]:
+        row = rows.get(number) if isinstance(rows, dict) else None
+        title = row.get("title") if isinstance(row, dict) else None
+        if not (isinstance(title, str)
+                and _RELEASE_RECHECK_TITLE_RX.search(title)):
+            continue                             # not release-shaped -> no flag
+        try:
+            res = ages(number)
+        except Exception:
+            res = None
+        if res is None:
+            continue                             # gh failed / unusable -> no flag
+        own_ts, _any_ts = res
+        if own_ts is None:
+            continue                             # no own re-check evidence -> safe
+        if working_time.working_deadline_passed(own_ts, now,
+                                                RELEASE_RECHECK_MAX_S):
+            flagged.add(number)
+    return flagged
+
+
 # #636: the gk hand-off labels that CONTRADICT an `ops-wait` park. Either means
 # "parked with the gatekeeper for a gk ACTION" — the gatekeeper is a named fleet
 # actor with a dedicated hand-off lane, NOT a third party (the exact parallel of
