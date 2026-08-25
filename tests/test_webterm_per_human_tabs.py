@@ -230,19 +230,27 @@ class TestUnselectedTabContrast(unittest.TestCase):
 class TestTabLabelLeftPadding(unittest.TestCase):
     """#661 owner-acceptance amendment (2026-08-24): the tab NAMES sit a bit
     too close to the tab's left edge ("odsadit nazvy tabov z lavej strany, apon
-    trosicku"). The fix indents all tab content from the left by bumping ONLY
-    the `.tab` left padding 12px -> 16px (a restrained +4px), so the shorthand
-    becomes the 4-value `padding: 6px 12px 6px 16px` (top/right/bottom
-    unchanged). Locks the chosen value so a revert to the tighter 12px is RED."""
+    trosicku"). The fix indents all tab content from the left by bumping the
+    `.tab` LEFT padding to 16px (a restrained +4px over the 12px right),
+    expressed via the 4-value shorthand. This test locks that #661 INTENT — a
+    left padding of 16px, distinct from and larger than the 12px right, never
+    the pre-#661 tight `12px`-all-round form. The VERTICAL (top/bottom) values
+    are owned by #691 (vertical-breathing rework, 6px -> 9px), so they are NOT
+    pinned here — only the left/right asymmetry #661 introduced."""
 
     def test_tab_has_extra_left_padding(self):
         html = _render_owner()
         m = re.search(r"\.tab \{[^}]*\}", html)
         self.assertIsNotNone(m, ".tab CSS rule not found")
         rule = m.group(0)
-        # Left padding lifted to 16px via the 4-value shorthand; the tight
-        # 12px-all-round form must be gone.
-        self.assertIn("padding: 6px 12px 6px 16px", rule)
+        pm = re.search(r"padding: (\d+)px (\d+)px (\d+)px (\d+)px", rule)
+        self.assertIsNotNone(pm, "4-value .tab padding shorthand not found: %s" % rule)
+        _top, right, _bottom, left = (int(pm.group(i)) for i in (1, 2, 3, 4))
+        # #661 intent: left indented to 16px, larger than the 12px right.
+        self.assertEqual(left, 16, "tab left padding must stay the #661 16px")
+        self.assertEqual(right, 12)
+        self.assertGreater(left, right, "left must stay indented past the right (#661)")
+        # The pre-#661 tight two-value all-round form must be gone.
         self.assertNotIn("padding: 6px 12px;", rule)
 
 
