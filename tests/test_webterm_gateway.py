@@ -12,8 +12,10 @@ Two layers:
 Nothing here EVER binds a non-loopback interface (the security invariant).
 """
 import asyncio
+import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -281,11 +283,14 @@ class _GatewayHarness:
     port BEFORE binding so the gateway knows its own origin for the CSWSH check)."""
 
     def __init__(self, cred="zbynek:s3cret\n", dash="<!DOCTYPE html>DASHBOARD",
-                 sessions=None, limiter=None):
+                 sessions=None, limiter=None, u_status_path=None,
+                 u_collect_spawn=None):
         self.cred_text = cred
         self.dash_text = dash
         self.sessions = sessions
         self.limiter = limiter
+        self.u_status_path = u_status_path        # #677: the aggregate U file
+        self.u_collect_spawn = u_collect_spawn     # #677: injected detached spawner
         self.fake = _FakeTtyd()
 
     async def request(self, raw_bytes, read_all=True):
@@ -331,7 +336,8 @@ class TestGatewayIntegration(unittest.TestCase):
             "127.0.0.1", port, str(h.dash_path), str(h.cred_path),
             ttyd_host="127.0.0.1", ttyd_port=h.ttyd_port, base_path="/t",
             origins=([h.origin] if origins is None else origins),
-            sessions=h.sessions, limiter=h.limiter)
+            sessions=h.sessions, limiter=h.limiter,
+            u_status_path=h.u_status_path, u_collect_spawn=h.u_collect_spawn)
         h.port = port
         return h
 
@@ -731,6 +737,167 @@ ACCESS_HEADER = "Cf-Access-Authenticated-User-Email"
 def _access_gateway():
     return g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
                      trust_access_header=ACCESS_HEADER)
+
+
+class TestUStatusRoute(unittest.TestCase):
+    """#677: GET /u-status serves the aggregate per-box U map (for the tab dots),
+    auth-gated exactly like `/` and the PWA assets, and — when the file is stale —
+    fire-and-forgets a detached collector (rate-limited) without blocking the
+    response."""
+
+    async def _harness(self, **kw):
+        # A standalone copy of TestGatewayIntegration._harness (no subclassing, so
+        # its test methods don't double-run here).
+        origins = kw.pop("origins", None)
+        h = _GatewayHarness(**kw)
+        h.tmp = tempfile.mkdtemp()
+        h.cred_path = Path(h.tmp) / "cred"
+        h.cred_path.write_text(h.cred_text, encoding="utf-8")
+        h.dash_path = Path(h.tmp) / "index.html"
+        h.dash_path.write_text(h.dash_text, encoding="utf-8")
+        h.ttyd_port = await h.fake.start()
+        probe = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
+        port = probe.sockets[0].getsockname()[1]
+        probe.close()
+        await probe.wait_closed()
+        h.origin = "http://127.0.0.1:%d" % port
+        h.server = await g.start_gateway(
+            "127.0.0.1", port, str(h.dash_path), str(h.cred_path),
+            ttyd_host="127.0.0.1", ttyd_port=h.ttyd_port, base_path="/t",
+            origins=([h.origin] if origins is None else origins),
+            sessions=h.sessions, limiter=h.limiter,
+            u_status_path=h.u_status_path, u_collect_spawn=h.u_collect_spawn)
+        h.port = port
+        return h
+
+    async def _teardown(self, h):
+        h.server.close()
+        await h.server.wait_closed()
+        await h.fake.stop()
+
+    def test_serves_fresh_u_status_json_when_authed(self):
+        async def go():
+            up = Path(tempfile.mkdtemp()) / "webterm-u-status.json"
+            up.write_text(json.dumps({"u": {"dev2": 3}, "ts": int(time.time())}),
+                          encoding="utf-8")
+            spawned = []
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, u_status_path=str(up),
+                                    u_collect_spawn=lambda: spawned.append(1))
+            try:
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /u-status HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b'"dev2": 3', r.replace(b" ", b" "))
+                self.assertIn(b"application/json", r)
+                self.assertEqual(spawned, [])   # fresh -> no collector spawn
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_u_status_requires_auth(self):
+        async def go():
+            up = Path(tempfile.mkdtemp()) / "webterm-u-status.json"
+            up.write_text(json.dumps({"u": {}, "ts": 0}), encoding="utf-8")
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, u_status_path=str(up))
+            try:
+                r = await h.request(b"GET /u-status HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertNotIn(b"200 OK", r)          # unauth -> never served
+                self.assertNotIn(b"webterm-u-status", r)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_stale_file_triggers_a_detached_collect_spawn(self):
+        async def go():
+            up = Path(tempfile.mkdtemp()) / "webterm-u-status.json"
+            up.write_text(json.dumps({"u": {"dev2": 1}, "ts": 1}), encoding="utf-8")
+            import os
+            os.utime(str(up), (1, 1))               # ancient mtime -> stale
+            spawned = []
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, u_status_path=str(up),
+                                    u_collect_spawn=lambda: spawned.append(1))
+            try:
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /u-status HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)         # still serves the (stale) file
+                self.assertEqual(spawned, [1])      # ... AND kicked a refresh
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_absent_file_serves_empty_map_authed(self):
+        async def go():
+            up = Path(tempfile.mkdtemp()) / "does-not-exist.json"
+            spawned = []
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, u_status_path=str(up),
+                                    u_collect_spawn=lambda: spawned.append(1))
+            try:
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /u-status HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b'"u"', r)            # a valid empty map, never a 500
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_feature_off_serves_empty_and_never_spawns(self):
+        # #677 review 🟡: a NON-owner gateway (no u_status_path -> feature off, the
+        # david/marek case) serves an empty map and NEVER spawns an owner-fleet
+        # collector, even when authenticated.
+        async def go():
+            spawned = []
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, u_status_path=None,
+                                    u_collect_spawn=lambda: spawned.append(1))
+            try:
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /u-status HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b'"u": {}', r.replace(b'"u":{}', b'"u": {}'))
+                self.assertEqual(spawned, [])       # OFF -> no collector spawn ever
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_u_status_fail_closed_in_access_mode(self):
+        # #677 review 🔵4: exercise the ACCESS-mode unauth path for /u-status — with
+        # no trusted Cloudflare header the route denies (403) and never leaks the U
+        # map (same fail-closed gate as `/` and the PWA assets).
+        up = Path(tempfile.mkdtemp()) / "u.json"
+        up.write_text(json.dumps({"u": {"dev2": 9}, "ts": int(time.time())}),
+                      encoding="utf-8")
+        gw = g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                       trust_access_header=ACCESS_HEADER, u_status_path=str(up))
+
+        class _W:
+            def __init__(self):
+                self.buf = b""
+
+            def write(self, d):
+                self.buf += d
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        w_ = _W()
+        asyncio.run(gw._route_u_status(w_, [("Host", "x")]))    # NO access header
+        self.assertIn(b"403", w_.buf)
+        self.assertNotIn(b"dev2", w_.buf)                       # U map never leaked
 
 
 class TestAccessModeAuth(unittest.TestCase):
