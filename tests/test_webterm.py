@@ -1395,9 +1395,10 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         fn = _extract_js_function(html, "fitFixedGrid")
         self.assertIn("term.resize =", fn)             # clamp installed
-        # #672: clamp reads the per-current-tab grid LIVE (getters), not a value
-        # captured at install time -- still the fixed grid, just the live source.
-        self.assertIn("real(CFG.term_cols, CFG.term_rows)", fn)
+        # #672 rework (owner ruling 2026-08-25): one canonical grid for every tab,
+        # so the per-current-tab getter is gone and the clamp re-pins to the fixed
+        # (cols, rows) captured at fitFixedGrid entry (the single owner grid).
+        self.assertIn("real(cols, rows)", fn)
         self.assertIn("term.options.fontSize", fn)     # font scaling (crisp)
         self.assertNotIn("scale(", fn)                 # never a CSS scale in the PRIMARY fit
         apply = _extract_js_function(html, "applyFixedGrid")
@@ -1592,18 +1593,16 @@ class TestFullDisplayAndDomains655(unittest.TestCase):
         self.assertIn("location.hostname", html)
         self.assertRegex(html, r"document\.title\s*=")
 
-    def test_footer_hint_is_readable_not_micro_text(self):
-        # #674 removed the ? button and the #hint help OVERLAY (#655). The only
-        # persistent hint element is now the single #clip-hint footer line, which
-        # must stay READABLE (>= 12px — the #655 owner complaint was the old 11px
-        # "nezrozumiteľný mikro text dole") and muted, matching the dashboard chrome.
+    def test_no_footer_hint_strip(self):
+        # #671 rework (owner ruling 2026-08-25, verbatim "znova si napchal text na
+        # copy paste ktory zerie spodnu cast !!!!! nic take som nechcel, potrebujem
+        # hlavne pracovnu plochu nie tvoje blbe vysvetlivky"): the #clip-hint footer
+        # strip is REMOVED entirely -- element, CSS rule and JS -- so the terminal
+        # reclaims the freed vertical space. The select/copy/paste FUNCTIONALITY
+        # (attachClipboard) stays; only the UI strip goes.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        m = re.search(r"#clip-hint\s*\{[^}]*\}", html)
-        self.assertIsNotNone(m, "#clip-hint CSS rule not found")
-        rule = m.group(0)
-        self.assertIn("font-size: 12px", rule)     # readable, not the old 11px micro-text
-        self.assertIn("#767676", rule)             # muted Campbell grey
-        # the old hidden-overlay #hint rule + ? toggle are gone
+        self.assertNotIn("clip-hint", html)        # no element, no CSS rule, no JS ref
+        # the old hidden-overlay #hint rule + ? toggle stay gone (#674)
         self.assertNotIn("#hint", html)
 
 
@@ -1725,27 +1724,16 @@ class TestClipboardBridge(unittest.TestCase):
         # attached where the term first exists (same place as themeTerminal)
         self.assertIn("attachClipboard(win)", html)
 
-    def test_footer_hint_states_paste_combo(self):
+    def test_no_clip_hint_footer_element_or_js(self):
+        # #671 rework (owner ruling 2026-08-25): the #clip-hint footer strip is
+        # gone entirely. No element, no CSS rule, and no honesty-rewrite JS that
+        # referenced it (getElementById('clip-hint')). The copy FUNCTIONALITY
+        # (attachClipboard OSC 52 + copy-on-select) is verified untouched by
+        # TestClipboardBridge; only the visible strip is removed.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        # #671 + #674: the combos live in an unobtrusive footer line, NOT a ?
-        # button (the ? button is removed by #674).
-        self.assertIn('id="clip-hint"', html)
-        foot = next(ln for ln in html.splitlines() if 'id="clip-hint"' in ln)
-        self.assertIn("Ctrl+Shift+V", foot)          # the working paste combo
-        self.assertIn("Ctrl+V", foot)                # names the NON-working one ("nie Ctrl+V")
-        self.assertIn("myš", foot.lower())           # mouse-select copies
-
-    def test_footer_hint_honest_over_http_feature_detect(self):
-        # #671 review: navigator.clipboard needs a secure context; over the
-        # plain-HTTP tailnet the copy bridge is inert, so the footer is
-        # feature-detected and rewritten to an honest message when clipboard is
-        # unavailable (mirrors the #585 Ctrl+W isSecureContext honesty) — never a
-        # false "mouse copies" promise. Paste (Ctrl+Shift+V) still works there.
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn("getElementById('clip-hint')", html)      # footer is feature-detected
-        self.assertIn("window.isSecureContext", html)           # secure-context gate
-        # the honest fallback names the real reason, not a false browser-unsupported
-        self.assertIn("kopírovanie myšou vyžaduje HTTPS", html)
+        self.assertNotIn('id="clip-hint"', html)                 # element gone
+        self.assertNotIn("getElementById('clip-hint')", html)    # honesty JS gone
+        self.assertNotIn("kopírovanie myšou vyžaduje HTTPS", html)
 
 
 class TestTopBarOnlyFullscreen(unittest.TestCase):
