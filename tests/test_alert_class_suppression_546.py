@@ -10,9 +10,12 @@ their signal moves to the machine channel (the watchdog journal + an explicit
 through `send()`, so suppression at the `send()` chokepoint leaves it untouched.
 
 These locks:
-  1. `_suppressed_alert_class()` maps exactly the five owning dedup-key prefixes
-     to a human label, and NOTHING else (❓ `waiting:`, ✅ `done:`, run-cards
-     `<repo>#<n>`, bounce/gkreq, `busypane:` job-4, `acctblock:` genuine-alarm).
+  1. `_suppressed_alert_class()` maps the suppressed dedup-key prefixes (#546's
+     five + #704's ten state/stall classes) to a human label, and NOTHING else
+     (❓ `waiting:`, ✅ `done:`, run-cards `<repo>#<n>`, bounce/gkreq,
+     `acctblock:` genuine-alarm). NOTE: `busypane:` was preserved here under
+     #546 (job-4, distinct from api-error) but is now #704-suppressed — see
+     PRESERVED_KEYS below and tests/test_state_stall_suppression_704.py.
   2. `send()` with a suppressed key POSTs NOTHING, returns "suppressed", and
      logs an explicit `suppressed` decision (not a silent drop, #486/#134).
   3. a non-suppressed key is unaffected (still reaches the real send path).
