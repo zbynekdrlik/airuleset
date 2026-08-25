@@ -982,15 +982,15 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
            "term_cols": term_cols, "term_rows": term_rows,
            "u_status": human == WEBTERM_LOGIN_USER}
-    subst = {"@@COUNT@@": str(len(tabs)), "@@BUTTONS@@": buttons,
-             "@@CFG_JSON@@": _json_for_script(cfg),
+    # #694: vestigial @@COUNT@@ dropped (absent from template since #671/#674).
+    subst = {"@@BUTTONS@@": buttons, "@@CFG_JSON@@": _json_for_script(cfg),
              # #643: the Campbell palette as an xterm.js theme object literal.
              "@@THEME_JSON@@": _json_for_script(CAMPBELL_THEME)}
     # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
     # button, the config JSON, the theme object) is never re-scanned, so a label
     # that happens to equal a `@@…@@` sentinel can't splice a later substitution
     # into itself.
-    return re.sub(r"@@(?:COUNT|BUTTONS|CFG_JSON|THEME_JSON)@@",
+    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON)@@",
                   lambda mo: subst[mo.group(0)], _DASHBOARD_TEMPLATE)
 
 
