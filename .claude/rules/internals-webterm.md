@@ -275,6 +275,31 @@ Lessons reusable for any future per-box aggregation over these caches:
   shared tree stays clean. Styling invariant worth knowing before touching tab CSS:
   `.tab:hover` and `.tab.active` have EQUAL specificity, so `.tab.active` must stay declared
   AFTER `.tab:hover` (source order is what keeps a hovered active tab from dimming).
+- **#691 REWORK (owner rejected v0.1.55 active-tab, 2026-08-25) — a KEEP-the-data-channel /
+  MOVE-the-render pattern + three sub-lessons.** The owner rejected the visual (top inset blue
+  stripe touched the label; the separate red `.udot` was the loudest element) and set a binding
+  hierarchy NAME > SELECTED > U. Fix WITHOUT touching the U data channel: the U-state moved from
+  a dedicated `<span class="udot">` to a colour-swap of the EXISTING left `▸ .ico` arrow
+  (`.tab.has-u .ico { color: #E74856 }`) — `applyUStatus`'s `.has-u` toggle + the whole
+  `_box_u_count`/`_U_READER_SNIPPET` collector stayed byte-untouched (only the RENDER changed);
+  the selected cue moved from a top `inset 0 2px` stripe to a BOTTOM `inset 0 -2px #3B78FF`
+  underline (a "selected tab" convention that never touches the label) + `.tab` top/bottom
+  padding 6→9px for vertical breathing. Reuse this shape for any "owner rejected the look, keep
+  the behaviour": re-express the SAME state on an existing element, retire the dedicated one.
+  (1) **RETIRING a UI element = grep the element's OLD NAME across the WHOLE file, JS COMMENTS
+  included — not just its CSS rule + markup.** The one review 🔵 was a stale JS comment above
+  `applyUStatus` still saying "the per-tab U dot" / "leaves the current dots untouched", 15
+  lines from the CSS comment that correctly called `.udot` retired. `grep -rn '<old-name>'
+  <file>` after any retirement; every hit is updated or a deliberate historical note. (2)
+  **`.tab.has-u .ico` (0,3,0) beats `.tab .ico` (0,2,0) by specificity — state-agnostic vs
+  `.active`**, so it reddens the arrow on an active+U tab regardless of source order (verified
+  live: active+U → `#E74856` on the `#333333` body). `assertNotIn("inset 0 2px 0 0")` is a sound
+  "top stripe retired" check precisely because the new value is `inset 0 -2px 0 0` — the `-`
+  breaks substring contiguity. (3) **A prior ticket's test that hardcoded a FULL multi-value CSS
+  string breaks when a later ticket legitimately changes ONE of those values** — the #661
+  left-padding lock asserted the whole `padding: 6px 12px 6px 16px`; #691's vertical-padding
+  change (6→9) broke it. Decouple such a lock to the asymmetry it actually owns (parse the
+  4-value shorthand, assert left=16 > right=12), never the values a later ticket owns.
 
 ### #685 tmux — a CONF-ONLY geometry pin never reaches a running server; live convergence is now sanctioned, version-gated
 

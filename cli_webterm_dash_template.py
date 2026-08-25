@@ -45,36 +45,38 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
   background: #0C0C0C; border-bottom: 1px solid #2b2b2b; overflow-x: auto;
   flex: 0 0 auto; white-space: nowrap; }
 .tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
-  position: relative; /* #677: anchor for the corner U dot */
-  padding: 6px 12px 6px 16px; border: 1px solid transparent; border-bottom: none; /* #661: left 12->16px, tab names indented a touch further from the left edge */
+  padding: 9px 12px 9px 16px; border: 1px solid transparent; border-bottom: none; /* #661: left 12->16px; #691 rework: top/bottom 6->9px = real vertical breathing so nothing touches the top edge (owner: "zhora a zdola skoro vobec"; taller tab explicitly OK) */
   border-radius: 7px 7px 0 0; background: #1b1b1b; color: #CCCCCC;
   font: inherit; line-height: 1; max-width: 170px; flex: 0 0 auto; }
-/* #677: a small restrained corner dot on a tab whose box has a question/approval
-   waiting on the owner (U > 0). Campbell brightRed with a 1px body-coloured ring
-   so it reads clearly against any tab state; hidden until applyUStatus adds
-   .has-u, and removed again the moment U falls to 0. */
-.tab .udot { position: absolute; top: 3px; right: 4px; width: 6px; height: 6px;
-  border-radius: 50%; background: #E74856; box-shadow: 0 0 0 1px #0C0C0C;
-  display: none; }
-.tab.has-u .udot { display: block; }
+/* #691 rework: the separate absolutely-positioned corner .udot (the #677 dot)
+   is RETIRED — the owner rejected it as the LOUDEST element ("mala byt doplnok,
+   teraz je najvyraznejsi prvok"). The U state now recolours the left arrow (see
+   .tab.has-u .ico below), so .tab needs no positioning anchor any more. */
 /* #661: unselected tab text lightened from #9a9a9a to the Campbell foreground
    #CCCCCC (owner: hard to read); hover brightens to #F2F2F2; the ACTIVE tab stays
    the lightest (#F2F2F2). Restrained Campbell greys, never garish. */
 .tab:hover { background: #262626; color: #F2F2F2; }
-/* #691: the old body-matching #0C0C0C active background read as RECESSED (it
-   was DARKER than the inactive #1b1b1b tabs) and the last chromatic active cue
-   left with the #661 .ord chip. One coherent restrained combination instead:
-   the active tab is the LIGHTEST shade on the ramp (inactive #1b1b1b < hover
-   #262626 < active #333333 — hover can never masquerade as active), carries a
-   2px Campbell-brightBlue top accent bar (inset shadow = zero layout shift,
-   follows the corner radius), a rim lightened to stay visible on the lighter
-   body, and a bold label (monospace face, so no advance-width change / no
-   tab-row reflow). Declared AFTER .tab:hover on purpose: equal specificity,
-   so source order keeps a hovered ACTIVE tab from dimming to the hover shade. */
+/* #691 REWORK (owner rejected v0.1.55): the top inset accent bar touched the
+   label ("text tabu sa dotyka modreho pruzku") — solve the selected state
+   differently, in the hierarchy NAME > SELECTED > U. The active tab is the
+   LIGHTEST shade on the ramp (inactive #1b1b1b < hover #262626 < active #333333
+   — hover can never masquerade as active), a rim lightened to stay visible on
+   the lighter body, a bold label (the NAME, rank 1), and a 2px Campbell-
+   brightBlue accent on the BOTTOM edge (inset -2px = a familiar "selected tab"
+   underline just above the tabbar seam; never touches the label, zero layout
+   shift). Declared AFTER .tab:hover on purpose: equal specificity, so source
+   order keeps a hovered ACTIVE tab from dimming to the hover shade. */
 .tab.active { background: #333333; color: #F2F2F2; border-color: #3f3f3f;
-  box-shadow: inset 0 2px 0 0 #3B78FF; }
+  box-shadow: inset 0 -2px 0 0 #3B78FF; }
 .tab.active .al { font-weight: 700; }
 .tab .ico { color: #13A10E; font-size: 11px; }
+/* #691 rework: the U indicator is the LEAST-prominent accessory (rank 3) — the
+   existing green ▸ arrow simply turns Campbell brightRed when the tab's box has
+   U > 0. Specificity (0,3,0) beats .tab .ico (0,2,0) and is state-agnostic vs
+   .active, so an active+U tab shows a red arrow on the #333333 body (legible
+   contrast). Replaces the retired .udot badge; applyUStatus's .has-u toggle and
+   the whole U-collector plumbing are UNCHANGED. */
+.tab.has-u .ico { color: #E74856; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
 #nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;
   padding-right: 4px; margin-right: 2px; background: #0C0C0C; flex: 0 0 auto; }
@@ -632,12 +634,14 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(function () {});
 }
-// #677: the per-tab U dot. Poll the gateway's /u-status (the aggregated per-box U
-// map) and toggle a tab's .has-u iff its target box currently has U > 0 -- a
-// navigation hint that a question/approval is waiting on the owner there. Read
-// LIVE (never a build-time value); a fetch failure leaves the current dots
-// untouched (graceful). The gateway fire-and-forgets a fresh collect on a stale
-// read, so a short burst after load catches it, then a steady minutes cadence.
+// #677 + #691 rework: the per-tab U indicator. Poll the gateway's /u-status
+// (the aggregated per-box U map) and toggle a tab's .has-u iff its target box
+// currently has U > 0 -- a navigation hint that a question/approval is waiting
+// on the owner there. .has-u recolours the tab's left ▸ arrow red (see
+// .tab.has-u .ico; the #677 corner dot was retired in #691). Read LIVE (never a
+// build-time value); a fetch failure leaves the current arrow colours untouched
+// (graceful). The gateway fire-and-forgets a fresh collect on a stale read, so a
+// short burst after load catches it, then a steady minutes cadence.
 function applyUStatus(map) {
   document.querySelectorAll('.tab').forEach((t) => {
     const s = CFG.sessions[+t.dataset.idx];

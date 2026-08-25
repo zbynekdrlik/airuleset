@@ -965,11 +965,14 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
         # chip on the first nine tabs) is REMOVED — it added no needed info and
         # ate space. The Ctrl+Alt+1..9 SHORTCUT stays fully functional (onHotkey
         # below); only the visible digit went. The green ▸ .ico separator stays.
-        # #677: a per-tab corner dot, hidden until the tab's box has U > 0
-        # (toggled by applyUStatus). It carries no data -> no injection surface.
+        # #691 rework (owner rejected the v0.1.55 #677 dot): the separate
+        # <span class="udot"> is RETIRED — the U state now recolours the .ico
+        # arrow (see .tab.has-u .ico in the template), a least-prominent
+        # accessory. applyUStatus still toggles .has-u on the tab; the U-state
+        # data channel is unchanged, only its render moved off a dedicated span.
         return ('<button class="tab" data-idx="%d" title="%s">'
                 '<span class="ico">&#9656;</span><span class="al">%s</span>'
-                '<span class="udot"></span></button>'
+                '</button>'
                 % (i, _html_escape(t["title"]), _html_escape(t["alias"])))
 
     buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
