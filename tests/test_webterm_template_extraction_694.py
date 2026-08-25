@@ -25,6 +25,7 @@ lock gets re-violated by hand):
     survives rendering — with a #700 content-continuity spot check
     (`stretchFrameToFill` shipped in the output).
 """
+import ast
 import re
 import sys
 import unittest
@@ -53,9 +54,15 @@ class TestTemplateExtraction694(unittest.TestCase):
         self.assertGreater(len(t.DASHBOARD_TEMPLATE), 20_000)
 
     def test_template_module_is_a_pure_constant_leaf(self):
+        # AST walk, not a raw-text grep: a text scan also matches lines INSIDE
+        # the triple-quoted template (a JS `class Foo {` or an ES-module
+        # `import … from …` at column start would false-fail it) — review 🔵.
         src = (REPO / "cli_webterm_dash_template.py").read_text(encoding="utf-8")
-        self.assertNotRegex(src, r"(?m)^\s*(?:import|from)\s")
-        self.assertNotRegex(src, r"(?m)^\s*(?:def|class)\s")
+        banned = (ast.Import, ast.ImportFrom, ast.FunctionDef,
+                  ast.AsyncFunctionDef, ast.ClassDef)
+        hits = [type(n).__name__ for n in ast.walk(ast.parse(src))
+                if isinstance(n, banned)]
+        self.assertEqual(hits, [])
 
     def test_cli_webterm_aliases_the_extracted_constant(self):
         import cli_webterm as w

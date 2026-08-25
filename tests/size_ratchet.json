@@ -328,7 +328,7 @@
     "tests/test_webterm_per_human_tabs.py": 250,
     "tests/test_webterm_profiles.py": 246,
     "tests/test_webterm_pwa.py": 201,
-    "tests/test_webterm_template_extraction_694.py": 86,
+    "tests/test_webterm_template_extraction_694.py": 93,
     "tests/test_webterm_theme.py": 158,
     "tests/test_webterm_tunnel.py": 214,
     "tests/test_webterm_u_status.py": 425,
