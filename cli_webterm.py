@@ -284,8 +284,12 @@ def webterm_inventory(profile=profiles.OWNER):
 #      REOPEN-2 (owner directive 2026-08-22) RESTORES the fixed-size
 #      invariant: `window-size manual` + `default-size 176x50`
 #      (cli_tmux_provisioning) pins every window regardless of any client, and
-#      the webterm attach carries `-f ignore-size` so a box still running the
-#      first-reopen `latest` server is fixed immediately (no restart). No
+#      the webterm attach carries `-f ignore-size` so the webterm itself can
+#      never SHRINK a window on a box still running a `latest` server. (#685:
+#      ignore-size cannot fix a window already LARGER than the owner's grid --
+#      a foreign client had grown dev2's codex-bridge to 305x56, cropping the
+#      CC footer; the gated live convergence in cli_tmux_provisioning is what
+#      converges a running server, at every install/push, no restart.) No
 #      client resizes another's window -- no "resizovanie hore-dole". The
 #      browser's OWN appearance at the fixed grid (no dark area) is solved on
 #      the BROWSER side (the dashboard fit-to-fixed-grid JS), never by

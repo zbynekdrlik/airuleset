@@ -4909,9 +4909,11 @@ class TestTmuxHistoryLimit(TestCase):
     missing, rewrite CONTENT in place if present, never touch anything
     outside the markers -- plus a live-apply on any running tmux server via
     an injectable `run` (never a real tmux call, never a keystroke, in
-    these tests). #236's own incident history settled that `resize-window`
-    is NEVER invoked, in any code path -- see TestTmuxWindowSizeNoResize
-    below for the structural lock."""
+    these tests). #236's old "per-window resize never, in any code path"
+    doctrine was NARROWED by #685 (owner-ruled #672 fixed-size invariant):
+    the ONE sanctioned site is the version-gated convergence helper -- see
+    TestTmuxWindowSizeNoResize below for the revised structural lock and
+    TestTmuxWindowGeometryConvergence for the behavioural one."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
@@ -5077,7 +5079,9 @@ class TestTmuxHistoryLimit(TestCase):
         # Keystroke-free, safe: the history-limit set-option is live-
         # applied against a running server -- exactly #235's original,
         # already-shipped, already-proven-safe scope. default-size is
-        # DELIBERATELY never live-applied via a real tmux subprocess call
+        # never in the static live_argvs list -- since #685 the gated
+        # convergence live-sets it on a probed >= 3.5 server; on this
+        # gate-closed runner it stays conf-only
         # (see TestTmuxWindowSizeRemoved below): a post-implementation
         # adversarial review, independently reproduced on this box's own
         # live tmux 3.7b binary via a real attached pty client, PROVED that
@@ -5543,13 +5547,17 @@ class TestTmuxWindowSizeRemoved(TestCase):
     still CONF-ONLY. #613 REOPEN removed it entirely (mis-targeting the
     browser client); #613 REOPEN-2 (owner directive 2026-08-22) RESTORES the
     #586 version-gated + conf-only behaviour as the owner's fixed-size
-    invariant. What this class still locks is the fail-closed behaviour (a box
-    we cannot probe, or one on the crashing 3.4, NEVER receives the line, so
-    the #241 catastrophe cannot recur) and the fact that window-size is NEVER
-    live-applied (no #236 live-apply resize hazard, and the first reopen's live
-    `-gu window-size` -- which forced a running server to `latest` against the
-    invariant -- is gone too). The POSITIVE emit-on-3.7b case lives in
-    TestTmuxWindowSizeVersionGated below. default-size 176x50 is unaffected."""
+    invariant. #685 then sanctioned a version-gated LIVE convergence (a conf-
+    only pin never reaches a server started before it -- the dev2 cropped-
+    footer incident), so what this class still locks is the FAIL-CLOSED
+    behaviour: a box we cannot probe, or one on the crashing 3.4, NEVER
+    receives the conf line AND never receives ANY live geometry call (the
+    #241 conf-crash and the dev1 3.4 format-expansion segfault classes stay
+    impossible; the first reopen's live `-gu window-size` -- which forced a
+    running server to `latest` against the invariant -- stays gone too). The
+    POSITIVE emit-on-3.7b case lives in TestTmuxWindowSizeVersionGated below;
+    the gate-OPEN live convergence lives in TestTmuxWindowGeometryConvergence.
+    default-size 176x50 in the conf is unaffected."""
 
     def test_window_size_not_emitted_when_tmux_version_is_unprobeable(self):
         # run=lambda: None never answers `tmux -V` -> version undetectable ->
@@ -5571,19 +5579,21 @@ class TestTmuxWindowSizeRemoved(TestCase):
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         joined = " ".join(str(c) for c in calls)
         self.assertNotIn("default-size", joined)
-        # but the conf file itself still carries it -- conf-only, not
-        # dropped from the feature.
+        # but the conf file itself still carries it -- on this GATE-CLOSED
+        # runner it stays conf-only (the #685 convergence live-sets it only
+        # on a probed >= 3.5 server), not dropped from the feature.
         self.assertIn("set-option -g default-size 176x50", p.read_text())
 
-    def test_no_window_size_or_resize_shaped_live_call_is_ever_issued(self):
-        # window-size is CONF-ONLY -- it is NEVER passed to a live `run` call in
-        # ANY form: neither a SET (`-g window-size manual/latest`, the #236
-        # snap/#241 crash hazard) nor an UNSET (`-gu window-size`, the first
-        # reopen's self-heal that forced a running server to `latest`, removed
-        # because it undid the owner's fixed-size invariant), nor resize-window /
-        # list-windows. `run=calls.append` closes the version gate (None -> no
-        # conf line), but the probe call `tmux -V` still fires -- that is the
-        # ONLY window-size-adjacent call, and it never TOUCHES a window's size.
+    def test_gate_closed_box_never_gets_a_window_size_or_resize_live_call(self):
+        # #685 REVISED framing (was the absolute "never in ANY form" doctrine):
+        # on a GATE-CLOSED box (version unprobeable / < 3.5) window-size is
+        # NEVER passed to a live `run` call in any form -- no SET, no UNSET
+        # (`-gu window-size`, the first reopen's removed self-heal), no
+        # per-window resize, no window listing. The gate-OPEN convergence path
+        # is locked in TestTmuxWindowGeometryConvergence. `run=calls.append`
+        # closes the version gate (None -> no conf line), but the probe call
+        # `tmux -V` still fires -- that is the ONLY window-size-adjacent call,
+        # and it never TOUCHES a window's size.
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
@@ -5650,19 +5660,24 @@ class TestTmuxWindowSizeVersionGated(TestCase):
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         self.assertNotIn("window-size", p.read_text())
 
-    def test_window_size_manual_is_conf_only_never_live_applied(self):
-        # Even on a supported version, window-size is written to the CONF
-        # (takes effect at next server start) and NEVER passed to a live
-        # `run` call -- the #236 live-apply resize hazard must not return.
+    def test_window_size_conf_line_plus_readonly_probe_when_server_unreadable(self):
+        # #685 REVISED (was: "conf-only, never live-applied"): on a supported
+        # version the conf gets the line AND the live convergence may run --
+        # but _FakeTmuxVersion answers ONLY `tmux -V` (every other call
+        # returns None, the dead-socket shape), so the convergence must bail
+        # at its first read-only state probe with ZERO mutations: no
+        # `set-option ... window-size`, no per-window resize. The gate-OPEN
+        # mutation path is locked in TestTmuxWindowGeometryConvergence.
         p = self._tmp()
         fake = _FakeTmuxVersion("tmux 3.7b\n")
         airuleset.apply_tmux_history_limit(p, run=fake)
         self.assertIn("set-option -g window-size manual", p.read_text())
-        # the version probe is the only window-size-adjacent live call; nothing
-        # ever SETS or UNSETS window-size on the running server.
-        set_calls = [c for c in fake.calls if c != ["tmux", "-V"]]
+        set_calls = [c for c in fake.calls
+                     if c[:2] == ["tmux", "set-option"]]
         live_joined = " ".join(" ".join(c) for c in set_calls)
         self.assertNotIn("window-size", live_joined)
+        self.assertNotIn("resize-window",
+                         " ".join(" ".join(c) for c in fake.calls))
 
     def test_version_probe_is_a_single_tmux_dash_V_call_first(self):
         p = self._tmp()
@@ -5694,25 +5709,260 @@ class TestTmuxWindowSizeVersionGated(TestCase):
 
 
 class TestTmuxWindowSizeNoResize(TestCase):
-    """#236's own incident history (two live-tmux destructions on dev1,
-    the second a kernel segfault in tmux 3.4's format-expansion code)
-    settled that `resize-window` is NEVER part of this feature -- not
-    gated behind an attached-client check, not a "one-time final
-    junction", not anywhere. Setting the default-size SERVER OPTION does
-    not disturb any attached client's current window size; only
-    `resize-window` does that, and it buys nothing new windows don't
-    already get from `default-size` on their own. This is a structural,
-    whole-file lock so it can never silently regress via a future edit
-    anywhere in the module, not just inside the one function #236/#241
-    touch."""
+    """#236's incident history (two live-tmux destructions on dev1, the
+    second a kernel segfault in tmux 3.4's format-expansion code) banned
+    per-window resizing outright. #685 NARROWS that ban instead of keeping
+    it absolute -- the requirement changed: the owner-ruled #672 fixed-size
+    invariant made 176x50-everywhere the DESIRED end state, a conf-only pin
+    provably never reaches a server started before it (agentic boxes never
+    restart tmux -- the dev2 cropped-footer incident), and the exact live
+    sequence (`set-option -g window-size manual` + per-window resize) was
+    proven safe on tmux >= 3.5 by the supervisor's montalu1-6@subdev + dev1
+    applies and this ticket's dev2/fleet convergence, sessions untouched.
+    What the 3.4-era hazards actually need is the VERSION GATE, which fails
+    CLOSED -- so the revised structural lock is: (1) `airuleset.py` (the CLI
+    monolith) still never carries the raw subcommands; (2) inside
+    `cli_tmux_provisioning.py` the MUTATING resize subcommand appears ONLY
+    in the sanctioned `converge_tmux_window_geometry` helper (every comment
+    elsewhere keeps the old convention of not spelling it out; the read-only
+    window LISTING is already an established read in the #554/#592 naming
+    feature); (3) the fail-closed / never-kill / never-type behaviour is
+    locked in TestTmuxWindowGeometryConvergence."""
 
-    def test_resize_window_is_never_constructed_or_invoked_anywhere(self):
+    def test_airuleset_py_never_carries_resize_window(self):
         src = Path(airuleset.__file__).read_text()
         self.assertNotIn("resize-window", src)
 
-    def test_list_windows_is_never_constructed_or_invoked_anywhere(self):
+    def test_airuleset_py_never_carries_list_windows(self):
         src = Path(airuleset.__file__).read_text()
         self.assertNotIn("list-windows", src)
+
+    def test_the_only_sanctioned_resize_site_is_the_convergence_helper(self):
+        # The MUTATING geometry subcommand -- the one the #236 incident
+        # history was actually about -- may appear ONLY inside the gated
+        # helper. (The read-only window LISTING is different: the #554/#592
+        # window-naming feature already reads it elsewhere in the module,
+        # so only `airuleset.py` stays literal-free for that one, above.)
+        import inspect
+        mod_src = (Path(airuleset.__file__).resolve().parent
+                   / "cli_tmux_provisioning.py").read_text()
+        helper_src = inspect.getsource(
+            airuleset.converge_tmux_window_geometry)
+        self.assertGreaterEqual(helper_src.count("resize-window"), 1)
+        self.assertEqual(mod_src.count("resize-window"),
+                         helper_src.count("resize-window"),
+                         "'resize-window' may appear ONLY inside "
+                         "converge_tmux_window_geometry (#685)")
+
+    def test_no_renderer_file_smuggles_a_resize_into_rendered_shell(self):
+        # #685 review 🔵: renderer modules emit bash/conf blocks that RUN on
+        # managed boxes (e.g. cli_bashrc_appliers renders `tmux list-windows`
+        # in the window-naming feature) -- a resize subcommand rendered there
+        # would bypass the version gate and the doctrine with zero friction.
+        base = Path(airuleset.__file__).resolve().parent
+        for name in ("cli_bashrc_appliers.py", "cli_webterm.py",
+                     "cli_webterm_lane.py", "cli_webterm_david.py",
+                     "cli_webterm_marek.py"):
+            f = base / name
+            if f.exists():
+                self.assertNotIn("resize-window", f.read_text(),
+                                 f"{name}: rendered shell must never carry "
+                                 "the raw resize subcommand (#685)")
+
+
+class _FakeTmuxServerState:
+    """#685: emulates a RUNNING tmux server for the geometry-convergence
+    helper -- answers `tmux -V`, `show-options -g window-size|default-size`
+    and the window listing from configurable state, records every argv, and
+    APPLIES mutations to its own state so idempotence is provable by a second
+    call. Never a real tmux server. `windows` is a LIST of (window_id, w, h)
+    tuples -- duplicates model tmux's grouped-session listing, where a shared
+    window appears once per session in the `-a` output."""
+
+    def __init__(self, version_line="tmux 3.7b\n", window_size="latest",
+                 default_size="80x24", windows=None, running=True):
+        self.version_line = version_line
+        self.window_size = window_size
+        self.default_size = default_size
+        self.windows = list(windows or [])
+        self.running = running
+        self.calls = []
+
+    def _r(self, stdout="", rc=0):
+        class _R:
+            pass
+        r = _R()
+        r.stdout = stdout
+        r.returncode = rc
+        r.stderr = "" if rc == 0 else "no server running"
+        return r
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if argv[:2] == ["tmux", "-V"]:
+            return self._r(self.version_line)
+        if not self.running:
+            return self._r("", rc=1)
+        if argv[:3] == ["tmux", "show-options", "-g"]:
+            name = argv[3]
+            if name == "window-size":
+                return self._r(f"window-size {self.window_size}\n")
+            if name == "default-size":
+                return self._r(f"default-size {self.default_size}\n")
+        if argv[:2] == ["tmux", "list-windows"]:
+            lines = "".join(f"{wid} {w} {h}\n" for wid, w, h in self.windows)
+            return self._r(lines)
+        if argv[:3] == ["tmux", "set-option", "-g"]:
+            if argv[3] == "window-size":
+                self.window_size = argv[4]
+            elif argv[3] == "default-size":
+                self.default_size = argv[4]
+            return self._r()
+        if argv[:2] == ["tmux", "resize-window"]:
+            wid = argv[argv.index("-t") + 1]
+            w = int(argv[argv.index("-x") + 1])
+            h = int(argv[argv.index("-y") + 1])
+            self.windows = [(i, w, h) if i == wid else (i, ow, oh)
+                            for i, ow, oh in self.windows]
+            return self._r()
+        return self._r()
+
+    @property
+    def mutating_calls(self):
+        return [c for c in self.calls
+                if c[:2] in (["tmux", "set-option"], ["tmux", "resize-window"])]
+
+
+class TestTmuxWindowGeometryConvergence(TestCase):
+    """#685: a tmux server reads the conf ONLY at server start, and agentic
+    fleet boxes never restart tmux -- so the #672 `window-size manual` +
+    `default-size 176x50` pin never reached a server started before v0.1.43
+    (live dev2: `window-size latest`, codex-bridge at 305x56 from David's
+    305x57 client, owner's 176x51 ignore-size webterm client cropping the
+    bottom rows = the invisible CC footer). `converge_tmux_window_geometry`
+    LIVE-converges such a server: version-gated >= 3.5 (the tmux 3.4
+    conf-crash / dev1 format-expansion segfault class stays impossible --
+    fails CLOSED), sets `window-size manual` + `default-size 176x50` when
+    they differ, resizes each window not already at 176x50, is a strict
+    no-op on a converged server, and NEVER kills/restarts a server or sends
+    a keystroke into any pane. Live-proven with the exact command sequence
+    on montalu1-6@subdev + dev1 (supervisor, 2026-08-25) and dev2 (this
+    ticket) -- sessions untouched, no restarts."""
+
+    def test_converges_an_unpinned_server(self):
+        fake = _FakeTmuxServerState(
+            window_size="latest", default_size="80x24",
+            windows=[("@0", 305, 56), ("@1", 176, 48), ("@2", 176, 50)])
+        applied = airuleset.converge_tmux_window_geometry(run=fake)
+        self.assertEqual(fake.window_size, "manual")
+        self.assertEqual(fake.default_size, "176x50")
+        self.assertEqual([(w, h) for _, w, h in fake.windows],
+                         [(176, 50)] * 3)
+        # the already-converged window @2 is never resized
+        resized = [c[c.index("-t") + 1] for c in fake.calls
+                   if c[:2] == ["tmux", "resize-window"]]
+        self.assertEqual(sorted(resized), ["@0", "@1"])
+        # the applied list reports exactly the mutations made
+        self.assertEqual(applied, fake.mutating_calls)
+        self.assertTrue(applied)
+
+    def test_strict_noop_on_a_converged_server(self):
+        fake = _FakeTmuxServerState(
+            window_size="manual", default_size="176x50",
+            windows=[("@0", 176, 50), ("@1", 176, 50)])
+        applied = airuleset.converge_tmux_window_geometry(run=fake)
+        self.assertEqual(applied, [])
+        self.assertEqual(fake.mutating_calls, [])
+
+    def test_fails_closed_on_tmux_3_4_no_call_but_the_probe(self):
+        # tmux 3.4: `window-size manual` crashes conf-parse (#241) and the
+        # dev1 kernel segfault lived in 3.4's format expansion -- the gate
+        # must fail CLOSED with ZERO live calls beyond the version probe.
+        fake = _FakeTmuxServerState(
+            version_line="tmux 3.4\n", window_size="latest",
+            windows=[("@0", 305, 56)])
+        applied = airuleset.converge_tmux_window_geometry(run=fake)
+        self.assertEqual(applied, [])
+        self.assertEqual(fake.calls, [["tmux", "-V"]])
+
+    def test_noop_when_no_server_is_running(self):
+        fake = _FakeTmuxServerState(running=False,
+                                    windows=[("@0", 305, 56)])
+        applied = airuleset.converge_tmux_window_geometry(run=fake)
+        self.assertEqual(applied, [])
+        self.assertEqual(fake.mutating_calls, [])
+
+    def test_grouped_session_duplicate_window_ids_resized_once(self):
+        # `list-windows -a` lists a grouped sessions' SHARED window once per
+        # session -- the same window_id repeats. Resize it exactly once.
+        fake = _FakeTmuxServerState(
+            window_size="manual", default_size="176x50",
+            windows=[("@3", 305, 56), ("@3", 305, 56)])
+        airuleset.converge_tmux_window_geometry(run=fake)
+        resizes = [c for c in fake.calls
+                   if c[:2] == ["tmux", "resize-window"]]
+        self.assertEqual(len(resizes), 1)
+
+    def test_never_kills_restarts_or_types_into_panes(self):
+        # structural: across every scenario above, no kill-server /
+        # kill-session / kill-window / send-keys argv is ever emitted.
+        scenarios = [
+            _FakeTmuxServerState(window_size="latest", default_size="80x24",
+                                 windows=[("@0", 305, 56)]),
+            _FakeTmuxServerState(window_size="manual",
+                                 default_size="176x50",
+                                 windows=[("@0", 176, 50)]),
+            _FakeTmuxServerState(version_line="tmux 3.4\n"),
+            _FakeTmuxServerState(running=False),
+        ]
+        for fake in scenarios:
+            airuleset.converge_tmux_window_geometry(run=fake)
+            for argv in fake.calls:
+                joined = " ".join(argv)
+                for banned in ("kill-server", "kill-session",
+                               "kill-window", "send-keys"):
+                    self.assertNotIn(banned, joined)
+
+    def test_supports_manual_param_skips_the_second_version_probe(self):
+        # apply_tmux_history_limit already probes `tmux -V` once; passing
+        # supports_manual=True must not re-probe.
+        fake = _FakeTmuxServerState(window_size="latest",
+                                    default_size="176x50", windows=[])
+        airuleset.converge_tmux_window_geometry(run=fake,
+                                                supports_manual=True)
+        self.assertNotIn(["tmux", "-V"], fake.calls)
+        self.assertEqual(fake.window_size, "manual")
+
+    def test_wired_into_apply_tmux_history_limit_single_probe(self):
+        # #685 mechanization: apply_tmux_history_limit (run by cmd_install on
+        # every managed box at every push) must invoke the convergence, so a
+        # server started before the conf pin converges at the next push
+        # instead of waiting for a restart that never comes -- with the
+        # `tmux -V` probe still made exactly ONCE.
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        fake = _FakeTmuxServerState(
+            window_size="latest", default_size="80x24",
+            windows=[("@0", 305, 56)])
+        airuleset.apply_tmux_history_limit(p, run=fake)
+        self.assertEqual(sum(1 for c in fake.calls if c == ["tmux", "-V"]), 1)
+        self.assertEqual(fake.window_size, "manual")
+        self.assertEqual(fake.default_size, "176x50")
+        self.assertEqual(fake.windows, [("@0", 176, 50)])
+
+    def test_apply_makes_no_geometry_call_on_tmux_3_4(self):
+        # the wired-in convergence inherits apply's own version gate: a 3.4
+        # box gets NO window-size/resize/show-options geometry call at all.
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        fake = _FakeTmuxServerState(
+            version_line="tmux 3.4\n", window_size="latest",
+            windows=[("@0", 305, 56)])
+        airuleset.apply_tmux_history_limit(p, run=fake)
+        joined = " ".join(" ".join(c) for c in fake.calls)
+        self.assertNotIn("resize-window", joined)
+        self.assertNotIn("window-size", joined)
+        self.assertEqual(fake.windows, [("@0", 305, 56)])
 
 
 class TestTmuxScrollbackKeybinds(TestCase):

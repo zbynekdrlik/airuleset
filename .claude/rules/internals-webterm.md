@@ -239,3 +239,31 @@ Lessons reusable for any future per-box aggregation over these caches:
   shared tree stays clean. Styling invariant worth knowing before touching tab CSS:
   `.tab:hover` and `.tab.active` have EQUAL specificity, so `.tab.active` must stay declared
   AFTER `.tab:hover` (source order is what keeps a hovered active tab from dimming).
+
+### #685 tmux — a CONF-ONLY geometry pin never reaches a running server; live convergence is now sanctioned, version-gated
+
+The #672 uniform-grid fix pinned `window-size manual` + `default-size 176x50` in the
+managed tmux conf — but a tmux server reads the conf ONLY at start, and agentic fleet
+boxes never restart tmux (that kills live Claude sessions), so every server started
+before the pin ran `window-size latest` forever. Live dev2: David's direct 305x57
+client sized the codex-bridge window to 305x56; the owner's 176x51 `-f ignore-size`
+webterm client showed the top-left 176x51 region → the CC footer (bottom ~5 rows)
+invisible after a window switch. **`-f ignore-size` only stops the webterm from
+SHRINKING a window — it cannot fix one already LARGER than the owner's viewport.**
+FIX = `converge_tmux_window_geometry` (cli_tmux_provisioning.py), invoked from
+`apply_tmux_history_limit` at every install/push: version-gated on the SAME >= 3.5
+probe as the conf line (fails CLOSED — tmux 3.4's conf-parse crash #241 and the dev1
+format-expansion segfault stay impossible; spinbike is 3.4 and is correctly refused),
+idempotent (state-read-first: `show-options -g`, window listing dedup'd by window id
+— grouped sessions list a shared window once per session), never kills/restarts,
+never types. The old "window-size NEVER live-set / per-window resize never anywhere"
+doctrine (#236/#241) was NARROWED, not deleted: `TestTmuxWindowSizeNoResize` now
+locks airuleset.py literal-free + the mutating resize subcommand to the ONE helper;
+the #236 "snap-resize hazard" is the owner-DESIRED convergence under #672. Live
+convergence recipe (manual, same as the helper): `tmux set-option -g window-size
+manual; tmux set-option -g default-size 176x50;` then per window ≠176x50
+`tmux resize-window -t <window_id> -x 176 -y 50` — proven on dev2, gk, david1/2,
+miva1, montalu1–8, marek@subdev, dev1: sessions untouched, attached larger clients
+just gain the cosmetic dark margin the owner decreed. Acceptance read-back:
+`tmux capture-pane -p -t <sess:win> | tail -6` shows the CC statusline inside the
+50-row window.

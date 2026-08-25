@@ -19,9 +19,10 @@ window to the owner size regardless of any client -- so the owner's 176x51
 `-f ignore-size` client shows every window whole (footer included). David/Marek
 get the owner's size (a harmless cosmetic dark border), which the owner
 explicitly wants -- this reverses the #648 "never degrade David" invariant by
-owner decree. That tmux-pin is already LIVE on the owner box (dev1: `show-options
--g` -> `window-size manual`, every window 176x50); its cross-box convergence + an
-isolated-tmux empirical proof are the deferred #685 / tmux-convergence follow-up.
+owner decree. That tmux-pin is now LIVE fleet-wide: #685 landed the cross-box
+convergence (`converge_tmux_window_geometry`, version-gated, run at every
+install/push -- dev1/dev2/gk/subdev streams converged live, spinbike's tmux 3.4
+correctly gate-refused; locks in TestTmuxWindowGeometryConvergence).
 This module locks the RENDER side (the m1..m6 micro-font unblock).
 """
 import json
