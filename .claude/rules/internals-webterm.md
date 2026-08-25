@@ -46,3 +46,13 @@ which auto-load when you read `cli_webterm.py`):
   one `-f ignore-size` smaller client; assert the footer marker is absent from the small client's
   RENDERED screen (crop) and present at the fixed grid. ALWAYS include a no-degradation CONTROL
   (the window size must be unchanged after the ignore-size attach). NEVER touch a live session.
+
+## Supervisor smoke po #663 (unix sockety)
+
+- Access-mode gateway/ttyd NEPOČÚVAJÚ na TCP — starý header-inject relay
+  (127.0.0.1:8199 → :8080) je mŕtvy. Supervízny smoke ide priamo cez socket:
+  `curl --unix-socket /run/user/<uid>/webterm-gateway.sock -H
+  "Cf-Access-Authenticated-User-Email: <owner e-mail>" http://localhost/`
+  (dev1 owner lane; subdev lane sockety: `webterm-<lane>-gateway.sock`).
+- Cross-account izolácia sa overuje NEGATÍVNE: cudzí účet dostane
+  "Couldn't connect" + `ls /run/user/<uid>` Permission denied (0700 runtime dir).
