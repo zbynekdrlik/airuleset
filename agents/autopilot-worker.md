@@ -28,8 +28,10 @@ CLOSED, or a genuinely routine/mechanical-ish ticket → dispatched AS-IS on thi
 `claude-opus-4-8` (`model-awareness.md` 2026-08-25). If YOU hit a HARD wall mid-ticket (a root
 cause that resists your first real
 attempt, a gnarly design fork), dispatch YOUR OWN hard-debug/design consult through the gate:
-`airuleset.py fable-gate` OPEN → `model: "fable"`; CLOSED → a fresh-context consult with the model
-override OMITTED (it inherits your own tier — fresh eyes; never Sonnet for judgment).
+`airuleset.py fable-gate` OPEN → `model: "fable"`; CLOSED → when you run as the 4.8-pinned worker,
+a fresh-context consult with the model override OMITTED (it inherits your `claude-opus-4-8` —
+fresh eyes at the fallback tier); a Fable-dispatched worker at gate CLOSED holds the judgment
+itself instead of dispatching a model-less copy of Fable (never Sonnet for judgment).
 
 The dispatch message tells you the repo and either ONE issue (`Work issue #41 in camera-box`) or a
 **batch** (`Work issues #41 #43 #47 in camera-box as one bundled PR`). Do EXACTLY the named issues —
@@ -465,7 +467,7 @@ push / PR / merge / deploy, never that backup.
    catching + re-dispatching without the override. The Opus 4.8 tier (execution AND routine review)
    is reached by NO override (your own `claude-opus-4-8` inheritance) or a `claude-opus-4-8`-pinned
    agent definition; the only valid explicit `model` params are `"sonnet"`, `"haiku"`, or
-   (design-heavy + gate OPEN) `"fable"`.
+   (gate OPEN) `"fable"`.
    **The reviewer's brief MUST additionally REFUTE the diff on STRUCTURAL grounds (#414 — SOTA
    architecture).** Does it grow a structureless script where `architecture-first.md`'s
    production-by-default rule classifies the code as production (unattended timer/service/hook,
