@@ -333,7 +333,21 @@ def classify_review_comment(body):
 # whitespace/(/ in the class that ref was invisible and the gate silently
 # passed a markerless worker commit (batch-32 corpus-replay catch,
 # 2026-08-16). `&#123`-style HTML entities stay excluded (no `&` in class).
-ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'\[])#([0-9]+)\b")
+# #692 -- the digit run is CAPPED at 5 (refs 1..99999): an ALL-DIGIT CSS
+# hex colour in a commit message (6-digit RGB `#333333`, 8-digit RGBA
+# `#33333380`) is otherwise indistinguishable from an issue ref and, being
+# nonexistent as an issue, hard-blocks via the #206 fail-toward-required
+# path (live #691 incident). Backtracking cannot carve a partial 5-digit
+# ref out of a longer run -- every shorter candidate fails the trailing \b
+# against the next digit. Letter-containing colours (`#3B78FF`) never
+# matched at all (\b cannot sit between a digit and a hex LETTER). The
+# accepted trade-off: a ref above #99999 (no fleet repo is within 20x of
+# that) would leave the gate silent for that ref -- the documented
+# low-cost direction -- while the over-match direction was a proven live
+# hard block on every CSS-touching commit. 3-digit shorthand (`#333`)
+# stays extracted: by shape it IS a plausible ref, and any rule dropping
+# it would open a real-ref bypass; #206 handles the real-and-closed case.
+ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'\[])#([0-9]{1,5})\b")
 
 
 def issue_refs(text):
