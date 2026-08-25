@@ -96,6 +96,29 @@ class TestGatesWired(unittest.TestCase):
                                 "floor too low to prove a substantial suite ran")
 
 
+class TestWorkspaceGitTrust(unittest.TestCase):
+    """Run 32836799214 (#683 run 3): the container runs as uid 0 while the
+    bind-mounted workspace is owned by the host runner uid, so every git
+    call needs `safe.directory` — AND `git clone <workspace>` (which
+    tests/test_rules_ab_experiment.py's make_tree does) opens the SOURCE
+    repo at `<workspace>/.git`, an EXACT-path safe.directory match the
+    workspace entry alone does not cover (probed live in docker
+    python:3.12: the clone dies `dubious ownership in repository at
+    '.../.git'` with only the workspace entry present). Lock BOTH."""
+
+    def test_workspace_marked_safe(self):
+        self.assertIn('safe.directory "$GITHUB_WORKSPACE"', _wf_text(),
+                      "workflow must mark the workspace safe for git — the "
+                      "container's uid 0 does not own the bind-mounted checkout")
+
+    def test_workspace_gitdir_marked_safe_for_local_clones(self):
+        self.assertIn('safe.directory "$GITHUB_WORKSPACE/.git"', _wf_text(),
+                      "a local `git clone <workspace>` opens the source at "
+                      "<workspace>/.git — exact-path matching means the "
+                      "workspace entry alone does not cover it (run "
+                      "32836799214's make_tree failure)")
+
+
 class TestDenylistIntegrity(unittest.TestCase):
     def test_every_entry_file_path_exists(self):
         # No rot: a deny-listed file (or a node-id's file part) that no longer

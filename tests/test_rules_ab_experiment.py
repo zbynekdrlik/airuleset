@@ -476,6 +476,39 @@ def test_make_tree_uses_the_replicate_slot(tmp_path):
     assert t2.name == "run-88-A-r2"
 
 
+def test_make_tree_fails_loud_when_the_clone_fails(tmp_path, monkeypatch):
+    """CI run 32836799214 (#683 run 3): the clone died in the container
+    (dubious ownership on <workspace>/.git + a fatal cross-device hardlink)
+    but _run() swallowed the non-zero rc — the NEXT command then raised a
+    misleading FileNotFoundError on the never-created tree, two steps away
+    from the real cause. script-failure-policy: the clone failure itself
+    must raise, carrying git's own stderr."""
+    monkeypatch.setattr(ab, "REPO", tmp_path / "definitely-not-a-repo")
+    with pytest.raises(RuntimeError, match="clone"):
+        ab.make_tree(tmp_path, ab.TASKS[88], "A", rep=1)
+
+
+def test_make_tree_clone_never_demands_hardlinks(tmp_path, monkeypatch):
+    """An EXPLICIT `--local` makes a cross-filesystem hardlink failure FATAL
+    (`Invalid cross-device link` — the CI container's bind-mounted /__w
+    workspace vs its overlay /tmp), while the default local-path clone falls
+    back to copying; on a same-fs box git hardlinks by default anyway, so
+    dropping the flag costs nothing locally. Probed live in docker
+    python:3.12 (#683 run-3 debug). Lock the clone argv free of --local."""
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None, timeout=600):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(ab, "_run", fake_run)
+    ab.make_tree(tmp_path, ab.TASKS[88], "A", rep=1)
+    clone = calls[0]
+    assert clone[:2] == ["git", "clone"]
+    assert "--no-checkout" in clone
+    assert "--local" not in clone
+
+
 def test_summarise_by_task_never_pools_different_tickets():
     """Pooling task 88 and task 96 into one A-vs-B total can hide a real
     per-ticket effect behind an unrelated one — each task gets its own

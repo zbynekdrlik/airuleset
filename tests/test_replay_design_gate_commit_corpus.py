@@ -5,6 +5,8 @@ history is replayed through the REAL shipped hook on every test run, so a
 future regression in either `design_gate.issue_refs` or
 `hooks/block-commit-without-design.sh`'s scope check is caught by CI, not
 just by a one-off manual run."""
+import importlib.util
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +17,19 @@ SCRIPT = ROOT / "scripts" / "replay_design_gate_commit_corpus.py"
 
 sys.path.insert(0, str(ROOT))
 import design_gate as dg                                   # noqa: E402
+
+
+def _load_script():
+    spec = importlib.util.spec_from_file_location(
+        "replay_design_gate_commit_corpus", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["replay_design_gate_commit_corpus"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+replay = _load_script()
 
 
 class TestReplayScriptAgreesOnARealSlice(TestCase):
@@ -37,6 +52,55 @@ class TestReplayScriptAgreesOnARealSlice(TestCase):
                            capture_output=True, text=True, timeout=60)
         self.assertIn("no issue reference:", r.stdout)
         self.assertIn("has issue reference:", r.stdout)
+
+
+class TestScratchHomeCarriesGitTrust(TestCase):
+    """CI run 32836799214 (#683 run 3): run_hook() relocates $HOME per arm
+    (isolating ~/.claude marker state), which in the CI container HID the
+    step-level `safe.directory` gitconfig — the container runs as uid 0
+    while the bind-mounted workspace is owned by the host runner uid, so
+    every `git -C ROOT` the hook ran died `fatal: detected dubious
+    ownership`, `notify.repo_name_for()` returned "", and the hook's own
+    documented unmeasurable->never-block fail-open turned ALL 28 has-ref
+    corpus commits into [has-ref-but-ON-passed] mismatches at once. The
+    relocated HOME must carry its OWN git trust for ROOT, exactly as any
+    real operating $HOME does."""
+
+    def test_scratch_home_gitconfig_marks_root_safe(self):
+        home = replay._scratch_home("airuleset-replay-selftest-")
+        try:
+            cfg = home / ".gitconfig"
+            self.assertTrue(cfg.exists(),
+                            "scratch HOME has no .gitconfig — in a container "
+                            "CI every hook git call dies dubious-ownership "
+                            "and the gate silently fail-opens")
+            body = cfg.read_text(encoding="utf-8")
+            self.assertIn("safe", body)
+            self.assertIn(str(replay.ROOT), body)
+            self.assertTrue((home / ".claude").is_dir(),
+                            "marker-state isolation dir must still exist")
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+
+class TestBypassTaggedSubjectsAreExcluded(TestCase):
+    """The corpus slice is the N most recent distinct subjects — a MOVING
+    window. The replay invariant is shape-stable for every future commit
+    (the extractor IS the hook's own design_gate.issue_refs) EXCEPT one
+    class: a subject carrying the hook's `[no-design: reason]` / bare
+    `[no-design]` bypass tag is honored BEFORE ref extraction (pass resp.
+    block regardless of refs), so the FIRST such commit subject would break
+    CI retroactively. That single non-deterministic class is excluded from
+    the corpus; the bypass path itself stays unit-tested in
+    tests/test_design_gate.py."""
+
+    def test_replayable_predicate(self):
+        self.assertFalse(replay._replayable("fix: x [no-design: reason] (#5)"))
+        self.assertFalse(replay._replayable("fix: x [no-design] (#5)"))
+        self.assertFalse(replay._replayable("docs: mention the [no-design] tag"))
+        self.assertTrue(replay._replayable("fix(webterm): [green] [#686] thing"))
+        self.assertTrue(replay._replayable("docs: no refs at all"))
+        self.assertTrue(replay._replayable("feat: no-design prose without brackets"))
 
 
 class TestNoOutOfRangeOrMissedReferences(TestCase):
