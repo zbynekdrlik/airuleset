@@ -2730,6 +2730,38 @@ SUPPRESSED_ALERT_PREFIXES = (
     # account-block) + watchdog job 35 (dead-fleet) stay the ONLY phone
     # alarms for a coverage outage.
     ("lanestall", "lane-stall give-up (#693)"),  # goal lane give-up ping (owner-ruled spam)
+    # #704 (2026-08-25 owner ruling, GENERAL): "an idle/stall/no-work/session-stojí
+    # state NEVER owner-pings" — the phone keeps ONLY ❓ question / ✅ final done /
+    # per-ticket run-card / acctblock / job-35 dead-fleet. These airuleset-OWNED
+    # STATE/STALL heuristic verdicts are the direct siblings of the family already
+    # suppressed above: each is a "loop/lane/session died/stalled/idle" heuristic
+    # that either has its OWN machine-channel recovery (goal_dark_watch re-arm,
+    # the lane/working nudge, resume) OR is a structural git-drift alarm a human
+    # resolves (stuck-main / delivery-stall) — NONE of which route through send(),
+    # so suppression at the chokepoint leaves the producer's control flow
+    # byte-identical (the #546/#688 architectural fact; each producer's
+    # once-per-episode latch is set independent of the send return status, so
+    # returning "suppressed" instead of "sent" causes no re-fire storm). The
+    # machine channel keeps the verdict (watchdog journal + the `suppressed`
+    # delivery-log line); job-35 covers a genuinely DEAD box. Measurement:
+    # issue #704. DELIBERATELY NOT suppressed here: `waiting:` (it relays the
+    # ACTUAL ❓ question text — a real question, kept), plus operational classes
+    # (net-drift / owner-decision-digest / conformance / janitor-stuck / gk* /
+    # dorphan / disk-headroom) left to a needs-user-decision follow-up.
+    # HAZARD (no live collision — all managed repos checked): the `prefix + "-"`
+    # boundary means a FUTURE repo whose NAME starts with one of these + a dash
+    # (e.g. `stuck-main-tool`, `long-turn-x`) would have its run-card key
+    # `<name>#<n>` swallowed. If onboarding such a repo, rename the prefix here.
+    ("goal-dark", "goal-loop-died (#704)"),          # goal.py::goal_dark_watch (auto-re-arm)
+    ("goalarm-expired", "goal-autoarm-failed (#704)"),  # goal.py::goal_sweep
+    ("stuck-main", "structural-stuck-main (#704)"),  # repo_health.py::stuck_main_sweep (open/recover)
+    ("delivery-stall", "structural-delivery-stall (#704)"),  # repo_health.py::delivery_stall_watch
+    ("inputdead", "session-input-wedge (#704)"),     # discord_replies.py (resume-recovery)
+    ("pwedge", "prompt-wedge (#704)"),               # wedge.py (pwedge / -backlog / -submit-giveup)
+    ("busypane", "working-stall-busypane (#704)"),   # __init__.py job 4 (visí na ⏳ WORKING)
+    ("long-turn", "long-turn (#704)"),               # long_turn.py (over-fires on long CI waits)
+    ("workingstall-giveup", "working-stall-giveup (#704)"),  # __init__.py job 4 escalate
+    ("textcall-giveup", "textcall-stall-giveup (#704)"),     # __init__.py job 4 escalate
 )
 
 

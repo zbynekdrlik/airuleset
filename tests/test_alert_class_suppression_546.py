@@ -10,9 +10,12 @@ their signal moves to the machine channel (the watchdog journal + an explicit
 through `send()`, so suppression at the `send()` chokepoint leaves it untouched.
 
 These locks:
-  1. `_suppressed_alert_class()` maps exactly the five owning dedup-key prefixes
-     to a human label, and NOTHING else (❓ `waiting:`, ✅ `done:`, run-cards
-     `<repo>#<n>`, bounce/gkreq, `busypane:` job-4, `acctblock:` genuine-alarm).
+  1. `_suppressed_alert_class()` maps the suppressed dedup-key prefixes (#546's
+     five + #704's ten state/stall classes) to a human label, and NOTHING else
+     (❓ `waiting:`, ✅ `done:`, run-cards `<repo>#<n>`, bounce/gkreq,
+     `acctblock:` genuine-alarm). NOTE: `busypane:` was preserved here under
+     #546 (job-4, distinct from api-error) but is now #704-suppressed — see
+     PRESERVED_KEYS below and tests/test_state_stall_suppression_704.py.
   2. `send()` with a suppressed key POSTs NOTHING, returns "suppressed", and
      logs an explicit `suppressed` decision (not a silent drop, #486/#134).
   3. a non-suppressed key is unaffected (still reaches the real send path).
@@ -89,7 +92,12 @@ PRESERVED_KEYS = [
     "camera-box#42",                  # per-ticket run-card
     "bounce:repo:9",                  # cross-stream bounce (directive: unchanged)
     "gkreq:repo:8",                   # gatekeeper request (unchanged)
-    "busypane:key:777",               # job 4 working-stall (NOT api-error)
+    # `busypane:` was preserved here under #546 (job-4 working-stall, distinct
+    # from the api-error class) — #704 (2026-08-25 owner ruling) REVERSES that:
+    # a "visí na ⏳ WORKING, zaseknuto" verdict is a session-stall heuristic and
+    # is now #546-suppressed. Its suppression is locked in
+    # tests/test_state_stall_suppression_704.py; removed from PRESERVED here so
+    # this control matches the current denylist (invert-with-justification, #688).
     "acctblock:sid:888",             # genuine one-shot alarm (deliberately kept)
     "conformance-hb:box:1",           # fleet-death alarm (job 35)
 ]
