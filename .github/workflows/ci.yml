@@ -23,6 +23,13 @@ on:
 permissions:
   contents: read
 
+# Container jobs default to `sh`, not bash — the pytest step uses `mapfile`
+# (a bashism), which made the first main run die with exit 127 (`mapfile:
+# not found`). Every run step here assumes bash; pin it explicitly.
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
