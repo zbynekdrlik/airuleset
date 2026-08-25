@@ -489,3 +489,80 @@ def evaluate_message_post_approval(content, user):
     if approval_present(content):
         return None
     return ApprovalViolation(number=number)
+
+
+# --------------------------------------------------------------------------- #
+# #695 -- message_post TICKET-BINDING gate.
+#
+# THE PROBLEM. The #627 close gate recognises a thread-bound ticket by the
+# opt-in `Discuss-thread:` mark -- and the exact stream that forgot the #627
+# doctrine forgets the mark too, so four odoo-erp tickets closed silently
+# while their client threads rotted for days (montalu5, 2026-08-25). The
+# binding must be CREATED where the thread relationship is born: at the
+# stream's message_post into the thread, never from the stream's memory at
+# close time. So EVERY discuss.channel message_post by a stream must carry a
+# `Discuss-ticket: #N` marker naming the bound ticket -- a falsifiable claim
+# (the #628 owner-approved model: presence is mechanical, truth is a review
+# matter), and the block message teaches recording the mirror line
+# (`Discuss-thread: <channel-id>`) on the ticket itself, which is what the
+# close gate reads.
+#
+# DELIBERATE ADAPTATION from the ticket's "at the stream's FIRST message_post"
+# wording: first-post detection needs durable per-stream-per-channel state,
+# but this hook is stateless and /tmp state is swept -- a lost state file
+# would read "not first" and SILENTLY skip the requirement (fail-UNSAFE).
+# Every-post is stateless, fails safe, and follows the exact #609/#628 model
+# (one extra comment token per posting script). Detection reuses
+# `is_channel_message_post` + `stream_number` -- never a second derivation.
+# Accepted residuals mirror #609/#628: a runtime-built marker over-blocks
+# (fail-safe, bypassable); a multi-op tool-call can mask an unbound post via
+# another op's marker; the marker cannot be verified to name a REAL ticket
+# (falsifiability + review, #516). Bypass for a genuine ticketless internal
+# post: `airuleset:discuss-bind-ok` (rare, logged).
+# --------------------------------------------------------------------------- #
+
+BINDING_MARKER_WORD = "Discuss-ticket"
+
+BIND_BYPASS_MARKER = "airuleset:discuss-bind-ok"
+
+# `Discuss-ticket: #N` -- the marker word, an optional-whitespace colon, then a
+# REAL `#`-prefixed issue number (the exact ref form the block message teaches;
+# a bare number is not accepted -- too easy to satisfy accidentally). Matched
+# anywhere in the content (the posting script carries it as a comment line),
+# case-insensitive like the close guard's own markers.
+_BINDING_RE = re.compile(r"(?i)Discuss-ticket[ \t]*:[ \t]*#[0-9]+")
+
+BindingViolation = namedtuple("BindingViolation", "number")
+
+
+def binding_present(content):
+    """True iff `content` carries a `Discuss-ticket: #N` binding marker with a
+    real `#`-prefixed ticket number. A bare `Discuss-ticket:` (or a number
+    without `#`) is NOT a binding -- the falsifiable-claim requirement."""
+    if not content:
+        return False
+    return bool(_BINDING_RE.search(content))
+
+
+def has_bind_bypass_marker(content):
+    """True iff the deliberate `airuleset:discuss-bind-ok` bypass marker
+    appears in `content` (rare, logged by the hook) -- for a genuine internal
+    post into a channel bound to NO ticket."""
+    return BIND_BYPASS_MARKER in (content or "")
+
+
+def evaluate_message_post_binding(content, user):
+    """A `BindingViolation` (number) iff `content` is a discuss.channel
+    message_post by a stream `user` (cli_aliases.stream_number) that carries
+    NO `Discuss-ticket: #N` binding marker; None (silent) otherwise -- a
+    non-stream user, a non-message_post op, or a post already carrying the
+    marker. The `airuleset:discuss-bind-ok` bypass is handled by the hook
+    (like the signature/approval bypasses), not here."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    if binding_present(content):
+        return None
+    return BindingViolation(number=number)
