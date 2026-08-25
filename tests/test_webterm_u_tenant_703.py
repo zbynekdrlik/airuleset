@@ -316,7 +316,12 @@ class TestGatewayLaneWiring703(unittest.TestCase):
         # imports no cli_webterm — the _default_u_status_path precedent); this
         # lock ties the two copies together (#663 lesson: tie copies with a
         # test, never re-derive).
-        g = gw._lane_u_status_path("x")
+        # Hermetic: the gateway side reads Path.home() at CALL time while the
+        # cli side bakes CLAUDE_DIR at IMPORT time -- pin the gateway's home
+        # to the cli's import-time root so the lock compares the FORMULAS,
+        # not whatever HOME a previous test module left behind.
+        with m.patch.object(gw.Path, "home", return_value=w.CLAUDE_DIR.parent):
+            g = gw._lane_u_status_path("x")
         c = w.webterm_lane_u_status_path("x")
         self.assertEqual(g, c)              # strictly stronger: ties the FULL
         #                                     path incl. the home-root derivation

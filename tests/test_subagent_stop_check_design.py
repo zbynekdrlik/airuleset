@@ -50,6 +50,18 @@ class _GateBase(TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-designstop-home-"))
         self.addCleanup(shutil.rmtree, self.home, True)
+        # mark() rebinds os.environ["HOME"] to this tmp home; restore the
+        # ORIGINAL value on cleanup, or every later test module in the same
+        # process inherits a deleted tmp HOME (caught by #703's drift-lock,
+        # which compares a call-time Path.home() against an import-time
+        # constant -- the one shape that sees the leak).
+        _prev_home = os.environ.get("HOME")
+        def _restore_home():
+            if _prev_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = _prev_home
+        self.addCleanup(_restore_home)
         (self.home / ".claude").mkdir(parents=True)
         self.repo = Path(tempfile.mkdtemp(prefix="airuleset-designstop-repo-"))
         self.addCleanup(shutil.rmtree, self.repo, True)
