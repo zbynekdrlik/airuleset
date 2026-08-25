@@ -182,3 +182,46 @@ which auto-load when you read `cli_webterm.py`):
   SimpleNamespace spec — setup_service only reads a handful of spec attrs on the ready
   path); (c) owner + lane render both drop `.ord` (parity, non-vacuous); (d) the
   `u_status` boundary above.
+### #686 webterm U-dot — a per-box AGGREGATION over tickets-status caches must FRESHNESS-filter, or a dead session's frozen U inflates it forever
+
+The #677 U-dot collector (`cli_webterm.py` `_box_u_count` local + the inline
+`_U_READER_SNIPPET` run over ssh on each remote box) summed `user_waiting` across
+EVERY `~/.claude/tickets-status/*.json` with no freshness test. A tickets-status
+cache is refreshed ONLY by the OWNER of its cwd (statusline shim on render, TTL
+120s; plus the watchdog's 60s re-warm of an ACTIVE cwd, `_watchdog_backlog_fetch`
+→ `_spawn_refresh`), so a DEAD session's cache FREEZES its `user_waiting` and the
+sum stays inflated forever (live: gk footer truthfully U 0 while `/u-status`
+summed the box's stale caches to 8 — the red dot never cleared; dev1 similarly).
+FIX = a freshness precondition (`_U_FRESH_MAX_AGE_S = 30 min = 15× the 120s TTL`)
+in BOTH readers: an entry counts only when `ts` is numeric and `now - ts <= M`.
+Lessons reusable for any future per-box aggregation over these caches:
+
+- **FRESHNESS is the right discriminator, NOT root-existence.** Real dev1 data
+  proved root-existence INSUFFICIENT: two dead-session caches (camera-box ~10.4h,
+  spinbike ~16.7h, `user_waiting=1`) had `root` EXISTING (a real repo dir, not a
+  removed worktree) — root-existence keeps them and still inflates; only freshness
+  drops a dead session in a real dir. Root-existence is ALSO redundant (a removed
+  worktree's cache is already stale) and would need the check baked into the FIXED
+  remote snippet (root-existence is only checkable on-box). Freshness alone handles
+  BOTH removed-worktree and dead-session-in-real-dir, and is the smallest fix.
+- **The remote read runs the snippet ON the box** (`_read_box_u` ssh-runs
+  `_U_READER_SNIPPET`; the collector receives only the integer), so the snippet must
+  carry the SAME freshness filter as `_box_u_count` — they are kept equal by
+  `tests/test_webterm_u_status.TestUReaderSnippet`. The max-age constant is baked
+  into the snippet string via `% _U_FRESH_MAX_AGE_S`.
+- **Window justification:** live sessions refresh within ~1–2 min (TTL 120s) +
+  watchdog 60s re-warm; every OBSERVED dead entry is ≥10h. 30 min is ~15× the TTL
+  (huge margin so a live-but-idle WAITING session — the case that legitimately has
+  U>0 — keeps its dot) yet ~20× below the smallest dead entry. Deliberately a bit
+  more generous than the sibling `_BACKLOG_STATUS_CACHE_MAX_AGE_S` (15 min, SAME
+  cache) because a false-negative here loses a navigation DOT, not just a fallback.
+- **Fail-safe direction preserved** (`_read_box_u` doctrine): a stale / undatable
+  (no-ts / non-numeric-ts) entry is DROPPED (dot lost, self-heals on next refresh),
+  never summed as a false positive; a transiently-unreachable box still returns None
+  (no dot) via the unchanged error path — the filter lives INSIDE the per-box sum.
+- **Contract-change test adaptation:** the pre-existing `TestBoxUCount` /
+  `TestUReaderSnippet` fixtures seeded caches with NO `ts` — after the fix a ts-less
+  cache is (correctly) dropped, so those fixtures were updated to seed a fresh `ts`
+  (a deliberate precondition change, not a weakening). The JS poll (`applyUStatus`,
+  ~1564) is UNCHANGED — a box aggregating to 0 yields `map[id]=0` → the existing
+  `u>0` toggle removes the dot.

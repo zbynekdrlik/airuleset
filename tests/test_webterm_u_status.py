@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock as m
@@ -40,29 +41,125 @@ class TestBoxUCount(unittest.TestCase):
         return d
 
     def test_sums_user_waiting_across_caches(self):
+        now = int(time.time())            # #686: freshness is now a precondition
         home = self._home([
-            {"open": 5, "user_waiting": 2},
-            {"open": 1, "user_waiting": 3},
-            {"open": 0, "user_waiting": 0},
+            {"open": 5, "user_waiting": 2, "ts": now - 10},
+            {"open": 1, "user_waiting": 3, "ts": now - 20},
+            {"open": 0, "user_waiting": 0, "ts": now - 30},
         ])
         self.assertEqual(w._box_u_count(home), 5)
 
     def test_missing_or_none_field_counts_zero(self):
+        now = int(time.time())
         home = self._home([
-            {"open": 5},                      # pre-#468 cache: no field at all
-            {"user_waiting": None},           # explicit None
-            {"user_waiting": 4},
+            {"open": 5, "ts": now},           # pre-#468 cache: no U field at all
+            {"user_waiting": None, "ts": now},   # explicit None
+            {"user_waiting": 4, "ts": now},
         ])
         self.assertEqual(w._box_u_count(home), 4)
 
     def test_bad_json_is_skipped_not_fatal(self):
-        home = self._home([{"user_waiting": 2}])
+        home = self._home([{"user_waiting": 2, "ts": int(time.time())}])
         (Path(home) / ".claude" / "tickets-status" / "bad.json").write_text(
             "{not json", encoding="utf-8")
         self.assertEqual(w._box_u_count(home), 2)
 
     def test_no_cache_dir_is_zero(self):
         self.assertEqual(w._box_u_count(tempfile.mkdtemp()), 0)
+
+
+class TestBoxUCountFreshness(unittest.TestCase):
+    """#686: a box's U aggregates ONLY FRESH caches. A DEAD session's cache (a
+    removed worktree, or an exited session in a real repo dir) never refreshes
+    (the statusline/watchdog only re-warm an ACTIVE cwd), so its frozen
+    `user_waiting` must NOT inflate the box U — otherwise the red dot never clears
+    once the live sessions are at U 0 (the gk footer-U0 / /u-status-8 bug)."""
+
+    def _home(self, caches):
+        d = tempfile.mkdtemp()
+        ts = Path(d) / ".claude" / "tickets-status"
+        ts.mkdir(parents=True)
+        for i, c in enumerate(caches):
+            (ts / ("%d.json" % i)).write_text(json.dumps(c), encoding="utf-8")
+        return d
+
+    def test_stale_dead_caches_do_not_inflate_box_u(self):
+        # the ticket's exact shape: fresh live cache U0 + stale dead caches U>0.
+        now = int(time.time())
+        home = self._home([
+            {"open": 0, "user_waiting": 0, "ts": now - 30},          # live main: U 0
+            {"open": 1, "user_waiting": 3, "ts": now - 6 * 3600,     # removed worktree
+             "root": "/home/x/.claude/worktrees/agent-dead"},
+            {"open": 1, "user_waiting": 2, "ts": now - 12 * 3600,    # exited session
+             "root": "/home/x/devel/camera-box"},
+        ])
+        # sum-all code returns 5; the freshness filter returns 0 (dot clears).
+        self.assertEqual(w._box_u_count(home), 0)
+
+    def test_fresh_user_waiting_is_counted(self):
+        now = int(time.time())
+        home = self._home([
+            {"user_waiting": 4, "ts": now - 30},
+            {"user_waiting": 1, "ts": now - 90},
+        ])
+        self.assertEqual(w._box_u_count(home), 5)
+
+    def test_stale_entry_with_existing_root_is_still_dropped(self):
+        # FRESHNESS, not root-existence, is the discriminator: a stale cache whose
+        # root still EXISTS (a dead session in a real repo dir) must still drop.
+        d = tempfile.mkdtemp()          # a real, existing directory to use as root
+        now = int(time.time())
+        home = self._home([
+            {"user_waiting": 3, "ts": now - 11 * 3600, "root": d},
+        ])
+        self.assertTrue(Path(d).exists())
+        self.assertEqual(w._box_u_count(home), 0)
+
+    def test_missing_or_nonnumeric_ts_is_dropped(self):
+        # a cache that cannot prove freshness (no ts / non-numeric ts) is dropped
+        # (the fail-safe direction: never sum a frozen value we can't date).
+        home = self._home([
+            {"user_waiting": 2},                       # no ts at all
+            {"user_waiting": 5, "ts": "nope"},         # non-numeric ts
+        ])
+        self.assertEqual(w._box_u_count(home), 0)
+
+    def test_future_dated_ts_is_dropped(self):
+        # #686 review 🔵: doctrine parity with _watchdog_backlog_fetch (#459) — an
+        # implausibly future-dated ts (clock skew / a synced cache) is undatable,
+        # so it drops (the safe direction), never counts.
+        now = int(time.time())
+        home = self._home([
+            {"user_waiting": 3, "ts": now + 10000},    # future -> dropped
+            {"user_waiting": 2, "ts": now - 30},       # fresh -> counted
+        ])
+        self.assertEqual(w._box_u_count(home), 2)
+
+
+class TestUReaderSnippetFreshness(unittest.TestCase):
+    """#686: the inline reader run over ssh on each remote box must apply the SAME
+    freshness filter as _box_u_count (a stale dead cache must not inflate)."""
+
+    def _home(self, caches):
+        d = tempfile.mkdtemp()
+        ts = Path(d) / ".claude" / "tickets-status"
+        ts.mkdir(parents=True)
+        for i, c in enumerate(caches):
+            (ts / ("%d.json" % i)).write_text(json.dumps(c), encoding="utf-8")
+        return d
+
+    def test_snippet_drops_stale_and_matches_box_u_count(self):
+        now = int(time.time())
+        d = self._home([
+            {"user_waiting": 4, "ts": now - 60},          # fresh -> counted
+            {"user_waiting": 9, "ts": now - 20 * 3600},   # stale dead -> dropped
+        ])
+        env = {"HOME": d, "PATH": __import__("os").environ.get("PATH", "")}
+        r = subprocess.run(["python3", "-c", w._U_READER_SNIPPET],
+                           capture_output=True, text=True, env=env, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(int(r.stdout.strip()), 4)
+        self.assertEqual(int(r.stdout.strip()), w._box_u_count(d))
 
 
 class TestCollectFleetU(unittest.TestCase):
@@ -149,9 +246,21 @@ class TestUReaderSnippet(unittest.TestCase):
         d = tempfile.mkdtemp()
         ts = Path(d) / ".claude" / "tickets-status"
         ts.mkdir(parents=True)
-        (ts / "a.json").write_text(json.dumps({"user_waiting": 2}), encoding="utf-8")
-        (ts / "b.json").write_text(json.dumps({"user_waiting": 5}), encoding="utf-8")
+        now = int(time.time())            # #686: fresh ts so both readers count it
+        (ts / "a.json").write_text(json.dumps({"user_waiting": 2, "ts": now}),
+                                   encoding="utf-8")
+        (ts / "b.json").write_text(json.dumps({"user_waiting": 5, "ts": now}),
+                                   encoding="utf-8")
         (ts / "c.json").write_text("{broken", encoding="utf-8")
+        # a stale dead cache both readers must drop identically (#686 equivalence)
+        (ts / "d.json").write_text(
+            json.dumps({"user_waiting": 9, "ts": now - 20 * 3600}), encoding="utf-8")
+        # #686 review 🔵: a non-dict JSON (list) and a future-dated ts must ALSO
+        # drop identically in both readers (the snippet drops the list via its broad
+        # except, _box_u_count via its isinstance(dict) guard — lock the equivalence).
+        (ts / "e.json").write_text("[1,2,3]", encoding="utf-8")
+        (ts / "f.json").write_text(
+            json.dumps({"user_waiting": 6, "ts": now + 10000}), encoding="utf-8")
         # run the real snippet with HOME pointed at the temp dir
         env = {"HOME": d, "PATH": __import__("os").environ.get("PATH", "")}
         r = subprocess.run(["python3", "-c", w._U_READER_SNIPPET],
