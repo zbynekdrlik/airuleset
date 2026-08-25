@@ -203,5 +203,104 @@ class TestSecretDeliveryLegPinsPinnedHost(unittest.TestCase):
         self.assertNotIn("StrictHostKeyChecking=no", argv)
 
 
+class TestRealForestshopDevPinned(unittest.TestCase):
+    """#679: forestshop-dev is a PUBLIC-DNS target (forestshop-dev.newlevel.media
+    = 178.105.89.168, no tailscale) on the SHARED-PASSWORD branch — its two
+    REMOTE_HOSTS entries carry no `identity`, so the deploy loop takes the
+    no-identity `sshpass -p newlevel` branch. It is the same public-internet
+    threat class as spinbike (#669) and WORSE: an un-pinned =no leg hands the
+    fleet-shared password to whatever key answers, so a MITM on the path to this
+    public DNS host (or a DNS hijack) gets any key accepted AND the password.
+    Both entries must carry a committed pin and verify strictly. RED on the
+    pre-#679 fleet data (neither entry has `host_keys`)."""
+
+    def _forestshop_entries(self):
+        return [h for h in airuleset.REMOTE_HOSTS
+                if h.get("host") == "forestshop-dev.newlevel.media"]
+
+    def test_both_forestshop_dev_accounts_present(self):
+        names = sorted(h["name"] for h in self._forestshop_entries())
+        self.assertEqual(
+            names, ["admin@forestshop-dev", "stepan@forestshop-dev"],
+            "both documented forestshop-dev accounts must be in the fleet")
+
+    def test_both_forestshop_dev_entries_pinned_and_strict(self):
+        entries = self._forestshop_entries()
+        self.assertEqual(len(entries), 2)
+        for h in entries:
+            self.assertTrue(
+                h.get("host_keys"),
+                "%s (public DNS, shared-password branch) must carry a committed "
+                "host-key pin — else a MITM gets any key AND the shared "
+                "password" % h["name"])
+            opts = cli_remote.host_key_check_opts(h)
+            self.assertIn("StrictHostKeyChecking=yes", opts,
+                          "%s must verify its host key strictly" % h["name"])
+            self.assertTrue(
+                any(o.startswith("UserKnownHostsFile=") for o in opts),
+                "%s must point ssh at the committed pin" % h["name"])
+            self.assertNotIn("StrictHostKeyChecking=no", opts,
+                             "%s must not keep the TOFU posture" % h["name"])
+
+    def test_both_forestshop_dev_entries_share_one_pin(self):
+        # Same physical box (same DNS name) -> the two accounts pin the SAME
+        # keys; a divergence would mean one account trusts a key the other
+        # rejects.
+        pins = [tuple(h.get("host_keys") or ())
+                for h in self._forestshop_entries()]
+        self.assertEqual(len(pins), 2)
+        self.assertTrue(pins[0], "forestshop-dev must carry a non-empty pin")
+        self.assertEqual(pins[0], pins[1],
+                         "both forestshop-dev accounts pin the same host keys")
+
+
+class TestPinFilePathContentAddressed(unittest.TestCase):
+    """#680 fold-in (routed through this lane — the shared helper lives in
+    cli_remote.py, which #680 is banned from). A PINNED webterm connect child
+    ends in os.execvp, so Python's atexit never fires and the RANDOM
+    `mkstemp` pin file leaked one /tmp file per pinned connect. The fix makes
+    the pin path DETERMINISTIC + content-addressed, so the file count is bounded
+    to O(#distinct pins) regardless of atexit. RED on the random-mkstemp code
+    (two 'fresh processes' -> two different paths)."""
+
+    ED = ("ssh-ed25519 "
+          "AAAAC3NzaC1lZDI1NTE5AAAAIJ4gdjBncONNRHmRw+W8hNFBDkkvEORFWLBxXUWS2r7g")
+    ED2 = ("ssh-ed25519 "
+           "AAAAC3NzaC1lZDI1NTE5AAAAIF0hQYw2+OticG0PVhzzDeJzghERkK7g+WkqpDihlbiI")
+
+    def _fresh_process_materialize(self, addr, keys):
+        # Simulate a brand-new process (a fork/exec webterm child): clear
+        # cli_remote's in-process cache so the path is derived purely from the
+        # pin content, exactly as a fresh interpreter would.
+        cli_remote._PINNED_KNOWN_HOSTS_FILES.clear()
+        return cli_remote._materialize_pinned_known_hosts(addr, keys)
+
+    def test_same_pin_across_processes_yields_same_path(self):
+        p1 = self._fresh_process_materialize("203.0.113.7", [self.ED])
+        p2 = self._fresh_process_materialize("203.0.113.7", [self.ED])
+        self.assertEqual(
+            p1, p2,
+            "the pin file path must be deterministic (content-addressed) so the "
+            "atexit-less os.execvp webterm path cannot leak one /tmp file per "
+            "pinned connect")
+
+    def test_distinct_pins_yield_distinct_paths(self):
+        p1 = self._fresh_process_materialize("203.0.113.7", [self.ED])
+        p2 = self._fresh_process_materialize("203.0.113.7", [self.ED2])
+        self.assertNotEqual(
+            p1, p2, "different pinned keys for one addr must map to different "
+            "files (content-addressed)")
+        p3 = self._fresh_process_materialize("198.51.100.9", [self.ED])
+        self.assertNotEqual(
+            p1, p3, "different addresses must map to different files")
+
+    def test_materialized_file_content_survives_the_deterministic_path(self):
+        # The deterministic path must still hold the genuine key keyed to the
+        # address (the #669 property is unchanged by the naming fix).
+        path = self._fresh_process_materialize("203.0.113.7", [self.ED])
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("203.0.113.7 " + self.ED, fh.read())
+
+
 if __name__ == "__main__":
     unittest.main()
