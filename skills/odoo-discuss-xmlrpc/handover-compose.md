@@ -151,6 +151,27 @@ is the FIRST rule for a reason).
   feature that is merged-but-not-yet-deployed or scheduled — the client must be
   able to act on it the moment they read the thread. Confirm it is live on their
   PROD first.
+- **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
+  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Verbatim: „vzdy
+  sa treba odvolavat na to co sa udialo nie na to co sa udeje. Bud mu iniciuj
+  email report teraz a posli ked si si ze mu odisiel a obsahuje co si mu slubil
+  alebo cakaj do zajtra!!!" — stream navrhol klientovi (vlákno 263) „od
+  zajtrajšieho ranného e-mailu bude pri každej položke aj kód dodávateľa", kód
+  bol na PROD, ale sľúbený artefakt (digest e-mail) ešte NEEXISTOVAL. Keď je
+  viditeľný výstup funkcie plánovaný ARTEFAKT (digest e-mail, report, cron
+  výsledok), máš presne dve legálne cesty — obe končia správou v MINULOM ČASE:
+  (1) artefakt SPUSTI TERAZ — vlastnou právomocou, alebo `GATEKEEPER-ACTION:`
+  ak ho na PROD vie spustiť len gatekeeper — a OVER, že odišiel S prisľúbeným
+  obsahom (read-back: psql / `mail.mail` na čerstvej prod-kópii, nikdy len
+  „odoslané"); alebo (2) POČKAJ na najbližší plánovaný beh, over ho, a až
+  potom píš — v minulom čase. Toto je HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`,
+  airuleset #696): stream `message_post` s budúcim sľubom v tele (od zajtra /
+  zajtrajš… / bude pri|v|obsahovať / v ďalšom e-maile|reporte / od budúc /
+  čoskoro / pripravujeme) je BLOKOVANÝ, kým obsah nenesie falsifikovateľnú
+  značku `airuleset:artifact-verified <ref>` — referenciu na to, ČO si z
+  reálneho artefaktu odčítal, kde a kedy; holá značka bez referencie neplatí
+  (model `airuleset:owner-approved`). Iná budúca formulácia mimo zoznamu
+  vzorov hookom prejde — táto doktrína platí na KAŽDÉ preformulovanie.
 - **The greeting (oslovenie — „Dobrý deň…" / „Ahoj…") belongs ONLY in the FIRST
   (opening) message of a thread.** A follow-up reply in an existing thread carries
   NO greeting — it continues directly with the content (an `@`-mention anchor only

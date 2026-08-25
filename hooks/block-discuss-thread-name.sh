@@ -43,9 +43,22 @@ set -euo pipefail
 # STDERR (stdout is invisible to the model). Fail-open on any unmeasurable state
 # (no jq/python3, spawn error) -- the prose rule + review are the backstop.
 #
+# #695 adds a THIRD message_post check on the same payload: the post content
+# must carry a `Discuss-ticket: #N` TICKET-BINDING marker (and the stream then
+# records `Discuss-thread: <id>` on that ticket -- what the #627 close gate
+# reads), so a thread's binding is created at the post, never left to memory.
+#
+# #696 adds a FOURTH: a client message may reference ONLY verified PAST events
+# -- a Slovak FUTURE-PROMISE pattern (od zajtra / zajtrajs... / bude pri|v|
+# obsahovat / v dalsom e-maile|reporte / od buduc / coskoro / pripravujeme) in
+# the post content BLOCKS unless the falsifiable `airuleset:artifact-verified
+# <ref>` evidence marker is present (owner ruling 2026-08-25, thread 263).
+#
 # Bypass (rare, logged): `airuleset:discuss-name-ok` waives the NAME check (a
 # legacy thread the owner accepted); `airuleset:discuss-sig-ok` waives the
-# SIGNATURE check (a genuine internal/legacy post the owner accepts unsigned).
+# SIGNATURE check (a genuine internal/legacy post the owner accepts unsigned);
+# `airuleset:discuss-bind-ok` waives the TICKET-BINDING check (a genuine
+# internal post into a channel bound to no ticket, #695).
 #
 # Test seam: AIRULESET_DISCUSS_STREAM_USER overrides the derived unix user (the
 # stream identity is the unix account, not derivable from cwd/payload).
@@ -88,6 +101,7 @@ except Exception:
 name_bypassed = g.has_bypass_marker(content)
 sig_bypassed = g.has_sig_bypass_marker(content)
 approval_bypassed = g.has_approval_bypass_marker(content)
+bind_bypassed = g.has_bind_bypass_marker(content)
 # #596/#597 create-NAME check -- skipped when the name is deliberately bypassed.
 if not name_bypassed:
     v = g.evaluate(content, user)
@@ -116,6 +130,28 @@ if not approval_bypassed:
         print("HITAPPROVAL")
         print(av.number)
         sys.exit(0)
+# #695 message_post TICKET-BINDING check -- skipped only when bind-bypassed.
+# Runs even if name/sig/approval were bypassed: none of those waives the
+# binding (each marker is an independent falsifiable claim).
+if not bind_bypassed:
+    bv = g.evaluate_message_post_binding(content, user)
+    if bv:
+        print("HITBIND")
+        print(bv.number)
+        sys.exit(0)
+# #696 message_post FUTURE-PROMISE check -- a client message may reference
+# ONLY verified PAST events. The only escape is the falsifiable
+# `airuleset:artifact-verified <ref>` evidence marker, checked inside the
+# evaluator itself (the ticket's explicit "bypass len s falsifikovatelnou
+# znackou" -- no separate convenience bypass exists).
+pv = g.evaluate_message_post_promise(content, user)
+if pv:
+    print("HITPROMISE")
+    print(pv.number)
+    # a hard-wrapped phrase can carry a real newline (`\s+` spans it) -- keep
+    # the MATCHED echo on ONE protocol line (bash reads it with sed -n 3p)
+    print(" | ".join(p.replace("\n", " ") for p in pv.matched))
+    sys.exit(0)
 # nothing blocked -- surface a bypass for logging.
 if name_bypassed:
     print("BYPASS")
@@ -123,6 +159,8 @@ elif sig_bypassed:
     print("SIGBYPASS")
 elif approval_bypassed:
     print("APPROVALBYPASS")
+elif bind_bypassed:
+    print("BINDBYPASS")
 PYEOF
 )
 
@@ -144,6 +182,46 @@ if [ "$LINE1" = "APPROVALBYPASS" ]; then
     LOG="/tmp/airuleset-discuss-approval-bypass-${EUID:-$(id -u)}.log"
     { echo "$(date -Iseconds)  approval-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
     exit 0
+fi
+
+if [ "$LINE1" = "BINDBYPASS" ]; then
+    LOG="/tmp/airuleset-discuss-bind-bypass-${EUID:-$(id -u)}.log"
+    { echo "$(date -Iseconds)  bind-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
+    exit 0
+fi
+
+# #695 -- a discuss.channel message_post by a sub-dev stream carrying no
+# Discuss-ticket binding marker.
+if [ "$LINE1" = "HITBIND" ]; then
+    NUMBER=$(printf '%s\n' "$OUT" | sed -n '2p')
+    cat >&2 <<MSG
+
+🚫 BLOCKED: a client Discuss message names no bound ticket (airuleset #695).
+
+You are sub-dev stream number "${NUMBER}". EVERY Odoo Discuss message_post a
+sub-dev stream sends MUST name the GitHub ticket the thread work belongs to --
+the binding is created where the thread relationship is born (at the post),
+never reconstructed from memory at close time. Four odoo-erp tickets were
+closed with NO closing note in their client threads because nothing ever
+recorded the binding (montalu5, 2026-08-25 -- threads rotted for days).
+
+Do BOTH, then re-run:
+
+  1. put the binding marker into the tool-call content (a comment line):
+       # Discuss-ticket: #<N>          (the ticket this thread work belongs to)
+
+  2. record the mirror line on THAT ticket (this is what the #627 close gate
+     reads -- a close without it is blocked until the closing note is posted):
+       gh issue comment <N> --body "Discuss-thread: <channel-id>"
+
+This is the same logged-falsifiable-claim model as airuleset:owner-approved /
+Discuss-closed: -- the marker's presence is mechanical, its truth is a review
+matter. It gates only a discuss.channel message_post by a sub-dev stream -- a
+create / rename and a non-stream user are never affected. Bypass (rare, logged,
+ONLY a genuine internal post into a channel bound to no ticket): put
+airuleset:discuss-bind-ok in the content.
+MSG
+    exit 2
 fi
 
 # #628 -- a discuss.channel message_post by a sub-dev stream carrying no
@@ -179,6 +257,44 @@ This gates only a discuss.channel message_post by a sub-dev stream -- a create /
 rename and a non-stream user are never affected. Bypass (rare, logged, only for
 a genuine internal / non-client post that needs no owner approval): put
 airuleset:discuss-approval-ok in the content.
+MSG
+    exit 2
+fi
+
+# #696 -- a discuss.channel message_post whose content promises a FUTURE
+# event/artifact with no verified-artifact evidence.
+if [ "$LINE1" = "HITPROMISE" ]; then
+    NUMBER=$(printf '%s\n' "$OUT" | sed -n '2p')
+    MATCHED=$(printf '%s\n' "$OUT" | sed -n '3p')
+    cat >&2 <<MSG
+
+🚫 BLOCKED: a client Discuss message promises a FUTURE event (airuleset #696).
+
+You are sub-dev stream number "${NUMBER}". A client message may reference ONLY
+events that ALREADY HAPPENED and that you VERIFIED — never what "will" happen
+(owner ruling, 2026-08-25: „vzdy sa treba odvolavat na to co sa udialo, nie na
+to co sa udeje" — a stream promised „od zajtrajšieho ranného e-mailu…" while
+the promised digest e-mail did not exist yet, thread 263).
+
+Future-promise phrase(s) found: ${MATCHED}
+
+Pick ONE of the two legal paths (skills/odoo-discuss-xmlrpc/handover-compose.md,
+section „Len minulé, overené udalosti"):
+
+  • RUN the artifact NOW (your own authority, or GATEKEEPER-ACTION: if only gk
+    can trigger it on PROD), VERIFY it went out WITH the promised content (a
+    read-back — e.g. psql/mail.mail on a fresh prod copy), rewrite the message
+    in the PAST tense, and record the falsifiable evidence in the tool-call
+    content:
+      # airuleset:artifact-verified <what you read back, where, when>
+
+  • or WAIT for the next scheduled run, verify it, and only then write the
+    message — in the past tense.
+
+A bare "airuleset:artifact-verified" with no reference is NOT accepted (the
+same logged-falsifiable-claim model as airuleset:owner-approved). This gates
+only a discuss.channel message_post by a sub-dev stream — a create / rename
+and a non-stream user are never affected.
 MSG
     exit 2
 fi

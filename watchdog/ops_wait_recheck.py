@@ -157,6 +157,18 @@ import re
 
 import watchdog
 
+# #695 -- the DISCUSS-AUDIT clause is odoo-erp-scoped (client Odoo Discuss
+# threads are an odoo-erp thing, the same repo scope the #627 close gate holds
+# in `block-fork-no-merge-issue-close.sh`). The cwd->repo-name derivation is
+# the fleet's ONE existing resolver, `notify.repo_name_for` -- never a second
+# parse. Fail-safe: notify unimportable -> resolver None -> the clause simply
+# never renders (a missing clause on odoo-erp costs one day's reminder; a
+# false clause elsewhere is daily noise instructing an audit with zero hits).
+try:
+    from notify import repo_name_for as _repo_name_resolver
+except Exception:  # pragma: no cover - notify unimportable (partial checkout)
+    _repo_name_resolver = None
+
 # env AIRULESET_OPS_WAIT_RECHECK_CADENCE_S — how long a W ticket sits parked (and
 # how long between re-nudges) before this job re-surfaces it into the loop. ~22h
 # so it fires a little more than daily (robust to sweep timing / never SKIPS a
@@ -666,8 +678,43 @@ _W_RELEASE_LANDED_OWNER_TAIL = (
     "(žiadna nová alarm trieda, #546).")
 
 
+def _discuss_audit_scope(cwd):
+    """True iff the repo at `cwd` is odoo-erp -- the ONLY repo whose tickets
+    bind client Odoo Discuss threads (#695; the same repo scope the #627 close
+    gate holds). Resolved via `notify.repo_name_for` (the fleet's one
+    cwd->repo-name derivation); ANY failure -- notify unimportable, no git
+    remote, a resolver error -- reads False, the fail-safe direction for a
+    nudge clause. Called only in the ~daily nudge branch, so the git read
+    never lands on the per-sweep hot path."""
+    if _repo_name_resolver is None:
+        return False
+    try:
+        return (_repo_name_resolver(cwd) or "").strip().lower() == "odoo-erp"
+    except Exception:
+        return False
+
+
+# #695 -- the DISCUSS-AUDIT clause: a CLOSED thread-bound ticket (the manual
+# `Discuss-thread:` mark OR the #657-mandated `discuss.channel_<N>` deep URL)
+# with no `Discuss-closed:`/`Discuss-defer:` disposition means a client thread
+# is rotting with no closing note (montalu5: 4 tickets, threads rotted for
+# days). The watchdog structurally CANNOT do this audit itself -- it has no
+# Discuss credential and per-ticket gh reads of CLOSED tickets on the sweep
+# path are the #507/#550-rejected shape -- so, exactly like the #607 hourly
+# thread-check, the DUTY is named in the daily nudge with the exact command,
+# and the session's own judgment + gh does the read. Doctrine-only: no count
+# changes, no new fetch, the supervisor still posts/records everything itself.
+_DISCUSS_ORPHAN_CLAUSE = (
+    "DISCUSS-AUDIT (#695): ZAVRETÝ thread-bound tiket (nesie `Discuss-thread:` "
+    "značku alebo discuss.channel_<N> deep URL) bez `Discuss-closed:`/"
+    "`Discuss-defer:` = klientske vlákno hnije bez záverečnej správy. Spusti "
+    "audit: `gh issue list -s closed -S \"Discuss-thread OR discuss.channel_\" "
+    "-L 30`, over dispozíciu každého; kde chýba, POŠLI záverečnú správu do "
+    "vlákna (handover-compose.md) a zapíš `Discuss-closed: msg <id>` na tiket.")
+
+
 def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
-                release_landed=None):
+                release_landed=None, discuss_audit=False):
     """The partition-audit keystroke injected into the armed loop. Carries the
     shared `stuck-check: ` prefix (own-payload recognition + machine-prompt
     exclusion — see the module docstring) and composes ONE ping from whichever
@@ -697,7 +744,11 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
     the cached #616 fetch). Non-empty -> the `_W_RELEASE_LANDED_CLAUSE`
     sub-clause names them with the clear-today action (plus the owner-ask tail
     above RELEASE_LANDED_OWNER_ASK_N members); None/empty -> the text is
-    byte-identical to the pre-#698 nudge (never a false "landed" claim)."""
+    byte-identical to the pre-#698 nudge (never a false "landed" claim).
+
+    `discuss_audit` (#695): True appends the odoo-erp-scoped DISCUSS-AUDIT
+    clause (closed thread-bound tickets without a closing-note disposition) —
+    the caller resolves it via `_discuss_audit_scope(cwd)` in the nudge branch."""
     i_pos = isinstance(i_count, int) and i_count > 0
     w_pos = isinstance(w_members, list) and bool(w_members)
     clauses = []
@@ -724,6 +775,8 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
         if stale:
             clauses.append(_W_STALE_CLAUSE
                            % " ".join("#%d" % n for n in sorted(stale)))
+    if discuss_audit:
+        clauses.append(_DISCUSS_ORPHAN_CLAUSE)
     return (
         "stuck-check: partition-audit — over či `I`/`W` labely tvojho `/goal` "
         "partition sedia s doktrínou #526/#539. %s Label mení supervisor s "
@@ -897,8 +950,12 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
             except Exception:
                 rstate = None
     landed = rel_shaped if _release_train_drained(rstate) else None
+    # #695: the DISCUSS-AUDIT clause scope is resolved HERE, in the nudge
+    # branch only (a per-cwd git-remote read at most ~once a day per pane),
+    # never on the per-sweep hot path.
     text = _nudge_text(i_count, members, now, new_rec["w_seen"],
-                       i_members=i_members, release_landed=landed)
+                       i_members=i_members, release_landed=landed,
+                       discuss_audit=_discuss_audit_scope(cwd))
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

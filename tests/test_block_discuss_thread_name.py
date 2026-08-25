@@ -95,9 +95,13 @@ SIGNED_MP = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
              '[cid],{"body":"<p>Ahoj, hotové.</p><p>ZbynekAI 2</p>"})')
 # #628 -- owner-approval fixtures. APPROVAL_EVID is the falsifiable evidence
 # marker (a NON-EMPTY reference after airuleset:owner-approved -- never a bare
-# assertion). APPROVED_MP is a fully valid client post: signed AND owner-approved.
+# assertion). #695 widened the full-hook contract again: a valid client post
+# ALSO carries the `Discuss-ticket: #N` TICKET-BINDING marker (BINDING_EVID),
+# so APPROVED_MP -- the fully valid client post -- now carries all three:
+# signature + owner-approval + ticket binding.
 APPROVAL_EVID = "airuleset:owner-approved owner odsúhlasil znenie 2026-08-22"
-APPROVED_MP = SIGNED_MP + "  # " + APPROVAL_EVID
+BINDING_EVID = "Discuss-ticket: #4512"
+APPROVED_MP = SIGNED_MP + "  # " + APPROVAL_EVID + "  " + BINDING_EVID
 
 
 class TestIsChannelCreate(TestCase):
@@ -645,10 +649,12 @@ class TestHookPassesSignature(_HookBase):
             self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user=None).returncode, 0)
 
     def test_sig_bypass_marker_passes(self):
-        # a genuine internal channel post bypasses BOTH the signature (#609) and
-        # the owner-approval (#628) checks -- it needs both bypass markers.
+        # a genuine internal channel post bypasses the signature (#609), the
+        # owner-approval (#628) AND the ticket-binding (#695) checks -- it
+        # needs all three bypass markers.
         cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok "
-               "airuleset:discuss-approval-ok internal channel")
+               "airuleset:discuss-approval-ok airuleset:discuss-bind-ok "
+               "internal channel")
         self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
 
     def test_non_discuss_message_post_passes(self):
@@ -823,9 +829,11 @@ class TestHookPassesApproval(_HookBase):
         self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 0)
 
     def test_approval_bypass_marker_passes(self):
-        # a genuine internal post: unsigned + BOTH bypass markers
+        # a genuine internal post: unsigned + all THREE bypass markers (#695
+        # added the ticket-binding check on the same message_post path)
         cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok "
-               "airuleset:discuss-approval-ok internal channel")
+               "airuleset:discuss-approval-ok airuleset:discuss-bind-ok "
+               "internal channel")
         self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
 
     def test_non_stream_user_unapproved_passes(self):
@@ -858,8 +866,9 @@ MAREK_MP_MARKEAI = ('models.execute_kw(db,uid,key,"discuss.channel","message_pos
 # the WRONG identity for a marek stream: signed ZbynekAI 4 instead of MarekAI 4
 MAREK_MP_WRONG_ZBYNEK = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
                          '[cid],{"body":"<p>Ahoj, hotové.</p><p>ZbynekAI 4</p>"})')
-# a fully valid marek client post: MarekAI signature AND owner-approval evidence
-MAREK_MP_APPROVED = MAREK_MP_MARKEAI + "  # " + APPROVAL_EVID
+# a fully valid marek client post: MarekAI signature, owner-approval evidence
+# AND (#695) the ticket-binding marker
+MAREK_MP_APPROVED = MAREK_MP_MARKEAI + "  # " + APPROVAL_EVID + "  " + BINDING_EVID
 
 
 class TestSignatureWord(TestCase):

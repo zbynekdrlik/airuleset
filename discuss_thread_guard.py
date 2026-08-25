@@ -453,7 +453,10 @@ APPROVAL_BYPASS_MARKER = "airuleset:discuss-approval-ok"
 # marker pass in exactly that shape, defeating the falsifiable-claim requirement
 # -- never a bare assertion). `re.escape` keeps the pattern linear regardless of
 # input size.
-_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[^\S\r\n]+\S")
+# `[ \t]` (not the earlier `[^\S\r\n]`): an exotic Unicode line separator
+# (U+2028, NEL, VT) must not satisfy the same-line claim -- tightened in one
+# sweep with the #696 `_ARTIFACT_RE` sibling (over-block direction).
+_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[ \t]+\S")
 
 ApprovalViolation = namedtuple("ApprovalViolation", "number")
 
@@ -489,3 +492,180 @@ def evaluate_message_post_approval(content, user):
     if approval_present(content):
         return None
     return ApprovalViolation(number=number)
+
+
+# --------------------------------------------------------------------------- #
+# #695 -- message_post TICKET-BINDING gate.
+#
+# THE PROBLEM. The #627 close gate recognises a thread-bound ticket by the
+# opt-in `Discuss-thread:` mark -- and the exact stream that forgot the #627
+# doctrine forgets the mark too, so four odoo-erp tickets closed silently
+# while their client threads rotted for days (montalu5, 2026-08-25). The
+# binding must be CREATED where the thread relationship is born: at the
+# stream's message_post into the thread, never from the stream's memory at
+# close time. So EVERY discuss.channel message_post by a stream must carry a
+# `Discuss-ticket: #N` marker naming the bound ticket -- a falsifiable claim
+# (the #628 owner-approved model: presence is mechanical, truth is a review
+# matter), and the block message teaches recording the mirror line
+# (`Discuss-thread: <channel-id>`) on the ticket itself, which is what the
+# close gate reads.
+#
+# DELIBERATE ADAPTATION from the ticket's "at the stream's FIRST message_post"
+# wording: first-post detection needs durable per-stream-per-channel state,
+# but this hook is stateless and /tmp state is swept -- a lost state file
+# would read "not first" and SILENTLY skip the requirement (fail-UNSAFE).
+# Every-post is stateless, fails safe, and follows the exact #609/#628 model
+# (one extra comment token per posting script). Detection reuses
+# `is_channel_message_post` + `stream_number` -- never a second derivation.
+# Accepted residuals mirror #609/#628: a runtime-built marker over-blocks
+# (fail-safe, bypassable); a multi-op tool-call can mask an unbound post via
+# another op's marker; the marker cannot be verified to name a REAL ticket
+# (falsifiability + review, #516). Bypass for a genuine ticketless internal
+# post: `airuleset:discuss-bind-ok` (rare, logged).
+# --------------------------------------------------------------------------- #
+
+BINDING_MARKER_WORD = "Discuss-ticket"
+
+BIND_BYPASS_MARKER = "airuleset:discuss-bind-ok"
+
+# `Discuss-ticket: #N` -- the marker word, an optional-whitespace colon, then a
+# REAL `#`-prefixed issue number (the exact ref form the block message teaches;
+# a bare number is not accepted -- too easy to satisfy accidentally). Matched
+# anywhere in the content (the posting script carries it as a comment line),
+# case-insensitive like the close guard's own markers.
+_BINDING_RE = re.compile(r"(?i)Discuss-ticket[ \t]*:[ \t]*#[0-9]+")
+
+BindingViolation = namedtuple("BindingViolation", "number")
+
+
+def binding_present(content):
+    """True iff `content` carries a `Discuss-ticket: #N` binding marker with a
+    real `#`-prefixed ticket number. A bare `Discuss-ticket:` (or a number
+    without `#`) is NOT a binding -- the falsifiable-claim requirement."""
+    if not content:
+        return False
+    return bool(_BINDING_RE.search(content))
+
+
+def has_bind_bypass_marker(content):
+    """True iff the deliberate `airuleset:discuss-bind-ok` bypass marker
+    appears in `content` (rare, logged by the hook) -- for a genuine internal
+    post into a channel bound to NO ticket."""
+    return BIND_BYPASS_MARKER in (content or "")
+
+
+def evaluate_message_post_binding(content, user):
+    """A `BindingViolation` (number) iff `content` is a discuss.channel
+    message_post by a stream `user` (cli_aliases.stream_number) that carries
+    NO `Discuss-ticket: #N` binding marker; None (silent) otherwise -- a
+    non-stream user, a non-message_post op, or a post already carrying the
+    marker. The `airuleset:discuss-bind-ok` bypass is handled by the hook
+    (like the signature/approval bypasses), not here."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    if binding_present(content):
+        return None
+    return BindingViolation(number=number)
+
+
+# --------------------------------------------------------------------------- #
+# #696 -- message_post FUTURE-PROMISE gate.
+#
+# OWNER RULING (2026-08-25, montalu5, verbatim): "Preco mu chces pisat o
+# zajtrajsom emaile, vzdy sa treba odvolavat na to co sa udialo nie na to co
+# sa udeje. Bud mu iniciuj email report teraz a posli ked si si ze mu odisiel
+# a obsahuje co si mu slubil alebo cakaj do zajtra!!!" -- a stream proposed a
+# client handover (thread 263) promising "od zajtrajsieho ranneho e-mailu..."
+# while the promised artifact (the digest e-mail) did not yet exist. A client
+# message may reference ONLY events that already happened AND were verified.
+#
+# DETECTION: the ticket's OWN Slovak pattern list, word-bounded and
+# case-insensitive, scanned over the whole message_post content (the #609
+# whole-content model -- the body is often a variable, so scoping to "the
+# body" is not reliably provable). The ONLY escape is the falsifiable
+# `airuleset:artifact-verified <ref>` evidence marker with a SAME-LINE
+# non-empty reference (the #628 `_APPROVAL_RE` shape) -- the ticket's
+# explicit "bypass len s falsifikovatelnou znackou"; there is deliberately NO
+# separate convenience bypass. Accepted residuals: an UNLISTED future
+# phrasing slips (fail toward not blocking on an un-named pattern -- the
+# doctrine in handover-compose.md covers the rest); a promise word outside
+# the client body but inside the same tool-call over-blocks (the same
+# whole-content residual as #609/#628, fail-safe direction); a genuinely
+# non-client post carrying a promise word needs an honest artifact-verified
+# ref naming why (rare; the marker stays falsifiable either way).
+# --------------------------------------------------------------------------- #
+
+ARTIFACT_MARKER_WORD = "airuleset:artifact-verified"
+
+# `airuleset:artifact-verified <ref>`: the marker word then SAME-LINE
+# horizontal whitespace then at least one non-whitespace char -- a real,
+# non-empty reference on the marker's OWN line (the #628 review-MAJOR lesson:
+# a `\s+\S` spanning the newline would let a bare reference-less marker pass
+# whenever the call follows on the next line). `[ \t]` -- not `[^\S\r\n]` --
+# so an exotic Unicode line separator (U+2028, NEL, VT) can never satisfy the
+# same-line claim either (#696 review 🔵; over-block direction: a marker
+# separated from its ref by an nbsp fails and gets retyped).
+_ARTIFACT_RE = re.compile(re.escape(ARTIFACT_MARKER_WORD) + r"[ \t]+\S")
+
+# The ticket's Slovak future-promise patterns. Word-bounded (`\b` is
+# unicode-aware in py3, so Slovak diacritics form real boundaries):
+#   od zajtra          -- also NOT inside "hod zajtra" (\b before `od`)
+#   zajtraj[šs]        -- stem covers zajtrajší/zajtrajšieho/... declensions
+#   bude (pri|v|obsahova[ťt]) -- the trailing \b keeps "bude viac" out (`v`
+#                            must end at a boundary)
+#   v [ďd]al[šs]om (e-maile|reporte)  -- `e-?maile` covers the unhyphenated form
+#   od bud[úu]c        -- stem covers budúceho/budúcej/budúcich
+#   [čc]oskoro, pripravujeme
+# `\s+` between words tolerates a hard-wrapped body. The diacritic letters are
+# TWO-CHAR CLASSES (š|s, ť|t, ď|d, ú|u, č|c) because this fleet demonstrably
+# writes ASCII-transliterated Slovak too (the owner's own verbatim #696 ruling
+# is diacritic-less) -- a transliteration is the SAME listed phrase, not a
+# rephrasing, and over-fire is the documented safe direction (#514; both #696
+# adversarial reviewers flagged the diacritic-only stems as the asymmetric
+# gap while `(?i)` case-folding was handled).
+_PROMISE_RE = re.compile(
+    r"(?i)\b(?:od\s+zajtra\b|zajtraj[šs]|bude\s+(?:pri|v|obsahova[ťt])\b|"
+    r"v\s+[ďd]al[šs]om\s+(?:e-?maile|reporte)\b|od\s+bud[úu]c|[čc]oskoro\b|"
+    r"pripravujeme\b)")
+
+PromiseViolation = namedtuple("PromiseViolation", "number matched")
+
+
+def promise_phrases(content):
+    """Every future-promise phrase matched in `content` (possibly empty)."""
+    return [m.group(0) for m in _PROMISE_RE.finditer(content or "")]
+
+
+def artifact_verified_present(content):
+    """True iff `content` carries the `airuleset:artifact-verified <ref>`
+    evidence marker WITH a non-empty same-line reference. A bare marker (no
+    reference, or the reference only on a later line) is NOT accepted -- the
+    falsifiable-claim requirement."""
+    if not content:
+        return False
+    return bool(_ARTIFACT_RE.search(content))
+
+
+def evaluate_message_post_promise(content, user):
+    """A `PromiseViolation` (number, matched phrases) iff `content` is a
+    discuss.channel message_post by a stream `user` (cli_aliases.
+    stream_number) whose content carries a Slovak FUTURE-PROMISE pattern and
+    NO `airuleset:artifact-verified <ref>` evidence marker; None (silent)
+    otherwise -- a non-stream user, a non-message_post op, past-tense-only
+    content, or a post carrying the artifact evidence. Unlike the sibling
+    gates there is NO separate convenience bypass -- the evidence marker IS
+    the only escape (#696, the ticket's explicit shape)."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    matched = promise_phrases(content)
+    if not matched:
+        return None
+    if artifact_verified_present(content):
+        return None
+    return PromiseViolation(number=number, matched=matched)

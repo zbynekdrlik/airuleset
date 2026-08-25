@@ -4,7 +4,10 @@ owner directive 2026-08-22).
 
 THE RULE. A ticket that binds an Odoo Discuss thread — recognised by a
 line-anchored `Discuss-thread: <channel-id>` marker on the ticket (its body
-OR any comment) — may be CLOSED only once it ALSO carries a disposition line:
+OR any comment), OR (#695) by a `discuss.channel_<N>` deep-link token in that
+same text (the #657-mandated URL form, read so a ticket whose stream forgot
+the manual mark still binds — see `_DEEP_URL_RE`) — may be CLOSED only once
+it ALSO carries a disposition line:
 
   * `Discuss-closed: <message-id>`  — the closing note ("všetko vyriešené,
     tému uzatvárame") was posted into the thread; this is the LAST ticket
@@ -37,8 +40,9 @@ untouched by a cross-stream move.
 
 WHAT THE GATE ACTUALLY KEYS ON (precise — the channel id is NOT consumed by
 the code). This decision is PER TICKET: `is_thread_bound(text) and not
-has_disposition(text)`. The gate reads only whether the `Discuss-thread:`
-marker is PRESENT (a binding exists) and whether a disposition is present — it
+has_disposition(text)`. The gate reads only whether a binding signal is
+PRESENT (the `Discuss-thread:` marker OR, #695, the deep-URL token —
+`_DEEP_URL_RE`) and whether a disposition is present — it
 never parses, groups, or compares the channel-id VALUE. The channel id inside
 the marker is the HUMAN-READABLE correlation key: it lets a reviewer / the
 owner see at a glance which tickets belong to the same thread and validate a
@@ -92,6 +96,24 @@ _THREAD_RE = re.compile(_MARK_OPEN + r"Discuss-thread" + _MARK_TAIL)
 _CLOSED_RE = re.compile(_MARK_OPEN + r"Discuss-closed" + _MARK_TAIL)
 _DEFER_RE = re.compile(_MARK_OPEN + r"Discuss-defer" + _MARK_TAIL)
 
+# #695 — SECOND binding recognition: the `discuss.channel_<N>` deep-link token.
+# The manual `Discuss-thread:` mark is opt-in, and the exact stream that forgot
+# the #627 doctrine forgets the mark too — so four odoo-erp tickets closed
+# silently past this gate while their client threads rotted (montalu5,
+# 2026-08-25). But the deep URL `…?active_id=discuss.channel_<N>` is MANDATORY
+# on every owner-facing thread mention (#657, prose-hook-enforced), so the
+# durable binding signal already exists on the ticket text; this regex reads
+# it. The `active_id=…` form CONTAINS the bare token as a substring, so one
+# pattern covers both ticket-named shapes. `_[0-9]+` requires digits right
+# after the underscore, so model FIELD names (`discuss.channel_id`,
+# `discuss.channel_member`) never match. Case-insensitive: recognition
+# over-fires SAFE (#514 — a bound ticket blocks toward MORE scrutiny), and the
+# remedy for a prose-only mention is cheap (`Discuss-defer:`/`Discuss-closed:`
+# or the hook's `airuleset:discuss-close-ok` bypass). The odoo-erp repo scope
+# lives in the .sh half, so meta tickets in OTHER repos (like airuleset's own
+# #657/#695, whose prose names this very token) never engage the gate.
+_DEEP_URL_RE = re.compile(r"(?i)discuss\.channel_[0-9]+")
+
 
 def collect_text(data):
     """Concatenate the issue body + every comment body into one newline-joined
@@ -112,8 +134,12 @@ def collect_text(data):
 
 
 def is_thread_bound(text):
-    """True iff the ticket carries a `Discuss-thread: <value>` binding."""
-    return bool(_THREAD_RE.search(text))
+    """True iff the ticket carries a binding: the line-anchored
+    `Discuss-thread: <value>` mark OR (#695) a `discuss.channel_<N>` deep-link
+    token anywhere in the ticket text — the #657-mandated form owner-facing
+    prose must already carry, so a ticket whose stream forgot the manual mark
+    is still recognised."""
+    return bool(_THREAD_RE.search(text) or _DEEP_URL_RE.search(text))
 
 
 def has_disposition(text):
