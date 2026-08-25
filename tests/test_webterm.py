@@ -56,6 +56,7 @@ const CFG = { term_cols: 176, term_rows: 51 };
 // reference. Kept in sync with cli_webterm.py by test_fit_fill_caps_match_source.
 const WT_FILL_MAX_CELL_STRETCH = 1.5;
 const WT_FILL_MAX_LINE_STRETCH = 1.8;
+const WT_FRAME_FILL_MAX_STRETCH = 1.25;
 const CW = 0.6, CH = 1.2;                 // fake NATURAL monospace cell = 0.6*fs x 1.2*fs
 // #678: cell dims track term.options — fontSize AND (native fill) lineHeight /
 // letterSpacing. A real xterm bakes lineHeight into cell HEIGHT and letterSpacing

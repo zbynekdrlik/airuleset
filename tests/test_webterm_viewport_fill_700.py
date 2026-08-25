@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cli_tmux_provisioning as prov  # noqa: E402
 import cli_webterm as w  # noqa: E402
-from test_webterm import _extract_js_function, _run_fit_harness  # noqa: E402
+from test_webterm import _FIT_HARNESS, _extract_js_function, _run_fit_harness  # noqa: E402
 
 
 def _inv():
@@ -74,6 +74,9 @@ class TestViewportExactFill700(unittest.TestCase):
         self.assertIn("stretchFrameToFill", _extract_js_function(html, "scheduleFill"))
         # the spilled letterbox is clipped by the frames container
         self.assertRegex(html, r"#frames\s*\{[^}]*overflow:\s*hidden")
+        # the node harness's cap can never silently drift from what ships
+        # (same lock pattern as test_fit_fill_caps_match_source)
+        self.assertIn("const WT_FRAME_FILL_MAX_STRETCH = 1.25;", _FIT_HARNESS)
 
     def test_stretch_fills_viewport_exactly_and_keeps_mouse_exact(self):
         # BEHAVIOURAL (node): after fit+fill+stretch the grid spans the
