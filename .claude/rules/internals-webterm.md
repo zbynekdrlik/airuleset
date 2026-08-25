@@ -369,6 +369,54 @@ side margins + an "empty row" under the status bar. Three reusable lessons:
   source lock (the #655 pattern), or the node run dies on ReferenceError only
   AFTER the source lands (a RED test can't see it).
 
+### #703 webterm — per-tenant U-dot for lanes: scope at READ+SERVE, opt-in per entry, never in client JS
+
+The david/marek lanes now have their own U-dot (owner ruling 2026-08-25) without touching the
+#677/#684 cross-tenant boundary. Reusable shapes for ANY future per-tenant feature on a lane:
+
+- **Tenant scoping is enforced where data is READ and SERVED, never in the browser.** The dash
+  cfg `u_status` stays a plain BOOLEAN (poll on/off — a client-side "boundary" is no boundary);
+  the real boundary is (a) the collector's entry set (`cli_webterm_profiles.u_tenant_entries`)
+  and (b) the served file living under the LANE account's own $HOME
+  (`webterm-<lane>-u-status.json` — the unix account boundary IS the tenant boundary, #663).
+- **"A lane's own sessions" = an explicit per-entry `u_tenant: True` OPT-IN in the profiles
+  leaf, never "everything the lane can connect to".** The lane inventories contain OWNER-account
+  targets (david's codex-bridge, marek's dev1/dev2 = `newlevel@…`) whose per-cwd tickets-status
+  caches aggregate the OWNER's sessions — a per-cwd cache carries NO per-tenant discrimination
+  within a unix account, so any read there is cross-tenant. Opt-in fails closed (a new tab never
+  silently joins U collection); a `user=="newlevel"` deny-list was rejected as the frailer shape.
+  `u_tenant_entries` ALSO drops identity-less non-local entries, so the `_ssh_read_prefix`
+  sshpass shared-password branch is structurally unreachable from a lane collector — and the
+  scoped set is a SUBSET of the lane's connect allowlist (same dedicated keys) = zero new reach.
+- **The owner/lane split is TWO DIFFERENT FLAGS, not one flag with account-conditional scope:**
+  owner unit `--u-collect` (fleet map), lane units `--u-lane <profile>` (per-tenant map + scoped
+  `webterm-u-collect --lane` spawn). The existing read-only locks (`assertNotIn("--u-collect",
+  lane_unit)`, `"u_status": false` for a no-opt-in lane render) stay green untouched — pick a new
+  flag name that is NOT a substring-superset of the locked one. Charset-gate the profile at EVERY
+  entry point (gateway argparse AND the collector's own argv parse): it names the served FILE, so
+  an unvalidated value is a path traversal; and gate with `is not None`, never truthiness — an
+  EMPTY `--u-lane ""` is falsy and would silently fall through as feature-off (caught live: the
+  charset test hung on a gateway that started SERVING instead of erroring).
+- **A prefix-builder that can RAISE must sit INSIDE the per-item guard.** `_ssh_read_prefix` now
+  honors a #680 `host_keys` pin via `cli_remote.host_key_check_opts`, which RAISES fail-closed on
+  a present-but-empty pin — built outside `_read_box_u`'s try it would have zeroed the WHOLE U
+  map for one bad entry instead of omitting one box (self-review catch, regression-locked).
+- **The design-gate hook classifies your LAST comment only, by keyword shape** (`design_gate.py`:
+  numbered `Prístup 1..3`, a literal `alternatíva`/`rejected` word, `Architektúra:` naming a
+  `framework`/`knižnic`/why-none-fits token). Posting a rich free-form design comment that fails
+  the classifier 3× costs a round-trip each — read the regexes once, then write ONE consolidated
+  comment carrying every marker.
+- **A per-tenant lane feature that reuses the #680 host-key pin (marek's forestshop is pinned)
+  raises the cadence of the `cli_remote` "shared deterministic pin file" race (review 🔵).** The
+  scoped `webterm-u-collect --lane` collector is a NORMAL-exit process (returns 0, not
+  `os.execvp` like the webterm connect leg), so its atexit unlinks the shared deterministic
+  `_pinned_known_hosts_path` — and the gateway now respawns it every ~60–90 s while a lane
+  dashboard is open, so a concurrent interactive forestshop tab connect can find its pin file
+  unlinked mid-connect. It stays the documented narrow/LOUD/self-healing race (a
+  `StrictHostKeyChecking=yes` miss = a visible rc-255 the connect retry heals; NEVER a silent
+  TOFU downgrade — a missing pin file refuses, it does not fall back to `=no`), only more often.
+  Known residual, acceptable as-is.
+
 ### #694 webterm — the dashboard template lives in `cli_webterm_dash_template.py`, NOT inline
 
 - **Where the HTML/CSS/JS is:** every dashboard markup/style/script edit (the #643/#661/#672/
