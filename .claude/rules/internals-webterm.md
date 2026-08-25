@@ -66,20 +66,29 @@ which auto-load when you read `cli_webterm.py`):
   exposes an unauthenticated, WRITABLE terminal on every interface incl. the
   tailnet. The real spawn sites: `WEBTERM_TTYD_BIND = "127.0.0.1"` (cli_webterm.py),
   `_LAUNCH_TEMPLATE` (`exec ttyd -p … -i 127.0.0.1 …`) and `_LAUNCH_TEMPLATE_SOCKET`
-  (`exec ttyd -i "$SOCK" …`); the gateway `--bind` argparse help says "never 0.0.0.0"
-  and `main()` fail-closes to exactly one of `--bind` (validated tailscale IP) / `--socket`.
-- **MITIGATION IN CODE (#681).** `_reject_wildcard_bind(bind, where)` (cli_webterm.py)
-  fails closed — a wildcard/empty bind at the two TCP-render chokepoints
-  (`render_webterm_launch_script` password branch + `_render_webterm_gateway_unit`)
-  raises `ValueError` instead of rendering a live exposure. Locked by
-  `tests/test_webterm_ttyd_wildcard_bind_681.py` (scans every rendered spawn
-  argv/unit for a wildcard + asserts the guard raises). The UNIX-socket path is not
-  a TCP interface and needs no guard.
+  (`exec ttyd -i "$SOCK" …`); the gateway binds either a `--bind` TCP interface (the
+  real install passes a `_tailscale_ip`-validated IP) or a `--socket` UNIX socket,
+  and `main()` fail-closes to exactly one of them (#663) AND rejects a wildcard
+  `--bind` outright (#681, below). IP-validation of `--bind` happens at render/
+  provision time (`_tailscale_ip`); `main()` itself only rejects the wildcard forms.
+- **MITIGATION IN CODE (#681).** `_reject_wildcard_bind(bind, where)` (cli_webterm.py,
+  backed by `_bind_is_wildcard` — an ipaddress/inet_aton parse that catches EVERY
+  interface-any spelling: `0.0.0.0`, `::`, `::0`, `0:0:0:0:0:0:0:0`, the legacy
+  shorthands `0`/`0.0`/`0.0.0`, `""`, `*`) fails closed at the two TCP-render
+  chokepoints (`render_webterm_launch_script` password branch +
+  `_render_webterm_gateway_unit`). The gateway `main()` carries its OWN local
+  `_bind_is_wildcard` (the module is standalone) and refuses a wildcard `--bind` at
+  runtime — closing the #671 class where an agent HAND-RUNS `--bind 0.0.0.0
+  --trust-access-header …` (a forgeable header + all-interfaces bind), which no
+  render would ever emit. Locked by `tests/test_webterm_ttyd_wildcard_bind_681.py`
+  (scans the rendered spawn argv/units — a hand-enumerated list, so enrol any new
+  renderer there — + asserts the guard raises) and `TestWildcardBindMainGuard681`.
+  The UNIX-socket path is not a TCP interface and needs no guard.
 - **TEST HARNESS = loopback too, never 0.0.0.0.** To live-verify webterm in Playwright
   MCP, bind the throwaway ttyd LOOPBACK `-i 127.0.0.1` and navigate
   `http://127.0.0.1:<port>/`. Playwright MCP DOES reach 127.0.0.1 on dev1 —
   EMPIRICALLY confirmed #681 (a loopback ttyd rendered its marker in the browser)
-  AND #657; this SUPERSEDES the earlier #661 harness claim ("Playwright MCP can't
+  AND #678; this SUPERSEDES the earlier #661 harness claim ("Playwright MCP can't
   reach the host 127.0.0.1 → bind 0.0.0.0"), which a review agent literally executed
   → an unauthenticated writable terminal on the tailnet, killed by hand (#671). The
-  `internals-tests.md` #661/#657 harness bullets now agree on loopback-only.
+  `internals-tests.md` #661/#678 harness bullets now agree on loopback-only.
