@@ -107,6 +107,29 @@ OWNER_GATEWAY_ACCESS_MODE = True
 # dashboard fitFixedGrid JS) so it is a twin of the owner's WT.
 WEBTERM_STATUS_ROWS = 1
 
+# #672: the FIXED client grid a FOREIGN-STREAM tab's browser xterm is force-fit
+# to, DISTINCT from the owner grid above. WHY it must be bigger: an owner box is
+# pinned window-size manual + default-size 176x50 (cli_tmux_provisioning), so the
+# owner grid (176x51) == the window and the -f ignore-size webterm client shows
+# it whole. A foreign-stream box's window is NOT pinned to 176x50 -- it is sized
+# by the STREAM developer's OWN client (David works at 305x57 -> window 305x56;
+# list-clients shows his 305x57 client WITHOUT ignore-size). The owner's webterm
+# client, if forced to the small 176x51 owner grid and attached -f ignore-size,
+# is SMALLER than that window, so tmux gives it a cursor-following CROP that
+# clips everything below the cursor -- the CC I/U/gk statusline footer + agent
+# strip (the #672 bug). Forcing the stream-tab grid >= the stream window makes
+# the owner client contain the whole window (footer visible); -f ignore-size is
+# KEPT so the stream developer's own window is never resized (the #648
+# no-degradation invariant, mirrored -- proven live: an ignore-size client
+# bigger than the window leaves the window untouched, a NON-ignore-size one
+# grows it). TRADE-OFF: this is a GENEROUS fixed grid (>= David's 305x57); a
+# stream dev in a SMALLER terminal gets a harmless cosmetic dark border on that
+# monitoring tab (everything visible) rather than a crop -- a strict improvement
+# toward "the owner sees the footer". All current owner-dashboard streams live
+# on the same UNPINNED subdev VPS, so no pinned box is dark-bordered in practice.
+# BUMP this if a stream developer starts working in a terminal larger than it.
+WEBTERM_STREAM_TERM_GRID = (320, 64)
+
 WEBTERM_INVENTORY_PATH = CLAUDE_DIR / "webterm-inventory.json"
 # The dashboard index the gateway serves at `/` for an authed session.
 WEBTERM_DASH_DIR = CLAUDE_DIR / "webterm-dash"
@@ -605,8 +628,18 @@ def _tab_sessions(inventory, preserve_order=False):
     default sorted in the owner's stable Windows-Terminal order (#579);
     `preserve_order=True` keeps the given inventory order untouched -- used when
     an EXCLUSIVE owner-defined tab list already dictates the exact order (#661)."""
-    tabs = [{"id": e["id"], "alias": _short_alias(e),
-             "title": e.get("label") or e["id"]} for e in inventory]
+    tabs = []
+    for e in inventory:
+        t = {"id": e["id"], "alias": _short_alias(e),
+             "title": e.get("label") or e["id"]}
+        # #672: a FOREIGN-STREAM tab carries its own larger fixed grid so the
+        # owner's -f ignore-size webterm client is >= the stream developer's
+        # window (whose size the owner box never pins) and tmux shows it whole,
+        # footer included. Owner tabs carry no override -> the JS getter falls
+        # back to the global 176x51 grid. See WEBTERM_STREAM_TERM_GRID.
+        if e.get("kind") == "stream":
+            t["tcols"], t["trows"] = WEBTERM_STREAM_TERM_GRID
+        tabs.append(t)
     if not preserve_order:
         tabs.sort(key=lambda t: _tab_order_key(t["alias"]))
     return tabs
@@ -782,6 +815,37 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 <div id="clip-hint">Označ text myšou = skopíruje sa &middot; vložiť <b>Ctrl+Shift+V</b> (nie Ctrl+V)</div>
 <script>
 const CFG = @@CFG_JSON@@;
+// #672: make CFG.term_cols/term_rows PER-TAB. A foreign-stream tab carries its
+// own larger grid (s.tcols/s.trows -- WEBTERM_STREAM_TERM_GRID) because its tmux
+// window is sized by the stream developer's own client, not the owner's fixed
+// 176x50; the owner's -f ignore-size webterm client must be >= that window or
+// tmux crops the CC statusline footer (see the WEBTERM_STREAM_TERM_GRID comment
+// in cli_webterm.py + the #672 design comment). These getters return the CURRENT
+// tab's override (or the owner base when none) so fitFixedGrid/fillFixedGrid read
+// CFG.term_cols/term_rows UNCHANGED -- the grid FILL algorithm is untouched. Only
+// the ACTIVE (visible) tab is ever fit (activate() sets `current` then fits it;
+// a hidden tab has 0-size and its fit no-ops), so keying on `current` is correct.
+(function () {
+  var baseCols = CFG.term_cols, baseRows = CFG.term_rows;
+  // try/catch: `current` is a `let` declared below, so a getter somehow read
+  // before it initialises (it never is -- every read is via fitFixedGrid, all
+  // after activate()) would hit its TDZ; falling back to the owner base then is
+  // correct and can never throw. An out-of-range index likewise falls back.
+  Object.defineProperty(CFG, 'term_cols', {
+    configurable: true,
+    get: function () {
+      try { var s = CFG.sessions[current]; return (s && s.tcols) || baseCols; }
+      catch (e) { return baseCols; }
+    }
+  });
+  Object.defineProperty(CFG, 'term_rows', {
+    configurable: true,
+    get: function () {
+      try { var s = CFG.sessions[current]; return (s && s.trows) || baseRows; }
+      catch (e) { return baseRows; }
+    }
+  });
+})();
 // #643: the Campbell palette (single source of truth) + a Cascadia-ish system
 // monospace stack (no external font fetch — CSP/Cloudflare-Access safe). Applied
 // to each terminal via `term.options.theme` on the same-origin `window.term`
