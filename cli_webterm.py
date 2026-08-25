@@ -230,6 +230,13 @@ def webterm_inventory(profile=profiles.OWNER):
             "host": h["host"],
             "user": user,
             "identity": h.get("identity"),
+            # #680: carry the committed PUBLIC host-key pin (spinbike-vps today)
+            # into the inventory so the connect child -- which must NOT import
+            # the fleet table (the inventory JSON IS its security allowlist) --
+            # can verify the raw public IP STRICTLY via cli_remote's #669 helper.
+            # PUBLIC key material, safe in the inventory JSON; absent (None) for
+            # every tailscale/subdev host, which stays =no.
+            "host_keys": h.get("host_keys"),
             "preferred": user if is_stream else OWNER_GROUP,
         })
     return entries
@@ -426,15 +433,32 @@ def _ssh_interactive_prefix(entry):
     """Match the deploy loop's identity rule (cli_remote.py cmd_push /
     provision_subdev_soniox_key, ~lines 204-223 / 770-795): `identity` present ->
     `ssh -i <identity>`; else -> `sshpass -p newlevel ssh` (default-key/shared-
-    password path). Interactive variant: force a PTY (-t), never write
-    known_hosts, fast connect timeout so a dead host fails visibly. DRIFT GUARD:
+    password path). Interactive variant: force a PTY (-t), never write the
+    USER's known_hosts (an unpinned host uses /dev/null; a #680-pinned host
+    reads a freshly materialized temp pin instead, with UpdateHostKeys=no so ssh
+    never appends to it either), fast connect timeout so a dead host fails
+    visibly. DRIFT GUARD:
     the identity-vs-sshpass DECISION is the same rule those two sites use — if the
     fleet's auth convention ever changes (password rotation, a new scheme), both
     those sites AND this one must move together; `test_webterm.py::
     test_identity_decision_matches_deploy_loop` fails on a decision drift."""
-    common = ["-o", "StrictHostKeyChecking=no",
-              "-o", "UserKnownHostsFile=/dev/null",
-              "-o", "ConnectTimeout=10", "-t"]
+    # #680: a target carrying a committed PUBLIC host-key pin (`host_keys`,
+    # threaded through the inventory from the fleet -- spinbike-vps today) is
+    # verified STRICTLY against that pin via the #669 helper, so the owner's
+    # interactive shell to the raw public IP can no longer be MITM'd (the pin
+    # file is materialized in THIS connect child at connect time, never
+    # persisted into the inventory JSON). Every unpinned tailscale/subdev host
+    # keeps the unchanged `=no` + `UserKnownHostsFile=/dev/null` posture: a MITM
+    # on a private address is implausible, and dropping /dev/null there would
+    # give the interactive shell the deploy leg's changed-key password-auth
+    # downgrade + a "Permanently added" warning for zero security gain.
+    if entry.get("host_keys") is not None:
+        from cli_remote import host_key_check_opts  # the ONE #669 pin source
+        hostkey_opts = host_key_check_opts(entry)
+    else:
+        hostkey_opts = ["-o", "StrictHostKeyChecking=no",
+                        "-o", "UserKnownHostsFile=/dev/null"]
+    common = hostkey_opts + ["-o", "ConnectTimeout=10", "-t"]
     identity = entry.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity)] + common

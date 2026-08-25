@@ -10,13 +10,18 @@ preserved verbatim) plus the external `burn`/`watchdog` packages (also local
 imports in the bodies). It deliberately does NOT `import airuleset` at module
 level — that would be the CLI-mode partially-initialized-import crash proven for
 the H/K splits (airuleset.py runs as `__main__`, so a top-level back-import
-re-enters this leaf mid-init). Its ONE outbound coupling is the shared
-`REMOTE_HOSTS` deploy registry (which stays in airuleset.py, referenced by ~20
-other functions there): the 3 functions that need it reach it via a lazily-
-placed deferred `import airuleset` (the C/D "new-module-needs-old-module-symbol"
-technique), scoped to the code path that actually needs it so the ~210 ms
-second-execution cost fires only on the rare `--host` CLI paths and never in
-production (fleet_burn_job always passes `hosts` explicitly).
+re-enters this leaf mid-init). It has TWO deferred outbound couplings, both
+call-time (never module-init): (1) the shared `REMOTE_HOSTS` deploy registry
+(which stays in airuleset.py, referenced by ~20 other functions there): the 3
+functions that need it reach it via a lazily-placed deferred `import airuleset`
+(the C/D "new-module-needs-old-module-symbol" technique), scoped to the code
+path that actually needs it so the ~210 ms second-execution cost fires only on
+the rare `--host` CLI paths and never in production (fleet_burn_job always
+passes `hosts` explicitly); (2) `cli_remote.host_key_check_opts` (#680), a
+deferred `from cli_remote import host_key_check_opts` inside `_remote_ssh_prefix`
+so a raw-public-IP burn target (spinbike-vps) is host-key-pinned -- cli_remote
+has no top-level `import airuleset`, so this coupling cannot re-enter airuleset
+mid-init.
 """
 import json
 import os
@@ -75,15 +80,26 @@ def _remote_ssh_prefix(remote):
     succeeds or fails, since `fleet_burn_job` claims the hour unconditionally
     once its `fetch()` returns — spreading any retries comfortably inside a
     typical fail2ban findtime window without new state."""
+    # #680: route the inline StrictHostKeyChecking=no through the #669 pin
+    # helper (the ONE source) -- a raw-public-IP target carrying a committed
+    # host_keys pin (spinbike-vps) is verified STRICTLY; every tailscale/subdev
+    # host keeps the unchanged =no. Deferred import (call-time, not module-init)
+    # so cli_burn's leaf-with-no-top-level-airuleset invariant is preserved --
+    # cli_remote is fully imported by the time any burn ssh runs. Spliced BEFORE
+    # BatchMode/NumberOfPasswordPrompts (distinct options, but keeps the pin
+    # first per #669's first-value-wins guidance).
+    from cli_remote import host_key_check_opts
+    hostkey_opts = host_key_check_opts(remote)
     identity = remote.get("identity")
     if identity:
-        return ["ssh", "-i", os.path.expanduser(identity),
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                f"{remote['user']}@{remote['host']}"]
-    return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            f"{remote['user']}@{remote['host']}"]
+        return (["ssh", "-i", os.path.expanduser(identity)]
+                + hostkey_opts
+                + ["-o", "BatchMode=yes",
+                   f"{remote['user']}@{remote['host']}"])
+    return (["sshpass", "-p", "newlevel", "ssh"]
+            + hostkey_opts
+            + ["-o", "NumberOfPasswordPrompts=1",
+               f"{remote['user']}@{remote['host']}"])
 
 
 def _burn_remote(remote, days):
