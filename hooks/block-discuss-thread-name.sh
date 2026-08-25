@@ -54,11 +54,21 @@ set -euo pipefail
 # the post content BLOCKS unless the falsifiable `airuleset:artifact-verified
 # <ref>` evidence marker is present (owner ruling 2026-08-25, thread 263).
 #
+# #702 adds a FIFTH: every addressee of a client message must be REALLY
+# @mentioned -- a stream message_post whose content names a `partner_ids` key
+# but carries NO mention-anchor token (`o_mail_redirect` /
+# `data-oe-model="res.partner"`) is BLOCKED: `partner_ids` drives only
+# DELIVERY, the mention notification (a mentions-only client's ping) fires
+# only from the anchor in the HTML body (owner ruling 2026-08-25, montalu
+# threads 262/287 -- three partner_ids-only posts pinged nobody).
+#
 # Bypass (rare, logged): `airuleset:discuss-name-ok` waives the NAME check (a
 # legacy thread the owner accepted); `airuleset:discuss-sig-ok` waives the
 # SIGNATURE check (a genuine internal/legacy post the owner accepts unsigned);
 # `airuleset:discuss-bind-ok` waives the TICKET-BINDING check (a genuine
-# internal post into a channel bound to no ticket, #695).
+# internal post into a channel bound to no ticket, #695);
+# `airuleset:discuss-mention-ok` waives the MENTION-ANCHOR check (a genuine
+# internal post where no addressee needs a mention, #702).
 #
 # Test seam: AIRULESET_DISCUSS_STREAM_USER overrides the derived unix user (the
 # stream identity is the unix account, not derivable from cwd/payload).
@@ -102,6 +112,7 @@ name_bypassed = g.has_bypass_marker(content)
 sig_bypassed = g.has_sig_bypass_marker(content)
 approval_bypassed = g.has_approval_bypass_marker(content)
 bind_bypassed = g.has_bind_bypass_marker(content)
+mention_bypassed = g.has_mention_bypass_marker(content)
 # #596/#597 create-NAME check -- skipped when the name is deliberately bypassed.
 if not name_bypassed:
     v = g.evaluate(content, user)
@@ -139,6 +150,16 @@ if not bind_bypassed:
         print("HITBIND")
         print(bv.number)
         sys.exit(0)
+# #702 message_post MENTION-ANCHOR check -- skipped only when mention-bypassed.
+# Runs even if name/sig/approval/bind were bypassed: none of those waives the
+# mention (each marker is an independent falsifiable claim), and mention-ok
+# never waives any sibling check either.
+if not mention_bypassed:
+    xv = g.evaluate_message_post_mention(content, user)
+    if xv:
+        print("HITMENTION")
+        print(xv.number)
+        sys.exit(0)
 # #696 message_post FUTURE-PROMISE check -- a client message may reference
 # ONLY verified PAST events. The only escape is the falsifiable
 # `airuleset:artifact-verified <ref>` evidence marker, checked inside the
@@ -161,6 +182,8 @@ elif approval_bypassed:
     print("APPROVALBYPASS")
 elif bind_bypassed:
     print("BINDBYPASS")
+elif mention_bypassed:
+    print("MENTIONBYPASS")
 PYEOF
 )
 
@@ -188,6 +211,45 @@ if [ "$LINE1" = "BINDBYPASS" ]; then
     LOG="/tmp/airuleset-discuss-bind-bypass-${EUID:-$(id -u)}.log"
     { echo "$(date -Iseconds)  bind-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
     exit 0
+fi
+
+if [ "$LINE1" = "MENTIONBYPASS" ]; then
+    LOG="/tmp/airuleset-discuss-mention-bypass-${EUID:-$(id -u)}.log"
+    { echo "$(date -Iseconds)  mention-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
+    exit 0
+fi
+
+# #702 -- a discuss.channel message_post naming partner_ids but @mentioning
+# nobody in the body.
+if [ "$LINE1" = "HITMENTION" ]; then
+    NUMBER=$(printf '%s\n' "$OUT" | sed -n '2p')
+    cat >&2 <<MSG
+
+🚫 BLOCKED: a client Discuss message names partner_ids but @mentions NOBODY (airuleset #702).
+
+You are sub-dev stream number "${NUMBER}". EVERY addressee of a client Odoo
+Discuss message must be REALLY @mentioned in the HTML body — a mention anchor
+per addressee — IN ADDITION to partner_ids. The two halves do different work:
+partner_ids drives DELIVERY (inbox/e-mail + the owner control ping); the
+mention ANCHOR in the body is what fires the client's MENTION notification —
+a client with notifications set to "mentions only" gets NO ping from a
+partner_ids-only post (owner, 2026-08-25: „posles spravu a peta neoznacis
+takze ak ma notify na mention tak mu to vobec nepipne!!!" — three approved
+messages on montalu PROD threads 262/287 had to be unlinked + reposted).
+
+The message_post being sent names partner_ids but its content carries no
+mention anchor. Embed, for EVERY addressee, the anchor the Odoo composer emits:
+
+  <a href="/odoo/res.partner/<id>" class="o_mail_redirect" data-oe-id="<id>" data-oe-model="res.partner">@Meno</a>
+
+(verify the exact attribute set against a real mention posted through the 19.0
+composer — skills/odoo-discuss-xmlrpc/SKILL.md), then re-run. This gates only a
+discuss.channel message_post by a sub-dev stream — a create / rename and a
+non-stream user are never affected. Bypass (rare, logged, only for a genuine
+internal post where no addressee needs a mention): put
+airuleset:discuss-mention-ok in the content.
+MSG
+    exit 2
 fi
 
 # #695 -- a discuss.channel message_post by a sub-dev stream carrying no

@@ -66,12 +66,15 @@ There is no reliable "correct it after" over RPC — get it right in the single
 - **`partner_ids`: the named recipients AND ALWAYS the owner** as a control ping,
   so a broken or missing delivery is always visible to the owner (odoo-erp
   #4006/#4011). Never post to a client thread without the owner on it.
-- For an `@`-mention, embed the partner-mention anchor Odoo's own composer emits
-  (an `<a>` carrying `data-oe-model="res.partner"` + `data-oe-id="<pid>"` for the
-  partner) inside the HTML body so it resolves instead of rendering as text —
-  **verify the exact attribute set against a real mention posted through the 19.0
-  Discuss composer** before relying on a hand-built anchor; the markup has changed
-  across versions.
+- **Mention anchors are MANDATORY — EVERY addressee of a client message is
+  REALLY @mentioned in the HTML body, alongside `partner_ids` (#702).**
+  `partner_ids` drives only delivery + the owner control ping; the MENTION
+  notification (a mentions-only client's ping) fires only from the embedded
+  partner-mention anchor Odoo's own composer emits (an `<a>` carrying
+  `data-oe-model="res.partner"` + `data-oe-id="<pid>"`) — hook-enforced.
+  **Verify the exact attribute set against a real mention posted through the
+  19.0 Discuss composer** before relying on a hand-built anchor; the markup
+  has changed across versions.
 
 ## Minimal correct example
 
@@ -82,7 +85,8 @@ common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
 uid = common.authenticate(db, login, api_key, {})   # login must be an internal user
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
-body_html = "<p>Objednávka <b>2041</b> potvrdená.</p>"
+body_html = ('<p><a href="/odoo/res.partner/7" class="o_mail_redirect" data-oe-id="7"'
+             ' data-oe-model="res.partner">@Peter</a> Objednávka <b>2041</b> potvrdená.</p>')
 
 # ONE post, HTML flagged, owner always on partner_ids.
 res = models.execute_kw(db, uid, api_key,
@@ -120,13 +124,6 @@ message_id = res[0] if isinstance(res, list) else res
 The recipe above is the SEND. Before you post a client PROD Discuss handover
 thread, its PROPOSAL (shown to the owner for approval) and its message body must
 follow the canonical cross-stream rules in the companion file
-**`handover-compose.md`** (same directory): complete proposal in the chat, a
-direct deep-link URL to the live feature, explicit owner thread membership, only
-functions already live on PROD, and the named-recipients self-blame reassurance.
-That file auto-loads at proposal time via its own situational trigger; kept
-separate from this recipe so the recipe stays lean.
-
-## Related
-
-- `montalu-odoo-19` (odoo-erp-owned) — fuller Odoo-19 dev gotchas incl. the
-  Discuss API section this recipe distills.
+**`handover-compose.md`** (same directory). That file auto-loads at proposal
+time via its own situational trigger; kept separate from this recipe so the
+recipe stays lean.

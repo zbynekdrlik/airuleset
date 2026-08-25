@@ -669,3 +669,117 @@ def evaluate_message_post_promise(content, user):
     if artifact_verified_present(content):
         return None
     return PromiseViolation(number=number, matched=matched)
+
+
+# --------------------------------------------------------------------------- #
+# #702 -- message_post MENTION-ANCHOR gate.
+#
+# OWNER RULING (2026-08-25, montalu2, verbatim): "extremne mi vadi ze posles
+# spravu a peta neoznacis takze ak ma notify na mention tak mu to vobec
+# nepipne!!! ... toto musi byt tvrde pravidlo ludia do discussion oddo musia
+# byt realne oznaceny". Odoo Discuss delivery has TWO INDEPENDENT halves:
+# `partner_ids` on message_post drives DELIVERY (inbox/e-mail + the owner
+# control ping), while the MENTION notification -- the one that pings a
+# client whose notifications are set to "mentions only" -- fires only from a
+# mention ANCHOR embedded in the HTML body (the composer-emitted
+# `<a class="o_mail_redirect" data-oe-model="res.partner" data-oe-id=...>`).
+# Live incident: three approved client messages (montalu PROD threads
+# 262/287, 24.-25.8.2026) went out with partner_ids ONLY -- the client got
+# NO ping; fixed by unlink+repost with anchors (msgs 1742837/1742838).
+#
+# DETECTION reuses `is_channel_message_post` + `cli_aliases.stream_number`
+# (never a second detection/derivation). The gate fires iff the content ALSO
+# names a `partner_ids` KEY (the falsifiable signal that the post claims
+# addressees) and carries NO mention-anchor token ANYWHERE (the #609
+# whole-content model -- the body is often a variable). Client-vs-internal
+# is NOT heuristically distinguished -- the family (#609/#628/#695) never
+# does; a genuine internal post carries the logged
+# `airuleset:discuss-mention-ok` bypass instead.
+#
+# Accepted residuals (documented, not chased, per #319):
+#   * a body built in a PREVIOUS tool call (only `body=body_html` + a literal
+#     partner_ids visible here) OVER-blocks -- the anchor is not visible in
+#     this content. Fail-safe (over-block) direction, off the recipe (which
+#     builds the body in the posting script), bypassable.
+#   * PER-ADDRESSEE binding (every pid in partner_ids has ITS OWN anchor) is
+#     not provable from the payload -- partner_ids is routinely a variable /
+#     unpacking (`[owner_pid, *recipient_pids]`, the recipe's own shape), and
+#     a literal-id match would false-block the owner control-ping pid (the
+#     owner is not an addressee of the client message). Presence-only here;
+#     the per-addressee arm rides doctrine (handover-compose.md) + review,
+#     exactly like #609 cedes exact signature placement.
+#   * a `partner_ids` token in a non-key position that still matches the
+#     key-ish regex (`partner_ids =` inside a comparison) OVER-detects ->
+#     over-block, safe direction, bypassable.
+#   * a message_post with NO visible partner_ids fails OPEN (addressees
+#     unmeasurable; the delivery-half mandate stays the doctrine's job) --
+#     the same unmeasurable->allow bias as the create gate's no-literal-name
+#     case; the incident always carried a literal partner_ids.
+#   * a multi-op tool-call can mask an unanchored post via ANOTHER op's
+#     anchor token -- the same unmeasurable->allow bias the sibling gates
+#     document for their own markers.
+# --------------------------------------------------------------------------- #
+
+MENTION_BYPASS_MARKER = "airuleset:discuss-mention-ok"
+
+# `partner_ids` used as a KEY: JSON `"partner_ids":`, dict `'partner_ids':`,
+# or a python kwarg/assignment `partner_ids=`.
+_PARTNER_IDS_RE = re.compile(r"""['"]?partner_ids['"]?\s*[:=]""")
+
+# A REAL mention anchor token, anywhere in the content: the composer-emitted
+# `class="o_mail_redirect"` OR `data-oe-model="res.partner"` (single/double/
+# backslash-escaped quotes -- the attribute routinely rides inside a
+# double-quoted JSON body string as `\"res.partner\"`). Presence-level ONLY:
+# the exact 19.0 attribute set is version-dependent (SKILL.md caveat), so the
+# gate requires the anchor's presence, never a full attribute match. A record
+# link to another model (`data-oe-model="product.product"`) is NOT a mention.
+_MENTION_ANCHOR_RE = re.compile(
+    r"""(?i)o_mail_redirect|data-oe-model\s*=\s*\\?['"]res\.partner\\?['"]""")
+
+MentionViolation = namedtuple("MentionViolation", "number")
+
+
+def partner_ids_present(content):
+    """True iff `content` names a `partner_ids` KEY (JSON / dict / kwarg) --
+    the falsifiable signal that the post claims addressees. A bare prose
+    mention of the word without `:`/`=` is not an addressee claim."""
+    if not content:
+        return False
+    return bool(_PARTNER_IDS_RE.search(content))
+
+
+def mention_anchor_present(content):
+    """True iff `content` carries a mention-anchor token anywhere -- the
+    `o_mail_redirect` class or a `data-oe-model` pointing at `res.partner`
+    (any quote style, incl. backslash-escaped). Plain-text `@Meno` is NOT an
+    anchor (the incident shape: text pings nobody)."""
+    if not content:
+        return False
+    return bool(_MENTION_ANCHOR_RE.search(content))
+
+
+def has_mention_bypass_marker(content):
+    """True iff the deliberate `airuleset:discuss-mention-ok` bypass marker
+    appears in `content` (rare, logged by the hook) -- for a genuine internal
+    post where no addressee needs a mention."""
+    return MENTION_BYPASS_MARKER in (content or "")
+
+
+def evaluate_message_post_mention(content, user):
+    """A `MentionViolation` (number) iff `content` is a discuss.channel
+    message_post by a stream `user` (cli_aliases.stream_number) that names a
+    `partner_ids` key but carries NO mention-anchor token; None (silent)
+    otherwise -- a non-stream user, a non-message_post op, a post with no
+    visible partner_ids (addressees unmeasurable -> fail open), or a post
+    already carrying an anchor. The `airuleset:discuss-mention-ok` bypass is
+    handled by the hook (like the sibling bypasses), not here."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    if not partner_ids_present(content):
+        return None
+    if mention_anchor_present(content):
+        return None
+    return MentionViolation(number=number)

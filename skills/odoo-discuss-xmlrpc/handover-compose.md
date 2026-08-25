@@ -172,10 +172,32 @@ is the FIRST rule for a reason).
   reálneho artefaktu odčítal, kde a kedy; holá značka bez referencie neplatí
   (model `airuleset:owner-approved`). Iná budúca formulácia mimo zoznamu
   vzorov hookom prejde — táto doktrína platí na KAŽDÉ preformulovanie.
+- **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
+  `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
+  Verbatim: „extremne mi vadi ze posles spravu a peta neoznacis takze ak ma
+  notify na mention tak mu to vobec nepipne!!! … toto musi byt tvrde pravidlo
+  ludia do discussion oddo musia byt realne oznaceny". Doručenie má DVE
+  polovice a každá robí inú prácu: `partner_ids` správu DORUČÍ (inbox/e-mail +
+  owner control ping), ale MENTION notifikáciu — tú, ktorá pípne klientovi s
+  nastavením „len zmienky" — spúšťa až mention ANCHOR v HTML tele. Tri
+  schválené klientske správy (montalu PROD, vlákna 262/287, 24.–25.8.) odišli
+  len s `partner_ids` a klient nedostal žiadny ping — opravené unlink+repost
+  (msg 1742837/1742838). Anchor pre KAŽDÉHO adresáta (presné atribúty over
+  podľa `SKILL.md` proti reálnemu 19.0 composeru):
+  `<a href="/odoo/res.partner/<id>" class="o_mail_redirect" data-oe-id="<id>" data-oe-model="res.partner">@Meno</a>`.
+  HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #702): stream
+  `message_post` na `discuss.channel`, ktorého content menuje `partner_ids`,
+  ale nenesie žiadny mention anchor, je BLOKOVANÝ — hook skenuje samotný
+  tool-call payload, takže platí bez ohľadu na to, ktorý skill si načítal
+  (odoo-erp-side `discuss-client-posting` skill žije v odoo-erp repe —
+  airuleset ho NEEDITUJE; jeho zrkadlová úprava je vec odoo-erp ticketu).
+  Bypass len pre ozajstný interný post bez adresátov na označenie:
+  `airuleset:discuss-mention-ok` v contente (logged).
 - **The greeting (oslovenie — „Dobrý deň…" / „Ahoj…") belongs ONLY in the FIRST
   (opening) message of a thread.** A follow-up reply in an existing thread carries
-  NO greeting — it continues directly with the content (an `@`-mention anchor only
-  where it genuinely belongs; `partner_ids` for delivery ALWAYS, on every message).
+  NO greeting — it continues directly with the content (a REAL `@`-mention
+  anchor for EVERY addressee — #702, mention bullet above — and `partner_ids`
+  for delivery ALWAYS, on every message).
   Repeating „Dobrý deň, pani …" on every follow-up in the same thread reads as
   machine-sent — the live miva PROD thread „Augustová dochádzka" (discuss.channel
   19) had three same-day follow-ups all reopening with „Dobrý deň…" (airuleset
