@@ -432,6 +432,71 @@ def notification_channel(env=None, owner=None, kind="default", project=None):
     return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
 
 
+_OWNER_CHANNEL_KEY_RE = re.compile(
+    r"^DISCORD_NOTIFICATION_CHANNEL_([A-Z0-9]+)(?:_Q)?$")
+
+
+def channel_owner(ch, env=None):
+    """#725 (#716 review finding 7) — the DETERMINISTIC REVERSE of
+    `notification_channel(env, owner, kind="questions")`: given a Discord
+    channel/thread id `ch` (a card's own posting channel), return the SINGLE
+    owner whose `-q` questions cascade resolves to it, or `None` when no
+    owner matches, more than one does, or `ch` is the SHARED fallback
+    channel (see below). NEVER a coin flip — mirrors #717's
+    `_repo_owner_from_panes` (single-unique-derivation-or-`None`, never a
+    first-match guess).
+
+    `ch` equal to the shared `DISCORD_NOTIFICATION_CHANNEL_ID` ALWAYS
+    resolves to `None`, before any owner is even considered (#725 review
+    finding — Fable 🟡). The shared channel is, by construction, not
+    owner-specific: ANY owner with no configured channel of their own falls
+    through to it — including one with NO `DISCORD_NOTIFICATION_CHANNEL_*`
+    key present at all, who is therefore never even a DISCOVERED candidate
+    below. Without this short-circuit, a `ch` equal to the shared id could
+    resolve to a single DISCOVERED sibling whose own key happens to (or is
+    misconfigured to) equal the shared id — a wrong-owner match exactly of
+    the kind this ticket exists to stop, since the real poster could just as
+    well be the undiscovered zero-config owner. Treating the shared id as
+    always-ambiguous closes that whole class, at the cost of never resolving
+    the genuinely-single-owner-on-the-box case where that owner's own key
+    happens to equal the shared id too (a rare, safely-degraded miss, not a
+    wrong answer — `never coin-flip` prefers `None` over a guess either way).
+
+    Candidate owners are discovered from THIS box's own local `.env` — every
+    key matching `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` or
+    `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q` (the bare shared
+    `DISCORD_NOTIFICATION_CHANNEL_ID` key names no owner and is excluded by
+    construction — `ID` never appears as an `<OWNER>` segment on its own
+    line; a `_P_<SLUG>` per-project key doesn't match either, since the
+    trailing `(?:_Q)?$` anchor requires the string to end right after the
+    optional `_Q`). A key's mere PRESENCE makes its owner a candidate —
+    an EMPTY value (`..._Q=`) is not specially excluded, because
+    `notification_channel()` itself treats a blank value exactly like an
+    absent key (falls through to the next cascade tier), so a candidate
+    with a blank key simply cascades to whatever its NEXT configured tier
+    resolves to, same as if the blank key were never there. For each
+    candidate the SAME forward cascade `notification_channel()` already
+    uses (`_Q` key first, else the plain per-owner key, else the shared id
+    — made inert for a UNIQUE match by the short-circuit above) is
+    re-evaluated and compared to `ch`; exactly one match is the answer.
+
+    Never raises; a falsy `ch` always returns `None`."""
+    ch = str(ch or "").strip()
+    if not ch:
+        return None
+    env = _read_env() if env is None else env
+    if ch == (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip():
+        return None
+    owners = set()
+    for k in env:
+        m = _OWNER_CHANNEL_KEY_RE.match(k)
+        if m and m.group(1) != "ID":
+            owners.add(m.group(1).lower())
+    matches = {o for o in owners
+              if notification_channel(env, owner=o, kind="questions") == ch}
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 # Min seconds between background provision-thread spawns, PER OWNER (#330) —
 # mirrors statusbar.SPAWN_GUARD_S's own marker-mtime shape, just a wider
 # window: provisioning is a one-time-until-persisted repair, not a routine

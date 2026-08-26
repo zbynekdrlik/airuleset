@@ -182,9 +182,29 @@ def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
     if not reason:
         return
     logs.append("reply orphaned (%s) %s [%s]" % (reason, mid_o[-8:], ch))
-    from notify import forget_marker, marker_delivered, send as _send
+    from notify import (channel_owner, forget_marker, marker_delivered,
+                        send as _send)
+    # #725 (#716 review finding 7): resolve the ping's owner DETERMINISTICALLY
+    # from the card's own channel `ch` — never let `_send` fall back to
+    # `resolve_owner()` (the calling PROCESS's own tmux session group, a coin
+    # flip on a multi-owner box unrelated to which owner's `-q` thread this
+    # orphaned card actually lives in). An unresolvable channel (unconfigured,
+    # ambiguous — two owners sharing the same channel, or the SHARED fallback
+    # channel, which is never owner-specific — see channel_owner()'s own
+    # docstring) is an explicit decision, not a silent fallback: skip the
+    # send, log it, and leave the message OFF `orphan_done` so a later config
+    # fix can still resolve it — the unconditional "reply orphaned" line
+    # above already satisfied the #449 never-silent floor. This re-logs
+    # "owner unresolved" every sweep the message stays in the fetch window
+    # (bounded by the SAME grace/prune window every other non-terminal
+    # outcome here already re-logs under — "no-config"/"error"/undelivered
+    # "dedup" are not marked done either; this is not a NEW churn class).
+    owner = channel_owner(ch, env=env)
+    if owner is None:
+        logs.append("reply orphan owner unresolved [%s]" % ch)
+        return
     dkey = "dorphan:%s" % mid_o
-    st_o = _send(watchdog._orphan_ping_text(msg, reason), env=env,
+    st_o = _send(watchdog._orphan_ping_text(msg, reason), env=env, owner=owner,
                  dedup_key=dkey, dry_run=dry_run, kind="questions")
     # #449-review F2: "dedup" alone is NOT confirmation — notify.send's
     # dedup CLAIM marker is written BEFORE the POST, so a retry after one
