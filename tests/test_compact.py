@@ -1925,6 +1925,223 @@ class TestCompactSweep(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 6b. #727 hold-extend — a structured live-own-task veto during the periodic
+#     sweep REFRESHES the pending request's `ts` (never `bts`/`cwd`/`origin`),
+#     so the 30-min age cap measures "time since the claim was last JUSTIFIED";
+#     a >30-min batch never loses its boundary compact, while a wedged (stale)
+#     lane stops the veto -> stops the refresh -> the cap resumes.
+# --------------------------------------------------------------------------- #
+
+class TestCompactHoldExtend727(unittest.TestCase):
+    CWD = "/home/newlevel/devel/holdextend727"
+    SID = "sess-hold-727"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return d.name
+
+    def _sweep(self, proj, now, cap=CB_IDLE_CAP, cap_seq=()):
+        tmux = DeliverCompactFakeTmux(
+            [("%9", "claude", self.CWD, "111")], cap, cap_seq=cap_seq)
+        logs = compact.compact_sweep(
+            now, run=tmux, projects_dir=proj, requests_path=self.reqp,
+            delivered_path=self.delp)
+        return logs, tmux
+
+    def test_727_live_tasks_hold_carries_claim_across_a_long_batch(self):
+        # The live incident (2026-08-26, varka 1->2 boundary): a batch ran
+        # >30 min, the live-tasks veto CORRECTLY held the boundary claim
+        # undelivered (no /compact while a sibling lane is live -- CC #29193),
+        # and the 30-min age cap expired the claim OUT FROM UNDER the still-
+        # running batch, so the boundary never got its /compact. Under
+        # hold-extend the sweep REFRESHES `ts` on every structured live-tasks
+        # veto, so the claim survives the batch and delivers once the lanes
+        # drain. `_live_bg_tasks_detail` judges lane freshness against the REAL
+        # wall clock, so the fixture uses real-time mtimes for the lane while
+        # the request/sweep timeline is synthetic (T).
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        # T+29min: a FRESH live worker lane (mtime = real now) -> skip:live-tasks.
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        logs1, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(any("skip:live-tasks" in ln for ln in logs1),
+                        "sweep 1 must veto on the fresh lane: %r" % logs1)
+        # T+45min: lanes DRAINED (lane transcript backdated stale) + idle bare
+        # pane. WITHOUT hold-extend `ts` is still T -> 45min > 30min cap ->
+        # `expired`, the boundary is lost. WITH hold-extend sweep 1 refreshed
+        # `ts` to T+29min -> 16min < cap -> the held claim DELIVERS.
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now - 20 * 60, agent_id="ghost727")
+        logs2, tmux2 = self._sweep(proj, T + 45 * 60)
+        self.assertIn("/compact", tmux2.typed_texts(),
+                      "the held claim must deliver once lanes drain: %r" % logs2)
+        self.assertTrue(any("-> sent" in ln for ln in logs2),
+                        "sweep 2 must log a SEND: %r" % logs2)
+        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
+
+    def test_727_stale_lanes_do_not_extend_the_hold(self):
+        # The wedge-bound: a wedged worker's transcript STOPS growing -> its lane
+        # goes stale -> the live-tasks veto stops firing -> `ts` stops refreshing
+        # -> the age cap resumes. Here the lane is stale at T+29min, so the sweep
+        # PASSES the live-tasks check (no veto = the returned word is NOT a
+        # hold-extend word) and only skips for a raced re-capture. `ts` is NOT
+        # refreshed, so at T+31min the claim EXPIRES (age > cap) -- exactly what
+        # keeps a genuinely-wedged batch from holding a claim forever.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        # STALE lane (mtime past the 15-min freshness window) -> reads NOT live.
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now - 20 * 60, agent_id="stale727")
+        # First capture idle passes every early gate + the (non-vetoing) stale
+        # live-tasks check; the re-capture is busy -> skip:raced (NOT a hold
+        # word, so `ts` is not refreshed).
+        logs1, _ = self._sweep(proj, T + 29 * 60,
+                               cap_seq=(CB_IDLE_CAP, CB_BUSY_CAP))
+        self.assertTrue(any("skip:raced" in ln for ln in logs1),
+                        "stale lane must pass live-tasks, skip on the race: %r"
+                        % logs1)
+        self.assertFalse(any("skip:live-tasks" in ln for ln in logs1),
+                         "a stale lane must NOT veto on live-tasks: %r" % logs1)
+        self.assertFalse(any("HOLD" in ln for ln in logs1),
+                         "a non-hold word must not refresh: %r" % logs1)
+        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
+                         int(T), "ts must NOT be refreshed by a stale lane")
+        # T+31min: age (from the un-refreshed T) > 30-min cap -> expired.
+        logs2, tmux2 = self._sweep(proj, T + 31 * 60)
+        self.assertTrue(any("LAPSE" in ln for ln in logs2),
+                        "the un-held claim must expire: %r" % logs2)
+        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
+        self.assertNotIn("/compact", tmux2.typed_texts())
+
+    def test_727_hold_preserves_cwd_origin_and_bts(self):
+        # A hold-extend refresh advances ONLY `ts`; `cwd`/`origin`/`bts` are the
+        # record's own values (bts = the ORIGINAL boundary, for the HOLD log).
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        self._sweep(proj, T + 29 * 60)
+        entry = compact.load_compact_requests(self.reqp)[self.SID]
+        self.assertEqual(entry["ts"], int(T + 29 * 60), "ts refreshed to now")
+        self.assertEqual(entry["bts"], int(T), "bts (original boundary) unchanged")
+        self.assertEqual(entry["cwd"], self.CWD)
+        self.assertEqual(entry["origin"], "self-callback")
+
+    def test_727_busy_word_does_not_refresh_the_hold(self):
+        # `skip:busy` is NOT a hold-extend word -- a busy pane with no live task
+        # is a NEW turn whose boundary supersedes, so it must NEVER refresh `ts`.
+        # (Mutation target: adding "skip:busy" to _COMPACT_HOLD_EXTEND_WORDS, or
+        # refreshing on every skip, fails this.)
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        logs, _ = self._sweep(proj, T + 5 * 60, cap=CB_BUSY_CAP)
+        self.assertTrue(any("skip:busy" in ln for ln in logs), logs)
+        self.assertFalse(any("HOLD" in ln for ln in logs), logs)
+        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
+                         int(T), "skip:busy must NOT refresh ts")
+
+    def test_727_hold_log_line_carries_boundary_held(self):
+        # The HOLD decision line names the word AND how long the boundary has
+        # been held (now - bts), so triage reads the hold from the journal.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        logs, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(
+            any("HOLD" in ln and "skip:live-tasks" in ln
+                and "boundary held %ds" % (29 * 60) in ln for ln in logs),
+            "HOLD line must carry the word + boundary-held seconds: %r" % logs)
+
+    def test_727_record_sets_the_bts_anchor(self):
+        compact.record_compact_request("sess-bts", "/x", now=1000,
+                                       path=self.reqp, origin="self-callback")
+        entry = compact.load_compact_requests(self.reqp)["sess-bts"]
+        self.assertEqual(entry["bts"], 1000)
+        self.assertEqual(entry["ts"], 1000)
+
+    def test_727_touch_ts_refreshes_only_ts_and_is_a_noop_when_gone(self):
+        compact.record_compact_request("sess-t", "/cwd", now=1000,
+                                       path=self.reqp, origin="self-callback")
+        self.assertTrue(compact._touch_compact_request_ts("sess-t", 1500,
+                                                          path=self.reqp))
+        entry = compact.load_compact_requests(self.reqp)["sess-t"]
+        self.assertEqual(entry["ts"], 1500)
+        self.assertEqual(entry["bts"], 1000)      # untouched
+        self.assertEqual(entry["cwd"], "/cwd")     # untouched
+        self.assertEqual(entry["origin"], "self-callback")  # untouched
+        # A vanished/absent entry is a fail-safe no-op, never a new entry.
+        self.assertFalse(compact._touch_compact_request_ts("no-such-sid", 2000,
+                                                           path=self.reqp))
+        self.assertNotIn("no-such-sid", compact.load_compact_requests(self.reqp))
+
+    def test_727_legacy_entry_without_bts_holds_with_a_question_mark(self):
+        # A request recorded by PRE-#727 code has no `bts`; the sweep must still
+        # HOLD (refresh ts) and report "boundary held ?s" -- never crash on the
+        # missing key (`_safe_age(now, None)` -> None -> "?").
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        # Seed a legacy entry directly on disk (NO `bts` key).
+        self.reqp.write_text(json.dumps({self.SID: {
+            "cwd": self.CWD, "ts": int(T), "origin": "self-callback"}}))
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        logs, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(any("HOLD" in ln and "boundary held ?s" in ln
+                            for ln in logs),
+                        "a bts-less entry must HOLD with ?s: %r" % logs)
+        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
+                         int(T + 29 * 60), "ts still refreshed for a legacy entry")
+
+    def test_727_hold_fail_leaves_the_claim_pending_without_refresh(self):
+        # If the ts-refresh WRITE fails (or the entry vanished mid-sweep),
+        # `_touch_compact_request_ts` returns False -> the sweep logs HOLD-FAIL,
+        # does NOT refresh `ts`, and LEAVES the request pending for the next sweep.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        with m.patch.object(compact, "_touch_compact_request_ts",
+                            return_value=False):
+            logs, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(any("HOLD-FAIL" in ln for ln in logs),
+                        "a failed refresh must log HOLD-FAIL: %r" % logs)
+        entry = compact.load_compact_requests(self.reqp)[self.SID]
+        self.assertIn(self.SID, compact.load_compact_requests(self.reqp))
+        self.assertEqual(entry["ts"], int(T), "HOLD-FAIL must not refresh ts")
+
+
+# --------------------------------------------------------------------------- #
 # 7. CLI wiring — `airuleset.py compact-request`.
 # --------------------------------------------------------------------------- #
 
