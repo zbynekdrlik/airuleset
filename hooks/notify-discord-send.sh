@@ -372,7 +372,14 @@ if [ "$KIND" = "questions" ] && [ -n "$PRIMARY_OWNER" ] \
     # delivered ❓ would carry. Best-effort — never blocks the exit; a
     # ticket-carrying ❓ is deduped OUT of the ticketless fold by statusbar
     # itself, exactly as a delivered one is.
-    if [ -n "${ND_SESSION_ID:-}" ]; then
+    #
+    # #716 review 🟡1: dry-run-GATED — the dry-run early-return lives INSIDE
+    # emit_one, which the #710 block never reaches (it exit-0s first), so
+    # without this guard a DISCORD_NOTIFY_DRYRUN=1 preview would write a real
+    # `suppressed:<sid>` entry into the live map (a phantom footer U N from a
+    # mere preview). Mirrors the delivered path (records only inside the real
+    # HTTP-2xx branch) and notify.send's own "never dry-run-mutating" #710 gate.
+    if [ -n "${ND_SESSION_ID:-}" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
         printf '%s' "$CONTENT_BASE" | \
         python3 "$AIRULESET_PY" notify --record-question --suppressed \
             --question-stdin --session "$ND_SESSION_ID" --cwd "$CWD" \

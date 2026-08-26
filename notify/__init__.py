@@ -354,13 +354,15 @@ def stream_redirect(raw_owner):
 # of a `kind="questions"` ping is suppressed for these owners; the session ❓
 # marker discipline, the question-map CODE and `needs-answer` tracking are
 # untouched, and a TICKET-CARRYING question still folds into the footer `U N`
-# via its `needs-answer` label. KNOWN bounded gap (#716): a genuinely TICKETLESS
-# ❓ is no longer recorded in `discord-questions.json` (the record is coupled to
-# a successful Discord POST via the returned message-id, which `record_question`
-# requires to be a real snowflake), so it surfaces only in webterm (the session
-# ❓ marker), not the `U N` ticketless fold — #716 preserves that fold. Owner
-# `david` (and david1-4 -> `david`) keeps FULL question delivery, so it is
-# deliberately NOT in this set.
+# via its `needs-answer` label. A genuinely TICKETLESS ❓ used to be lost from
+# the aggregate (the record was coupled to a successful Discord POST via the
+# returned message-id, which `record_question` requires to be a real snowflake,
+# so a suppressed owner's POST-less ❓ was never recorded) — #716 CLOSED that:
+# the interactive send hook and `reping_stale_questions` now record a
+# Discord-LESS `record_question(..., suppressed=True)` entry (synthetic
+# non-digit key, channel-less), so a ticketless suppressed ❓ folds into the
+# `U N` ticketless surface too, not only webterm. Owner `david` (and david1-4
+# -> `david`) keeps FULL question delivery, so it is deliberately NOT in this set.
 QUESTION_PING_OWNERS_OFF = frozenset({"zbynek", "marek"})
 
 
@@ -2214,17 +2216,30 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     # deliberately not fatal here — the supersede itself must still
     # happen (the live, newer ask wins the map either way).
     #
-    # #716: SKIPPED for a suppressed record — its deterministic per-session
-    # key already makes it a unique, idempotent overwrite (no sibling to
-    # supersede), and its channel="" would otherwise match ANY channel-less
-    # same-session entry and grace it away (a pre-#368 legacy delivered entry
-    # with a missing channel), removing a genuinely tracked question.
-    for mid in ([] if suppressed else
-                [mm for mm, v in d.items()
-                 if mm != message_id and isinstance(v, dict)
-                 and str(v.get("session") or "") == session
-                 and str(v.get("channel") or "") == channel
-                 and ask_generation(v) <= asked]):
+    # #716: a suppressed record uses a DIFFERENT supersede predicate. Its own
+    # deterministic per-session key makes it an idempotent overwrite (no
+    # SUPPRESSED sibling to supersede), and matching its channel="" against
+    # other entries would grace ANY channel-less same-session entry (a pre-#368
+    # legacy entry with a missing channel), removing a genuinely tracked
+    # question. So instead of the exact-channel match, a suppressed record
+    # graces a SAME-SESSION generation-older DELIVERED sibling — one with a real
+    # snowflake channel (`channel.isdigit()`), e.g. a stale entry from before
+    # this owner went #710-OFF — converging the transitional `U N` double-count
+    # (review 🔵4) while its replies still route via the grace store, and NEVER
+    # touching a channel-less legacy entry (the "" match hazard above).
+    if suppressed:
+        superseded = [mm for mm, v in d.items()
+                      if mm != message_id and isinstance(v, dict)
+                      and str(v.get("session") or "") == session
+                      and str(v.get("channel") or "").isdigit()
+                      and ask_generation(v) <= asked]
+    else:
+        superseded = [mm for mm, v in d.items()
+                      if mm != message_id and isinstance(v, dict)
+                      and str(v.get("session") or "") == session
+                      and str(v.get("channel") or "") == channel
+                      and ask_generation(v) <= asked]
+    for mid in superseded:
         _grace_put(mid, d.get(mid), now=now,
                    path=grace_path if grace_path is not None
                    else _grace_path_for(path))
@@ -2250,7 +2265,8 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
 
 
 def touch_question(qid, now=None, path=None):
-    """#716: bump an EXISTING question-map entry's `ts` (and `asked`) to `now`
+    """#716: bump an EXISTING question-map entry's `ts` (never `asked` — the ask
+    GENERATION stays stable, this is the SAME question re-timestamped) to `now`
     WITHOUT re-tracking it under a new message id. Used by
     `reping_stale_questions` when a re-ask returns "suppressed" (a #710 OFF
     owner takes the question in the footer `U N`, not a phone re-ping): the
@@ -2677,6 +2693,14 @@ def update_question(session, text, env=None, now=None, path=None, http=None):
     for mid, v in sorted(d.items(), key=lambda kv: kv[1].get("ts") or 0,
                          reverse=True):
         if v.get("session") != session:
+            continue
+        # #716 review 🔵5: a Discord-LESS suppressed entry (synthetic non-digit
+        # key, empty channel) has no live card to edit — skip it so the reword
+        # path never issues a doomed `GET channels//messages/suppressed:<sid>`
+        # (a wasted round-trip, up to the 6s timeout on a black-hole network,
+        # inside the 15s Stop-hook budget). The reword falls through to a fresh
+        # suppressed record that overwrites in place.
+        if v.get("suppressed") or not str(mid).isdigit():
             continue
         if now - (v.get("ts") or 0) > _EDIT_WINDOW_S:
             continue

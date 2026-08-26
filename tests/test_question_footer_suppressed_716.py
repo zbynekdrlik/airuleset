@@ -326,5 +326,121 @@ class TestOrphanFloorMarksDoneOnSuppressed(unittest.TestCase):
                       "done so it never re-fires every sweep")
 
 
+# --------------------------------------------------------------------------- #
+# 5. review-fix locks (#716 adversarial review): dry-run non-mutation,
+#    transitional-supersede convergence, update_question skip, real fetch drive.
+# --------------------------------------------------------------------------- #
+SEND = ROOT / "hooks" / "notify-discord-send.sh"
+
+
+class TestReviewFixes(unittest.TestCase):
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="airuleset-716-rf-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        (self.home / ".claude").mkdir(parents=True, exist_ok=True)
+        self.path = str(self.home / ".claude" / "discord-questions.json")
+        self.gpath = str(self.home / ".claude" / "discord-questions-grace.json")
+        self.cwd = "/home/x/devel/demo"
+
+    def _map(self):
+        return json.loads(Path(self.path).read_text()) if os.path.exists(self.path) else {}
+
+    # 🟡1 — a DRY-RUN preview must NOT write a real suppressed map entry.
+    def test_dryrun_send_hook_does_not_mutate_the_map(self):
+        d = self.home / ".claude" / "channels" / "discord"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ".env").write_text(
+            "DISCORD_BOT_TOKEN=xxtok\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ID=123\n"
+            "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=77799\n")
+        dryfile = self.home / "dry.out"
+        env = {**os.environ, "HOME": str(self.home),
+               "AIRULESET_NOTIFY_OWNER": "zbynek",
+               "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": str(dryfile),
+               "ND_EMOJI": "❓", "ND_BLOCK": "1",
+               "ND_TEXT": "**Otázka — projekt demo:** čo?\n❓ NEEDS YOU: A či B?",
+               "ND_CWD": self.cwd, "ND_SESSION_ID": "rf-sid-dry"}
+        r = subprocess.run(["bash", str(SEND)], text=True, capture_output=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        p = self.home / ".claude" / "discord-questions.json"
+        self.assertFalse(p.exists() and json.loads(p.read_text()),
+                         "a dry-run preview must never write a real suppressed "
+                         "entry (a phantom footer U N from a mere preview)")
+
+    # 🔵4 — a suppressed record graces a stale DELIVERED sibling (converges the
+    # transitional U N double-count) but never a channel-less legacy entry.
+    def test_suppressed_supersedes_stale_delivered_but_not_channelless(self):
+        # a stale DELIVERED entry (real snowflake channel, older generation)
+        notify.record_question("999888", "777001", "sid-sup", self.cwd,
+                               now=1000, path=self.path, grace_path=self.gpath,
+                               question="staré delivered?")
+        # a channel-LESS legacy entry for the SAME session (must be untouched)
+        d = self._map()
+        d["legacy-nochan"] = {"session": "sid-sup", "cwd": self.cwd,
+                              "channel": "", "ts": 900, "asked": 900,
+                              "question": "legacy?", "block": "legacy?"}
+        Path(self.path).write_text(json.dumps(d))
+        # now a NEW ticketless suppressed ❓ for the same session
+        notify.record_question("", "", "sid-sup", self.cwd, now=2000,
+                               path=self.path, grace_path=self.gpath,
+                               question="nové ticketless?", suppressed=True)
+        left = self._map()
+        self.assertNotIn("999888", left,
+                         "the stale delivered sibling must be superseded (graced)")
+        self.assertIn("suppressed:sid-sup", left)
+        self.assertIn("legacy-nochan", left,
+                      "a channel-less legacy entry must NOT be graced by the "
+                      "suppressed record")
+        g = notify.load_grace_questions(self.gpath)
+        self.assertIn("999888", g, "the delivered sibling's replies still route via grace")
+
+    # 🔵5 — update_question skips a suppressed entry (no doomed Discord GET).
+    def test_update_question_skips_suppressed_entry(self):
+        notify.record_question("", "", "sid-upd", self.cwd, question="q?",
+                               path=self.path, suppressed=True)
+        calls = []
+
+        def http_spy(token, method, ep, body=None):
+            calls.append((method, ep))
+            return None
+
+        r = notify.update_question("sid-upd", "reworded?",
+                                   env={"DISCORD_BOT_TOKEN": "tok"},
+                                   path=self.path, http=http_spy)
+        self.assertFalse(r, "a suppressed entry has no card to edit")
+        self.assertEqual(calls, [],
+                         "no Discord GET/PATCH may be issued for a suppressed "
+                         "entry (would be a doomed round-trip): %r" % calls)
+
+    # 🔵6 — drive the REAL job-7 fetch-set build: a suppressed entry's "" channel
+    # is never fetched, while a real delivered entry's channel IS.
+    def test_suppressed_channel_never_fetched_by_real_job7(self):
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_MENTION_ZBYNEK": "773451844110385193",
+               "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        with m.patch.object(notify, "_questions_path", lambda: self.path), \
+                m.patch.object(notify, "_read_env", lambda: dict(env)), \
+                m.patch.object(wd, "_react_ok", return_value=True):
+            # a REAL delivered entry (channel 777001) + a suppressed entry ("")
+            notify.record_question("888001", "777001", "sid-real", self.cwd,
+                                   now=time.time() - 60, path=self.path,
+                                   question="ticket?")
+            notify.record_question("", "", "sid-sup", self.cwd,
+                                   question="ticketless?", path=self.path,
+                                   suppressed=True)
+            fetched = []
+
+            def fetch_spy(ch, token):
+                fetched.append(ch)
+                return []
+
+            wd.deliver_discord_replies(time.time(), lambda *a, **k: "",
+                                       {}, {}, dry_run=False,
+                                       discord_fetch=fetch_spy)
+        self.assertIn("777001", fetched, "the real delivered channel IS fetched")
+        self.assertNotIn("", fetched, "the suppressed entry's empty channel is never fetched")
+        self.assertNotIn("suppressed:sid-sup", fetched)
+
+
 if __name__ == "__main__":
     unittest.main()
