@@ -691,9 +691,22 @@ gap in either.
      Whether a ticket EARNS the Fable design + review phases is the JUDGMENT-CONTENT phase selector
      (non-trivial implementation, review of a non-trivial change, hard debug, design/synthesis —
      when unsure, it QUALIFIES for those phases); a genuinely routine/mechanical ticket (one obvious
-     shape, zero design decisions) gets an Opus 4.8 one-paragraph design comment + a trivial-diff
-     review, no Fable at all. Never dispatch an automatic `model: fable` without the gate check. You
+     shape, zero design decisions) gets a one-paragraph design comment (written by the WORKER on its
+     own implementation tier — Sonnet 5 for a settled-design ticket) + a trivial-diff review, no
+     Fable at all. Never dispatch an automatic `model: fable` without the gate check. You
      (the main session) re-verify every line of the worker's evidence block regardless of its model.
+     - **SETTLED-DESIGN vs COMPLEX at DISPATCH (which implementation tier the worker gets, #721)** —
+       decided from the SAME Step-1c triage, never at cycle time: a member that is NOT design-heavy
+       AND carries NO escalation criterion → dispatch the worker with an explicit `model: "sonnet"`
+       (Sonnet 5, the default). A member that is design-heavy, OR carries any of — a multi-component
+       change, concurrency, a security boundary, a hard-debug lane, or a prior Sonnet worker already
+       failed on this ticket — → dispatch it AS-IS (no `model` param → the frontmatter pin, Opus 4.8);
+       unsure → AS-IS (4.8). "Settled" means the APPROACH is decided (a design-heavy member already
+       got its Step-1c Fable synthesis), NOT that the worker's own CYCLE-step-2 design comment is
+       already posted — the worker still writes that during implementation, on its dispatched tier.
+       A Sonnet worker that hits a hard wall mid-ticket cannot re-tier itself: it RETURNS with its
+       findings → you re-dispatch that ticket AS-IS on the `claude-opus-4-8` pin (the "prior Sonnet
+       worker failed" criterion).
    - **Authority rides the dispatch.** Include the resolved profile in every worker prompt
      (`Authority profile: <profile>` + what "done" means for it). branch-merge: the worker's PR
      targets and merges into the INTEGRATION branch (develop unless the project CLAUDE.md names

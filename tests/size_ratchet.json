@@ -190,7 +190,7 @@
     "tests/test_meeting_analysis_redaction.py": 161,
     "tests/test_meeting_analysis_skill.py": 88,
     "tests/test_merge_drivers.py": 431,
-    "tests/test_model_tiering.py": 660,
+    "tests/test_model_tiering.py": 694,
     "tests/test_module_machinery_offload.py": 62,
     "tests/test_no_conflict_markers.py": 72,
     "tests/test_no_question_flag.py": 578,

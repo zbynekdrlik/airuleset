@@ -17,9 +17,15 @@ assertions lock:
                                  selector: a non-trivial ticket gets a Fable
                                  DESIGN phase + a Fable REVIEW phase; tie-break
                                  unsure -> it DOES -> gets those phases)
-  implementation (the work)    = Opus 4.8 pinned worker / Sonnet 5 mechanical
-                                 -- the implementing worker NEVER carries a
-                                 model:"fable" override, on ANY repo
+  implementation (the work)    = Sonnet 5 default for a SETTLED-DESIGN ticket
+                                 (dispatched model:"sonnet"); Opus 4.8 pinned
+                                 worker on complexity (multi-component /
+                                 concurrency / security-boundary / hard-debug /
+                                 prior-Sonnet-failure), the frontmatter pin
+                                 reached AS-IS; Sonnet 5 also for mechanical --
+                                 the implementing worker NEVER carries a
+                                 model:"fable" override, on ANY repo (#721
+                                 refined the default; #715 the per-phase split)
   routine fallback / CLOSED    = Opus 4.8 via agent-definition frontmatter /
                                  Workflow opts.model full id / inheritance
   mechanical / read-only       = sonnet low (haiku most-trivial) -- unchanged
@@ -59,6 +65,18 @@ class TestOpus5BanLineup(TestCase):
     """The 2026-08-13 directive bans Opus 5 everywhere and rewrites the
     lineup -- these lock the NEW ACTIVE policy in the always-on module."""
 
+    @staticmethod
+    def _impl_bullet_line(t):
+        """The #721 IMPLEMENTATION bullet is ONE unwrapped physical markdown
+        line -- return it so escalation-criteria/default assertions can be
+        anchored to it (real teeth vs a partial revert), never satisfied by a
+        pre-existing occurrence of the same token elsewhere in the module."""
+        for ln in t.splitlines():
+            if ln.startswith(
+                    "- **IMPLEMENTATION (the actual work) = Sonnet 5 by DEFAULT"):
+                return ln
+        return ""
+
     def test_model_awareness_active_policy_header(self):
         t = read(MODULE)
         # #715 revision (2026-08-26): PER-PHASE tiering, FLEET-WIDE — the
@@ -67,7 +85,7 @@ class TestOpus5BanLineup(TestCase):
         # single-line fragments (the wrap-trap this file documents).
         self.assertIn(
             "Model tiering — PER-PHASE (fleet-wide): design + review = Fable "
-            "(gated); implementation = Opus 4.8 / Sonnet 5", t)
+            "(gated); implementation = Sonnet 5 default / Opus 4.8 on complexity", t)
         self.assertIn(
             "Opus 5 BANNED (ACTIVE policy, 2026-08-26 — revises 2026-08-25 "
             "Fable-majority)", t)
@@ -187,14 +205,20 @@ class TestOpus5BanLineup(TestCase):
         # the no-Fable-on-worker invariant (from #715) STAYS:
         self.assertIn(
             'implementing worker NEVER carries a `model: "fable"` override', t)
-        # the five escalation criteria are all named and testable:
-        self.assertIn("multi-component change", t)
-        self.assertIn("concurrency", t)
-        self.assertIn("security boundary", t)
-        self.assertIn("hard-debug lane", t)
-        self.assertIn("prior Sonnet worker already failed on this ticket", t)
-        # fail-safe direction preserved (unsure -> the higher tier):
-        self.assertIn("when in doubt, Opus 4.8", t)
+        # #498/#500 TEETH: the five escalation criteria + the sonnet default
+        # must all co-occur ON the IMPLEMENTATION bullet's OWN physical line
+        # (it is a single unwrapped markdown bullet), so a partial revert of
+        # that clause -- leaving "concurrency"/'model: "sonnet"' present
+        # elsewhere in the module -- is caught, not just a full deletion.
+        impl_line = self._impl_bullet_line(t)
+        for tok in ("multi-component change", "concurrency", "security boundary",
+                    "hard-debug lane",
+                    "prior Sonnet worker already failed on this ticket",
+                    '`model: "sonnet"`', "when in doubt, Opus 4.8"):
+            self.assertIn(
+                tok, impl_line,
+                "escalation/default token missing from the IMPLEMENTATION "
+                "bullet line: %r" % tok)
         # #715's flat "implementation = Opus 4.8" default is retired as the
         # LIVE default (the whole point of #721):
         self.assertNotIn(
@@ -213,10 +237,13 @@ class TestOpus5BanLineup(TestCase):
         # pin (dispatch AS-IS), never by a param -- which also makes the
         # fail-safe direction UP (forget-to-classify -> Opus 4.8, never lower).
         t = read(MODULE)
-        self.assertIn('`model: "sonnet"`', t)
-        self.assertIn("escalation tier", t)
-        self.assertIn("fail-safe default", t)
-        self.assertIn("frontmatter stays pinned `model: claude-opus-4-8`", t)
+        # anchored to the IMPLEMENTATION bullet's own line for teeth (#498):
+        impl_line = self._impl_bullet_line(t)
+        self.assertIn('`model: "sonnet"`', impl_line)
+        self.assertIn("escalation tier", impl_line)
+        self.assertIn("fail-safe default", impl_line)
+        self.assertIn(
+            "frontmatter stays pinned `model: claude-opus-4-8`", impl_line)
 
     def test_sonnet_never_complex(self):
         t = read(MODULE)
@@ -460,10 +487,17 @@ class TestDispatchSurfacesRewritten(TestCase):
         self.assertNotIn(
             "Escalate the review to Fable ONLY when the TICKET itself "
             "genuinely meets the design-heavy taxonomy", norm)
-        # #455 MINOR-2 fix survives: the worker's OWN model-less dispatch is
-        # safe (claude-opus-4-8-pinned, so no-override inherits 4.8); the
-        # model-less-inherits-Fable hazard is a Fable-MAIN one.
-        self.assertIn("Your OWN model-less dispatch is SAFE", norm)
+        # #721: the worker's OWN model-less dispatch is safe ONLY when it RUNS
+        # on claude-opus-4-8 (an escalated ticket, dispatched AS-IS). A
+        # model:"sonnet"-dispatched settled-design worker running on Sonnet
+        # would inherit SONNET model-less, so the claim is now SCOPED, and the
+        # gate-CLOSED non-trivial review leans on the supervisor's re-verify.
+        self.assertIn(
+            "Your OWN model-less dispatch is SAFE ONLY when you RUN on "
+            "`claude-opus-4-8`", norm)
+        self.assertIn(
+            '`model: "sonnet"`-dispatched worker\'s model-less dispatch inherits '
+            "SONNET", norm)
         self.assertIn('carries an explicit `model: "sonnet"`/`"haiku"`', norm)
 
     def test_opus_alias_trap_warning_present(self):

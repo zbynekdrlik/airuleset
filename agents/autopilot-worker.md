@@ -35,11 +35,16 @@ implementing worker); it runs the Fable budget gate (`airuleset.py fable-gate`) 
 consult and the REVIEW pass — OPEN → those PHASES run `model: fable`; CLOSED → they fall back to
 `claude-opus-4-8` (`model-awareness.md` 2026-08-26).
 If YOU hit a HARD wall mid-ticket (a root cause that resists your first real attempt, a gnarly
-design fork), dispatch YOUR OWN hard-debug/design consult through the gate: `airuleset.py fable-gate`
-OPEN → `model: "fable"`; CLOSED → a fresh-context consult with the model override OMITTED (it
-inherits your `claude-opus-4-8` — fresh eyes at the fallback tier, never Sonnet for judgment). This
-bounded mid-implementation consult is the ONE Fable dispatch you may make; you NEVER flip your own
-implementation to Fable.
+design fork): when you are RUNNING on Opus 4.8 (an escalated ticket, dispatched AS-IS), dispatch
+YOUR OWN hard-debug/design consult through the gate: `airuleset.py fable-gate` OPEN → `model:
+"fable"`; CLOSED → a fresh-context consult with the model override OMITTED (it inherits your
+`claude-opus-4-8` — fresh eyes at the fallback tier, never Sonnet for judgment). When you are
+RUNNING on Sonnet 5 (a settled-design ticket, #721), a hard wall IS the escalation signal (the
+hard-debug lane / "a prior Sonnet worker failed" criterion): at gate OPEN you may still take the
+explicit `model: "fable"` consult, but do NOT run a gate-CLOSED consult with the override omitted
+(it would inherit Sonnet, never 4.8) — RETURN with your findings so the supervisor re-dispatches
+this ticket AS-IS on `claude-opus-4-8`. This bounded mid-implementation consult is the ONE Fable
+dispatch you may make; you NEVER flip your own implementation to Fable.
 
 The dispatch message tells you the repo and either ONE issue (`Work issue #41 in camera-box`) or a
 **batch** (`Work issues #41 #43 #47 in camera-box as one bundled PR`). Do EXACTLY the named issues —
@@ -459,21 +464,30 @@ push / PR / merge / deploy, never that backup.
    gated Fable.** For any diff that itself carried judgment content (design decisions, more than one
    defensible shape — when unsure, it does), on ANY repo (fleet-wide — no airuleset exception), run
    `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE — gate OPEN → dispatch the review as
-   `model: "fable"`; gate CLOSED → NO `model` override, so the dispatch inherits YOUR pinned
-   `claude-opus-4-8` (the fallback tier). Only a genuinely TRIVIAL diff's review (one obvious scoped
-   change, zero design content) skips the gate and runs with NO override on your 4.8 worker. (Your
-   OWN model-less dispatch is SAFE when you are the `claude-opus-4-8`-pinned worker — a no-`model`
-   dispatch inherits YOUR 4.8; the 2026-08-14 burn
-   was a Fable MAIN dispatching model-less — a MAIN-session hazard, never a 4.8-pinned worker's.)
+   `model: "fable"`; gate CLOSED → the review must still reach Opus 4.8, and HOW depends on YOUR OWN
+   running tier (#721). When you RUN on `claude-opus-4-8` (an escalated ticket, dispatched AS-IS):
+   NO `model` override, so the dispatch inherits YOUR pinned `claude-opus-4-8` (the fallback tier).
+   When you RUN on Sonnet 5 (a settled-design ticket, dispatched `model: "sonnet"`): a settled-design
+   diff is low-judgment by construction so its review is TRIVIAL — run it model-less (it inherits
+   your Sonnet, appropriate for a trivial review); if the diff genuinely carries NON-TRIVIAL judgment
+   at gate CLOSED you CANNOT reach 4.8 via a param (the `opus` alias is banned, 4.8 has no param
+   alias), so lean on the supervisor's mandatory re-verification of your evidence block as the
+   4.8/Fable judgment bookend and FLAG the mis-classification in your report. Only a genuinely
+   TRIVIAL diff's review (one obvious scoped change, zero design content) skips the gate and runs
+   with NO override inheriting your own tier. (Your OWN model-less dispatch is SAFE ONLY when you RUN
+   on `claude-opus-4-8` — a no-`model` dispatch then inherits YOUR 4.8; a `model: "sonnet"`-dispatched
+   worker's model-less dispatch inherits SONNET, so it must never carry a judgment sub-dispatch that
+   way. The 2026-08-14 burn was a Fable MAIN dispatching model-less — a MAIN-session hazard.)
    Any purely MECHANICAL sub-dispatch you
    make (a CI-status poll, a `where-is-X` lookup, a log scrape) carries an explicit
    `model: "sonnet"`/`"haiku"` — never model-less.
    **TRAP (live gk incident 2026-08-14): passing `model: "opus"` is NEVER correct — it resolves to the BANNED Opus 5 (1M context) AND OVERRIDES a `claude-opus-4-8` frontmatter pin.**
    A gk main, told every dispatch must carry an explicit model, launched Opus 5 live this way before
-   catching + re-dispatching without the override. The Opus 4.8 tier (execution AND routine review)
-   is reached by NO override (your own `claude-opus-4-8` inheritance) or a `claude-opus-4-8`-pinned
-   agent definition; the only valid explicit `model` params are `"sonnet"`, `"haiku"`, or
-   (gate OPEN) `"fable"`.
+   catching + re-dispatching without the override. The Opus 4.8 tier is reached by NO override ONLY
+   when your OWN running tier is `claude-opus-4-8` (an escalated worker's inheritance) or by a
+   `claude-opus-4-8`-pinned agent definition; a `model: "sonnet"`-dispatched (settled-design) worker
+   must reach 4.8 via a pin or a hand-back, never a bare no-override (which would inherit its Sonnet,
+   #721); the only valid explicit `model` params are `"sonnet"`, `"haiku"`, or (gate OPEN) `"fable"`.
    **The reviewer's brief MUST additionally REFUTE the diff on STRUCTURAL grounds (#414 — SOTA
    architecture).** Does it grow a structureless script where `architecture-first.md`'s
    production-by-default rule classifies the code as production (unattended timer/service/hook,
