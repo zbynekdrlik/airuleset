@@ -132,23 +132,25 @@ class NudgeNamesGkHandoffMembers(unittest.TestCase):
     """The job-20 nudge NAMES the gk-handoff W members with the doctrine action
     (drop ops-wait — it is a gk hand-off, not a third-party wait, #636)."""
 
-    def test_gk_handoff_members_named_with_action(self):
+    def test_gk_handoff_flag_fires_with_action(self):
+        # #714: the gk-handoff sub-clause is a compact COUNT flag (members in
+        # `slice-quals --ops-wait`, tagged `gk-handoff!`) keeping the token +
+        # #636 + the needs-gatekeeper target lane — no member enumeration.
         members = [{"number": 4600, "stale": False, "gk_handoff": True},
                    {"number": 43, "stale": False, "gk_handoff": False}]
-        t = owr._nudge_text(None, members, now=1000.0,
-                            w_seen={"4600": 1000.0, "43": 1000.0})
-        self.assertIn("#4600", t)
-        self.assertIn("gk-handoff", t.lower())
-        self.assertIn("needs-gatekeeper", t)   # the doctrine target lane
+        t = owr._nudge_text(None, members, now=1000.0)
+        self.assertIn("gk-handoff 1", t.lower())   # the flag fires (count=1)
+        self.assertIn("needs-gatekeeper", t)       # the doctrine target lane
+        self.assertIn("#636", t)
+        self.assertNotIn("#4600", t)               # no member enumeration (#714)
 
     def test_no_gk_handoff_clause_when_none_flagged(self):
         members = [{"number": 43, "stale": False, "gk_handoff": False}]
-        t = owr._nudge_text(None, members, now=1000.0, w_seen={"43": 1000.0})
+        t = owr._nudge_text(None, members, now=1000.0)
         self.assertNotIn("gk-handoff", t.lower())
 
     def test_legacy_int_members_have_no_gk_handoff_clause(self):
-        t = owr._nudge_text(None, [41, 43], now=1000.0,
-                            w_seen={"41": 1000.0, "43": 1000.0})
+        t = owr._nudge_text(None, [41, 43], now=1000.0)
         self.assertNotIn("gk-handoff", t.lower())
 
 

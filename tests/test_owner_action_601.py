@@ -301,18 +301,18 @@ class OwnerActionDoctrineLock(unittest.TestCase):
 # (d) job-20 partition-audit nudge names the owner-blocked mis-shape
 # --------------------------------------------------------------------------- #
 class Job20MisshapeNudge(unittest.TestCase):
-    def test_W_clause_names_owner_action_relabel(self):
-        clause = ops_wait_recheck._W_CLAUSE
+    def test_W_trigger_names_owner_action_relabel(self):
+        # #714: the compact `_W_TRIGGER` keeps the #601 owner-blocked mis-shape
+        # re-label label (the full doctrine lives in the session's modules).
+        clause = ops_wait_recheck._W_TRIGGER
         self.assertIn("needs-owner-action", clause,
-                      "#601: the job-20 W→I clause must tell the loop to "
+                      "#601: the job-20 W→I trigger must tell the loop to "
                       "re-label an owner-blocked W ticket needs-owner-action")
         self.assertIn("owner", clause.lower())
 
     def test_nudge_text_carries_owner_action_relabel_when_W_present(self):
         # A composed nudge with W members names the mis-shape instruction.
-        w_members = [688]
-        txt = ops_wait_recheck._nudge_text(
-            0, w_members, now=0.0, w_seen={"688": 0.0})
+        txt = ops_wait_recheck._nudge_text(0, [688], now=0.0)
         self.assertIn("needs-owner-action", txt,
                       "#601: the composed job-20 nudge must carry the "
                       "owner-blocked mis-shape re-label instruction")

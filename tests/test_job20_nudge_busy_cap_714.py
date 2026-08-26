@@ -34,7 +34,6 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import watchdog as wd  # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
@@ -152,12 +151,42 @@ class TestBusyPaneGate(_OrchBase):
         # The narrow gate must NOT defer a healthy armed-with-workers pane.
         wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
         tmux = self._tmux()
-        logs = self._run(wrecs, lambda cwd: [41, 43], tmux,
-                         captured=GOAL_ARMED_STRIP_CAP)
+        self._run(wrecs, lambda cwd: [41, 43], tmux,
+                  captured=GOAL_ARMED_STRIP_CAP)
         self.assertTrue(any("stuck-check" in t for t in tmux.typed_texts()),
                         "an armed pane with ◯ workers (no Waiting line) must "
                         "still be nudged")
         self.assertEqual(wrecs[self.sid]["last_nudge"], NOW)
+
+
+class TestBoundedRetry(_OrchBase):
+    """#714 escalation (owner, 2026-08-26): a NON-busy pane that persistently
+    SWALLOWS the submit must NOT be typed-and-failed every 60s sweep forever —
+    the retry storm the owner hit ("neda sa tam teraz pracovat"). After
+    MAX_SEND_FAILS consecutive undelivered sends the nudge backs off a full
+    cadence instead of retrying every sweep."""
+
+    def test_persistent_swallow_backs_off_after_max_fails(self):
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        state = {}
+        attempts = 0
+        backed_off = False
+        for _ in range(6):
+            tmux = self._tmux(enters_swallowed=99)   # every submit swallowed
+            logs = self._run(wrecs, lambda cwd: [41], tmux, state=state)
+            if any("submit-unverified" in ln for ln in logs):
+                attempts += 1
+            if any("backing off" in ln for ln in logs):
+                backed_off = True
+        self.assertTrue(backed_off,
+                        "a persistently-swallowing pane must BACK OFF, never "
+                        "type-and-fail every 60s sweep (the retry storm, #714)")
+        self.assertLessEqual(
+            attempts, owr.MAX_SEND_FAILS,
+            "bounded retry: at most MAX_SEND_FAILS type-and-fail attempts per "
+            "cadence, not one per sweep forever — got %d" % attempts)
+        self.assertEqual(wrecs[self.sid]["last_nudge"], NOW,
+                         "the backoff advances last_nudge (waits a full cadence)")
 
 
 # --------------------------------------------------------------------------- #

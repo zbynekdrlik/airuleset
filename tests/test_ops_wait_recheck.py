@@ -416,10 +416,9 @@ class TestOrchestrator(_OrchBase):
         logs = self._run(wrecs, lambda cwd: [41, 43], tmux,
                          handled=handled, state=state)
         self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
-        typed = " ".join(tmux.typed_texts())
+        typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed)
-        self.assertIn("#41", typed)
-        self.assertIn("#43", typed)
+        self.assertIn("W=2", typed)        # #714 compact COUNT, not #41 #43
         self.assertEqual(wrecs[self.sid]["last_nudge"], NOW)
         self.assertIn(self.sid, handled)   # claims the pane vs other jobs
 
@@ -489,24 +488,21 @@ class TestBusyPaneRefire594(_OrchBase):
         self.assertIsNone(wrecs[self.sid]["last_nudge"])
 
 
-class TestParkedAge594(_OrchBase):
-    """#594 root cause B — a W member the watchdog first sees THIS sweep must be
-    aged from ITS OWN W entry, never from a stale partition-level anchor."""
+class TestParkedAgeSummary714(_OrchBase):
+    """#714 SUPERSEDES #594's per-member W-park age rendering: the compact nudge
+    is a COUNT, not a per-member enumeration, so it renders NO per-member ages at
+    all (the actionable freshness signal is the `stale!` tag in `slice-quals
+    --ops-wait`, which the session runs itself). The decider still tracks `w_seen`
+    per-ticket (its tests unchanged) — the nudge just no longer prints it."""
 
-    def test_fresh_w_member_not_aged_by_stale_partition_anchor(self):
-        # The incident shape: the partition/session has been tracked ~24h, and a
-        # W member #3076 that entered W ~1h ago is nudged. Pre-fix the nudge ages
-        # #3076 by the single partition-level `w_first_seen` (~24h) -> RED. GREEN:
-        # a per-ticket first-seen map ages #3076 from its own entry (~0h).
-        wrecs = {self.sid: {"first_seen": NOW - DAY, "w_first_seen": NOW - DAY,
-                            "last_nudge": None}}
+    def test_nudge_is_a_count_with_no_per_member_age(self):
+        wrecs = {self.sid: {"first_seen": NOW - DAY, "last_nudge": None}}
         tmux = self._tmux()
         self._run(wrecs, lambda cwd: [3076], tmux, handled=set(), state={})
         typed = "".join(tmux.typed_texts())
-        self.assertIn("#3076", typed)
-        self.assertIn("~0h", typed,
-                      "a freshly-parked W member must be aged from its own W "
-                      "entry (~0h), not the stale ~24h partition anchor (#594)")
+        self.assertIn("W=1", typed)          # a compact count
+        self.assertNotIn("#3076", typed)     # no member enumeration
+        self.assertNotIn("~0h", typed)       # no per-member age rendered
         self.assertNotIn("~24h", typed)
 
 
@@ -522,34 +518,33 @@ class TestNudgeText(unittest.TestCase):
         self.assertIn("#526/#539", t)
         self.assertNotIn("parknuté `ops-wait`", t)   # no W clause when W empty
 
-    def test_w_only_degrades_to_547_shape(self):
-        # #594: per-ticket w_seen map — both members aged from their own entry.
-        t = owr._nudge_text(0, [41, 43], NOW,
-                            {"41": NOW - 3 * 3600, "43": NOW - 3 * 3600})
+    def test_w_only_is_a_compact_count(self):
+        # #714: W-only nudge is the W trigger + COUNT, no I clause, no member
+        # enumeration, no per-member ages.
+        t = owr._nudge_text(0, [41, 43], NOW)
         self.assertIn("stuck-check:", t)
         self.assertNotIn("re-audituj", t)         # no I clause when I==0
-        self.assertIn("#41", t)
-        self.assertIn("#43", t)
-        self.assertIn("~3h", t)                   # truthful per-ticket W-park age
+        self.assertIn("W=2", t)                   # the count
+        self.assertNotIn("#41", t)                # no member enumeration
+        self.assertNotIn("#43", t)
 
     def test_both_directions_ride_one_ping(self):
-        t = owr._nudge_text(2, [41], NOW, {"41": NOW - 3600})
-        self.assertIn("re-audituj", t)
-        self.assertIn("#41", t)
+        t = owr._nudge_text(2, [41], NOW)
+        self.assertIn("re-audituj", t)            # I clause
+        self.assertIn("W=1", t)                   # W count
         self.assertIn("supervisor", t)            # label-change ownership note
 
-    def test_w_age_is_per_ticket_from_w_seen(self):
-        # #594: two members with DIFFERENT per-ticket entries render DIFFERENT
-        # ages in the SAME nudge — a fresh member ~0h beside an old one ~24h.
-        t = owr._nudge_text(0, [7, 9], NOW, {"7": NOW, "9": NOW - 24 * 3600})
-        self.assertIn("#7 (~0h)", t)
-        self.assertIn("#9 (~24h)", t)
+    def test_w_count_scales_not_enumerates(self):
+        # #714: any number of W members renders a COUNT, never per-member `#N`.
+        t = owr._nudge_text(0, [7, 9, 3498, 4990], NOW)
+        self.assertIn("W=4", t)
+        for n in ("#7", "#9", "#3498", "#4990"):
+            self.assertNotIn(n, t)
 
-    def test_w_member_missing_from_w_seen_ages_unknown(self):
-        # A member absent from the map (a state/fetch edge) ages `?`, never a
-        # fabricated age (#539 fail-safe bias).
-        t = owr._nudge_text(0, [7], NOW, {})
-        self.assertIn("#7 (?)", t)
+    def test_nudge_never_exceeds_cap(self):
+        # every shape stays bounded (#714).
+        t = owr._nudge_text(41, list(range(3498, 3498 + 53)), NOW)
+        self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
 
 
 class TestOrchestratorIDirection(_OrchBase):
@@ -657,11 +652,11 @@ class TestLaneSweepWiring(unittest.TestCase):
         state = {"ops_wait_recheck": {
             "sess-547-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}}}
         sid, tmux = self._armed_sweep(state, ops_wait_fetch=lambda cwd: [41, 43])
-        typed = " ".join(tmux.typed_texts())
+        typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed,
                       "an armed pane with W parked past cadence must be nudged "
                       "(RED before goal_lane_sweep wires goal_ops_wait_recheck)")
-        self.assertIn("#41", typed)
+        self.assertIn("W=2", typed)        # #714 compact count
         self.assertEqual(state["ops_wait_recheck"][sid]["last_nudge"], NOW)
 
     def test_i_only_partition_past_cadence_is_nudged(self):
