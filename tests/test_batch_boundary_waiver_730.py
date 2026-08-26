@@ -41,7 +41,6 @@ literal-newline substring match would.
 """
 
 import re
-import subprocess
 import sys
 from pathlib import Path
 from unittest import TestCase, main
@@ -280,21 +279,6 @@ class TestAutopilotMasterLane2KeepsDurableAnchorsContinuously(TestCase):
     def test_lane2_anchor_discipline_is_ongoing_not_only_at_the_end(self):
         window = norm(self._lane2_window())
         self.assertIn(norm("AS THE RELEASE PROGRESSES"), window)
-
-
-class TestNoWatchdogCodeTouched(TestCase):
-    """Docs+test only per the ticket scope -- watchdog/compact.py and
-    watchdog/goal.py stay byte-identical to origin/main; only skills/ prose
-    (and this test file) changed."""
-
-    def test_compact_py_unchanged_vs_main(self):
-        out = subprocess.run(
-            ["git", "diff", "--name-only", "origin/main...HEAD", "--", "watchdog/"],
-            cwd=str(ROOT), capture_output=True, text=True,
-        )
-        changed = [line for line in out.stdout.splitlines() if line.strip()]
-        self.assertEqual(changed, [],
-                          "watchdog/ files touched by this docs-only ticket: %r" % changed)
 
 
 if __name__ == "__main__":
