@@ -11,9 +11,18 @@ absorbs the stray while leaving the owner session and a grouped work session
 untouched.
 
 Isolation (the #613 discipline + `tests/test_tmux_test_isolation_lock.py`):
-EVERY tmux call carries an explicit `-S <sock>` on a fresh per-test tempdir
-socket, TMUX/TMUX_PANE stripped, a pre-flight emptiness check, and the server
-killed + removed unconditionally in tearDown.
+every REAL tmux call carries an explicit `-S <sock>` on a fresh per-test
+tempdir socket, TMUX/TMUX_PANE stripped, a pre-flight emptiness check, and the
+server killed + removed unconditionally in tearDown.
+
+#711/#427 hermeticity: the kill sweep's ONE load-sensitive read of a stray --
+`list-panes ... #{pane_current_command}/#{pane_current_path}` of the freshly
+spawned pane -- is DETERMINISTICALLY injected (`_pane_read_override` /
+`_settled_pane_line`), because that read flakes under full-suite load (a fresh
+bash momentarily reads non-bare / unsettled). The stray is still really created
++ really killed + observed on the isolated server; only that one transient read
+is routed through the deterministic path. Every other tmux call (list-sessions,
+kill-session, and the grouped `montalu2` skip) still hits the real server.
 """
 import os
 import shutil
@@ -57,6 +66,14 @@ def _settled_pane_line(home, pid="1"):
     (cli_tmux_provisioning.py:1310). `pid` is a don't-care because the tests
     neutralize the shell child-guard with an idle `ps_run`."""
     return "0\t\tbash\t%s\t%s" % (pid, home)
+
+
+def _idle_ps(argv):
+    """#660: a deterministic no-child `ps_run` -- keeps the sweep from probing
+    the freshly-spawned bash panes (whose transient rc-file children would flake
+    the child-guard, review 🔵5). `ps --ppid <pid>` exits 1 with empty output
+    when there are NO children (the safe-to-kill case)."""
+    return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
 
 
 class _Iso:
@@ -117,24 +134,19 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
 
         stray_res = tmuxprov._owner_box_stray_name_res("zbynek",
                                                        single_session=False)
-        # a deterministic no-child ps runner keeps the sweep from probing the
-        # real freshly-spawned bash panes (whose transient rc-file children
-        # would flake the child-guard, review 🔵5); the child-guard itself is
-        # locked by a dedicated fake-runner test.
-        def idle_ps(argv):
-            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
         # #711/#427 HERMETICITY: route marek's ONE load-sensitive pane read
         # (#{pane_current_command}/#{pane_current_path} of the just-spawned pane)
         # through a DETERMINISTIC settled line, so the sweep's absorb decision no
         # longer depends on the transient real-box read that flaked under
         # full-suite load. marek is still really created + really killed; every
         # other read (the grouped `montalu2` skip) hits the real isolated server.
+        # `_idle_ps` keeps the child-guard from probing the real bash panes.
         hermetic_run = _pane_read_override(
             self.iso, {"marek": _settled_pane_line(self.iso.dir)})
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
                 "zbynek", run=hermetic_run, stray_name_res=stray_res,
-                audit_dir=td, ps_run=idle_ps, home=self.iso.dir)
+                audit_dir=td, ps_run=_idle_ps, home=self.iso.dir)
             log = (Path(td) / "normalize.log").read_text()
 
         after = self.iso.names()
@@ -163,9 +175,6 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         stray_res = tmuxprov._owner_box_stray_name_res("zbynek",
                                                        single_session=False)
 
-        def idle_ps(argv):
-            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
-
         # PHASE 1 -- the flake, made deterministic: the #427 load transient
         # (bash still sourcing its rc reads a NON-bare #{pane_current_command})
         # makes the sweep SKIP the genuinely-idle stray. Same real marek; only
@@ -174,7 +183,7 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
                 "zbynek", run=transient_run, stray_name_res=stray_res,
-                audit_dir=td, ps_run=idle_ps, home=self.iso.dir)
+                audit_dir=td, ps_run=_idle_ps, home=self.iso.dir)
             log1 = (Path(td) / "normalize.log").read_text()
         self.assertIn("marek", self.iso.names())   # transient read -> skipped
         self.assertIn("skip", log1)
@@ -187,7 +196,7 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
                 "zbynek", run=settled_run, stray_name_res=stray_res,
-                audit_dir=td, ps_run=idle_ps, home=self.iso.dir)
+                audit_dir=td, ps_run=_idle_ps, home=self.iso.dir)
             log2 = (Path(td) / "normalize.log").read_text()
         self.assertNotIn("marek", self.iso.names())   # settled read -> absorbed
         self.assertIn("killed", log2)
