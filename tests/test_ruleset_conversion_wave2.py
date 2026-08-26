@@ -249,10 +249,15 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
         # #546 raised the cap 1700 -> 1750: the api-error/limit/burn alert
         # class was RETIRED, and that is a genuine always-on POLICY inversion
         # this always-on module must carry (a concise note; the mechanism
-        # detail stays in the notification-mechanics skill) — still 17% below
-        # the 2082-word original, so the "shrank meaningfully" intent holds.
+        # detail stays in the notification-mechanics skill).
+        # #710 raised the cap 1750 -> 1800 for the SAME reason: the owner
+        # directive to owner-scope question DELIVERY (zbynek/marek OFF, david
+        # ON) is a genuine always-on POLICY every session must know — carried
+        # here as a concise note, the mechanism detail in the
+        # notification-mechanics skill — still ~14% below the 2082-word
+        # original, so the "shrank meaningfully" intent holds.
         t = read(self.MOD)
-        self.assertLess(len(t.split()), 1750)
+        self.assertLess(len(t.split()), 1800)
 
 
 class TestDeliberatelyKeptInlineCandidates(TestCase):

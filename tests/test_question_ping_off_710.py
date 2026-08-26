@@ -184,12 +184,17 @@ class TestWatchdogRepingHonorsSuppression(_HomeIsolated):
         return str(p)
 
     def test_zbynek_reping_suppressed_and_entry_kept(self):
-        self._write_env()
+        import unittest.mock as m
+        import watchdog as wd
         import watchdog.questions as wq
+        self._write_env()
         path = self._qmap("zbynek")
-        logs = wq.reping_stale_questions(
-            now=10 ** 9, send_fn=notify.send, path=path,
-            account_owner="zbynek")
+        # Neutralise the 00:00-05:59 sleep-window deferral so the re-ask actually
+        # runs regardless of the wall clock (the documented #457 clock-flake).
+        with m.patch.object(wd, "_in_sleep_window", lambda *a, **k: False):
+            logs = wq.reping_stale_questions(
+                now=10 ** 9, send_fn=notify.send, path=path,
+                account_owner="zbynek")
         self.assertEqual(self.posts, [], "a zbynek re-ask must POST nothing")
         self.assertTrue(any("suppressed" in ln for ln in logs)
                         or any("suppressed" in ln for ln in self.log_lines()),

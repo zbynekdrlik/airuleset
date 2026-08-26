@@ -44,6 +44,28 @@ class TestQuestionPolicy(TestCase):
         # The old defer-by-default clause must be gone.
         self.assertNotIn("a per-ticket question is ALWAYS deferred", t)
 
+    def test_marker_rule_owner_scoped_delivery_710(self):
+        # #710 (owner directive 2026-08-26): the DELIVERY of a question ping is
+        # owner-scoped — david keeps the Discord phone ping; zbynek/marek take
+        # questions via the footer `U N` + webterm (no phone ping). The SESSION
+        # discipline (write the marker, ask the moment, never bury/reproach) is
+        # unchanged for every owner — only the delivery channel is scoped. The
+        # invariant phrase "ALWAYS pings the phone" is preserved (still true for
+        # the on owners) and immediately scoped, so both must appear.
+        for rel in ["modules/core/message-status-marker.md",
+                    "modules/core/milestone-notifications.md",
+                    "modules/core/user-questions-slovak.md"]:
+            t = read(rel)
+            self.assertIn("#710", t, f"{rel}: missing the #710 owner-scope")
+            self.assertIn("zbynek", t)
+            self.assertIn("marek", t)
+            self.assertIn("david", t)
+            self.assertIn("footer `U N`", t)
+        # The session discipline is explicitly stated as unchanged, not dropped.
+        msm = read("modules/core/message-status-marker.md")
+        self.assertIn("ALWAYS pings the phone", msm)   # the invariant is kept
+        self.assertIn("owner-scoped", msm.lower())
+
     def test_marker_rule_bans_reproach_and_burying(self):
         t = read("modules/core/message-status-marker.md")
         # Never reproach the user for an unanswered (pinged) question.

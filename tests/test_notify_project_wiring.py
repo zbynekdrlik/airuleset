@@ -63,7 +63,7 @@ class TestRunCardPassesProject(unittest.TestCase):
                     provision_question_thread=False, provision_project_thread=False,
                     project_label=False, record_question=False,
                     edit_question=False, channel_id=False, owner=False,
-                    mirror_owners=False, body=None, run=None,
+                    mirror_owners=False, question_ping_off=False, body=None, run=None,
                     repo="zbynekdrlik/odoo-erp", issue=5, pr=None,
                     achieved="a", result=None, goal="g", version="v1",
                     merge_sha=None, url=None, review="ok", handoff=False,
@@ -147,7 +147,7 @@ class TestApiErrorPassesProject(unittest.TestCase):
                     backfill_digest=False, provision_question_thread=False,
                     provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False,
-                    channel_id=False, owner=False, mirror_owners=False,
+                    channel_id=False, owner=False, mirror_owners=False, question_ping_off=False,
                     body=None, run=None, dry_run=False, dedup_key=None,
                     session="s1", project="odoo-erp",
                     text="API Error: Server is temporarily limiting requests "
@@ -201,7 +201,7 @@ def _path_with_fake_curl_capturing_channel(log_path, http_code="200"):
 
 class TestSendHookProjectRouting(_HomeIsolated):
 
-    def _write_env(self, project_channel=None, q_channel=None):
+    def _write_env(self, project_channel=None, q_channel=None, owner="zbynek"):
         # #369 review m7 (TRIGGERED): the project env KEY must be derived
         # via the SAME functions the hook itself calls
         # (`project_label_for`/`_owner_project_key`) rather than the
@@ -218,10 +218,11 @@ class TestSendHookProjectRouting(_HomeIsolated):
                 "DISCORD_NOTIFICATION_CHANNEL_ID=100"]
         label = notify.project_label_for(str(ROOT))
         if project_channel:
-            lines.append("%s=%s" % (notify._owner_project_key("zbynek", label),
+            lines.append("%s=%s" % (notify._owner_project_key(owner, label),
                                     project_channel))
         if q_channel:
-            lines.append("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=%s" % q_channel)
+            lines.append("DISCORD_NOTIFICATION_CHANNEL_%s_Q=%s"
+                         % (owner.upper(), q_channel))
         (d / ".env").write_text("\n".join(lines) + "\n")
 
     def _run(self, emoji, cwd, curl_path):
@@ -245,14 +246,17 @@ class TestSendHookProjectRouting(_HomeIsolated):
 
     def test_questions_kind_never_reads_the_project_channel(self):
         # A ❓ ping must land in the QUESTIONS thread even though a project
-        # thread is ALSO configured -- #369's own design decision.
-        self._write_env(project_channel="333", q_channel="222")
+        # thread is ALSO configured -- #369's own design decision. #710: uses
+        # owner `david`, whose question delivery stays ON (zbynek/marek are now
+        # owner-scoped OFF -- a zbynek/marek ❓ POSTs nothing; that suppression
+        # is locked in tests/test_question_ping_off_710.py).
+        self._write_env(project_channel="333", q_channel="222", owner="david")
         urls_log = self.home / "urls.log"
         curl_path = _path_with_fake_curl_capturing_channel(str(urls_log))
         self.addCleanup(shutil.rmtree, curl_path.split(os.pathsep)[0], True)
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "❓",
               "ND_TEXT": "otazka", "ND_CWD": str(ROOT), "ND_CONFIRM": "1",
-              "AIRULESET_NOTIFY_OWNER": "zbynek", "PATH": curl_path}
+              "AIRULESET_NOTIFY_OWNER": "david", "PATH": curl_path}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         r = subprocess.run(["bash", str(SEND_HOOK)], input="",
                            capture_output=True, text=True, env=env)
@@ -337,7 +341,7 @@ class TestAutopilotDonePassesProject(unittest.TestCase):
                     provision_question_thread=False, provision_project_thread=False,
                     project_label=False, record_question=False,
                     edit_question=False, channel_id=False, owner=False,
-                    mirror_owners=False, api_error=False, body=None, run=None,
+                    mirror_owners=False, question_ping_off=False, api_error=False, body=None, run=None,
                     repo="zbynekdrlik/odoo-erp", pr=None, tickets_json="[]",
                     version="v1", merge_sha=None, review="ok",
                     done=None, remaining=None, dedup_key=None, dry_run=False)

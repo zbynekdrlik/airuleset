@@ -56,7 +56,7 @@ def _run_card_args(**overrides):
         run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
         repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
         record_question=False, edit_question=False, channel_id=False,
-        owner=False, mirror_owners=False, body=None, run=None,
+        owner=False, mirror_owners=False, question_ping_off=False, body=None, run=None,
         repo="o/x", issue=457, pr=None, achieved="Oprava nasadená a overená",
         result=None, goal="Tunel občas vypadne pri krátkom výpadku",
         version="0.4.0-dev.206", merge_sha=None, url=None, review="ok",

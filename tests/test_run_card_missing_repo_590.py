@@ -47,7 +47,7 @@ def _run_card_args(**overrides):
         repo_name=False, newest_card=False, backfill_digest=False,
         provision_question_thread=False, provision_project_thread=False,
         project_label=False, record_question=False, edit_question=False,
-        channel_id=False, owner=False, mirror_owners=False, body=None, run=None,
+        channel_id=False, owner=False, mirror_owners=False, question_ping_off=False, body=None, run=None,
         repo="o/x", issue=586, pr=None,
         achieved="Zmergované 4d840f1d, suita zelená, overené",
         result=None, goal="Oprava tichej vetvy run-card",

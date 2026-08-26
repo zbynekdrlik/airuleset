@@ -1315,14 +1315,20 @@ class SendKindRouting(unittest.TestCase):
     already provides — needed so a Python-side daily re-ask (watchdog) lands
     in the owner's separate questions thread, not mixed into their normal
     ✅/card thread, mirroring what hooks/notify-discord-send.sh already does
-    for every interactive ❓ ping."""
+    for every interactive ❓ ping.
+
+    #710: uses owner `david`, whose Discord question delivery stays FULLY ON —
+    zbynek/marek now have question delivery OWNER-SCOPED OFF (a
+    `send(owner="zbynek", kind="questions")` returns "suppressed", not "sent"),
+    so this routing test uses a still-delivering owner. The zbynek/marek
+    suppression contract is locked in tests/test_question_ping_off_710.py."""
 
     def setUp(self):
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
-                    "DISCORD_MENTION_ZBYNEK": "773451844110385193",
-                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001",
-                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "777099"}
+                    "DISCORD_MENTION_DAVID": "773451844110385193",
+                    "DISCORD_NOTIFICATION_CHANNEL_DAVID": "777001",
+                    "DISCORD_NOTIFICATION_CHANNEL_DAVID_Q": "777099"}
         p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
         p.start()
         self.addCleanup(p.stop)
@@ -1342,21 +1348,21 @@ class SendKindRouting(unittest.TestCase):
     def test_kind_questions_routes_to_the_dedicated_thread(self):
         import unittest.mock as m
         with m.patch.object(notify, "_post_discord", self._post):
-            status = notify.send("hi", owner="zbynek", kind="questions")
+            status = notify.send("hi", owner="david", kind="questions")
         self.assertEqual(status, "sent")
         self.assertEqual(self.posted, ["777099"])
 
     def test_kind_default_stays_on_the_normal_thread(self):
         import unittest.mock as m
         with m.patch.object(notify, "_post_discord", self._post):
-            notify.send("hi", owner="zbynek")
+            notify.send("hi", owner="david")
         self.assertEqual(self.posted, ["777001"])
 
     def test_kind_questions_falls_back_to_the_normal_thread_when_unconfigured(self):
-        del self.env["DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q"]
+        del self.env["DISCORD_NOTIFICATION_CHANNEL_DAVID_Q"]
         import unittest.mock as m
         with m.patch.object(notify, "_post_discord", self._post):
-            notify.send("hi", owner="zbynek", kind="questions")
+            notify.send("hi", owner="david", kind="questions")
         self.assertEqual(self.posted, ["777001"])
 
 

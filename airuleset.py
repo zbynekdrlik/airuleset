@@ -1692,7 +1692,7 @@ def cmd_notify(args):
                            to pin the real owner explicitly (#334).
     """
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
-                        notification_channel, resolve_owner,
+                        notification_channel, question_ping_off, resolve_owner,
                         resolve_project_channel, resolve_questions_channel,
                         send)
 
@@ -1757,6 +1757,17 @@ def cmd_notify(args):
 
     if getattr(args, "owner", False):
         sys.stdout.write(resolve_owner())
+        return
+
+    if getattr(args, "question_ping_off", False):
+        # #710: read-only predicate — does the resolved owner have ❓ QUESTION
+        # Discord delivery turned OFF (zbynek/marek)? Prints "1" (off) / "0"
+        # (on), always exit 0. hooks/notify-discord-send.sh consults this
+        # PER-TARGET (via AIRULESET_NOTIFY_OWNER="$T") to suppress the
+        # interactive ❓ ping for an off owner while leaving david untouched.
+        # An explicit --owner-name still overrides the tmux-resolved owner.
+        owner = (getattr(args, "owner_name", "") or "").strip() or resolve_owner()
+        sys.stdout.write("1" if question_ping_off(owner) else "0")
         return
 
     if getattr(args, "mention_prefix", False):
@@ -5735,6 +5746,13 @@ def main():
     p_notify.add_argument("--owner", dest="owner", action="store_true",
                           help="Print the resolved tmux owner (so a caller can resolve "
                                "once and pass AIRULESET_NOTIFY_OWNER to keep mention+channel in sync)")
+    p_notify.add_argument("--question-ping-off", dest="question_ping_off",
+                          action="store_true",
+                          help="#710: print '1' if the resolved owner has ❓ QUESTION "
+                               "Discord delivery turned OFF (zbynek/marek — they take "
+                               "questions in webterm + the footer 'U N'), else '0'. The "
+                               "interactive send hook consults this per-target to suppress "
+                               "an off owner's ❓ ping; david keeps full delivery")
     p_notify.add_argument("--mirror-owners", dest="mirror_owners", action="store_true",
                           help="Print the space-separated parallel/CC recipients for the "
                                "current owner (DISCORD_MIRROR_<OWNER>) — the shell send path "

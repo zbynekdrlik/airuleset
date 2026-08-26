@@ -183,9 +183,12 @@ class TestShellSendLogsEveryNonDelivery(_HomeIsolated):
         self._write_env(token=True, channel=True)
         d = _path_with_fake_curl("200")
         self.addCleanup(shutil.rmtree, d.split(os.pathsep)[0], True)
+        # #710: pin a NON-suppressed owner so the ❓ delivery path actually runs
+        # (a bare box resolves owner=zbynek, whose question delivery is now OFF;
+        # empty owner is never suppressed and falls to the shared channel).
         env = {**os.environ, "HOME": str(self.home), "ND_EMOJI": "❓",
                "ND_TEXT": "otazka", "ND_CWD": str(ROOT), "ND_CONFIRM": "1",
-               "PATH": d}
+               "AIRULESET_NOTIFY_OWNER": "", "PATH": d}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         r = subprocess.run(["bash", str(SEND_HOOK)], input="",
                            capture_output=True, text=True, env=env)

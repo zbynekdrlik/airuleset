@@ -339,6 +339,26 @@ if [ "$EMOJI" = "✅" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
     fi
 fi
 
+# #710: owner-scoped ❓ QUESTION-ping suppression — the interactive Stop-hook
+# transport (this file is reached via ND_EMOJI="❓" -> KIND="questions"). A ❓
+# ping whose PRIMARY owner has Discord question delivery OFF (zbynek/marek — they
+# take questions in webterm + the footer `U N`, not a phone ping) is SUPPRESSED
+# entirely (primary + any mirrors), never POSTed. PRIMARY-owner-scoped, matching
+# the Python `notify.send(kind="questions")` chokepoint exactly (both suppress
+# iff the primary owner is off — a mirror INTO an OFF owner from a delivering
+# primary does not occur in production: the david->zbynek question mirror is off
+# by design). Logged as an explicit `suppressed` delivery-log decision (never a
+# silent drop — the #546/#704 machine-channel pattern). Scoped to
+# KIND=="questions" so ✅ and every other emoji are untouched; david (and
+# david1-4 -> david) keeps FULL delivery. `_delivery_log` self-gates on dry-run,
+# so a preview stays silent AND reflects the suppression (no output). exit 0 so
+# the ❓ confirm path (send_q) records LASTQ instead of retrying every turn.
+if [ "$KIND" = "questions" ] \
+   && [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$PRIMARY_OWNER" 2>/dev/null || echo 0)" = "1" ]; then
+    _delivery_log "suppressed" "#710 question-ping-off owner=${PRIMARY_OWNER:-?}"
+    exit 0
+fi
+
 emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
 for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them
     [ -n "$T" ] || continue
