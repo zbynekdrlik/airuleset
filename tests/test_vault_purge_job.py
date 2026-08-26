@@ -220,14 +220,18 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # its own NEW trailing line, so the closing `):` moved off the
         # `conformance_hb_enabled=False` line — the anchor grew a last line;
         # the mutation target `vault_purge=None` is untouched.)
+        # #707 re-pin: `owner_decision_fetch=None` was REMOVED (the #461
+        # owner-decision digest class is retired — its run_once param and
+        # registry entry are gone), so `gk_selfservice_fetch=None` now sits
+        # alone on that line; the anchor shrank a middle line, the mutation
+        # target `vault_purge=None` is untouched.
         old = ("             vault_purge=None, vault_backstop=None, "
                "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
                "             ops_wait_fetch=None, i_members_fetch=None,\n"
                "             progress_dir=None, questions_path=None,\n"
-               "             owner_decision_fetch=None, "
-               "gk_selfservice_fetch=None,\n"
+               "             gk_selfservice_fetch=None,\n"
                "             u_reconcile_clear=None, conformance_root=None,\n"
                "             conformance_is_target=None, "
                "conformance_hb_enabled=False,\n"
@@ -246,8 +250,10 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
         # truncating replacement would drop later params whose body
-        # references sit outside a try/except (e.g. #461's own
-        # `if owner_decision_fetch is not None:` guard), NameError-ing the
+        # references sit outside a try/except (historically #461's own
+        # `if owner_decision_fetch is not None:` guard, a param since removed
+        # by #707; any bare registry gate closure has the same shape),
+        # NameError-ing the
         # mutant for a reason unrelated to the guard under test. Preserving
         # the whole signature is both correct and future-proof.
         mutated = src.replace(

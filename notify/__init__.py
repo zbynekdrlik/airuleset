@@ -2746,8 +2746,10 @@ SUPPRESSED_ALERT_PREFIXES = (
     # delivery-log line); job-35 covers a genuinely DEAD box. Measurement:
     # issue #704. DELIBERATELY NOT suppressed here: `waiting:` (it relays the
     # ACTUAL ❓ question text — a real question, kept), plus operational classes
-    # (net-drift / owner-decision-digest / conformance / janitor-stuck / gk* /
-    # dorphan / disk-headroom) left to a needs-user-decision follow-up.
+    # (net-drift / conformance / janitor-stuck / gk* / dorphan / disk-headroom)
+    # left to a needs-user-decision follow-up. (owner-decision-digest was on
+    # that deferred list until #707 delivered its owner decision — the entry
+    # below.)
     # HAZARD (no live collision — all managed repos checked): the `prefix + "-"`
     # boundary means a FUTURE repo whose NAME starts with one of these + a dash
     # (e.g. `stuck-main-tool`, `long-turn-x`) would have its run-card key
@@ -2762,6 +2764,22 @@ SUPPRESSED_ALERT_PREFIXES = (
     ("long-turn", "long-turn (#704)"),               # long_turn.py (over-fires on long CI waits)
     ("workingstall-giveup", "working-stall-giveup (#704)"),  # __init__.py job 4 escalate
     ("textcall-giveup", "textcall-stall-giveup (#704)"),     # __init__.py job 4 escalate
+    # #707 (2026-08-26 owner ruling): the DAILY OWNER-DECISION DIGEST class
+    # (#461) is ABOLISHED — the box-wide per-project ticket roundup was
+    # addressed to `account_owner` (the first-owner-seen pane-scan coin flip,
+    # no `owners_seen` ambiguity guard) and delivered montalu client-ticket
+    # content into David's thread on multi-owner dev2: a cross-subject
+    # information LEAK, not mere spam (#489 had gated only reduced-authority
+    # boxes). The producer (`watchdog/questions.py::
+    # reping_owner_decision_tickets`) is a permanent no-op tombstone; THIS
+    # entry is the belt-and-braces backstop so even STALE code on a
+    # not-yet-redeployed box can never ping. Same #546 audience split:
+    # machine channel keeps the decision (journal + the `suppressed`
+    # delivery-log line). It matches the class's own dedup_key
+    # (`owner-decision-digest:<day-bucket>`) — this layer is dedup_key-keyed
+    # by construction (see _suppressed_alert_class), so the true match needs
+    # no new message-prefix mechanism.
+    ("owner-decision-digest", "owner-decision-digest (#707)"),  # questions.py digest (owner-ruled leak)
 )
 
 
@@ -2814,8 +2832,9 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     every existing caller.
 
     #546: a `dedup_key` belonging to an owner-suppressed ALERT class
-    (`SUPPRESSED_ALERT_PREFIXES` — api-error / limit / token-burn, plus the
-    #676 oauth-revoke class) POSTs
+    (`SUPPRESSED_ALERT_PREFIXES` — api-error / limit / token-burn, the #676
+    oauth-revoke class, the #688/#693/#704 state-stall family and the #707
+    owner-decision-digest class) POSTs
     NOTHING and returns "suppressed" — logged as an explicit decision (never a
     silent drop), never dry-run-mutating. The gate runs FIRST so a suppressed
     class never claims a dedup marker, resolves a channel, or reaches the
