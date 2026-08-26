@@ -13,8 +13,8 @@ Layers, mirroring the #539 test shape:
       the #539 chained-I gate — both are the owner's court).
   (b) DISPLAY — a flagged action member shows `no-action!` (missing delivered
       ACTION notice), not `no-question!`.
-  (c) DIGEST — `needs-owner-action` is NOT in OWNER_DECISION_LABELS: the daily
-      owner-decision "Odpovedz prosím" re-ask does not spam a physical step.
+  (c) LABELS — `needs-owner-action` is NOT in OWNER_DECISION_LABELS (a step,
+      not a decision; the #461 digest is #707-RETIRED, job 32 still consumes).
   (d) DOCTRINE — statusline U + W bullets and autopilot SKILL Step-1 name the
       rule; the job-20 partition-audit nudge names the owner-blocked mis-shape so
       running loops fleet-wide re-label their own W tickets.
@@ -222,13 +222,13 @@ class OwnerActionNoQuestionFlag(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (c) DIGEST — action excluded from the daily owner-decision re-ask
+# (c) action excluded from OWNER_DECISION_LABELS (digest #707-retired; job 32)
 # --------------------------------------------------------------------------- #
 class OwnerActionExcludedFromDailyDigest(unittest.TestCase):
     def test_needs_owner_action_not_in_owner_decision_labels(self):
         self.assertNotIn("needs-owner-action", wd.OWNER_DECISION_LABELS,
-                         "#601: a physical owner step is NOT a decision to "
-                         "re-ask daily as a question")
+                         "#601: a physical owner step is NOT a decision "
+                         "(label set lives on for job 32 post-#707)")
 
     def test_owner_decision_labels_are_the_two_answer_decision_only(self):
         self.assertEqual(set(wd.OWNER_DECISION_LABELS),
