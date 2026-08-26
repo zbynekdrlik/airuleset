@@ -104,7 +104,9 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     never touched `/goal`, satisfied every existing gate, and got
     auto-armed ~2 minutes later -- the live incident this closes.
 
-    Combines TWO independent signals, EITHER sufficient to refuse:
+    Combines up to THREE independent signals, ANY sufficient to refuse (the
+    third, #731's attached-tmux-client input, only when a caller threads
+    `pane_target`/`run` -- see the note at the end of this docstring):
 
     1. The presence marker `/tmp/claude-user-active-<sid>` (stamped by
        `clear-question-dedup.sh` on UserPromptSubmit ONLY -- a `/goal`

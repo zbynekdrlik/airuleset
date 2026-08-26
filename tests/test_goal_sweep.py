@@ -2520,6 +2520,50 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
                          "a FOREIGN draft must be left completely untouched")
         self.assertTrue(any("leftover=not-ours" in ln for ln in logs), logs)
 
+    def test_attempt_cap_leftover_not_cleared_without_provenance(self):
+        # #731-review F1 -- own /goal text in the box but NO janitor provenance
+        # (no prior watchdog watch mark): _janitor_recover no-ops, the box stays
+        # dirty, so the journal must NOT claim leftover=cleared (the #134/#726
+        # honesty class). The leftover is READ BACK from the janitor verdict.
+        sid = "sess-cap-noprov"
+        proj, tmux, _state = self._preseed_at_cap(sid, "/goal x")
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                                   requests_path=self.reqp, state={},  # no watch mark
+                                   send_fn=lambda m, **k: None,
+                                   sleep_fn=lambda *a, **k: None)
+        self.assertEqual(tmux.box, "/goal x",
+                         "no provenance -> the janitor must not touch the box")
+        self.assertFalse(any("leftover=cleared" in ln for ln in logs),
+                         "must NOT assert cleared when the box was untouched: %s"
+                         % logs)
+
+    def test_attempt_cap_does_not_clear_a_busy_pane(self):
+        # #731-review F3 -- the cap-drop cleanup must NOT Escape/clear a pane
+        # rendering a live turn (a busy / non-input boundary): design B's
+        # `_classify_boundary=="input"` gate.
+        sid = "sess-cap-busy"
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        d = goal.load_goal_requests(self.reqp)
+        d[sid]["dl_fails"] = self._cap()
+        Path(self.reqp).write_text(json.dumps(d))
+        # a BUSY render (a running turn) — never a clean input boundary.
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_BUSY_CAP)
+        state = {"janitor_watch": {"%9": 2000}}
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                                   requests_path=self.reqp, state=state,
+                                   send_fn=lambda m, **k: None,
+                                   sleep_fn=lambda *a, **k: None)
+        self.assertEqual(tmux.sent, [],
+                         "a busy pane must get ZERO recovery keystrokes")
+        self.assertTrue(any("drop:attempt-cap" in ln for ln in logs), logs)
+        self.assertTrue(any("leftover=skipped" in ln for ln in logs), logs)
+
     # -------- D3: tmux client input is a human signal for ALL origins ---- #
     def test_client_active_defers_delivery(self):
         proj = self._dir()
