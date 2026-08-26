@@ -2103,7 +2103,8 @@ def ask_generation(rec):
 
 
 def record_question(message_id, channel, session, cwd, now=None, path=None,
-                    question="", asked_ts=None, grace_path=None):
+                    question="", asked_ts=None, grace_path=None,
+                    suppressed=False):
     """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
     `session` (transcript stem = CC session id) in `cwd`. Prunes malformed +
     over-cap entries in the same write (#368: no longer AGE — see the module
@@ -2143,7 +2144,25 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     message_id = str(message_id or "").strip()
     channel = str(channel or "").strip()
     session = str(session or "").strip()
-    if not message_id.isdigit() or not channel.isdigit() or not session:
+    if not session:
+        return False
+    if suppressed:
+        # #716: a Discord-less entry for a #710-suppressed owner (zbynek/marek).
+        # No Discord POST happened, so there is NO snowflake message-id/channel;
+        # the entry exists PURELY to fold the ticketless ❓ into the footer `U N`
+        # (statusbar.ticketless_question_pings reads only cwd/block/question).
+        # The key is SYNTHESISED here (a non-digit `suppressed:<session>`,
+        # never the caller's message_id) so a Mock/garbage id can never leak in
+        # — the incident-hardened digit guard is BYPASSED only on this explicit
+        # flag. Deterministic per session => an idempotent overwrite: the newest
+        # ticketless ❓ replaces the older (the normal supersede's "newest ask
+        # per session"), so the supersede loop below is SKIPPED (nothing to
+        # grace). channel="" so job 7's fetch-set build drops it via
+        # `q_channels.discard("")` and its non-snowflake key can never match a
+        # real reply_to (parse_discord_reply / _orphan_answer_reason).
+        message_id = "suppressed:" + session
+        channel = ""
+    elif not message_id.isdigit() or not channel.isdigit():
         return False
     now = time.time() if now is None else now
     if isinstance(asked_ts, bool) or not isinstance(asked_ts, (int, float)):
@@ -2158,6 +2177,11 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
                      "channel": str(channel or ""), "ts": int(now),
                      "asked": asked, "question": q, "block": block}
+    if suppressed:
+        # #716: self-documenting marker so the watchdog consumers (reping,
+        # orphan floor) and any future reader can identify a Discord-less
+        # entry explicitly instead of inferring it from the key shape.
+        d[message_id]["suppressed"] = True
     # #407: SUPERSEDE — the newest ASK per (session, channel) is the ONLY
     # tracked entry. A reworded ❓ past _EDIT_WINDOW_S cannot EDIT the old
     # Discord card any more (update_question refuses purely on age), so the
@@ -2189,11 +2213,18 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     # the statusline both read ONLY the main map. A _grace_put failure is
     # deliberately not fatal here — the supersede itself must still
     # happen (the live, newer ask wins the map either way).
-    for mid in [mm for mm, v in d.items()
-                if mm != message_id and isinstance(v, dict)
-                and str(v.get("session") or "") == session
-                and str(v.get("channel") or "") == channel
-                and ask_generation(v) <= asked]:
+    #
+    # #716: SKIPPED for a suppressed record — its deterministic per-session
+    # key already makes it a unique, idempotent overwrite (no sibling to
+    # supersede), and its channel="" would otherwise match ANY channel-less
+    # same-session entry and grace it away (a pre-#368 legacy delivered entry
+    # with a missing channel), removing a genuinely tracked question.
+    for mid in ([] if suppressed else
+                [mm for mm, v in d.items()
+                 if mm != message_id and isinstance(v, dict)
+                 and str(v.get("session") or "") == session
+                 and str(v.get("channel") or "") == channel
+                 and ask_generation(v) <= asked]):
         _grace_put(mid, d.get(mid), now=now,
                    path=grace_path if grace_path is not None
                    else _grace_path_for(path))
@@ -2215,6 +2246,31 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
                 key=lambda kv: kv[1].get("ts") or 0 if isinstance(kv[1], dict) else 0
         )[:len(d) - _QUESTIONS_MAX]:
             d.pop(mid, None)
+    return _save_questions(d, path)
+
+
+def touch_question(qid, now=None, path=None):
+    """#716: bump an EXISTING question-map entry's `ts` (and `asked`) to `now`
+    WITHOUT re-tracking it under a new message id. Used by
+    `reping_stale_questions` when a re-ask returns "suppressed" (a #710 OFF
+    owner takes the question in the footer `U N`, not a phone re-ping): the
+    entry STAYS folded into `U N`, but its due-clock is reset so the suppressed
+    re-attempt fires at most once per re-ask interval, never every 60s sweep.
+    Works for ANY key shape (a synthetic `suppressed:<session>` OR a real
+    snowflake whose owner became OFF after record time). Fail-safe; returns
+    True iff the entry existed and was bumped."""
+    qid = str(qid or "").strip()
+    if not qid:
+        return False
+    now = time.time() if now is None else now
+    d = load_questions(path)
+    rec = d.get(qid)
+    if not isinstance(rec, dict):
+        return False
+    # Only `ts` (the re-attempt clock reping's due-check reads) is bumped;
+    # `asked` (the ask GENERATION) stays stable — this is the SAME question
+    # re-timestamped, not a new ask.
+    rec["ts"] = int(now)
     return _save_questions(d, path)
 
 

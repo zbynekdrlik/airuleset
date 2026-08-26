@@ -1761,7 +1761,8 @@ def cmd_notify(args):
             except (OSError, ValueError):
                 q_text = ""
         ok = record_question(args.message_id, args.channel, args.session,
-                             args.cwd, question=q_text)
+                             args.cwd, question=q_text,
+                             suppressed=getattr(args, "suppressed", False))
         sys.stdout.write("recorded" if ok else "skip")
         return
 
@@ -5811,6 +5812,14 @@ def main():
                                "this flag stdin is NEVER touched — an "
                                "unconditional read blocked forever on an "
                                "inherited never-closing pipe")
+    p_notify.add_argument("--suppressed", dest="suppressed",
+                          action="store_true",
+                          help="With --record-question (#716): record a "
+                               "Discord-LESS 'suppressed' entry for a #710 "
+                               "OFF owner (zbynek/marek) so the ticketless ❓ "
+                               "still folds into the footer U N. No "
+                               "--message-id/--channel needed (a synthetic "
+                               "non-Discord key keyed on --session is used)")
     p_notify.add_argument("--edit-question", dest="edit_question",
                           action="store_true",
                           help="EDIT the session's recent ❓ ping in place with "

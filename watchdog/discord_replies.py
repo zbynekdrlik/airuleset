@@ -196,7 +196,14 @@ def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
     # instead of short-circuiting at the stale claim forever (worst case
     # of the release: one duplicate ⚠️ ping under a rare cross-process
     # race — strictly better than a permanently silent one).
-    if not dry_run and (st_o == "sent"
+    # #716: "suppressed" (a #710 OFF owner — zbynek/marek — whose orphan ping
+    # is a made-and-logged decision to NOT phone-ping) is a CONFIRMED terminal
+    # outcome exactly like "sent": mark it done so an orphaned reply to that
+    # owner's old own-box card does not re-log + re-attempt the (suppressed)
+    # ping every sweep while it is in the fetch window. The unconditional
+    # "reply orphaned" journal line above already fired once — never-silent —
+    # so marking done here suppresses the re-fire, not the record.
+    if not dry_run and (st_o == "sent" or st_o == "suppressed"
                         or (st_o == "dedup" and marker_delivered(dkey))):
         orphan_done_set.add(mid_o)
         orphan_done.append(mid_o)

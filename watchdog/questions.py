@@ -551,7 +551,7 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
     sweep retries -- a transient failure must never silently defer a whole
     day's worth of "ask again"."""
     from notify import (ask_generation, grace_question, load_questions,
-                        record_question, notification_channel)
+                        record_question, touch_question, notification_channel)
     reping = watchdog.QUESTION_REPING_S if reping is None else reping
     owner_by_sid = owner_by_sid or {}
     owner_by_cwd = owner_by_cwd or {}
@@ -589,6 +589,20 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
             dry_run=dry_run, return_message_id=True)
         logs.append("question-reping %s -> %s [%s]"
                     % (str(qid)[-6:], status, watchdog.project_label(cwd)))
+        if not dry_run and status == "suppressed":
+            # #716: a #710 OFF owner (zbynek/marek) takes questions in the
+            # footer `U N`, not a phone re-ping — send() POSTed nothing and
+            # returned "suppressed". Refresh the entry's ts so it is
+            # re-evaluated at most ONCE per re-ask interval, not every 60s
+            # sweep (which would emit one `suppressed` delivery-log + journal
+            # line per sweep, ~1440/day). The entry STAYS in the map (still
+            # folded into `U N`) until genuinely answered/pruned; it is never
+            # re-tracked with a new id (there is no Discord message) and never
+            # dropped. This is a re-ask CHOICE, not the transient failure the
+            # `status != "sent"` fall-through below treats every other
+            # non-"sent" status as.
+            touch_question(qid, now=now, path=path)
+            continue
         if dry_run or status != "sent":
             continue
         # Adversarial review (#368): drop the OLD key ONLY once the fresh
