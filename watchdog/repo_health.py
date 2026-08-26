@@ -186,7 +186,8 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
                          dry_run=False, git_run=None, delivery_probe=None,
                          owner_by_sid=None, project_by_sid=None,
                          stall=None, work_fresh=None, min_undelivered=None,
-                         reping=None, authority=None):
+                         reping=None, authority=None,
+                         owner_by_cwd=None, owners_seen=None, account_owner=""):
     """Job 24 — see the section comment.
 
     Gated on `delivery_probe` (the "wired = on" convention of jobs 8/11/16):
@@ -225,6 +226,13 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
         min_undelivered = DELIVERY_MIN_UNDELIVERED
     reping = DELIVERY_REPING_S if reping is None else reping
     owner_by_sid = owner_by_sid or {}
+    # #717: same multi-owner coin-flip guard as the repo-sweep jobs. The
+    # session's own pane owner (owner_by_sid[sid], then owner_by_cwd[cwd]) is
+    # the repo-derived answer; a miss on a multi-owner box SKIPs rather than
+    # falling to `owner=None` -> resolve_owner()'s box-wide coin flip (#707).
+    # An EMPTY/1-owner set is not ambiguous -> every pre-#717 caller unchanged.
+    owner_by_cwd = owner_by_cwd or {}
+    ambiguous = len(set(owners_seen or ())) > 1
     seen = dict(state.get("delivery_stall") or {})
     logs = []
     live = set()
@@ -268,6 +276,15 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
             # delivered, so a later sweep with a real notify path still owes
             # the user this alert (job 21's contract, reused verbatim).
             continue
+        # #717: resolve the recipient; a multi-owner box whose pane owner we
+        # cannot resolve SKIPs (logged, no dedup advance -> retries when the
+        # box becomes deliverable) rather than coin-flipping via owner=None.
+        derived = owner_by_sid.get(sid) or (owner_by_cwd.get(cwd) if cwd else None)
+        deliver, owner = _alert_recipient(derived, ambiguous, account_owner)
+        if not deliver:
+            logs.append("delivery-stall skip owner-ambiguous %s "
+                        "(multi-owner box)" % label)
+            continue
         blocker = ""
         if isinstance(info, dict) and info.get("pr"):
             blocker = "\n> Blokuje to PR #%s%s." % (
@@ -281,7 +298,7 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
             "jeden ticket.%s"
             % (label, days, st["undelivered"], st["base"].split("/")[-1],
                days, blocker),
-            owner=owner_by_sid.get(sid) or None,
+            owner=owner,   # #717: pane-derived / single-owner, never a coin flip
             dedup_key="delivery-stall:%s:%d" % (label, int(now // reping)),
             dry_run=dry_run)
         logs.append("delivery-stall PING %s -> %s" % (label, status))
@@ -491,11 +508,58 @@ NET_DRIFT_THRESHOLD = 10          # net > this pings; env AIRULESET_NET_DRIFT_TH
 # so this job no longer has (or needs) a `reping` knob.
 
 
+def _repo_owner_from_panes(root, owner_by_cwd):
+    """#717 -- the box's own answer to "who works THIS repo here": the UNIQUE
+    owner of a live pane whose cwd is AT or UNDER `root`. Returns that owner,
+    or None when NO pane sits in the repo OR more than one distinct owner does
+    (both are "not derivable" -> the caller falls back to the box single/multi-
+    owner guard). Path-segment aware (a sibling `/repos/cb-old` never matches
+    `/repos/cb`); `os.path.normpath` collapses a trailing slash / `.`. Never
+    raises. This is what lets a REPO-scoped alert deliver to the right owner
+    even on a multi-owner box, instead of a first-owner-seen coin flip (#707)."""
+    if not root or not owner_by_cwd:
+        return None
+    base = os.path.normpath(str(root))
+    prefix = base + os.sep
+    owners = set()
+    for cwd, owner in owner_by_cwd.items():
+        if not owner or not cwd:
+            continue
+        c = os.path.normpath(str(cwd))
+        if c == base or c.startswith(prefix):
+            owners.add(owner)
+    return next(iter(owners)) if len(owners) == 1 else None
+
+
+def _alert_recipient(derived, ambiguous, account_owner):
+    """#717 / #707 doctrine -- the recipient for a box-level repo-health alert
+    on a possibly multi-owner box. Returns `(deliver, owner)`:
+
+    - a repo/session-DERIVED owner (a live pane's owner for THIS repo) is
+      always unambiguous -> `(True, derived)`;
+    - else on a SINGLE-owner box `account_owner` is a reliable answer ->
+      `(True, account_owner or None)` (a zero-owner box collapses to owner
+      None -> the shared channel, the pre-#717 behaviour, unchanged);
+    - else the box is MULTI-owner with no derived owner -> `account_owner`
+      would be the first-owner-seen COIN FLIP (#707), so DO NOT deliver:
+      `(False, None)`, and the caller logs the skip (machine channel, never a
+      wrong-owner @mention). This mirrors the `("" if ambiguous else
+      account_owner)` guard `deliver_pending_done`/`reping_stale_questions`
+      already carry, made strict: a genuinely-ambiguous alert is skipped +
+      logged, not routed to a guessed owner."""
+    if derived:
+        return True, derived
+    if not ambiguous:
+        return True, (account_owner or None)
+    return False, None
+
+
 def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                     issue_counts_fetch=None, git_run=None, threshold=None,
                     window=NET_DRIFT_WINDOW_S,
                     interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
-                    max_repos=None, episode_gate=None):
+                    max_repos=None, episode_gate=None,
+                    owner_by_cwd=None, owners_seen=None, account_owner=""):
     """Job 27 -- see the section comment. `issue_counts_fetch(repo_label,
     window_s) -> (opened, closed) | None` -- None means unmeasurable (no gh
     auth, rate-limited, repo not on GitHub) and is never treated as a stall.
@@ -543,6 +607,12 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
         except ValueError:
             threshold = NET_DRIFT_THRESHOLD
     persist = persist or (lambda: None)
+    # #717: on a MULTI-owner box (>1 owner with a pane here) the account-wide
+    # owner is a first-owner-seen coin flip; an alert with no repo-derived
+    # owner must not ping a guessed person. An EMPTY/1-owner set is NOT
+    # ambiguous, so every pre-#717 caller (owners_seen=None) is unchanged.
+    ambiguous = len(set(owners_seen or ())) > 1
+    owner_by_cwd = owner_by_cwd or {}
     logs = []
     if not _sweep_due(state, "net_drift_last_sweep", now, interval):
         return logs
@@ -583,6 +653,17 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
             # so a later real sweep still owes the onset). Measurement is
             # already logged above for diagnostics.
             continue
+        # #717: resolve the recipient BEFORE the gate. A multi-owner box with
+        # no pane in this repo has no unambiguous owner -> SKIP to the machine
+        # channel (logged) WITHOUT consulting the gate, so the episode stays
+        # fresh and fires an onset once the box becomes deliverable -- the
+        # same "no delivery path -> don't observe" shape as the branch above.
+        deliver, owner = _alert_recipient(
+            _repo_owner_from_panes(root, owner_by_cwd), ambiguous, account_owner)
+        if not deliver:
+            logs.append("net-drift skip owner-ambiguous %s "
+                        "(multi-owner box, no repo pane)" % label)
+            continue
         healthy = net <= threshold
         decision = gate("net-drift:%s" % label, healthy, now=now)
         logs.append("net-drift GATE %s -> %s" % (label, decision))
@@ -593,6 +674,7 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                 "> Za poslednych 7 dni pribudlo %d novych a zavrelo sa len %d -- "
                 "backlog rastie rychlejsie, ako sa stiha spracovavat."
                 % (label, net, opened, closed),
+                owner=owner,   # #717: repo-derived / single-owner, never a coin flip
                 # send-layer key is FRESH per instant (int(now), the gk_request
                 # / #535 / #543 pattern), never a coarser bucket than the gate's
                 # own primary dedup -- else notify's TTL would swallow a genuine
@@ -607,6 +689,7 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                 "ticketov -- backlog sa vratil pod kontrolu (predtym nahlaseny "
                 "rast je vyrieseny)."
                 % (label, opened, closed),
+                owner=owner,   # #717
                 dedup_key="net-drift-recover:%s:%d" % (label, int(now)),
                 dry_run=dry_run)
             logs.append("net-drift RECOVER %s -> %s" % (label, status))
@@ -647,7 +730,8 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                      git_run=None, git_fetch=None, age_threshold=None,
                      ahead_threshold=None,
                      interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
-                     max_repos=None, episode_gate=None):
+                     max_repos=None, episode_gate=None,
+                     owner_by_cwd=None, owners_seen=None, account_owner=""):
     """Job 28 -- see the section comment. `git_fetch(root)` is called (best-
     effort before this pass -- see the #172 reopened note below) before
     reading refs, since no live session may have fetched this repo recently
@@ -701,6 +785,10 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
             ahead_threshold = STUCK_MAIN_AHEAD_MIN
     persist = persist or (lambda: None)
     gate = episode_gate if episode_gate is not None else notify.episode_gate
+    # #717: same multi-owner coin-flip guard as net_drift_alarm -- an EMPTY/
+    # 1-owner set is not ambiguous, so every pre-#717 caller is unchanged.
+    ambiguous = len(set(owners_seen or ())) > 1
+    owner_by_cwd = owner_by_cwd or {}
     logs = []
     if not _sweep_due(state, "stuck_main_last_sweep", now, interval):
         return logs
@@ -753,6 +841,16 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                                  # gate (#516 dry-run store guard; a `send_fn
                                  # is None` sweep delivered nothing, so a later
                                  # real sweep still owes the onset)
+        # #717: resolve the recipient BEFORE the gate (see net_drift_alarm's
+        # matching comment) -- a multi-owner box with no pane in this repo has
+        # no unambiguous owner, so SKIP to the machine channel (logged) rather
+        # than coin-flip the alert, and leave the episode fresh.
+        deliver, owner = _alert_recipient(
+            _repo_owner_from_panes(root, owner_by_cwd), ambiguous, account_owner)
+        if not deliver:
+            logs.append("stuck-main skip owner-ambiguous %s "
+                        "(multi-owner box, no repo pane)" % label)
+            continue
         healthy = not stalled
         decision = gate("stuck-main:%s" % label, healthy, now=now)
         logs.append("stuck-main GATE %s -> %s" % (label, decision))
@@ -764,6 +862,7 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                 "> Praca sa hromadi na pracovnej vetve, ale do %s sa uz %d dni nic "
                 "nezluilo -- skontroluj, ci nie je zablokovany merge/PR."
                 % (label, base, days, st["undelivered"], base, days),
+                owner=owner,   # #717: repo-derived / single-owner, never a coin flip
                 # FRESH per-instant key (#535/#543) -- never a bucket that
                 # notify's TTL could use to swallow a new episode's re-open.
                 dedup_key="stuck-main-open:%s:%d" % (label, int(now)),
@@ -775,6 +874,7 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                 "> Do %s sa uz zlucuje -- predtym nahlaseny zablokovany merge "
                 "je vyrieseny."
                 % (label, base, base),
+                owner=owner,   # #717
                 dedup_key="stuck-main-recover:%s:%d" % (label, int(now)),
                 dry_run=dry_run)
             logs.append("stuck-main RECOVER %s -> %s" % (label, status))
