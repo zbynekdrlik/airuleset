@@ -68,6 +68,28 @@ BLOCK_LOG_PATH = Path("/tmp/airuleset-main-exec-block-%d.log" % os.getuid())
 BYPASS_LOG_PATH = Path("/tmp/airuleset-main-exec-bypass-%d.log" % os.getuid())
 
 
+def _isolated_exec_logs(testcase):
+    """#732: the hook's block/bypass audit logs are the ONLY cross-SESSION
+    shared artifacts it writes — everything else (bypass markers, run
+    counter, presence marker) is SID-keyed and thus unique per session. On
+    the push-gate box the suite runs on a LIVE dev1 where concurrent worker
+    lanes + the supervisor session (all the SAME UID) genuinely arm/consume
+    bypass markers, appending to the SAME per-uid log MID-SUITE — so a test
+    that counts WHOLE-FILE log lines miscounts (the `2 != 1` false push-block,
+    incident 2026-08-26). This hands the test its OWN throwaway log dir;
+    passing it to the hook as AIRULESET_MAIN_EXEC_LOG_DIR redirects BOTH logs
+    there, so no concurrent real fleet session can touch the file this test
+    reads. Returns `(dir, block_log, bypass_log)`; the temp dir outlives the
+    subprocess (cleaned at testcase teardown, never inside the hook run)."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    base = Path(d.name)
+    uid = os.getuid()
+    return (base,
+            base / ("airuleset-main-exec-block-%d.log" % uid),
+            base / ("airuleset-main-exec-bypass-%d.log" % uid))
+
+
 def _entry(role_type, content, **extra):
     d = {"type": role_type}
     d.update(extra)
@@ -1377,13 +1399,20 @@ class BypassCarriesAReason128(unittest.TestCase):
         return Path("/tmp/airuleset-%s-exec-ok-%s"
                     % ("fable" if legacy else "main", sid))
 
-    def _run(self, sid, command="grep -rn 'TODO' ."):
+    def _run(self, sid, command="grep -rn 'TODO' .", logdir=None):
+        # #732: `logdir` set -> redirect BOTH audit logs into a dir this test
+        # owns (via AIRULESET_MAIN_EXEC_LOG_DIR), so a whole-file log count is
+        # immune to concurrent fleet bypasses. None -> the real shared /tmp
+        # path, unchanged.
         helper = MainImplementationGuard()
+        extra_env = ({"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)}
+                     if logdir is not None else None)
         return helper._run(tool="Bash", command=command, sid=sid,
-                           transcript_text=goal_armed_transcript())
+                           transcript_text=goal_armed_transcript(),
+                           extra_env=extra_env)
 
-    def _bypass_lines(self, sid):
-        log = BYPASS_LOG_PATH
+    def _bypass_lines(self, sid, log=None):
+        log = log if log is not None else BYPASS_LOG_PATH
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
@@ -1462,6 +1491,38 @@ class BypassCarriesAReason128(unittest.TestCase):
         self.assertEqual(len(after) - before, 1,
                          "one bypass = exactly one log line")
         self.assertIn("first line of the reason", after[-1])
+
+    def test_bypass_log_is_redirected_to_an_isolated_dir(self):
+        # #732 regression — PROVES the pollution vector + its fix. The block/
+        # bypass logs are the ONLY cross-SESSION-shared artifacts this hook
+        # writes (everything else is SID-keyed). On the push-gate box,
+        # concurrent lanes + the supervisor (same UID) append to the SAME
+        # per-uid bypass log MID-SUITE, so the whole-file count in the test
+        # above miscounted (the `2 != 1` false push-block, 2026-08-26). Proof
+        # the count is hermetic: with the log redirected into a dir THIS test
+        # owns, the multiline bypass lands there — flattened to EXACTLY ONE
+        # physical line (the newline-split teeth are kept, not weakened) — and
+        # NEVER in the real shared log a concurrent fleet session also writes,
+        # so no concurrent write can change what this test counts.
+        #
+        # RED on unpatched code: the hook ignores AIRULESET_MAIN_EXEC_LOG_DIR,
+        # so the bypass line goes to the real /tmp log, the isolated log stays
+        # empty (0 != 1), and the real-log assertion below also trips.
+        logdir, _block, bypass = _isolated_exec_logs(self)
+        sid = "t-mg-reason-isolated-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("first line of the reason\nsecond line\nthird")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid, logdir=logdir)
+        mine = bypass.read_text().splitlines() if bypass.exists() else []
+        self.assertEqual(len(mine), 1,
+                         "the bypass must be logged to the ISOLATED dir, "
+                         "flattened to exactly one physical line — redirected "
+                         "off the shared per-uid log")
+        self.assertIn("first line of the reason", mine[0])
+        self.assertFalse(self._bypass_lines(sid),
+                         "a redirected bypass must never touch the real shared "
+                         "log a concurrent fleet session writes")
 
     def test_legacy_marker_needs_a_reason_too(self):
         sid = "t-mg-reason-legacy-" + uuid.uuid4().hex[:8]
