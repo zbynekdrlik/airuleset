@@ -301,12 +301,18 @@ is the FIRST rule for a reason).
   thread lifecycle, never a second mechanism. A long / resolved /
   multi-topic thread is CLOSED — the #627 bullet above, never left to grow
   forever; THIS bullet's job is to peel a new topic off the moment it
-  appears, before the thread ever reaches that state. Precedent: odoo-erp
-  #5319 (the new topic from msg 1724252/1724253 split out with the
-  triggering messages copied across), closure of thread 257 via msg
-  1743448.
+  appears, before the thread ever reaches that state. When the triggering
+  new-topic message is ALSO the client's not-yet-reacted-to last message
+  (the „React to the client's previous answer FIRST" bullet above, #625),
+  a brief APPROVED acknowledgement posted in the EXISTING thread —
+  pointing to the new ticket/thread, never developing the new topic itself
+  there — satisfies #625 without violating this bullet; that
+  acknowledgement is a normal client-facing message and needs the SAME
+  owner approval as any other. Precedent: odoo-erp #5319 (the new topic
+  from msg 1724252/1724253 split out with the triggering messages copied
+  across), closure of thread 257 via msg 1743448.
 
-Each new thread this doctrine creates still follows the existing channel
+Every thread this file governs still follows the existing channel
 placement rule: a sub-thread under the channel the owner named (montalu:
 IT-support) — never a new top-level channel or group chat (see `## Channel +
 recipients` in `SKILL.md`). Ask the owner ONE decision at a time, and re-ask a

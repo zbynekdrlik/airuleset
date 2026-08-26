@@ -171,6 +171,19 @@ class TestNewTopicCoreRule(_CompanionBase):
         self.assertNotIn("Dobrý deň / Ahoj", w)
         self.assertNotIn("Discuss-defer: siblings", w)
 
+    def test_625_interaction_resolved_without_a_loophole(self):
+        # Review finding (fresh-context adversarial pass): the #625 "react
+        # to the client's previous answer FIRST" bullet can collide with
+        # this one when the client's own last message IS the new topic.
+        # The resolution must stay narrow (a brief APPROVED acknowledgement
+        # in the existing thread, never developing the new topic there) and
+        # must NOT read as an approval bypass.
+        w = self._window(self.START)
+        self.assertIn("#625", w)
+        self.assertIn("brief APPROVED acknowledgement", w)
+        self.assertIn("never developing the new topic itself", w)
+        self.assertIn("needs the SAME owner approval as any other", w)
+
 
 class TestClosureBulletStillPresentUnchanged(_CompanionBase):
     """The pre-existing #627 closure doctrine (lines ~247-273 pre-#728) must
@@ -188,15 +201,33 @@ class TestClosureBulletStillPresentUnchanged(_CompanionBase):
 class TestChannelPlacementParagraphSurvives(_CompanionBase):
     """The pre-#728 channel-placement guidance (sub-thread under the owner's
     named channel, ask one decision at a time) must still be present -- the
-    expansion must not have silently dropped it."""
+    expansion must not have silently dropped it.
+
+    Review finding (fresh-context adversarial pass on this ticket): "sub-
+    thread under the channel the owner named" now appears TWICE in the
+    file -- once inside the lifecycle bullet's historical quote of the
+    PRE-#728 wording, and once in this closing paragraph. A whole-file
+    assertIn on that phrase alone would keep passing even if a partial
+    edit dropped it from the closing paragraph (it would still match the
+    quote). Fix: bound the window to the closing paragraph's OWN unique
+    start anchor ("Every thread this file governs") through end-of-file,
+    so the check can only be satisfied by the closing paragraph itself."""
+
+    START = "Every thread this file governs"
+
+    def _closing_window(self):
+        i = self.raw.index(self.START)
+        return norm(self.raw[i:])
 
     def test_channel_placement_kept(self):
-        self.assertIn("sub-thread under the channel the owner named", self.t)
-        self.assertIn("never a new top-level channel or group chat", self.t)
-        self.assertIn("Channel + recipients", self.t)
+        w = self._closing_window()
+        self.assertIn("sub-thread under the channel the owner named", w)
+        self.assertIn("never a new top-level channel or group chat", w)
+        self.assertIn("Channel + recipients", w)
 
     def test_ask_one_decision_kept(self):
-        self.assertIn("Ask the owner ONE decision at a time", self.t)
+        w = self._closing_window()
+        self.assertIn("Ask the owner ONE decision at a time", w)
 
 
 if __name__ == "__main__":
