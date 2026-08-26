@@ -85,6 +85,32 @@ class TestChannelOwnerResolver(unittest.TestCase):
         env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_P_MONTALU": "888888"}
         self.assertIsNone(notify.channel_owner("888888", env))
 
+    def test_shared_id_channel_never_resolves_even_with_one_discovered_owner(self):
+        # #725 review (Fable finding 7): a `ch` equal to the SHARED
+        # DISCORD_NOTIFICATION_CHANNEL_ID must NEVER resolve to a single
+        # owner, even when only ONE owner is discovered from the env -- an
+        # owner with NO configured key at all also falls through to the
+        # shared channel and would never be "discovered", so a unique
+        # DISCOVERED match there is not a genuine unique DERIVATION.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "900001",
+              "DISCORD_NOTIFICATION_CHANNEL_ID": "900001"}
+        self.assertIsNone(notify.channel_owner("900001", env))
+
+    def test_shared_id_channel_never_resolves_with_two_discovered_owners(self):
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "900002",
+              "DISCORD_NOTIFICATION_CHANNEL_MAREK_Q": "900003",
+              "DISCORD_NOTIFICATION_CHANNEL_ID": "900004"}
+        self.assertIsNone(notify.channel_owner("900004", env))
+
+    def test_q_key_takes_precedence_so_the_plain_value_alone_resolves_none(self):
+        # an owner with BOTH a _Q key and a (different) plain key cascades to
+        # the _Q value first -- the plain value is then unclaimed by them,
+        # and (with no other owner claiming it either) resolves to None.
+        env = {"DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "900005",
+              "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "900006"}
+        self.assertEqual(notify.channel_owner("900005", env), "zbynek")
+        self.assertIsNone(notify.channel_owner("900006", env))
+
 
 # --------------------------------------------------------------------------- #
 # 2. _orphan_floor wiring -- the routing fix at the actual call site

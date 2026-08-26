@@ -189,11 +189,16 @@ def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
     # `resolve_owner()` (the calling PROCESS's own tmux session group, a coin
     # flip on a multi-owner box unrelated to which owner's `-q` thread this
     # orphaned card actually lives in). An unresolvable channel (unconfigured,
-    # or ambiguous — two owners sharing the same channel) is an explicit
-    # decision, not a silent fallback: skip the send, log it, and leave the
-    # message OFF `orphan_done` so a later config fix can still resolve it —
-    # the unconditional "reply orphaned" line above already satisfied the
-    # #449 never-silent floor.
+    # ambiguous — two owners sharing the same channel, or the SHARED fallback
+    # channel, which is never owner-specific — see channel_owner()'s own
+    # docstring) is an explicit decision, not a silent fallback: skip the
+    # send, log it, and leave the message OFF `orphan_done` so a later config
+    # fix can still resolve it — the unconditional "reply orphaned" line
+    # above already satisfied the #449 never-silent floor. This re-logs
+    # "owner unresolved" every sweep the message stays in the fetch window
+    # (bounded by the SAME grace/prune window every other non-terminal
+    # outcome here already re-logs under — "no-config"/"error"/undelivered
+    # "dedup" are not marked done either; this is not a NEW churn class).
     owner = channel_owner(ch, env=env)
     if owner is None:
         logs.append("reply orphan owner unresolved [%s]" % ch)
