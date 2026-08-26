@@ -353,9 +353,14 @@ fi
 # david1-4 -> david) keeps FULL delivery. `_delivery_log` self-gates on dry-run,
 # so a preview stays silent AND reflects the suppression (no output). exit 0 so
 # the ❓ confirm path (send_q) records LASTQ instead of retrying every turn.
-if [ "$KIND" = "questions" ] \
+# Only when the PRIMARY owner is non-empty: an empty owner is never off (the
+# CLI would fall back to resolve_owner() and could pick up the box's tmux owner
+# — e.g. zbynek — wrongly suppressing an empty-owner send that would otherwise
+# deliver to the shared fallback channel). The reason is a SINGLE field token
+# (no spaces — the delivery-log line has a trailing `qhash=` field).
+if [ "$KIND" = "questions" ] && [ -n "$PRIMARY_OWNER" ] \
    && [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$PRIMARY_OWNER" 2>/dev/null || echo 0)" = "1" ]; then
-    _delivery_log "suppressed" "#710 question-ping-off owner=${PRIMARY_OWNER:-?}"
+    _delivery_log "suppressed" "#710-question-ping-off-owner=${PRIMARY_OWNER}"
     exit 0
 fi
 

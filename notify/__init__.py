@@ -350,12 +350,17 @@ def stream_redirect(raw_owner):
 
 # #710 (owner directive 2026-08-26): owners whose ❓ QUESTION Discord delivery is
 # turned OFF — they take questions in webterm + the footer `U N` (in-session ❓
-# markers + the #606 step-by-step delivery), NOT a phone ping. Only DISCORD
-# DELIVERY of a `kind="questions"` ping is suppressed for these owners; the
-# session ❓ marker discipline, the `discord-questions.json` map, `needs-answer`
-# tracking and the footer `U N` partition are ALL untouched. Owner `david` (and
-# david1-4 -> `david`) keeps FULL question delivery, so it is deliberately NOT in
-# this set.
+# markers + the #606 step-by-step delivery), NOT a phone ping. The DISCORD POST
+# of a `kind="questions"` ping is suppressed for these owners; the session ❓
+# marker discipline, the question-map CODE and `needs-answer` tracking are
+# untouched, and a TICKET-CARRYING question still folds into the footer `U N`
+# via its `needs-answer` label. KNOWN bounded gap (#716): a genuinely TICKETLESS
+# ❓ is no longer recorded in `discord-questions.json` (the record is coupled to
+# a successful Discord POST via the returned message-id, which `record_question`
+# requires to be a real snowflake), so it surfaces only in webterm (the session
+# ❓ marker), not the `U N` ticketless fold — #716 preserves that fold. Owner
+# `david` (and david1-4 -> `david`) keeps FULL question delivery, so it is
+# deliberately NOT in this set.
 QUESTION_PING_OWNERS_OFF = frozenset({"zbynek", "marek"})
 
 

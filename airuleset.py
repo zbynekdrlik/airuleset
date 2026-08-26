@@ -1714,6 +1714,7 @@ def cmd_notify(args):
             ("--project-label", getattr(args, "project_label", False)),
             ("--newest-card", getattr(args, "newest_card", False)),
             ("--mention-prefix", getattr(args, "mention_prefix", False)),
+            ("--question-ping-off", getattr(args, "question_ping_off", False)),
         ) if on]
         if _query_only:
             print("notify --run-card: %s is a read-only query flag, not a send "
@@ -1762,10 +1763,12 @@ def cmd_notify(args):
     if getattr(args, "question_ping_off", False):
         # #710: read-only predicate — does the resolved owner have ❓ QUESTION
         # Discord delivery turned OFF (zbynek/marek)? Prints "1" (off) / "0"
-        # (on), always exit 0. hooks/notify-discord-send.sh consults this
-        # PER-TARGET (via AIRULESET_NOTIFY_OWNER="$T") to suppress the
-        # interactive ❓ ping for an off owner while leaving david untouched.
-        # An explicit --owner-name still overrides the tmux-resolved owner.
+        # (on), always exit 0. hooks/notify-discord-send.sh consults this ONCE
+        # for the PRIMARY owner (passed via --owner-name "$PRIMARY_OWNER"),
+        # before the emit loop, to suppress the interactive ❓ ping for an off
+        # owner while leaving david untouched — primary-owner-scoped, matching
+        # the notify.send(kind="questions") chokepoint. An explicit --owner-name
+        # overrides the tmux-resolved owner (empty falls back to resolve_owner).
         owner = (getattr(args, "owner_name", "") or "").strip() or resolve_owner()
         sys.stdout.write("1" if question_ping_off(owner) else "0")
         return
@@ -5751,8 +5754,9 @@ def main():
                           help="#710: print '1' if the resolved owner has ❓ QUESTION "
                                "Discord delivery turned OFF (zbynek/marek — they take "
                                "questions in webterm + the footer 'U N'), else '0'. The "
-                               "interactive send hook consults this per-target to suppress "
-                               "an off owner's ❓ ping; david keeps full delivery")
+                               "interactive send hook consults this once for the PRIMARY "
+                               "owner to suppress an off owner's ❓ ping; david keeps "
+                               "full delivery")
     p_notify.add_argument("--mirror-owners", dest="mirror_owners", action="store_true",
                           help="Print the space-separated parallel/CC recipients for the "
                                "current owner (DISCORD_MIRROR_<OWNER>) — the shell send path "
