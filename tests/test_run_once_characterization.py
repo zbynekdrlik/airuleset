@@ -2,7 +2,7 @@
 
 `watchdog/__init__.py::run_once` is a 2012-line sweep that runs a fused
 per-transcript PANE LOOP (jobs 1-7,10) and then a fixed sequence of STANDALONE
-job invocations (jobs 3/5/7 + their #368/#461 extensions, then jobs 8→29). Each
+job invocations (jobs 3/5/7 + their #368 extension, then jobs 8→29). Each
 standalone job has the identical shape::
 
     if <gate>:
@@ -111,7 +111,7 @@ CANONICAL_SWEEP = [
     # pane loop entry (always; must be first)
     JobSpec("list_claude_panes", "wd", "list_claude_panes", None, None, "empty", None),
 
-    # jobs 3 / 5 / 7 + #368 / #461 extensions (post-loop, pre-job-8)
+    # jobs 3 / 5 / 7 + the #368 extension (post-loop, pre-job-8)
     JobSpec("check_usage", "wd", "check_usage", "usage_fetch", _stub_fetch, "none", ""),
     JobSpec("deliver_pending_done", "wd", "deliver_pending_done", None, None, "list", ""),
     JobSpec("deliver_discord_replies", "wd", "deliver_discord_replies",
@@ -120,8 +120,8 @@ CANONICAL_SWEEP = [
             None, None, "list", "question-prune error"),
     JobSpec("reping_stale_questions", "wd", "reping_stale_questions",
             None, None, "list", "question-reping error"),
-    JobSpec("reping_owner_decision_tickets", "wd", "reping_owner_decision_tickets",
-            "owner_decision_fetch", _stub_fetch, "list", "owner-decision-digest error"),
+    # (#461's reping_owner_decision_tickets JobSpec was RETIRED by #707 —
+    # the digest job, its gate param and registry entry no longer exist.)
 
     # jobs 8 → 30 (standalone registry)
     JobSpec("bounce_backstop", "wd", "bounce_backstop",

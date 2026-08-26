@@ -1,11 +1,11 @@
 """Question-lifecycle JOB family + owner-answer/foreign-session helpers
 (issue #433 item G, step 7).
 
-Extracted VERBATIM from ``watchdog/__init__.py``: the prune / re-ping /
-owner-decision-digest jobs (``prune_answered_questions``,
-``reping_stale_questions``, ``reping_owner_decision_tickets`` and their
-``_fetch_owner_decision_tickets`` / ``_owner_decision_digest_block`` /
-``_in_sleep_window`` helpers), the ``#449`` never-silent owner-answer floor
+Extracted VERBATIM from ``watchdog/__init__.py``: the prune / re-ping jobs
+(``prune_answered_questions``, ``reping_stale_questions`` and their
+``_in_sleep_window`` helper — plus the ``reping_owner_decision_tickets``
+tombstone, a permanent no-op since ``#707`` retired the owner-decision
+digest), the ``#449`` never-silent owner-answer floor
 (``_orphan_answer_reason`` / ``_orphan_ping_text``), the FOREIGN-user hosted-map
 helpers (``_foreign_user`` / ``_foreign_session_info`` / ``_foreign_questions`` /
 ``_foreign_drop_question``), and the transcript-timestamp readers those jobs use
@@ -17,7 +17,7 @@ This is the question-lifecycle family, distinct from job 7's live DELIVERY flow
 Direction: BACK-REFERENCE (``import watchdog`` + call-time ``watchdog.<name>``).
 Every reference to a name that was a top-level ``watchdog`` name before the split
 -- co-moved step-7 helpers (``_in_sleep_window``, ``_last_human_prompt_ts``,
-``_transcript_for_session``, ``_owner_decision_digest_block``), an
+``_transcript_for_session``), an
 ``__init__``-resident constant (``ORPHAN_ANSWER_WINDOW_S``, ``QUESTION_REPING_S``,
 ``OWNER_DECISION_LABELS``, ``AUTOPILOT_SKIP_EXCL``, ``_MACHINE_PROMPT_EXACT``,
 ``_MACHINE_PROMPT_PREFIXES``, ``_COMPACT_CONTINUATION_PREFIX``, ``_REAL_TURN_TYPES``),
@@ -626,166 +626,39 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
     return logs
 
 
-def _fetch_owner_decision_tickets(home=None):
-    """Open owner-decision tickets across this box's recently-worked repos, as
-    a sorted list of (repo_name, number, title). Returns None ONLY when EVERY
-    repo query failed (unmeasurable -- an auth/network hiccup must never look
-    like 'no decisions pending' and record the day-bucket, silencing the
-    digest; mirrors #199/#172's 'never guess from a failed read'). A genuinely
-    empty result -- queries ran, nothing labelled, or no repos at all --
-    returns []."""
-    import subprocess
-    env = watchdog._gh_env(home)
-    # comma-OR within the label qualifier (verified-live label-family behaviour,
-    # internals #399/#181) UNIONs the two labels; AUTOPILOT_SKIP_EXCL drops a
-    # ticket the owner has deliberately set aside / an ops-channel.
-    search = ("label:%s " % ",".join(watchdog.OWNER_DECISION_LABELS)
-              + watchdog.AUTOPILOT_SKIP_EXCL).strip()
-    out = []
-    any_ok = False
-    roots = watchdog._cache_repo_roots(home)
-    for root, name in sorted(roots.items()):
-        try:
-            r = subprocess.run(
-                ["gh", "issue", "list", "--state", "open", "--search",
-                 search, "-L", "100", "--json", "number,title"],
-                cwd=root, env=env, capture_output=True, text=True, timeout=8)
-            if r.returncode != 0:
-                continue                       # this repo failed -- try the rest
-            any_ok = True
-            for x in json.loads(r.stdout):
-                out.append((name, int(x["number"]),
-                            str(x.get("title") or "").strip()))
-        except Exception:
-            continue                           # one repo never kills the digest
-    if roots and not any_ok:
-        return None                            # every query failed -> unmeasurable
-    return sorted(out)
 
 
-def _owner_decision_digest_block(tickets, limit=12):
-    """The Slovak, phone-readable, self-contained digest body. NOT a session
-    `❓` marker (this is posted directly to Discord by send_fn, never via a
-    Stop-hook), so it carries no `NEEDS YOU` keyword. `limit` caps the listed
-    tickets (the rest collapse into one honest '…a ďalších K' line) so the
-    WORST case -- long repo names + 80-char titles + header/footer -- stays
-    under notify's `_MAX_CONTENT` (1900) forwarding cap: 12 lines is ~1.6 KB,
-    comfortably clear, whereas 15 could reach ~1.9 KB and silently drop the
-    tail tickets AND the 'Odpovedz prosím' footer mid-truncation."""
-    n = len(tickets)
-    lines = [
-        "**Rozhodnutia čakajúce na teba (denný súhrn):**",
-        "",
-        "Týchto %d ticketov je dlhodobo BLOKOVANÝCH na tvojom rozhodnutí — "
-        "nikto ich nevie posunúť ďalej, kým neodpovieš:" % n,
-        "",
-    ]
-    for repo, num, title in tickets[:limit]:
-        t = (title or "").replace("\n", " ").strip()
-        if len(t) > 80:
-            t = t[:77] + "…"
-        lines.append("- %s #%d%s" % (repo, num, (" — " + t) if t else ""))
-    if n > limit:
-        lines.append("- … a ďalších %d" % (n - limit))
-    lines += [
-        "",
-        "Odpovedz prosím na konkrétny ticket (v session, ktorá ho rieši, "
-        "alebo komentárom na #N).",
-    ]
-    return "\n".join(lines)
+def reping_owner_decision_tickets(*_args, **_kwargs):
+    """PERMANENT NO-OP -- the daily owner-decision digest (#461) is RETIRED
+    (#707, owner ruling 2026-08-26). Do not resurrect.
 
+    The digest addressed a BOX-WIDE, per-project ticket roundup to
+    ``account_owner`` -- the first-owner-seen pane-scan COIN FLIP
+    (``watchdog/__init__.py``'s own comment: ">1 -> account_owner is a coin
+    flip, not an answer") -- with none of the ``owners_seen`` ambiguity guard
+    its siblings carry (``reping_stale_questions`` /
+    ``deliver_pending_done``). On dev2, which hosts THREE owners' tmux
+    sessions, the flip picked David and delivered montalu client-ticket
+    content into his Discord thread (2026-08-26) -- a cross-subject
+    information leak. #489 had gated only reduced-authority BOXES; a
+    full-authority box hosting multi-owner sessions stayed open. The owner
+    ordered the WHOLE message class abolished ("CHcem aby si tento druh
+    sprav zrusil"), not a routing fix -- consistent with #693/#704: the
+    footer `U N` badge and the per-ticket ❓ pings are the critical paths
+    and STAY; the digest was always a "daily nicety" by its own comment.
 
-def reping_owner_decision_tickets(now, send_fn, state, home=None, dry_run=False,
-                                  reping=None, account_owner="", fetch=None,
-                                  persist=None, authority=None):
-    """#461 -- see the section comment above OWNER_DECISION_LABELS. Once per
-    QUESTION_REPING_S day-bucket, ping the owner with a summary of every open
-    owner-decision ticket. No-op unless BOTH send_fn and fetch are wired
-    (fetch=None keeps every OTHER job's run_once test network-free, exactly
-    like jobs 8/11).
-
-    #489 -- runs ONLY on a full-authority box (box owner = the genuine decision
-    recipient). `authority` is injectable for hermetic tests; it defaults to the
-    box-wide `_box_authority()` (never `resolve_authority()`'s per-repo marker).
-    A reduced-authority sub-dev box skips ENTIRELY (before any fetch or ping) --
-    its box owner is an external sub-dev but the tickets belong to the
-    gatekeeper/boss.
-
-    Gated on a state day-bucket stamp BEFORE the network fetch (no 60s query
-    storm) and deferred past the sleep window (retried after 06:00, bucket
-    NOT recorded). The cadence stamp is recorded on a genuine (measurable)
-    fetch -- even an empty one -- so a working GitHub with no pending decisions
-    costs one query/day, while an all-failed (None) fetch retries next sweep.
-    persist() is invoked BEFORE the ping leaves the process (cadence survives a
-    TimeoutStartSec kill -- the job-8 pattern). The Discord post itself is
-    additionally deduped by notify.send's own marker on the day-bucketed
-    dedup_key, so a re-record after a restart cannot double-post."""
-    reping = watchdog.QUESTION_REPING_S if reping is None else reping
-    if send_fn is None or fetch is None:
-        return []
-    bucket = int(now // reping)
-    dd = state.get("owner_decision_digest") or {}
-    if dd.get("bucket") == bucket:
-        return []                              # already handled this day-bucket
-    # #489 -- the digest is a BOX-WIDE aggregate (every repo in
-    # _cache_repo_roots) pinged to the BOX OWNER. Run it ONLY where the box owner
-    # is the GENUINE decision recipient: a full-authority (zbynek: gk/dev1/dev2)
-    # box. On a reduced-authority sub-dev box the owner is an EXTERNAL sub-dev
-    # (david = CEO slovnormalu) but the tickets belong to the gatekeeper/boss --
-    # so the repo-scoped fetch leaked 24 internal odoo-erp tickets into david's
-    # Discord thread with a false "these N tickets wait on YOUR decision". Skip
-    # ENTIRELY, before any fetch or ping (the sub-dev's own slice is already
-    # surfaced by the footer `U N` badge + the per-ticket ❓ pings -- the digest's
-    # own "critical paths"). The SINGLE authority check (no new heuristic gate,
-    # #486), resolved cwd-independently so no stray marker re-opens the leak.
-    # Placed AFTER the bucket dedup and it stamps the bucket on skip, so a reduced
-    # box logs the skip at most ONCE per day-bucket (dedup silences the rest),
-    # never every 60s sweep.
-    authority = watchdog._box_authority() if authority is None else authority
-    if authority != "full":
-        dd["bucket"] = bucket
-        state["owner_decision_digest"] = dd
-        (persist or (lambda: None))()
-        return ["owner-decision-digest skipped: reduced-authority box (%s) -- "
-                "decisions belong to the maintainer, not this box" % authority]
-    logs = []
-    if watchdog._in_sleep_window(now):
-        logs.append("owner-decision-digest deferred sleep-window")
-        return logs                            # retry after 06:00 (bucket unset)
-    tickets = fetch(home)
-    if tickets is None:
-        logs.append("owner-decision-digest unmeasurable "
-                    "(all repo queries failed)")
-        return logs                            # retry next sweep (bucket unset)
-    # The bucket is stamped on a measurable FETCH, before the send -- so a
-    # Discord POST failure (transient 5xx, or a box with notify unconfigured)
-    # loses THIS day's roundup rather than re-fetching+re-posting every 60s all
-    # day. Deliberate: the digest is a daily nicety (the footer `U N` and the
-    # per-ticket ❓ pings are the critical paths), and one lost day beats an
-    # all-day query/POST storm on a persistent misconfig. notify.send's own
-    # marker only records on genuine DELIVERY (#135), so it would NOT dedupe a
-    # retry -- our bucket stamp is the only cap, on purpose.
-    dd["bucket"] = bucket
-    state["owner_decision_digest"] = dd
-    (persist or (lambda: None))()              # cadence survives a kill (job 8)
-    if not tickets:
-        logs.append("owner-decision-digest: 0 pending")
-        return logs
-    # ONE owner per box: account_owner/resolve_owner() is box-scoped, while the
-    # tickets span every repo in _cache_repo_roots(home). On the fleet each
-    # box's $HOME belongs to one Discord owner (dev1=newlevel; every subdev
-    # stream user has their OWN $HOME + account), so this is per-owner-correct
-    # today. Accepted residual (FREEZE): a single $HOME whose repos spanned two
-    # different Discord owners would ping the box owner for all of them -- the
-    # same box-wide addressing every other watchdog ping already uses (#212).
-    owner = account_owner or None              # already stream-redirected (#212)
-    if not owner:
-        from notify import resolve_owner
-        owner = resolve_owner() or None        # self-applies STREAM_NOTIFY_OWNER
-    block = watchdog._owner_decision_digest_block(tickets)
-    status = send_fn(block, owner=owner, kind="questions",
-                     dedup_key="owner-decision-digest:%d" % bucket,
-                     dry_run=dry_run)
-    logs.append("owner-decision-digest -> %s (%d pending)"
-                % (status, len(tickets)))
-    return logs
+    Retirement shape = the #400 ``notify-compact-request.sh`` pattern: the
+    name stays importable for any stale caller, the body does NOTHING -- no
+    gh fetch, no state read/write, no send_fn call, any call shape accepted.
+    Belt-and-braces: ``notify.SUPPRESSED_ALERT_PREFIXES`` additionally
+    denylists the ``owner-decision-digest`` dedup_key class at the send()
+    chokepoint, so even STALE code on a not-yet-redeployed box can never
+    ping (machine channel keeps the decision: journal + the `suppressed`
+    delivery-log line). The ``_fetch_owner_decision_tickets`` /
+    ``_owner_decision_digest_block`` helpers, the
+    ``airuleset._watchdog_owner_decision_fetch`` wiring and run_once's
+    ``owner_decision_fetch`` param + registry entry were REMOVED outright
+    (dead code, mvp-philosophy). ``OWNER_DECISION_LABELS`` OUTLIVES the
+    digest -- job 32's mechanical U-label clear (``watchdog/u_labels.py``)
+    and the footer `U N` decision-subset invariant still consume it."""
+    return []

@@ -40,17 +40,18 @@ def _registry_labels():
     return re.findall(r'_add\(\s*"([^"]+)"', src)
 
 
-# The 23 standalone entries in CANONICAL_SWEEP order (the step-15 contract, i.e.
+# The 22 standalone entries in CANONICAL_SWEEP order (the step-15 contract, i.e.
 # everything the sweep runs AFTER the pane loop's `list_claude_panes` entry).
-# Jobs 3/5/7 + their #368/#461 extensions come first, then jobs 8->30 in
-# literal call order.
+# Jobs 3/5/7 + their #368 extension come first, then jobs 8->30 in
+# literal call order. (The #461 owner-decision digest entry was RETIRED by
+# #707 — the whole message class is abolished, its producer is a no-op
+# tombstone and the wiring is gone.)
 EXPECTED_STANDALONE = [
     "check_usage",                      # (3)
     "deliver_pending_done",             # (5)
     "deliver_discord_replies",          # (7)
     "prune_answered_questions",         # (7, terminal-answer prune)
     "reping_stale_questions",           # (7 / #368)
-    "reping_owner_decision_tickets",    # (7 / #461)
     "bounce_backstop",                  # (8)
     "gk_request_backstop",              # (11)
     "burn_snapshot_job",                # (13)

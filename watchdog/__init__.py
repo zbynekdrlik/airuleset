@@ -595,8 +595,9 @@ from watchdog.questions import (  # noqa: E402
     prune_answered_questions as prune_answered_questions,
     _in_sleep_window as _in_sleep_window,
     reping_stale_questions as reping_stale_questions,
-    _fetch_owner_decision_tickets as _fetch_owner_decision_tickets,
-    _owner_decision_digest_block as _owner_decision_digest_block,
+    # reping_owner_decision_tickets is a PERMANENT NO-OP tombstone (#707 —
+    # the daily owner-decision digest is retired; its _fetch/_digest_block
+    # helpers were deleted outright). Kept re-exported for stale callers.
     reping_owner_decision_tickets as reping_owner_decision_tickets,
 )
 
@@ -699,35 +700,35 @@ _REAL_TURN_TYPES = ("user", "assistant")
 QUESTION_REPING_S = 24 * 3600
 
 
-# #461 -- the DURABLE owner-decision queue's daily re-ask. #368 (above)
-# re-asks unanswered SESSION questions from the discord-questions.json map --
-# but that map only ever grows from a live session's own ❓ ping. A TICKET
-# blocked on the OWNER's decision -- carrying `needs-answer`/`needs-decision`
-# (the SAME labels #468's footer `U N` counts) -- that NO session ever turned
-# into a ❓ (or whose asking session has long since ended, its map entry
-# pruned) had NO durable re-ask channel at all, so it rotted silently (the
-# odoo-erp #3018/#3020/#2968/#3189 incident: 6 owner-blocked tickets for
-# weeks, footer empty, Discord never pinged). This is the missing BACKSTOP:
-# once per QUESTION_REPING_S day-bucket, summarise every open owner-decision
-# ticket across this box's recently-worked repos into ONE Discord ping. An
-# extension of the SAME #368 daily-reask section of run_once -- NEVER a new
-# numbered job, NEVER a new hook (the FREEZE).
+# #461 -- the DURABLE owner-decision queue's daily re-ask -- is RETIRED
+# (#707, owner ruling 2026-08-26). The digest summarised every open
+# `needs-answer`/`needs-decision` ticket across the box's repos into ONE
+# daily Discord ping addressed to `account_owner` -- the first-owner-seen
+# pane-scan coin flip -- with none of the `owners_seen` ambiguity guard its
+# siblings carry, so on multi-owner dev2 it delivered montalu client-ticket
+# content into David's thread (a cross-subject leak; #489 had gated only
+# reduced-authority boxes). The owner abolished the WHOLE message class:
+# `reping_owner_decision_tickets` is a permanent no-op tombstone in
+# questions.py, its fetch/digest-block helpers and the run_once wiring are
+# deleted, and notify.SUPPRESSED_ALERT_PREFIXES denylists the
+# `owner-decision-digest` dedup_key class so even stale code cannot ping.
+# The tickets still surface via the footer `U N` badge + the per-ticket ❓
+# pings (the critical paths, #693/#704).
 #
-# OWNER_DECISION_LABELS is the DECISION SUBSET of cli_quals.USER_WAITING_LABELS
+# OWNER_DECISION_LABELS OUTLIVES the digest -- its live consumers are job
+# 32's mechanical U-label clear (watchdog/u_labels.py) and the invariant
+# below. It is the DECISION SUBSET of cli_quals.USER_WAITING_LABELS
 # (the footer/stop-proof `U N` family, #468). #512 DIVERGED the two on purpose:
 # USER_WAITING_LABELS gained `needs-acceptance` (a DONE ticket awaiting the
-# owner's/client's sign-off), but this owner-DECISION re-ping is a re-ask job
-# the #512 owner decision scoped EXPLICITLY UNCHANGED ("watchdog re-ask joby
-# bežia nezmenené") — a needs-acceptance ticket is an ACCEPTANCE, not a blocked
-# DECISION that rots silently without a daily "please answer" nudge, so it is
-# deliberately NOT re-pinged (it still surfaces on the footer's `U N`). Kept as
+# owner's/client's sign-off) and #601 added `needs-owner-action` (a physical
+# owner step) — both are deliberately OUTSIDE the decision subset job 32
+# clears on an owner answer. Kept as
 # a flat literal here (never a module-level `from cli_quals import`) because the
 # import direction is airuleset -> watchdog and watchdog is a 60s systemd timer;
 # a reverse import would add import-time cost to every sweep. The SUBSET
-# invariant (every re-ping label ∈ USER_WAITING_LABELS; the DELIBERATELY-excluded
-# ones are needs-acceptance — an acceptance, not a decision — AND, since #601,
-# needs-owner-action — a physical owner step, not a daily "Odpovedz prosím"
-# question) is pinned by TestOwnerDecisionLabelsInSync.
+# invariant (every owner-decision label ∈ USER_WAITING_LABELS; the excluded
+# set is exactly {needs-acceptance, needs-owner-action}) is pinned by
+# TestOwnerDecisionLabelsInSync.
 OWNER_DECISION_LABELS = ("needs-answer", "needs-decision")
 
 
@@ -736,9 +737,11 @@ def _box_authority():
     fork-no-merge), resolved cwd-INDEPENDENTLY from the OS user's fixed
     `AUTHORITY_BY_USER` mapping.
 
-    #489: the owner-decision digest is a BOX-WIDE aggregate (every repo in
-    `_cache_repo_roots`) pinged to the BOX OWNER, so the question it gates on is
-    "is THIS BOX's owner the genuine recipient of these decisions" — fixed by the
+    #489: born to gate the owner-decision digest (RETIRED in #707 — its
+    coin-flip addressing leaked cross-subject anyway); the doctrine outlives
+    it: any BOX-WIDE decision keyed to the box owner (live consumer: job 24's
+    delivery-stall watch, #667) gates on "is THIS BOX's owner the genuine
+    recipient" — fixed by the
     box identity, never by whatever cwd the watchdog happens to run from.
     Deliberately NOT `resolve_authority()`: that honours a per-repo
     `airuleset:authority=full` CLAUDE.md marker, and a stray such marker in the
@@ -1968,7 +1971,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              ops_wait_fetch=None, i_members_fetch=None,
              progress_dir=None, questions_path=None,
-             owner_decision_fetch=None, gk_selfservice_fetch=None,
+             gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
@@ -3755,7 +3758,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 del bc[k]
 
     # --- STANDALONE JOB REGISTRY (#433 step 16) ------------------------------
-    # The post-loop standalone sequence (jobs 3/5/7 + #368/#461 extensions,
+    # The post-loop standalone sequence (jobs 3/5/7 + the #368 extension,
     # then jobs 8→29) as an ORDER-PRESERVING (label, gate, invoke, err) registry
     # run by the single loop before save_state. Gates/args are verbatim inside
     # closures capturing locals naturally, so every `watchdog.<name>` seam is
@@ -3828,17 +3831,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                         account_owner=account_owner),
          "question-reping error")
 
-    # #461 -- the DURABLE owner-decision queue's daily re-ask (the TICKET
-    # backstop of #368's session-question re-ask above). Same #368 daily-reask
-    # section, never a new job. Only when a real fetch is wired (cmd_watchdog),
-    # so other jobs' run_once tests stay network-free. `account_owner` is the
-    # box-wide owner resolved in the pane loop above (already stream-redirected).
-    _add("reping_owner_decision_tickets", lambda: owner_decision_fetch is not None,
-         lambda: reping_owner_decision_tickets(
-             now, send_fn, state, dry_run=dry_run,
-             account_owner=account_owner, fetch=owner_decision_fetch,
-             persist=lambda: save_state(state_path, state)),
-         "owner-decision-digest error")
+    # #461 (the daily owner-decision digest) is RETIRED (#707): its registry
+    # entry, `owner_decision_fetch` param and fetch/digest helpers are GONE —
+    # the box-wide digest leaked cross-subject via the `account_owner` coin
+    # flip on multi-owner dev2, and the owner abolished the message class.
+    # `reping_owner_decision_tickets` survives only as a no-op tombstone
+    # (questions.py); notify's `owner-decision-digest` dedup_key denylist
+    # backstops stale code.
 
     # #255 (adversarial review, MAJOR finding): jobs 8/9 must NOT reuse the
     # bare `sweep_deadline` above -- that deadline is scoped to the

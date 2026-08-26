@@ -42,12 +42,12 @@ IS the ownership proof. Runs on EVERY box (full + reduced): a sub-dev clearing
 its OWN answered-question labels is exactly the miva1 fix.
 
 Why NOT a broad "any needs-answer ticket with no pending question -> clear"
-sweep (rejected): that population is EXACTLY #461's owner-decision digest
-target (a decision ticket that NEVER became a ``❓``, re-pinged daily) --
-clearing it would delete the #461 backstop AND risk hiding a genuine pending
-decision (a question's stored text need not literally contain its ``#N``).
-#515 clears DELIVERED-AND-ANSWERED questions (unambiguously resolved); #461
-re-pings NEVER-answered decisions. Complementary, never overlapping.
+sweep (rejected): a decision ticket that NEVER became a ``❓`` is still a
+genuine pending decision (a question's stored text need not literally
+contain its ``#N``) -- a broad clear would silently hide it. #515 clears
+only DELIVERED-AND-ANSWERED questions. (The #461 daily digest that also
+targeted that never-asked population is RETIRED, #707 -- only the footer
+``U N`` badge surfaces it now, so the narrow scope here matters MORE.)
 
 Topology mirrors cluster C (`watchdog/janitor.py`): ONE top-level
 ``import watchdog`` (never ``from watchdog import <name>``), every resident

@@ -1,6 +1,6 @@
 """#433 item G step 7 -- `watchdog/questions.py` split.
 
-The 15-function question-lifecycle family (the prune / re-ping / owner-decision
+The question-lifecycle family (the prune / re-ping jobs and, until #707, owner-decision
 jobs, the #449 never-silent owner-answer floor, the FOREIGN-user hosted-map
 helpers, and the transcript-timestamp readers those jobs use) was moved VERBATIM
 out of `watchdog/__init__.py` into `watchdog.questions`, then re-exported IN
@@ -49,7 +49,7 @@ sys.path.insert(0, str(REPO))
 import watchdog as wd  # noqa: E402
 import watchdog.questions as questions  # noqa: E402
 
-# The 15 names moved into questions.py, in definition (facade) order. A hand-
+# The names living in questions.py, in definition (facade) order. A hand-
 # maintained checklist every other test trusts; the two tests in
 # MovedNamesChecklistIsSelfValidating cross-check it against the module's own
 # defs and the facade import block.
@@ -67,8 +67,9 @@ MOVED_NAMES = [
     "prune_answered_questions",
     "_in_sleep_window",
     "reping_stale_questions",
-    "_fetch_owner_decision_tickets",
-    "_owner_decision_digest_block",
+    # (#707: reping_owner_decision_tickets stays as a permanent no-op
+    # tombstone; its _fetch_owner_decision_tickets /
+    # _owner_decision_digest_block helpers were DELETED with the digest.)
     "reping_owner_decision_tickets",
 ]
 
@@ -192,38 +193,25 @@ class CoMovedCrossCallsGoThroughPackageSeam(unittest.TestCase):
         self.assertTrue(any("deferred sleep-window" in ln for ln in logs), logs)
         self.assertEqual(sends, [])   # night -> nothing sent
 
-    def test_reping_owner_observes_patched_sleep_and_digest(self):
-        # reping_owner -> watchdog._in_sleep_window + watchdog._owner_decision_
-        # digest_block. authority='full' injected to isolate these from the
-        # _box_authority gate (its own seam is tested below).
-        sends = []
-
-        def send_fn(block, **k):
-            sends.append(block)
-            return "sent"
-
+    def test_reping_owner_tombstone_touches_no_seams(self):
+        # #707: reping_owner_decision_tickets is a PERMANENT NO-OP tombstone —
+        # the two seam tests that used to live here (patched _in_sleep_window /
+        # _owner_decision_digest_block observation) locked behavior of the
+        # ABOLISHED digest and were removed with it. The tombstone must reach
+        # NO seam at all: neither the sleep window nor _box_authority, even
+        # fully wired.
+        touched = []
         state = {}
-        with mock.patch.object(wd, "_in_sleep_window", return_value=False), \
-             mock.patch.object(wd, "_owner_decision_digest_block",
-                               return_value="SENT-DIGEST"):
-            wd.reping_owner_decision_tickets(
-                10 ** 9, send_fn, state, authority="full",
+        with mock.patch.object(wd, "_in_sleep_window",
+                               side_effect=lambda *a, **k: touched.append("sleep")), \
+             mock.patch.object(wd, "_box_authority",
+                               side_effect=lambda: touched.append("auth")):
+            out = wd.reping_owner_decision_tickets(
+                10 ** 9, lambda *a, **k: "sent", state,
                 fetch=lambda home: [("r", 1, "t")], account_owner="owner")
-        self.assertIn("SENT-DIGEST", sends)
-
-    def test_reping_owner_deferred_by_patched_sleep_window(self):
-        # A True sleep window (patched) must defer before any fetch -- proves
-        # _in_sleep_window is reached through the package seam on this path too.
-        fetched = []
-        state = {}
-        # NOON epoch (real _in_sleep_window False) so patched True diverges from
-        # reality -> a bare-revert would fetch, failing both assertions (teeth).
-        with mock.patch.object(wd, "_in_sleep_window", return_value=True):
-            logs = wd.reping_owner_decision_tickets(
-                1704106800, lambda *a, **k: "sent", state, authority="full",
-                fetch=lambda home: fetched.append(1) or [])
-        self.assertTrue(any("deferred sleep-window" in ln for ln in logs), logs)
-        self.assertEqual(fetched, [])
+        self.assertEqual(out, [])
+        self.assertEqual(touched, [])
+        self.assertEqual(state, {})
 
 
 class FacadeReexportSeamsGoThroughPackage(unittest.TestCase):
@@ -265,13 +253,9 @@ class FacadeReexportSeamsGoThroughPackage(unittest.TestCase):
             wd._transcript_for_session(d, "sid1", "/some/cwd")
         enc.assert_called_once_with("/some/cwd")
 
-    def test_fetch_owner_decision_uses_patched_gh_env_and_repo_roots(self):
-        genv = mock.MagicMock(return_value={"GH": "X"})
-        with mock.patch.object(wd, "_gh_env", genv), \
-             mock.patch.object(wd, "_cache_repo_roots", return_value={}):
-            out = wd._fetch_owner_decision_tickets()
-        self.assertEqual(out, [])          # empty roots -> [] (no subprocess)
-        genv.assert_called_once()
+    # (#707: test_fetch_owner_decision_uses_patched_gh_env_and_repo_roots was
+    # removed WITH _fetch_owner_decision_tickets itself — the digest's fetch
+    # helper is deleted, so there is no seam left to lock.)
 
 
 class ConstantSeamsGoThroughPackage(unittest.TestCase):
@@ -342,48 +326,12 @@ class ConstantSeamsGoThroughPackage(unittest.TestCase):
         with mock.patch.object(wd, "_REAL_TURN_TYPES", ()):
             self.assertIsNone(wd._last_real_turn_ts(p))
 
-    def test_fetch_owner_decision_search_uses_patched_label_constants(self):
-        captured = {}
-
-        class _R:
-            returncode = 1
-            stdout = ""
-
-        def fake_run(argv, **k):
-            captured["argv"] = argv
-            return _R()
-
-        with mock.patch.object(wd, "_gh_env", return_value={}), \
-             mock.patch.object(wd, "_cache_repo_roots", return_value={"/r": "repo"}), \
-             mock.patch.object(wd, "OWNER_DECISION_LABELS", ("SENT-LABEL",)), \
-             mock.patch.object(wd, "AUTOPILOT_SKIP_EXCL", "-label:SENT-EXCL"), \
-             mock.patch("subprocess.run", fake_run):
-            wd._fetch_owner_decision_tickets()
-        argv = captured["argv"]
-        search = argv[argv.index("--search") + 1]
-        self.assertIn("SENT-LABEL", search)
-        self.assertIn("SENT-EXCL", search)
-
-    def test_reping_owner_bucket_uses_patched_reping_constant(self):
-        state = {}
-        with mock.patch.object(wd, "QUESTION_REPING_S", 1000), \
-             mock.patch.object(wd, "_in_sleep_window", return_value=False):
-            wd.reping_owner_decision_tickets(
-                50000, lambda *a, **k: "sent", state, authority="full",
-                fetch=lambda h: [])
-        # 50000 // 1000 == 50 (default 86400 would give bucket 0)
-        self.assertEqual(state["owner_decision_digest"]["bucket"], 50)
-
-    def test_reping_owner_gates_on_patched_box_authority(self):
-        state = {}
-        fetched = []
-        with mock.patch.object(wd, "_box_authority",
-                               return_value="fork-no-merge"):
-            logs = wd.reping_owner_decision_tickets(
-                10 ** 9, lambda *a, **k: "sent", state,
-                fetch=lambda h: fetched.append(1) or [])
-        self.assertTrue(any("reduced-authority" in ln for ln in logs), logs)
-        self.assertEqual(fetched, [])   # skipped before any fetch
+    # (#707: the three digest seam tests that used to close this class —
+    # fetch label-constants, reping day-bucket constant, reping
+    # _box_authority gate — locked behavior of the ABOLISHED owner-decision
+    # digest and were removed with it. The tombstone's zero-seam behavior is
+    # locked by test_reping_owner_tombstone_touches_no_seams above; the
+    # retirement itself by tests/test_owner_decision_digest.py.)
 
 
 if __name__ == "__main__":

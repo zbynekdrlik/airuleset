@@ -3777,15 +3777,6 @@ def _watchdog_gkorphan_handoff_fetch(root):
                                       _comment_handoff_window_s())
 
 
-def _watchdog_owner_decision_fetch(home=None):
-    """#461 daily owner-decision digest fetch — the box-wide aggregate of open
-    `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
-    every OTHER job's run_once unit test stays network-free, exactly like the
-    job 8/11 bounce/gk-request fetches."""
-    from watchdog import _fetch_owner_decision_tickets
-    return _fetch_owner_decision_tickets(home)
-
-
 def _watchdog_u_reconcile_clear(cwd, num):
     """Job 32's real gh side-effect (#515) — remove needs-answer/needs-decision
     from open ticket #`num` in the repo at `cwd`. Wired here (not inside
@@ -4699,10 +4690,8 @@ def cmd_watchdog(args):
                     # #516 — job 31 gk self-service auto-bounce, gated on this
                     # fetch being wired (network-free tests for every other job).
                     gk_selfservice_fetch=_watchdog_gk_selfservice_fetch,
-                    # #461 — the daily owner-decision ticket digest fires from
-                    # run_once's #368 daily-reask section, gated on this fetch
-                    # being wired (network-free tests for every other job).
-                    owner_decision_fetch=_watchdog_owner_decision_fetch,
+                    # (#461's owner-decision digest fetch was wired here until
+                    # #707 retired the whole message class.)
                     # #515 — job 32 mechanical U-label lifecycle, gated on this
                     # clear-fn being wired (network-free tests for every other
                     # job). Clears a needs-answer/needs-decision label whose
