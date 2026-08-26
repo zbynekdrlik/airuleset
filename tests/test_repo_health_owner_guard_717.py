@@ -113,8 +113,34 @@ class TestNetDriftOwnerGuard(_RepoHealthStoreIsolated):
             owner_by_cwd={})
         self.assertEqual(self.send.sent, [])                        # NOT delivered
         self.assertTrue(any("skip owner-ambiguous" in ln for ln in logs), logs)
+        # F1/F4: the skip is BEFORE the episode gate, so the store is untouched
+        # (moving the skip AFTER gate() would leave an "open" episode here).
+        self.assertEqual(self.episodes(), {})
 
-    def test_single_owner_box_delivers_unchanged(self):
+    def test_skip_leaves_episode_fresh_so_a_later_deliverable_sweep_fires(self):
+        # #717 review F4: proves the skip-before-gate invariant has teeth --
+        # a multi-owner box with no repo pane SKIPs without consuming the
+        # onset, so once the box becomes deliverable the alert fires FRESH
+        # (no permanent silence). A skip-AFTER-gate would mark the episode
+        # "open" on sweep 1 -> "hold" on sweep 2 -> zero sends (test RED).
+        wd.net_drift_alarm(
+            NOW, self.state, send_fn=self.send,
+            repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
+            owners_seen={"zbynek", "david"}, account_owner="david",
+            owner_by_cwd={}, interval=1)
+        self.assertEqual(self.send.sent, [])
+        self.assertEqual(self.episodes(), {})
+        wd.net_drift_alarm(
+            NOW + 2, self.state, send_fn=self.send,
+            repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
+            owners_seen={"zbynek", "david"}, account_owner="david",
+            owner_by_cwd={"/repos/zbynek-proj": "zbynek"}, interval=1)
+        self.assertEqual(len(self.send.sent), 1)
+        self.assertEqual(self.send.sent[0]["owner"], "zbynek")
+
+    def test_single_owner_box_delivers_to_the_sole_owner(self):
+        # single-owner box: still DELIVERED (to the sole owner's own thread) --
+        # an improvement over the pre-#717 shared-channel path, not suppressed.
         wd.net_drift_alarm(
             NOW, self.state, send_fn=self.send,
             repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
@@ -162,8 +188,10 @@ class TestStuckMainOwnerGuard(_RepoHealthStoreIsolated):
             owner_by_cwd={})
         self.assertEqual(self.send.sent, [])
         self.assertTrue(any("skip owner-ambiguous" in ln for ln in logs), logs)
+        # F4: skip is BEFORE the episode gate -> store untouched.
+        self.assertEqual(self.episodes(), {})
 
-    def test_single_owner_box_delivers_unchanged(self):
+    def test_single_owner_box_delivers_to_the_sole_owner(self):
         r = self._repo()
         wd.stuck_main_sweep(
             NOW, self.state, send_fn=self.send, repo_roots=[str(r)],
@@ -205,8 +233,21 @@ class TestDeliveryStallOwnerGuard(_DeliveryBase):
                           owners_seen={"zbynek", "david"}, account_owner="david")
         self.assertEqual(self.sent, [])
         self.assertTrue(any("skip owner-ambiguous" in ln for ln in logs), logs)
+        # F4: skip is BEFORE the seen[root] dedup advance -> store not latched,
+        # so a later deliverable sweep still owes the alert.
+        self.assertEqual(self.state.get("delivery_stall") or {}, {})
 
-    def test_single_owner_box_delivers_unchanged(self):
+    def test_repo_derived_pane_owner_delivers_when_sid_owner_unknown(self):
+        # #717 review F3: the sid's own owner is unknown, but another live
+        # pane in the SAME repo resolves uniquely -> _repo_owner_from_panes
+        # derives it, so the alert delivers to zbynek (not the box coin flip).
+        r = self._stalled()
+        self.watch([r], owner_by_sid={}, owner_by_cwd={str(r): "zbynek"},
+                   owners_seen={"zbynek", "david"}, account_owner="david")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0]["owner"], "zbynek")
+
+    def test_single_owner_box_delivers_to_the_sole_owner(self):
         r = self._stalled()
         self.watch([r], owner_by_sid={}, owner_by_cwd={},
                    owners_seen={"zbynek"}, account_owner="zbynek")

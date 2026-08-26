@@ -279,7 +279,14 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
         # #717: resolve the recipient; a multi-owner box whose pane owner we
         # cannot resolve SKIPs (logged, no dedup advance -> retries when the
         # box becomes deliverable) rather than coin-flipping via owner=None.
-        derived = owner_by_sid.get(sid) or (owner_by_cwd.get(cwd) if cwd else None)
+        # The `_repo_owner_from_panes(root, ...)` tail makes this derivation
+        # UNIFORM with jobs 27/28 (#717 review F3): if the first-sorted sid's
+        # own owner is unresolved but another live pane in the SAME repo has a
+        # unique owner, that owner is still derivable (and >1 owner in the repo
+        # is treated as not-derivable -> the box guard, never an arbitrary win).
+        derived = (owner_by_sid.get(sid)
+                   or (owner_by_cwd.get(cwd) if cwd else None)
+                   or _repo_owner_from_panes(root, owner_by_cwd))
         deliver, owner = _alert_recipient(derived, ambiguous, account_owner)
         if not deliver:
             logs.append("delivery-stall skip owner-ambiguous %s "
@@ -537,16 +544,32 @@ def _alert_recipient(derived, ambiguous, account_owner):
 
     - a repo/session-DERIVED owner (a live pane's owner for THIS repo) is
       always unambiguous -> `(True, derived)`;
-    - else on a SINGLE-owner box `account_owner` is a reliable answer ->
-      `(True, account_owner or None)` (a zero-owner box collapses to owner
-      None -> the shared channel, the pre-#717 behaviour, unchanged);
+    - else on a `not ambiguous` box `account_owner` is a reliable answer ->
+      `(True, account_owner or None)`. A ZERO-owner box (account_owner "")
+      collapses to owner None -> the shared channel, byte-identical to the
+      pre-#717 caller path (locked by `test_pre_717_callers_unchanged_*`). A
+      genuine SINGLE-owner box now delivers to that owner's OWN thread with an
+      @mention -- a deliberate IMPROVEMENT over the pre-#717 `resolve_owner()`
+      path (which, in the plain systemd watchdog env, resolved "" -> the
+      shared channel), NOT recipient parity (#717 review F2);
     - else the box is MULTI-owner with no derived owner -> `account_owner`
       would be the first-owner-seen COIN FLIP (#707), so DO NOT deliver:
       `(False, None)`, and the caller logs the skip (machine channel, never a
       wrong-owner @mention). This mirrors the `("" if ambiguous else
       account_owner)` guard `deliver_pending_done`/`reping_stale_questions`
       already carry, made strict: a genuinely-ambiguous alert is skipped +
-      logged, not routed to a guessed owner."""
+      logged, not routed to a guessed owner.
+
+    RESIDUAL (#717 review F1, inherent to the reused #707 proxy): `ambiguous`
+    is derived from ONE sweep's live-pane scan (`len(set(owners_seen)) > 1`).
+    On a genuinely multi-owner box that MOMENTARILY shows only one owner's
+    panes (the others' sessions closed, or the pane loop cut short by the
+    sweep-deadline budget so `owners_seen` is partial), `ambiguous` is False
+    and a pane-less foreign repo's alert can still deliver to the only-seen
+    owner. This is the SAME accepted proxy `deliver_pending_done`/
+    `reping_stale_questions` carry; a TTL'd owners-seen high-water mark would
+    close it but is deliberately out of scope here (it would diverge from the
+    sibling guard the #707 doctrine reuses). Named, not silently accepted."""
     if derived:
         return True, derived
     if not ambiguous:
