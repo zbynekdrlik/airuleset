@@ -674,19 +674,39 @@ gap in either.
      BANNED — never any `opus`-aliased dispatch, never sonnet on anything complex; the old airuleset
      Fable-MAJORITY exception is ABOLISHED — the same split on every repo). A ticket runs on TWO
      tiers, never one: **(a) the DESIGN phase** (Step 1c) and **(b) the REVIEW phase** are the
-     gated-Fable dispatches; **(c) the IMPLEMENTATION worker** runs Opus 4.8. The `autopilot-worker`
-     frontmatter pins `model: claude-opus-4-8`, reached by dispatching the worker AS-IS (no `model`
-     param) —
-     **the implementation worker is dispatched AS-IS on `claude-opus-4-8`, never a `model: fable` override.**
+     gated-Fable dispatches; **(c) the IMPLEMENTATION worker** runs Sonnet 5 by default (a
+     settled-design ticket) or Opus 4.8 (complexity). The `autopilot-worker` frontmatter pins
+     `model: claude-opus-4-8` = the escalation tier + fail-safe default; for an ordinary
+     SETTLED-DESIGN ticket downtier it with an explicit **`model: "sonnet"`**, and OMIT the param
+     (frontmatter pin stands → Opus 4.8) to ESCALATE when the implementation carries complexity —
+     a multi-component change, concurrency, a security boundary, a hard-debug lane, or a
+     prior Sonnet worker already failed on this ticket (unsure → Opus 4.8; 4.8 has no param alias and the
+     `opus` alias is banned, so the pin is the only way to reach it — fail-safe UP). Either way
+     **the implementation worker carries no Fable override** —
+     never a `model: fable` override, never `model: "sonnet"` for a complex ticket, never the
+     banned `opus` alias (#721).
      For the DESIGN consult (Step 1c) and the REVIEW pass, run
      `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE —
      **gate OPEN (exit 0) → dispatch `model: fable` for that PHASE; gate CLOSED (exit 1) → dispatch AS-IS on `claude-opus-4-8`.**
      Whether a ticket EARNS the Fable design + review phases is the JUDGMENT-CONTENT phase selector
      (non-trivial implementation, review of a non-trivial change, hard debug, design/synthesis —
      when unsure, it QUALIFIES for those phases); a genuinely routine/mechanical ticket (one obvious
-     shape, zero design decisions) gets an Opus 4.8 one-paragraph design comment + a trivial-diff
-     review, no Fable at all. Never dispatch an automatic `model: fable` without the gate check. You
+     shape, zero design decisions) gets a one-paragraph design comment (written by the WORKER on its
+     own implementation tier — Sonnet 5 for a settled-design ticket) + a trivial-diff review, no
+     Fable at all. Never dispatch an automatic `model: fable` without the gate check. You
      (the main session) re-verify every line of the worker's evidence block regardless of its model.
+     - **SETTLED-DESIGN vs COMPLEX at DISPATCH (which implementation tier the worker gets, #721)** —
+       decided from the SAME Step-1c triage, never at cycle time: a member that is NOT design-heavy
+       AND carries NO escalation criterion → dispatch the worker with an explicit `model: "sonnet"`
+       (Sonnet 5, the default). A member that is design-heavy, OR carries any of — a multi-component
+       change, concurrency, a security boundary, a hard-debug lane, or a prior Sonnet worker already
+       failed on this ticket — → dispatch it AS-IS (no `model` param → the frontmatter pin, Opus 4.8);
+       unsure → AS-IS (4.8). "Settled" means the APPROACH is decided (a design-heavy member already
+       got its Step-1c Fable synthesis), NOT that the worker's own CYCLE-step-2 design comment is
+       already posted — the worker still writes that during implementation, on its dispatched tier.
+       A Sonnet worker that hits a hard wall mid-ticket cannot re-tier itself: it RETURNS with its
+       findings → you re-dispatch that ticket AS-IS on the `claude-opus-4-8` pin (the "prior Sonnet
+       worker failed" criterion).
    - **Authority rides the dispatch.** Include the resolved profile in every worker prompt
      (`Authority profile: <profile>` + what "done" means for it). branch-merge: the worker's PR
      targets and merges into the INTEGRATION branch (develop unless the project CLAUDE.md names

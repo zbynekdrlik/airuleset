@@ -190,7 +190,7 @@
     "tests/test_meeting_analysis_redaction.py": 161,
     "tests/test_meeting_analysis_skill.py": 88,
     "tests/test_merge_drivers.py": 431,
-    "tests/test_model_tiering.py": 599,
+    "tests/test_model_tiering.py": 694,
     "tests/test_module_machinery_offload.py": 62,
     "tests/test_no_conflict_markers.py": 72,
     "tests/test_no_question_flag.py": 578,
@@ -450,7 +450,7 @@
     ".claude/rules/internals-scripts.md": 51200,
     ".claude/rules/internals-skills-modules.md": 51200,
     ".claude/rules/internals-statusbar.md": 51200,
-    ".claude/rules/internals-tests.md": 49662,
+    ".claude/rules/internals-tests.md": 51098,
     ".claude/rules/internals-watchdog.md": 51200,
     ".claude/rules/internals-webterm.md": 51200
   }
