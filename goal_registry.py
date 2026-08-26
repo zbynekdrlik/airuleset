@@ -56,14 +56,18 @@ class Clause:
 
 
 # The reconciliation the owner asked to be VISIBLE in the registry, not buried
-# in prose: `saturation-core` is the PARALLEL-dispatch half (dispatch worktree
-# lanes to saturation, never one ticket per turn); `saturation-delivery` and
-# `compact-boundary` are the SERIAL half — delivery integrates returned branches
-# one-per-turn, and compact-boundary paces exactly ONE integration/hand-off per
-# turn while the parallel lanes keep building. So dispatch is parallel and
-# integration is serial one-per-turn; the clauses cannot contradict. Tests
-# assert compact-boundary carries the reconciliation marker and that the old
-# serializing "do NOT dispatch the next ... in the same turn" is gone.
+# in prose (#723 BATCH mode, deliberately reversing #456's continuous refill FOR
+# autopilot): `saturation-core` dispatches a BOUNDED PARALLEL BATCH (up to 5
+# worktree lanes, NO refill while a batch runs); `saturation-delivery` integrates
+# each returned branch SERIALLY under the mutex as it returns; `compact-boundary`
+# fires the compact ONLY at the DRAINED batch boundary (whole batch returned +
+# integrated = ZERO live tasks) then dispatches the NEXT batch — NEVER mid-fleet
+# (that breaks task handles/goal, CC #29193 unfixed as of CC 2.1.246). So dispatch
+# is a BOUNDED parallel batch, integration is serial, and compact is at the clean
+# boundary; the clauses cannot contradict. Tests assert compact-boundary fires at
+# the DRAINED batch boundary (zero live tasks → next batch) and that the old
+# continuous "compact boundary paces ONE integration per turn / parallel lanes
+# keep building" framing is GONE.
 SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
                                  "compact-boundary")
 
@@ -146,11 +150,11 @@ CLAUSES = [
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
     Clause("saturation-core", PROFILES,
-        "SATURATE, never one ticket per turn: refill PARALLEL `isolation:worktree` autopilot-worker lanes to saturation, backing off only on a resource signal;"),
+        "BATCH MODE, never one ticket per turn: dispatch a BATCH of up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes, NO refill while a batch runs;"),
     Clause("saturation-delivery", PROFILES, {
-        "full": "integrate returned branches SERIALLY, ONE per turn under the integration mutex.",
-        "branch-merge": "merge returned branches into the integration branch SERIALLY, ONE per turn under the integration mutex;",
-        "fork-no-merge": "hand off returned fork branches SERIALLY, ONE per turn;",
+        "full": "integrate returned branches SERIALLY under the integration mutex as they return;",
+        "branch-merge": "merge returned branches into the integration branch SERIALLY under the mutex as they return;",
+        "fork-no-merge": "hand off returned fork branches SERIALLY as they return;",
     }),
     Clause("prod-gate", ("full",),
         "Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live."),
@@ -174,9 +178,9 @@ CLAUSES = [
         "fork-no-merge": "Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first.",
     }),
     Clause("compact-boundary", PROFILES, {
-        "full": "After every merge, END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — which means CONTINUE and NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (returns promptly, #402) as your own last tool call, THEN do NOT integrate a SECOND branch this turn — the compact boundary paces ONE integration per turn, NOT the parallel lanes, which keep building; the ARMED GOAL fires the NEXT TURN (lets the context compact).",
-        "branch-merge": "After every merge, END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call, THEN do NOT integrate a SECOND branch this turn — the compact boundary paces ONE integration per turn, NOT the parallel lanes, which keep building; the ARMED GOAL fires the NEXT TURN (lets the context compact).",
-        "fork-no-merge": "After every hand-off, END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call, THEN do NOT hand off a SECOND branch this turn — the compact boundary paces ONE hand-off per turn, NOT the parallel lanes, which keep building; the ARMED GOAL fires the NEXT TURN (lets the context compact).",
+        "full": "After each integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + integrated (ZERO live tasks) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#402) as your last tool call — the ARMED GOAL fires the NEXT TURN, compacting then dispatching the next batch; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).",
+        "branch-merge": "After each integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + merged (ZERO live tasks) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call — the ARMED GOAL fires the NEXT TURN, compacting then dispatching the next batch; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).",
+        "fork-no-merge": "After each hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + handed off (ZERO live tasks) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call — the ARMED GOAL fires the NEXT TURN, compacting then dispatching the next batch; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).",
     }),
 ]
 

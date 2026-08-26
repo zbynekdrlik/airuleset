@@ -48,41 +48,47 @@ def window(text, start, end):
     return " ".join(text[i:j].split())
 
 
-class TestNoFixedAgentCap(TestCase):
-    """#456: the account-wide bound is REACTIVE (a real resource signal), NOT a
-    fixed number -- superseding #332's fixed cap of 8. The section still cites
-    the #332 measurements as CONTEXT for what a rate-limit signal looks like, and
-    still covers workers + validators combined, not workers alone."""
+class TestBatchCapWithinBatchResourceSignal(TestCase):
+    """#723: the batch cap (up to 5 lanes, no refill while a batch runs) is now
+    the PRIMARY concurrency bound -- reversing #456's uncapped saturation FOR
+    autopilot to give the main session a clean drained boundary to compact at.
+    WITHIN a batch the account-wide resource-signal backoff (the #332 measured
+    incident) still applies. The section still cites those measurements as
+    CONTEXT and still covers workers + validators combined."""
 
-    def test_the_section_exists_and_states_no_fixed_number(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
-        self.assertIn("no fixed number", w.lower())
+    def test_the_section_states_the_batch_cap_and_resource_signal(self):
+        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+        self.assertIn("up to 5", w.lower())
+        self.assertIn("batch cap", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertNotIn("at 8.", w)
 
     def test_the_section_cites_the_real_measured_incident(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
         self.assertIn("18 total agents", w)
         self.assertIn("3 of them", w)
         self.assertIn("rate limit", w.lower())
         self.assertIn("2026-08-08", w)
 
     def test_the_section_names_stagger_into_waves(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
         self.assertIn("waves", w.lower())
 
     def test_the_section_covers_validators_not_just_workers(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
         self.assertIn("validator", w.lower())
         self.assertIn("workers", w.lower())
 
 
 class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
-    def test_step_1b_points_at_the_no_fixed_cap_saturation_doctrine(self):
+    def test_step_1b_points_at_the_batch_cap_backoff_doctrine(self):
+        # #723: validators are bounded by the batch's own membership + the Batch
+        # cap section's resource-signal/wave back-off (not the reversed
+        # continuous "no-fixed-cap saturate" wording).
         t = read(AUTOPILOT)
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
-        self.assertIn("no-fixed-cap", w.lower())
+        self.assertIn("batch cap section", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertIn("wave", w.lower())
 
@@ -91,7 +97,7 @@ class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
         self.assertIn("NEVER re-dispatched", w)
-        self.assertIn("NEVER blocks the round", w)
+        self.assertIn("NEVER blocks the batch", w)
         self.assertIn("Step 0", w)
 
 
@@ -179,13 +185,14 @@ class TestAccountWideCapScopeNotPerRound(TestCase):
     regime account-wide. The rule sentence itself must say the cap applies
     across everything concurrently running, not per round."""
 
-    def test_the_rule_sentence_says_account_wide_not_per_round(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap",
+    def test_the_rule_sentence_says_account_wide_within_a_batch(self):
+        # #723: the within-batch second bound stays ACCOUNT-WIDE (never per
+        # lane / per repo); "per round" is gone with the round model itself.
+        w = window(read(AUTOPILOT), "**Batch cap",
                    "**Serial fallback")
         self.assertNotIn("at 8.", w)
         self.assertIn("ACCOUNT-WIDE", w)
-        self.assertIn("never", w.lower())
-        self.assertIn("per round", w.lower())
+        self.assertIn("never per lane", w.lower())
 
     def test_master_collision_guards_says_account_wide_never_per_lane(self):
         w = window(read(MASTER), "**Collision guards:**", "Single-lane commands")
@@ -227,12 +234,12 @@ class TestMeasurementClaimsAreAccurate(TestCase):
     combined with the failing validator burst."""
 
     def test_kolo_2_claim_does_not_overstate_zero_issues(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
         self.assertIn("no rate-limit kills", w.lower())
         self.assertNotIn("ran clean with zero issues", w)
 
     def test_the_five_worker_band_is_not_claimed_clean(self):
-        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
         self.assertNotIn("(4–5 workers, no validator burst)", w)
         self.assertNotIn("(4-5 workers, no validator burst)", w)
 

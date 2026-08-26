@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). By DEFAULT it CONTINUOUSLY dispatches SEVERAL such bundled batches as PARALLEL isolation:worktree in-session BACKGROUND autopilot-worker lanes, refilling to saturation (run_in_background — your main session stays FREE + thin, every worker stays visible in the agent strip) that can still ASK YOU the important questions directly, then the supervisor integrates each returned branch SERIALLY under an integration mutex (one merge/PR/CI/deploy at a time per repo — dispatch never blocked; falls back to one-worker-at-a-time when worktree isolation isn't available). Never pre-filters needs-input issues and never refuses to start; after each integration (incl. after merge) it refills the next lanes. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
+description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). By DEFAULT it works the backlog in BATCHES (#723): it dispatches a BATCH of up to 5 such bundled units as PARALLEL isolation:worktree in-session BACKGROUND autopilot-worker lanes, with NO refill while that batch runs (run_in_background — your main session stays FREE + thin, every worker stays visible in the agent strip) that can still ASK YOU the important questions directly, then the supervisor integrates each returned branch SERIALLY under an integration mutex (one merge/PR/CI/deploy at a time per repo; falls back to one-worker-at-a-time when worktree isolation isn't available). Once the WHOLE batch has returned + integrated (zero live tasks) it compacts the main session at that clean boundary and dispatches the NEXT batch. Never pre-filters needs-input issues and never refuses to start. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual] [dialog]"
 user-invocable: true
 disable-model-invocation: true
@@ -8,16 +8,18 @@ disable-model-invocation: true
 
 # Autopilot — Hands-off Backlog Loop
 
-> Solves the **ENTIRE** open backlog by CONTINUOUSLY saturating lanes — by DEFAULT a FLEET of
-> PARALLEL `isolation: "worktree"` workers (#317/#456), one per solo ticket or bundle-safe batch,
-> dispatched to keep every lane full and integrated SERIALLY by the supervisor as each branch
-> returns (never held for a whole "round" to finish). Each batch is
+> Solves the **ENTIRE** open backlog in **BATCHES** (#723, reversing #456's continuous refill FOR
+> autopilot) — by DEFAULT a BATCH of up to 5 PARALLEL `isolation: "worktree"` workers (#317/#456),
+> one per solo ticket or bundle-safe batch, dispatched together with **NO refill while that batch
+> runs** and integrated SERIALLY by the supervisor as each branch returns. Each unit is
 > handed to an **in-session background `autopilot-worker` subagent** (`run_in_background: true`)
 > — fresh context (your main session stays thin AND interactive — you can keep messaging it),
 > visible in the agent strip, and **able to ask you the genuinely-important questions directly**.
-> As each integration lands (merged + deployed) or a question resolves — and continuously as lanes
-> free up — the loop refills the **next** lanes, including right after a merge. It **NEVER** pre-filters "needs input" issues and
-> **NEVER** refuses to start. The goal is to finish everything; your only job is to answer the
+> When the **WHOLE batch** has returned + integrated — so ZERO background tasks are live — the loop
+> **compacts the main session at that clean boundary** (the only moment `compact-request --self`'s
+> live-tasks veto can pass, and the only moment a compact cannot break task handles / the armed goal,
+> CC #29193 unfixed) and dispatches the **NEXT** batch. It **NEVER** pre-filters "needs input" issues
+> and **NEVER** refuses to start. The goal is to finish everything; your only job is to answer the
 > important per-issue questions when a worker raises one.
 
 > **Usage:** `/autopilot [status] [manual] [dialog]`
@@ -52,25 +54,29 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 
 ## How it works
 
-- **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles a ROUND — by
-  DEFAULT several bundle-safe BATCHES (each one bundle-safe issue, or several bundled into one PR
-  — see Step 3.1) — and CONTINUOUSLY dispatches ONE in-session BACKGROUND `autopilot-worker` PER
-  batch, `isolation: "worktree"`, running MANY IN PARALLEL and refilling to saturation
-  (`run_in_background: true`, Step 3.2, #317/#456); every dispatch returns IMMEDIATELY so your main
+- **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles a BATCH — by
+  DEFAULT up to 5 bundle-safe UNITS (each one bundle-safe issue, or several bundled into one PR
+  — see Step 3.1) — and dispatches ONE in-session BACKGROUND `autopilot-worker` PER unit,
+  `isolation: "worktree"`, running them IN PARALLEL with **NO refill while the batch is open**
+  (`run_in_background: true`, Step 3.2, #317/#456/#723); every dispatch returns IMMEDIATELY so your main
   session stays FREE, and any worker finishing RE-INVOKES the loop. Each worker runs its cycle to a
   green LOCAL result on its own worktree branch; the main agent then integrates each returned branch
   SERIALLY under the integration mutex — one merge/test/push at a time — as it becomes ready and
-  verifies from GitHub, WHILE new lanes keep dispatching. The loop refills continuously until the
-  backlog is empty. (Worktree isolation unavailable, or a lane's candidates overlap too heavily to
+  verifies from GitHub. When the WHOLE batch has returned + integrated (zero live tasks) the main
+  session compacts at that clean boundary and the NEXT turn dispatches the next batch of up to 5.
+  (Worktree isolation unavailable, or a lane's candidates overlap too heavily to
   parallelize? Dispatch falls back to the documented single-worker serial shape — same mechanics,
-  no `isolation:`, one batch at a time.)
-- **Bundling AND fleet dispatch both cut cost — different axes.** CI is long here, so bundling
+  no `isolation:`, one unit at a time.)
+- **Bundling AND batched fleet dispatch both cut cost — different axes.** CI is long here, so bundling
   spends ONE CI cycle on as many bundle-safe issues as the gate allows
   (`autonomous-batch-issue-development.md`) instead of one-PR-per-issue — this cuts CI cost per
-  worker. Continuous fleet dispatch (many worktree-isolated worker lanes running concurrently) cuts
-  WALL-CLOCK by keeping lanes saturated instead of working batches one after another. Issues that
+  worker. Batched fleet dispatch (up to 5 worktree-isolated worker lanes running concurrently per
+  batch) cuts WALL-CLOCK by working 5 units at once instead of one after another. The trade-off #723
+  accepts vs #456's continuous refill: a batch waits for its SLOWEST lane before the next batch
+  starts (a small tail-lane wall-clock cost), bought in exchange for a bounded main-session context
+  and unbroken tasks/goal — the compact can fire only when the batch has fully drained. Issues that
   fail the bundling gate (large / schema / API / security / cross-cut) still run solo — as their
-  own single-member batch within a round, or alone in the serial fallback.
+  own single-member unit within a batch, or alone in the serial fallback.
 - **Worker = in-session BACKGROUND `autopilot-worker` subagent** (`run_in_background: true`, user-
   level, installed by airuleset). Background so your MAIN session stays FREE (you can keep messaging
   it) and THIN while the worker runs — and since Claude Code's 2026-W26 change the worker's prompts
@@ -320,19 +326,19 @@ The agent itself cannot type `/goal` into its own input — print the ONE line m
 **AUTHORITY: full** (default — merge to main + deploy):
 
 ```
-/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — SATURATE, never one ticket per turn: refill PARALLEL `isolation:worktree` autopilot-worker lanes to saturation, backing off only on a resource signal; integrate returned branches SERIALLY, ONE per turn under the integration mutex. Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. 00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds oldest-first (never preempting a running batch); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After every merge, END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — which means CONTINUE and NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (returns promptly, #402) as your own last tool call, THEN do NOT integrate a SECOND branch this turn — the compact boundary paces ONE integration per turn, NOT the parallel lanes, which keep building; the ARMED GOAL fires the NEXT TURN (lets the context compact).
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain). (B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it). Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the backlog — BATCH MODE, never one ticket per turn: dispatch a BATCH of up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes, NO refill while a batch runs; integrate returned branches SERIALLY under the integration mutex as they return; Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live. ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable. A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence. 00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds oldest-first (never preempting a running batch); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline. Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first. After each integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + integrated (ZERO live tasks) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#402) as your last tool call — the ARMED GOAL fires the NEXT TURN, compacting then dispatching the next batch; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).
 ```
 
 **AUTHORITY: branch-merge** (montalu / marek shape — own PR merged into the project's INTEGRATION branch only, never staging/main, never deploy):
 
 ```
-/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue ASSIGNED TO ME here not labeled autopilot-skip is MERGED via my own PR into the project's INTEGRATION branch (develop unless the project CLAUDE.md names another), no open prio:bounce for my stream, and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run all four, paste each output, write the `🏁` line — no proof, no stop. A handed-off ticket or an empty backlog, release still pending, is NOT done — REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any new stream/bounce ticket. My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the assigned backlog — SATURATE, never one ticket per turn: refill PARALLEL `isolation:worktree` autopilot-worker lanes to saturation, backing off only on a resource signal; merge returned branches into the integration branch SERIALLY, ONE per turn under the integration mutex; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable. 00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline. Count a hand-off done ONLY after verifying it from primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first. After every merge, END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call, THEN do NOT integrate a SECOND branch this turn — the compact boundary paces ONE integration per turn, NOT the parallel lanes, which keep building; the ARMED GOAL fires the NEXT TURN (lets the context compact).
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every open issue ASSIGNED TO ME here not labeled autopilot-skip is MERGED via my own PR into the project's INTEGRATION branch (develop unless the project CLAUDE.md names another), no open prio:bounce for my stream, and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run all four, paste each output, write the `🏁` line — no proof, no stop. A handed-off ticket or an empty backlog, release still pending, is NOT done — REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any new stream/bounce ticket. My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'. Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts. While NEITHER holds, work the assigned backlog — BATCH MODE, never one ticket per turn: dispatch a BATCH of up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes, NO refill while a batch runs; merge returned branches into the integration branch SERIALLY under the mutex as they return; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable. 00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline. Count a hand-off done ONLY after verifying it from primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first. After each integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + merged (ZERO live tasks) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call — the ARMED GOAL fires the NEXT TURN, compacting then dispatching the next batch; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).
 ```
 
 **AUTHORITY: fork-no-merge** (David shape — fork branch + local verification + ready hand-off; NEVER open or merge a PR, never close the issue yourself):
 
 ```
-/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every issue ASSIGNED TO ME here not labeled autopilot-skip is HANDED OFF — closing it after is the maintainer's job, not mine to prove — and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a clean local verification. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run all three, paste each output, write the `🏁` line — no proof, no stop. An open ticket carrying my READY-FOR-REVIEW comment (names the fork branch + green local verification; the comment is the signal, the label best-effort) never blocks 🏁, but PREFER REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any gatekeeper bounce. My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, never close the issue, never touch other streams'. Also stop for a genuinely-irreversible approval or local verification failing twice. While NEITHER holds, work the assigned backlog — SATURATE, never one ticket per turn: refill PARALLEL `isolation:worktree` autopilot-worker lanes to saturation, backing off only on a resource signal; hand off returned fork branches SERIALLY, ONE per turn; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable. 00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline. Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first. After every hand-off, END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — FIRST run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call, THEN do NOT hand off a SECOND branch this turn — the compact boundary paces ONE hand-off per turn, NOT the parallel lanes, which keep building; the ARMED GOAL fires the NEXT TURN (lets the context compact).
+/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript: (A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`. (B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED. Every issue ASSIGNED TO ME here not labeled autopilot-skip is HANDED OFF — closing it after is the maintainer's job, not mine to prove — and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a clean local verification. IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run all three, paste each output, write the `🏁` line — no proof, no stop. An open ticket carrying my READY-FOR-REVIEW comment (names the fork branch + green local verification; the comment is the signal, the label best-effort) never blocks 🏁, but PREFER REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any gatekeeper bounce. My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, never close the issue, never touch other streams'. Also stop for a genuinely-irreversible approval or local verification failing twice. While NEITHER holds, work the assigned backlog — BATCH MODE, never one ticket per turn: dispatch a BATCH of up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes, NO refill while a batch runs; hand off returned fork branches SERIALLY as they return; ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable. 00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night. Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline. Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first. After each hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + handed off (ZERO live tasks) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call — the ARMED GOAL fires the NEXT TURN, compacting then dispatching the next batch; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).
 ```
 
 The condition lists ONLY `autopilot-skip` as the exclusion, so `needs-design` / `needs-decision`
@@ -432,10 +438,12 @@ the `/goal` line, the loop never starts.
 > You reach this section only when a turn fires under the `/goal` loop the user pasted in Step 2.
 > The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself.
 
-Each loop turn keeps a CONTINUOUS FLEET of `isolation: "worktree"`-isolated `autopilot-worker`
-lanes running in PARALLEL — one lane per solo ticket or bundle-safe batch — refilling to
-saturation every turn, and integrates each returned branch SERIALLY, under an integration
-mutex, as it becomes ready (never waiting for the whole fleet to finish first).
+Each loop turn works the backlog in **BATCHES** (#723): a batch is up to 5 `isolation: "worktree"`-
+isolated `autopilot-worker` lanes — one lane per solo ticket or bundle-safe unit — dispatched
+together in PARALLEL, then **NO new lane is dispatched while that batch is open**; the supervisor
+integrates each returned branch SERIALLY, under an integration mutex, as it becomes ready. When the
+WHOLE batch has returned + integrated (so ZERO background tasks are live) the main session compacts
+at that clean boundary and the NEXT turn dispatches the next batch of up to 5.
 Fleet dispatch is the default dispatch shape (2026-08-08, #317): the `Agent` tool's
 `isolation: "worktree"` gives each worker its OWN checkout sharing only `.git`, so the collision
 risk that used to force one-worker-at-a-time dispatch (two workers editing the SAME `dev` tree) no
@@ -444,43 +452,47 @@ ran #313+#315+#316 as three parallel worktree workers alongside a #311+#312 batc
 tree, four concurrent workers, zero collisions. What stays STRICTLY serial is INTEGRATION: merging
 N worktree branches, running the one CI/test cycle, and pushing — always ONE AT A TIME, always
 supervisor-owned, never by a worker itself (Step 4 below). Bundling (packing more issues into one
-worker's PR, `autonomous-batch-issue-development.md`) and fleet-parallelism (running several
-bundled batches at once) are COMPLEMENTARY levers, not substitutes: bundling cuts CI cost per
-worker, fleet dispatch cuts wall-clock by running several bundled batches concurrently.
+worker's PR, `autonomous-batch-issue-development.md`) and batch-parallelism (running up to 5
+bundled units at once) are COMPLEMENTARY levers, not substitutes: bundling cuts CI cost per
+worker, batch dispatch cuts wall-clock by running up to 5 bundled units concurrently.
 
-**Serialize-on-overlap — no fixed lane cap (#456).** There is NO fixed number of parallel lanes:
-SATURATE — dispatch a lane for every workable bundle-safe unit — bounded ONLY by the real resource
-signals in the next paragraph, never by a chosen number. A worker should still prefer running a
+**Serialize-on-overlap — up to the batch cap (#456/#723).** A batch is up to 5 parallel lanes:
+dispatch a lane for each workable bundle-safe unit UP TO that batch cap, and no more (the batch
+cap, not a resource number, is the primary bound — #723 reverses #456's uncapped continuous
+saturation FOR autopilot). A worker should still prefer running a
 SCOPED test subset first before the full suite where the project supports it, same discipline as
-any single worker. When assembling a
-candidate batch for a NEW lane (repeat the per-lane procedure below for each lane you dispatch),
+any single worker. When assembling the
+batch (repeat the per-lane procedure below for each lane you dispatch, up to 5),
 SKIP — don't dispatch it — any issue whose bundling-relevant files heavily overlap a
-batch ALREADY claimed by a LIVE lane (today's live example: #311/#316/#317
+unit ALREADY claimed by a LIVE lane in THIS batch (today's live example: #311/#316/#317
 all edited `agents/autopilot-worker.md` and had to be sequenced, not parallelized). Two workers
 independently editing the same file in two separate worktrees is a guaranteed merge conflict at
 integration — worse than simply waiting until the overlapping lane has integrated. An overlapping
-issue is not lost — it seeds a LATER lane, exactly like any issue that fails the bundling gate today.
+issue is not lost — it seeds a LATER batch, exactly like any issue that fails the bundling gate today.
 
-**No fixed agent cap — saturate; back off ONLY on a real resource signal + stagger (#456; the
-#332 numbers below are measured CONTEXT, not a cap).** There is NO fixed number bounding the
-agents this loop runs concurrently: the worker lanes PLUS the read-only `ticket-validator`
-dispatches Step 1b fires for EVERY batch member PLUS every LANE 1 review dispatch PLUS anything a
+**Batch cap — up to 5 lanes per batch; within a batch back off on a real resource signal + stagger (#723;
+the #332 numbers below are measured CONTEXT).** The batch cap (up to 5 lanes, no refill while a batch
+runs) is the primary concurrency bound — #723's reversal of #456's uncapped saturation, to give the
+main session a clean drained boundary to compact at. WITHIN that batch a SECOND, account-wide bound
+still applies: the up-to-5 worker lanes PLUS the read-only `ticket-validator`
+dispatches Step 1b fires for EVERY batch member PLUS anything a
 DIFFERENT concurrent lane or session under this account runs are all the SAME kind of Claude-API
-subagent, from the SAME account, against the SAME server-side rate limit. So the bound is
+subagent, from the SAME account, against the SAME server-side rate limit. So that bound is
 ACCOUNT-WIDE (one rate limit shared by everything the account runs, workers and read-only helpers
-alike), never per lane, per round, or per repo — and it is REACTIVE, not a number: SATURATE
-(dispatch every workable unit in parallel) and back off ONLY when a real resource signal appears —
-a server-side rate-limit error, box memory pressure, or CC's own max-concurrent-subagents
-ceiling. A CI-waiting lane is NOT a local slot and never bounds new dispatch (CI runs on dynamic
-autoscaled VPS runners — capacity is not local). What a rate-limit signal actually looks like,
+alike), never per lane, never per repo — and if even the 5-lane batch plus its validators hits it,
+back off: a server-side rate-limit error, box memory pressure, or CC's own max-concurrent-subagents
+ceiling. A CI-waiting lane costs no local capacity (CI runs on dynamic autoscaled VPS runners —
+capacity is not local) — but under batch mode the BATCH BOUNDARY, not CI capacity, paces dispatch:
+an in-flight integration CI waiter keeps a live background task, so it holds the drained boundary
+(and thus the next batch) open until it lands. What a rate-limit signal actually looks like,
 measured (2026-08-08, this repo's own dogfooding): a burst of 4 parallel worktree workers ran with
 no rate-limit kills (it did hit a benign doc-append merge conflict at integration, resolved
 keep-both per `docs/autopilot-log.md` — unrelated to rate limiting); a LATER burst of 5 workers
 PLUS 13 concurrent `ticket-validator` dispatches — 18 total agents fired at once — had 3 of them (a
 worker and two validators) killed by a server-side rate limit ("Server is temporarily limiting
 requests (not your usage limit) · Rate limited") within a few minutes. **Stagger on a signal: when
-a rate-limit error, memory pressure, or the max-subagents ceiling hits (or a planned burst is
-obviously huge), split the dispatch into sequential WAVES** — fire the first wave (however many
+a rate-limit error, memory pressure, or the max-subagents ceiling hits within a batch,
+split the batch's dispatch into sequential WAVES** — fire the first wave (however many
 `Agent` tool_use blocks fit), wait for it to genuinely return (a real bounded pause, e.g. tens of
 seconds, gives the rate limiter room to recover) before the next wave. Never fire one giant
 simultaneous burst just because the harness lets a single message hold arbitrarily many `Agent`
@@ -489,9 +501,9 @@ actually shows.
 
 **Serial fallback (documented, not an improvisation).** Dispatch stays the single-worker,
 shared-tree, cross-session-locked shape (unchanged, described in full below) whenever: worktree
-isolation is genuinely unavailable in this environment, or every remaining round candidate this
-turn overlaps a batch already claimed this round (nothing left to safely parallelize). Never force
-a worktree merge you can already see will conflict — serialize instead. A round of size 1 (fleet
+isolation is genuinely unavailable in this environment, or every remaining batch candidate this
+turn overlaps a unit already claimed in this batch (nothing left to safely parallelize). Never force
+a worktree merge you can already see will conflict — serialize instead. A batch of size 1 (fleet
 dispatch with a single worker) and the serial fallback are behaviorally identical except for the
 `isolation:` flag; the fallback exists for the environments/situations where even THAT flag is
 unsafe to use.
@@ -516,9 +528,10 @@ unsafe to use.
 long-CI repos (#332).** Fleet parallelism is a PURE WIN on a `dev`→`main` PR repo with a genuinely
 long CI, at least as much as on a fast one: each integration cycle's ONE CI (repo-flow policy
 above) is paid exactly once no matter how many lanes built the branches feeding it, so
-parallelizing the IMPLEMENTATION phase never costs anything on the CI side — it only saves
-wall-clock, and a CI-waiting lane never blocks dispatch of the next one (dynamic autoscaled VPS
-runners — CI capacity is not local). The supervisor's own CI wait during a cycle is its own
+parallelizing the IMPLEMENTATION phase within a batch never costs anything on the CI side — it only
+saves wall-clock across the batch's lanes, and a CI-waiting lane costs no local capacity (dynamic
+autoscaled VPS runners — CI capacity is not local); the batch boundary, not CI capacity, is what
+paces the NEXT batch. The supervisor's own CI wait during a cycle is its own
 long-lived job and follows `ci-monitoring.md`'s short-wait-foreground / long-wait-background split
 exactly like any other CI wait (the supervisor, never a worker, is the component a
 `run_in_background` poll safely re-invokes across a long wait). Fleet dispatch genuinely is NOT
@@ -528,7 +541,7 @@ at all this turn. The bundling gate (`autonomous-batch-issue-development.md`) pl
 heuristic together are the whole answer to "which issues share one lane" — this ticket found no
 gap in either.
 
-**Continuous lane refill — saturate; NEVER 1–2 lanes while a bundle-safe backlog sits (#456, supersedes the #442 fill-the-cap round mandate).** DISPATCH is CONTINUOUS, not per-round: on ANY loop turn, while unworked bundle-safe backlog remains, assemble the next bundle-safe batch (per-lane procedure below — bundling gate + collision heuristic, skipping only a batch that file-overlaps a LIVE lane) and dispatch it into a fresh `isolation: "worktree"` lane IMMEDIATELY — including WHILE other lanes still run and WHILE returned branches await integration. Refill to saturation every turn — a lane per every workable unit, bounded ONLY by real resource signals (the no-fixed-cap section above: rate-limit errors, box memory, CC max-subagents), never a number; a CI-waiting lane never holds a slot. A single lane's long CI wait then never idles the fleet, because the others were dispatched the moment they were free — never held for a "round" to finish. The ONLY thing serialized is INTEGRATION: Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions) — DISPATCH never waits on it.
+**Batch dispatch — up to 5 lanes, NO refill while a batch is open (#723, deliberately reverses #456's continuous refill FOR autopilot).** DISPATCH is BATCHED, not continuous: at the START of a batch (a turn with NO batch open) — while unworked bundle-safe backlog remains — assemble up to 5 bundle-safe units (per-lane procedure below — bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane in this batch) and dispatch each into a fresh `isolation: "worktree"` lane, all in the SAME message. Then NO new lane is dispatched while the batch is open — a returned lane is integrated SERIALLY (Step 4) but NOT replaced. When the WHOLE batch has returned + integrated — ZERO live background tasks, meaning no lane still running AND no in-flight integration CI waiter — the main session compacts at that clean boundary (Step 5) and the NEXT turn dispatches the next batch of up to 5. The trade-off vs #456 (named honestly): a batch waits for its SLOWEST lane before the next batch starts (a small tail-lane wall-clock cost), accepted in exchange for a bounded main-session context and a compact that can NEVER break task handles / the armed goal (CC #29193 unfixed as of CC 2.1.246). Two research facts make this SAFE (comment on #723): a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes and dispatches the next batch; and the ONLY moment a compact is safe is with ZERO live background tasks (CC #29193 — the task-handle registry is dropped on a mid-fleet compact, notifications lost, exactly what the drained batch boundary avoids). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the batch-dispatch decision.
 
 1. **Per lane SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
@@ -568,11 +581,11 @@ gap in either.
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
    are independent, so validate them in parallel, **but they are the SAME account-wide rate-limited
-   agents as the worker fleet (the no-fixed-cap section above): SATURATE, and back off ONLY on a
-   real resource signal — staggering the validators PLUS workers into sequential WAVES when a
-   rate-limit error, box memory pressure, or CC's max-subagents ceiling hits, never a fixed number
-   (#456).** A validator KILLED by a rate limit (or any
-   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the round — treat
+   agents as the worker fleet (the Batch cap section above): bounded by this batch's own membership,
+   they stagger into sequential WAVES only when a real resource signal — a rate-limit error, box
+   memory pressure, or CC's max-subagents ceiling — hits
+   (#332/#723).** A validator KILLED by a rate limit (or any
+   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the batch — treat
    that ONE member exactly as if Step 1b had simply been skipped for it (the worker's own Step 0
    re-validation, `verify-issue-still-valid.md`, mechanically backstops every member regardless of
    whether Step 1b ran — #213), and dispatch its worker normally without a Step 1b verdict. Branch
@@ -633,7 +646,10 @@ gap in either.
    direction.
 2. **Dispatch the ROUND — one in-session BACKGROUND `autopilot-worker` PER assembled batch, each
    `isolation: "worktree"`, all fired in the SAME message (multiple Agent tool_use blocks — this
-   is what makes them run concurrently rather than one-after-another).** For each batch:
+   is what makes them run concurrently rather than one-after-another).** (Vocabulary note, #723: this
+   "ROUND" IS the batch of up to 5 worktree lanes, and each "batch"/unit below is ONE lane's own
+   bundle-safe issue set — the legacy bundling term; a fuller terminology disambiguation is tracked
+   in #724.) For each batch:
    `subagent_type: autopilot-worker`, **`run_in_background: true`**, **`isolation: "worktree"`**
    (the default; omit it only for the documented serial fallback above) — this keeps your main
    session FREE + thin while every worker runs, each worker stays VISIBLE in the agent strip, and
@@ -726,17 +742,18 @@ gap in either.
      reduced profile, and NEVER the ticket closed by the worker itself.
    - **Every dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting on any of them. End
      the turn `⏳ WORKING`; ANY worker returning RE-INVOKES this loop, and on each re-invocation you
-     BOTH refill lanes to saturation (continuous refill, above) AND integrate any ready branches
-     (Step 4) under the integration mutex — never waiting for the whole fleet to finish first.
-   - **Integration mutex (hard) — the #8 cross-session lock now guards INTEGRATION ONLY, never
-     dispatch (#456; narrowed from the old round-level lock).** DISPATCH is NEVER gated: continuous
-     refill (above) fires new lanes whenever backlog remains, and N lanes running concurrently in
-     THIS session is exactly the point — there is no "do nothing while a worker runs" check any
-     more. The ONE thing serialized is the merge→gates→push INTEGRATION cycle: acquire the mutex
+     integrate any ready branches (Step 4) under the integration mutex as they return — but you do
+     NOT refill: no new lane is dispatched while this batch is still open (#723). Only when the WHOLE
+     batch has drained (Step 5's compact boundary) does the NEXT turn dispatch the next batch.
+   - **Integration mutex (hard) — the #8 cross-session lock guards INTEGRATION ONLY, never the
+     batch-dispatch decision (#456/#723; narrowed from the old round-level lock).** The mutex never
+     gates dispatch: batch dispatch (above) is paced by the batch-open state, not by the mutex, and
+     the up-to-5 lanes running concurrently in THIS session is exactly the point. The ONE thing the
+     mutex serializes is the merge→gates→push INTEGRATION cycle: acquire it
      immediately BEFORE each integration cycle (Step 4) — `python3
      ~/devel/airuleset/airuleset.py autopilot-lock acquire --repo <repo path>` (exit 0 = acquired,
      do the merge→gates→push; exit 1 = a DIFFERENT live session is integrating this repo right now
-     — do NOT integrate this turn, keep DISPATCHING new lanes and re-check next turn) — and
+     — do NOT integrate this turn, wait for THIS batch's other lanes and re-check next turn) — and
      **release it the moment that cycle's push has landed** (`autopilot-lock release --repo <repo
      path>`), so another session's integration can proceed. This mutex is what prevents two sessions
      running a merge/push on the SAME repo at the SAME instant (the proven camera-box #495 and
@@ -846,18 +863,20 @@ gap in either.
    > `--resume` continues you, exactly why the wait is safe here and fatal inside a subagent), and
    > when CI is green dispatch the next short-lived worker for the next promotion (develop→staging,
    > staging→main, merge→deploy-verify). The integration mutex still serializes each promotion
-   > cycle (one merge/push at a time per repo, Step 3.2), while dispatch keeps refilling lanes;
-   > each worker's lifetime just shrinks. This is the SANCTIONED pattern — not an improvisation. For a
+   > cycle (one merge/push at a time per repo, Step 3.2), within the SAME batch (no new lane is
+   > dispatched until the batch drains); each worker's lifetime just shrinks. This is the SANCTIONED
+   > pattern — not an improvisation. For a
    > plain 2-branch single-CI repo it isn't needed: the worker waits FOREGROUND through the one short
    > CI and runs the whole cycle itself.
-4. **As workers return with ready branches, integrate them under the integration mutex — do NOT
-   wait for the whole fleet** (#456; Step 3.2's mutex serializes each merge→gates→push cycle, and
-   continuous dispatch keeps refilling lanes meanwhile). For each returned worker being integrated,
+4. **As workers return with ready branches, integrate them under the integration mutex as they
+   return — one integration cycle at a time, NO new lane dispatched while the batch is open**
+   (#456/#723; Step 3.2's mutex serializes each merge→gates→push cycle). For each returned worker being integrated,
    independently verify its evidence block from primary sources (never trust the claim). Read its
    `dropped:` and `obsolete_closed:` lines and compute that worker's **SURVIVING set** = its batch
    members MINUS dropped MINUS obsolete-closed —
    a dropped / obsolete member is **NOT a verify failure**. This integration cycle's surviving set
-   is the union across the workers integrated in it (a straggler still running joins the NEXT cycle).
+   is the union across the workers integrated in it (a lane still running is integrated in a LATER
+   cycle of the SAME batch — never held for the whole batch, but no new lane replaces it).
 
    > **Serial fallback (no `isolation:`): unchanged, per-batch, exactly as before.** The worker
    > already pushed, opened, and merged its OWN PR — verify it directly:
@@ -873,11 +892,11 @@ gap in either.
    > confirm the worker carded each merged member.
 
    > **Fleet/worktree mode: INTEGRATION — serial, supervisor-owned, one merge→test→push CYCLE at a
-   > time under the #8 integration mutex, repeated as branches return (never held for the whole
-   > fleet — #456).** This is what replaces the worker's own push→PR→merge→deploy for each returned
-   > batch. Each integration cycle acquires the mutex, integrates whatever branches are READY at
-   > that moment (never waiting for stragglers), and releases it; DISPATCH keeps refilling lanes
-   > independently the whole time:
+   > time under the #8 integration mutex, repeated as this batch's branches return (never held for
+   > the whole batch — #456/#723).** This is what replaces the worker's own push→PR→merge→deploy for
+   > each returned batch member. Each integration cycle acquires the mutex, integrates whatever
+   > branches are READY at that moment (never waiting for stragglers), and releases it; NO new lane
+   > is dispatched while the batch is open (Step 3.2):
    > 1. For each worker (any order), spot-check its evidence against its own worktree: `git -C
    >    <worktree-path> log --oneline` / `git -C <worktree-path> diff <base>` — confirm the
    >    claimed commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review`
@@ -960,17 +979,16 @@ gap in either.
    running, or `⏳ WORKING` when this turn still has dispatched lanes in flight (background work IS
    running — never claim idleness). This IS a real completion of the integrated members (merged,
    verified, carded — durable in git/GitHub), not a lie; the signal that MORE work follows is the
-   **ARMED GOAL** Claude Code shows in its footer (`◎ /goal`) plus any lanes still running. This genuine `## ✅ Work Complete` boundary is also
-   where the supervisor itself should call `airuleset.py compact-request --self` FIRST (before
-   writing the report — see `completion-report.md`'s own "Compact at your own boundary" section),
-   so the ticket-boundary `/compact` fires PER INTEGRATION CYCLE instead of once for the whole
-   backlog — an integrated cycle's durable state already lives in git/GitHub, so it is a safe
-   compaction boundary
-   every time. (#400, 2026-08-12: `notify-compact-request.sh`, the old passive Stop-hook text-sniff
-   this used to describe, is now a permanent no-op — `compact-request --self` is the only mechanism
-   left for the supervisor's own turn boundary.) The idle Discord ping is separately guarded while
+   **ARMED GOAL** Claude Code shows in its footer (`◎ /goal`) plus any lanes still running. **The
+   supervisor calls `airuleset.py compact-request --self` FIRST (before writing the report) ONLY at
+   the DRAINED BATCH BOUNDARY — the turn where THIS integration was the batch's LAST, so ZERO
+   background tasks are live (#723)** — the only moment the compact veto passes and a compact cannot
+   break tasks/goal (CC #29193). If lanes of this batch STILL run, do NOT call it yet.
+   (#400: `notify-compact-request.sh`, the old passive Stop-hook text-sniff, is now a
+   permanent no-op — `compact-request --self` is the only mechanism left for the supervisor's own
+   turn boundary.) The idle Discord ping is separately guarded while
    the goal stays armed
-   (`milestone-notifications.md`) — the run-cards already gave phone visibility for this round, so
+   (`milestone-notifications.md`) — the run-cards already gave phone visibility for this batch, so
    nothing double-pings.
    **Reduced-authority streams (branch-merge / fork-no-merge) carry the SAME Step 5 mandate — never
    silence (#58, the david #2129 incident).** There is no PR-to-main, no merge, no deploy for these
@@ -987,7 +1005,12 @@ gap in either.
    stream might not have recognized it applies to its hand-off turns too.
    **The `/goal` loop's NEXT fire re-enters Step 1 for the next batch** — do NOT chain into Step 1
    within this same turn anymore. Do NOT re-run `/issue-planner`; do NOT hand-type `/compact` yourself
-   (the watchdog handles the timing once the pane goes idle).
+   (the watchdog handles the timing once the pane goes idle). **Compact delivery is NOT
+   instantaneous / per-boundary deterministic:** `compact-request --self` RECORDS a request the
+   watchdog types in the drained boundary's idle window (~60s tick); a request that misses the window
+   on a long (>30 min) batch lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
+   every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT drained
+   boundary — never lost, just not strictly deterministic per boundary.
 
 ### Bounce nudge-ack — an injected prompt while the loop runs (ACK it; never work it inline)
 
@@ -1158,20 +1181,24 @@ thin across `--resume` — moved verbatim to `skills/autopilot/references/sessio
 
 ## Guardrails (hard — never relax)
 
-- **Serial INTEGRATION per repo, CONTINUOUS parallel dispatch by default (#317/#456, 2026-08-08).**
+- **Serial INTEGRATION per repo, BATCHED parallel dispatch by default (#317/#456/#723, 2026-08-26).**
   Only the merge→gates→push INTEGRATION cycle is serialized — the integration mutex (Step 3.2)
   allows ONE integration in flight per repo at a time across ALL sessions, supervisor-owned, never
-  simultaneous. DISPATCH, by contrast, is CONTINUOUS and NOT serialized: it keeps refilling a FLEET
-  of `isolation: "worktree"`-isolated worker lanes running IN PARALLEL — one per solo ticket or
-  bundle-safe batch, saturating to every workable unit, bounded ONLY by real resource signals
-  (rate-limit errors, box memory, CC max-subagents), never a fixed cap, and never blocked by the
-  integration mutex. The collision risk that used to force one-worker-at-a-time DISPATCH was two
+  simultaneous. DISPATCH, by contrast, is BATCHED (#723, reversing #456's continuous refill FOR
+  autopilot): each batch is up to 5 `isolation: "worktree"`-isolated worker lanes running IN
+  PARALLEL — one per solo ticket or bundle-safe unit — dispatched together with **NO refill while a
+  batch is open**; within a batch the account-wide resource-signal backoff (rate-limit errors, box
+  memory, CC max-subagents) still applies. When the WHOLE batch has drained (returned + integrated,
+  zero live tasks) the main session compacts at that clean boundary and the next turn dispatches the
+  next batch. This deliberately reintroduces #456's tail-lane wall-clock cost, bought for a bounded
+  main-session context and a compact that never breaks tasks/goal (CC #29193 unfixed). The collision
+  risk that used to force one-worker-at-a-time DISPATCH was two
   workers sharing the SAME `dev` tree; a worktree gives each its own checkout sharing only `.git`,
   so that risk is gone for dispatch. Falling back to the fully-serial single-worker shape (no
   `isolation:`) is still correct whenever worktree isolation is unavailable or a lane's candidates
   overlap too heavily to safely parallelize (Step 3). Two INDEPENDENT levers cut cost, and neither
   replaces the other: BUNDLING many issues into ONE worker's single PR/CI cycle (Step 3.1) cuts CI
-  cost per worker; CONTINUOUS FLEET DISPATCH (Step 3.2) cuts wall-clock by keeping lanes saturated.
+  cost per worker; BATCHED FLEET DISPATCH (Step 3.2) cuts wall-clock by running up to 5 units at once.
   (Different repos can each run their own `/autopilot`
   independently, exactly as before.)
 - **Independent verification is mandatory** — a worker's "merged and deployed" counts only after

@@ -561,82 +561,86 @@ class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
                 if len(line) > 4000]
         self.assertEqual(over, [])
 
-class TestContinuousRefillMandate(TestCase):
-    """#456 -- a single worker blocked on CI for 2h+ let ~46 tickets sit idle.
-    Root cause: the loop was ROUND-based. The supervisor dispatched a whole
-    round of lanes only at the START of a turn, and the round-level gate plus
-    the OLD #8 cross-session lock (held through integration) forbade any second
-    dispatch until the whole round finished and integrated. So as a round's fast
-    lanes finished while one blocked on a 2h CI wait, the live-lane count decayed
-    to 1-2 by design and never refilled -- the #442 fill-the-round-to-the-cap
-    mandate could not fix it, because filling a round of 5 still drops to 1 as
-    fast lanes finish while the round-lock blocks refill until the slow lane's CI
-    ends.
+class TestBatchDispatchMandate(TestCase):
+    """#723 -- autopilot's dispatch moves from CONTINUOUS refill (#456) to BATCH
+    mode: dispatch up to 5 parallel worktree lanes, NO refill while a batch is
+    open, integrate serially as branches return, and compact ONLY at the DRAINED
+    batch boundary (zero live tasks) before the next batch. This is a deliberate
+    reversal of #456 FOR autopilot -- it reintroduces the tail-lane wall-clock
+    cost to buy a bounded main-session context + a compact that never breaks task
+    handles / the armed goal (CC #29193 unfixed). Root cause it fixes: continuous
+    refill kept a lane always live, so `compact-request --self`'s live-tasks veto
+    always skipped and the boundary compact never fired.
 
-    #456 DECOUPLES dispatch from integration: DISPATCH becomes CONTINUOUS
-    (saturate lanes every turn -- a lane per every workable unit, bounded ONLY by
-    real resource signals, never a fixed number, superseding #442's fixed 3-5
-    cap), while INTEGRATION stays STRICTLY EXCLUSIVE, serialized by the #8 lock
-    NARROWED to guard the merge->gates->push critical section ONLY (never
-    dispatch) and integrating ready branches without waiting for stragglers.
+    autopilot-MASTER is NOT in this ticket's scope: its LANE 1 review-watch +
+    LANE 2 release are long-lived and never drain to zero, so batch mode needs
+    its OWN separate design (filed as #724). So the SKILL_MASTER
+    assertions still lock the #456 continuous doctrine, and only the SKILL
+    (autopilot) ones move to batch.
 
-    This class locks that the consolidated continuous-refill protocol TEXT is
-    present in BOTH loop skills (a future edit that silently drops it, or
-    re-introduces the superseded fixed cap, fails loudly here) plus the
-    LANES-FULL reminder inside the MASTER LOOP /goal condition. The 4000-char cap
-    stays locked separately by TheTemplatesMustFitClaudeCodesGoalCap /
-    TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo above.
+    This class locks that autopilot's batch-dispatch protocol TEXT is present (a
+    future edit that reverts it to continuous refill fails loudly), that
+    autopilot-master still mandates continuous saturation, plus the LANES-FULL
+    reminder inside the MASTER LOOP /goal condition. The 4000-char cap stays
+    locked separately above.
     """
 
-    def test_both_loop_skill_bodies_mandate_continuous_lane_refill(self):
-        for rel in (SKILL, SKILL_MASTER):
-            body = read(rel).lower()
-            self.assertIn("continuous", body,
-                          "%s missing the #456 continuous-refill mandate" % rel)
-            self.assertIn("refill", body,
-                          "%s missing the #456 lane-refill mandate" % rel)
+    def test_autopilot_mandates_batch_dispatch_no_refill_while_open(self):
+        body = read(SKILL).lower()
+        self.assertIn("batch", body, "SKILL missing the #723 batch-dispatch mandate")
+        self.assertIn("no refill while a batch", body,
+                      "SKILL missing the #723 no-refill-while-open mandate")
 
-    def test_both_bodies_bound_saturation_on_a_resource_signal_not_a_number(self):
+    def test_master_still_mandates_continuous_lane_refill(self):
+        body = read(SKILL_MASTER).lower()
+        self.assertIn("continuous", body,
+                      "SKILL_MASTER missing the #456 continuous-refill mandate")
+        self.assertIn("refill", body,
+                      "SKILL_MASTER missing the #456 lane-refill mandate")
+
+    def test_both_bodies_bound_saturation_on_a_resource_signal(self):
         for rel in (SKILL, SKILL_MASTER):
             self.assertIn("resource signal", read(rel).lower(),
-                          "%s missing the #456 real-resource-signal back-off bound" % rel)
+                          "%s missing the real-resource-signal back-off bound" % rel)
 
     def test_both_bodies_serialize_only_integration_under_the_mutex(self):
         for rel in (SKILL, SKILL_MASTER):
             self.assertIn("integration mutex", read(rel).lower(),
-                          "%s missing the #456 integration-mutex (dispatch decoupled)" % rel)
+                          "%s missing the integration-mutex" % rel)
 
-    def test_the_superseded_fixed_cap_mandate_is_gone(self):
-        for rel in (SKILL, SKILL_MASTER):
-            body = read(rel).lower()
-            self.assertNotIn("keep the lanes full", body,
-                             "%s still carries the superseded #442 keep-lanes-full mandate" % rel)
-            # A bold form (**3-5**) has `*` between the digits and "parallel",
-            # so the old bare `assertNotIn("3-5 parallel")` missed it. Match any
-            # 3<dash>5 (ASCII hyphen OR en-dash) anywhere: the skills contain no
-            # legitimate 3-5 range, so a hit is always the resurrected cap.
-            self.assertIsNone(re.search(r"3[-–]5", body),
-                              "%s still names a fixed 3-5 cap (any spelling)" % rel)
-            self.assertIsNone(re.search(r"cap (a|the) round", body),
-                              "%s still mandates capping a round at a fixed size" % rel)
-            # The positive half: the superseding no-fixed-cap doctrine must be
-            # PRESENT, so a revert that deletes it (not just re-adds 3-5) fails.
-            self.assertIn("fixed cap", body,
-                          "%s dropped the #456 'no fixed cap' doctrine" % rel)
+    def test_autopilot_names_a_batch_cap_not_the_superseded_fixed_cap(self):
+        # #723: the batch cap (up to 5, no refill while open) is now the primary
+        # bound; the pre-#723 "3-5 fixed cap" / "keep the lanes full" must not
+        # reappear, and the batch-cap doctrine must be PRESENT.
+        body = read(SKILL).lower()
+        self.assertIn("batch cap", body, "SKILL dropped the #723 batch-cap doctrine")
+        self.assertIn("up to 5", body, "SKILL dropped the #723 up-to-5 batch size")
+        self.assertNotIn("keep the lanes full", body)
+        self.assertIsNone(re.search(r"3[-–]5", body),
+                          "SKILL still names a fixed 3-5 cap (any spelling)")
+        self.assertIsNone(re.search(r"cap (a|the) round", body),
+                          "SKILL still mandates capping a round at a fixed size")
 
-    def test_the_integration_mutex_bullet_locks_dispatch_decoupling(self):
-        # M2: the decay-causing revert re-widens the #8 lock back to round
-        # scope. That revert passes every OTHER test here (it can leave
-        # "continuous"/"refill"/"integration mutex" words intact while making
-        # the lock gate dispatch again). These two phrases are what it CANNOT
-        # keep: the exact narrowed-mutex bullet name, and the flat statement
-        # that dispatch is never gated. Scoped to SKILL (autopilot), where the
-        # narrowed #8-lock bullet lives.
+    def test_master_still_forbids_the_superseded_fixed_cap(self):
+        body = read(SKILL_MASTER).lower()
+        self.assertNotIn("keep the lanes full", body,
+                         "SKILL_MASTER still carries the superseded #442 keep-lanes-full mandate")
+        self.assertIsNone(re.search(r"3[-–]5", body),
+                          "SKILL_MASTER still names a fixed 3-5 cap (any spelling)")
+        self.assertIn("fixed cap", body,
+                      "SKILL_MASTER dropped the #456 'no fixed cap' doctrine")
+
+    def test_the_integration_mutex_bullet_locks_batch_dispatch_decoupling(self):
+        # #723: the mutex still guards INTEGRATION only, never the batch-dispatch
+        # decision (dispatch is now paced by the batch-open state, not the mutex).
+        # These two phrases are what a revert to continuous/round mode CANNOT
+        # keep. Scoped to SKILL (autopilot), where the narrowed #8-lock bullet
+        # lives.
         body = read(SKILL).lower()
         self.assertIn("integration mutex (hard)", body,
-                      "SKILL dropped the #456 narrowed integration-mutex bullet")
-        self.assertIn("dispatch is never gated", body,
-                      "SKILL dropped the #456 'DISPATCH is NEVER gated' guarantee")
+                      "SKILL dropped the narrowed integration-mutex bullet")
+        self.assertIn("gates only integration, never the batch-dispatch decision", body,
+                      "SKILL dropped the #723 mutex-gates-only-integration guarantee")
 
     def test_the_master_locks_all_lanes_concurrent_and_reviews_never_starve(self):
         # Round-2 blocker (#456 decision 3): decisions 1 & 2 got positive locks
@@ -736,20 +740,20 @@ class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
         for line in goal_lines():
             self.assertIn("compact-request --self", line)
 
-    def test_every_template_says_to_hold_before_dispatching(self):
-        # #621: the compact boundary now paces exactly ONE integration/hand-off
-        # per turn (the reconciled tail), REPLACING the old "do NOT dispatch the
-        # next issue in the same turn" — that phrasing serialized the WHOLE loop
-        # and suppressed the parallel worktree fleet (the whole point of #621).
-        # --self must still come first (calling it only makes sense before the
-        # turn ends).
-        for idx, line in enumerate(goal_lines()):
-            hold = ("do NOT hand off a SECOND branch this turn"
-                    if idx == FORK_NO_MERGE
-                    else "do NOT integrate a SECOND branch this turn")
-            self.assertIn(hold, line)
-            self.assertLess(line.index("compact-request --self"),
-                            line.index(hold))
+    def test_every_template_compacts_only_at_the_drained_batch_boundary(self):
+        # #723 BATCH mode: the compact-request --self call is now GATED on the
+        # whole batch having returned (zero live tasks), REPLACING #621's
+        # "compact boundary paces ONE integration per turn / do NOT integrate a
+        # SECOND branch this turn" continuous framing. So "WHOLE batch has
+        # returned" must appear BEFORE the compact call on the same line, and
+        # the superseded serializing tail must be gone.
+        for line in goal_lines():
+            self.assertIn("compact-request --self", line)
+            self.assertIn("WHOLE batch has returned", line)
+            self.assertLess(line.index("WHOLE batch has returned"),
+                            line.index("compact-request --self"))
+            self.assertNotIn("do NOT integrate a SECOND branch this turn", line)
+            self.assertNotIn("do NOT hand off a SECOND branch this turn", line)
 
 
 class TestClauseARearmHintIsFullAuthorityOnlyByDesign(TestCase):

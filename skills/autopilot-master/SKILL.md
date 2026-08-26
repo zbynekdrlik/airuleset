@@ -114,12 +114,15 @@ another — dispatch saturates every lane in parallel, bounded only by real reso
     `❓ ASKED` (ask-and-continue), plain Slovak: okno je otvorené, deploy neprebehne,
     blokuje ho #X/#Y (s témou), fix beží — nechať dobehnúť (odporúčam) / zasiahnuť?
     The user must never wake up to a silently missed window.
-- **LANE 3 CORE** — open non-skip core-slice issues remain? Per the `autopilot` skill
-  Step 3, **CONTINUOUSLY refill** worktree `autopilot-worker` lanes (#456, supersedes
-  the #442 fill-the-cap round mandate): validate each ticket (ticket-validator), bundle
+- **LANE 3 CORE** — open non-skip core-slice issues remain? **CONTINUOUSLY refill**
+  worktree `autopilot-worker` lanes (#456, supersedes the #442 fill-the-cap round mandate):
+  validate each ticket (ticket-validator), bundle
   bundle-safe issues, and dispatch a lane for EVERY workable bundle-safe unit the moment
-  it is free — NO fixed cap, bounded only by real resource signals (see the `autopilot`
-  skill's saturation section), skipping only a batch that file-overlaps a lane already
+  it is free — NO fixed cap, bounded only by real resource signals (the resource-signal +
+  wave-stagger back-off doctrine lives in the `autopilot` skill's Batch cap section —
+  read PAST that skill's batch cap: the `autopilot` skill's Step 3 moved to #723 BATCH
+  mode, but master's LANE 3 DELIBERATELY stays continuous; master's own batch adaptation is
+  tracked in #724), skipping only a batch that file-overlaps a lane already
   in flight (a guaranteed merge conflict). A CI-blocked lane never holds up new dispatch.
   INTEGRATION is the ONLY thing serialized: the supervisor merges each returned branch
   under the #8 **integration mutex** (one merge/test/push cycle at a time across ALL
@@ -161,7 +164,10 @@ concurrent lane or session under this account runs) until a REAL resource signal
 server-side rate-limit error, box memory pressure, or CC's max-subagents ceiling — then
 stagger/back off. This is ACCOUNT-WIDE (the account has ONE rate limit shared across every
 lane and session), never per lane. The canonical, measured back-off doctrine lives in the
-`autopilot` skill's own saturation section (#332/#456); never re-derive it here.**
+`autopilot` skill's own Batch cap section (#332/#456); never re-derive it here. (NB: that
+skill's Step 3 moved to #723 BATCH mode — read its back-off/measured-incident content, not
+its up-to-5 batch cap; master's LANE 3 deliberately stays continuous, batch adaptation
+tracked in #724.)**
 
 **Single-lane commands stay:** `/process-subdev <stream>` and `/autopilot` remain valid
 for a deliberate single-lane run; on the gatekeeper the master is the default because
