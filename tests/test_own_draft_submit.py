@@ -64,10 +64,9 @@ OWN_GKREQ = wd.GKREQ_NUDGE % ("#40", "odoo-erp")
 
 class OwnNudgeSubmitPrefix(unittest.TestCase):
     def test_matches_the_three_unambiguous_machine_prefixes(self):
+        # #726: GOAL_LANE_UNDERSAT_NUDGE_TEXT was retired; OWN_LANE
+        # (GOAL_LANE_NUDGE_TEXT) already exercises the "lane-check: " prefix.
         self.assertEqual(wd._own_nudge_submit_prefix(OWN_LANE), "lane-check: ")
-        self.assertEqual(
-            wd._own_nudge_submit_prefix(goal.GOAL_LANE_UNDERSAT_NUDGE_TEXT
-                                        % (2, 5, 9, 1)), "lane-check: ")
         self.assertEqual(wd._own_nudge_submit_prefix(OWN_BOUNCE),
                          "bounce-backstop: ")
         self.assertEqual(wd._own_nudge_submit_prefix(OWN_GKREQ),

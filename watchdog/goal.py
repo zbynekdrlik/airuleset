@@ -2400,8 +2400,9 @@ GOAL_LANE_MAX_NUDGES = 2
 # workers) is nudged only with at least this many genuinely-workable open
 # tickets. A lone open umbrella epic / 1-2 held-or-foreign items reads as
 # "workable" for core-quals but is not dispatchable, and nudging it produced the
-# reported gk storm (nudge -> "nič workable" -> nudge ...). The UNDER-SATURATED
-# branch keeps its own stricter surplus floor (>= GOAL_LANE_UNDERSAT_SURPLUS).
+# reported gk storm (nudge -> "nič workable" -> nudge ...). #726: this is now the
+# ONLY backlog floor -- the under-saturated surplus floor was retired with the
+# fill nudge (a running batch is never refilled under batch mode).
 GOAL_LANE_MIN_BACKLOG = 3
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 # #693 -- how fresh the tickets-status cache must be for the give-up CAUSE
@@ -2584,40 +2585,53 @@ def _account_limit_notify_owner(send_fn, pid, run, sid, cwd, dry_run,
             "(no-reset cap, job-6-unhandled)" % loc)
 
 
-# #442 -- the text TEACHES the fleet-dispatch doctrine
-# (skills/autopilot/SKILL.md: parallel worktree workers, the account-wide
-# concurrent-agent cap of 8, serialize-only integration), never just a
-# bare "dispatch more workers" poke.
+# #442/#726 -- the text TEACHES the BATCH doctrine
+# (skills/autopilot SKILL.md + goal_registry.py::saturation-core; #723/#724
+# reversed #456's continuous saturation). 0 dispatched workers = the várka
+# (batch) is CLOSED, so this fires ONLY when a workable backlog sits with no
+# open batch -- "you should have started a NEW batch and did not" -- never a
+# mid-drain refill (the running-batch state is skip:batch-running, see
+# goal_lane_occupancy_nudge). It commands: a BATCH of up to 5 parallel worktree
+# lanes, oldest-first, NO refill while a batch runs, serial integration under the
+# mutex, compact at the drained boundary, and (the canonical post-#723 within-
+# batch bound -- NOT the retired #442 fixed "cap 8") back off ONLY on a real
+# resource signal (rate-limit / memory pressure / CC max-subagents ceiling).
 GOAL_LANE_NUDGE_TEXT = (
     "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
     "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
-    "NErátaj; dispatchni len naozaj workable), no BEŽÍ 0 dispatched "
-    "workerov (žiadny live subagent transcript; waiterov beží: %d). "
-    "Prázdne implementačné lány nie sú dôvod na nečinnosť ani počas "
-    "čakania na CI/waiter. Postupuj podľa FLEET doktríny skills/autopilot "
-    "SKILL.md: dispatchni TERAZ ďalšie batchnuté tickety ako PARALELNÝCH "
-    "isolation:\"worktree\" autopilot-worker subagentov "
-    "(run_in_background), drž ACCOUNT-WIDE cap 8 súbežných agentov "
-    "(workeri + validatory + review dispatche SPOLU) a integruj výhradne "
-    "SÉRIOVO — jeden merge/CI/push za celé kolo."
+    "NErátaj; dispatchni len naozaj workable), no BEŽÍ 0 dispatched workerov "
+    "(žiadny live subagent transcript; waiterov beží: %d) — várka je ZAVRETÁ. "
+    "Prázdne lány pri workable backlogu = mala si začať NOVÚ várku a nezačala. "
+    "Podľa BATCH doktríny skills/autopilot SKILL.md (#723/#724): začni NOVÚ "
+    "várku — dispatchni BATCH až 5 PARALELNÝCH isolation:\"worktree\" "
+    "autopilot-worker lán (run_in_background), oldest-first; VO várke ustúp "
+    "(back off) len na REÁLNY resource signál — server-side rate-limit error, "
+    "memory pressure boxu, alebo CC max-subagents strop; ŽIADNY refill kým "
+    "várka beží; vrátené vetvy integruj výhradne SÉRIOVO pod integračným "
+    "mutexom; na vydrenovanej hranici várky sprav compact-request --self a "
+    "až potom ďalšiu várku."
 )
 
-# #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the COUNT-based
-# fill-the-cap widening. The empty-lane nudge above (0 workers) fires as before;
-# this threshold adds the UNDER-SATURATED case (some workers, but fewer than the
-# fill floor, while any backlog still waits). Owner (#456 "DOPLNENIE
-# ROZHODNUTIA"): "kludne ovela viac subagentov moze paralelne pracovat" -- so the
-# floor is 5, not a small 3, and the nudge TEXT frames saturation as WORK-DRIVEN
-# (every independent workable ticket/review/release step earns a lane; a
-# CI-waiting worker never blocks further dispatch), not a fixed target.
-# #481: the fill floor is `min(GOAL_LANE_SATURATION_WORKERS, backlog)` -- a
-# small-but-real backlog (2-10 workable) with idle lanes is filled up to the
-# backlog, not just once it passes a fixed 10-ticket gate, matching the owner's
-# `active_workers < min(5, workable_backlog)`. GOAL_LANE_SATURATION_WORKERS is a
-# pragmatic UPPER cap on WHEN the nudge stops firing, never a "fill exactly this
-# many" target.
-GOAL_LANE_SATURATION_WORKERS = 5      # fill floor caps here: >= min(5, backlog) live workers -> saturated
+# #442/#481/#726 -- the batch-size ceiling (matching the batch cap of up to 5
+# parallel lanes). Its LIVE role under batch mode (#726 retired the #456
+# continuous fill-the-cap): `floor = min(GOAL_LANE_SATURATION_WORKERS, backlog)`
+# is the "saturated" vs "batch-running" LOG boundary in goal_lane_occupancy_nudge
+# -- both are a RUNNING batch and both SKIP (>= floor logs "saturated", 0 <
+# live_workers < floor logs "skip:batch-running"); neither refills. It is no
+# longer a "fill up to this many lanes" target -- the nudge fires ONLY for a
+# CLOSED batch (live_workers == 0). backlog_n is >= 1 at the floor computation, so
+# floor >= 1 and workers==0 is always < floor (the empty-lane branch is reachable).
+GOAL_LANE_SATURATION_WORKERS = 5      # batch ceiling: >= min(5, backlog) live workers -> "saturated" skip (#726: a running batch, no refill)
 
+# #726 DORMANT-via-nudge: the whole low-mem OOM subsystem below (this constant +
+# GOAL_LANE_LOWMEM_SURFACE_STREAK + _mem_available_mb + _lane_min_mem_avail_mb +
+# _lane_lowmem_skip + one_glance.lane_low_mem_surface_decision) gated the RETIRED
+# under-saturated fill nudge, so the NUDGE never reaches it now. RETAINED (not
+# deleted): the empty-lane "start a NEW batch" nudge also dispatches, so whether
+# batch-start should gate on memory headroom is an UNSETTLED design question (see
+# the #726 design comment); its pure decision cores stay unit-tested
+# (_lane_min_mem_avail_mb, lane_low_mem_surface_decision). Removal is folded into
+# the dormant-machinery cleanup follow-up (#729). Historical rationale below.
 # #442 re-fix 2 (owner directive 2026-08-14: "vsak ak na to mas watcher tak ten
 # si vie aj pamet na boxe overit") -- the fill-lanes nudge (which tells the
 # supervisor to dispatch MORE parallel workers) fires only when the box has real
@@ -2686,27 +2700,11 @@ def _stuck_alert_streak():
         v = GOAL_LANE_STUCK_ALERT_STREAK
     return v if v >= 1 else GOAL_LANE_STUCK_ALERT_STREAK
 
-# #442 re-fix 2 -- the UNDER-SATURATED (non-zero worker) nudge text. Distinct
-# from GOAL_LANE_NUDGE_TEXT (which says "0 dispatched workerov"): here 1-4 workers
-# ARE running, so the text names the real count and frames saturation as
-# work-driven, not a fixed number. #481: also names the target lane floor
-# (min(5, backlog)) alongside the seen worker count. Args: (live_workers, floor,
-# backlog_n, waiters).
-GOAL_LANE_UNDERSAT_NUDGE_TEXT = (
-    "lane-check: beží len %d z cieľových %d lán (floor=min(5, backlog)), no "
-    "čaká %d OTVORENÝCH tiketov (nie všetky hneď rozpracovateľné — zadržané "
-    "zelené vetvy / cudzí repo / zastrešujúce NErátaj; dispatchni len workable) "
-    "(waiterov beží: %d). Lány nie sú plné podľa "
-    "PRÁCE: každý nezávislý "
-    "workable tiket / review / release krok má dostať vlastnú PARALELNÚ lane, a "
-    "worker čakajúci na CI NEblokuje ďalší dispatch. Nikdy nenechaj 1-2 workerov, "
-    "kým sedí veľký backlog. Podľa FLEET doktríny skills/autopilot SKILL.md "
-    "dispatchni TERAZ ďalšie batchnuté tickety ako PARALELNÝCH "
-    "isolation:\"worktree\" autopilot-worker subagentov (run_in_background) — "
-    "nasýtenie je podľa PRÁCE, nie fixného počtu, až po ACCOUNT-WIDE hard strop "
-    "8 súbežných agentov (workeri + validatory + review dispatche SPOLU) — a "
-    "integruj výhradne SÉRIOVO, jeden merge/CI/push za celé kolo."
-)
+# #726 -- the UNDER-SATURATED (non-zero worker) fill nudge text is RETIRED. Its
+# doctrine (#442/#481/#456: "fill lanes to 5 whenever a slot opens") was the
+# continuous-saturation refill #723/#724 reversed; under batch mode a running
+# batch (live_workers>0) is never refilled -- goal_lane_occupancy_nudge logs
+# skip:batch-running instead. GOAL_LANE_UNDERSAT_NUDGE_TEXT/_SURPLUS are removed.
 
 
 def _mem_available_mb():
@@ -2715,7 +2713,15 @@ def _mem_available_mb():
     nudge): this guard's whole purpose is that a stalled box is too SILENT, and
     every managed box is Linux with /proc/meminfo -- an unreadable meminfo is an
     anomaly that must not re-silence the guard, so only the memory PROTECTION is
-    skipped, never the nudge itself."""
+    skipped, never the nudge itself.
+
+    #726: DORMANT -- with the under-saturated fill nudge retired (batch mode, no
+    mid-drain refill), the nudge's memory-headroom gate is gone, so this + the
+    low-mem helpers below are currently UNCALLED. Retained (not deleted): the
+    OOM-protection subsystem may be re-wired to the empty-lane batch-start nudge
+    (which also dispatches) -- an unsettled question (see the #726 design comment).
+    Its pure decision core is still unit-tested (one_glance.lane_low_mem_surface_
+    decision, _lane_min_mem_avail_mb)."""
     try:
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
             for line in f:
@@ -2746,21 +2752,18 @@ def _lane_min_mem_avail_mb():
     return v if v > 0 else GOAL_LANE_MIN_MEM_AVAIL_MB
 
 
-# #509 -- SURPLUS FLOOR for the UNDER-SATURATED (fill-more-lanes) nudge. The
-# workable-backlog count (core-quals/slice-quals) over-represents genuinely-
-# DISPATCHABLE units -- held green branches awaiting CI, umbrella/tracking
-# tickets, ops-wait / evidence-gated items (e.g. #499) the count cannot
-# structurally distinguish yet -- so `live_workers < min(5, backlog)` is true even
-# when there is nothing real to lift (the live incident: the guard pushing for a
-# 5th lane against a workable count that could not fill it, ~8 nudges/night). Push
-# for MORE lanes only when the backlog exceeds the running lanes by this margin:
-# with 1-4 workers this lands the absolute floor at 6-9, matching the owner's
-# "~10+ open for the target" intuition, while NEVER silencing the stalled 0-worker
-# EMPTY-lane branch (anti-silence -- it ignores this floor entirely). The
-# effectiveness backoff below handles the residual (a real surplus that still
-# can't be lifted).
-GOAL_LANE_UNDERSAT_SURPLUS = 5
+# #726 -- GOAL_LANE_UNDERSAT_SURPLUS (the #509 fill-more-lanes surplus floor) is
+# RETIRED with the under-saturated fill nudge: a running batch is never refilled
+# under batch mode, so there is no "push for more lanes" decision to floor.
 
+# #726 DORMANT-via-nudge: the #509 effectiveness backoff (GOAL_LANE_INEFFECTIVE_
+# BACKOFF_S + _lane_effective_interval + _lane_effectiveness, and the
+# under_saturated branches of _lane_cooldown_decision/_lane_record_nudge below)
+# shaped the RETIRED under-saturated fill nudge, so the NUDGE never reaches it now
+# (a running batch skips at skip:batch-running). It is NOT deleted: those two
+# helpers stay GENERAL utilities whose under_saturated path is directly unit-
+# tested by tests/test_lane_dedup_670.py (both branches), and removing it is
+# folded into the dormant-machinery cleanup follow-up (#729). Historical rationale below.
 # #509 -- effectiveness (feedback) backoff for the UNDER-SATURATED fill nudge. The
 # fixed 15-min cooldown re-nudged "fill more lanes" every 15 min for HOURS even
 # when every nudge produced NO new lane (the supervisor answering "everything
@@ -2927,10 +2930,13 @@ def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, n
 
 
 def _lane_clear_effectiveness(rec):
-    """#509 -- drop the effectiveness-backoff baseline/streak. Called when the box
-    is NOT under-saturated (fully saturated, or drained to 0 workers): the streak
-    is an under-saturated concept, and a lane-count change to either extreme is
-    itself a reset condition."""
+    """#509 -- drop the effectiveness-backoff baseline/streak (`lineff`/`lnw`/
+    `lnb`). #726: those keys are the under-saturated fill nudge's dampening state,
+    which the nudge no longer SETS (a running batch skips at skip:batch-running),
+    so this is now a defensive clear of any pre-#726 leftover -- called on every
+    reachable branch (saturated / batch-running / empty-lane). Retained as a
+    general helper (the shared `_lane_cooldown_decision`/`_lane_record_nudge` still
+    accept the under_saturated path, directly unit-tested by test_lane_dedup_670)."""
     for k in ("lineff", "lnw", "lnb"):
         rec.pop(k, None)
 
@@ -3076,17 +3082,19 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
         if send_fn is not None and not dry_run:
             rec["lpinged"] = True
             from notify import stream_redirect
-            # #442 re-fix 2: the give-up is now reachable in the
-            # UNDER-SATURATED state (1-4 workers), so the text names the
-            # real count instead of the old "nebeží ani jeden worker".
+            # #726: the count give-up is reachable ONLY from the empty-lane
+            # (0-worker) branch now (a running batch skips at skip:batch-
+            # running, never counting toward the give-up), so live_workers is
+            # 0 here -- the box has a workable backlog but never started a
+            # NEW batch despite repeated nudges.
             # #693: send() SUPPRESSES this ping (`lanestall:` is in
             # SUPPRESSED_ALERT_PREFIXES) -- the composed body survives only
             # as the `suppressed` delivery-log trace; the owner-facing
             # channel is gone, the journal verdict below is the signal.
             send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
                     "rozpracovateľné), "
-                    "`/goal` armovaný, ale %d min sa lány nezaplnili na "
-                    "fill cap (beží len %d workerov, waiterov: %d) a %s "
+                    "`/goal` armovaný, ale %d min sa NEZAČALA nová várka na "
+                    "workable backlog (beží %d workerov, waiterov: %d) a %s "
                     "(%s). Pozri sa na reláciu, prosím."
                     % (watchdog.project_label(cwd), backlog_n,
                        int(idle // 60), live_workers, waiters, why, loc),
@@ -3171,9 +3179,11 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
 
 
 def _lane_lowmem_reset(rec, dry_run):
-    """#571 -- clear the low-mem CAPACITY-CAPPED surface episode when the box
-    FILLED (saturated) or mem RECOVERED (the under-saturated mem-OK path), so a
-    FUTURE persistent low-mem run re-surfaces once. ``dry_run`` mutates nothing
+    """#571 -- clear the low-mem CAPACITY-CAPPED surface episode. #726: the
+    episode is only ever SET by `_lane_lowmem_skip`, which was the retired
+    under-saturated memory-headroom gate, so this is now a defensive clear of any
+    pre-#726 leftover -- called on the saturated + batch-running skips (the caller
+    that used to be the under-saturated mem-OK path). ``dry_run`` mutates nothing
     (#516: a diagnostic sweep must not wipe a real episode's latch)."""
     if dry_run:
         return
@@ -3262,10 +3272,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         _lane_skip(logs, loc, "skip:awaiting-user (❓ marker -- session blocked "
                               "on a question, never nudge)")
         return logs, False
-    # #442 re-fix 2 (REOPEN č.2): worker PRESENCE is now a COUNT decision made
-    # below (`live_workers`), so it can distinguish an UNDER-SATURATED box (1-4
-    # workers + big backlog -> still nudge to fill the cap) from a saturated one
-    # -- the whole point of the reopen. The old early-skip on
+    # #442 re-fix 2 (REOPEN č.2) / #726: worker PRESENCE is a COUNT decision made
+    # below (`live_workers`), so it can distinguish a CLOSED batch (0 workers ->
+    # start a NEW batch nudge) from a RUNNING one (any workers -> skip:batch-
+    # running; #726 retired the "fill to floor" under-saturated nudge). The old
+    # early-skip on
     # `_pane_has_bg_agent(captured)` made that impossible: with ANY visible worker
     # in the agent strip it returned True and skipped the entire path BEFORE
     # `live_workers` was even counted, so the count widening alone would never fire
@@ -3347,67 +3358,67 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "no measurable open backlog, skip"
                     % (loc, live_workers, waiters, backlog_n))
         return logs, False
-    # #442 re-fix 2 + #481 -- the fill-the-cap widening, on the PURE COUNTS the
-    # guard already reads (live worker count + open backlog), no
-    # transcript-content heuristic. Two nudge-worthy states:
-    #   * EMPTY lanes (live_workers == 0) -- fires on ANY open backlog, exactly as
-    #     before this widening; memory-exempt (a fully stalled box must always be
-    #     nudged) and idle-gated (wait for quiet) below.
-    #   * UNDER-SATURATED lanes (0 < live_workers < floor) with genuine memory
-    #     headroom -- 1-4 workers while workable tickets sit unallocated should be
-    #     filling the empty parallel worktree lanes up to the floor.
-    # #481: floor = min(GOAL_LANE_SATURATION_WORKERS, backlog) -- the owner's
-    # `active_workers < min(5, workable_backlog)`. This unifies the old fixed
-    # `>= 5` cap + the `backlog > 10` hard gate: a small-but-real backlog (2-10
-    # workable) with idle lanes is now filled up to the backlog, not just once it
-    # passes 10. backlog_n is already >= 1 (the `<= 0` guard above returned), so
-    # floor >= 1 and workers==0 is always < floor (the empty-lane branch stays
-    # reachable). live_workers (dispatched SUBAGENT transcripts) EXCLUDES `waiters`
+    # #726 BATCH MODE (#723/#724 reverse #442/#481/#456's fill-the-cap
+    # continuous saturation) -- on the PURE COUNTS the guard reads (live worker
+    # count + open backlog), no transcript-content heuristic. There is now exactly
+    # ONE nudge-worthy state:
+    #   * EMPTY lanes (live_workers == 0) = the batch is CLOSED -- fires on ANY
+    #     open backlog ("start a NEW batch"); memory-exempt (a fully stalled box
+    #     must always be nudged).
+    # A RUNNING batch (0 < live_workers, saturated OR draining) is NEVER nudged to
+    # refill -- it logs skip:batch-running above (the retired "fill lanes to floor"
+    # under-saturated nudge). DO NOT re-add a fill branch here: any mid-batch fire
+    # violates the NO-refill doctrine regardless of wording (the #726 root cause).
+    # #481: floor = min(GOAL_LANE_SATURATION_WORKERS, backlog); backlog_n is >= 1
+    # (the `<= 0` guard above returned), so floor >= 1 and workers==0 is always <
+    # floor (the empty-lane branch stays reachable). It still separates the
+    # "saturated" (>= floor) skip from the "batch-running" (< floor) skip above --
+    # both skip, both are a running batch. live_workers (dispatched SUBAGENT
+    # transcripts) EXCLUDES `waiters`
     # (CC's bg-shell/monitor badge). #587 changed the finished direction: a
     # CI-waiting subagent is still counted (tool_use tail = mid-work), but a
-    # cleanly-FINISHED one now DROPS from live_workers immediately (terminal
-    # stop_reason) / after FINISH_SETTLE_S -- a TIGHTER estimate, no longer masking
-    # a just-finished-but-free lane (the intended #587 fill direction: a freed lane
-    # with backlog SHOULD be filled on the real gap). The old completion-recency
+    # cleanly-FINISHED one DROPS from live_workers immediately (terminal
+    # stop_reason) / after FINISH_SETTLE_S -- a TIGHTER estimate, so a fully
+    # DRAINED batch (all workers finished) reads live_workers==0 and reaches the
+    # empty-lane "start a NEW batch" nudge promptly. The old completion-recency
     # anti-flap (a just-merged worker counted through its integration window) is
     # gone (it WAS the #587 ghost); now = 1-hour cooldown + 3-min recent-human +
-    # ~30s FINISH_SETTLE_S debounce (#619 removed the empty-lane idle gate). At/
-    # above floor = silent.
-    mem_mb = None
+    # ~30s FINISH_SETTLE_S debounce. Any live_workers>0 = a running batch = skip.
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
     if live_workers >= floor:
-        _lane_clear_effectiveness(rec)   # #509: filled -> re-probe fresh on next dip
+        _lane_clear_effectiveness(rec)   # #509: a full batch -> re-probe fresh next dip
         _lane_lowmem_reset(rec, dry_run)   # #571: box filled -> low-mem episode over
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "saturated (>= %d workers), skip"
                     % (loc, live_workers, waiters, backlog_n, floor))
         return logs, False
     under_saturated = live_workers > 0
-    if not under_saturated:
-        _lane_clear_effectiveness(rec)   # #509: a lane-drop reset condition
-        if backlog_n < GOAL_LANE_MIN_BACKLOG:   # #530 -- empty-lane floor
-            _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
-                       % (backlog_n, GOAL_LANE_MIN_BACKLOG))
-            return logs, False
-    elif (backlog_n - live_workers) < GOAL_LANE_UNDERSAT_SURPLUS:
-        # #509 SURPLUS FLOOR (under-saturated only; see GOAL_LANE_UNDERSAT_SURPLUS).
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "skip:surplus-floor (backlog-workers=%d < %d)"
-                    % (loc, live_workers, waiters, backlog_n,
-                       backlog_n - live_workers, GOAL_LANE_UNDERSAT_SURPLUS))
-        return logs, True
     if under_saturated:
-        # The fill-lanes nudge dispatches MORE parallel workers -- only fire when
-        # the box has real memory headroom, else another worktree worker risks the
-        # #448 pressure-reap zone on a memory-tight box. Measured on the box the
-        # guard runs on (owner directive). The 0-worker empty-lane nudge is exempt
-        # (a fully stalled box must always be nudged).
-        mem_mb = _mem_available_mb()
-        if mem_mb is not None and mem_mb < _lane_min_mem_avail_mb():  # #574: effective floor
-            logs += _lane_lowmem_skip(rec, live_workers, waiters, backlog_n,
-                                      mem_mb, loc, dry_run)   # #571: OOM + surface
-            return logs, True
-        _lane_lowmem_reset(rec, dry_run)   # #571: mem OK -> low-mem episode over
+        # #726 -- BATCH MODE (#723/#724 reverse #456's continuous saturation).
+        # 0<live_workers<floor means a BATCH is OPEN and draining serially (some
+        # lanes still working, returned branches awaiting serial integration). The
+        # doctrine forbids ANY refill while a batch runs, so the old under-saturated
+        # "fill to floor" nudge is RETIRED: ANY mid-batch fire violates NO-refill,
+        # regardless of wording. Skip -- the nudge fires ONLY for a CLOSED batch
+        # (the live_workers==0 branch below): "should have started a NEW batch and
+        # did not". The #509 effectiveness backoff + #571/#574 low-mem headroom gate
+        # that shaped the fill nudge are retired with it; the memory helpers stay --
+        # the empty-lane batch-start also dispatches, so whether it should gate on
+        # memory is a separate, unsettled question (see the #726 design comment).
+        _lane_clear_effectiveness(rec)   # #509: a batch is running -> re-probe fresh
+        _lane_lowmem_reset(rec, dry_run)   # #571: not a fill path -> episode over
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "skip:batch-running (batch open/draining; NO refill while a "
+                    "batch runs, #723)"
+                    % (loc, live_workers, waiters, backlog_n))
+        return logs, False
+    # live_workers == 0 -> the batch is CLOSED; the empty-lane "start a NEW batch"
+    # nudge. #530 empty-lane floor: a lone/tiny backlog is not batch-worthy.
+    _lane_clear_effectiveness(rec)   # #509: a lane-drop reset condition
+    if backlog_n < GOAL_LANE_MIN_BACKLOG:
+        _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
+                   % (backlog_n, GOAL_LANE_MIN_BACKLOG))
+        return logs, False
     # #619 -- the empty-lane fill nudge is NO LONGER gated on the 15-min idle
     # floor. A continuously serially-working under-saturated session writes a
     # turn every few min, so `idle` almost never reached 15m and the nudge was
@@ -3421,17 +3432,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # redundant "wait for quiet" gate that a busy under-saturated session defeats.
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
-    # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies
-    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets bounded
-    # pokes then ONE per-episode record (#693: classified machine-channel
-    # verdict; the owner ping is send()-suppressed), never a forever-nudge. #620: the
-    # count give-up is REACHABLE now -- `ln` advances monotonically per landed
-    # nudge and resets only on lane appearance (`_lane_count_giveup_reset`), never
-    # on a backlog change, so consecutive ineffective empty-lane nudges reach it.
-    # The UNDER-SATURATED branch has NO permanent give-up (pushed every
-    # GOAL_LANE_INTERVAL_S). The stash-abort give-up stays for BOTH branches -- a
+    # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies to
+    # the 0-worker empty-lane branch, the ONLY nudge branch that reaches here now
+    # (#726: a running batch skips at skip:batch-running above): a truly stalled
+    # box gets bounded pokes then ONE per-episode record (#693: classified
+    # machine-channel verdict; the owner ping is send()-suppressed), never a
+    # forever-nudge. #620: the count give-up is REACHABLE -- `ln` advances
+    # monotonically per landed nudge and resets only on lane appearance
+    # (`_lane_count_giveup_reset`), never on a backlog change, so consecutive
+    # ineffective empty-lane nudges reach it. The stash-abort give-up stays -- a
     # delivery-mechanics bound, not a "stop nudging" one.
-    count_gaveup = (not under_saturated) and n >= GOAL_LANE_MAX_NUDGES
+    count_gaveup = n >= GOAL_LANE_MAX_NUDGES
     stash_gaveup = aborts >= GOAL_LANE_MAX_STASH_ABORTS
     if count_gaveup or stash_gaveup:
         giveup_skip, giveup_logs = _lane_giveup_decision(
@@ -3505,13 +3516,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> draft changed "
                     "between captures -- human composing right now" % loc)
         return logs, True
-    # #442 re-fix 2: EMPTY-lane vs UNDER-SATURATED text. The empty-lane text says
-    # "0 dispatched workerov"; the under-saturated text names the real count
-    # (mem_mb was already read above in the under-saturated branch).
-    if live_workers == 0:
-        text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
-    else:
-        text = GOAL_LANE_UNDERSAT_NUDGE_TEXT % (live_workers, floor, backlog_n, waiters)
+    # #726: only the empty-lane (batch CLOSED) nudge reaches here -- a running
+    # batch (live_workers>0) already returned at skip:batch-running above.
+    text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
     if fresh_draft:
         # #442 -- deliver INTO the held draft via the stash protocol (the
         # primitive re-verifies idle-with-draft itself and undoes its own
@@ -3609,19 +3616,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
         mode = "typed"
-    # #479/#509 -- commit the LANDED nudge; see _lane_record_nudge.
+    # #479/#509 -- commit the LANDED nudge; see _lane_record_nudge (under_saturated
+    # is provably False here -- only the empty-lane branch reaches delivery, #726).
     _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, cd_moved, n,
                        now)
-    # #442 re-fix 2: log the real worker count and (for the under-saturated fill
-    # nudge) the measured MemAvailable, so an under-saturated firing is diagnosable.
-    mem_suffix = "" if mem_mb is None else " MemAvailable=%dMB" % mem_mb
-    # #442 THIRD GAP: the give-up counter only bounds the 0-worker branch, so
-    # only that branch logs "(n/MAX)"; the under-saturated fill-the-cap branch
-    # repeats with the cooldown and has no MAX, so it logs "(fill)".
-    prog = "fill" if under_saturated else "%d/%d" % (n + 1, GOAL_LANE_MAX_NUDGES)
-    logs.append("lane-occupancy nudge (%s) %s workers=%d floor=%d%s waiters=%d "
+    # #442 THIRD GAP: the give-up counter bounds this 0-worker empty-lane branch,
+    # so it logs "(n/MAX)". #726 removed the under-saturated "(fill)" variant + the
+    # MemAvailable suffix (both were the retired fill nudge's).
+    prog = "%d/%d" % (n + 1, GOAL_LANE_MAX_NUDGES)
+    logs.append("lane-occupancy nudge (%s) %s workers=%d floor=%d waiters=%d "
                 "backlog=%d idle=%dm (%s)" % (mode, loc, live_workers, floor,
-                                              mem_suffix, waiters, backlog_n,
+                                              waiters, backlog_n,
                                               idle // 60, prog))
     return logs, True
 

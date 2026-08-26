@@ -1257,15 +1257,13 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         live_ev = [WorkerLane("w1", "live", 100.0, None, "")]
         with m.patch.object(wd, "transcript_last_marker", return_value="⏳"), \
              m.patch.object(wd, "_pane_live_task_count", return_value=0), \
-             m.patch.object(wd, "count_live_workers", return_value=(1, live_ev)), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+             m.patch.object(wd, "count_live_workers", return_value=(1, live_ev)):
             logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
         self.assertFalse(any("skip:working-no-tasks" in ln for ln in logs), logs)
-        # positive proof it proceeded past working-no-tasks into the fill logic
-        # (1 live lane, backlog 5 -> under-saturated surplus-floor is the next
-        # decision the fill path reaches).
-        self.assertTrue(any("surplus-floor" in ln or "saturated" in ln
-                            or "lane-occupancy nudge" in ln for ln in logs), logs)
+        # positive proof it proceeded past working-no-tasks into the batch
+        # decision (#726: 1 live lane -> a batch is running -> skip:batch-running
+        # is the next decision the path reaches).
+        self.assertTrue(any("skip:batch-running" in ln for ln in logs), logs)
 
     def test_571_genuinely_zero_structured_lanes_still_defers(self):
         # #571 LOCK (b) at the goal.py level: a ⏳ marker, 0 render badges, AND 0
@@ -1281,42 +1279,19 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:working-no-tasks" in ln for ln in logs), logs)
 
-    def test_571_low_mem_capacity_capped_surfaces_once(self):
-        # #571 LOCK (d) at the goal.py level: after M consecutive low-mem skips
-        # with a genuine backlog, the ONE deduped CAPACITY-CAPPED owner-decision
-        # line fires; the OOM skip:low-mem line is preserved every sweep and NO
-        # nudge is typed (OOM protection unchanged).
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
-                   WorkerLane("w2", "live", 100.0, None, "")]
-        rec = {"lms": goal.GOAL_LANE_LOWMEM_SURFACE_STREAK - 1}
-        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
-             m.patch.object(goal, "_mem_available_mb", return_value=812):
-            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 12, now,
-                                          tmtime, rec=rec)
-        self.assertTrue(any("skip:low-mem" in ln for ln in logs), logs)
-        self.assertTrue(any("CAPACITY-CAPPED" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])       # OOM protection preserved
-        # dedup -- a later sweep in the SAME episode does NOT re-surface (rec
-        # carries lms/lmsurf); the skip:low-mem line still fires every sweep.
-        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
-             m.patch.object(goal, "_mem_available_mb", return_value=812):
-            logs2, _o2, _t2 = self._call(GOAL_ARMED_CAP, lambda cwd: 12, now,
-                                         tmtime, rec=rec)
-        self.assertTrue(any("skip:low-mem" in ln for ln in logs2), logs2)
-        self.assertFalse(any("CAPACITY-CAPPED" in ln for ln in logs2), logs2)
-
     def test_571_low_mem_recovered_resets_the_capacity_episode(self):
-        # #571: mem OK -> the OOM skip did not fire -> the surface episode resets
-        # (lms/lmsurf cleared), so a FUTURE persistent low-mem run re-surfaces.
+        # #571/#726: with the under-saturated fill nudge retired, a running batch
+        # (2 workers) takes the skip:batch-running path, which still calls
+        # `_lane_lowmem_reset` -> any low-mem surface episode (lms/lmsurf cleared),
+        # so a FUTURE persistent low-mem run re-surfaces.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
                    WorkerLane("w2", "live", 100.0, None, "")]
         rec = {"lms": 3, "lmsurf": True}
-        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+        # #726: the skip:batch-running path never consults _mem_available_mb (the
+        # memory gate was under-saturated-only, retired), so no mem patch needed.
+        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)):
             self._call(GOAL_ARMED_CAP, lambda cwd: 12, now, tmtime, rec=rec)
         self.assertEqual(rec.get("lms", 0), 0)
         self.assertFalse(rec.get("lmsurf", False))
@@ -1417,67 +1392,6 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("no measurable open backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_live_worker_present_small_backlog_backs_off_509(self):
-        # #509 OVERTURNS #481's tiny-backlog fill: (2 workers, backlog 5) has
-        # surplus 5-2=3 < GOAL_LANE_UNDERSAT_SURPLUS(5), so the guard no longer
-        # pushes for a 5th lane against a workable count too small to fill it -- it
-        # skips:surplus-floor. #481's real-backlog filling survives at a genuine
-        # surplus (test_undersaturated_large_surplus_still_nudges_509). This test
-        # locked the pre-#509 "small-but-real backlog must be filled" invariant,
-        # which is exactly what #509 deliberately narrows.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
-                                          now, tmtime)
-        self.assertTrue(any("skip:surplus-floor" in ln for ln in logs), logs)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
-
-    # ---------------------------------------------------------------- #
-    # #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the
-    # COUNT-based fill-the-cap widening. Nudge when live_workers < 5 AND
-    # backlog > 10 AND MemAvailable is healthy; the old guard only fired at
-    # exactly 0 workers, and its `_pane_has_bg_agent` early-skip meant it
-    # could never fire on a live box with visible workers at all.
-    # ---------------------------------------------------------------- #
-
-    def test_two_workers_big_backlog_with_memory_nudges(self):
-        # THE live-box lock: 2 live workers (structured `count_live_workers`) +
-        # backlog 37 + healthy memory must NUDGE (under-saturated fill). The pane
-        # SHOWS the agent strip; post-#518 the count is the structured G2 count,
-        # not the render strip, so the reopen-2 root cause (the old
-        # `_pane_has_bg_agent` early-skip) can no longer suppress it.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
-                                          now, tmtime)
-        self.assertTrue(owns)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertTrue(any("workers=2" in ln for ln in logs), logs)
-        self.assertTrue(any("MemAvailable=8192MB" in ln for ln in logs), logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
-        # The under-saturated text, not the empty-lane "0 dispatched" text.
-        typed = " ".join(a[-1] for a in tmux.sent if "-l" in a)
-        self.assertIn("beží len 2", typed)
-
-    def test_four_workers_big_backlog_with_memory_nudges(self):
-        # Owner #456: the floor is 5, so 4 workers is still under-saturated ->
-        # NUDGE (was silent under the earlier <3 draft).
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "count_live_workers", return_value=(4, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
-                                          now, tmtime)
-        self.assertTrue(owns)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertTrue(any("workers=4" in ln for ln in logs), logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
-
     def test_five_workers_big_backlog_is_silent(self):
         # 5 workers >= GOAL_LANE_SATURATION_WORKERS -> saturated -> silent.
         now = 100000
@@ -1559,20 +1473,6 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("workers=0" in ln for ln in logs), logs)
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
-    def test_undersaturated_low_memory_skips_with_diagnostic(self):
-        # Under-saturated + big backlog but LOW memory -> silent, and the skip
-        # is journaled with the measured value so a tight box stays diagnosable.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=812):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
-                                          now, tmtime)
-        self.assertTrue(owns)  # a genuine candidate, deferred for memory
-        self.assertTrue(any("skip:low-mem MemAvailable=812MB" in ln
-                            for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
-
     def test_max_nudges_gives_up_and_pings_once(self):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
@@ -1586,31 +1486,12 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
     # ---------------------------------------------------------------- #
     # #442 THIRD GAP (2026-08-14) -- the top-of-function idle gate
     # (`idle < GOAL_LANE_IDLE_S`, 15 min) early-returned with EMPTY logs
-    # BEFORE workers/backlog were counted, so a BUSY under-saturated
-    # session (turns spinning -> transcript mtime always fresh) never
-    # reached the fill-the-cap decision and journalled NOTHING. Plus
-    # GOAL_LANE_MAX_NUDGES was a permanent give-up. The fix moves the idle
-    # gate into the branch decision (0-worker keeps 15 min; under-saturated
-    # has NO idle floor and NO permanent give-up), and every reaching sweep
-    # logs its decision with numbers.
+    # BEFORE workers/backlog were counted, so a BUSY session (turns spinning ->
+    # transcript mtime always fresh) never reached the nudge decision and
+    # journalled NOTHING. #619 removed the empty-lane idle floor; every reaching
+    # sweep logs its decision with numbers. (#726 retired the under-saturated
+    # fill nudge -- a running batch is now skip:batch-running.)
     # ---------------------------------------------------------------- #
-
-    def test_busy_undersaturated_fires_despite_fresh_transcript(self):
-        # THE headline lock: a BUSY session (FRESH tmtime, idle=30s) with 2
-        # workers, big backlog, healthy memory must FIRE -- exactly the gk
-        # live-box state (2 workers, I 32, journal empty 20+ min). On the OLD
-        # code the top idle gate early-returned SILENTLY here (logs == [],
-        # nothing typed); this is the reopen-3 root cause.
-        now = 100000
-        tmtime = now - 30  # fresh: transcript written 30s ago, idle << 15min
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
-                                          now, tmtime)
-        self.assertTrue(owns)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertTrue(any("workers=2" in ln for ln in logs), logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
     def test_619_zero_worker_active_session_fires_no_more_skip_idle(self):
         # #619 OVERTURNS the pre-#619 "empty-lane keeps its 15-min idle floor"
@@ -1814,43 +1695,6 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(rec.get("lpinged"))   # reset fired BEFORE the backlog skip
         self.assertFalse(rec.get("ln"))
 
-    def test_undersaturated_has_no_permanent_giveup(self):
-        # A session that stays under-saturated for hours must keep being
-        # pushed: GOAL_LANE_MAX_NUDGES is NOT a give-up for the fill-the-cap
-        # branch. With ln already at the cap, an under-saturated box still
-        # FIRES (cooldown-gated only), never "GAVE UP". On the OLD code this
-        # gave up and went silent.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES}
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
-                                          now, tmtime, rec=rec)
-        self.assertTrue(owns)
-        self.assertFalse(any("GAVE UP" in ln for ln in logs), logs)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
-
-    def test_undersaturated_cooldown_logs_remaining(self):
-        # Under-saturated but within the per-fire cooldown window -> skip, and
-        # the skip is journalled with the remaining seconds (item 3), not the
-        # old numberless "rate-limited". #530: the FIRST cooldown check is the
-        # shared hard hourly cap (both branches), so a nudge 60s after the last
-        # skips:hourly-cap; the value is asserted so a sign-flip mutant is caught.
-        # Fired 60s ago into the 1h cap -> GOAL_LANE_INTERVAL_S - 60 remaining.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"llast": now - 60}  # fired 60s ago, inside the hourly cap
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
-                                          now, tmtime, rec=rec)
-        self.assertTrue(owns)
-        self.assertTrue(any("skip:hourly-cap remaining=%ds" % (
-            goal.GOAL_LANE_INTERVAL_S - 60) in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
-
     def test_min_floor_saturates_below_five_when_backlog_is_small(self):
         # #481: floor = min(5, backlog). (3 workers, backlog 3) -> floor 3,
         # 3 >= 3 -> SATURATED (silent), and the decision names the ACTUAL
@@ -1866,14 +1710,16 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
                         logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_busy_undersaturated_stash_abort_still_reaches_giveup(self):
-        # #442-review F1: the stash-abort give-up (requirement 2 -- must stay
-        # for BOTH branches) was made structurally UNREACHABLE on a busy
-        # under-saturated session by the session-active reset. A busy session
-        # always has idle < GOAL_LANE_IDLE_S, so the reset zeroed `lna` every
-        # sweep before the streak could reach the cap. A permanently-aborting
-        # lane (parked draft occupying the stash slot) on a busy box must still
-        # accumulate the streak across sweeps and fire the ONE give-up ping.
+    def test_busy_empty_lane_stash_abort_still_reaches_giveup(self):
+        # #442-review F1 / #726: the stash-abort give-up (a delivery-mechanics
+        # bound) was made structurally UNREACHABLE on a busy session by the
+        # session-active reset. A busy session always has idle < GOAL_LANE_IDLE_S,
+        # so the reset zeroed `lna` every sweep before the streak could reach the
+        # cap. A permanently-aborting empty-lane (0 workers -> batch CLOSED ->
+        # nudge fires; a parked draft occupies the stash slot) on a busy box must
+        # still accumulate the streak across sweeps and fire the ONE give-up ping.
+        # (#726 retired the under-saturated nudge, so this now exercises the
+        # empty-lane path -- the only branch that reaches stash delivery.)
         # #479 -- the abort streak is now throttled by ELAPSED TIME (an
         # escalating backoff parks each next attempt), not by raw iteration
         # count, so "across sweeps" must advance the clock past each park
@@ -1893,8 +1739,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         sent = []
         all_logs = []
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])), \
              m.patch.object(wd, "deliver_with_stash", return_value=False):
             for i in range(goal.GOAL_LANE_MAX_STASH_ABORTS + 3):
                 now = start + i * step
@@ -2237,12 +2082,11 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID)
         tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])), \
              m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
             for i in range(10):                     # 10 sweeps, 60s apart
                 now = start + i * 60
-                tmtime = now - 30                    # busy under-saturated
+                tmtime = now - 30                    # busy empty-lane (#726)
                 tmux = DeliverGoalFakeTmux(
                     [("%9", "claude", self.CWD, "111")], GOAL_ARMED_DRAFT_CAP)
                 goal.goal_lane_occupancy_nudge(
@@ -2255,156 +2099,6 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertLessEqual(len(calls), 4,
                              "backoff must throttle the 60s retry hammer to a "
                              "few attempts, never once per sweep")
-
-    # ---------------------------------------------------------------- #
-    # #509 -- SURPLUS FLOOR + effectiveness (feedback) BACKOFF for the
-    # UNDER-SATURATED fill nudge. FLOOR: only push for MORE lanes when the
-    # workable backlog clearly exceeds the running lanes. BACKOFF: a nudge
-    # that produced NO new LIVE lane (`count_live_workers` flat) widens the
-    # NEXT interval, holding at the cap forever (never silent); it resets
-    # when a lane appears / the backlog grows / a lane drops. Empty-lane
-    # (0 workers) is UNAFFECTED (anti-silence).
-    # ---------------------------------------------------------------- #
-
-    def _undersat_call(self, backlog, now, tmtime, rec, subagents, eff_workers,
-                       mem=8192):
-        # Drive the under-saturated fill path deterministically. Post-#518 the
-        # gating count AND the #509 effectiveness signal are BOTH
-        # `count_live_workers` (= `eff_workers`); the `subagents` patch of the
-        # now-unused `_count_live_subagents` is a harmless no-op kept only so the
-        # existing #509 call sites (which pass `subagents == eff_workers`) stay
-        # byte-identical. Healthy memory, recent-human gate neutralized.
-        with m.patch.object(wd, "_count_live_subagents", return_value=subagents), \
-             m.patch.object(wd, "count_live_workers",
-                            return_value=(eff_workers, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=mem), \
-             m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "test")):
-            return self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: backlog, now,
-                              tmtime, rec=rec)
-
-    def test_undersaturated_below_surplus_floor_skips_509(self):
-        # 2 workers + backlog 5 -> pre-#509 floor min(5,5)=5, 2<5 -> NUDGED.
-        # #509: surplus 5-2=3 < GOAL_LANE_UNDERSAT_SURPLUS(5) -> skip:surplus-floor.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        logs, owns, tmux = self._undersat_call(5, now, tmtime, {}, 2, 2)
-        self.assertTrue(any("skip:surplus-floor" in ln for ln in logs), logs)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
-
-    def test_undersaturated_large_surplus_still_nudges_509(self):
-        # A genuine surplus (backlog 37, 2 workers, surplus 35 >= 5) still fills --
-        # #481's real-backlog filling is preserved.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        logs, owns, tmux = self._undersat_call(37, now, tmtime, {}, 2, 2)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
-
-    def test_ineffective_nudge_widens_interval_509(self):
-        # #530: two ineffective nudges (count_live_workers flat), spaced past the
-        # 1h hourly cap so each fires, then a 3rd attempt 90 min after nudge 2 --
-        # past the hourly cap but INSIDE the widened stage-1 (2h) interval -- must
-        # skip:ineffective-backoff.
-        #
-        # #670 ADAPTATION: the backlog DECREASES 37->36->35 across the three
-        # sweeps (a supervisor solving tickets inline while staying under-
-        # saturated -- workers flat, no NEW lane). Pre-#670 this test held the
-        # backlog at a flat 37; #670's dedup now suppresses an EXACTLY-unchanged
-        # (workers, backlog) signature outright (skip:dedup-unchanged, locked in
-        # test_lane_dedup_670), so a flat 37 would dedup at nudge 2, never
-        # reaching the #509 ineffective-backoff this test exercises. A decreasing
-        # backlog is CHANGED (not deduped) yet still INEFFECTIVE (backlog did not
-        # GROW, workers did not increase) -> `_lane_effectiveness` is False ->
-        # the streak advances and the interval widens exactly as before. #509 and
-        # #670 partition the "not moved" space: exactly-unchanged -> #670 dedup,
-        # changed-but-not-improved -> #509 backoff.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {}
-        logs1, _, _ = self._undersat_call(37, now, tmtime, rec, 2, 2)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs1), logs1)
-        t2 = now + goal.GOAL_LANE_INTERVAL_S + 1
-        logs2, _, _ = self._undersat_call(36, t2, tmtime, rec, 2, 2)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs2), logs2)
-        self.assertEqual(rec.get("lineff"), 1, rec)   # streak advanced
-        t3 = t2 + 90 * 60
-        logs3, _, tmux3 = self._undersat_call(35, t3, tmtime, rec, 2, 2)
-        self.assertTrue(any("skip:ineffective-backoff" in ln for ln in logs3), logs3)
-        self.assertEqual(tmux3.sent, [])
-
-    def test_effective_nudge_resets_backoff_509(self):
-        # A deep-backoff lane (streak 3) whose next sweep sees a NEW live lane
-        # (count_live_workers 2 -> 3) resets the streak to 0 and fires at the base
-        # interval. #530: called 61 min later -- past the 1h hourly cap, so with
-        # the streak reset to 0 (base interval == hourly cap) it FIRES; had the
-        # streak stayed 3 (4h interval) it would still be backed off.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"ln": 3, "llast": now, "lineff": 3, "lnw": 2, "lnb": 37}
-        logs, owns, tmux = self._undersat_call(37, now + 61 * 60, tmtime, rec, 2, 3)
-        self.assertEqual(rec.get("lineff"), 0, rec)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-
-    def test_backoff_resets_when_backlog_grows_509(self):
-        # A deep-backoff lane whose backlog GREW since the last nudge resets
-        # (re-probe -- genuine new work). #530: 61 min later, past the hourly cap,
-        # so the reset-to-base-interval nudge fires.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"ln": 3, "llast": now, "lineff": 3, "lnw": 2, "lnb": 37}
-        logs, owns, tmux = self._undersat_call(50, now + 61 * 60, tmtime, rec, 2, 2)
-        self.assertEqual(rec.get("lineff"), 0, rec)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-
-    def test_backoff_does_not_reset_on_a_bare_lane_drop_509(self):
-        # #509 adversarial review (both reviewers converged): a bare lane DROP does
-        # NOT reset the streak. On an un-liftable backlog a worker completing with
-        # nothing to replace it (count 3->1) is the normal "nothing to lift" churn;
-        # resetting on it would re-open the burn. #530: at streak 3 the interval is
-        # 240 min; 90 min elapsed -- past the 1h hourly cap but still inside the
-        # deep interval -> skip:ineffective-backoff, streak unchanged, NO nudge.
-        # (Under the rejected drop=reset the interval would collapse to the base
-        # 1h and it would fire at 90 min.)
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"ln": 3, "llast": now, "lineff": 3, "lnw": 3, "lnb": 37}
-        logs, owns, tmux = self._undersat_call(37, now + 90 * 60, tmtime, rec, 1, 1)
-        self.assertEqual(rec.get("lineff"), 3, rec)   # streak NOT reset by a drop
-        self.assertTrue(any("skip:ineffective-backoff" in ln for ln in logs), logs)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
-
-    def test_surplus_floor_boundary_is_exactly_five_509(self):
-        # #509 review MINOR-2 (both reviewers): lock GOAL_LANE_UNDERSAT_SURPLUS==5
-        # at the boundary so a `<`->`<=` off-by-one is caught. surplus 4 (backlog
-        # 6, 2 workers) skips; surplus 5 (backlog 7, 2 workers) nudges (design:
-        # backlog exceeds lanes by >=5 fills).
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        logs4, _, tmux4 = self._undersat_call(6, now, tmtime, {}, 2, 2)
-        self.assertTrue(any("skip:surplus-floor" in ln for ln in logs4), logs4)
-        self.assertEqual(tmux4.sent, [])
-        logs5, _, tmux5 = self._undersat_call(7, now, tmtime, {}, 2, 2)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs5), logs5)
-        self.assertFalse(any("skip:surplus-floor" in ln for ln in logs5), logs5)
-
-    def test_backoff_holds_at_cap_never_silent_509(self):
-        # Anti-silence (#134): at the widest schedule stage the interval HOLDS and
-        # STILL fires once it elapses -- never permanently silent.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        cap = goal.GOAL_LANE_INEFFECTIVE_BACKOFF_S[-1]
-        seed = {"ln": 9, "llast": now, "lineff": 9, "lnw": 2, "lnb": 37}
-        logs_in, _, _ = self._undersat_call(37, now + cap - 60, tmtime,
-                                            dict(seed), 2, 2)
-        self.assertTrue(any("skip:ineffective-backoff" in ln for ln in logs_in),
-                        logs_in)
-        logs_out, _, _ = self._undersat_call(37, now + cap + 60, tmtime,
-                                             dict(seed), 2, 2)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs_out),
-                        logs_out)
 
     def test_empty_lane_ignores_surplus_floor_and_backoff_509(self):
         # Anti-silence: the 0-worker EMPTY-lane nudge is UNAFFECTED by the
@@ -2432,14 +2126,18 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
     # ---------------------------------------------------------------- #
 
     def test_stash_abort_giveup_reprobes_and_delivers_after_park_511(self):
-        # The gk latch: aborts at the cap, already pinged, park long elapsed,
-        # pane now a clean deliverable idle prompt, huge surplus. The nudge must
-        # RE-PROBE and DELIVER, never latch on skip:gave-up forever.
+        # The gk latch: STASH aborts at the cap, already pinged, park long
+        # elapsed, pane now a clean deliverable idle prompt. The nudge must
+        # RE-PROBE and DELIVER, never latch on skip:gave-up forever. #726: driven
+        # on the empty-lane (0-worker) path -- the only branch that still reaches
+        # stash delivery -- with ln BELOW the count give-up cap so ONLY the
+        # stash-abort give-up (lna) is exercised, isolating the #511 re-probe.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"ln": 4, "lna": goal.GOAL_LANE_MAX_STASH_ABORTS, "lpinged": True,
+        rec = {"ln": 0, "lna": goal.GOAL_LANE_MAX_STASH_ABORTS, "lpinged": True,
                "lnpark": now - 10000, "llast": now - 40000}
-        logs, owns, tmux = self._undersat_call(37, now, tmtime, rec, 2, 2)
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 37, now, tmtime,
+                                      rec=rec)
         self.assertFalse(any("skip:gave-up" in ln for ln in logs), logs)
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
@@ -2453,12 +2151,14 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # Same latch but the abort-backoff park is still ACTIVE: the sweep must
         # fall through to the #479 park (skip:abort-backoff, re-probe pending),
         # never the permanent skip:gave-up short-circuit. Proves the fall-through
-        # reaches the park instead of returning early.
+        # reaches the park instead of returning early. #726: empty-lane path,
+        # ln below the count give-up cap (see the sibling above).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"ln": 4, "lna": goal.GOAL_LANE_MAX_STASH_ABORTS, "lpinged": True,
+        rec = {"ln": 0, "lna": goal.GOAL_LANE_MAX_STASH_ABORTS, "lpinged": True,
                "lnpark": now + 500, "llast": now - 40000}
-        logs, owns, tmux = self._undersat_call(37, now, tmtime, rec, 2, 2)
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 37, now, tmtime,
+                                      rec=rec)
         self.assertFalse(any("skip:gave-up" in ln for ln in logs), logs)
         self.assertTrue(any("skip:abort-backoff" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
@@ -2529,21 +2229,6 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_530_hourly_cap_under_saturated(self):
-        # The SAME hard 1-hour cap applies to the under-saturated branch: a fill
-        # nudge 1000s after the last skips:hourly-cap (RED on the old code, whose
-        # under-sat stage-0 interval was 15 min -> fires at 1000s).
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"llast": now - 1000}
-        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
-            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
-                                          now, tmtime, rec=rec)
-        self.assertTrue(any("skip:hourly-cap" in ln for ln in logs), logs)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
-
     def test_620_giveup_holds_and_fires_when_backlog_unchanged(self):
         # #620: an empty-lane sweep with the give-up already reached HOLDS the
         # counter and fires GAVE UP, whatever the backlog (here unchanged from the
@@ -2597,35 +2282,27 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
 
 
 class TestGoalLaneNudgeDoctrine(unittest.TestCase):
-    """#442 — the nudge TEXT must teach the fleet-dispatch doctrine
-    (skills/autopilot SKILL.md), not just poke: parallel worktree worker
-    dispatch, the account-wide concurrent-agent cap of 8, and
-    serialize-only integration."""
+    """#442/#726 — the (empty-lane, batch-CLOSED) nudge TEXT must teach the BATCH
+    doctrine (skills/autopilot SKILL.md, #723/#724), not the retired continuous
+    saturation: parallel worktree worker dispatch, the account-wide cap of 8,
+    NO refill while a batch runs, and serialize-only integration. (The
+    comprehensive batch-language lock lives in
+    tests/test_batch_orchestration.py::TestWatchdogLaneNudgeIsBatch.)"""
 
-    def test_nudge_text_commands_fleet_dispatch_doctrine(self):
+    def test_nudge_text_commands_batch_dispatch_doctrine(self):
         rendered = goal.GOAL_LANE_NUDGE_TEXT % (7, 2)
         low = rendered.lower()
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
-        self.assertIn("8", rendered)
         self.assertIn("sériovo", low)
-
-    def test_undersat_nudge_text_is_work_driven_and_names_the_count(self):
-        # #442 re-fix 2 + #481: the under-saturated text names the real worker
-        # count AND the target lane floor, commands fleet dispatch, and frames
-        # saturation as WORK-DRIVEN (not a fixed cap number).
-        # Args: (live_workers, floor, backlog, waiters).
-        rendered = goal.GOAL_LANE_UNDERSAT_NUDGE_TEXT % (2, 5, 37, 1)
-        low = rendered.lower()
-        self.assertIn("beží len 2", rendered)
-        # #481: the target lane floor is cited alongside the seen worker count.
-        self.assertIn("cieľových 5", rendered)
-        self.assertIn("worktree", low)
-        self.assertIn("paraleln", low)
-        self.assertIn("sériovo", low)
-        # work-driven, not a fixed target
-        self.assertIn("prác", low)
-        self.assertIn("ci", low)
+        # #726: batch doctrine, not the retired "fill lanes" continuous refill.
+        self.assertIn("várk", low)
+        self.assertIn("refill", low)
+        self.assertNotIn("dispatchni teraz ďalšie", low)
+        # #726 (review finding 2): the within-batch bound is the canonical
+        # post-#723 resource-signal backoff, NOT the retired #442 fixed "cap 8".
+        self.assertIn("rate-limit", low)
+        self.assertNotIn("8", rendered)
 
     def test_min_mem_threshold_is_a_named_constant_documented(self):
         # #442 re-fix 2 / #574: the memory floor is a named, sane default
