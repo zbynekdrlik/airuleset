@@ -50,7 +50,7 @@
     "filedrop/vault.py": 1071,
     "filedrop/vault_server.py": 580,
     "goal_registry.py": 283,
-    "notify/__init__.py": 2996,
+    "notify/__init__.py": 3134,
     "statusbar.py": 830,
     "subagent_statusline.py": 300,
     "tests/_goal_arm_helpers.py": 261,
@@ -259,6 +259,7 @@
     "tests/test_question_ping_off_710.py": 316,
     "tests/test_question_policy.py": 215,
     "tests/test_question_prune.py": 678,
+    "tests/test_question_thread_install_718.py": 279,
     "tests/test_release_gap.py": 822,
     "tests/test_release_landed_698.py": 495,
     "tests/test_release_recheck_699.py": 211,
@@ -413,7 +414,7 @@
   "functions": {
     "airuleset.py::_notify_run_card": 288,
     "airuleset.py::cmd_gk_request": 209,
-    "airuleset.py::cmd_install": 630,
+    "airuleset.py::cmd_install": 649,
     "airuleset.py::cmd_notify": 351,
     "airuleset.py::cmd_tickets_status": 214,
     "airuleset.py::cmd_watchdog": 210,
@@ -449,7 +450,7 @@
     ".claude/rules/internals-scripts.md": 51200,
     ".claude/rules/internals-skills-modules.md": 51200,
     ".claude/rules/internals-statusbar.md": 51200,
-    ".claude/rules/internals-tests.md": 47902,
+    ".claude/rules/internals-tests.md": 49662,
     ".claude/rules/internals-watchdog.md": 51200,
     ".claude/rules/internals-webterm.md": 51200
   }

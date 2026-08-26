@@ -1275,6 +1275,25 @@ def cmd_install(args):
     except Exception as e:
         print(f"  discord notify check error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 7b. Discord questions (-q) thread: self-heal + LOUD gap report (#718) ---
+    # check_discord_notify_config above only REPORTS whether Discord is wired;
+    # it does not close the #296 gap that the per-owner questions thread
+    # (claude-<owner>-q) is NEVER auto-created — so a question-delivery-ENABLED
+    # owner (david; NOT the #710-suppressed zbynek/marek) whose box never ran
+    # the explicit --provision-question-thread has its ❓ pings fall back into
+    # the main thread forever (live incident #718: david on subdev). This
+    # self-heals it fleet-wide at every install, scoped to the one owner THIS
+    # box delivers as; machine channel only (stdout), never an owner ping.
+    try:
+        from notify import (provision_owner_question_thread_for_install,
+                            format_qthread_install_report)
+        _q_result = provision_owner_question_thread_for_install()
+        for _q_line in format_qthread_install_report(_q_result):
+            print(_q_line)
+    except Exception as e:
+        print(f"  discord questions-thread provision error (non-fatal): {e}",
+              file=sys.stderr)
+
     # --- 8. Tier-0 target/ retention: purge stale build artefacts (#315) ---
     # Existing Tier-0 (default) local-builds policy bans HEAVY local builds
     # but still legitimately fills target/ via the cheap checks it DOES
