@@ -1289,8 +1289,9 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
                    WorkerLane("w2", "live", 100.0, None, "")]
         rec = {"lms": 3, "lmsurf": True}
-        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+        # #726: the skip:batch-running path never consults _mem_available_mb (the
+        # memory gate was under-saturated-only, retired), so no mem patch needed.
+        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)):
             self._call(GOAL_ARMED_CAP, lambda cwd: 12, now, tmtime, rec=rec)
         self.assertEqual(rec.get("lms", 0), 0)
         self.assertFalse(rec.get("lmsurf", False))
@@ -2293,12 +2294,15 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         low = rendered.lower()
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
-        self.assertIn("8", rendered)
         self.assertIn("sériovo", low)
-        # #726: batch doctrine, not the retired "fill lanes" continuous refill
+        # #726: batch doctrine, not the retired "fill lanes" continuous refill.
         self.assertIn("várk", low)
         self.assertIn("refill", low)
         self.assertNotIn("dispatchni teraz ďalšie", low)
+        # #726 (review finding 2): the within-batch bound is the canonical
+        # post-#723 resource-signal backoff, NOT the retired #442 fixed "cap 8".
+        self.assertIn("rate-limit", low)
+        self.assertNotIn("8", rendered)
 
     def test_min_mem_threshold_is_a_named_constant_documented(self):
         # #442 re-fix 2 / #574: the memory floor is a named, sane default

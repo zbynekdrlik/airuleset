@@ -212,6 +212,10 @@ class TestWatchdogLaneNudgeIsBatch(TestCase):
         self.assertIn("paraleln", low)
         self.assertIn("sériovo", low)       # serial integration under the mutex
         self.assertIn("5", rendered)        # a BATCH of up to 5
+        # the within-batch bound is the canonical post-#723 resource-signal
+        # backoff, NOT the retired #442 fixed "cap 8" (review finding 2)
+        self.assertIn("rate-limit", low)
+        self.assertNotIn("8", rendered)
 
     def test_empty_lane_text_dropped_the_continuous_refill_phrasing(self):
         low = goal.GOAL_LANE_NUDGE_TEXT.lower()
@@ -234,10 +238,11 @@ class TestWatchdogLaneNudgeIsBatch(TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
+        # #726: the nudge no longer consults _mem_available_mb (the memory gate
+        # was under-saturated-only and is retired), so no mem patch is needed.
         with m.patch("airuleset.resolve_authority", return_value="full"), \
              m.patch.object(wd, "count_live_workers",
-                            return_value=(workers, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8000):
+                            return_value=(workers, [])):
             logs, owns = goal.goal_lane_occupancy_nudge(
                 now, tmux, {}, self.SID, self.CWD, "111", GOAL_ARMED_CAP,
                 tpath, tmtime, "loc", None, False, None, proj,
@@ -255,6 +260,15 @@ class TestWatchdogLaneNudgeIsBatch(TestCase):
         # the retired under-saturated decision lines are gone
         self.assertFalse(any("surplus-floor" in ln for ln in logs), logs)
         self.assertFalse(any("(fill)" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [], tmux.sent)
+
+    def test_one_worker_draining_batch_is_skipped_at_the_boundary(self):
+        # the exact live shape (#726 incident): 1 lane still draining, backlog
+        # waiting. The `live_workers > 0` boundary must SKIP, never nudge -- a
+        # `> 1` off-by-one would refill a single-lane draining batch.
+        logs, tmux = self._drive(workers=1, backlog=37)
+        self.assertTrue(any("skip:batch-running" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [], tmux.sent)
 
     def test_closed_batch_with_backlog_still_fires_the_start_a_batch_nudge(self):

@@ -263,9 +263,10 @@ class TestNudgeTextQualifiesOpenCount(unittest.TestCase):
         self.assertIn("nie všetky", low)
         self.assertIn("rozpracovate", low)
         self.assertIn("workable", low)
-        # doctrine preserved
+        # doctrine preserved (#726: within-batch bound is the resource-signal
+        # backoff, not the retired #442 "cap 8")
         self.assertIn("worktree", low)
-        self.assertIn("8", rendered)
+        self.assertIn("rate-limit", low)
         self.assertIn("sériovo", low)
 
 
