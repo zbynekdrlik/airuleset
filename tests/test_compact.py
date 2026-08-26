@@ -1925,6 +1925,71 @@ class TestCompactSweep(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 6b. #727 hold-extend — a structured live-own-task veto during the periodic
+#     sweep REFRESHES the pending request's `ts` (never `bts`/`cwd`/`origin`),
+#     so the 30-min age cap measures "time since the claim was last JUSTIFIED";
+#     a >30-min batch never loses its boundary compact, while a wedged (stale)
+#     lane stops the veto -> stops the refresh -> the cap resumes.
+# --------------------------------------------------------------------------- #
+
+class TestCompactHoldExtend727(unittest.TestCase):
+    CWD = "/home/newlevel/devel/holdextend727"
+    SID = "sess-hold-727"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return d.name
+
+    def _sweep(self, proj, now, cap=CB_IDLE_CAP, cap_seq=()):
+        tmux = DeliverCompactFakeTmux(
+            [("%9", "claude", self.CWD, "111")], cap, cap_seq=cap_seq)
+        logs = compact.compact_sweep(
+            now, run=tmux, projects_dir=proj, requests_path=self.reqp,
+            delivered_path=self.delp)
+        return logs, tmux
+
+    def test_727_live_tasks_hold_carries_claim_across_a_long_batch(self):
+        # The live incident (2026-08-26, varka 1->2 boundary): a batch ran
+        # >30 min, the live-tasks veto CORRECTLY held the boundary claim
+        # undelivered (no /compact while a sibling lane is live -- CC #29193),
+        # and the 30-min age cap expired the claim OUT FROM UNDER the still-
+        # running batch, so the boundary never got its /compact. Under
+        # hold-extend the sweep REFRESHES `ts` on every structured live-tasks
+        # veto, so the claim survives the batch and delivers once the lanes
+        # drain. `_live_bg_tasks_detail` judges lane freshness against the REAL
+        # wall clock, so the fixture uses real-time mtimes for the lane while
+        # the request/sweep timeline is synthetic (T).
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        # T+29min: a FRESH live worker lane (mtime = real now) -> skip:live-tasks.
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        logs1, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(any("skip:live-tasks" in ln for ln in logs1),
+                        "sweep 1 must veto on the fresh lane: %r" % logs1)
+        # T+45min: lanes DRAINED (lane transcript backdated stale) + idle bare
+        # pane. WITHOUT hold-extend `ts` is still T -> 45min > 30min cap ->
+        # `expired`, the boundary is lost. WITH hold-extend sweep 1 refreshed
+        # `ts` to T+29min -> 16min < cap -> the held claim DELIVERS.
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now - 20 * 60, agent_id="ghost727")
+        logs2, tmux2 = self._sweep(proj, T + 45 * 60)
+        self.assertIn("/compact", tmux2.typed_texts(),
+                      "the held claim must deliver once lanes drain: %r" % logs2)
+        self.assertTrue(any("-> sent" in ln for ln in logs2),
+                        "sweep 2 must log a SEND: %r" % logs2)
+        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
+
+
+# --------------------------------------------------------------------------- #
 # 7. CLI wiring — `airuleset.py compact-request`.
 # --------------------------------------------------------------------------- #
 
