@@ -1170,11 +1170,11 @@ _GOAL_CONT_OK = ("```", "─", "•", "**", "❓", "❯", "⎿", "●", "✻")
 # CC's AMBIENT status while background subagents run ("✻ Waiting for N
 # background agents to finish") stays on screen although the turn has ENDED
 # and the prompt is a free bare `❯` — the exact autopilot shape (main idle,
-# worker in background; `pane_at_idle_prompt` passes by design). Job 9 must
-# not read it as live work: the arm question at the tail IS the session
-# asking for the paste, and typing /goal there is what the user would do by
-# hand (restreamer incident 2026-07-24 — the goal never armed while any
-# background worker ran). Every OTHER `Waiting for` still blocks.
+# worker in background; `pane_at_idle_prompt` passes by design). `_pane_has_bg_
+# agent` must not read it as live work blocking dark-watch re-DETECTION
+# (restreamer 2026-07-24). But a KEYSTROKE's Enter is SWALLOWED here, so
+# `_pane_busy_waiting` (#714/#720) DEFERS a /goal submit into it — never type
+# into the Waiting state (empirical swallow). Every OTHER `Waiting for` blocks.
 _BG_AGENTS_WAIT_RX = re.compile(
     r"Waiting for \d+ background agents? to finish")
 
