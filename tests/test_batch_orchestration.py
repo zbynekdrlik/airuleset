@@ -23,13 +23,24 @@ test_goal_backlog_proof.py. This file is the single dedicated batch-doctrine loc
 """
 
 import sys
+import unittest.mock as m
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import goal_registry as gr  # noqa: E402
+import watchdog as wd  # noqa: E402
+from watchdog import goal  # noqa: E402
+from _goal_arm_helpers import (  # noqa: E402
+    GOAL_ARMED_CAP,
+    DeliverGoalFakeTmux,
+    _encode,
+    _write_marker_transcript,
+)
 
 SKILL = "skills/autopilot/SKILL.md"
 SKILL_MASTER = "skills/autopilot-master/SKILL.md"
@@ -173,6 +184,85 @@ class TestToolingModuleReconciled(TestCase):
         self.assertIn("#723", body)
         # parallel lanes stay the default WITHIN a batch
         self.assertIn("Parallel lanes stay the default WITHIN a batch", body)
+
+
+class TestWatchdogLaneNudgeIsBatch(TestCase):
+    """#726 -- the job-20 lane-check nudge (`watchdog/goal.py`) carries the BATCH
+    doctrine, not the superseded continuous saturation (#456). The validator
+    found this the ONE batch surface with no coverage: the skill/registry locks
+    above never touched the watchdog nudge, which kept firing "fill lanes to 5"
+    into a DRAINING batch (2 false nudges live, 2026-08-26). Two invariants:
+    (1) the empty-lane nudge TEXT teaches "start a NEW batch", never "fill
+    lanes"; (2) a RUNNING batch (live_workers>0 -- saturated OR draining) is
+    NEVER nudged to refill: it logs skip:batch-running and delivers nothing. The
+    under-saturated fill TEXT + surplus constant are RETIRED."""
+
+    CWD = "/home/newlevel/devel/lanenudge726"
+    SID = "sess-lane-726"
+
+    # ---- content locks (stable, no driving) ----
+
+    def test_empty_lane_text_teaches_start_a_new_batch(self):
+        rendered = goal.GOAL_LANE_NUDGE_TEXT % (37, 2)
+        low = rendered.lower()
+        # batch doctrine language (goal_registry.py::saturation-core / master LANE 3)
+        self.assertIn("várk", low)          # "začni NOVÚ várku"
+        self.assertIn("refill", low)        # "ŽIADNY refill kým várka beží"
+        self.assertIn("worktree", low)
+        self.assertIn("paraleln", low)
+        self.assertIn("sériovo", low)       # serial integration under the mutex
+        self.assertIn("5", rendered)        # a BATCH of up to 5
+
+    def test_empty_lane_text_dropped_the_continuous_refill_phrasing(self):
+        low = goal.GOAL_LANE_NUDGE_TEXT.lower()
+        # the retired #456 "dispatch MORE lanes NOW" refill wording is gone
+        self.assertNotIn("dispatchni teraz ďalšie", low)
+
+    def test_under_saturated_fill_text_and_surplus_constant_are_retired(self):
+        self.assertFalse(hasattr(goal, "GOAL_LANE_UNDERSAT_NUDGE_TEXT"))
+        self.assertFalse(hasattr(goal, "GOAL_LANE_UNDERSAT_SURPLUS"))
+
+    # ---- behavioral lock: a running batch is never nudged to refill ----
+
+    def _drive(self, workers, backlog, now=100000):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name)
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        tmtime = now - 100
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath)
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+             m.patch.object(wd, "count_live_workers",
+                            return_value=(workers, [])), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8000):
+            logs, owns = goal.goal_lane_occupancy_nudge(
+                now, tmux, {}, self.SID, self.CWD, "111", GOAL_ARMED_CAP,
+                tpath, tmtime, "loc", None, False, None, proj,
+                backlog_fetch=lambda cwd: backlog, state={},
+                sleep_fn=lambda s: None)
+        return logs, tmux
+
+    def test_running_batch_is_skipped_never_refilled(self):
+        # a DRAINING batch: 2 live lanes < 5, large backlog (surplus 35). Under
+        # the retired #456 doctrine this fired the "fill to 5" nudge; under batch
+        # mode (#723/#724) it must SKIP -- NO refill while a batch is open.
+        logs, tmux = self._drive(workers=2, backlog=37)
+        self.assertTrue(any("skip:batch-running" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # the retired under-saturated decision lines are gone
+        self.assertFalse(any("surplus-floor" in ln for ln in logs), logs)
+        self.assertFalse(any("(fill)" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [], tmux.sent)
+
+    def test_closed_batch_with_backlog_still_fires_the_start_a_batch_nudge(self):
+        # live_workers==0 (batch CLOSED) + workable backlog -> the empty-lane
+        # nudge DOES fire: "you should have started a NEW batch and did not".
+        logs, tmux = self._drive(workers=0, backlog=37)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:batch-running" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
