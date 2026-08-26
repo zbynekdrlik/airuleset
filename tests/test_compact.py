@@ -2099,6 +2099,47 @@ class TestCompactHoldExtend727(unittest.TestCase):
                                                            path=self.reqp))
         self.assertNotIn("no-such-sid", compact.load_compact_requests(self.reqp))
 
+    def test_727_legacy_entry_without_bts_holds_with_a_question_mark(self):
+        # A request recorded by PRE-#727 code has no `bts`; the sweep must still
+        # HOLD (refresh ts) and report "boundary held ?s" -- never crash on the
+        # missing key (`_safe_age(now, None)` -> None -> "?").
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        # Seed a legacy entry directly on disk (NO `bts` key).
+        self.reqp.write_text(json.dumps({self.SID: {
+            "cwd": self.CWD, "ts": int(T), "origin": "self-callback"}}))
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        logs, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(any("HOLD" in ln and "boundary held ?s" in ln
+                            for ln in logs),
+                        "a bts-less entry must HOLD with ?s: %r" % logs)
+        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
+                         int(T + 29 * 60), "ts still refreshed for a legacy entry")
+
+    def test_727_hold_fail_leaves_the_claim_pending_without_refresh(self):
+        # If the ts-refresh WRITE fails (or the entry vanished mid-sweep),
+        # `_touch_compact_request_ts` returns False -> the sweep logs HOLD-FAIL,
+        # does NOT refresh `ts`, and LEAVES the request pending for the next sweep.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        real_now = time.time()
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=real_now, agent_id="ghost727")
+        with m.patch.object(compact, "_touch_compact_request_ts",
+                            return_value=False):
+            logs, _ = self._sweep(proj, T + 29 * 60)
+        self.assertTrue(any("HOLD-FAIL" in ln for ln in logs),
+                        "a failed refresh must log HOLD-FAIL: %r" % logs)
+        entry = compact.load_compact_requests(self.reqp)[self.SID]
+        self.assertIn(self.SID, compact.load_compact_requests(self.reqp))
+        self.assertEqual(entry["ts"], int(T), "HOLD-FAIL must not refresh ts")
+
 
 # --------------------------------------------------------------------------- #
 # 7. CLI wiring — `airuleset.py compact-request`.

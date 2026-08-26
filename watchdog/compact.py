@@ -90,13 +90,13 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
             except an EXPIRED request (condition e) or one that is already
             otherwise handled (already-queued, in cooldown), which is
-            DISCARDED outright. "No infinite waiting" is satisfied by the
-            hard age cap itself, not by refusing to re-evaluate — a
-            request that arrives while a sibling task is still finishing
-            (the common case on an autopilot batch) still gets compacted
-            once the sweep observes a quiet moment, rather than being lost
-            the instant the first synchronous attempt happens to race a
-            live worker.
+            DISCARDED outright. "No infinite waiting" is the hard age cap's
+            job — EXCEPT while a structured live-own-task veto keeps refreshing
+            the claim (#727 hold-extend: a mid-batch loop holds past 30 min by
+            design; the wedge-bound + the named forever-live residual bound it,
+            see `_COMPACT_HOLD_EXTEND_WORDS`). A request that arrives while a
+            sibling task is finishing (the autopilot-batch common case) still
+            compacts once the sweep observes a quiet moment, never lost to a race.
 
   LOGGING — every decision (SEND or SKIP) is appended to `compact-sync.log`
             via `_log_compact_sync`, unconditionally, from the ONE place
@@ -148,8 +148,10 @@ def compact_requests_path():
 
 
 def load_compact_requests(path=None):
-    """{session_id: {"cwd":..., "ts":..., "origin":...}} — the pending
-    `/compact` requests. {} on any error or missing file; never raises."""
+    """{session_id: {"cwd":..., "ts":..., "bts":..., "origin":...}} — the
+    pending `/compact` requests (`bts` = the #727 original-boundary anchor;
+    a legacy entry written before #727 has no `bts`, handled as a no-op).
+    {} on any error or missing file; never raises."""
     path = path or compact_requests_path()
     try:
         with open(path, encoding="utf-8") as f:
@@ -238,7 +240,9 @@ def _touch_compact_request_ts(sid, now, path=None):
     measures "time since the claim was last JUSTIFIED", not "time since the last
     boundary". Fail-safe: a vanished entry (delivered/superseded between the
     sweep's delivery verdict and this call) is a no-op. Returns True iff an
-    entry existed and the refreshed dict was written."""
+    entry existed and the refreshed dict was written. Shares the module's
+    pre-existing lock-free read-modify-write (like `clear`/`record`): a record
+    landing in the ~us load->save window can be clobbered — benign, 60s cadence."""
     sid = str(sid or "").strip()
     if not sid:
         return False
@@ -600,13 +604,10 @@ def _compact_live_bg_bash(cwd, sid, projects_dir=None):
     (a START with no later completion/kill in the bounded tail), joined by ",",
     or "" when none — so a `/compact` never orphans a live bg job's completion
     (#29193). #605: returns the DETAIL (not a bare bool) so the SKIP live-bg-bash
-    decision log NAMES the job (thread 3), via `session_live_bg_bash_ids` (the
-    id-returning sibling of the `session_has_live_bg_bash` bool). DELIBERATELY
-    SEPARATE from the worker-lane `count_live_workers` signal
-    (`_live_bg_tasks_detail`): a bg-bash job is NOT a worker lane, so the
-    lane-occupancy (#571) / gk-fill consumers whose danger is UNDER-counting a
-    live lane must never see it — keeping this in its own compact-only reader is
-    what leaves them structurally unaffected. Unmeasurable (no transcript) → ""."""
+    log NAMES the job, via `session_live_bg_bash_ids`. DELIBERATELY SEPARATE from
+    the worker-lane `count_live_workers` signal (a bg-bash job is NOT a lane, so
+    the #571/#565 lane-occupancy/gk-fill consumers never see it — this compact-only
+    reader leaves them structurally unaffected). No transcript → ""."""
     pdir = projects_dir or watchdog.PROJECTS_DIR
     tpath = watchdog._transcript_for_session(pdir, sid, cwd)
     if tpath is None:
@@ -1061,6 +1062,12 @@ _COMPACT_TERMINAL_WORDS = frozenset(("sent", "expired", "already-queued", "coold
 _COMPACT_HOLD_EXTEND_WORDS = frozenset((
     "skip:live-tasks", "skip:live-bg-bash",
     "skip:live-tasks-raced", "skip:live-bg-bash-raced"))
+# RESIDUAL (design #727 §5): a genuinely-forever-live own task holds the claim
+# forever -- a 24/7 bg job, or a #604 launched-then-vanished bg-bash orphan on a
+# gone-quiet session (its START never scrolls out of the tail AND skip:live-bg-bash
+# now refreshes past the age cap). Bounded (1-pending-per-session + every new
+# boundary supersedes + delivery is re-vetoed each sweep), NOT a delivery risk;
+# reopen trigger = a HOLD journal line whose `boundary held` exceeds hours.
 
 # A small margin over `COMPACT_MIN_REQUEST_AGE_S` so a `time.sleep()` that
 # very slightly undershoots its requested duration (never observed on this
@@ -1125,11 +1132,11 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
     """The periodic re-evaluation of every PENDING request (the thinned
     replacement for the old job 14) — wired at the SAME `run_once()` slot.
     Re-checks each still-pending request's SAME unmodified conditions
-    every sweep; nothing here overrides a hard condition, nothing mutates
-    the request except via `deliver_compact`'s own clear-on-handled. A
-    request that keeps failing a condition simply sits until either it
-    clears (delivered next sweep) or the age cap (condition e) discards
-    it — "no infinite waiting" is the age cap's job, not this loop's.
+    every sweep; nothing here overrides a hard DELIVERY condition, but the
+    #727 hold branch below DOES refresh the request's `ts` on the four
+    hold-extend words. Otherwise a request that keeps failing a condition sits
+    until it clears (delivered) or the age cap (condition e) discards it — "no
+    infinite waiting" is the cap's job, bounded per `_COMPACT_HOLD_EXTEND_WORDS`.
 
     `handled` (optional, a `set()`): every sid this sweep actually SENT to
     is added — job 20 (goal re-arm) reads this so it never types a
