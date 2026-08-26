@@ -49,6 +49,16 @@ def _pane_read_override(iso, overrides):
     return run
 
 
+def _settled_pane_line(home, pid="1"):
+    """#711/#427: the DETERMINISTIC SETTLED `list-panes` read for a standalone
+    idle bare-shell stray sitting in $HOME -- unattached (`0`), ungrouped (``),
+    bare `bash`, cwd == home. This is the stray's TRUE post-settle state; the
+    freshly-spawned pane merely mis-reads it TRANSIENTLY under load
+    (cli_tmux_provisioning.py:1310). `pid` is a don't-care because the tests
+    neutralize the shell child-guard with an idle `ps_run`."""
+    return "0\t\tbash\t%s\t%s" % (pid, home)
+
+
 class _Iso:
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="stray660-")
@@ -113,10 +123,18 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         # locked by a dedicated fake-runner test.
         def idle_ps(argv):
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        # #711/#427 HERMETICITY: route marek's ONE load-sensitive pane read
+        # (#{pane_current_command}/#{pane_current_path} of the just-spawned pane)
+        # through a DETERMINISTIC settled line, so the sweep's absorb decision no
+        # longer depends on the transient real-box read that flaked under
+        # full-suite load. marek is still really created + really killed; every
+        # other read (the grouped `montalu2` skip) hits the real isolated server.
+        hermetic_run = _pane_read_override(
+            self.iso, {"marek": _settled_pane_line(self.iso.dir)})
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
-                "zbynek", run=self.run, stray_name_res=stray_res, audit_dir=td,
-                ps_run=idle_ps, home=self.iso.dir)
+                "zbynek", run=hermetic_run, stray_name_res=stray_res,
+                audit_dir=td, ps_run=idle_ps, home=self.iso.dir)
             log = (Path(td) / "normalize.log").read_text()
 
         after = self.iso.names()
@@ -147,19 +165,32 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
 
         def idle_ps(argv):
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
-        # The #427 load transient: bash still sourcing its rc reads a NON-bare
-        # #{pane_current_command}. Injected verbatim for marek's list-panes;
-        # everything else hits the real isolated server (marek is really killed).
-        transient = "0\t\tcat\t1\t"
-        run = _pane_read_override(self.iso, {"marek": transient})
+
+        # PHASE 1 -- the flake, made deterministic: the #427 load transient
+        # (bash still sourcing its rc reads a NON-bare #{pane_current_command})
+        # makes the sweep SKIP the genuinely-idle stray. Same real marek; only
+        # the one pane read is injected. marek SURVIVES (this is the flake).
+        transient_run = _pane_read_override(self.iso, {"marek": "0\t\tcat\t1\t"})
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
-                "zbynek", run=run, stray_name_res=stray_res, audit_dir=td,
-                ps_run=idle_ps, home=self.iso.dir)
+                "zbynek", run=transient_run, stray_name_res=stray_res,
+                audit_dir=td, ps_run=idle_ps, home=self.iso.dir)
+            log1 = (Path(td) / "normalize.log").read_text()
+        self.assertIn("marek", self.iso.names())   # transient read -> skipped
+        self.assertIn("skip", log1)
+        self.assertIn("non-shell", log1)
 
-        # The sweep must absorb the genuinely-idle standalone stray regardless of
-        # the transient read -- this is what flakes under full-suite load.
-        self.assertNotIn("marek", self.iso.names())
+        # PHASE 2 -- the fix: routing that SAME still-alive stray's read through
+        # the DETERMINISTIC settled line (its true post-settle state) absorbs it.
+        settled_run = _pane_read_override(
+            self.iso, {"marek": _settled_pane_line(self.iso.dir)})
+        with tempfile.TemporaryDirectory() as td:
+            tmuxprov._live_normalize_owner_session(
+                "zbynek", run=settled_run, stray_name_res=stray_res,
+                audit_dir=td, ps_run=idle_ps, home=self.iso.dir)
+            log2 = (Path(td) / "normalize.log").read_text()
+        self.assertNotIn("marek", self.iso.names())   # settled read -> absorbed
+        self.assertIn("killed", log2)
 
     def test_subdev_box_never_sweeps_foreign_names(self):
         # on a single-session (subdev) box the widening is OFF, so a session
