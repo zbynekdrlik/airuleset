@@ -67,11 +67,14 @@ class _CompanionBase(TestCase):
         """Bound a norm()-collapsed slice from *start_anchor* (must sit on
         ONE physical line, verified against the raw file) to the NEXT `- **`
         bullet marker -- so a PARTIAL revert of the operative bullet (not
-        just a full deletion) still fails the assertions inside the window."""
+        just a full deletion) still fails the assertions inside the window.
+        Falls back to end-of-file when no later bullet exists (the CORE
+        #728 bullet is the LAST `- **` item in the file, followed only by
+        the plain closing paragraph)."""
         i = self.raw.index(start_anchor)
         j = self.raw.find("\n- **", i + len(start_anchor))
-        self.assertNotEqual(j, -1,
-                             "operative bullet must be followed by another `- **` bullet")
+        if j == -1:
+            j = len(self.raw)
         return norm(self.raw[i:j])
 
 

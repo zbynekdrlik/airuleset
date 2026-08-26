@@ -271,7 +271,43 @@ is the FIRST rule for a reason).
   ticket text at close time). Bypass only a genuine non-client / meta ticket
   (`airuleset:discuss-close-ok` in the close command).
 
-One thread = one topic, a sub-thread under the channel the owner named (montalu:
+- **One thread = one topic — now the WHOLE lifecycle, not just addressing
+  (airuleset #728, owner directive 2026-08-26).** Verbatim: „treba vlakna
+  drzat maximalne atomicke a ak sa otvori nejaka nova tema vo vlakne tak
+  radsej vytvorit nove vlakno/ticket a spravu ktora temu vyvolala
+  prekopirovat, presunut do toho noveho vlakna". The pre-#728 rule at the
+  bottom of this file ("one thread = one topic, a sub-thread under the
+  channel the owner named") covered only ADDRESSING at creation — it now
+  covers the thread's ENTIRE lifecycle: every follow-up, reminder and reply
+  the stream posts into an EXISTING thread must still belong to that
+  thread's OWN topic, never a different one it merely happens to sit in.
+  Incident: the client thread „Etapy zákaziek vo výrobe 1" (montalu PROD,
+  discuss.channel_257) grew to 36 messages across ~6 unrelated topics (etapy
+  per typ zákazky, odovzdávka pracovísk, automatický posun etáp, pavúk
+  workflow, tablety, výber píly) plus the CEO opening a brand-new topic in
+  it (odsúhlasenie zamerania zákazníkom) — the owner: „to vlakno uz je
+  prilis dlhe, tazko sa v nom orientuje", and had to order a full review +
+  closure by hand.
+- **A NEW topic a participant (client / CEO / anyone) opens in an EXISTING
+  client thread is NEVER developed there.** The stream creates a NEW ticket
+  immediately — and, once it reaches client communication, a NEW thread once
+  the owner approves its exact name + text (the SAME per-message approval
+  doctrine as the FIRST bullet of this file — a new-topic split is never an
+  excuse to skip approval) — and COPIES/quotes the triggering message into
+  the new ticket/thread WITH A CITATION (msg id + author + date), so the
+  context is never torn away from its origin. When the new ticket binds its
+  new thread, record it with the SAME `Discuss-thread: <channel-id>` key the
+  #627 closure doctrine above already uses — one binding key for the whole
+  thread lifecycle, never a second mechanism. A long / resolved /
+  multi-topic thread is CLOSED — the #627 bullet above, never left to grow
+  forever; THIS bullet's job is to peel a new topic off the moment it
+  appears, before the thread ever reaches that state. Precedent: odoo-erp
+  #5319 (the new topic from msg 1724252/1724253 split out with the
+  triggering messages copied across), closure of thread 257 via msg
+  1743448.
+
+Each new thread this doctrine creates still follows the existing channel
+placement rule: a sub-thread under the channel the owner named (montalu:
 IT-support) — never a new top-level channel or group chat (see `## Channel +
 recipients` in `SKILL.md`). Ask the owner ONE decision at a time, and re-ask a
 question whole and fresh if you have to (`user-questions-slovak.md`).
