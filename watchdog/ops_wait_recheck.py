@@ -730,6 +730,29 @@ def _prune_ops_wait_orphans(wrecs, visited_sids, now,
         wrecs.pop(sid, None)
 
 
+def _book_unverified_send(rec, new_rec, loc, sig, now):
+    """#714 bounded retry: book ONE undelivered send onto the persisted rec
+    (`new_rec` IS `wrecs[sid]`, so mutation persists). Under MAX_SEND_FAILS it
+    increments the consecutive-failure counter and retries next sweep; at
+    MAX_SEND_FAILS it BACKS OFF one full cadence (advance last_nudge, reset the
+    counter) so a persistently-swallowing NON-busy pane is not typed into every
+    60s sweep forever. The counter crosses the JSON persistence boundary, so a
+    corrupt/legacy non-int reads as 0 and never raises (the module's own
+    persisted-state discipline, cf. `_cached_member_fetch`'s `ts` guard).
+    Returns the decision log line."""
+    prior = rec.get("send_fails")
+    fails = (prior if isinstance(prior, int) and not isinstance(prior, bool)
+             else 0) + 1
+    if fails >= MAX_SEND_FAILS:
+        new_rec["last_nudge"] = now
+        new_rec["send_fails"] = 0
+        return ("ops-wait-recheck %s -> submit-unverified x%d — backing off one "
+                "cadence (bounded retry #714, partition %s)" % (loc, fails, sig))
+    new_rec["send_fails"] = fails
+    return ("ops-wait-recheck %s -> submit-unverified (attempt %d/%d, retry next "
+            "sweep, partition %s)" % (loc, fails, MAX_SEND_FAILS, sig))
+
+
 # --- ORCHESTRATOR ----------------------------------------------------------
 
 def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
@@ -903,30 +926,15 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                                 logs=logs, out=send_out)
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
-        # Genuinely unverified (swallowed / aborted / unreadable) — transient,
-        # normally retried next sweep (last_nudge NOT advanced, pane NOT claimed
-        # in `handled`). #714 BOUNDED RETRY: a PERSISTENTLY-swallowing NON-busy
-        # pane would otherwise be typed into every 60s sweep forever (the retry
-        # storm — the #594 dedup covers only the delivered-unconfirmed race, not
-        # a persistent swallow). Count consecutive undelivered sends (carried on
-        # the persisted rec); after MAX_SEND_FAILS, BACK OFF one full cadence
-        # (advance last_nudge, reset the counter) so the storm is bounded to
-        # ≤MAX_SEND_FAILS keystrokes per cadence. send_verified already backed our
-        # own text OUT of the box on a genuine swallow, so nothing parks.
-        fails = (rec.get("send_fails", 0) or 0) + 1
-        if fails >= MAX_SEND_FAILS:
-            new_rec["last_nudge"] = now
-            new_rec["send_fails"] = 0
-            wrecs[sid] = new_rec
-            logs.append("ops-wait-recheck %s -> submit-unverified x%d — backing "
-                        "off one cadence (bounded retry #714, partition %s)"
-                        % (loc, fails, sig))
-            return logs
-        new_rec["send_fails"] = fails
-        wrecs[sid] = new_rec
-        logs.append("ops-wait-recheck %s -> submit-unverified (attempt %d/%d, "
-                    "retry next sweep, partition %s)"
-                    % (loc, fails, MAX_SEND_FAILS, sig))
+        # #714 BOUNDED RETRY: a genuine swallow leaves last_nudge unadvanced so it
+        # retries next sweep — but a PERSISTENTLY-swallowing NON-busy pane would
+        # then be typed into every 60s sweep forever (the retry storm; the #594
+        # dedup covers only the delivered-unconfirmed race, not a persistent
+        # swallow). `_book_unverified_send` counts the failure on the persisted
+        # rec (new_rec IS wrecs[sid]) and backs off a full cadence after
+        # MAX_SEND_FAILS. send_verified already backed our text OUT of the box on
+        # a genuine swallow, so nothing parks, and the pane is NOT claimed.
+        logs.append(_book_unverified_send(rec, new_rec, loc, sig, now))
         return logs
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now

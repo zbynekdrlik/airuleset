@@ -188,6 +188,15 @@ class TestBoundedRetry(_OrchBase):
         self.assertEqual(wrecs[self.sid]["last_nudge"], NOW,
                          "the backoff advances last_nudge (waits a full cadence)")
 
+    def test_corrupt_send_fails_is_tolerated_not_crashed(self):
+        # send_fails crosses the JSON boundary; a corrupt/legacy non-int must
+        # read as 0, never raise (the module's persisted-state discipline).
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None,
+                            "send_fails": "corrupt"}}
+        tmux = self._tmux(enters_swallowed=99)
+        logs = self._run(wrecs, lambda cwd: [41], tmux, state={})
+        self.assertTrue(any("submit-unverified" in ln for ln in logs))
+
 
 # --------------------------------------------------------------------------- #
 # 3. Size cap — a TRIGGER, never a wall of 53 tickets + full doctrine.
