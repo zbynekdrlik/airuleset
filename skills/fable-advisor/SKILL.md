@@ -80,8 +80,9 @@ consult bar as the tiering boundary.
 - Consulting Fable as a long-lived WORKER or letting it ground itself by
   reading the repo → the exact 2026-07-01 burn. Digest in, decision out.
 - Escalating genuinely MECHANICAL work (a CI poll, a lookup, a
-  format-only transform) to Fable → those stay sonnet/haiku; and ALL
-  implementation (the actual work) stays Opus 4.8 — never Fable. (Since
+  format-only transform) to Fable → those stay sonnet/haiku; and
+  implementation (the actual work) runs its tier (Sonnet 5 for a settled-design
+  ticket, Opus 4.8 on complexity — #721) — never Fable. (Since
   2026-08-26 Fable is confined to the DESIGN and REVIEW PHASES of a
   non-trivial ticket — never the implementing worker end-to-end.)
 - Skipping the gate because "it's just one call" → every automatic Fable

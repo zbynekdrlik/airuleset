@@ -152,7 +152,8 @@ repo's own CLAUDE.md / playbook is what names the command.
    evidence into digests — `claude-opus-4-8` at low effort, `sonnet` only for the
    genuinely trivial collection); the Fable stage receives the digest + THE DIFF
    ITSELF (the diff is the review object — reading it is not self-grounding) and
-   returns findings/verdict; a routine or implementation follow-up runs the pinned Opus 4.8 worker,
+   returns findings/verdict; a routine or implementation follow-up runs the worker on its tier
+   (Sonnet 5 for a settled-design follow-up, the pinned Opus 4.8 for complexity — #721),
    while a further REVIEW-phase pass (a deeper adversarial verify) runs gated `model: "fable"`
    (`model-awareness.md` 2026-08-26 — the gatekeeper's cold-review IS the REVIEW phase). Finding
    VERIFIERS may run `claude-opus-4-8`; the final clean-verdict pass is the gated

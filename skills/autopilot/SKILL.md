@@ -674,10 +674,17 @@ gap in either.
      BANNED — never any `opus`-aliased dispatch, never sonnet on anything complex; the old airuleset
      Fable-MAJORITY exception is ABOLISHED — the same split on every repo). A ticket runs on TWO
      tiers, never one: **(a) the DESIGN phase** (Step 1c) and **(b) the REVIEW phase** are the
-     gated-Fable dispatches; **(c) the IMPLEMENTATION worker** runs Opus 4.8. The `autopilot-worker`
-     frontmatter pins `model: claude-opus-4-8`, reached by dispatching the worker AS-IS (no `model`
-     param) —
-     **the implementation worker is dispatched AS-IS on `claude-opus-4-8`, never a `model: fable` override.**
+     gated-Fable dispatches; **(c) the IMPLEMENTATION worker** runs Sonnet 5 by default (a
+     settled-design ticket) or Opus 4.8 (complexity). The `autopilot-worker` frontmatter pins
+     `model: claude-opus-4-8` = the escalation tier + fail-safe default; for an ordinary
+     SETTLED-DESIGN ticket downtier it with an explicit **`model: "sonnet"`**, and OMIT the param
+     (frontmatter pin stands → Opus 4.8) to ESCALATE when the implementation carries complexity —
+     a multi-component change, concurrency, a security boundary, a hard-debug lane, or a
+     prior Sonnet worker already failed on this ticket (unsure → Opus 4.8; 4.8 has no param alias and the
+     `opus` alias is banned, so the pin is the only way to reach it — fail-safe UP). Either way
+     **the implementation worker carries no Fable override** —
+     never a `model: fable` override, never `model: "sonnet"` for a complex ticket, never the
+     banned `opus` alias (#721).
      For the DESIGN consult (Step 1c) and the REVIEW pass, run
      `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE —
      **gate OPEN (exit 0) → dispatch `model: fable` for that PHASE; gate CLOSED (exit 1) → dispatch AS-IS on `claude-opus-4-8`.**
