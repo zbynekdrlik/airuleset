@@ -1,6 +1,6 @@
 [project]
 name = "airuleset"
-version = "0.1.75"
+version = "0.1.76"
 description = "Claude Code configuration management — centralized rules, skills, and hooks"
 requires-python = ">=3.10"
 license = "MIT"
