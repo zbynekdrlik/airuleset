@@ -11,7 +11,6 @@ gated by `question_ping_off` (#710: zbynek/marek suppressed → skipped) and
 `bot_token`, and reports a LOUD machine-channel gap when it cannot provision.
 """
 import os
-import re
 import tempfile
 import unittest
 from pathlib import Path

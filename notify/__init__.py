@@ -839,6 +839,113 @@ def provision_question_thread(owner, env=None, env_path=None, http=None,
 
 
 # --------------------------------------------------------------------------- #
+# #718 -- wire the CREATE-capable questions-thread provisioning into `install`.
+#
+# Root cause it closes: `--provision-question-thread` WITH create (the only
+# path that POSTs a new thread) is a ONE-TIME, EXPLICIT CLI action, never wired
+# into push/install (#296: "creating a thread for every possible stream owner
+# on every deploy was not asked for"), and the AUTOMATIC per-❓ self-heal is
+# `--find-only` by #330 design (never auto-CREATE unattended). So a
+# `claude-<owner>-q` thread NOBODY ever explicitly created stays uncreated
+# forever, and every ❓ ping for that owner falls back into their main thread
+# (live incident #718: david on subdev). Since #710 made question DELIVERY a
+# per-owner decision, the principled set to provision-at-install is now exact:
+# the SINGLE question-delivery-ENABLED owner THIS box actually delivers AS
+# (`resolve_owner()`, which maps david1-4 -> "david" via STREAM_NOTIFY_OWNER
+# with no tmux needed), skipping the #710-suppressed owners (zbynek/marek) and
+# any box with no owner / no bot token. Install is a deliberate, non-per-❓
+# action (the same tier #296 already blesses for create), so it carries
+# create=True WITHOUT the duplicate-thread risk #330 fenced off for the
+# unattended self-heal.
+# --------------------------------------------------------------------------- #
+
+
+def provision_owner_question_thread_for_install(env=None, env_path=None,
+                                                http=None, owner=None):
+    """At install, ensure the question-delivery-ENABLED owner THIS box delivers
+    AS has a provisioned `claude-<owner>-q` thread (#718). Reuses the existing
+    idempotent `provision_question_thread(create=True)` (find-then-create-and-
+    persist), so it CREATES the thread once (on the first such box to install)
+    and FINDS+persists it on every subsequent box — self-healing fleet-wide.
+
+    Returns `{"owner": <owner or "">, "status": <str>, "thread": <id or "">}`,
+    status one of:
+      - "skip-no-owner"  : this box delivers as no owner (nothing to provision)
+      - "skip-suppressed": owner's ❓ delivery is OFF (#710 zbynek/marek) — no
+                           -q thread is needed; makes ZERO Discord calls
+      - "skip-no-token"  : no bot token here (a more fundamental gap that
+                           `check_discord_notify_config` already reports loudly
+                           — a -q gap on top would point at the wrong repair,
+                           the SAME rationale `resolve_questions_channel` uses)
+      - "provisioned"    : the -q thread id is now configured (found/created)
+      - "gap"            : enabled owner + token present, but the thread could
+                           not be found/created (no anchor / Discord
+                           unreachable) — a durable `provision-gap` delivery-log
+                           line is written; `cmd_install` also prints LOUD.
+    Never raises (best-effort install step)."""
+    owner_for_log = owner
+    try:
+        env = _read_env() if env is None else env
+        owner = resolve_owner() if owner is None else owner
+        owner_for_log = owner
+        if not owner:
+            return {"owner": "", "status": "skip-no-owner", "thread": ""}
+        if question_ping_off(owner):
+            return {"owner": owner, "status": "skip-suppressed", "thread": ""}
+        if not bot_token(env):
+            return {"owner": owner, "status": "skip-no-token", "thread": ""}
+        tid = provision_question_thread(owner, env=env, env_path=env_path,
+                                        http=http, create=True)
+        if tid:
+            return {"owner": owner, "status": "provisioned", "thread": tid}
+        log_delivery("provision-gap", kind="questions", key=owner,
+                     reason="install: q-thread enabled but not find/create-able")
+        return {"owner": owner, "status": "gap", "thread": ""}
+    except Exception as exc:
+        # This is a best-effort install step riding no live delivery — a
+        # provisioning attempt that blows up is a GAP, reported like any other,
+        # never an exception into cmd_install (matches the surrounding steps'
+        # non-fatal try/except contract).
+        try:
+            log_delivery("provision-gap", kind="questions",
+                         key=str(owner_for_log or ""),
+                         reason="install-exc: %r" % (exc,))
+        except Exception as log_exc:
+            # A failure IN reporting the failure — stderr only, never re-raise
+            # (mirrors resolve_questions_channel's own side-effect guard). The
+            # gap result below is still returned regardless.
+            print("provision_owner_question_thread_for_install: gap-log "
+                  "failed: %r" % (log_exc,), file=sys.stderr)
+        return {"owner": str(owner_for_log or ""), "status": "gap",
+                "thread": ""}
+
+
+def format_qthread_install_report(result):
+    """Install-output lines for a `provision_owner_question_thread_for_install`
+    result (#718) — PURE, returns the list of lines, never prints. LOUD only on
+    "gap" (an enabled owner whose -q thread could not be provisioned — machine
+    channel, NEVER an owner Discord ping); a quiet one-line confirmation on
+    "provisioned"; SILENT on every skip-* (no owner / suppressed owner / no
+    Discord — all legitimate non-cases that need no operator attention)."""
+    result = result or {}
+    status = result.get("status", "")
+    owner = result.get("owner", "") or ""
+    if status == "provisioned":
+        return ["    Discord questions thread ready for %s (claude-%s-q)."
+                % (owner, owner)]
+    if status == "gap":
+        return [
+            "    ⚠ Discord questions thread claude-%s-q NOT provisioned on "
+            "this host." % owner,
+            "      ❓ pings for %s fall back into the main claude-%s thread "
+            "(questions mixed with cards)." % (owner, owner),
+            "      Check: DISCORD_NOTIFICATION_CHANNEL_%s anchor present + bot "
+            "can find/create threads here." % owner.upper(),
+        ]
+    return []
+
+
+# --------------------------------------------------------------------------- #
 # #369 -- per-PROJECT threads, generalizing #296's per-owner QUESTIONS
 # thread to "one thread per project/subdev-stream, per owner". Mirrors the
 # question-thread trio above (find/create/provision) as closely as
