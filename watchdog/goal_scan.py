@@ -49,9 +49,54 @@ from pathlib import Path
 import watchdog
 
 
+# #731 -- the tmux-client-input human window (signal 3, below). Deliberately
+# 5 min, NOT the 30-min transcript window: an ATTACHED-but-idle owner (last
+# input 25 min ago) must NOT starve delivery, so the client signal only vetoes
+# a keystroke while a human's hands are provably on the keyboard NOW -- exactly
+# the montalu4 blind spot (deleting a stranded paste is client input the
+# transcript-based signals 1/2 never see, because nothing is ever submitted).
+GOAL_CLIENT_INPUT_VETO_S = 300
+
+
+def _tmux_client_recent_input(pane_target, run, now, veto_s=None, skew_s=None):
+    """#731 signal 3 -- (True, reason) VETO when an ATTACHED tmux client of this
+    pane's session shows input activity within `veto_s`, else (False, "").
+
+    Reads the STRUCTURED `#{client_activity}` field (#486: structured tmux
+    state, never render parsing) -- the max epoch across attached clients. 0
+    attached clients (detached / headless) => (False, "") = no veto, fail OPEN
+    like signal 1 (absence never MANUFACTURES presence); a `run` failure /
+    missing target is the same fail-open. `veto_s` defaults to
+    GOAL_CLIENT_INPUT_VETO_S; the symmetric future-skew clamp mirrors signals
+    1/2 (a grossly-future client_activity from a clock skew is not read as
+    recent, but a small future drift still is -- fail-safe toward MORE veto)."""
+    if not pane_target or run is None:
+        return False, ""
+    veto_s = GOAL_CLIENT_INPUT_VETO_S if veto_s is None else veto_s
+    skew_s = veto_s if skew_s is None else skew_s
+    out = run(["tmux", "list-clients", "-t", str(pane_target), "-F",
+               "#{client_activity}"]) or ""
+    epochs = []
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            epochs.append(float(ln))
+        except ValueError:
+            continue
+    if not epochs:
+        return False, ""            # 0 clients -> fail OPEN
+    age = now - max(epochs)
+    if -skew_s <= age < veto_s:
+        return True, "client input %s" % watchdog._human_age_desc(age)
+    return False, ""
+
+
 def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
                                         extra_human_prefixes=(),
-                                        future_skew_s=None):
+                                        future_skew_s=None,
+                                        pane_target=None, run=None):
     """#339 -- job 9's virgin-candidate path (`_goal_autoarm_virgin_candidate`)
     had NO discriminator at all for "is a live human using this pane RIGHT
     NOW" -- only whether `/goal` had ever been touched. montalu3's own
@@ -143,7 +188,15 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     clear, `_recovery_recent_human`) and the sub-window callers (compact,
     lane-nudge) keep the symmetric default, where a future-dated read reading
     "recent" only makes them MORE cautious (an extra VETO of a keystroke) --
-    exactly the fail-safe direction #339 relied on, unchanged."""
+    exactly the fail-safe direction #339 relied on, unchanged.
+
+    `pane_target`/`run` (#731, optional): when BOTH are threaded, a third
+    signal -- an attached tmux client's own recent input activity
+    (`_tmux_client_recent_input`, its own 5-min GOAL_CLIENT_INPUT_VETO_S
+    window) -- can also make this return recent. It is the signal a human
+    DELETING a stranded paste emits (no prompt submitted -> signals 1/2 blind).
+    Omitted (the default None) it is a no-op fail-open, so every existing
+    caller that does not pass a pane target is byte-identical."""
     window_s = watchdog.GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
     skew_s = window_s if future_skew_s is None else future_skew_s
     try:
@@ -162,6 +215,16 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
         age = now - hts
         if -skew_s <= age < window_s:
             return True, "transcript human prompt %s" % watchdog._human_age_desc(age)
+    # #731 -- signal 3: an ATTACHED tmux client's own input activity, the
+    # structured signal the transcript-based signals 1/2 are blind to (a human
+    # DELETING a stranded paste submits nothing, so no prompt is ever written).
+    # Only when a caller threads the pane target + run (a no-op fail-open
+    # otherwise); its OWN 5-min window (GOAL_CLIENT_INPUT_VETO_S), not `window_s`.
+    if pane_target is not None and run is not None:
+        crecent, creason = _tmux_client_recent_input(pane_target, run, now,
+                                                     skew_s=skew_s)
+        if crecent:
+            return True, creason
     return False, ""
 
 
