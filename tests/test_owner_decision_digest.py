@@ -1,463 +1,159 @@
-"""#461 — the durable owner-decision queue's daily re-ask (watchdog digest).
+"""#707 — the daily owner-decision digest (#461) is RETIRED. These are the locks.
 
-Covers `_fetch_owner_decision_tickets` (aggregate gh fetch across the box's
-recently-worked repos, unmeasurable-vs-empty discipline), the
-`reping_owner_decision_tickets` cadence/sleep-window/dedup logic, the digest
-message body, the OWNER_DECISION_LABELS sync with cli_quals, and the run_once
-wiring (the digest fires only when a real fetch is injected).
+The digest addressed a BOX-WIDE, per-project ticket roundup to `account_owner`
+— the first-owner-seen pane-scan COIN FLIP ("coin flip, not an answer",
+watchdog/__init__.py) — with none of the `owners_seen` ambiguity guard its
+siblings carry (`reping_stale_questions` / `deliver_pending_done`). On dev2
+(three owners' tmux sessions) the flip delivered montalu client-ticket content
+into David's Discord thread on 2026-08-26 — a cross-subject information leak
+(#489 had gated only reduced-authority boxes). The owner ordered the WHOLE
+message class abolished ("CHcem aby si tento druh sprav zrusil"), not a
+routing fix.
+
+Locked here:
+
+  1. `reping_owner_decision_tickets` is a PERMANENT NO-OP tombstone (#400
+     pattern): importable for any stale caller, but it never fetches, never
+     sends, never touches state — even fully wired on a full-authority box.
+  2. The dead machinery is REMOVED outright (mvp-philosophy): the
+     `_fetch_owner_decision_tickets` / `_owner_decision_digest_block` helpers,
+     the `airuleset._watchdog_owner_decision_fetch` wiring, and run_once's
+     `owner_decision_fetch` param + registry entry.
+  3. The `owner-decision-digest` dedup_key class is denylisted at the
+     `notify.send()` chokepoint (#546 mechanism), so even STALE code on a
+     not-yet-redeployed box can never ping. (The send-level proof lives in
+     `test_state_stall_suppression_704.py` — the #707 digest class there,
+     which has the home-isolated send harness; here the classifier is locked.)
+  4. `OWNER_DECISION_LABELS` STAYS — its live consumers are job 32's
+     mechanical U-label clear (`watchdog/u_labels.py`) and the footer `U N`
+     decision-subset invariant, not the retired digest.
+
+RED against the pre-#707 tree (digest live, wired, and deliverable).
 """
-import json
-import os
+import inspect
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import watchdog as wd  # noqa: E402
 
 
-DAY = 24 * 3600
-
-
 def _daytime_now():
-    """An epoch that is NOT inside the Europe/Bratislava sleep window."""
+    """An epoch outside the Europe/Bratislava sleep window — the tombstone must
+    be a no-op WITHOUT relying on any sleep-window/cadence gate."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    return datetime(2026, 8, 14, 13, 0,
+    return datetime(2026, 8, 27, 13, 0,
                     tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
 
 
-def _night_now():
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    return datetime(2026, 8, 14, 3, 0,
-                    tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
+class TestDigestTombstoneIsPermanentNoOp(unittest.TestCase):
+    def test_never_fetches_sends_or_touches_state_even_fully_wired(self):
+        # The exact pre-#707 "fires" configuration: daytime, full authority,
+        # real-looking fetch, send_fn, persist — the tombstone must do NOTHING.
+        sends, fetches, persisted = [], [], []
+
+        def send(body, **k):
+            sends.append((body, k))
+            return "sent"
+
+        def fetch(home=None):
+            fetches.append(1)
+            return [("odoo-erp", 3018, "decide")]
+
+        state = {}
+        out = wd.reping_owner_decision_tickets(
+            _daytime_now(), send, state, fetch=fetch, account_owner="zbynek",
+            persist=lambda: persisted.append(1), authority="full")
+        self.assertEqual(out, [])
+        self.assertEqual(sends, [], "the retired digest must NEVER send")
+        self.assertEqual(fetches, [], "the retired digest must NEVER fetch")
+        self.assertEqual(state, {}, "the retired digest must NEVER touch state")
+        self.assertEqual(persisted, [], "no cadence stamp — nothing to persist")
+
+    def test_tolerates_any_stale_call_shape(self):
+        # A tombstone kept for stale callers must survive EVERY call shape a
+        # pre-#707 caller could use — including none at all.
+        self.assertEqual(wd.reping_owner_decision_tickets(), [])
+        self.assertEqual(
+            wd.reping_owner_decision_tickets(0, None, {}, home=None,
+                                             dry_run=True, reping=1,
+                                             account_owner="x"), [])
+
+    def test_docstring_names_the_retirement(self):
+        doc = wd.reping_owner_decision_tickets.__doc__ or ""
+        self.assertIn("#707", doc)
+        self.assertIn("no-op", doc.lower())
 
 
-class _FakeProc:
-    def __init__(self, returncode, stdout=""):
-        self.returncode = returncode
-        self.stdout = stdout
+class TestDigestMachineryRemoved(unittest.TestCase):
+    def test_fetch_and_block_helpers_are_gone(self):
+        import watchdog.questions as questions
+        for mod, label in ((wd, "watchdog"), (questions, "watchdog.questions")):
+            self.assertFalse(hasattr(mod, "_fetch_owner_decision_tickets"),
+                             "%s still carries the dead fetch helper" % label)
+            self.assertFalse(hasattr(mod, "_owner_decision_digest_block"),
+                             "%s still carries the dead digest-block helper"
+                             % label)
+
+    def test_airuleset_fetch_wiring_is_gone(self):
+        import airuleset
+        self.assertFalse(hasattr(airuleset, "_watchdog_owner_decision_fetch"))
+
+    def test_run_once_has_no_digest_param_or_registry_entry(self):
+        params = inspect.signature(wd.run_once).parameters
+        self.assertNotIn("owner_decision_fetch", params)
+        src = inspect.getsource(wd.run_once)
+        self.assertNotIn('_add("reping_owner_decision_tickets"', src,
+                         "run_once still registers the retired digest job")
 
 
-class TestFetchOwnerDecisionTickets(unittest.TestCase):
-    def _patch_env(self):
-        return mock.patch.object(wd, "_gh_env", lambda home=None, base=None: {})
+class TestDigestDedupKeyClassSuppressed(unittest.TestCase):
+    """#707 belt-and-braces: the class's own dedup_key
+    (`owner-decision-digest:<day-bucket>`) is denylisted at the send()
+    chokepoint, so a not-yet-redeployed box running the OLD producer can never
+    ping. The suppression layer is dedup_key-keyed by construction
+    (`notify._suppressed_alert_class`), so this is a true match — no message-
+    prefix mechanism was added."""
 
-    def test_none_when_every_repo_query_fails(self):
-        # unmeasurable: an auth/network hiccup must NEVER look like "no
-        # decisions pending" (which would record the day-bucket and silence
-        # the digest).
-        roots = {"/r/odoo-erp": "odoo-erp", "/r/camera-box": "camera-box"}
-        with self._patch_env(), \
-                mock.patch.object(wd, "_cache_repo_roots", lambda home=None: roots), \
-                mock.patch("subprocess.run", return_value=_FakeProc(1, "")):
-            self.assertIsNone(wd._fetch_owner_decision_tickets())
-
-    def test_empty_list_when_queries_run_but_nothing_labelled(self):
-        roots = {"/r/odoo-erp": "odoo-erp"}
-        with self._patch_env(), \
-                mock.patch.object(wd, "_cache_repo_roots", lambda home=None: roots), \
-                mock.patch("subprocess.run", return_value=_FakeProc(0, "[]")):
-            self.assertEqual(wd._fetch_owner_decision_tickets(), [])
-
-    def test_empty_when_no_repos_at_all(self):
-        with self._patch_env(), \
-                mock.patch.object(wd, "_cache_repo_roots", lambda home=None: {}):
-            # no roots => no queries => genuinely nothing pending, not "failed"
-            self.assertEqual(wd._fetch_owner_decision_tickets(), [])
-
-    def test_aggregates_and_sorts_across_repos(self):
-        roots = {"/r/odoo-erp": "odoo-erp", "/r/camera-box": "camera-box"}
-
-        def fake_run(argv, **kw):
-            if kw.get("cwd") == "/r/odoo-erp":
-                return _FakeProc(0, json.dumps([
-                    {"number": 3020, "title": "decide X"},
-                    {"number": 3018, "title": "decide Y"}]))
-            return _FakeProc(0, json.dumps([{"number": 12, "title": "pick a"}]))
-
-        with self._patch_env(), \
-                mock.patch.object(wd, "_cache_repo_roots", lambda home=None: roots), \
-                mock.patch("subprocess.run", side_effect=fake_run):
-            got = wd._fetch_owner_decision_tickets()
-        self.assertEqual(got, [
-            ("camera-box", 12, "pick a"),
-            ("odoo-erp", 3018, "decide Y"),
-            ("odoo-erp", 3020, "decide X"),
-        ])
-
-    def test_one_failing_repo_never_kills_the_whole_digest(self):
-        roots = {"/r/ok": "ok", "/r/bad": "bad"}
-
-        def fake_run(argv, **kw):
-            if kw.get("cwd") == "/r/bad":
-                raise OSError("boom")
-            return _FakeProc(0, json.dumps([{"number": 5, "title": "t"}]))
-
-        with self._patch_env(), \
-                mock.patch.object(wd, "_cache_repo_roots", lambda home=None: roots), \
-                mock.patch("subprocess.run", side_effect=fake_run):
-            got = wd._fetch_owner_decision_tickets()
-        # the good repo still contributes; the bad one is skipped, not fatal
-        self.assertEqual(got, [("ok", 5, "t")])
-
-    def test_search_uses_comma_or_labels_and_skip_exclusion(self):
-        captured = {}
-        roots = {"/r/x": "x"}
-
-        def fake_run(argv, **kw):
-            captured["argv"] = argv
-            return _FakeProc(0, "[]")
-
-        with self._patch_env(), \
-                mock.patch.object(wd, "_cache_repo_roots", lambda home=None: roots), \
-                mock.patch("subprocess.run", side_effect=fake_run):
-            wd._fetch_owner_decision_tickets()
-        argv = captured["argv"]
-        i = argv.index("--search")
-        search = argv[i + 1]
-        self.assertIn("label:needs-answer,needs-decision", search)
-        self.assertIn("-label:autopilot-skip", search)
-        self.assertIn("-label:ops-channel", search)
-
-
-class TestDigestBlock(unittest.TestCase):
-    def test_lists_tickets_with_repo_number_and_title(self):
-        block = wd._owner_decision_digest_block([
-            ("odoo-erp", 3018, "decide the box"),
-            ("camera-box", 12, "pick a codec"),
-        ])
-        self.assertIn("odoo-erp #3018", block)
-        self.assertIn("decide the box", block)
-        self.assertIn("camera-box #12", block)
-        # Slovak, self-contained framing — NOT a session ❓ marker keyword.
-        self.assertIn("rozhodnut", block.lower())
-        self.assertNotIn("NEEDS YOU", block)
-
-    def test_caps_a_huge_list_and_reports_the_remainder(self):
-        many = [("r", n, "t%d" % n) for n in range(50)]
-        block = wd._owner_decision_digest_block(many, limit=15)
-        # 15 shown, remainder summarised — never a wall of 50 lines.
-        self.assertLessEqual(block.count("\n- "), 16)  # 15 tickets + the "…"
-        self.assertIn("35", block)  # 50 - 15 = 35 more
-
-    def test_long_title_is_truncated(self):
-        block = wd._owner_decision_digest_block([("r", 1, "z" * 200)])
-        self.assertNotIn("z" * 120, block)
-
-    def test_default_worst_case_stays_under_notify_max_content(self):
-        # notify.send truncates a forwarded block at _MAX_CONTENT (1900). The
-        # default `limit` must keep the WORST case -- long repo names + full
-        # 80-char titles -- comfortably under that, or the tail tickets AND the
-        # 'Odpovedz prosím' footer would be silently cut mid-truncation. A
-        # revert of the default from 12 back to 15 makes this fail.
+    def test_digest_dedup_key_is_a_suppressed_class(self):
         import notify
-        many = [("automatizacie-montalu-x", 9999999, "T" * 200)
-                for _ in range(60)]
-        block = wd._owner_decision_digest_block(many)   # production default
-        self.assertLess(len(block), notify._MAX_CONTENT,
-                        "digest %d >= _MAX_CONTENT %d -- footer would be cut"
-                        % (len(block), notify._MAX_CONTENT))
-        # The cap still fired and stayed honest about the remainder.
-        self.assertIn("ďalších", block)
+        for k in ("owner-decision-digest:20691",     # the live producer's key
+                  "owner-decision-digest",           # bare-prefix form
+                  "owner-decision-digest-retry:1"):  # `prefix-` boundary form
+            self.assertIsNotNone(
+                notify._suppressed_alert_class(k),
+                "%r must be an owner-suppressed class (#707)" % k)
 
-
-class TestRepingOwnerDecisionTickets(unittest.TestCase):
-    def _spy_send(self):
-        calls = []
-
-        def send(body, **k):
-            calls.append((body, k))
-            return "sent"
-        return send, calls
-
-    def test_no_op_without_fetch(self):
-        send, calls = self._spy_send()
-        state = {}
-        out = wd.reping_owner_decision_tickets(
-            _daytime_now(), send, state, fetch=None)
-        self.assertEqual(out, [])
-        self.assertEqual(calls, [])
-        self.assertNotIn("owner_decision_digest", state)
-
-    def test_no_op_without_send_fn(self):
-        state = {}
-        out = wd.reping_owner_decision_tickets(
-            _daytime_now(), None, state, fetch=lambda home=None: [])
-        self.assertEqual(out, [])
-
-    def test_fires_one_ping_and_records_bucket(self):
-        send, calls = self._spy_send()
-        state = {}
-        persisted = []
-        now = _daytime_now()
-        tickets = [("odoo-erp", 3018, "decide")]
-        wd.reping_owner_decision_tickets(
-            now, send, state, fetch=lambda home=None: tickets,
-            account_owner="zbynek", persist=lambda: persisted.append(1),
-            authority="full")
-        # exactly ONE ping
-        self.assertEqual(len(calls), 1)
-        body, k = calls[0]
-        self.assertEqual(k.get("kind"), "questions")
-        self.assertEqual(k.get("owner"), "zbynek")
-        self.assertEqual(k.get("dedup_key"),
-                         "owner-decision-digest:%d" % int(now // DAY))
-        self.assertIn("odoo-erp #3018", body)
-        # bucket recorded + persisted (cadence survives a kill, job-8 pattern)
-        self.assertEqual(state["owner_decision_digest"]["bucket"],
-                         int(now // DAY))
-        self.assertEqual(persisted, [1])
-
-    def test_second_call_same_bucket_is_deduped_no_refetch(self):
-        send, calls = self._spy_send()
-        state = {}
-        now = _daytime_now()
-        fetch_calls = []
-
-        def fetch(home=None):
-            fetch_calls.append(1)
-            return [("r", 1, "t")]
-
-        wd.reping_owner_decision_tickets(now, send, state,
-                                         fetch=fetch, account_owner="z",
-                                         authority="full")
-        # a SECOND sweep in the same day-bucket must NOT fetch or send again
-        wd.reping_owner_decision_tickets(now + 60, send, state,
-                                         fetch=fetch, account_owner="z",
-                                         authority="full")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(len(fetch_calls), 1)
-
-    def test_deferred_in_sleep_window_records_nothing(self):
-        send, calls = self._spy_send()
-        state = {}
-        fetch_calls = []
-        out = wd.reping_owner_decision_tickets(
-            _night_now(), send, state,
-            fetch=lambda home=None: fetch_calls.append(1) or [("r", 1, "t")],
-            account_owner="z", authority="full")
-        self.assertEqual(calls, [])
-        self.assertEqual(fetch_calls, [])           # no network at night
-        self.assertNotIn("owner_decision_digest", state)  # retried after 06:00
-        self.assertTrue(any("sleep-window" in ln for ln in out))
-
-    def test_unmeasurable_fetch_does_not_record_bucket(self):
-        send, calls = self._spy_send()
-        state = {}
-        out = wd.reping_owner_decision_tickets(
-            _daytime_now(), send, state,
-            fetch=lambda home=None: None, account_owner="z", authority="full")
-        self.assertEqual(calls, [])
-        self.assertNotIn("owner_decision_digest", state)  # retry next sweep
-        self.assertTrue(any("unmeasurable" in ln for ln in out))
-
-    def test_empty_fetch_records_bucket_but_sends_nothing(self):
-        send, calls = self._spy_send()
-        state = {}
-        now = _daytime_now()
-        out = wd.reping_owner_decision_tickets(
-            now, send, state, fetch=lambda home=None: [], account_owner="z",
-            authority="full")
-        self.assertEqual(calls, [])                         # nothing pending
-        self.assertEqual(state["owner_decision_digest"]["bucket"],
-                         int(now // DAY))                   # but one fetch/day
-        self.assertTrue(any("0 pending" in ln for ln in out))
-
-    def test_falls_back_to_resolve_owner_when_no_account_owner(self):
-        send, calls = self._spy_send()
-        state = {}
-        with mock.patch("notify.resolve_owner", return_value="marek"):
-            wd.reping_owner_decision_tickets(
-                _daytime_now(), send, state,
-                fetch=lambda home=None: [("r", 1, "t")], account_owner="",
-                authority="full")
-        self.assertEqual(calls[0][1].get("owner"), "marek")
-
-
-class TestReducedAuthorityBoxSkipsDigest(unittest.TestCase):
-    """#489 — a reduced-authority (sub-dev) box must NEVER send the box-wide
-    owner-decision digest. Its box OWNER is an external sub-dev (david = CEO
-    slovnormalu), but the repo-scoped tickets belong to the gatekeeper/boss —
-    so the repo-wide digest leaked internal odoo-erp tickets to david's Discord
-    thread with a false 'these N tickets wait on YOUR decision'. The digest runs
-    ONLY on a full-authority (owner = the genuine decision recipient) box."""
-
-    def _spy_send(self):
-        calls = []
-
-        def send(body, **k):
-            calls.append((k.get("owner"), body))
-            return "sent"
-        return send, calls
-
-    def test_reduced_authority_box_never_sends_repo_wide_digest(self):
-        # RED on today's code: reping has no authority gate, so a reduced-
-        # authority box (box OS user = david, fork-no-merge) sends the repo-wide
-        # digest to the external owner AND hits the repo-wide fetch.
-        import airuleset
-        send, calls = self._spy_send()
-        state = {}
-        repo_wide = [("odoo-erp", 3020, "provizie obchodnikov"),
-                     ("odoo-erp", 3018, "Money migracia")]
-        fetch_calls = []
-
-        def fetch(home=None):
-            fetch_calls.append(1)
-            return repo_wide
-
-        with mock.patch.object(airuleset, "_current_user", lambda: "david1"):
-            wd.reping_owner_decision_tickets(
-                _daytime_now(), send, state, fetch=fetch, account_owner="david")
-        self.assertEqual(calls, [],
-                         "digest leaked to a reduced-authority box owner")
-        self.assertEqual(fetch_calls, [],
-                         "digest must skip BEFORE the box-wide repo fetch")
-
-    def test_default_box_authority_resolver_skips_reduced_box(self):
-        # No explicit authority=: the default _box_authority() reads the box OS
-        # user's AUTHORITY_BY_USER entry. A real reduced user (david1, renamed
-        # from david #537) -> skip.
-        import airuleset
-        send, calls = self._spy_send()
-        state = {}
-        with mock.patch.object(airuleset, "_current_user", lambda: "david1"):
-            out = wd.reping_owner_decision_tickets(
-                _daytime_now(), send, state,
-                fetch=lambda home=None: [("odoo-erp", 1, "t")],
-                account_owner="david")
-        self.assertEqual(calls, [])
-        self.assertTrue(any("reduced-authority" in ln for ln in out))
-
-    def test_branch_merge_box_also_skips(self):
-        # EVERY non-full profile skips, not just fork-no-merge (marek/montalu are
-        # branch-merge sub-devs; the tickets still belong to the boss).
-        send, calls = self._spy_send()
-        state = {}
-        out = wd.reping_owner_decision_tickets(
-            _daytime_now(), send, state,
-            fetch=lambda home=None: [("odoo-erp", 1, "t")],
-            account_owner="marek", authority="branch-merge")
-        self.assertEqual(calls, [])
-        self.assertTrue(any("branch-merge" in ln for ln in out))
-
-    def test_reduced_skip_stamps_bucket_and_dedups_second_sweep(self):
-        # The skip records the day-bucket, so the reduced box logs the skip at
-        # most ONCE per day and every later same-bucket sweep is a silent dedup
-        # (no per-60s-sweep log noise, no repeated fetch).
-        send, calls = self._spy_send()
-        state = {}
-        now = _daytime_now()
-        fetch_calls = []
-
-        def fetch(home=None):
-            fetch_calls.append(1)
-            return [("odoo-erp", 1, "t")]
-
-        out1 = wd.reping_owner_decision_tickets(
-            now, send, state, fetch=fetch, account_owner="david",
-            authority="fork-no-merge")
-        out2 = wd.reping_owner_decision_tickets(
-            now + 60, send, state, fetch=fetch, account_owner="david",
-            authority="fork-no-merge")
-        self.assertTrue(any("reduced-authority" in ln for ln in out1))
-        self.assertEqual(out2, [])                 # deduped, silent
-        self.assertEqual(calls, [])                # never sent
-        self.assertEqual(fetch_calls, [])          # never fetched
-        self.assertEqual(state["owner_decision_digest"]["bucket"],
-                         int(now // DAY))
-
-    def test_full_authority_default_resolver_still_sends(self):
-        # gk/dev1/dev2 keep working: an UNMAPPED box user resolves to "full" via
-        # the default _box_authority() resolver, and the digest sends as before.
-        import airuleset
-        send, calls = self._spy_send()
-        state = {}
-        with mock.patch.object(airuleset, "_current_user",
-                               lambda: "newlevel-not-in-map"):
-            wd.reping_owner_decision_tickets(
-                _daytime_now(), send, state,
-                fetch=lambda home=None: [("odoo-erp", 3018, "decide")],
-                account_owner="zbynek")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][0], "zbynek")
+    def test_boundary_no_false_match(self):
+        import notify
+        self.assertIsNone(
+            notify._suppressed_alert_class("owner-decision-digests:1"))
 
 
 class TestOwnerDecisionLabelsInSync(unittest.TestCase):
+    """KEPT after #707: `OWNER_DECISION_LABELS` outlives the retired digest —
+    its live consumers are job 32's mechanical U-label clear
+    (`watchdog/u_labels.py`) and the footer `U N` decision-subset relationship
+    below. The SUBSET invariant (#512/#601) is unchanged."""
+
     def test_owner_decision_is_the_decision_subset_of_user_waiting(self):
-        # #512 DIVERGED these two sets, intentionally. `USER_WAITING_LABELS`
-        # (the footer `U N` / stop-proof family) GAINED `needs-acceptance` — but
-        # the watchdog owner-DECISION re-ping (`OWNER_DECISION_LABELS`) is a
-        # re-ask job the #512 owner decision scoped EXPLICITLY UNCHANGED
-        # ("watchdog re-ask joby bežia nezmenené"): needs-acceptance is an
-        # ACCEPTANCE (done, awaiting sign-off), not a blocked DECISION that would
-        # rot silently without a daily "please answer" nudge, so it does NOT
-        # belong in that backstop. The invariant is now a SUBSET one: every
-        # owner-decision re-ping label is a user-waiting label (so the re-ping
-        # never nags about something the footer wouldn't call owner-parked), and
-        # the user-waiting labels NOT re-pinged are `needs-acceptance` (#512, an
-        # acceptance not a decision) and `needs-owner-action` (#601, a physical
-        # owner step, not a decision to re-ask as a daily "Odpovedz prosím"
-        # question).
+        # #512 DIVERGED these two sets, intentionally: `USER_WAITING_LABELS`
+        # (the footer `U N` / stop-proof family) gained `needs-acceptance` (an
+        # ACCEPTANCE, not a blocked decision) and #601 added
+        # `needs-owner-action` (a physical owner step). Both are deliberately
+        # NOT in the DECISION subset job 32 clears on an owner answer.
         import cli_quals
         self.assertTrue(set(wd.OWNER_DECISION_LABELS)
                         <= set(cli_quals.USER_WAITING_LABELS),
-                        "every re-ping label must be a user-waiting label")
+                        "every owner-decision label must be a user-waiting label")
         self.assertEqual(
             set(cli_quals.USER_WAITING_LABELS) - set(wd.OWNER_DECISION_LABELS),
             {"needs-acceptance", "needs-owner-action"},
             "needs-acceptance (#512: an acceptance, not a decision) AND "
-            "needs-owner-action (#601: a physical owner step, not a daily "
-            "'Odpovedz prosím' question) are the user-waiting labels "
-            "deliberately NOT in the owner-decision re-ping; watchdog re-ask "
-            "jobs stay scoped to genuine decisions")
-
-
-class TestRunOnceWiring(unittest.TestCase):
-    def _tmp_json(self):
-        f = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        f.write(b"{}")
-        f.close()
-        self.addCleanup(lambda: os.path.exists(f.name) and os.unlink(f.name))
-        return f.name
-
-    def _tmp_dir(self):
-        import shutil
-        d = tempfile.mkdtemp()
-        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
-        return d
-
-    def test_digest_fetch_is_reached_when_wired(self):
-        """The digest fires from run_once's #368 daily-reask section only when a
-        real fetch is injected (jobs 8/11 network-free-tests pattern). Pinned to a
-        full-authority box (#489) so the reach test is hermetic regardless of the
-        test box's own OS user."""
-        fetch_calls = []
-
-        def spy_fetch(home=None):
-            fetch_calls.append(1)
-            return []       # measurable, empty → no send, just records bucket
-
-        with mock.patch.object(wd, "_box_authority", lambda: "full"):
-            wd.run_once(now=_daytime_now(), dry_run=False,
-                        run=lambda argv, **k: "", send_fn=lambda *a, **k: "sent",
-                        projects_dir=self._tmp_dir(), state_path=self._tmp_json(),
-                        questions_path=self._tmp_json(),
-                        owner_decision_fetch=spy_fetch)
-        self.assertEqual(fetch_calls, [1],
-                         "run_once must reach the owner-decision digest fetch "
-                         "when it is wired")
-
-    def test_digest_not_reached_when_fetch_absent(self):
-        # No owner_decision_fetch → the digest section is a no-op (default None).
-        logs = wd.run_once(now=_daytime_now(), dry_run=False,
-                           run=lambda argv, **k: "", send_fn=lambda *a, **k: "sent",
-                           projects_dir=self._tmp_dir(), state_path=self._tmp_json(),
-                           questions_path=self._tmp_json())
-        self.assertFalse(any("owner-decision-digest" in ln for ln in logs))
+            "needs-owner-action (#601: a physical owner step) are the "
+            "user-waiting labels deliberately outside the decision subset")
 
 
 if __name__ == "__main__":

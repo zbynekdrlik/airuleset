@@ -101,8 +101,11 @@ STATE_STALL_KEYS = [
 # Classes that MUST keep pinging — the sanctioned set + the deliberately-KEPT
 # question relay. `waiting:` carries the ACTUAL ❓ question text (a real question
 # relay, NOT a stall verdict — __init__.py:3293), so it is NEVER suppressed. The
-# operational classes (conformance / net-drift / owner-decision-digest / gkreq /
-# dorphan) are left to a needs-user-decision follow-up, not suppressed here.
+# operational classes (conformance / net-drift / gkreq / dorphan) are left to a
+# needs-user-decision follow-up, not suppressed here. The owner-decision-digest
+# class this list used to keep ("a digest the owner may want — follow-up") got
+# its owner decision in #707: the class is ABOLISHED (cross-subject leak via the
+# account_owner coin flip) — see TestOwnerDigestAbolished707 below.
 STILL_DELIVERED_KEYS = [
     "waiting:proj-key:1000000",            # ❓ question relay — KEEP
     "acctblock:sid:1",                     # genuine account block — needs a human
@@ -110,7 +113,6 @@ STILL_DELIVERED_KEYS = [
     "odoo-erp#4607",                       # per-ticket run-card (with a dash in name)
     "conformance:dev1:deploy:1000",        # config-drift ops alert — follow-up, not here
     "net-drift-open:odoo-erp:1000",        # backlog-trend — follow-up, not here
-    "owner-decision-digest:1000",          # a digest the owner may want — follow-up
     "gkreq:odoo-erp:1000",                 # cross-stream request — follow-up
 ]
 
@@ -181,6 +183,42 @@ class TestSanctionedAndQuestionRelayUntouched(_HomeIsolated):
         self.assertIsNotNone(notify._suppressed_alert_class("apierr-giveup:k:h:1"))
         self.assertIsNotNone(notify._suppressed_alert_class("sesslimit:s:1"))
         self.assertIsNotNone(notify._suppressed_alert_class("stuckalert:sid:1"))
+
+
+class TestOwnerDigestAbolished707(_HomeIsolated):
+    """#707 — the daily owner-decision digest class is ABOLISHED (owner ruling
+    2026-08-26). The producer is a permanent no-op tombstone
+    (`watchdog/questions.py::reping_owner_decision_tickets`); THIS is the
+    belt-and-braces send()-chokepoint proof, so even STALE code on a
+    not-yet-redeployed box can never ping. The class's own dedup_key
+    (`owner-decision-digest:<day-bucket>`) is the denylist match — the #546
+    layer is dedup_key-keyed by construction, no message-prefix mechanism
+    needed. Machine channel keeps the decision: the `suppressed` delivery-log
+    line below, never a silent drop."""
+
+    def test_digest_send_posts_nothing_and_returns_suppressed(self):
+        self._write_env()          # fully configured — a normal key WOULD post
+        r = notify.send(
+            "**Rozhodnutia čakajúce na teba (denný súhrn):**\n\n"
+            "- automatizacie-montalu #285 — …",
+            dedup_key="owner-decision-digest:20691")
+        self.assertEqual(r, "suppressed",
+                         "the abolished digest class must never POST (#707)")
+        self.assertEqual(self.posts, [], "a suppressed digest must POST nothing")
+
+    def test_digest_suppression_is_a_logged_decision_not_silent(self):
+        self._write_env()
+        notify.send("body", dedup_key="owner-decision-digest:20692")
+        lines = [ln for ln in self.log_lines() if "suppressed" in ln]
+        self.assertTrue(lines, "a suppressed digest send must be LOGGED")
+        self.assertIn("owner-decision-digest", lines[-1],
+                      "the log line names the key")
+
+    def test_prefix_boundary_no_false_match(self):
+        # boundary-matched on ':'/'-' — a same-letters-but-longer key must NOT
+        # be swept in (the #704 HAZARD comment's discipline).
+        self.assertIsNone(
+            notify._suppressed_alert_class("owner-decision-digests:1"))
 
 
 if __name__ == "__main__":
