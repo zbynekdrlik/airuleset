@@ -572,17 +572,18 @@ class TestBatchDispatchMandate(TestCase):
     refill kept a lane always live, so `compact-request --self`'s live-tasks veto
     always skipped and the boundary compact never fired.
 
-    autopilot-MASTER is NOT in this ticket's scope: its LANE 1 review-watch +
-    LANE 2 release are long-lived and never drain to zero, so batch mode needs
-    its OWN separate design (filed as #724). So the SKILL_MASTER
-    assertions still lock the #456 continuous doctrine, and only the SKILL
-    (autopilot) ones move to batch.
+    autopilot-MASTER got its OWN batch adaptation in #724: because its LANE 1
+    review-watch + LANE 2 release are long-lived and never drain to zero, #724
+    redefines the compact boundary as LANE 3's OWN drained batch (a DRAIN WINDOW
+    at zero live tasks), rather than #723's flat "drain ALL lanes". So the
+    SKILL_MASTER assertions now lock the SAME batch doctrine as the SKILL
+    (autopilot) ones -- both moved off #456 continuous refill.
 
-    This class locks that autopilot's batch-dispatch protocol TEXT is present (a
-    future edit that reverts it to continuous refill fails loudly), that
-    autopilot-master still mandates continuous saturation, plus the LANES-FULL
-    reminder inside the MASTER LOOP /goal condition. The 4000-char cap stays
-    locked separately above.
+    This class locks that autopilot's AND autopilot-master's batch-dispatch
+    protocol TEXT is present (a future edit that reverts either to continuous
+    refill fails loudly), plus the master's BATCH+COMPACT drain-window reminder
+    inside the MASTER LOOP /goal condition. The 4000-char cap stays locked
+    separately above.
     """
 
     def test_autopilot_mandates_batch_dispatch_no_refill_while_open(self):
@@ -591,12 +592,21 @@ class TestBatchDispatchMandate(TestCase):
         self.assertIn("no refill while a batch", body,
                       "SKILL missing the #723 no-refill-while-open mandate")
 
-    def test_master_still_mandates_continuous_lane_refill(self):
+    def test_master_now_mandates_batch_lane_dispatch(self):
+        # #724: master's LANE 3 moves off #456 continuous refill onto #723 batch
+        # mode -- dispatch up to 5 parallel lanes, NO refill while a batch is
+        # open, compact at the drained batch boundary. The superseded
+        # continuous-refill affirmatives must be gone.
         body = read(SKILL_MASTER).lower()
-        self.assertIn("continuous", body,
-                      "SKILL_MASTER missing the #456 continuous-refill mandate")
-        self.assertIn("refill", body,
-                      "SKILL_MASTER missing the #456 lane-refill mandate")
+        self.assertIn("batch", body, "SKILL_MASTER missing the #724 batch-dispatch mandate")
+        self.assertIn("no refill while a batch", body,
+                      "SKILL_MASTER missing the #724 no-refill-while-open mandate")
+        self.assertNotIn("refilling continuously", body,
+                         "SKILL_MASTER still carries the #456 continuous-refill directive")
+        self.assertNotIn("saturating continuously", body,
+                         "SKILL_MASTER still carries the #456 saturate-continuously directive")
+        self.assertNotIn("continuously refill", body,
+                         "SKILL_MASTER still carries the #456 continuously-refill directive")
 
     def test_both_bodies_bound_saturation_on_a_resource_signal(self):
         for rel in (SKILL, SKILL_MASTER):
@@ -621,14 +631,17 @@ class TestBatchDispatchMandate(TestCase):
         self.assertIsNone(re.search(r"cap (a|the) round", body),
                           "SKILL still mandates capping a round at a fixed size")
 
-    def test_master_still_forbids_the_superseded_fixed_cap(self):
+    def test_master_now_names_a_batch_cap_not_the_superseded_fixed_cap(self):
+        # #724: master's LANE 3 primary bound is now the batch cap (up to 5, no
+        # refill while a batch runs); the pre-#723 fixed-cap and keep-lanes-full
+        # phrasings must not reappear.
         body = read(SKILL_MASTER).lower()
+        self.assertIn("batch cap", body, "SKILL_MASTER dropped the #724 batch-cap doctrine")
+        self.assertIn("up to 5", body, "SKILL_MASTER dropped the #724 up-to-5 batch size")
         self.assertNotIn("keep the lanes full", body,
                          "SKILL_MASTER still carries the superseded #442 keep-lanes-full mandate")
         self.assertIsNone(re.search(r"3[-–]5", body),
                           "SKILL_MASTER still names a fixed 3-5 cap (any spelling)")
-        self.assertIn("fixed cap", body,
-                      "SKILL_MASTER dropped the #456 'no fixed cap' doctrine")
 
     def test_the_integration_mutex_bullet_locks_batch_dispatch_decoupling(self):
         # #723: the mutex still guards INTEGRATION only, never the batch-dispatch
@@ -661,25 +674,41 @@ class TestBatchDispatchMandate(TestCase):
         self.assertIn("must never starve", body,
                       "master Step-3 body dropped reviews' never-starve precedence")
 
-    def test_the_master_template_carries_the_lanes_full_reminder(self):
+    def test_the_master_template_carries_the_batch_compact_reminder(self):
         # master_goal_lines()[0] IndexErrors if the template ever vanishes --
         # a hard failure, guarding against silently measuring nothing.
-        self.assertIn("LANES-FULL", master_goal_lines()[0],
-                      "master /goal template missing the LANES-FULL rule")
+        # #724: the LANES-FULL continuous reminder is re-derived as the
+        # BATCH+COMPACT drain-window reminder.
+        tpl = master_goal_lines()[0]
+        self.assertIn("BATCH+COMPACT", tpl,
+                      "master /goal template missing the #724 BATCH+COMPACT reminder")
+        self.assertNotIn("LANES-FULL", tpl,
+                         "master /goal template still carries the superseded LANES-FULL reminder")
 
-    def test_the_master_template_reminder_is_continuous_not_a_fixed_cap(self):
-        # N6: scope to the LANES-FULL clause itself, not the whole template
-        # line -- LANE 3 CORE also says "continuous", so a whole-line check
-        # would pass even if the LANES-FULL reminder silently lost the word.
+    def test_the_master_template_reminder_is_batch_not_continuous(self):
+        # #724: scope to the BATCH+COMPACT clause itself, not the whole template
+        # line. Slice to "LANE 4" (not r"LANE \d") because the clause itself
+        # says "LANE 3's drained boundary". The reminder must name the drained
+        # batch boundary + the compact-request --self boundary + the drain-window
+        # no-new-dispatch phrase, and must NOT re-introduce continuous saturation
+        # or a fixed 3-5 cap.
         full = master_goal_lines()[0]
-        start = full.index("LANES-FULL:")
-        after = full[start + len("LANES-FULL:"):]
-        m = re.search(r"LANE \d", after)
+        start = full.index("BATCH+COMPACT:")
+        after = full[start + len("BATCH+COMPACT:"):]
+        m = re.search(r"LANE 4", after)
         clause = (after[:m.start()] if m else after).lower()
-        self.assertIn("continuous", clause,
-                      "master LANES-FULL clause must mandate continuous saturation")
+        self.assertIn("compact-request --self", clause,
+                      "master BATCH+COMPACT clause must name the compact-request --self boundary")
+        self.assertIn("zero live", clause,
+                      "master BATCH+COMPACT clause must name the zero-live-tasks drain condition")
+        self.assertIn("drain window", clause,
+                      "master BATCH+COMPACT clause must name the drain window")
+        self.assertIn("no new background task", clause,
+                      "master BATCH+COMPACT clause must state the no-new-dispatch drain rule")
+        self.assertNotIn("saturating continuously", clause,
+                         "master BATCH+COMPACT clause must not re-introduce continuous saturation")
         self.assertIsNone(re.search(r"3[-–]5", clause),
-                          "master LANES-FULL clause must not name a fixed 3-5 cap")
+                          "master BATCH+COMPACT clause must not name a fixed 3-5 cap")
 
 
 if __name__ == "__main__":

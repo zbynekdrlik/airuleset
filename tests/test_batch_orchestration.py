@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 import goal_registry as gr  # noqa: E402
 
 SKILL = "skills/autopilot/SKILL.md"
+SKILL_MASTER = "skills/autopilot-master/SKILL.md"
 TOOLING = "modules/core/claude-code-tooling.md"
 
 
@@ -130,13 +131,15 @@ class TestSkillBakesInTheResearchFacts(TestCase):
 
 
 class TestNoContinuousReversion(TestCase):
-    """Negative lock (review finding, #723): an ADDITIVE re-introduction of the
-    pre-#723 continuous-refill phrasing ALONGSIDE the batch text passes every
-    positive-presence lock above, so guard the exact affirmative phrases too.
-    Scoped to `skills/autopilot/SKILL.md` ONLY — autopilot-master legitimately
-    keeps continuous phrasing, so this is never a repo-wide lock. The current
-    SKILL body uses 'continuous refill' solely inside 'reverses #456's
-    continuous refill' negations, which none of these affirmative phrases hit."""
+    """Negative lock (review finding, #723; scope extended to master by #724):
+    an ADDITIVE re-introduction of the pre-#723 continuous-refill phrasing
+    ALONGSIDE the batch text passes every positive-presence lock above, so guard
+    the exact affirmative phrases too. #724 migrated autopilot-MASTER to batch
+    mode as well (LANE 3's drained batch = the compact boundary), so this lock
+    now covers BOTH skills — master no longer legitimately keeps continuous
+    refill phrasing. Both bodies use 'continuous refill' solely inside 'reverses
+    #456's continuous refill' negations, which none of these affirmative phrases
+    hit."""
 
     BANNED_AFFIRMATIVE = (
         "refilling to saturation",
@@ -150,11 +153,13 @@ class TestNoContinuousReversion(TestCase):
         "refills continuously",
     )
 
-    def test_skill_never_re_adds_the_old_continuous_directive(self):
-        body = read(SKILL)
-        present = [p for p in self.BANNED_AFFIRMATIVE if p in body]
-        self.assertEqual(present, [],
-                         "SKILL re-introduced pre-#723 continuous phrasing: %r" % present)
+    def test_neither_skill_re_adds_the_old_continuous_directive(self):
+        for rel in (SKILL, SKILL_MASTER):
+            body = read(rel)
+            present = [p for p in self.BANNED_AFFIRMATIVE if p in body]
+            self.assertEqual(present, [],
+                             "%s re-introduced pre-#723 continuous phrasing: %r"
+                             % (rel, present))
 
 
 class TestToolingModuleReconciled(TestCase):

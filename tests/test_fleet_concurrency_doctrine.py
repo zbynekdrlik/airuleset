@@ -152,26 +152,37 @@ class TestFleetPaysOffDoctrine(TestCase):
 
 class TestAutopilotMasterPointsAtTheCanonicalHome(TestCase):
     """autopilot-master's own rule: 'never re-derive or fork their content
-    here' -- so this file gets a POINTER, not a duplicated explanation."""
+    here' -- so this file gets a POINTER, not a duplicated explanation. #724
+    migrated master's LANE 3 to batch mode, so the pointers now name the BATCH
+    cap as LANE 3's primary bound (still pointing at the autopilot skill's Batch
+    cap section, never re-derived here)."""
 
     def test_the_collision_guards_bullet_points_at_the_autopilot_skill(self):
+        # #724: master's LANE 3 primary bound is now the BATCH cap, not #456's
+        # "no fixed concurrent-agent cap"; the collision guards still POINT at
+        # the autopilot skill's Batch cap section (never re-derive it here) and
+        # keep the account-wide within-batch resource-signal backoff.
         t = read(MASTER)
         w = window(t, "**Collision guards:**", "Single-lane commands")
-        self.assertIn("no fixed concurrent-agent cap", w.lower())
+        self.assertIn("batch cap", w.lower())
+        self.assertNotIn("no fixed concurrent-agent cap", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertIn("never re-derive it here", w)
 
-    def test_the_goal_master_loop_template_mandates_continuous_saturation(self):
-        """#456 INVERTS the pre-#332 regression guard: the `/goal MASTER LOOP`
-        LANES-FULL reminder must NO LONGER carry the superseded "capped 3-5"
-        fixed cap -- it must mandate CONTINUOUS saturation bounded only by a real
-        resource signal. If "capped 3-5" reappears, the fixed-cap regression #456
-        removed is back. The 4000-char cap still holds."""
+    def test_the_goal_master_loop_template_mandates_batch_dispatch(self):
+        """#724 reverses the #456 continuous reminder FOR the master too: the
+        `/goal MASTER LOOP` LANE 3 clause + its BATCH+COMPACT reminder must name
+        batch dispatch (up to 5, no refill while a batch is open) and the
+        drained-boundary compact, NOT continuous saturation. Both "capped 3-5"
+        and "saturating continuously" must be gone. The 4000-char cap holds."""
         t = read(MASTER)
         lines = re.findall(r"^/goal MASTER LOOP.*$", t, re.MULTILINE)
         self.assertEqual(len(lines), 1)
         self.assertNotIn("capped 3-5", lines[0])
-        self.assertIn("saturating continuously", lines[0].lower())
+        self.assertNotIn("saturating continuously", lines[0].lower())
+        self.assertIn("up to 5", lines[0].lower())
+        self.assertIn("no refill while a batch", lines[0].lower())
+        self.assertIn("compact-request --self", lines[0])
         self.assertLessEqual(len(lines[0]), 4000)
 
 
