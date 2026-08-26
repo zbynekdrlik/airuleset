@@ -1,27 +1,30 @@
-"""Locks the model tiering: Opus 5 BANNED; Fable for judgment-content work.
+"""Locks the model tiering: Opus 5 BANNED; PER-PHASE Fable design + review.
 
 History: 2026-07-03 middle tier (Opus 5 + Sonnet 5 default) -> 2026-08-13
 (Opus 5 banned outright, gated Fable the default judgment layer) ->
 2026-08-14 refinement #455 (Fable narrowed to HARD-only after the
-inherited-Fable burn; Opus 4.8 default) -> **2026-08-25 revision #690**: the
-HARD-only boundary produced ZERO Fable subagent dispatches in practice (the
-"when unsure -> it is NOT hard" tie-break + the taxonomy's height; the owner
-never once saw a Fable subagent across the subdevs' lifetime), so the
-boundary MOVES. The lineup these assertions lock:
+inherited-Fable burn; Opus 4.8 default) -> 2026-08-25 revision #690 (the
+HARD-only boundary produced ZERO Fable subagent dispatches, so it moved to
+"Fable for every judgment-content task + airuleset Fable-MAJORITY + ~50%
+fleet target") -> **2026-08-26 revision #715**: that whole-worker Fable +
+~50% + airuleset-majority burned subscriptions (Fable weekly 89-93%), so the
+boundary moves AGAIN, to a PER-PHASE split, FLEET-WIDE. The lineup these
+assertions lock:
 
   main session managed default = Fable 5 (claude-fable-5[1m], MANAGED_MODEL)
-  judgment-CONTENT tasks       = Fable 5 through the budget gate (non-trivial
-                                 implementation, review of a non-trivial
-                                 change, hard debug, plan/design/synthesis;
-                                 tie-break REVERSED: unsure -> it QUALIFIES;
-                                 ~50% of subagent tasks is the owner's
-                                 CALIBRATION target, never a counter)
-  airuleset repo subagents     = Fable-MAJORITY: every substantive dispatch
-                                 carries model: "fable" at gate OPEN
-  routine execution fallback   = Opus 4.8 via agent-definition frontmatter /
+  design + review PHASES       = Fable 5 through the budget gate, FLEET-WIDE
+                                 (the JUDGMENT-CONTENT test is now a PHASE
+                                 selector: a non-trivial ticket gets a Fable
+                                 DESIGN phase + a Fable REVIEW phase; tie-break
+                                 unsure -> it DOES -> gets those phases)
+  implementation (the work)    = Opus 4.8 pinned worker / Sonnet 5 mechanical
+                                 -- the implementing worker NEVER carries a
+                                 model:"fable" override, on ANY repo
+  routine fallback / CLOSED    = Opus 4.8 via agent-definition frontmatter /
                                  Workflow opts.model full id / inheritance
-                                 (also the gate-CLOSED fallback tier)
   mechanical / read-only       = sonnet low (haiku most-trivial) -- unchanged
+  airuleset-majority exception = ABOLISHED (2026-08-26): the per-phase split
+                                 is fleet-wide, airuleset is not special
   Opus 5 (claude-opus-5, and the bare `opus` alias that resolves to it)
                                = BANNED on every dispatch surface (grep-gated)
 
@@ -58,17 +61,22 @@ class TestOpus5BanLineup(TestCase):
 
     def test_model_awareness_active_policy_header(self):
         t = read(MODULE)
-        # #690 revision (2026-08-25): Fable for judgment-content work,
-        # airuleset subagents Fable-MAJORITY, Opus 4.8 the routine fallback.
-        # Header asserted as two single-line fragments (the wrap-trap this
-        # file documents).
+        # #715 revision (2026-08-26): PER-PHASE tiering, FLEET-WIDE — the
+        # design + review PHASES run gated Fable, the implementation worker
+        # runs Opus 4.8 / Sonnet 5 and NEVER Fable. Header asserted as
+        # single-line fragments (the wrap-trap this file documents).
         self.assertIn(
+            "Model tiering — PER-PHASE (fleet-wide): design + review = Fable "
+            "(gated); implementation = Opus 4.8 / Sonnet 5", t)
+        self.assertIn(
+            "Opus 5 BANNED (ACTIVE policy, 2026-08-26 — revises 2026-08-25 "
+            "Fable-majority)", t)
+        # the 2026-08-25 header (Fable judgment-content + airuleset-majority)
+        # is retired as the LIVE header:
+        self.assertNotIn(
             "Model tiering — Fable 5 for judgment-content work; "
             "airuleset subagents Fable-MAJORITY; Opus 4.8 routine fallback", t)
-        self.assertIn(
-            "Opus 5 BANNED (ACTIVE policy, 2026-08-25 — revises 2026-08-14 "
-            "HARD-only)", t)
-        # the 2026-08-14 header (Fable HARD-only) is retired as the LIVE header:
+        # the 2026-08-14 header (Fable HARD-only) stays retired:
         self.assertNotIn(
             "Model tiering — Opus 4.8 default; Fable 5 for HARD work only; "
             "Sonnet 5 for light work", t)
@@ -95,34 +103,58 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn(
             "chcem aby sa ta hranica posunula aby sa pouzival fable ovela viac", t)
         self.assertIn("na airuleset chcem aby sa majoritne pouzival fable", t)
+        # #715 -- the 2026-08-26 per-phase directive, verbatim:
+        self.assertIn(
+            "Najviacej by sa mi pacilo keby sa tickety nejak tak robili ze "
+            "brainstorming, specs a plan fable, implementacia opus4.8/sonnet 5, "
+            "review fable", t)
+        self.assertIn(
+            "len tie dolezite fazy ktore vyzaduju veci dobre vymysliet a "
+            "skontrolovat no samotna praca by bol nizsi model", t)
+        # #715 -- the fleet-wide scope clarification, verbatim:
+        self.assertIn(
+            "ja horovrim o pravidlach pre vsetky targety nie len pre airuleset "
+            "projekt", t)
 
-    def test_judgment_content_criterion_is_the_selector(self):
-        # #690: the fleet-wide Fable selector is the JUDGMENT-CONTENT test --
-        # a mechanizable per-task criterion, never a percentage counter, with
-        # the tie-break REVERSED (the old "unsure -> NOT hard" tie-break is
-        # the traced root cause of zero Fable dispatches).
+    def test_judgment_content_is_the_phase_selector(self):
+        # #715: the JUDGMENT-CONTENT test no longer decides whether a whole
+        # subagent runs Fable -- it is now a PHASE selector: it decides whether
+        # a ticket is non-trivial enough to warrant the two Fable PHASES (the
+        # DESIGN phase before implementation, the REVIEW phase before
+        # integration). The implementing worker is NEVER Fable. Tie-break kept
+        # (unsure -> it DOES -> gets the Fable design + review phases).
         t = read(MODULE)
         self.assertIn("JUDGMENT-CONTENT test", t)
+        self.assertIn("PHASE selector", t)
+        self.assertIn("the DESIGN phase", t)
+        self.assertIn("the REVIEW phase", t)
         self.assertIn("Non-trivial implementation", t)
-        self.assertIn("Review / verify of a non-trivial change", t)
+        self.assertIn("Review of a non-trivial change", t)
         self.assertIn("Hard debugging", t)
         self.assertIn(
             "when unsure whether a task carries judgment content → it DOES", t)
-        self.assertIn("calibration check, never a counter", t)
-        self.assertIn("≈50%", t)
+        # the implementing worker never runs Fable, on any repo:
+        self.assertIn("never the implementing worker end-to-end", t)
         # the old always-against-Fable tie-break must be gone as LIVE policy:
         self.assertNotIn(
             "When unsure whether it is design-heavy → it is NOT", t)
 
-    def test_airuleset_repo_is_fable_majority(self):
-        # #690: on the airuleset repo every substantive subagent dispatch is
-        # Fable at gate OPEN; gate CLOSED falls back to the frontmatter pin.
+    def test_airuleset_exception_abolished_fleet_wide(self):
+        # #715: the 2026-08-25 "airuleset repo = Fable-MAJORITY subagent
+        # dispatch" exception is ABOLISHED -- the per-phase split is fleet-wide,
+        # the same on every target and project, and there is NO repo where the
+        # implementing worker runs Fable. "Fable-MAJORITY" survives ONLY as
+        # dated history (do not assert its absence -- it is preserved), so lock
+        # the LIVE fleet-wide statement + the abolition, and assert the old
+        # airuleset-majority BULLET phrasing is gone as live policy.
         t = read(MODULE)
-        self.assertIn("Fable-MAJORITY", t)
-        self.assertIn(
-            'carries an explicit `model: "fable"` when the gate is OPEN', t)
+        self.assertIn("FLEET-WIDE", t)
         self.assertRegex(
-            t, r"[Gg]ate CLOSED[^\n]*frontmatter-pinned `claude-opus-4-8`")
+            t, r"airuleset[^\n]*Fable-MAJORITY[^\n]*exception is ABOLISHED")
+        self.assertIn("no repo where the implementing worker runs Fable", t)
+        # the old live airuleset-majority bullet phrase is gone:
+        self.assertNotIn(
+            'carries an explicit `model: "fable"` when the gate is OPEN', t)
 
     def test_gate_threshold_default_is_90(self):
         # #690: threshold raised 80 -> 90 so the new usage level actually
@@ -141,10 +173,15 @@ class TestOpus5BanLineup(TestCase):
         # rule ever reaches for the bare `opus` alias again:
         self.assertIn("`opus` alias", t)
 
-    def test_execution_tier_is_opus_4_8(self):
+    def test_implementation_tier_is_opus_4_8(self):
+        # #715: the IMPLEMENTATION phase (the actual work) runs Opus 4.8 /
+        # Sonnet 5 and NEVER Fable -- the implementing worker never carries a
+        # model:"fable" override, on any repo.
         t = read(MODULE)
         self.assertIn(
-            "EXECUTION of settled, scoped code = Opus 4.8 (`claude-opus-4-8`)", t)
+            "IMPLEMENTATION (the actual work) = Opus 4.8 (`claude-opus-4-8`)", t)
+        self.assertIn(
+            'implementing worker NEVER carries a `model: "fable"` override', t)
         self.assertNotIn("EXECUTION of settled, scoped code = Sonnet 5", t)
 
     def test_sonnet_never_complex(self):
@@ -153,16 +190,15 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn("when in doubt, Opus 4.8", t)
 
     def test_gate_guards_every_automatic_fable_dispatch(self):
-        # #690 (2026-08-25): the gate guards EVERY automatic Fable dispatch
-        # (the judgment-content tier + the airuleset Fable-majority), no
-        # longer only a HARD-only escalation. The LIVE gate-role phrase must
-        # flip; older gate-role phrasings stay retired.
+        # #715 (2026-08-26): the gate guards EVERY automatic Fable dispatch --
+        # now the design-phase consult + the review-phase pass. Older gate-role
+        # phrasings stay retired.
         t = read(MODULE)
         self.assertIn("airuleset.py fable-gate", t)
         self.assertIn("guards EVERY automatic Fable dispatch", t)
         self.assertNotIn("guards the HARD-only Fable escalation", t)
         self.assertNotIn("guards the DEFAULT judgment layer", t)
-        self.assertIn("ONCE per qualifying task/batch", t)
+        self.assertIn("ONCE per qualifying Fable phase-dispatch", t)
         self.assertIn("missing/stale cache = CLOSED", t)
         self.assertIn("Never skip the gate", t)
         # CLOSED falls back to Opus 4.8, never the banned alias:
@@ -251,10 +287,10 @@ class TestWorkflowStageTiering(TestCase):
         t = read(TOOLING)
         self.assertIn("`opts.model: 'fable'`", t)
         self.assertIn("ONLY when the budget gate is OPEN", t)
-        # #690 (2026-08-25): Fable stages are every stage with real
-        # judgment/design content (the judgment-content test), no longer the
-        # HARD-only subset; a genuinely mechanical stage stays cheap.
-        self.assertIn("every stage with real judgment/design content", t)
+        # #715 (2026-08-26): the Fable stages are the DESIGN + REVIEW (+
+        # synthesis / adversarial-verify) PHASES -- an IMPLEMENTATION/EXECUTION
+        # stage NEVER runs Fable, even if it feels like it carries judgment.
+        self.assertIn("DESIGN / SYNTHESIS / REVIEW / adversarial-VERIFY", t)
         self.assertNotIn("ONLY for the HARD subset", t)
         self.assertIn("BEFORE authoring the script", t)
         self.assertIn("never bake in an ungated Fable stage", t)
@@ -307,16 +343,20 @@ class TestDispatchSurfacesRewritten(TestCase):
                     % ln[:80])
 
     def test_autopilot_supervisor_dispatch_model_rule(self):
-        # #690: airuleset repo -> Fable-MAJORITY worker dispatch; other repos
-        # -> the judgment-content criterion; Opus 4.8 stays the routine
-        # fallback (frontmatter pin, dispatched AS-IS).
+        # #715: fleet-wide per-phase dispatch. The supervisor dispatches the
+        # implementation WORKER on Opus 4.8 (frontmatter pin, AS-IS, NEVER a
+        # model:fable override); the DESIGN consult (Step 1c) and the REVIEW
+        # pass are the gated-Fable PHASES. No airuleset-majority exception.
         s = read("skills/autopilot/SKILL.md")
-        self.assertIn("Fable-MAJORITY", s)
-        self.assertIn("JUDGMENT-CONTENT test", s)
+        self.assertIn("PER-PHASE", s)
         self.assertIn("gate OPEN (exit 0) → dispatch `model: fable`", s)
         self.assertIn("gate CLOSED (exit 1)", s)
         self.assertIn(
             "Never dispatch an automatic `model: fable` without the gate check", s)
+        # the implementation worker is dispatched AS-IS on claude-opus-4-8,
+        # never Fable:
+        self.assertIn("implementation worker", s)
+        self.assertIn("never a `model: fable` override", s)
         self.assertNotIn("Model = Opus 4.8 by default", s)
         self.assertNotIn("Model = Sonnet 5 by default", s)
         self.assertNotIn('`model: "opus"`', s)
@@ -422,12 +462,22 @@ class TestAdvisorHistoryPreserved(TestCase):
         self.assertIn("Haiku 4.5 $1/$5", a)
 
     def test_2026_08_25_revision_recorded(self):
-        # #690: the advisor's history/tables must cite the current policy --
-        # judgment-content boundary + airuleset Fable-majority + gate 80->90.
+        # #690: the advisor's history must cite the 2026-08-25 revision --
+        # judgment-content boundary + airuleset Fable-majority + gate 80->90 --
+        # as HISTORY (superseded by #715, but the record stays).
         a = read(ADVISOR)
         self.assertIn("2026-08-25", a)
         self.assertIn("majoritne pouzival fable", a)
         self.assertIn("80→90", a)
+
+    def test_2026_08_26_revision_recorded(self):
+        # #715: the advisor history records the per-phase revision (design +
+        # review = Fable, implementation = Opus 4.8/Sonnet, fleet-wide, the
+        # airuleset-majority exception abolished).
+        a = read(ADVISOR)
+        self.assertIn("2026-08-26", a)
+        self.assertIn("per-phase", a.lower())
+        self.assertIn("review fable", a)
 
 
 class TestOpus5GrepGate(TestCase):
