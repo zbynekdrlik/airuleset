@@ -432,6 +432,52 @@ def notification_channel(env=None, owner=None, kind="default", project=None):
     return (env.get("DISCORD_NOTIFICATION_CHANNEL_ID") or "").strip()
 
 
+_OWNER_CHANNEL_KEY_RE = re.compile(
+    r"^DISCORD_NOTIFICATION_CHANNEL_([A-Z0-9]+)(?:_Q)?$")
+
+
+def channel_owner(ch, env=None):
+    """#725 (#716 review finding 7) — the DETERMINISTIC REVERSE of
+    `notification_channel(env, owner, kind="questions")`: given a Discord
+    channel/thread id `ch` (a card's own posting channel), return the SINGLE
+    owner whose `-q` questions cascade resolves to it, or `None` when no
+    owner matches or more than one does. NEVER a coin flip — mirrors #717's
+    `_repo_owner_from_panes` (single-unique-derivation-or-`None`, never a
+    first-match guess).
+
+    Candidate owners are discovered from THIS box's own local `.env` — every
+    key matching `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` or
+    `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q` (the bare shared
+    `DISCORD_NOTIFICATION_CHANNEL_ID` key names no owner and is excluded by
+    construction — `ID` never appears as an `<OWNER>` segment on its own
+    line; a `_P_<SLUG>` per-project key doesn't match either, since the
+    trailing `(?:_Q)?$` anchor requires the string to end right after the
+    optional `_Q`). For each candidate the SAME forward cascade
+    `notification_channel()` already uses (`_Q` key first, else the plain
+    per-owner key, else — inert here, see below — the shared id) is
+    re-evaluated and compared to `ch`; exactly one match is the answer.
+
+    A `ch` that only equals the SHARED `DISCORD_NOTIFICATION_CHANNEL_ID`
+    resolves to `None` whenever >=2 discovered owners would cascade into it
+    (the inherently-ambiguous case this ticket exists to stop coin-flipping
+    on) — and to that single owner only in the degenerate one-owner-on-the-
+    box case, which is a safe, unambiguous derivation, not a guess.
+
+    Never raises; a falsy `ch` always returns `None`."""
+    ch = str(ch or "").strip()
+    if not ch:
+        return None
+    env = _read_env() if env is None else env
+    owners = set()
+    for k in env:
+        m = _OWNER_CHANNEL_KEY_RE.match(k)
+        if m and m.group(1) != "ID":
+            owners.add(m.group(1).lower())
+    matches = {o for o in owners
+              if notification_channel(env, owner=o, kind="questions") == ch}
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 # Min seconds between background provision-thread spawns, PER OWNER (#330) —
 # mirrors statusbar.SPAWN_GUARD_S's own marker-mtime shape, just a wider
 # window: provisioning is a one-time-until-persisted repair, not a routine

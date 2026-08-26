@@ -148,7 +148,7 @@ class TestOrphanFloorResolvesOwnerFromChannel(unittest.TestCase):
                          "an unresolvable channel must NEVER fall back to "
                          "resolve_owner()'s coin flip by calling send() "
                          "with no owner")
-        self.assertTrue(any("owner unresolved" in l for l in logs),
+        self.assertTrue(any("owner unresolved" in line for line in logs),
                         "the skip must be an explicit decision-log line, "
                         "never a silent drop: %r" % logs)
         # non-terminal -- a config fix on a later sweep can still resolve it.
@@ -160,7 +160,7 @@ class TestOrphanFloorResolvesOwnerFromChannel(unittest.TestCase):
         # whether the owner resolves.
         logs, _orphan_done_set, _state = self._run_floor(
             "999999", _env_two_owners(), lambda *a, **k: "sent", mid="900004")
-        self.assertTrue(any("reply orphaned" in l for l in logs), logs)
+        self.assertTrue(any("reply orphaned" in line for line in logs), logs)
 
     def test_resolved_off_owner_suppressed_still_marks_done(self):
         # #716 terminal-marking semantics survive the new explicit-owner
