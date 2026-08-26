@@ -184,7 +184,10 @@ batch is open), bounded by real resource signals (below).
   precisely the recovery `ci-monitoring.md` already mandates after ANY compaction. **A
   drained batch boundary must NEVER be crossed into the next batch uncompacted just because
   a re-derivable watch/poll waiter spans it** — that silent drift (three full batches, zero
-  compacts) is the exact incident this waiver closes.
+  compacts) is the exact incident this waiver closes. Relaunch on your NEXT turn regardless of
+  whether the compact-request itself was actually delivered that turn (it can lapse and roll
+  to a later drained boundary, per Step 5's own note) — a TaskStopped waiter is never left
+  un-relaunched waiting on that.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via
