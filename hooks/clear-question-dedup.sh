@@ -53,14 +53,21 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // ""' 2>/dev/null || echo "")
+# Review hardening (#712): classify on the LEADING-whitespace-trimmed prompt —
+# a payload variant delivering the task-notification tag after a leading
+# newline must not dodge the classifier. (Matching the tag ANYWHERE would
+# over-match a human prompt QUOTING one, so trim-then-prefix stays exact;
+# trailing whitespace is deliberately kept, narrowing the bare-"continue"
+# match to the watchdog's exact NUDGE_TEXT.)
+TRIMMED="${PROMPT#"${PROMPT%%[![:space:]]*}"}"
 
 # #712 — classify the submission; only a genuine human prompt falls through to
 # the clears below.
 AUTO=""
-if [ -z "$PROMPT" ]; then
+if [ -z "$TRIMMED" ]; then
     AUTO="empty-prompt"
 else
-    case "$PROMPT" in
+    case "$TRIMMED" in
         "<task-notification>"*)   AUTO="task-notification" ;;
         "lane-check: "*)          AUTO="machine-nudge-lane-check" ;;
         "stuck-check: "*)         AUTO="machine-nudge-stuck-check" ;;

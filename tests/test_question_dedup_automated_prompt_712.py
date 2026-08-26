@@ -132,6 +132,17 @@ class AutomatedPromptsDoNotClear(_Base):
                                  "machine nudge stamped user-present: %s"
                                  % nudge[:30])
 
+    def test_task_notification_with_leading_whitespace_still_classified(self):
+        # Review hardening: a payload variant delivering the tag after a
+        # leading newline/indent must not dodge the classifier
+        # (trim-then-prefix — never an anywhere-match, which would over-match
+        # a human prompt QUOTING a task-notification).
+        sid = self._sid()
+        self._seed(sid)
+        self._run(sid, prompt="\n  " + _TASK_NOTIFICATION_PROMPT)
+        self.assertTrue(self._lastq(sid).exists(),
+                        "leading whitespace dodged the classifier")
+
     def test_bare_continue_nudge_does_not_clear(self):
         # NUDGE_TEXT — the api-error auto-resume types exactly "continue".
         sid = self._sid()
