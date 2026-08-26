@@ -137,9 +137,10 @@ class TestNoContinuousReversion(TestCase):
     the exact affirmative phrases too. #724 migrated autopilot-MASTER to batch
     mode as well (LANE 3's drained batch = the compact boundary), so this lock
     now covers BOTH skills — master no longer legitimately keeps continuous
-    refill phrasing. Both bodies use 'continuous refill' solely inside 'reverses
-    #456's continuous refill' negations, which none of these affirmative phrases
-    hit."""
+    refill phrasing. Both bodies use 'continuous refill' solely inside the
+    reverses/superseding-#456's-continuous-refill negations, which none of these
+    affirmative phrases hit. The membership check is case-insensitive so a
+    lower-case re-add ('dispatch is continuous') cannot slip the lock."""
 
     BANNED_AFFIRMATIVE = (
         "refilling to saturation",
@@ -155,8 +156,8 @@ class TestNoContinuousReversion(TestCase):
 
     def test_neither_skill_re_adds_the_old_continuous_directive(self):
         for rel in (SKILL, SKILL_MASTER):
-            body = read(rel)
-            present = [p for p in self.BANNED_AFFIRMATIVE if p in body]
+            body = read(rel).lower()
+            present = [p for p in self.BANNED_AFFIRMATIVE if p.lower() in body]
             self.assertEqual(present, [],
                              "%s re-introduced pre-#723 continuous phrasing: %r"
                              % (rel, present))

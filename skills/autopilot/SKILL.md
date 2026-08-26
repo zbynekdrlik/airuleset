@@ -648,8 +648,8 @@ gap in either.
    `isolation: "worktree"`, all fired in the SAME message (multiple Agent tool_use blocks — this
    is what makes them run concurrently rather than one-after-another).** (Vocabulary note, #723: this
    "ROUND" IS the batch of up to 5 worktree lanes, and each "batch"/unit below is ONE lane's own
-   bundle-safe issue set — the legacy bundling term; a fuller terminology disambiguation is tracked
-   in #724.) For each batch:
+   bundle-safe issue set — the legacy bundling term; disambiguating the two "batch" senses
+   fleet-wide is a known cross-cutting follow-up, out of #724's scope.) For each batch:
    `subagent_type: autopilot-worker`, **`run_in_background: true`**, **`isolation: "worktree"`**
    (the default; omit it only for the documented serial fallback above) — this keeps your main
    session FREE + thin while every worker runs, each worker stays VISIBLE in the agent strip, and
