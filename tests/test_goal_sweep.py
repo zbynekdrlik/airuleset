@@ -2363,3 +2363,249 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
 #    crash on a line that would have needed `_entry_asks_to_arm`/
 #    `_GOAL_ASK_PROBE` (both deleted).
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# 8. #731 -- per-request delivery-attempt CAP + prompt-cleanup on drop + the
+#    tmux-client-input human signal + arm-confirm-fail diagnostics. The
+#    montalu4 retype livelock: verify-failed / stash-abort alternate with NO
+#    shared cap, each sweep re-typing ~3.4 kB into the prompt, the human
+#    deleting the paste never seen by the transcript-based gate.
+# --------------------------------------------------------------------------- #
+class _ClientActiveFake(DeliverGoalFakeTmux):
+    """#731 D3 -- a DeliverGoalFakeTmux that answers `tmux list-clients -F
+    '#{client_activity}'` with the given attached-client epoch(s). Everything
+    else delegates to the base fake (no other behaviour changes)."""
+
+    def __init__(self, *a, client_epochs=(), **kw):
+        super().__init__(*a, **kw)
+        self.client_epochs = list(client_epochs)
+
+    def __call__(self, argv, timeout=8):
+        if "list-clients" in " ".join(argv):
+            if not self.client_epochs:
+                return ""
+            return "\n".join(str(int(e)) for e in self.client_epochs) + "\n"
+        return super().__call__(argv, timeout)
+
+
+class TestGoalDeliveryAttemptCap731(unittest.TestCase):
+    CWD = "/home/newlevel/devel/capdrop"
+
+    def setUp(self):
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _cap(self):
+        # the design constant, read defensively so this RED test runs BEFORE
+        # the constant exists and still demonstrates the behaviour difference.
+        return getattr(goal, "GOAL_DELIVERY_ATTEMPT_CAP", 3)
+
+    # -------- D1: the retype loop is bounded by the attempt cap ---------- #
+    def test_verify_failed_retype_is_bounded_by_attempt_cap(self):
+        proj = self._dir()
+        sid = "sess-cap-d1"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        # arm_on_submit=False -> every submit is read as a plain prompt, the
+        # goal never arms -> skip:verify-failed EVERY sweep (the #720 shape).
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   arm_on_submit=False)
+        cap = self._cap()
+        last_logs = []
+        for t in range(cap + 1):
+            last_logs = goal.goal_sweep(2000 + t, run=tmux, projects_dir=proj,
+                                        requests_path=self.reqp,
+                                        send_fn=lambda m, **k: None,
+                                        sleep_fn=lambda *a, **k: None)
+        # AFTER the fix: at most `cap` keystroke deliveries, then a terminal
+        # drop. BEFORE the fix: cap+1 (types forever), request never cleared.
+        self.assertLessEqual(len(tmux.typed_texts()), cap,
+                             "retype must be bounded by the attempt cap; typed "
+                             "%d times" % len(tmux.typed_texts()))
+        self.assertTrue(any("drop:attempt-cap" in ln for ln in last_logs),
+                        last_logs)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {},
+                         "the capped request must be terminally cleared")
+
+    def test_attempt_cap_pings_once_for_normal_origin(self):
+        proj = self._dir()
+        sid = "sess-cap-ping"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   arm_on_submit=False)
+        pings = []
+        for t in range(self._cap() + 1):
+            goal.goal_sweep(2000 + t, run=tmux, projects_dir=proj,
+                            requests_path=self.reqp,
+                            send_fn=lambda m, **k: pings.append((m, k)),
+                            sleep_fn=lambda *a, **k: None)
+        capped = [k for _m, k in pings
+                  if str(k.get("dedup_key", "")).startswith("goalarm-attempt-cap")]
+        self.assertEqual(len(capped), 1,
+                         "a normal-origin attempt-cap drop pings exactly once")
+
+    def test_attempt_cap_silent_for_stale_rearm(self):
+        proj = self._dir()
+        sid = "sess-cap-stale"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "branch-merge",
+                                 now=1000, path=self.reqp, origin="stale-rearm")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   arm_on_submit=False)
+        pings = []
+        for t in range(self._cap() + 1):
+            goal.goal_sweep(2000 + t, run=tmux, projects_dir=proj,
+                            requests_path=self.reqp,
+                            send_fn=lambda m, **k: pings.append((m, k)),
+                            sleep_fn=lambda *a, **k: None)
+        capped = [k for _m, k in pings
+                  if str(k.get("dedup_key", "")).startswith("goalarm-attempt-cap")]
+        self.assertEqual(capped, [],
+                         "a stale-rearm attempt-cap drop is SILENT (#675)")
+        self.assertEqual(goal.load_goal_requests(self.reqp), {},
+                         "silent drop still clears the request")
+
+    # -------- D2: cap-drop cleans up OUR leftover, never a foreign one ---- #
+    def _preseed_at_cap(self, sid, box, origin="self-callback"):
+        """A request already AT the cap with `box` sitting in the pane and
+        janitor provenance present (a prior delivery attempt marked it)."""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin=origin)
+        d = goal.load_goal_requests(self.reqp)
+        d[sid]["dl_fails"] = self._cap()
+        d[sid]["dl_last"] = "skip:verify-failed"
+        Path(self.reqp).write_text(json.dumps(d))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   initial_box=box)
+        state = {"janitor_watch": {"%9": 2000}}
+        return proj, tmux, state
+
+    def test_attempt_cap_clears_own_leftover_in_box(self):
+        sid = "sess-cap-own"
+        proj, tmux, state = self._preseed_at_cap(sid, "/goal x")
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                                   requests_path=self.reqp, state=state,
+                                   send_fn=lambda m, **k: None,
+                                   sleep_fn=lambda *a, **k: None)
+        self.assertEqual(tmux.box, "",
+                         "our own stranded /goal must be CLEARED at the cap drop")
+        self.assertTrue(any("leftover=cleared" in ln for ln in logs), logs)
+
+    def test_attempt_cap_leaves_foreign_leftover_untouched(self):
+        sid = "sess-cap-foreign"
+        foreign = ("moja vlastna dlha rozpisana sprava ktoru vobec nechcem "
+                   "aby mi ju hocikto zmazal je to cisto moj text a nie goal")
+        proj, tmux, state = self._preseed_at_cap(sid, foreign)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                                   requests_path=self.reqp, state=state,
+                                   send_fn=lambda m, **k: None,
+                                   sleep_fn=lambda *a, **k: None)
+        self.assertEqual(tmux.box, foreign,
+                         "a FOREIGN draft must be left completely untouched")
+        self.assertTrue(any("leftover=not-ours" in ln for ln in logs), logs)
+
+    # -------- D3: tmux client input is a human signal for ALL origins ---- #
+    def test_client_active_defers_delivery(self):
+        proj = self._dir()
+        sid = "sess-cap-client"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        # an attached client with input 10 s ago -> a live human -> defer.
+        tmux = _ClientActiveFake([("%9", "claude", self.CWD, "111")],
+                                 GOAL_IDLE_CAP, model_type=True,
+                                 client_epochs=[1990])
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=self.reqp,
+                               send_fn=lambda m, **k: None,
+                               sleep_fn=lambda *a, **k: None)
+        self.assertEqual(tmux.typed_texts(), [],
+                         "a live tmux client vetoes the keystroke")
+        self.assertTrue(any("skip:client-active" in ln for ln in logs), logs)
+        self.assertIn(sid, goal.load_goal_requests(self.reqp),
+                      "a client-active defer leaves the request pending")
+
+    def test_no_clients_does_not_veto(self):
+        proj = self._dir()
+        sid = "sess-cap-noclient"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        # zero attached clients (headless) -> no veto, delivery proceeds.
+        tmux = _ClientActiveFake([("%9", "claude", self.CWD, "111")],
+                                 GOAL_IDLE_CAP, model_type=True, client_epochs=[])
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=self.reqp,
+                               send_fn=lambda m, **k: None,
+                               sleep_fn=lambda *a, **k: None)
+        self.assertFalse(any("skip:client-active" in ln for ln in logs), logs)
+        self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
+
+    # -------- D4: arm-confirm-fail diagnostics ---------------------------- #
+    def test_arm_confirm_fail_writes_diagnostic_line(self):
+        proj = self._dir()
+        sid = "sess-cap-diag"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   arm_on_submit=False)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                            requests_path=self.reqp,
+                            send_fn=lambda m, **k: None,
+                            sleep_fn=lambda *a, **k: None)
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("ARM-CONFIRM-FAIL", log)
+        for field in ("boundary=", "busywait=", "armed=", "box="):
+            self.assertIn(field, log, "diagnostic must carry %s" % field)
+
+    # -------- int-guard: a string dl_fails across the JSON boundary ------- #
+    def test_dl_fails_string_value_is_int_guarded(self):
+        sid = "sess-cap-strint"
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        d = goal.load_goal_requests(self.reqp)
+        d[sid]["dl_fails"] = str(self._cap())     # a STRING across the boundary
+        Path(self.reqp).write_text(json.dumps(d))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   arm_on_submit=False)
+        # must not crash, and must still treat >= cap as a terminal drop.
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=self.reqp,
+                               send_fn=lambda m, **k: None,
+                               sleep_fn=lambda *a, **k: None)
+        self.assertTrue(any("drop:attempt-cap" in ln for ln in logs), logs)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
+
+    def test_delivery_attempt_cap_constant_is_a_small_debounce(self):
+        self.assertEqual(goal.GOAL_DELIVERY_ATTEMPT_CAP, 3)
+        self.assertIn("skip:verify-failed", goal._GOAL_KEYSTROKE_SKIPS)
+        self.assertIn("skip:stash-abort", goal._GOAL_KEYSTROKE_SKIPS)
+        self.assertNotIn("skip:stash-abort-slot-occupied",
+                         goal._GOAL_KEYSTROKE_SKIPS)
+        self.assertEqual(wd.GOAL_CLIENT_INPUT_VETO_S, 300)
+
+
+if __name__ == "__main__":
+    unittest.main()
