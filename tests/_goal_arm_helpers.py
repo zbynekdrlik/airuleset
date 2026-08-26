@@ -100,13 +100,22 @@ class DeliverGoalFakeTmux:
 
     def __init__(self, panes, captured, in_mode=False, cap_seq=(),
                 model_type=False, enters_swallowed=0, transcript_path=None,
-                initial_box="", wrap_width=None):
+                initial_box="", wrap_width=None, arm_on_submit=True):
         self.panes = panes
+        # #720 — arm the modelled pane after a `/goal <cond>` submit (default).
+        # `False` models the #720 incident: the /goal was submitted but CC read
+        # it as a plain prompt, so the pane NEVER shows the `◎ /goal` footer.
+        self.arm_on_submit = arm_on_submit
         self.captured = captured
         self.in_mode = in_mode
         self.cap_seq = list(cap_seq)
         self._cap_calls = 0
         self.sent = []
+        # #720 — model CC arming/clearing a goal on a `/goal` submit so a
+        # POST-submit `pane_goal_armed` read is truthful (what `_send_goal_
+        # verified`'s #720 arm-confirm polls): a `/goal <cond>` submit sets it
+        # True, a `/goal clear` submit False, a plain nudge leaves it untouched.
+        self._armed = False
         self.model_type = model_type
         # #490 — model the two facts `send_verified` verifies against: an
         # ACCEPTED submit appends a real `user` turn to `transcript_path` and
@@ -155,11 +164,26 @@ class DeliverGoalFakeTmux:
         if not self.model_type or self._bare_line is None:
             return self.captured
         if not self.box:
-            return self.captured
+            return self._with_arm(self.captured)   # #720 post-submit armed footer
         if self.wrap_width:
             return self._render_wrapped()
         new_line = self._bare_line.replace("❯", "❯ " + self.box, 1)
         return self.captured.replace(self._bare_line, new_line, 1)
+
+    def _with_arm(self, base):
+        """#720 — append CC's `◎ /goal active` footer glyph to the ctx line when
+        `self._armed` (a `/goal <cond>` was submitted), so a post-submit
+        `pane_goal_armed` read is truthful. `arm_on_submit`-off / a `/goal clear`
+        submit leave the flag False — the 'submitted but never armed' shape the
+        #720 arm-confirm guards against."""
+        if not self._armed or "◎ /goal" in base:
+            return base
+        lines = base.split("\n")
+        for i, ln in enumerate(lines):
+            if "ctx" in ln:
+                lines[i] = ln + "  ◎ /goal active"
+                break
+        return "\n".join(lines)
 
     def _render_wrapped(self):
         """#501 — render `self.box` the way a REAL wrapped input box captures:
@@ -212,9 +236,19 @@ class DeliverGoalFakeTmux:
                         # transcript gains NOTHING (the #490 live incident).
                         self.enters_swallowed -= 1
                     else:
+                        submitted = self.box            # #720 — before clearing
                         if self.box and self.transcript_path is not None:
                             self._append_user_turn(self.box)
                         self.box = ""
+                        # #720 — model CC arming (`/goal <cond>`) / clearing
+                        # (`/goal clear`) a goal on this submit, unless
+                        # `arm_on_submit` is off (the 'read as a plain prompt,
+                        # never armed' shape); a non-`/goal` submit is untouched.
+                        s = submitted.strip()
+                        if s == "/goal clear":
+                            self._armed = False
+                        elif s.startswith("/goal ") and self.arm_on_submit:
+                            self._armed = True
                 elif keys and all(k == "BSpace" for k in keys):
                     n = len(keys)
                     self.box = self.box[:-n] if n < len(self.box) else ""
@@ -233,6 +267,34 @@ class DeliverGoalFakeTmux:
 
     def keys(self):
         return [a[-1] for a in self.sent]
+
+
+class _SwallowFirstCharFake(DeliverGoalFakeTmux):
+    """A DeliverGoalFakeTmux whose FIRST-byte of a FRESH type is SWALLOWED,
+    `swallow_budget` times. A `send-keys -l` burst landing while the box is
+    empty (a fresh type's first chunk) has its opening character dropped — the
+    live first-byte race (#670) — so the box renders "ane-check…" not
+    "lane-check…". Later chunks and re-types land intact once the budget is
+    spent (modelling an INTERMITTENT race that a retry escapes). Shared home
+    (#720): the goal-arm bare-box send now routes through the SAME head-inclusive
+    verified typing primitive `send_verified` uses, so both test files drive this
+    one fake."""
+
+    def __init__(self, *a, swallow_budget=1, **kw):
+        super().__init__(*a, **kw)
+        self.swallow_budget = swallow_budget
+
+    def __call__(self, argv, timeout=8):
+        if self.model_type and "send-keys" in " ".join(argv) and "-l" in argv:
+            self.sent.append(argv)
+            chunk = argv[-1]
+            if self.box == "" and self.swallow_budget > 0 and chunk:
+                self.swallow_budget -= 1
+                self.box += chunk[1:]        # <-- first char dropped
+            else:
+                self.box += chunk
+            return ""
+        return super().__call__(argv, timeout)
 
 
 def _isolate_goal_state(testcase):

@@ -23,7 +23,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd  # noqa: E402
-from _goal_arm_helpers import DeliverGoalFakeTmux, GOAL_IDLE_CAP  # noqa: E402
+from _goal_arm_helpers import (  # noqa: E402
+    DeliverGoalFakeTmux, GOAL_IDLE_CAP, _SwallowFirstCharFake,
+)
 
 PID = "%9"
 # A realistic wrapped nudge: >200 chars (so `_type_literal` CHUNKS) and it
@@ -35,31 +37,6 @@ TEXT = ("lane-check: backlog=22 OTVORENYCH tiketov (nie vsetky musia byt hned "
         "rozbehni dalsie worktree lany; ak nie, vysvetli preco. pozri SKILL "
         "autopilot pre fleet dispatch a bundling gate detaily tu.")
 WRAP = 60
-
-
-class _SwallowFirstCharFake(DeliverGoalFakeTmux):
-    """A DeliverGoalFakeTmux whose FIRST-byte of a FRESH type is SWALLOWED,
-    `swallow_budget` times. A `send-keys -l` burst landing while the box is
-    empty (a fresh type's first chunk) has its opening character dropped — the
-    live first-byte race — so the box renders "ane-check…" not "lane-check…".
-    Later chunks and re-types land intact once the budget is spent (modelling
-    an INTERMITTENT race that a retry escapes)."""
-
-    def __init__(self, *a, swallow_budget=1, **kw):
-        super().__init__(*a, **kw)
-        self.swallow_budget = swallow_budget
-
-    def __call__(self, argv, timeout=8):
-        if self.model_type and "send-keys" in " ".join(argv) and "-l" in argv:
-            self.sent.append(argv)
-            chunk = argv[-1]
-            if self.box == "" and self.swallow_budget > 0 and chunk:
-                self.swallow_budget -= 1
-                self.box += chunk[1:]        # <-- first char dropped
-            else:
-                self.box += chunk
-            return ""
-        return super().__call__(argv, timeout)
 
 
 def _tpath():
