@@ -258,8 +258,26 @@ RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 # could pre-create it unwritable — but that only silences a victim's own
 # telemetry (the brace-group below keeps it leak-free either way), never a
 # concern on these trusted dev boxes and no worse than the old fixed name.
-BLOCK_LOG="/tmp/airuleset-main-exec-block-${EUID:-$(id -u)}.log"
-BYPASS_LOG="/tmp/airuleset-main-exec-bypass-${EUID:-$(id -u)}.log"
+# #732: the block/bypass logs are the ONLY cross-SESSION-shared artifacts this
+# hook writes — everything else (bypass markers, run counter, presence marker)
+# is SID-keyed and thus unique per session. During the airuleset push gate the
+# fail-closed test suite runs on the LIVE dev box, where concurrent worker lanes
+# + the supervisor session (all the SAME uid) genuinely arm/consume bypass
+# markers, appending to these SAME per-uid logs mid-suite — so a test that
+# counts WHOLE-FILE log lines miscounts (the v0.1.88 gate "2 != 1" false
+# push-block, 2026-08-26). AIRULESET_MAIN_EXEC_LOG_DIR lets a test redirect BOTH
+# logs into an isolated dir it owns (the per-uid suffix is preserved), so no
+# concurrent real fleet session — which never sets this var — can touch the file
+# the test reads. FAIL-SAFE: unset / empty / not-a-directory falls back to the
+# current /tmp path BYTE-FOR-BYTE, so real (non-test) invocations are unchanged.
+# An `if` condition's failure never trips `set -e`.
+_EXEC_LOG_DIR="/tmp"
+if [ -n "${AIRULESET_MAIN_EXEC_LOG_DIR:-}" ] \
+   && [ -d "${AIRULESET_MAIN_EXEC_LOG_DIR}" ]; then
+    _EXEC_LOG_DIR="${AIRULESET_MAIN_EXEC_LOG_DIR%/}"
+fi
+BLOCK_LOG="${_EXEC_LOG_DIR}/airuleset-main-exec-block-${EUID:-$(id -u)}.log"
+BYPASS_LOG="${_EXEC_LOG_DIR}/airuleset-main-exec-bypass-${EUID:-$(id -u)}.log"
 
 # ---- #80: a DISPATCH resets the per-dispatch Bash counter ----
 # This is the whole point of the counter: it measures main-agent Bash calls

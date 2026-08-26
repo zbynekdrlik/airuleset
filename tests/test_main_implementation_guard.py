@@ -1018,10 +1018,10 @@ class OneShotBypass80(unittest.TestCase):
         m = self._marker(sid)
         m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        log = BYPASS_LOG_PATH
-        self.assertTrue(log.exists())
-        self.assertTrue([ln for ln in log.read_text().splitlines() if sid in ln],
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
+        self.assertTrue(byp.exists())
+        self.assertTrue([ln for ln in byp.read_text().splitlines() if sid in ln],
                         "a consumed bypass must still be logged")
 
 
@@ -1147,11 +1147,11 @@ class DispatchRatioNudge80(unittest.TestCase):
 
     def test_the_nudge_is_logged(self):
         sid = self._sid("cap10")
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         for _ in range(4):
-            self._run(sid)
-        log = BLOCK_LOG_PATH
-        self.assertTrue(log.exists())
-        mine = [ln for ln in log.read_text().splitlines() if sid in ln]
+            self._run(sid, extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
+        self.assertTrue(block.exists())
+        mine = [ln for ln in block.read_text().splitlines() if sid in ln]
         self.assertTrue(mine, "the nudge must be in the block log")
         self.assertIn("per-dispatch", " ".join(mine))
 
@@ -1170,18 +1170,21 @@ class BlockLogging73(unittest.TestCase):
 
     LOG_PATH = BLOCK_LOG_PATH
 
-    def _lines_for(self, sid):
-        if not self.LOG_PATH.exists():
+    def _lines_for(self, sid, log=None):
+        log = log if log is not None else self.LOG_PATH
+        if not log.exists():
             return []
-        return [ln for ln in self.LOG_PATH.read_text().splitlines() if sid in ln]
+        return [ln for ln in log.read_text().splitlines() if sid in ln]
 
     def test_bash_block_is_logged(self):
         sid = "t-mg-logbash-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
-                          sid=sid, transcript_text=goal_armed_transcript())
+                          sid=sid, transcript_text=goal_armed_transcript(),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        lines = self._lines_for(sid)
+        lines = self._lines_for(sid, block)
         self.assertTrue(lines, "no block-log line for session %s" % sid)
         self.assertIn("Bash", lines[-1])
         self.assertIn("grep", lines[-1])
@@ -1189,40 +1192,48 @@ class BlockLogging73(unittest.TestCase):
 
     def test_edit_block_is_logged(self):
         sid = "t-mg-logedit-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
-        out = helper._run(tool="Edit", sid=sid)
+        out = helper._run(tool="Edit", sid=sid,
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        lines = self._lines_for(sid)
+        lines = self._lines_for(sid, block)
         self.assertTrue(lines, "no block-log line for session %s" % sid)
         self.assertIn("Edit", lines[-1])
 
     def test_goal_armed_write_block_is_logged_with_rule(self):
         sid = "t-mg-logwrite-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Write", sid=sid,
-                          transcript_text=goal_armed_transcript("claude-opus-4-8"))
+                          transcript_text=goal_armed_transcript("claude-opus-4-8"),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        lines = self._lines_for(sid)
+        lines = self._lines_for(sid, block)
         self.assertTrue(lines)
         self.assertIn("GOAL_ARMED", lines[-1])
 
     def test_bypassed_command_is_not_logged_as_block(self):
         sid = "t-mg-logbypass-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
                           sid=sid, bypass="new",
-                          transcript_text=goal_armed_transcript())
+                          transcript_text=goal_armed_transcript(),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertFalse(self._lines_for(sid),
+        self.assertFalse(self._lines_for(sid, block),
                          "bypassed command must not appear in the BLOCK log")
 
     def test_allowed_command_is_not_logged_as_block(self):
         sid = "t-mg-logallow-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="gh pr view 42",
-                          sid=sid, transcript_text=goal_armed_transcript())
+                          sid=sid, transcript_text=goal_armed_transcript(),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertFalse(self._lines_for(sid),
+        self.assertFalse(self._lines_for(sid, block),
                          "allowed command must not appear in the BLOCK log")
 
 
@@ -1367,9 +1378,11 @@ class AwayEngagement128(unittest.TestCase):
 
     def test_away_block_is_tagged_in_the_block_log(self):
         sid = "t-mg-awaylog-" + uuid.uuid4().hex[:8]
-        self._plain(tool="Bash", command=self.SWEEP, presence_age=1800, sid=sid)
-        log = BLOCK_LOG_PATH
-        lines = [ln for ln in log.read_text().splitlines() if sid in ln]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
+        self._plain(tool="Bash", command=self.SWEEP, presence_age=1800, sid=sid,
+                    extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
+        lines = [ln for ln in block.read_text().splitlines() if sid in ln] \
+            if block.exists() else []
         self.assertTrue(lines, "away block was not logged")
         self.assertIn("USER_AWAY", lines[-1])
 
@@ -1463,8 +1476,9 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines, "a refused marker must be logged")
         self.assertIn("refused", lines[-1])
 
@@ -1473,23 +1487,28 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("terminal driver spike — needs the live rig in main")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines)
         self.assertIn("terminal driver spike", lines[-1],
                       "the audit must be able to read WHY, from the log alone")
 
     def test_multiline_reason_does_not_break_the_log_format(self):
+        # #732: count on an ISOLATED log dir this test owns (via
+        # AIRULESET_MAIN_EXEC_LOG_DIR), so a concurrent fleet bypass appended
+        # to the shared per-uid log mid-suite can never change this count (the
+        # `2 != 1` push-gate false block, 2026-08-26). The teeth are kept in
+        # full: a reason whose newlines were NOT flattened would still add
+        # extra physical lines HERE, so this still fails on that regression.
+        logdir, _block, bypass = _isolated_exec_logs(self)
         sid = "t-mg-reason-multi-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
         m.write_text("first line of the reason\nsecond line\nthird")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        before = (len(BYPASS_LOG_PATH.read_text().splitlines())
-                  if BYPASS_LOG_PATH.exists() else 0)
-        self._run(sid)
-        after = BYPASS_LOG_PATH.read_text().splitlines()
-        self.assertEqual(len(after) - before, 1,
-                         "one bypass = exactly one log line")
+        self._run(sid, logdir=logdir)
+        after = bypass.read_text().splitlines() if bypass.exists() else []
+        self.assertEqual(len(after), 1, "one bypass = exactly one log line")
         self.assertIn("first line of the reason", after[-1])
 
     def test_bypass_log_is_redirected_to_an_isolated_dir(self):
@@ -1547,8 +1566,9 @@ class BypassCarriesAReason128(unittest.TestCase):
         sid = "t-mg-arm-echolog-" + uuid.uuid4().hex[:8]
         cmd = ('printf %%s "reason: policy authoring" '
                '> /tmp/airuleset-main-exec-ok-%s' % sid)
-        self._run(sid, command=cmd)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, command=cmd, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines, "arming must be logged")
         self.assertIn("bypass-arm", lines[-1])
 
@@ -1583,8 +1603,9 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("dôvod: písanie politiky — obsah je úsudok")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines)
         self.assertIn("písanie politiky", lines[-1])
 
@@ -1712,8 +1733,8 @@ class BypassReasonJqFails180(unittest.TestCase):
     def _marker(self, sid):
         return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
 
-    def _bypass_lines(self, sid):
-        log = BYPASS_LOG_PATH
+    def _bypass_lines(self, sid, log=None):
+        log = log if log is not None else BYPASS_LOG_PATH
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
@@ -1731,15 +1752,17 @@ class BypassReasonJqFails180(unittest.TestCase):
         stubdir = _stub_jq_dir(self, ".[0:200]")
         env = dict(os.environ)
         env["PATH"] = stubdir + ":" + env["PATH"]
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .", sid=sid,
                           transcript_text=goal_armed_transcript(),
-                          extra_env={"PATH": env["PATH"]})
+                          extra_env={"PATH": env["PATH"],
+                                     "AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(
             out.returncode, 2,
             "a jq failure must never accidentally HONOR a bypass it "
             "couldn't actually read: " + out.stdout + out.stderr)
-        lines = self._bypass_lines(sid)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines, "the refusal must be logged")
         self.assertIn(
             "FAILED", lines[-1],
@@ -2239,7 +2262,13 @@ class CrossUserLogPathCollision492(unittest.TestCase):
     the exit status), the `Permission denied` LEAKS to stderr, which Claude
     Code surfaces as a `PreToolUse:Bash hook error` on every block. Fix:
     per-user (`-<uid>`) path so each user owns their own accumulating file,
-    plus a brace-group redirect so an unwritable log can never leak again."""
+    plus a brace-group redirect so an unwritable log can never leak again.
+
+    #732 note: this class deliberately does NOT set AIRULESET_MAIN_EXEC_LOG_DIR
+    — it asserts the DEFAULT `/tmp/airuleset-main-exec-*-<uid>.log` naming and
+    its EACCES-leak hardening, which is exactly the behaviour the #732 env seam
+    falls back to when unset. All its reads are sid-filtered, so concurrent
+    fleet writes to the shared default log never affect them."""
 
     UID = os.getuid()
     BLOCK_LOG = Path("/tmp/airuleset-main-exec-block-%d.log" % UID)
