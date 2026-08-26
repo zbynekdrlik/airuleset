@@ -10,6 +10,7 @@ CREATE-capable provisioning into `cmd_install`, scoped by `resolve_owner()` and
 gated by `question_ping_off` (#710: zbynek/marek suppressed → skipped) and
 `bot_token`, and reports a LOUD machine-channel gap when it cannot provision.
 """
+import ast
 import os
 import tempfile
 import unittest
@@ -170,22 +171,108 @@ class TestFormatQthreadInstallReport(unittest.TestCase):
 
 
 class TestCmdInstallWiresQuestionThreadProvisioning(unittest.TestCase):
-    """Source-level lock: cmd_install must CALL the provisioning + report
-    functions (a functional invocation of the whole monolithic cmd_install is
-    not worth its setup; this pins the wiring so it cannot be silently
-    dropped)."""
+    """AST lock (#718 review 🔵): pin that cmd_install's FunctionDef actually
+    CALLS the provisioning + report functions. A raw substring check was
+    satisfiable by a COMMENT (comment the wiring out, keep a mention within
+    4000 chars of check_discord_notify_config, and it would still pass) — the
+    AST walk of the function body cannot be fooled that way."""
+
+    def _cmd_install_node(self):
+        src = Path(__file__).resolve().parent.parent / "airuleset.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "cmd_install":
+                return node
+        self.fail("cmd_install FunctionDef not found in airuleset.py")
+        return None
+
+    def _called_names(self, fn):
+        names = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Call):
+                name = getattr(n.func, "id", None) or getattr(n.func, "attr", None)
+                if name:
+                    names.add(name)
+        return names
 
     def test_cmd_install_calls_the_provisioning_functions(self):
-        src = Path(__file__).resolve().parent.parent / "airuleset.py"
-        text = src.read_text(encoding="utf-8")
-        self.assertIn("provision_owner_question_thread_for_install", text)
-        self.assertIn("format_qthread_install_report", text)
-        # wired as a non-fatal step (#718): guarded, referenced near the
-        # existing check_discord_notify_config install step.
-        idx = text.index("provision_owner_question_thread_for_install")
-        window = text[max(0, idx - 4000):idx + 1000]
-        self.assertIn("check_discord_notify_config", window,
-                      "the -q provisioning step must sit next to the notify-config step")
+        called = self._called_names(self._cmd_install_node())
+        self.assertIn(
+            "provision_owner_question_thread_for_install", called,
+            "cmd_install must CALL the #718 provisioning step, not just mention it")
+        self.assertIn(
+            "format_qthread_install_report", called,
+            "cmd_install must CALL the #718 report formatter")
+
+
+class TestFindFailureIsNotAbsence(unittest.TestCase):
+    """#718 review 🟡: a Discord lookup FAILURE must NOT read as 'thread
+    absent' — a create-on-failure would fork a duplicate (the #330 hiccup),
+    now re-armed at install frequency. `find_owner_question_thread` returns
+    None on a lookup failure vs "" on a conclusive absence; neither
+    `provision_question_thread(create=True)` nor the install wrapper creates
+    on None."""
+
+    def _env(self):
+        return {"DISCORD_BOT_TOKEN": "tok",
+                "DISCORD_NOTIFICATION_CHANNEL_DAVID": "dthread"}
+
+    def test_find_returns_none_on_anchor_get_failure(self):
+        self.assertIsNone(notify.find_owner_question_thread(
+            self._env(), "david", http=lambda *a, **k: None))
+
+    def test_find_returns_none_on_listing_failure(self):
+        def http(token, method, path, payload=None):
+            if path == "channels/dthread":
+                return {"parent_id": "pchan"}   # anchor ok, no guild -> archived
+            return None                          # archived listing FAILS
+        self.assertIsNone(notify.find_owner_question_thread(
+            self._env(), "david", http=http))
+
+    def test_find_returns_empty_on_conclusive_absence(self):
+        def http(token, method, path, payload=None):
+            if path == "channels/dthread":
+                return {"parent_id": "pchan"}
+            return {"threads": []}               # every lookup succeeds, no match
+        self.assertEqual(notify.find_owner_question_thread(
+            self._env(), "david", http=http), "")
+
+    def test_provision_create_true_never_creates_on_lookup_failure(self):
+        posts = []
+
+        def http(token, method, path, payload=None):
+            if method == "POST":
+                posts.append(path)
+                return {"id": "should-not-happen"}
+            return None                          # every GET fails
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n"
+                               "DISCORD_NOTIFICATION_CHANNEL_DAVID=dthread\n")
+            r = notify.provision_question_thread(
+                "david", env=self._env(), env_path=p, http=http, create=True)
+        self.assertEqual(r, "")
+        self.assertEqual(posts, [],
+                         "must NOT POST a create thread on a lookup failure")
+
+    def test_install_wrapper_reports_gap_on_lookup_failure_no_create(self):
+        posts = []
+
+        def http(token, method, path, payload=None):
+            if method == "POST":
+                posts.append(path)
+                return {"id": "should-not-happen"}
+            return None
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            Path(p).write_text("DISCORD_BOT_TOKEN=tok\n"
+                               "DISCORD_NOTIFICATION_CHANNEL_DAVID=dthread\n")
+            with m.patch.object(notify, "_claude_dir", return_value=d):
+                r = notify.provision_owner_question_thread_for_install(
+                    env=self._env(), env_path=p, http=http, owner="david")
+        self.assertEqual(r["status"], "gap")
+        self.assertEqual(posts, [],
+                         "install must never create a thread on a lookup failure")
 
 
 if __name__ == "__main__":
