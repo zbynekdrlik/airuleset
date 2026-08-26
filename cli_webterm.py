@@ -642,13 +642,15 @@ def _tab_order_key(alias):
 # inventory ids (_sanitize_id: marek@subdev -> marek-subdev).
 WEBTERM_DASHBOARD_TABS = {
     # zbynek.newlevel.media -- owner ROZHODNUTÉ 2026-08-24, EXACT order (verbatim
-    # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"). EXCLUDES montalu7/8, david3/4,
-    # simap1, marek@subdev, stepan@forestshop-dev, admin@forestshop-dev.
+    # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"); david3 (d3) added after d2 per
+    # owner request 2026-08-26 (#719). EXCLUDES montalu7/8, david4, simap1,
+    # marek@subdev, stepan@forestshop-dev, admin@forestshop-dev.
     "zbynek": [
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
-        "david1-subdev", "david2-subdev", "miva1-subdev", "spinbike-vps",
+        "david1-subdev", "david2-subdev", "david3-subdev",
+        "miva1-subdev", "spinbike-vps",
     ],
     # marek.newlevel.media -- Marek's set (owner #661 rework 2026-08-25): his
     # own subdev account first (default-active tab), his montalu4 stream, his
