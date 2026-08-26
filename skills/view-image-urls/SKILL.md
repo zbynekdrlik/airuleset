@@ -1,7 +1,7 @@
 ---
 name: view-image-urls
 user-invocable: false
-description: How to VIEW a URL the user pasted when it must be SEEN, or when WebFetch can't read it — image/screenshot hosts (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg/.webp links) AND JS-walled / bot-blocked social pages (X.com, twitter.com, mobile.twitter.com posts, Instagram, Facebook, LinkedIn posts). For an IMAGE the FIRST move needs NO browser — download it locally with curl and open it with the Read tool (Read renders local image pixels). Playwright is only for a genuinely hostile JS-gated CDN or a JS-walled social page. NEVER answer "I can't read this", and NEVER claim Playwright "is not installed". Load the moment a user message contains such a URL to look at, or when WebFetch already failed/refused to read a pasted link.
+description: How to VIEW a URL the user pasted when it must be SEEN, or when WebFetch can't read it — image/screenshot hosts (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg/.webp links) AND JS-walled / bot-blocked social pages (X.com, twitter.com, mobile.twitter.com posts, Instagram, Facebook, LinkedIn posts). For an IMAGE the FIRST move needs NO browser — download it locally with curl and open it with the Read tool (Read renders local image pixels). Playwright is only for a genuinely hostile JS-gated CDN or a JS-walled social page. NEVER answer "I can't read this", and NEVER claim Playwright "is not installed". Also covers a SYSTEM-carried attachment on a client message (Odoo ir.attachment, mail attachments) — read it BEFORE interpreting the text, the same "download it and Read it" doctrine generalized past a pasted URL. Load the moment a user message contains such a URL to look at, when WebFetch already failed/refused to read a pasted link, or when interpreting a client message that carries an attachment.
 ---
 
 ### Viewing Image URLs and JS-Walled Pages — Download-and-Read FIRST, Browser Only When Needed, NEVER "I can't read this"
@@ -71,6 +71,16 @@ These are client-rendered SPAs: the CONTENT (post text, author, replies) is buil
 #### The iron rule
 
 **NEVER answer "I can't read this" (image or page) while you have an untried path.** For an image: download it with `curl` and Read the file first. For a JS-walled page: render it in Playwright first (navigate + snapshot, with one retry on a login wall). Only after a genuine attempt may you report what is actually blocked — and even then, show what you DID get (the placeholder state, or the partial snapshot), never a bare refusal. And never explain a gap with "Playwright is not installed" — it is installed AND enabled on every managed box (#542), and an image never needed it.
+
+#### System / client-message attachments (Odoo ir.attachment, mail attachments) — the SAME rule, a different channel
+
+**A client or system message can carry an attachment through the SYSTEM itself, not a pasted URL — Odoo `ir.attachment` on a `mail.message`, a ticket-system attachment, a support-inbox attachment.** The doctrine is identical to the URL case above: to actually READ a message, you SEE every attachment it carries BEFORE you interpret the text — the attachment is a PRIMARY source, equal to the text, never optional context you skip because the text alone "seems clear enough".
+
+Incident that created this half of the skill: an odoo-erp stream read a client's Discuss reply (`mail.message` 1742799) over the Odoo API WITHOUT fetching `attachment_ids`, interpreted the request from the bare text alone, and shipped the wrong/incomplete fix — the client had attached a screenshot (`ir.attachment` 13204) circling the exact UI element the text alone did not make clear (airuleset #709, 2026-08-25/26).
+
+**The recipe:** fetch the message WITH `attachment_ids` in the read (never a bare `body`/`subject` read); for every id, `ir.attachment.read(fields=['name','mimetype','datas'])` returns base64 in `datas` — decode it, write it to a local scratch file, then Read that file exactly like a downloaded image above (or view/convert a non-image attachment). The full XML-RPC recipe + working code shape lives in `odoo-discuss-xmlrpc`'s companion `read-with-attachments.md` — load it before interpreting ANY Odoo Discuss client message.
+
+**Anti-pattern:** "spracoval som správu" / "I processed the message" / "I read and responded" when the fetch never carried `attachment_ids`, or an attachment was fetched but never actually downloaded-and-Read — banned, the same as claiming "I can't read this" for a pasted URL above. A message with an unread attachment is a message you have not actually read. Applies to all rewordings and semantic equivalents, and to every system-attachment channel, not only Odoo.
 
 #### Anti-patterns (all banned — these are WHY it fails or adds friction)
 
