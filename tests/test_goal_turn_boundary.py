@@ -46,44 +46,50 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
             self.assertNotIn("immediately pick the next assigned issue.", line)
 
     def test_every_template_ends_the_turn_before_the_next_ticket(self):
-        # #621 reconciled the tail: the compact boundary now paces exactly ONE
-        # integration/hand-off per turn (the parallel worker lanes keep building
-        # meanwhile), REPLACING the old "do NOT dispatch the next ... in the
-        # same turn" that serialized the whole loop and suppressed the fleet.
+        # #723 BATCH mode reconciled the tail again: the compact now fires ONLY
+        # at the DRAINED batch boundary (whole batch returned + integrated =
+        # zero live tasks), REPLACING the #621 "compact boundary paces ONE
+        # integration per turn / do NOT integrate a SECOND branch this turn"
+        # continuous framing. The armed goal still fires the next turn.
         # Its twin in test_goal_backlog_proof.py was reconciled the same way.
-        for idx, line in enumerate(goal_lines()):
-            hold = ("do NOT hand off a SECOND branch this turn" if idx == 2
-                    else "do NOT integrate a SECOND branch this turn")
+        for line in goal_lines():
             self.assertIn("END the turn", line)
-            self.assertIn(hold, line)
+            self.assertIn("WHOLE batch has returned", line)
+            self.assertIn("ZERO live tasks", line)
             self.assertIn("NEXT TURN", line)
             self.assertIn("✅ DONE:", line)
             self.assertIn("ARMED GOAL", line)
+            # the superseded serializing/continuous tails must be gone
+            self.assertNotIn("do NOT integrate a SECOND branch this turn", line)
+            self.assertNotIn("do NOT hand off a SECOND branch this turn", line)
 
     def test_every_template_explains_the_compaction_benefit(self):
+        # #723: the benefit is now stated as compacting THEN dispatching the
+        # next batch at the drained boundary (the only safe moment), not the
+        # old "lets the context compact" tail.
         for line in goal_lines():
-            self.assertIn("lets the context compact", line)
+            self.assertIn("compacting then dispatching the next batch", line)
 
     def test_full_authority_references_completion_report(self):
         full = goal_lines()[0]
         self.assertIn("completion-report.md", full)
-        self.assertIn("After every merge,", full)
+        self.assertIn("After each integration", full)
 
     def test_branch_merge_references_its_reduced_authority_variant(self):
         branch_merge = goal_lines()[1]
         self.assertIn("completion-report.md", branch_merge)
         # #621 tightened "branch-merge reduced-authority variant" -> the shorter
-        # "the branch-merge variant" to make room for the saturation clause; the
-        # completion-report.md reference (which variant to use) is preserved.
+        # "the branch-merge variant"; the completion-report.md reference (which
+        # variant to use) is preserved.
         self.assertIn("the branch-merge variant", branch_merge)
-        self.assertIn("After every merge,", branch_merge)
+        self.assertIn("After each integration", branch_merge)
 
     def test_fork_no_merge_references_its_hand_off_variant(self):
         fork = goal_lines()[2]
         self.assertIn("completion-report.md", fork)
         self.assertIn("the fork-no-merge variant", fork)
         self.assertIn("READY-FOR-REVIEW", fork)
-        self.assertIn("After every hand-off,", fork)
+        self.assertIn("After each hand-off", fork)
 
     def test_generic_phrase_lock_immediately_must_pair_with_end_the_turn(self):
         # Forward-looking guard: if a future edit reintroduces "immediately

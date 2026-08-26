@@ -124,47 +124,63 @@ class TestClauseCoverage(TestCase):
 
 
 class TestSaturationDirectiveIsReal(TestCase):
-    """Acceptance guard: "the template contains the word worktree" is NOT the
-    fix. Lock the actual directive — parallel worktree lanes to saturation,
-    resource-signal backoff, serial one-per-turn integration."""
+    """Acceptance guard (#723 BATCH mode): "the template contains the word
+    worktree" is NOT the fix. Lock the actual directive — a BOUNDED parallel
+    batch (up to 5 worktree lanes, NO refill while a batch runs) with serial
+    integration as branches return."""
 
     def test_saturation_core_states_the_full_directive(self):
         core = next(c for c in gr.CLAUSES if c.id == "saturation-core").text
-        for token in ("SATURATE", "PARALLEL", "isolation:worktree",
-                      "autopilot-worker", "saturation", "resource signal"):
+        for token in ("BATCH MODE", "up to 5", "PARALLEL", "isolation:worktree",
+                      "autopilot-worker", "NO refill"):
             self.assertIn(token, core)
 
     def test_saturation_delivery_integrates_serially(self):
         for p in gr.PROFILES:
             d = next(c for c in gr.CLAUSES if c.id == "saturation-delivery").text_for(p)
             self.assertIn("SERIALLY", d)
-            self.assertIn("ONE per turn", d)
+            self.assertIn("as they return", d)
 
 
 class TestSaturationReconcilesCompactBoundary(TestCase):
     """The owner required the reconciliation to be VISIBLE in the registry, not
-    buried in prose: saturation dispatches parallel lanes + integrates serially
-    one-per-turn; compact-boundary paces exactly ONE integration/hand-off per
-    turn and states the parallel lanes keep building. They cannot contradict."""
+    buried in prose (#723 BATCH mode): saturation-core dispatches a bounded
+    parallel batch (no refill while it runs); saturation-delivery integrates
+    each returned branch serially; compact-boundary fires the compact ONLY at
+    the DRAINED batch boundary (whole batch returned + integrated = zero live
+    tasks) then dispatches the next batch — never mid-fleet. They cannot
+    contradict."""
 
     def test_the_reconciled_pair_is_registered(self):
         self.assertEqual(gr.SATURATION_RECONCILES_COMPACT,
                          ("saturation-core", "saturation-delivery",
                           "compact-boundary"))
 
-    def test_compact_boundary_paces_one_per_turn_and_keeps_lanes(self):
+    def test_compact_boundary_fires_at_the_drained_batch_boundary(self):
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
-            self.assertIn("compact boundary paces ONE", cb)
-            self.assertIn("NOT the parallel lanes", cb)
-            self.assertIn("keep building", cb)
+            self.assertIn("WHOLE batch has returned", cb)
+            self.assertIn("ZERO live tasks", cb)
+            self.assertIn("next batch", cb)
 
-    def test_compact_boundary_no_longer_serializes_the_loop(self):
-        # the old serializing tail — "do NOT dispatch the next issue in the same
-        # turn" — is exactly what suppressed the fleet; it must be gone.
+    def test_compact_boundary_never_compacts_mid_fleet(self):
+        # #723: the whole point — a compact fired while lanes are live breaks
+        # task handles / the armed goal (CC #29193). It must say so.
+        for p in gr.PROFILES:
+            cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
+            self.assertIn("NEVER compact while lanes live", cb)
+            self.assertIn("#29193", cb)
+
+    def test_compact_boundary_no_longer_serializes_or_continuously_refills(self):
+        # the OLD continuous-mode framing — "compact boundary paces ONE
+        # integration per turn / parallel lanes keep building" and the older
+        # "do NOT dispatch the next issue in the same turn" — is exactly what
+        # suppressed the compact/fleet; both must be gone.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
             self.assertNotIn("do NOT dispatch the next", cb)
+            self.assertNotIn("paces ONE", cb)
+            self.assertNotIn("keep building", cb)
 
 
 class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):
@@ -218,13 +234,14 @@ class TestShippedSkillMatchesRegistry(TestCase):
                          "SKILL.md /goal lines drifted from the registry: %r"
                          % [p for p, _, _ in d])
 
-    def test_every_shipped_goal_line_carries_the_saturation_directive(self):
+    def test_every_shipped_goal_line_carries_the_batch_directive(self):
         import re
         lines = re.findall(r"^/goal STOP CONDITIONS.*$", skill_text(), re.MULTILINE)
         self.assertEqual(len(lines), 3)
         for line in lines:
-            self.assertIn("SATURATE", line)
+            self.assertIn("BATCH MODE", line)
             self.assertIn("isolation:worktree", line)
+            self.assertIn("NO refill while a batch runs", line)
 
 
 class TestRenderIntoIsSurgical(TestCase):
