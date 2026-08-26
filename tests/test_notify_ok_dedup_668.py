@@ -118,7 +118,13 @@ class OkDedup(_Base):
         self._fire_idle(sid, out, self.home)
         self.assertEqual(self._deliveries(out), 1)
         env = {**os.environ, "HOME": str(self.home)}
-        subprocess.run(["bash", str(CLEAR)], input=json.dumps({"session_id": sid}),
+        # #712: the clear hook now classifies the submission — only a genuine
+        # HUMAN prompt clears the dedup, and a payload with no usable `.prompt`
+        # is an automated firing. This fixture simulates "the user actually
+        # typed", so it must say what was typed.
+        subprocess.run(["bash", str(CLEAR)],
+                       input=json.dumps({"session_id": sid,
+                                         "prompt": "pokracuj"}),
                        text=True, capture_output=True, env=env)
         Path(self._pending(sid)).write_text("✅ hotovo")
         self._fire_idle(sid, out, self.home)

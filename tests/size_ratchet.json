@@ -199,7 +199,7 @@
     "tests/test_notify_dedup_long_key.py": 159,
     "tests/test_notify_delivery_log.py": 372,
     "tests/test_notify_episode_dedup_558.py": 166,
-    "tests/test_notify_ok_dedup_668.py": 338,
+    "tests/test_notify_ok_dedup_668.py": 344,
     "tests/test_notify_project_channel.py": 674,
     "tests/test_notify_project_wiring.py": 378,
     "tests/test_notify_question_block.py": 303,

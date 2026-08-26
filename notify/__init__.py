@@ -2767,9 +2767,15 @@ SUPPRESSED_ALERT_PREFIXES = (
     # suppressed above: each is a "loop/lane/session died/stalled/idle" heuristic
     # that either has its OWN machine-channel recovery (goal_dark_watch re-arm,
     # the lane/working nudge, resume) OR is a structural git-drift alarm a human
-    # resolves (stuck-main / delivery-stall) — NONE of which route through send(),
-    # so suppression at the chokepoint leaves the producer's control flow
-    # byte-identical (the #546/#688 architectural fact; each producer's
+    # resolves (stuck-main / delivery-stall). The recovery ACTIONS are what
+    # never route through send() (tmux keystrokes / re-arms), so suppression at
+    # the chokepoint leaves the producer's control flow byte-identical — the
+    # alert SENDS themselves all DO route through send() (run_once wires
+    # send_fn = notify.send), which is why this denylist suffices. (#713: the
+    # old "NONE of which route through send()" phrasing here read as if the
+    # ALERTS bypass send() and seeded a false bypass hypothesis — the
+    # 2026-08-25 23:29 delivery-stall ping was pure deploy-lag: #704 merged
+    # to main 23:55, dev2 pulled it 00:47.) (the #546/#688 architectural fact; each producer's
     # once-per-episode latch is set independent of the send return status, so
     # returning "suppressed" instead of "sent" causes no re-fire storm). The
     # machine channel keeps the verdict (watchdog journal + the `suppressed`
