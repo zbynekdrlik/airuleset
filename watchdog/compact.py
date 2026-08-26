@@ -56,13 +56,13 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
                 passed since the last REAL `/compact` delivered to this
                 session;
             (e) the request itself is not older than
-                `COMPACT_REQUEST_MAX_AGE_S`, anchored at the LAST boundary
-                record — REFRESHED by every re-record (#599 supersede,
-                REVERSING #400's non-refreshable anchor: the strong direct
-                delivery conditions now replace the marker proxy the age cap
-                used to backstop, so the cap measures "time since the LAST
-                boundary" — a busy loop's request holds until delivered while a
-                gone-quiet session's ages out after 30 min of no new boundary).
+                `COMPACT_REQUEST_MAX_AGE_S`, whose `ts` REFRESHES both on every
+                re-record (#599 supersede, REVERSING #400's non-refreshable
+                anchor) AND on every structured live-own-task veto during the
+                periodic sweep (#727 hold-extend), so the cap measures "time
+                since the claim was last JUSTIFIED" (a genuine boundary OR a
+                measured live own-task hold) — a busy/mid-batch loop holds until
+                delivered, a gone-quiet session ages out after 30 min.
             Two more checks ride along, both closing real previously-live
             production incidents scoped to the two proven origins, not
             merely the 5 named above: the user must not be actively
@@ -98,44 +98,28 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             the instant the first synchronous attempt happens to race a
             live worker.
 
-  LOGGING — every decision (SEND or SKIP) is appended to
-            `compact-sync.log` via `_log_compact_sync`, unconditionally,
-            from the ONE place `deliver_compact` makes the call — never
-            two different call sites that could drift out of sync with
-            each other (the #400-review MINOR-6 bug this module does not
-            re-introduce: the SEND line is written IMMEDIATELY after the
-            keystrokes are typed, before any other state write, so a
-            later exception can never leave a real send unlogged).
+  LOGGING — every decision (SEND or SKIP) is appended to `compact-sync.log`
+            via `_log_compact_sync`, unconditionally, from the ONE place
+            `deliver_compact` calls it (the SEND line IMMEDIATELY after the
+            keystrokes, before any other state write, so a later exception can
+            never leave a real send unlogged — the #400-review MINOR-6 bug).
 
-WHAT WAS DELETED, not "kept as dead code" (see the design comment on
-issue #402 for the full function-by-function accounting): the claim/lock
-file and its process-fingerprint liveness check (protected against
-MULTIPLE senders racing a pane — impossible once exactly two,
-mutually-exclusive call sites exist); the "substantiality" gate (did >=1
-git commit land — a heuristic guess at a boundary the two origins already
-prove structurally); the "thin context" gate; a dedicated stall-watch
-job (it only ever watched the claim file, which no longer exists); the
-two grace-window overrides named above; the retry-until-hold loop and its
-six tuning constants; the stash-around-a-draft delivery variant; and the
-msg-hash-based delivered-dedup layer (it only ever deduped repeated
-TEXT-SNIFFED fires of an unchanged message — that trigger channel is
-gone).
+WHAT WAS DELETED, not "kept as dead code" (full function-by-function
+accounting: the #402 design comment): the claim/lock file + its
+process-fingerprint liveness; the "substantiality" and "thin context" gates;
+the dedicated stall-watch job; the two grace-window overrides named above; the
+retry-until-hold loop + its six tuning constants; the stash-around-a-draft
+delivery variant; and the msg-hash delivered-dedup layer (all compensating for
+the IMPLICIT-boundary-guess era the two proven origins replaced).
 
-MODULE-IMPORT SAFETY. `watchdog/__init__.py` never imports this file at
-ITS OWN module level — matching the existing `notify`/`burn` convention
-this codebase already uses for every sibling package, callers reach this
-module with a LAZY `from watchdog import compact` (or `import
-watchdog.compact`) inside a function body (`run_once`, `cmd_compact_
-request`), only at the point they actually need it. Because of that, this
-file's own `import watchdog` (never `from watchdog import <name>`) is
-always safe: by the time anything imports `watchdog.compact` at all,
-`watchdog/__init__.py` has already finished executing top to bottom (its
-own module-level code has to run to completion before any of ITS function
-bodies — the only place a lazy import lives — can even be called). A bare
-`import watchdog` here also keeps a test's
-`unittest.mock.patch.object(watchdog, "capture_pane", ...)` working
-exactly as it always has — a `from watchdog import capture_pane` binding
-would silently stop seeing such a patch.
+MODULE-IMPORT SAFETY. `watchdog/__init__.py` never imports this file at its
+own module level (the `notify`/`burn` convention) — callers reach it via a
+LAZY `from watchdog import compact` inside a function body. So this file's own
+`import watchdog` (never `from watchdog import <name>`) is always safe:
+`watchdog/__init__.py` has finished executing before any lazy import here can
+be called. A bare `import watchdog` also keeps a test's
+`patch.object(watchdog, "capture_pane", ...)` working (a `from` binding would
+silently stop seeing the patch).
 """
 
 import json
@@ -193,53 +177,44 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     production called ONLY via the `self-callback` proven origin
     (`compact-request --self` and the issue-411 `--record --origin
     self-callback` Stop-hook backstop); the `subagent-stop` PRODUCER was retired
-    by #610 (a worker return is not the supervisor's ticket boundary under the
-    fleet model), though the function and the delivery machinery still accept
-    that origin generically (see the INPUT note in the module docstring).
-    Overwrites any earlier pending request
-    for the SAME session, INCLUDING its `ts`: `ts` is set to `now` on EVERY
-    record (the #599 SUPERSEDE rule, REVERSING #400's non-refreshable anchor).
-    Dedup is 1-pending-per-session (the dict is keyed by session). `cwd` and
-    `origin` both take the newest call's value. Fail-safe (never raises).
-    Returns True on success.
+    by #610, though the function and the delivery machinery still accept that
+    origin generically (see the INPUT note in the module docstring). Overwrites
+    any earlier pending request for the SAME session, INCLUDING its `ts` AND its
+    `bts`: both are set to `now` on EVERY record (the #599 SUPERSEDE rule,
+    REVERSING #400's non-refreshable anchor). `bts` is the ORIGINAL-boundary
+    anchor for OBSERVABILITY only — a genuine re-record resets it (a new
+    boundary), the #727 hold-extend `ts` refresh does NOT touch it, so the HOLD
+    log line can report how long a claim has been held. Dedup is
+    1-pending-per-session. `cwd` and `origin` take the newest call's value.
+    Fail-safe (never raises). Returns True on success.
 
     WHY #400 IS REVERSED (design comment on #599). #400 made the anchor
-    non-refreshable because a request kept alive forever could deliver
-    `/compact` at a much-later INAPPROPRIATE moment — but that hazard existed
-    only because the delivery logic then relied on the boundary MARKER still
-    being present (a proxy for "still an appropriate moment"). #599 replaces
-    that proxy with the DIRECT delivery conditions (pane idle, no live worker,
-    no live bg-bash, no draft, no recent-human, not `❓`), so an appropriate
-    moment is checked directly AT DELIVERY — the age cap no longer has to be the
-    safety mechanism. A recorded boundary request is now a STANDING claim: it
-    HOLDS until delivered or SUPERSEDED by a newer boundary of the same session,
-    not discarded by an arbitrary timeout that a 24/7 loop's boundaries never
-    align with (cambox: 244 SKIP / 0 SEND). The 30-min `COMPACT_REQUEST_MAX_AGE_S`
-    cap stays, but with `ts` refreshing on every genuine boundary it now measures
-    "time since the LAST boundary" — on a busy loop (a boundary every few
-    minutes) it never bites (holds until delivered); on a GONE-QUIET session
-    (loop stopped) it discards a stale request after 30 min of no new boundary.
-    THAT is how a SEND happens on a saturated loop: the anchor keeps refreshing,
-    the request never expires while the loop is alive, and it delivers at the
-    first safe moment (measured frequent: ~71% of trailing windows are free of
-    live bg-bash, plus idle-between-turns is constant). The #400 text-sniffing
-    trigger that could refresh a request forever is separately, structurally
-    gone (retired to a permanent no-op); the only re-records now are genuine
-    boundaries, which SHOULD supersede.
+    non-refreshable because the delivery logic then relied on the boundary
+    MARKER still being present as a proxy for "still an appropriate moment".
+    #599 replaces that proxy with the DIRECT delivery conditions (pane idle, no
+    live worker, no live bg-bash, no draft, no recent-human, not `❓`), so an
+    appropriate moment is checked AT DELIVERY and the age cap no longer has to be
+    the safety mechanism. A recorded boundary request is now a STANDING claim: it
+    HOLDS until delivered or SUPERSEDED, not discarded by an arbitrary timeout a
+    24/7 loop's boundaries never align with (cambox: 244 SKIP / 0 SEND). The
+    30-min cap stays but with `ts` refreshing (every genuine boundary #599, AND
+    every structured live-own-task veto #727) it measures "time since the claim
+    was last JUSTIFIED": a busy/mid-batch loop never expires (holds until
+    delivered), a GONE-QUIET session ages out after 30 min. The #400 text-sniff
+    trigger that could refresh forever is structurally gone (a permanent no-op);
+    the only re-records now are genuine boundaries, which SHOULD supersede.
 
-    ORIGIN takes the newest value (#599): the #402-era "origin never downgrades
-    from self-callback" protection is REMOVED with the #425 `⏳` exemption it
-    existed to guard — #599 drops that exemption entirely, so no origin is
-    second-class any more (point 4). Both record sites always pass a proven
-    origin, so the stored origin stays proven in practice, and
+    ORIGIN takes the newest value (#599): the #402-era "origin never downgrades"
+    protection is REMOVED with the #425 `⏳` exemption it guarded. Both record
+    sites always pass a proven origin, so the stored origin stays proven and
     `_compact_session_unresumed`'s proven-origin gate keeps working across a
-    self-callback <-> subagent-stop supersede (both are proven)."""
+    self-callback <-> subagent-stop supersede (both proven)."""
     session = str(session or "").strip()
     if not session:
         return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
-    d[session] = {"cwd": str(cwd or ""), "ts": int(now),
+    d[session] = {"cwd": str(cwd or ""), "ts": int(now), "bts": int(now),
                   "origin": str(origin or "").strip()}
     return _save_compact_requests(d, path)
 
@@ -255,6 +230,25 @@ def clear_compact_request(session, path=None):
         d.pop(session, None)
         return _save_compact_requests(d, path)
     return False
+
+
+def _touch_compact_request_ts(sid, now, path=None):
+    """#727 hold-extend: refresh ONLY the `ts` of `sid`'s existing pending
+    request to `now` — `cwd`/`origin`/`bts` are left untouched, so the age cap
+    measures "time since the claim was last JUSTIFIED", not "time since the last
+    boundary". Fail-safe: a vanished entry (delivered/superseded between the
+    sweep's delivery verdict and this call) is a no-op. Returns True iff an
+    entry existed and the refreshed dict was written."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    now = time.time() if now is None else now
+    d = load_compact_requests(path)
+    entry = d.get(sid)
+    if not isinstance(entry, dict):
+        return False
+    entry["ts"] = int(now)
+    return _save_compact_requests(d, path)
 
 
 def compact_delivered_path():
@@ -533,28 +527,22 @@ def _live_bg_tasks_detail(sid, cwd, projects_dir=None, now=None):
     3 — the incident was blind-diagnosed twice from a bare `SKIP live-tasks`).
 
     #605: the STRUCTURED `count_live_workers` signal is now the ONLY signal — the
-    pane `_BG_AGENTS_WAIT_RX` scrape (former signal (a)) was REMOVED. That scrape
-    carried NO timestamp, so it could not tell a genuinely-live "Waiting for N
-    background agents" render from a STALE one left in an idle session's
-    scrollback; and it was only ever reached at an idle `❯` boundary (PAST the
-    `busy` check in `deliver_compact`), where a genuinely-live "Waiting" state
-    does not occur — so it only ever produced FALSE positives (the 02:50 incident
-    on sid 2d02a127: 30 min of false SKIP live-tasks at an idle prompt with ZERO
-    fresh lanes). It also lost no real coverage: a genuinely-live background AGENT
-    always has a fresh subagent transcript inside the 15-min window (which
-    exceeds the 10-min Bash tool cap, #518), so signal (b) catches every real
-    live worker, and the sub-second dispatch race is covered by the #238
-    too-young floor. This is the #486 direction — replace a pane-render heuristic
-    with structured transcript state.
+    pane `_BG_AGENTS_WAIT_RX` scrape (former signal (a)) was REMOVED (no
+    timestamp -> false positives at an idle prompt: the 02:50 incident on sid
+    2d02a127, 30 min of false SKIP live-tasks with ZERO fresh lanes). It lost no
+    coverage — a genuinely-live agent always has a fresh subagent transcript
+    inside the 15-min window (> the 10-min Bash cap, #518) — and is the #486
+    direction: replace a pane-render heuristic with structured transcript state.
+    This same freshness partition is the #727 hold-extend WEDGE-BOUND: a wedged
+    lane whose transcript stops growing goes stale -> stops reading live -> the
+    veto stops firing -> the held claim stops refreshing -> the age cap resumes.
 
     Vetoes on ANY FRESH lane via the SAME `_LANE_NOT_LIVE_STATES` partition
-    `lane_has_live_evidence` uses (`live_lane_labels`, single source of truth —
-    the detail can never disagree with the veto): a `live`/`wedged`/`unreadable`
-    lane counts live (#565-review: a wedged lane pending job-1 auto-resume is
-    recoverable in-flight work the supervisor still owns); a `finished` lane is
-    EXCLUDED (#587 — a worker that produced its final reply and returned is a
-    FREE lane, not the 15-min mtime ghost). Unreadable → [] → "" (a deferral
-    optimization, never a new way to block on "we don't know").
+    `lane_has_live_evidence` uses (`live_lane_labels`, single source of truth):
+    a `live`/`wedged`/`unreadable` lane counts live (#565-review: a wedged lane
+    pending job-1 auto-resume is recoverable in-flight work), a `finished` lane
+    is EXCLUDED (#587). Unreadable → [] → "" (a deferral, never a new block on
+    "we don't know").
 
     `count_live_workers` is disk-only and blind to a generic background Bash
     CI-wait — that is a SEPARATE compact-only signal (`_compact_live_bg_bash`,
@@ -634,20 +622,19 @@ def _compact_live_bg_bash(cwd, sid, projects_dir=None):
 # --------------------------------------------------------------------------- #
 
 COMPACT_TEXT = "/compact"
-# A request whose `ts` is older than this is DISCARDED. KEPT at 30 min but its
-# SEMANTICS changed under #599: `ts` now REFRESHES on every genuine boundary
-# (supersede — `record_compact_request`), so this measures "time since the LAST
-# boundary", not "time since first-seen" (#400's non-refreshable anchor is
-# reversed). On a busy loop (a boundary every few minutes) it never bites — the
-# request HOLDS until it delivers at the first safe moment, which is what fixes
-# cambox's 244 SKIP / 0 SEND (together with #599 dropping the `⏳` veto that
-# starved every delivery). On a GONE-QUIET session (the loop stopped / finished)
-# `ts` stops refreshing and the request ages out after 30 min of no new
-# boundary — correct: a pending request from a session that has not hit a
-# boundary in half an hour is stale. The "possibly-inappropriate late moment"
-# hazard the #400 non-refreshable anchor guarded is now handled by the DIRECT
-# delivery conditions (pane idle, no live worker, no live bg-bash, no draft, no
-# recent-human, not `❓`), never by this cap.
+# A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
+# SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
+# first-seen" — #400's non-refreshable anchor is reversed). `ts` REFRESHES on
+# a genuine boundary re-record (#599 supersede — `record_compact_request`) AND
+# on a structurally-measured live own-task hold during the sweep (#727
+# hold-extend — `_touch_compact_request_ts`). So a busy/mid-batch loop NEVER
+# bites (the claim HOLDS until it delivers at the first safe moment, fixing
+# cambox's 244 SKIP / 0 SEND and #727's mid-batch expiry); a GONE-QUIET session
+# (neither fires) ages out after 30 min; a WEDGED lane goes stale -> the veto
+# stops -> the hold stops -> expiry resumes (the wedge-bound). The "late
+# inappropriate moment" hazard #400 guarded is now handled by the DIRECT
+# delivery conditions (pane idle, no live worker/bg-bash, no draft/recent-human,
+# not `❓`), never by this cap.
 COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 
 COMPACT_MIN_REQUEST_AGE_S = 2.0   # env AIRULESET_COMPACT_MIN_REQUEST_AGE_S
@@ -898,11 +885,10 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     """Evaluate every delivery condition for `sid` ONCE and act. Called
     from BOTH entry points' own immediate synchronous attempt (`--record`/
     `--self`) AND from the periodic sweep (`compact_sweep`) — both thread
-    the request's own non-refreshable `ts` anchor through as `request_ts`,
-    which drives BOTH condition (e) (the hard age cap — REQUIRED, or a
-    request evaluated only by the periodic sweep would never expire) and
-    the #238 too-young floor (a no-op in practice at the sweep's own ~60s
-    cadence, since real elapsed time almost always already clears it).
+    the request's `ts` anchor through as `request_ts`, which drives BOTH
+    condition (e) (the hard age cap — REQUIRED, or a request evaluated only
+    by the periodic sweep would never expire) and the #238 too-young floor
+    (a no-op at the sweep's ~60s cadence, since real elapsed time clears it).
 
     Returns:
       "sent"            — `/compact` was typed.
@@ -928,20 +914,16 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     sleep_fn = sleep_fn or time.sleep
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
 
-    # Condition (e) — the hard, non-refreshable age cap. Checked first: an
-    # expired request needs no pane resolution at all.
+    # Condition (e) — the hard age cap. Checked first: an expired request
+    # needs no pane resolution at all.
     if request_ts is not None:
         age = _safe_age(now, request_ts)
         if age is not None and age > COMPACT_REQUEST_MAX_AGE_S:
-            # #523: name the ORIGIN on the discard record. Post-#610 the sole
+            # #523: name the ORIGIN on the discard record — post-#610 the sole
             # producer is `self-callback`, so a lapse now means a gone-quiet
-            # session (no new boundary in 30 min, #599 supersede); the retired
-            # `subagent-stop` producer is what used to lapse under the old
-            # #425 `⏳` veto. Surfacing the origin here (the
-            # #486 "silent suppression -> explicit decision log" guardrail,
-            # logging-only) turns "half my per-ticket compacts lapse" triage
-            # into a read instead of a re-investigation, without touching any
-            # delivery decision.
+            # session (no new boundary in 30 min AND no #727 live-task hold);
+            # the #486 explicit-decision-log guardrail, logging-only (no
+            # delivery decision changed).
             _log_compact_sync("SKIP expired sid=%s cwd=%s origin=%s"
                               % (sid, cwd, origin or "-"))
             return "expired"
@@ -1069,6 +1051,17 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 # rather than leaving it pending for the next sweep.
 _COMPACT_TERMINAL_WORDS = frozenset(("sent", "expired", "already-queued", "cooldown"))
 
+# #727 hold-extend: the four STRUCTURED live-own-task veto words. While one is
+# the SWEEP's verdict, the session is PROVABLY mid-batch (a measured live worker
+# lane or a live run_in_background bash job vetoed delivery, correctly — CC
+# #29193), NOT gone-quiet, so `compact_sweep` REFRESHES the request's `ts`. NEVER
+# on `skip:busy` (a busy pane with no live task is a NEW turn whose boundary
+# supersedes) and NEVER on a pane-render signal. A wedged lane goes stale -> the
+# veto stops firing -> ts stops refreshing -> the age cap resumes (wedge-bound).
+_COMPACT_HOLD_EXTEND_WORDS = frozenset((
+    "skip:live-tasks", "skip:live-bg-bash",
+    "skip:live-tasks-raced", "skip:live-bg-bash-raced"))
+
 # A small margin over `COMPACT_MIN_REQUEST_AGE_S` so a `time.sleep()` that
 # very slightly undershoots its requested duration (never observed on this
 # stack, but no reason to shave it exactly to the boundary) still clears
@@ -1087,26 +1080,16 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     machinery), sized to just clear `deliver_compact`'s own
     `COMPACT_MIN_REQUEST_AGE_S` floor, then ONE call to `deliver_compact`.
 
-    WHY THE WAIT EXISTS AT ALL (#402-review MAJOR-1). The record and this
-    attempt happen in the SAME call, so a request's age is provably ~0 at
-    the instant `deliver_compact` would check it — without the wait, the
-    min-age floor refuses EVERY fresh request unconditionally, silently
-    deferring it to job 14's ~60s poll and reverting a previously-fixed,
-    previously-MEASURED regression: the pre-#402 code's own
-    `deliver_compact_record` docstring records "18 of 87 real sends on
-    this box alone" took that slow path for want of exactly this (#238's
-    own adversarial review, finding 🔴1). The floor's OWN purpose is real
-    — a same-turn-dispatched sibling worker can be briefly invisible to
-    `_live_bg_tasks_detail` — and this wait is what gives that
-    signal a genuine chance to catch up, exactly like the old retry loop
-    did, without resurrecting the loop itself: the wait is computed from
-    the REQUEST's own recorded `ts` (via a fresh `load_compact_requests`
-    read). Under the #599 supersede rule `record_compact_request` sets `ts`
-    to `now` on EVERY record, so on this synchronous path `req_ts` is always
-    ~now and the fresh boundary sleeps the ~2s `COMPACT_MIN_REQUEST_AGE_S`
-    floor once — exactly the #238 same-turn-dispatch race protection the old
-    retry loop gave (the pre-#599 "a re-record whose anchor was already old
-    enough sleeps zero" branch is unreachable now that ts never carries over).
+    WHY THE WAIT EXISTS AT ALL (#402-review MAJOR-1). Record + attempt happen
+    in the SAME call, so a request's age is ~0 when `deliver_compact` checks it;
+    without the wait the min-age floor refuses EVERY fresh request and defers it
+    to the ~60s sweep (the pre-#402 regression: "18 of 87 real sends" took that
+    slow path). The floor's purpose is real — a same-turn-dispatched sibling
+    worker can be briefly invisible to `_live_bg_tasks_detail` — and this wait
+    gives that signal a chance to catch up without resurrecting the retry loop.
+    The wait is computed from the REQUEST's own recorded `ts`; #599 sets `ts`
+    to `now` on every record, so `req_ts` is ~now here and the fresh boundary
+    sleeps the ~2s floor once (the #238 same-turn-dispatch race protection).
 
     Returns the disposition word `deliver_compact` returns (or
     `"skip:no-session"` if recording itself failed — a disk-write
@@ -1166,13 +1149,13 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
         if dry_run:
             logs.append("DRY-RUN compact-sweep would evaluate sid=%s" % sid)
             continue
-        # `request_ts` is the entry's own non-refreshable anchor -- REQUIRED
-        # here so condition (e), the hard age cap, is actually enforced by
-        # the sweep (a bug caught by this ticket's own tests: passing None
-        # unconditionally would silently disable expiry for every request
-        # that only ever gets evaluated by the periodic sweep). The #238
-        # too-young floor derived from the SAME value is a no-op in
-        # practice at ~60s sweep cadence, never a reason to withhold it.
+        # `request_ts` is the entry's own `ts` anchor -- REQUIRED here so
+        # condition (e), the hard age cap, is actually enforced by the sweep
+        # (passing None would silently disable expiry for every request only
+        # ever evaluated by the periodic sweep). `ts` is REFRESHABLE (#599
+        # supersede + #727 hold-extend); the sweep re-reads it each call, so the
+        # hold branch below advances it. The #238 too-young floor derived from
+        # the SAME value is a no-op at ~60s sweep cadence.
         word = deliver_compact(sid, cwd, origin=origin, run=run,
                                projects_dir=projects_dir,
                                delivered_path=delivered_path, now=now,
@@ -1191,6 +1174,23 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
             # failure — the origin is what lets triage tell the two apart.
             logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
                         "(age > cap, discarded)" % (sid, origin or "-"))
+        elif word in _COMPACT_HOLD_EXTEND_WORDS:
+            # #727 hold-extend: a structured live-own-task veto PROVES the
+            # session is mid-batch -> REFRESH `ts` so the 30-min cap never
+            # expires a still-held boundary out from under a >30-min batch.
+            # `bts` (the ORIGINAL boundary) is untouched, so the line reports
+            # how long the boundary has been held; a refresh WRITE failure (or a
+            # vanished entry) logs HOLD-FAIL and behaves as an ordinary SKIP --
+            # the next sweep re-tries the refresh.
+            held = _safe_age(now, entry.get("bts"))
+            held_s = "?" if held is None else "%d" % int(held)
+            if _touch_compact_request_ts(sid, now, path=requests_path):
+                logs.append("HOLD (compact-sweep) sid=%s -> %s "
+                            "(ts refreshed, boundary held %ss)"
+                            % (sid, word, held_s))
+            else:
+                logs.append("HOLD-FAIL (compact-sweep) sid=%s -> %s "
+                            "(ts NOT refreshed)" % (sid, word))
         else:
             logs.append("SKIP (compact-sweep) sid=%s -> %s" % (sid, word))
     return logs

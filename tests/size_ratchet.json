@@ -95,7 +95,7 @@
     "tests/test_cloudflare_api_tokens_skill.py": 138,
     "tests/test_cluster_le_split.py": 202,
     "tests/test_cluster_lf_split.py": 205,
-    "tests/test_compact.py": 2672,
+    "tests/test_compact.py": 2783,
     "tests/test_compact_subagent_retire_610.py": 158,
     "tests/test_conformance_check.py": 487,
     "tests/test_conformance_heartbeat.py": 405,
