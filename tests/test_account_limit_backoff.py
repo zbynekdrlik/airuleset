@@ -268,16 +268,6 @@ class TestNudgeTextQualifiesOpenCount(unittest.TestCase):
         self.assertIn("8", rendered)
         self.assertIn("sériovo", low)
 
-    def test_undersat_text_qualifies_open_not_workable(self):
-        rendered = goal.GOAL_LANE_UNDERSAT_NUDGE_TEXT % (2, 5, 37, 1)
-        low = rendered.lower()
-        self.assertIn("nie všetky", low)
-        self.assertIn("rozpracovate", low)
-        # doctrine preserved
-        self.assertIn("beží len 2", rendered)
-        self.assertIn("cieľových 5", rendered)
-        self.assertIn("worktree", low)
-
 
 if __name__ == "__main__":
     unittest.main()
