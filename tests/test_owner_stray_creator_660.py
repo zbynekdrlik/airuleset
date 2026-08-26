@@ -27,6 +27,28 @@ import cli_tmux_provisioning as tmuxprov
 _LIVE_SIGNATURES = ("attached)", "windows (created")
 
 
+def _pane_read_override(iso, overrides):
+    """#711/#427: wrap `iso.t` so the kill sweep's ONE load-sensitive read --
+    `tmux list-panes ... -t =<stray> -F ...#{pane_current_command}...
+    #{pane_current_path}` -- returns a DETERMINISTIC line for each stray named
+    in `overrides` (a `#{session_attached}\\t#{session_group}\\t
+    #{pane_current_command}\\t#{pane_pid}\\t#{pane_current_path}` string),
+    instead of reading the freshly-spawned pane's transient state. EVERY other
+    tmux call (list-sessions, kill-session, and any non-overridden pane read
+    like the grouped `montalu2`) passes straight through to the real isolated
+    server, so the session lifecycle stays genuinely end-to-end. This is the
+    #427 remedy: route the uncontrolled real-box read through an override-able
+    path, keep the rest real."""
+    def run(argv):
+        if len(argv) >= 5 and argv[1] == "list-panes" and "-t" in argv:
+            name = argv[argv.index("-t") + 1].lstrip("=")
+            if name in overrides:
+                return subprocess.CompletedProcess(
+                    argv, 0, stdout=overrides[name] + "\n", stderr="")
+        return iso.t(*argv[1:])
+    return run
+
+
 class _Iso:
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="stray660-")
@@ -103,6 +125,41 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         self.assertIn("montalu2", after)      # grouped work session preserved
         self.assertIn("killed", log)
         self.assertIn("marek", log)
+
+    def test_hermetic_pane_read_absorbs_stray_under_transient_load(self):
+        # #711/#427: the ROOT of the full-suite flake -- the sweep reads the
+        # freshly-spawned stray pane's #{pane_current_command}/#{pane_current_path}
+        # ONCE (cli_tmux_provisioning.py:1310), and under load that read is
+        # momentarily NON-bare / unsettled, so the genuinely-idle stray is
+        # falsely SKIPPED. Reproduce that transient read DETERMINISTICALLY (the
+        # #427 remedy: no timing race) and prove the sweep still absorbs the
+        # stray when the read is routed through a settled path.
+        self.assertEqual(self.iso.t("-f", "/dev/null", "new-session", "-d",
+                                    "-s", "zbynek", "-x", "80", "-y", "24")
+                         .returncode, 0)
+        # a REAL standalone bare-bash stray in $HOME (the creator-path shape).
+        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "marek",
+                                    "-c", self.iso.dir).returncode, 0)
+        self.assertIn("marek", self.iso.names())
+
+        stray_res = tmuxprov._owner_box_stray_name_res("zbynek",
+                                                       single_session=False)
+
+        def idle_ps(argv):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+        # The #427 load transient: bash still sourcing its rc reads a NON-bare
+        # #{pane_current_command}. Injected verbatim for marek's list-panes;
+        # everything else hits the real isolated server (marek is really killed).
+        transient = "0\t\tcat\t1\t"
+        run = _pane_read_override(self.iso, {"marek": transient})
+        with tempfile.TemporaryDirectory() as td:
+            tmuxprov._live_normalize_owner_session(
+                "zbynek", run=run, stray_name_res=stray_res, audit_dir=td,
+                ps_run=idle_ps, home=self.iso.dir)
+
+        # The sweep must absorb the genuinely-idle standalone stray regardless of
+        # the transient read -- this is what flakes under full-suite load.
+        self.assertNotIn("marek", self.iso.names())
 
     def test_subdev_box_never_sweeps_foreign_names(self):
         # on a single-session (subdev) box the widening is OFF, so a session
