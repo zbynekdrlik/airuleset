@@ -1651,6 +1651,12 @@ class GoalArmedJqFails180(unittest.TestCase):
 
     def test_jq_failure_reading_the_goal_marker_blocks_not_allows(self):
         sid = "t-mg-jqfail-goal-" + uuid.uuid4().hex[:8]
+        # #732: redirect the block log into an isolated dir this test owns —
+        # its read below is sid-filtered (immune), but redirecting keeps the
+        # WHOLE file off the real shared /tmp log per the #711 mandate, so a
+        # future edit turning this presence check into a count can't re-open
+        # the pollution vector. The dir outlives the `with` (addCleanup).
+        logdir, block, _byp = _isolated_exec_logs(self)
         with TemporaryDirectory() as d:
             tp = str(Path(d) / "sess.jsonl")
             # a PLAIN, non-Fable, no-goal-marker transcript -- with a
@@ -1667,6 +1673,7 @@ class GoalArmedJqFails180(unittest.TestCase):
                        "transcript_path": tp}
             env = dict(os.environ)
             env["PATH"] = stubdir + ":" + env["PATH"]
+            env["AIRULESET_MAIN_EXEC_LOG_DIR"] = str(logdir)   # #732
             out = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                                  env=env, capture_output=True, text=True)
         self.assertEqual(
@@ -1681,7 +1688,7 @@ class GoalArmedJqFails180(unittest.TestCase):
         # must be the DISTINCT GOAL_UNKNOWN, never GOAL_ARMED -- an audit
         # reading the log must never be told a goal was armed when the
         # truth is "the transcript could not be read".
-        block_log = BLOCK_LOG_PATH
+        block_log = block
         self.assertTrue(block_log.exists(), "the block must be logged")
         lines = [ln for ln in block_log.read_text().splitlines() if sid in ln]
         self.assertTrue(lines, "expected a block log line for this session")
@@ -2353,6 +2360,58 @@ class CrossUserLogPathCollision492(unittest.TestCase):
             transcript_text=goal_armed_transcript())
         self.assertEqual(out.returncode, 2, out.stderr)
         self.assertNotIn("Permission denied", out.stderr, out.stderr)
+
+
+class LogDirSeamFailSafe732(unittest.TestCase):
+    """#732 review-fix: a BAD AIRULESET_MAIN_EXEC_LOG_DIR override (root `/`
+    whose trailing slash strips to the empty string, or an existing but
+    UNWRITABLE dir) must FALL BACK to /tmp — never silently lose the audit
+    line to `/` or to a dir it cannot write — while the block DECISION stays
+    unaffected (it never reads the log path). These lock the strip-then-
+    nonempty + `[ -w ]` guards added after the adversarial review; each is
+    RED without its guard (the line goes to `/`/the unwritable dir -> lost ->
+    absent from /tmp) and GREEN with it. Reads are sid-filtered, so concurrent
+    fleet writes to the shared /tmp log never affect them (the same immune
+    pattern as CrossUserLogPathCollision492)."""
+
+    def _run_blocked(self, sid, logdir_env):
+        return MainImplementationGuard()._run(
+            tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+            transcript_text=goal_armed_transcript(),
+            extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": logdir_env})
+
+    def _in_real_block_log(self, sid):
+        if not BLOCK_LOG_PATH.exists():
+            return []
+        return [ln for ln in BLOCK_LOG_PATH.read_text().splitlines() if sid in ln]
+
+    def test_root_slash_override_falls_back_to_tmp(self):
+        sid = "t-732-rootslash-" + uuid.uuid4().hex[:8]
+        out = self._run_blocked(sid, "/")
+        self.assertEqual(out.returncode, 2, out.stderr)     # block unaffected
+        self.assertTrue(
+            self._in_real_block_log(sid),
+            "root-`/` override must fall back to /tmp, not lose the audit line "
+            "at `/` (the trailing-slash strip must yield an empty override)")
+
+    def test_unwritable_override_dir_falls_back_to_tmp(self):
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses -w; the unwritable-dir fallback can't be reproduced")
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        # restore write BEFORE d.cleanup runs (addCleanup is LIFO) so rmtree works
+        self.addCleanup(lambda: os.chmod(d.name, 0o700))
+        os.chmod(d.name, 0o500)                             # r-x, NOT writable
+        sid = "t-732-unwritable-" + uuid.uuid4().hex[:8]
+        out = self._run_blocked(sid, d.name)
+        self.assertEqual(out.returncode, 2, out.stderr)     # block unaffected
+        self.assertTrue(
+            self._in_real_block_log(sid),
+            "an unwritable override dir must fall back to /tmp, not silently "
+            "lose the audit line")
+        self.assertFalse(
+            (Path(d.name) / ("airuleset-main-exec-block-%d.log" % os.getuid())).exists(),
+            "nothing must be written into the unwritable override dir")
 
 
 if __name__ == "__main__":

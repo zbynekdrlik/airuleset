@@ -182,7 +182,7 @@
     "tests/test_local_poll_repeat_block.py": 605,
     "tests/test_long_turn.py": 408,
     "tests/test_long_wait_background_waiter.py": 236,
-    "tests/test_main_implementation_guard.py": 2359,
+    "tests/test_main_implementation_guard.py": 2418,
     "tests/test_managed_plugins.py": 791,
     "tests/test_managed_repo_sweeps.py": 1047,
     "tests/test_mdreview_content_axes.py": 129,
