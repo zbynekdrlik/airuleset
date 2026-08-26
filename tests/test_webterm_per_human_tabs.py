@@ -27,23 +27,25 @@ import cli_webterm as w  # noqa: E402
 import cli_webterm_profiles as profiles  # noqa: E402
 
 # The owner-defined zbynek.newlevel.media tab list, EXACT order (owner ROZHODNUTÉ
-# 2026-08-24: "dev1, dev2, gk, m1..m6, d1, d2, miva, sb").
+# 2026-08-24: "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"; david3 (d3) added after
+# d2 per owner request 2026-08-26, #719).
 ZBYNEK_ORDER = [
     "dev1", "dev2", "gatekeeper",
     "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
     "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
-    "david1-subdev", "david2-subdev", "miva1-subdev", "spinbike-vps",
+    "david1-subdev", "david2-subdev", "david3-subdev",
+    "miva1-subdev", "spinbike-vps",
 ]
-# Fleet targets the owner EXCLUDED from his domain.
+# Fleet targets the owner EXCLUDED from his domain (david4 stays excluded, #719).
 ZBYNEK_EXCLUDED = [
-    "montalu7-subdev", "montalu8-subdev", "david3-subdev", "david4-subdev",
+    "montalu7-subdev", "montalu8-subdev", "david4-subdev",
     "simap1-subdev", "marek-subdev", "stepan-forestshop-dev",
     "admin-forestshop-dev",
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
     "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6", "d1", "d2",
-    "miva", "sb",
+    "d3", "miva", "sb",
 ]
 
 
@@ -127,7 +129,7 @@ class TestOwnerDashboardRender(unittest.TestCase):
     def test_owner_dashboard_html_excludes_other_humans(self):
         html = _render_owner()
         for other in ('title="marek@subdev"', 'title="stepan@forestshop-dev"',
-                      'title="david3@subdev"', 'title="david4@subdev"',
+                      'title="david4@subdev"',
                       'title="admin@forestshop-dev"', 'title="montalu7@subdev"',
                       'title="simap1@subdev"'):
             self.assertNotIn(other, html)
@@ -135,7 +137,8 @@ class TestOwnerDashboardRender(unittest.TestCase):
     def test_owner_dashboard_html_includes_his_boxes(self):
         html = _render_owner()
         for present in ('title="dev1 (localhost)"', 'title="dev2"',
-                        'title="gatekeeper"', 'title="spinbike-vps"'):
+                        'title="gatekeeper"', 'title="spinbike-vps"',
+                        'title="david3@subdev"'):  # #719: d3 now on the owner dashboard
             self.assertIn(present, html)
 
     def test_owner_dashboard_tab_alias_order_is_owner_defined(self):
