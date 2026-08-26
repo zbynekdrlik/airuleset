@@ -899,16 +899,20 @@ class TestDiscordNotifyHooks(TestCase):
         home = tempfile.mkdtemp()
         d = Path(home) / ".claude" / "channels" / "discord"
         d.mkdir(parents=True)
-        (d / ".env").write_text("DISCORD_MENTION_ZBYNEK=773451844110385193\n")
+        (d / ".env").write_text(
+            "DISCORD_MENTION_ZBYNEK=773451844110385193\n"
+            "DISCORD_MENTION_DAVID=90000\n")   # #710: david keeps question delivery
         return home
 
     def test_immediate_question_prepends_owner_mention(self):
-        # The ❓ immediate ping must @mention the tmux owner. Hermetic: temp HOME
-        # with a DISCORD_MENTION_ZBYNEK map + forced owner=zbynek.
+        # The ❓ immediate ping must @mention the owner. Hermetic: temp HOME with a
+        # DISCORD_MENTION_<OWNER> map + forced owner. #710: uses owner `david`,
+        # whose question delivery stays ON (a zbynek/marek ❓ POSTs nothing now —
+        # the suppression is locked in tests/test_question_ping_off_710.py).
         sid, _p = self._sid()
         self._stop(sid, "❓ NEEDS YOU: reset na 0 dB?",
-                   owner="zbynek", home=self._mention_home())
-        self.assertTrue(self._sent().startswith("<@773451844110385193> **❓"),
+                   owner="david", home=self._mention_home())
+        self.assertTrue(self._sent().startswith("<@90000> **❓"),
                         f"❓ ping not @mention-prefixed: {self._sent()!r}")
 
     def test_idle_prepends_owner_mention(self):
@@ -8298,7 +8302,7 @@ class TestDiscordAutopilotNotify(TestCase):
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                       record_question=False, edit_question=False,
-                      channel_id=False, owner=False, mirror_owners=False,
+                      channel_id=False, owner=False, mirror_owners=False, question_ping_off=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr="https://h/pull/9", achieved="did the thing", result=None,
                       goal="Tunel občas vypadne", version="v9.9.9", merge_sha=None,
@@ -8357,7 +8361,7 @@ class TestDiscordAutopilotNotify(TestCase):
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                           record_question=False, edit_question=False,
-                      channel_id=False, owner=False, mirror_owners=False,
+                      channel_id=False, owner=False, mirror_owners=False, question_ping_off=False,
                           body=None, run=None, repo=repo, issue=606, pr=None,
                           achieved="a", result=None, goal="g", version=None,
                           merge_sha=None, url=None, review="ok", handoff=False,
@@ -8378,7 +8382,7 @@ class TestDiscordAutopilotNotify(TestCase):
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                       record_question=False, edit_question=False,
-                      channel_id=False, owner=False, mirror_owners=False,
+                      channel_id=False, owner=False, mirror_owners=False, question_ping_off=False,
                       body=None, run=None, repo="zbynekdrlik/airuleset", issue=42,
                       pr=None, achieved="oprava retry logiky", result=None,
                       goal="Retry logika sa neopakuje", version="v1.2.3",
@@ -8413,7 +8417,7 @@ class TestDiscordAutopilotNotify(TestCase):
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                       record_question=False, edit_question=False,
-                      channel_id=False, owner=False, mirror_owners=False,
+                      channel_id=False, owner=False, mirror_owners=False, question_ping_off=False,
                       body=None, run=None, repo="o/x", issue=5,
                       pr=None, achieved="a", result=None,
                       goal="g", version="v1", merge_sha=None,
@@ -8817,7 +8821,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name="zbynek")
         import io
         import contextlib
@@ -8835,7 +8839,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name=None)
         with m.patch("notify.resolve_owner", return_value="marek"), \
                 m.patch("notify.provision_question_thread",
@@ -8857,7 +8861,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name="zbynek")
         with m.patch("notify.provision_question_thread", return_value=""), \
                 m.patch("notify.log_delivery"):
@@ -8875,7 +8879,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name="zbynek")
         with m.patch("notify.provision_question_thread", return_value=""), \
                 m.patch("notify.log_delivery") as fake_log:
@@ -8895,7 +8899,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name="zbynek")
         import io
         import contextlib
@@ -8917,7 +8921,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name="zbynek")
         with m.patch("notify.provision_question_thread",
                      return_value="q1") as fake:
@@ -8935,7 +8939,7 @@ class TestDiscordAutopilotNotify(TestCase):
                       mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
-                      mirror_owners=False, run_card=False, api_error=False,
+                      mirror_owners=False, question_ping_off=False, run_card=False, api_error=False,
                       body=None, owner_name="Zbynek ")
         with m.patch("notify.provision_question_thread",
                      return_value="q1") as fake:
@@ -9010,8 +9014,13 @@ class TestDiscordAutopilotNotify(TestCase):
             "printf '%%s\\n' \"$*\" >> %s\n"
             "exec %s \"$@\"\n" % (str(log), real_py3))
         shim.chmod(0o755)
+        # #710: owner `david` keeps question delivery ON (zbynek/marek are now
+        # owner-scoped OFF — a zbynek ❓ POSTs nothing, so it would resolve no
+        # --channel-id call at all; the suppression is locked in
+        # tests/test_question_ping_off_710.py). ✅ delivery is unaffected for
+        # every owner, so the default-kind half is owner-agnostic.
         base_env = {**os.environ, "PATH": str(shimdir) + os.pathsep + os.environ["PATH"],
-                   "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek",
+                   "HOME": home, "AIRULESET_NOTIFY_OWNER": "david",
                    "DISCORD_NOTIFY_DRYRUN": "1"}
 
         def _channel_kinds():
@@ -9056,16 +9065,21 @@ class TestDiscordAutopilotNotify(TestCase):
         shim.chmod(0o755)
         d = Path(home) / ".claude" / "channels" / "discord"
         d.mkdir(parents=True)
-        (d / ".env").write_text("DISCORD_MIRROR_ZBYNEK=marek\n")
+        # #710: PRIMARY owner `david` keeps question delivery ON (zbynek/marek
+        # are owner-scoped OFF — a ❓ whose PRIMARY owner is off POSTs nothing,
+        # primary + mirrors, so it would resolve zero --channel-id calls). The
+        # mirror still fans out under a delivering primary, exercising the
+        # per-mirror --kind questions resolution this test locks.
+        (d / ".env").write_text("DISCORD_MIRROR_DAVID=marek\n")
         env = {**os.environ, "PATH": str(shimdir) + os.pathsep + os.environ["PATH"],
-              "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek",
+              "HOME": home, "AIRULESET_NOTIFY_OWNER": "david",
               "DISCORD_NOTIFY_DRYRUN": "1", "ND_EMOJI": "❓", "ND_TEXT": "t",
               "ND_CWD": "/tmp"}
         subprocess.run(["bash", str(self.SEND_HOOK)], input="", text=True,
                        capture_output=True, env=env)
         lines = log.read_text().splitlines() if log.exists() else []
         calls = [ln for ln in lines if "--channel-id" in ln]
-        # primary (zbynek) + mirror (marek) = 2 --channel-id calls this sweep
+        # primary (david) + mirror (marek) = 2 --channel-id calls this sweep
         self.assertEqual(len(calls), 2, log.read_text())
         for ln in calls:
             toks = ln.split()

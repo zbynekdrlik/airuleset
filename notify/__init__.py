@@ -348,6 +348,36 @@ def stream_redirect(raw_owner):
     return STREAM_NOTIFY_OWNER.get(raw_owner, raw_owner)
 
 
+# #710 (owner directive 2026-08-26): owners whose ❓ QUESTION Discord delivery is
+# turned OFF — they take questions in webterm + the footer `U N` (in-session ❓
+# markers + the #606 step-by-step delivery), NOT a phone ping. The DISCORD POST
+# of a `kind="questions"` ping is suppressed for these owners; the session ❓
+# marker discipline, the question-map CODE and `needs-answer` tracking are
+# untouched, and a TICKET-CARRYING question still folds into the footer `U N`
+# via its `needs-answer` label. KNOWN bounded gap (#716): a genuinely TICKETLESS
+# ❓ is no longer recorded in `discord-questions.json` (the record is coupled to
+# a successful Discord POST via the returned message-id, which `record_question`
+# requires to be a real snowflake), so it surfaces only in webterm (the session
+# ❓ marker), not the `U N` ticketless fold — #716 preserves that fold. Owner
+# `david` (and david1-4 -> `david`) keeps FULL question delivery, so it is
+# deliberately NOT in this set.
+QUESTION_PING_OWNERS_OFF = frozenset({"zbynek", "marek"})
+
+
+def question_ping_off(owner):
+    """True when a ❓ QUESTION ping to `owner`'s Discord thread must be
+    SUPPRESSED (#710). Normalised via `stream_redirect` so a stream persona
+    whose questions ROUTE INTO claude-zbynek / claude-marek (montalu5/montalu1/
+    simap1 -> zbynek, ...) is classified by its real THREAD owner and is off
+    too, while david1-4 -> `david` passes through and stays ON. Empty/None/
+    unknown owner -> False (never suppress on "don't know" — the safe direction:
+    a spurious ping is one extra line, a wrong suppression is a lost question).
+    Never raises."""
+    if not owner:
+        return False
+    return stream_redirect(str(owner).strip().lower()) in QUESTION_PING_OWNERS_OFF
+
+
 def notification_channel(env=None, owner=None, kind="default", project=None):
     """Resolve the Discord channel/THREAD id to POST to for the current owner.
 
@@ -2859,6 +2889,24 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     # (a tmux re-query between them could otherwise disagree).
     if owner is None:
         owner = resolve_owner()
+
+    # #710: owner-scoped QUESTION-ping suppression (the watchdog re-ask / digest
+    # transport — every `send(kind="questions")` caller). Gated AFTER owner
+    # resolution but BEFORE the keyless-key derivation / dedup claim / channel
+    # resolution / network, mirroring the #546 alert-class gate: a suppressed
+    # question POSTs NOTHING, returns "suppressed", and logs one explicit
+    # decision (never a silent drop — the #134/#546 machine-channel split). Only
+    # `kind="questions"` for an OFF owner is affected; a ✅ / any other kind to
+    # the same owner is untouched, and david keeps FULL question delivery. The
+    # interactive Stop-hook ❓ path never routes through send() — it is gated
+    # separately, on the SAME `question_ping_off` predicate, in
+    # hooks/notify-discord-send.sh.
+    if kind == "questions" and question_ping_off(owner):
+        if not dry_run:
+            log_delivery("suppressed", kind="question-ping",
+                         key=dedup_key or "",
+                         reason="#710 owner-directed: %s" % (owner or "?"))
+        return ("suppressed", None) if return_message_id else "suppressed"
 
     # #559: a keyless send used to bypass dedup AND trace entirely (logged
     # key=-). Auto-derive a bounded-window content-hash key so it becomes
