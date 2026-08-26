@@ -484,7 +484,10 @@ back off: a server-side rate-limit error, box memory pressure, or CC's own max-c
 ceiling. A CI-waiting lane costs no local capacity (CI runs on dynamic autoscaled VPS runners —
 capacity is not local) — but under batch mode the BATCH BOUNDARY, not CI capacity, paces dispatch:
 an in-flight integration CI waiter keeps a live background task, so it holds the drained boundary
-(and thus the next batch) open until it lands. What a rate-limit signal actually looks like,
+(and thus the next batch) open until it lands — UNLESS it qualifies for the **#730 waiver** (a
+RE-DERIVABLE waiter, its whole state in a durable anchor: `TaskStop` it, `compact-request --self`,
+relaunch from that anchor — see Step 5), which never lets a boundary sit uncompacted indefinitely.
+What a rate-limit signal actually looks like,
 measured (2026-08-08, this repo's own dogfooding): a burst of 4 parallel worktree workers ran with
 no rate-limit kills (it did hit a benign doc-append merge conflict at integration, resolved
 keep-both per `docs/autopilot-log.md` — unrelated to rate limiting); a LATER burst of 5 workers
@@ -541,7 +544,7 @@ at all this turn. The bundling gate (`autonomous-batch-issue-development.md`) pl
 heuristic together are the whole answer to "which issues share one lane" — this ticket found no
 gap in either.
 
-**Batch dispatch — up to 5 lanes, NO refill while a batch is open (#723, deliberately reverses #456's continuous refill FOR autopilot).** DISPATCH is BATCHED, not continuous: at the START of a batch (a turn with NO batch open) — while unworked bundle-safe backlog remains — assemble up to 5 bundle-safe units (per-lane procedure below — bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane in this batch) and dispatch each into a fresh `isolation: "worktree"` lane, all in the SAME message. Then NO new lane is dispatched while the batch is open — a returned lane is integrated SERIALLY (Step 4) but NOT replaced. When the WHOLE batch has returned + integrated — ZERO live background tasks, meaning no lane still running AND no in-flight integration CI waiter — the main session compacts at that clean boundary (Step 5) and the NEXT turn dispatches the next batch of up to 5. The trade-off vs #456 (named honestly): a batch waits for its SLOWEST lane before the next batch starts (a small tail-lane wall-clock cost), accepted in exchange for a bounded main-session context and a compact that can NEVER break task handles / the armed goal (CC #29193 unfixed as of CC 2.1.246). Two research facts make this SAFE (comment on #723): a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes and dispatches the next batch; and the ONLY moment a compact is safe is with ZERO live background tasks (CC #29193 — the task-handle registry is dropped on a mid-fleet compact, notifications lost, exactly what the drained batch boundary avoids). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the batch-dispatch decision.
+**Batch dispatch — up to 5 lanes, NO refill while a batch is open (#723, deliberately reverses #456's continuous refill FOR autopilot).** DISPATCH is BATCHED, not continuous: at the START of a batch (a turn with NO batch open) — while unworked bundle-safe backlog remains — assemble up to 5 bundle-safe units (per-lane procedure below — bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane in this batch) and dispatch each into a fresh `isolation: "worktree"` lane, all in the SAME message. Then NO new lane is dispatched while the batch is open — a returned lane is integrated SERIALLY (Step 4) but NOT replaced. When the WHOLE batch has returned + integrated — ZERO live background tasks, meaning no lane still running AND no in-flight integration CI waiter that ISN'T covered by the **#730 waiver** (a RE-DERIVABLE waiter — whole state in a durable anchor — is `TaskStop`ped and relaunched from that anchor right after the compact, never left holding the boundary open; worker lanes get NO such waiver — see Step 5) — the main session compacts at that clean boundary (Step 5) and the NEXT turn dispatches the next batch of up to 5. The trade-off vs #456 (named honestly): a batch waits for its SLOWEST lane before the next batch starts (a small tail-lane wall-clock cost), accepted in exchange for a bounded main-session context and a compact that can NEVER break task handles / the armed goal (CC #29193 unfixed as of CC 2.1.246). Two research facts make this SAFE (comment on #723): a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes and dispatches the next batch; and the ONLY moment a compact is safe is with ZERO live background tasks (CC #29193 — the task-handle registry is dropped on a mid-fleet compact, notifications lost, exactly what the drained batch boundary avoids). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the batch-dispatch decision.
 
 1. **Per lane SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
@@ -1011,6 +1014,34 @@ gap in either.
    on a long (>30 min) batch lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
    every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT drained
    boundary — never lost, just not strictly deterministic per boundary.
+   **WAIVER — a RE-DERIVABLE waiter never holds a drained boundary open forever (#730, owner
+   incident 2026-08-26): gk `/autopilot-master` crossed batch 1 → drain → batch 2 → drain →
+   batch 3 with ZERO compacts, because a release-lane waiter — shadow rerun → deploy →
+   lock-retry — spanned EVERY drained boundary; doctrinally correct under the old absolute
+   "zero live tasks" text, and exactly risk #1 named in the #727 design comment (an
+   eternally-live background job holds the boundary open forever).** A background task earns
+   this waiver ONLY as a **RE-DERIVABLE WAITER** — a CI/release/deploy/lock watcher whose
+   ENTIRE state lives in a durable, externally-readable resource (a `gh run id`, a
+   release/promotion ticket, a lock target) such that `ci-monitoring.md`'s own post-compaction
+   recovery doctrine ALREADY mandates re-deriving it from that resource and relaunching a fresh
+   waiter — never a task holding state only in its own process memory. **Worker LANES get NO
+   waiver — they are drained exactly as today, no exception.** At a batch boundary where the
+   ONLY live background tasks are re-derivable waiters:
+   1. Record the durable anchor(s) — run-id / ticket / lock target — in ONE line of the turn,
+      so relaunch afterward is trivial.
+   2. `TaskStop` those waiters DELIBERATELY. This is the ONLY thing that changes —
+      `watchdog/compact.py`'s live-tasks veto itself is NOT touched, not by one line: CC #29193
+      is still respected LITERALLY. The boundary becomes genuinely ZERO live tasks BECAUSE the
+      waiters were stopped, never because the veto was loosened.
+   3. Run `compact-request --self` on this now genuinely-drained boundary, exactly as above.
+   4. After the compact, RELAUNCH each waiter fresh from its durable anchor (`gh run view <id>`
+      / re-read the release ticket / re-check the lock) — precisely the recovery
+      `ci-monitoring.md` already mandates after ANY compaction, so this triggers existing
+      doctrine, it does not add new machinery.
+   Cost = one waiter restart per boundary; gain = the whole point of #723 — bounded supervisor
+   context. **A drained batch boundary must NEVER be crossed into the next batch uncompacted
+   just because a re-derivable watch/poll waiter spans it** — that silent drift (three full
+   batches, zero compacts) is the exact incident this waiver closes.
 
 ### Bounce nudge-ack — an injected prompt while the loop runs (ACK it; never work it inline)
 
