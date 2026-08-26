@@ -173,16 +173,50 @@ class TestOpus5BanLineup(TestCase):
         # rule ever reaches for the bare `opus` alias again:
         self.assertIn("`opus` alias", t)
 
-    def test_implementation_tier_is_opus_4_8(self):
-        # #715: the IMPLEMENTATION phase (the actual work) runs Opus 4.8 /
-        # Sonnet 5 and NEVER Fable -- the implementing worker never carries a
-        # model:"fable" override, on any repo.
+    def test_implementation_tier_default_sonnet_escalate_opus_4_8(self):
+        # #721 (burn phase 2 after #715): the IMPLEMENTATION phase defaults to
+        # Sonnet 5 for a SETTLED-DESIGN ticket; it escalates to Opus 4.8 only
+        # when the implementation itself carries complexity (named, testable
+        # criteria). It STILL never runs Fable -- the implementing worker never
+        # carries a model:"fable" override, on any repo. #715's flat
+        # "implementation = Opus 4.8" default is retired.
         t = read(MODULE)
         self.assertIn(
-            "IMPLEMENTATION (the actual work) = Opus 4.8 (`claude-opus-4-8`)", t)
+            "IMPLEMENTATION (the actual work) = Sonnet 5 by DEFAULT for a "
+            "settled-design ticket", t)
+        # the no-Fable-on-worker invariant (from #715) STAYS:
         self.assertIn(
             'implementing worker NEVER carries a `model: "fable"` override', t)
+        # the five escalation criteria are all named and testable:
+        self.assertIn("multi-component change", t)
+        self.assertIn("concurrency", t)
+        self.assertIn("security boundary", t)
+        self.assertIn("hard-debug lane", t)
+        self.assertIn("prior Sonnet worker already failed on this ticket", t)
+        # fail-safe direction preserved (unsure -> the higher tier):
+        self.assertIn("when in doubt, Opus 4.8", t)
+        # #715's flat "implementation = Opus 4.8" default is retired as the
+        # LIVE default (the whole point of #721):
+        self.assertNotIn(
+            "IMPLEMENTATION (the actual work) = Opus 4.8 (`claude-opus-4-8`)", t)
+        # the old banned Sonnet-execution phrasing stays banned:
         self.assertNotIn("EXECUTION of settled, scoped code = Sonnet 5", t)
+
+    def test_implementation_tier_mechanism_frontmatter_pin_is_escalation(self):
+        # #721 mechanism (the design decision this ticket owns): the
+        # autopilot-worker frontmatter STAYS pinned claude-opus-4-8 = the
+        # escalation tier AND the fail-safe default. The supervisor downtiers
+        # to Sonnet 5 with an explicit model:"sonnet" for a settled-design
+        # ticket; it OMITS the param (pin stands -> Opus 4.8) to escalate.
+        # This is the only mechanically-enforceable shape: the opus alias is
+        # banned and 4.8 has NO param alias, so 4.8 can ONLY be reached by the
+        # pin (dispatch AS-IS), never by a param -- which also makes the
+        # fail-safe direction UP (forget-to-classify -> Opus 4.8, never lower).
+        t = read(MODULE)
+        self.assertIn('`model: "sonnet"`', t)
+        self.assertIn("escalation tier", t)
+        self.assertIn("fail-safe default", t)
+        self.assertIn("frontmatter stays pinned `model: claude-opus-4-8`", t)
 
     def test_sonnet_never_complex(self):
         t = read(MODULE)
@@ -296,11 +330,21 @@ class TestWorkflowStageTiering(TestCase):
         self.assertIn("never bake in an ungated Fable stage", t)
         self.assertRegex(t, r"CLOSED[^\n]*claude-opus-4-8")
 
-    def test_execution_stages_are_opus_4_8(self):
+    def test_execution_stages_default_sonnet_escalate_opus_4_8(self):
+        # #721: a Workflow ROUTINE EXECUTION stage (a settled plan / the actual
+        # work) defaults to Sonnet 5 and escalates to Opus 4.8 on complexity --
+        # the same settled-vs-complex split as the autopilot worker. It still
+        # NEVER runs Fable (the per-phase invariant from #715 stays). #715's
+        # flat "execution stage = claude-opus-4-8" default is retired.
         t = read(TOOLING)
         self.assertIn("EXECUTION stages", t)
-        self.assertIn("opts.model: 'claude-opus-4-8'", t)
-        self.assertNotIn("`opts.model: 'sonnet'` (= Sonnet 5)", t)
+        self.assertIn("code transforms/migrations → `opts.model: 'sonnet'`", t)
+        self.assertIn("ESCALATE the stage to `opts.model: 'claude-opus-4-8'`", t)
+        # the flat opus-4.8 execution default is retired:
+        self.assertNotIn(
+            "code transforms/migrations → `opts.model: 'claude-opus-4-8'`", t)
+        # the per-phase Fable invariant survives (execution never runs Fable):
+        self.assertIn("NEVER runs Fable", t)
 
     def test_no_opus_alias_stage(self):
         self.assertNotIn("opts.model: 'opus'", read(TOOLING))
@@ -314,12 +358,21 @@ class TestWorkflowStageTiering(TestCase):
 class TestDispatchSurfacesRewritten(TestCase):
     """Every dispatch-instructing surface names the new lineup."""
 
-    def test_autopilot_worker_pinned_to_opus_4_8(self):
+    def test_autopilot_worker_frontmatter_pin_and_default_sonnet(self):
+        # #721: the frontmatter pin STAYS claude-opus-4-8 (the escalation tier
+        # + fail-safe default -- the only way to reach 4.8 on a dispatch, since
+        # the opus alias is banned and 4.8 has no param alias). The worker RUNS
+        # on Sonnet 5 by default: the supervisor downtiers it with an explicit
+        # model:"sonnet" for a settled-design ticket, and dispatches it AS-IS
+        # (frontmatter pin -> Opus 4.8) to escalate for complexity.
         w = read("agents/autopilot-worker.md")
         fm = w.split("---")[1]
-        self.assertIn("model: claude-opus-4-8", fm)
-        self.assertNotIn("model: sonnet", fm)
-        self.assertIn("You run on Opus 4.8", w)
+        self.assertIn("model: claude-opus-4-8", fm)   # pin stays 4.8
+        self.assertNotIn("model: sonnet", fm)          # never in frontmatter
+        self.assertIn("You run on Sonnet 5 by DEFAULT", w)
+        self.assertIn('the supervisor passes `model: "sonnet"`', w)
+        # #715's flat "You run on Opus 4.8" body claim is retired:
+        self.assertNotIn("You run on Opus 4.8", w)
 
     def test_ticket_validator_pinned_to_opus_4_8(self):
         v = read("agents/ticket-validator.md")
@@ -361,6 +414,14 @@ class TestDispatchSurfacesRewritten(TestCase):
         self.assertNotIn("Model = Sonnet 5 by default", s)
         self.assertNotIn('`model: "opus"`', s)
         self.assertNotIn("`model: opus`", s)
+        # #721: the implementation worker defaults to Sonnet 5 for a
+        # settled-design ticket (explicit model:"sonnet"), escalating to
+        # Opus 4.8 (dispatched AS-IS, frontmatter pin) for complexity. The
+        # supervisor never names a param for 4.8 (opus alias banned).
+        self.assertIn('`model: "sonnet"`', s)
+        self.assertIn("Sonnet 5 by default", s)
+        self.assertIn("settled-design", s)
+        self.assertIn("prior Sonnet worker already failed on this ticket", s)
 
     def test_fable_advisor_gate_closed_falls_back_to_opus_4_8(self):
         a = read(ADVISOR)
