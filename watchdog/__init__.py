@@ -1814,6 +1814,8 @@ from watchdog.repo_health import (  # noqa: E402
     REPO_SWEEP_BATCH_MAX as REPO_SWEEP_BATCH_MAX,
     net_drift_alarm as net_drift_alarm,
     NET_DRIFT_THRESHOLD as NET_DRIFT_THRESHOLD,
+    _repo_owner_from_panes as _repo_owner_from_panes,   # #717
+    _alert_recipient as _alert_recipient,               # #717
     stuck_main_sweep as stuck_main_sweep,
     _stuck_main_skip_set as _stuck_main_skip_set,
     STUCK_MAIN_AGE_S as STUCK_MAIN_AGE_S,
@@ -4104,6 +4106,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                       send_fn=send_fn, dry_run=dry_run,
                                       delivery_probe=delivery_probe,
                                       owner_by_sid=owner_by_sid,
+                                      owner_by_cwd=owner_by_cwd,          # #717
+                                      owners_seen=owners_seen,            # #717
+                                      account_owner=account_owner,        # #717
                                       project_by_sid=project_by_sid, authority=_box_authority()),  # #667
          "delivery-stall error")
 
@@ -4157,6 +4162,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
          lambda: net_drift_alarm(now, state, send_fn=send_fn,
                                  dry_run=dry_run, repo_roots=repo_roots,
                                  issue_counts_fetch=issue_counts_fetch,
+                                 owner_by_cwd=owner_by_cwd,          # #717
+                                 owners_seen=owners_seen,            # #717
+                                 account_owner=account_owner,        # #717
                                  persist=lambda: save_state(state_path, state)),
          "net-drift error")
 
@@ -4173,6 +4181,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
          lambda: stuck_main_sweep(now, state, send_fn=send_fn,
                                   dry_run=dry_run, repo_roots=repo_roots,
                                   git_fetch=git_fetch,
+                                  owner_by_cwd=owner_by_cwd,          # #717
+                                  owners_seen=owners_seen,            # #717
+                                  account_owner=account_owner,        # #717
                                   persist=lambda: save_state(state_path, state)),
          "stuck-main error")
 
