@@ -361,6 +361,30 @@ fi
 if [ "$KIND" = "questions" ] && [ -n "$PRIMARY_OWNER" ] \
    && [ "$(python3 "$AIRULESET_PY" notify --question-ping-off --owner-name "$PRIMARY_OWNER" 2>/dev/null || echo 0)" = "1" ]; then
     _delivery_log "suppressed" "#710-question-ping-off-owner=${PRIMARY_OWNER}"
+    # #716: the POST is suppressed, but a genuinely-TICKETLESS ❓ from an OFF
+    # owner (zbynek/marek) must still fold into the footer `U N` — the surface
+    # #710 redirected them to. Record a Discord-LESS "suppressed" map entry
+    # (a synthetic non-snowflake key keyed on the session, channel-less) so
+    # `statusbar.ticketless_question_pings` counts it. Only on the ❓ Stop-hook
+    # path (ND_SESSION_ID set); pipe CONTENT_BASE (header + question, no
+    # per-target @mention — record_question strips mentions anyway) so the
+    # fold's #N dedup and `question_map_ticket_refs` see the same text a
+    # delivered ❓ would carry. Best-effort — never blocks the exit; a
+    # ticket-carrying ❓ is deduped OUT of the ticketless fold by statusbar
+    # itself, exactly as a delivered one is.
+    #
+    # #716 review 🟡1: dry-run-GATED — the dry-run early-return lives INSIDE
+    # emit_one, which the #710 block never reaches (it exit-0s first), so
+    # without this guard a DISCORD_NOTIFY_DRYRUN=1 preview would write a real
+    # `suppressed:<sid>` entry into the live map (a phantom footer U N from a
+    # mere preview). Mirrors the delivered path (records only inside the real
+    # HTTP-2xx branch) and notify.send's own "never dry-run-mutating" #710 gate.
+    if [ -n "${ND_SESSION_ID:-}" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
+        printf '%s' "$CONTENT_BASE" | \
+        python3 "$AIRULESET_PY" notify --record-question --suppressed \
+            --question-stdin --session "$ND_SESSION_ID" --cwd "$CWD" \
+            >/dev/null 2>&1 || true
+    fi
     exit 0
 fi
 

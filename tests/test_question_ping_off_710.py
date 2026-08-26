@@ -11,18 +11,20 @@ Discord transports — the interactive Stop-hook shell path
 watchdog Python `notify.send(kind="questions")` re-ask path — each leaving an
 explicit `suppressed` delivery-log line (never a silent drop, the #546/#704
 machine-channel pattern). Owner **david** (and david1-4 -> david) keeps FULL
-question delivery. Only DISCORD DELIVERY changes: the session ❓ marker
-discipline, the `discord-questions.json` map, `needs-answer` tracking, and the
-footer `U N` partition are all UNTOUCHED.
+question delivery changes here: the session ❓ marker discipline, `needs-answer`
+tracking, and the footer `U N` partition are all UNTOUCHED.
 
 Job 7 (Discord reply -> asking session) is not modified: for david the question
-is still RECORDED in the map (so job 7 routes his replies exactly as before);
-for zbynek/marek nothing is recorded (the POST is suppressed before the record
-step), so job 7 simply has no entry to match — its existing empty-match path, a
-no-op, never an error. These locks assert that record-level contract directly
-(the map has david's entry, none for zbynek/marek) rather than re-driving job 7
-(whose own mechanics are already covered by tests/test_discord_reply.py and are
-byte-for-byte unchanged by this ticket).
+is RECORDED in the map under its Discord message-id (so job 7 routes his replies
+exactly as before); for zbynek/marek the POST is suppressed, so NO Discord-
+message-id-keyed entry is recorded (these locks assert exactly that — `710001`
+etc. is never a map key), and job 7 has nothing snowflake-keyed to match — its
+existing empty-match path, a no-op, never an error. (#716 later adds a SEPARATE
+Discord-LESS `suppressed:<session>` entry so the ticketless ❓ folds into `U N`;
+that non-digit key is still invisible to job 7 — see
+tests/test_question_footer_suppressed_716.py.) These locks assert the
+record-level contract directly rather than re-driving job 7 (whose own mechanics
+are covered by tests/test_discord_reply.py and unchanged by #710).
 """
 
 import json
