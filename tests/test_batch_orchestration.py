@@ -129,6 +129,34 @@ class TestSkillBakesInTheResearchFacts(TestCase):
         self.assertIn("CC 2.1.246", read(SKILL))
 
 
+class TestNoContinuousReversion(TestCase):
+    """Negative lock (review finding, #723): an ADDITIVE re-introduction of the
+    pre-#723 continuous-refill phrasing ALONGSIDE the batch text passes every
+    positive-presence lock above, so guard the exact affirmative phrases too.
+    Scoped to `skills/autopilot/SKILL.md` ONLY — autopilot-master legitimately
+    keeps continuous phrasing, so this is never a repo-wide lock. The current
+    SKILL body uses 'continuous refill' solely inside 'reverses #456's
+    continuous refill' negations, which none of these affirmative phrases hit."""
+
+    BANNED_AFFIRMATIVE = (
+        "refilling to saturation",
+        "refill to saturation",
+        "refills the next lanes",
+        "it refills the next lanes",
+        "keep every lane full",
+        "saturating lanes",
+        "DISPATCH is CONTINUOUS",
+        "CONTINUOUSLY refill",
+        "refills continuously",
+    )
+
+    def test_skill_never_re_adds_the_old_continuous_directive(self):
+        body = read(SKILL)
+        present = [p for p in self.BANNED_AFFIRMATIVE if p in body]
+        self.assertEqual(present, [],
+                         "SKILL re-introduced pre-#723 continuous phrasing: %r" % present)
+
+
 class TestToolingModuleReconciled(TestCase):
     """The always-on max-acceleration module points at the batch boundary
     without re-deriving the doctrine (pointer-class, #701)."""

@@ -481,8 +481,10 @@ subagent, from the SAME account, against the SAME server-side rate limit. So tha
 ACCOUNT-WIDE (one rate limit shared by everything the account runs, workers and read-only helpers
 alike), never per lane, never per repo — and if even the 5-lane batch plus its validators hits it,
 back off: a server-side rate-limit error, box memory pressure, or CC's own max-concurrent-subagents
-ceiling. A CI-waiting lane is NOT a local slot and never bounds new dispatch (CI runs on dynamic
-autoscaled VPS runners — capacity is not local). What a rate-limit signal actually looks like,
+ceiling. A CI-waiting lane costs no local capacity (CI runs on dynamic autoscaled VPS runners —
+capacity is not local) — but under batch mode the BATCH BOUNDARY, not CI capacity, paces dispatch:
+an in-flight integration CI waiter keeps a live background task, so it holds the drained boundary
+(and thus the next batch) open until it lands. What a rate-limit signal actually looks like,
 measured (2026-08-08, this repo's own dogfooding): a burst of 4 parallel worktree workers ran with
 no rate-limit kills (it did hit a benign doc-append merge conflict at integration, resolved
 keep-both per `docs/autopilot-log.md` — unrelated to rate limiting); a LATER burst of 5 workers
@@ -526,9 +528,10 @@ unsafe to use.
 long-CI repos (#332).** Fleet parallelism is a PURE WIN on a `dev`→`main` PR repo with a genuinely
 long CI, at least as much as on a fast one: each integration cycle's ONE CI (repo-flow policy
 above) is paid exactly once no matter how many lanes built the branches feeding it, so
-parallelizing the IMPLEMENTATION phase never costs anything on the CI side — it only saves
-wall-clock, and a CI-waiting lane never blocks dispatch of the next one (dynamic autoscaled VPS
-runners — CI capacity is not local). The supervisor's own CI wait during a cycle is its own
+parallelizing the IMPLEMENTATION phase within a batch never costs anything on the CI side — it only
+saves wall-clock across the batch's lanes, and a CI-waiting lane costs no local capacity (dynamic
+autoscaled VPS runners — CI capacity is not local); the batch boundary, not CI capacity, is what
+paces the NEXT batch. The supervisor's own CI wait during a cycle is its own
 long-lived job and follows `ci-monitoring.md`'s short-wait-foreground / long-wait-background split
 exactly like any other CI wait (the supervisor, never a worker, is the component a
 `run_in_background` poll safely re-invokes across a long wait). Fleet dispatch genuinely is NOT
@@ -578,11 +581,11 @@ gap in either.
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
    are independent, so validate them in parallel, **but they are the SAME account-wide rate-limited
-   agents as the worker fleet (the no-fixed-cap section above): SATURATE, and back off ONLY on a
-   real resource signal — staggering the validators PLUS workers into sequential WAVES when a
-   rate-limit error, box memory pressure, or CC's max-subagents ceiling hits, never a fixed number
-   (#456).** A validator KILLED by a rate limit (or any
-   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the round — treat
+   agents as the worker fleet (the Batch cap section above): bounded by this batch's own membership,
+   they stagger into sequential WAVES only when a real resource signal — a rate-limit error, box
+   memory pressure, or CC's max-subagents ceiling — hits
+   (#332/#723).** A validator KILLED by a rate limit (or any
+   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the batch — treat
    that ONE member exactly as if Step 1b had simply been skipped for it (the worker's own Step 0
    re-validation, `verify-issue-still-valid.md`, mechanically backstops every member regardless of
    whether Step 1b ran — #213), and dispatch its worker normally without a Step 1b verdict. Branch
@@ -643,7 +646,10 @@ gap in either.
    direction.
 2. **Dispatch the ROUND — one in-session BACKGROUND `autopilot-worker` PER assembled batch, each
    `isolation: "worktree"`, all fired in the SAME message (multiple Agent tool_use blocks — this
-   is what makes them run concurrently rather than one-after-another).** For each batch:
+   is what makes them run concurrently rather than one-after-another).** (Vocabulary note, #723: this
+   "ROUND" IS the batch of up to 5 worktree lanes, and each "batch"/unit below is ONE lane's own
+   bundle-safe issue set — the legacy bundling term; a fuller terminology disambiguation is tracked
+   in #724.) For each batch:
    `subagent_type: autopilot-worker`, **`run_in_background: true`**, **`isolation: "worktree"`**
    (the default; omit it only for the documented serial fallback above) — this keeps your main
    session FREE + thin while every worker runs, each worker stays VISIBLE in the agent strip, and
@@ -979,7 +985,12 @@ gap in either.
    stream might not have recognized it applies to its hand-off turns too.
    **The `/goal` loop's NEXT fire re-enters Step 1 for the next batch** — do NOT chain into Step 1
    within this same turn anymore. Do NOT re-run `/issue-planner`; do NOT hand-type `/compact` yourself
-   (the watchdog handles the timing once the pane goes idle).
+   (the watchdog handles the timing once the pane goes idle). **Compact delivery is NOT
+   instantaneous / per-boundary deterministic:** `compact-request --self` RECORDS a request the
+   watchdog types in the drained boundary's idle window (~60s tick); a request that misses the window
+   on a long (>30 min) batch lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
+   every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT drained
+   boundary — never lost, just not strictly deterministic per boundary.
 
 ### Bounce nudge-ack — an injected prompt while the loop runs (ACK it; never work it inline)
 

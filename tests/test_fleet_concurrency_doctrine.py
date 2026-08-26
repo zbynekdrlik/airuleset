@@ -81,11 +81,14 @@ class TestBatchCapWithinBatchResourceSignal(TestCase):
 
 
 class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
-    def test_step_1b_points_at_the_no_fixed_cap_saturation_doctrine(self):
+    def test_step_1b_points_at_the_batch_cap_backoff_doctrine(self):
+        # #723: validators are bounded by the batch's own membership + the Batch
+        # cap section's resource-signal/wave back-off (not the reversed
+        # continuous "no-fixed-cap saturate" wording).
         t = read(AUTOPILOT)
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
-        self.assertIn("no-fixed-cap", w.lower())
+        self.assertIn("batch cap section", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertIn("wave", w.lower())
 
@@ -94,7 +97,7 @@ class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
         self.assertIn("NEVER re-dispatched", w)
-        self.assertIn("NEVER blocks the round", w)
+        self.assertIn("NEVER blocks the batch", w)
         self.assertIn("Step 0", w)
 
 

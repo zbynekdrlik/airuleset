@@ -574,7 +574,7 @@ class TestBatchDispatchMandate(TestCase):
 
     autopilot-MASTER is NOT in this ticket's scope: its LANE 1 review-watch +
     LANE 2 release are long-lived and never drain to zero, so batch mode needs
-    its OWN separate design (filed as a follow-up). So the SKILL_MASTER
+    its OWN separate design (filed as #724). So the SKILL_MASTER
     assertions still lock the #456 continuous doctrine, and only the SKILL
     (autopilot) ones move to batch.
 
