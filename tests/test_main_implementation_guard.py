@@ -68,6 +68,28 @@ BLOCK_LOG_PATH = Path("/tmp/airuleset-main-exec-block-%d.log" % os.getuid())
 BYPASS_LOG_PATH = Path("/tmp/airuleset-main-exec-bypass-%d.log" % os.getuid())
 
 
+def _isolated_exec_logs(testcase):
+    """#732: the hook's block/bypass audit logs are the ONLY cross-SESSION
+    shared artifacts it writes — everything else (bypass markers, run
+    counter, presence marker) is SID-keyed and thus unique per session. On
+    the push-gate box the suite runs on a LIVE dev1 where concurrent worker
+    lanes + the supervisor session (all the SAME UID) genuinely arm/consume
+    bypass markers, appending to the SAME per-uid log MID-SUITE — so a test
+    that counts WHOLE-FILE log lines miscounts (the `2 != 1` false push-block,
+    incident 2026-08-26). This hands the test its OWN throwaway log dir;
+    passing it to the hook as AIRULESET_MAIN_EXEC_LOG_DIR redirects BOTH logs
+    there, so no concurrent real fleet session can touch the file this test
+    reads. Returns `(dir, block_log, bypass_log)`; the temp dir outlives the
+    subprocess (cleaned at testcase teardown, never inside the hook run)."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    base = Path(d.name)
+    uid = os.getuid()
+    return (base,
+            base / ("airuleset-main-exec-block-%d.log" % uid),
+            base / ("airuleset-main-exec-bypass-%d.log" % uid))
+
+
 def _entry(role_type, content, **extra):
     d = {"type": role_type}
     d.update(extra)
@@ -996,10 +1018,10 @@ class OneShotBypass80(unittest.TestCase):
         m = self._marker(sid)
         m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        log = BYPASS_LOG_PATH
-        self.assertTrue(log.exists())
-        self.assertTrue([ln for ln in log.read_text().splitlines() if sid in ln],
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
+        self.assertTrue(byp.exists())
+        self.assertTrue([ln for ln in byp.read_text().splitlines() if sid in ln],
                         "a consumed bypass must still be logged")
 
 
@@ -1125,11 +1147,11 @@ class DispatchRatioNudge80(unittest.TestCase):
 
     def test_the_nudge_is_logged(self):
         sid = self._sid("cap10")
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         for _ in range(4):
-            self._run(sid)
-        log = BLOCK_LOG_PATH
-        self.assertTrue(log.exists())
-        mine = [ln for ln in log.read_text().splitlines() if sid in ln]
+            self._run(sid, extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
+        self.assertTrue(block.exists())
+        mine = [ln for ln in block.read_text().splitlines() if sid in ln]
         self.assertTrue(mine, "the nudge must be in the block log")
         self.assertIn("per-dispatch", " ".join(mine))
 
@@ -1148,18 +1170,21 @@ class BlockLogging73(unittest.TestCase):
 
     LOG_PATH = BLOCK_LOG_PATH
 
-    def _lines_for(self, sid):
-        if not self.LOG_PATH.exists():
+    def _lines_for(self, sid, log=None):
+        log = log if log is not None else self.LOG_PATH
+        if not log.exists():
             return []
-        return [ln for ln in self.LOG_PATH.read_text().splitlines() if sid in ln]
+        return [ln for ln in log.read_text().splitlines() if sid in ln]
 
     def test_bash_block_is_logged(self):
         sid = "t-mg-logbash-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
-                          sid=sid, transcript_text=goal_armed_transcript())
+                          sid=sid, transcript_text=goal_armed_transcript(),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        lines = self._lines_for(sid)
+        lines = self._lines_for(sid, block)
         self.assertTrue(lines, "no block-log line for session %s" % sid)
         self.assertIn("Bash", lines[-1])
         self.assertIn("grep", lines[-1])
@@ -1167,40 +1192,48 @@ class BlockLogging73(unittest.TestCase):
 
     def test_edit_block_is_logged(self):
         sid = "t-mg-logedit-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
-        out = helper._run(tool="Edit", sid=sid)
+        out = helper._run(tool="Edit", sid=sid,
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        lines = self._lines_for(sid)
+        lines = self._lines_for(sid, block)
         self.assertTrue(lines, "no block-log line for session %s" % sid)
         self.assertIn("Edit", lines[-1])
 
     def test_goal_armed_write_block_is_logged_with_rule(self):
         sid = "t-mg-logwrite-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Write", sid=sid,
-                          transcript_text=goal_armed_transcript("claude-opus-4-8"))
+                          transcript_text=goal_armed_transcript("claude-opus-4-8"),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        lines = self._lines_for(sid)
+        lines = self._lines_for(sid, block)
         self.assertTrue(lines)
         self.assertIn("GOAL_ARMED", lines[-1])
 
     def test_bypassed_command_is_not_logged_as_block(self):
         sid = "t-mg-logbypass-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
                           sid=sid, bypass="new",
-                          transcript_text=goal_armed_transcript())
+                          transcript_text=goal_armed_transcript(),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertFalse(self._lines_for(sid),
+        self.assertFalse(self._lines_for(sid, block),
                          "bypassed command must not appear in the BLOCK log")
 
     def test_allowed_command_is_not_logged_as_block(self):
         sid = "t-mg-logallow-" + uuid.uuid4().hex[:8]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="gh pr view 42",
-                          sid=sid, transcript_text=goal_armed_transcript())
+                          sid=sid, transcript_text=goal_armed_transcript(),
+                          extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertFalse(self._lines_for(sid),
+        self.assertFalse(self._lines_for(sid, block),
                          "allowed command must not appear in the BLOCK log")
 
 
@@ -1345,9 +1378,11 @@ class AwayEngagement128(unittest.TestCase):
 
     def test_away_block_is_tagged_in_the_block_log(self):
         sid = "t-mg-awaylog-" + uuid.uuid4().hex[:8]
-        self._plain(tool="Bash", command=self.SWEEP, presence_age=1800, sid=sid)
-        log = BLOCK_LOG_PATH
-        lines = [ln for ln in log.read_text().splitlines() if sid in ln]
+        logdir, block, _byp = _isolated_exec_logs(self)   # #732
+        self._plain(tool="Bash", command=self.SWEEP, presence_age=1800, sid=sid,
+                    extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
+        lines = [ln for ln in block.read_text().splitlines() if sid in ln] \
+            if block.exists() else []
         self.assertTrue(lines, "away block was not logged")
         self.assertIn("USER_AWAY", lines[-1])
 
@@ -1377,13 +1412,20 @@ class BypassCarriesAReason128(unittest.TestCase):
         return Path("/tmp/airuleset-%s-exec-ok-%s"
                     % ("fable" if legacy else "main", sid))
 
-    def _run(self, sid, command="grep -rn 'TODO' ."):
+    def _run(self, sid, command="grep -rn 'TODO' .", logdir=None):
+        # #732: `logdir` set -> redirect BOTH audit logs into a dir this test
+        # owns (via AIRULESET_MAIN_EXEC_LOG_DIR), so a whole-file log count is
+        # immune to concurrent fleet bypasses. None -> the real shared /tmp
+        # path, unchanged.
         helper = MainImplementationGuard()
+        extra_env = ({"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)}
+                     if logdir is not None else None)
         return helper._run(tool="Bash", command=command, sid=sid,
-                           transcript_text=goal_armed_transcript())
+                           transcript_text=goal_armed_transcript(),
+                           extra_env=extra_env)
 
-    def _bypass_lines(self, sid):
-        log = BYPASS_LOG_PATH
+    def _bypass_lines(self, sid, log=None):
+        log = log if log is not None else BYPASS_LOG_PATH
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
@@ -1434,8 +1476,9 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines, "a refused marker must be logged")
         self.assertIn("refused", lines[-1])
 
@@ -1444,24 +1487,61 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("terminal driver spike — needs the live rig in main")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines)
         self.assertIn("terminal driver spike", lines[-1],
                       "the audit must be able to read WHY, from the log alone")
 
     def test_multiline_reason_does_not_break_the_log_format(self):
+        # #732: count on an ISOLATED log dir this test owns (via
+        # AIRULESET_MAIN_EXEC_LOG_DIR), so a concurrent fleet bypass appended
+        # to the shared per-uid log mid-suite can never change this count (the
+        # `2 != 1` push-gate false block, 2026-08-26). The teeth are kept in
+        # full: a reason whose newlines were NOT flattened would still add
+        # extra physical lines HERE, so this still fails on that regression.
+        logdir, _block, bypass = _isolated_exec_logs(self)
         sid = "t-mg-reason-multi-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
         m.write_text("first line of the reason\nsecond line\nthird")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        before = (len(BYPASS_LOG_PATH.read_text().splitlines())
-                  if BYPASS_LOG_PATH.exists() else 0)
-        self._run(sid)
-        after = BYPASS_LOG_PATH.read_text().splitlines()
-        self.assertEqual(len(after) - before, 1,
-                         "one bypass = exactly one log line")
+        self._run(sid, logdir=logdir)
+        after = bypass.read_text().splitlines() if bypass.exists() else []
+        self.assertEqual(len(after), 1, "one bypass = exactly one log line")
         self.assertIn("first line of the reason", after[-1])
+
+    def test_bypass_log_is_redirected_to_an_isolated_dir(self):
+        # #732 regression — PROVES the pollution vector + its fix. The block/
+        # bypass logs are the ONLY cross-SESSION-shared artifacts this hook
+        # writes (everything else is SID-keyed). On the push-gate box,
+        # concurrent lanes + the supervisor (same UID) append to the SAME
+        # per-uid bypass log MID-SUITE, so the whole-file count in the test
+        # above miscounted (the `2 != 1` false push-block, 2026-08-26). Proof
+        # the count is hermetic: with the log redirected into a dir THIS test
+        # owns, the multiline bypass lands there — flattened to EXACTLY ONE
+        # physical line (the newline-split teeth are kept, not weakened) — and
+        # NEVER in the real shared log a concurrent fleet session also writes,
+        # so no concurrent write can change what this test counts.
+        #
+        # RED on unpatched code: the hook ignores AIRULESET_MAIN_EXEC_LOG_DIR,
+        # so the bypass line goes to the real /tmp log, the isolated log stays
+        # empty (0 != 1), and the real-log assertion below also trips.
+        logdir, _block, bypass = _isolated_exec_logs(self)
+        sid = "t-mg-reason-isolated-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text("first line of the reason\nsecond line\nthird")
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._run(sid, logdir=logdir)
+        mine = bypass.read_text().splitlines() if bypass.exists() else []
+        self.assertEqual(len(mine), 1,
+                         "the bypass must be logged to the ISOLATED dir, "
+                         "flattened to exactly one physical line — redirected "
+                         "off the shared per-uid log")
+        self.assertIn("first line of the reason", mine[0])
+        self.assertFalse(self._bypass_lines(sid),
+                         "a redirected bypass must never touch the real shared "
+                         "log a concurrent fleet session writes")
 
     def test_legacy_marker_needs_a_reason_too(self):
         sid = "t-mg-reason-legacy-" + uuid.uuid4().hex[:8]
@@ -1486,8 +1566,9 @@ class BypassCarriesAReason128(unittest.TestCase):
         sid = "t-mg-arm-echolog-" + uuid.uuid4().hex[:8]
         cmd = ('printf %%s "reason: policy authoring" '
                '> /tmp/airuleset-main-exec-ok-%s' % sid)
-        self._run(sid, command=cmd)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, command=cmd, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines, "arming must be logged")
         self.assertIn("bypass-arm", lines[-1])
 
@@ -1522,8 +1603,9 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("dôvod: písanie politiky — obsah je úsudok")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        self._run(sid)
-        lines = self._bypass_lines(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        self._run(sid, logdir=logdir)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines)
         self.assertIn("písanie politiky", lines[-1])
 
@@ -1569,6 +1651,12 @@ class GoalArmedJqFails180(unittest.TestCase):
 
     def test_jq_failure_reading_the_goal_marker_blocks_not_allows(self):
         sid = "t-mg-jqfail-goal-" + uuid.uuid4().hex[:8]
+        # #732: redirect the block log into an isolated dir this test owns —
+        # its read below is sid-filtered (immune), but redirecting keeps the
+        # WHOLE file off the real shared /tmp log per the #711 mandate, so a
+        # future edit turning this presence check into a count can't re-open
+        # the pollution vector. The dir outlives the `with` (addCleanup).
+        logdir, block, _byp = _isolated_exec_logs(self)
         with TemporaryDirectory() as d:
             tp = str(Path(d) / "sess.jsonl")
             # a PLAIN, non-Fable, no-goal-marker transcript -- with a
@@ -1585,6 +1673,7 @@ class GoalArmedJqFails180(unittest.TestCase):
                        "transcript_path": tp}
             env = dict(os.environ)
             env["PATH"] = stubdir + ":" + env["PATH"]
+            env["AIRULESET_MAIN_EXEC_LOG_DIR"] = str(logdir)   # #732
             out = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                                  env=env, capture_output=True, text=True)
         self.assertEqual(
@@ -1599,7 +1688,7 @@ class GoalArmedJqFails180(unittest.TestCase):
         # must be the DISTINCT GOAL_UNKNOWN, never GOAL_ARMED -- an audit
         # reading the log must never be told a goal was armed when the
         # truth is "the transcript could not be read".
-        block_log = BLOCK_LOG_PATH
+        block_log = block
         self.assertTrue(block_log.exists(), "the block must be logged")
         lines = [ln for ln in block_log.read_text().splitlines() if sid in ln]
         self.assertTrue(lines, "expected a block log line for this session")
@@ -1651,8 +1740,8 @@ class BypassReasonJqFails180(unittest.TestCase):
     def _marker(self, sid):
         return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
 
-    def _bypass_lines(self, sid):
-        log = BYPASS_LOG_PATH
+    def _bypass_lines(self, sid, log=None):
+        log = log if log is not None else BYPASS_LOG_PATH
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
@@ -1670,15 +1759,17 @@ class BypassReasonJqFails180(unittest.TestCase):
         stubdir = _stub_jq_dir(self, ".[0:200]")
         env = dict(os.environ)
         env["PATH"] = stubdir + ":" + env["PATH"]
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .", sid=sid,
                           transcript_text=goal_armed_transcript(),
-                          extra_env={"PATH": env["PATH"]})
+                          extra_env={"PATH": env["PATH"],
+                                     "AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(
             out.returncode, 2,
             "a jq failure must never accidentally HONOR a bypass it "
             "couldn't actually read: " + out.stdout + out.stderr)
-        lines = self._bypass_lines(sid)
+        lines = self._bypass_lines(sid, byp)
         self.assertTrue(lines, "the refusal must be logged")
         self.assertIn(
             "FAILED", lines[-1],
@@ -2178,7 +2269,13 @@ class CrossUserLogPathCollision492(unittest.TestCase):
     the exit status), the `Permission denied` LEAKS to stderr, which Claude
     Code surfaces as a `PreToolUse:Bash hook error` on every block. Fix:
     per-user (`-<uid>`) path so each user owns their own accumulating file,
-    plus a brace-group redirect so an unwritable log can never leak again."""
+    plus a brace-group redirect so an unwritable log can never leak again.
+
+    #732 note: this class deliberately does NOT set AIRULESET_MAIN_EXEC_LOG_DIR
+    — it asserts the DEFAULT `/tmp/airuleset-main-exec-*-<uid>.log` naming and
+    its EACCES-leak hardening, which is exactly the behaviour the #732 env seam
+    falls back to when unset. All its reads are sid-filtered, so concurrent
+    fleet writes to the shared default log never affect them."""
 
     UID = os.getuid()
     BLOCK_LOG = Path("/tmp/airuleset-main-exec-block-%d.log" % UID)
@@ -2263,6 +2360,58 @@ class CrossUserLogPathCollision492(unittest.TestCase):
             transcript_text=goal_armed_transcript())
         self.assertEqual(out.returncode, 2, out.stderr)
         self.assertNotIn("Permission denied", out.stderr, out.stderr)
+
+
+class LogDirSeamFailSafe732(unittest.TestCase):
+    """#732 review-fix: a BAD AIRULESET_MAIN_EXEC_LOG_DIR override (root `/`
+    whose trailing slash strips to the empty string, or an existing but
+    UNWRITABLE dir) must FALL BACK to /tmp — never silently lose the audit
+    line to `/` or to a dir it cannot write — while the block DECISION stays
+    unaffected (it never reads the log path). These lock the strip-then-
+    nonempty + `[ -w ]` guards added after the adversarial review; each is
+    RED without its guard (the line goes to `/`/the unwritable dir -> lost ->
+    absent from /tmp) and GREEN with it. Reads are sid-filtered, so concurrent
+    fleet writes to the shared /tmp log never affect them (the same immune
+    pattern as CrossUserLogPathCollision492)."""
+
+    def _run_blocked(self, sid, logdir_env):
+        return MainImplementationGuard()._run(
+            tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+            transcript_text=goal_armed_transcript(),
+            extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": logdir_env})
+
+    def _in_real_block_log(self, sid):
+        if not BLOCK_LOG_PATH.exists():
+            return []
+        return [ln for ln in BLOCK_LOG_PATH.read_text().splitlines() if sid in ln]
+
+    def test_root_slash_override_falls_back_to_tmp(self):
+        sid = "t-732-rootslash-" + uuid.uuid4().hex[:8]
+        out = self._run_blocked(sid, "/")
+        self.assertEqual(out.returncode, 2, out.stderr)     # block unaffected
+        self.assertTrue(
+            self._in_real_block_log(sid),
+            "root-`/` override must fall back to /tmp, not lose the audit line "
+            "at `/` (the trailing-slash strip must yield an empty override)")
+
+    def test_unwritable_override_dir_falls_back_to_tmp(self):
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses -w; the unwritable-dir fallback can't be reproduced")
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        # restore write BEFORE d.cleanup runs (addCleanup is LIFO) so rmtree works
+        self.addCleanup(lambda: os.chmod(d.name, 0o700))
+        os.chmod(d.name, 0o500)                             # r-x, NOT writable
+        sid = "t-732-unwritable-" + uuid.uuid4().hex[:8]
+        out = self._run_blocked(sid, d.name)
+        self.assertEqual(out.returncode, 2, out.stderr)     # block unaffected
+        self.assertTrue(
+            self._in_real_block_log(sid),
+            "an unwritable override dir must fall back to /tmp, not silently "
+            "lose the audit line")
+        self.assertFalse(
+            (Path(d.name) / ("airuleset-main-exec-block-%d.log" % os.getuid())).exists(),
+            "nothing must be written into the unwritable override dir")
 
 
 if __name__ == "__main__":
