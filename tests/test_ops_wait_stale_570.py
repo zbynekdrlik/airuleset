@@ -157,21 +157,22 @@ class NudgeNamesStaleMembers(unittest.TestCase):
     """The job-20 nudge text NAMES the stale W members with the doctrine action
     (verify blocker + remind the third party TODAY via a ticket comment)."""
 
-    def test_stale_members_named_with_action(self):
+    def test_stale_flag_fires_with_action(self):
+        # #714: the stale sub-clause is a compact COUNT flag (the members live
+        # in `slice-quals --ops-wait`, tagged `stale!`), keeping STALE + DNES.
         members = [{"number": 41, "stale": True}, {"number": 43, "stale": False}]
-        t = owr._nudge_text(None, members, now=1000.0,
-                            w_seen={"41": 1000.0 - 3 * DAY, "43": 1000.0 - 3 * DAY})
-        self.assertIn("#41", t)
-        self.assertIn("STALE", t)          # the stale sub-clause fires
+        t = owr._nudge_text(None, members, now=1000.0)
+        self.assertIn("STALE 1", t)        # the stale flag fires (count=1)
+        self.assertIn("#607", t)           # the doctrine pointer
         self.assertIn("DNES", t)           # the required action (remind today)
+        self.assertNotIn("#41", t)         # no member enumeration (#714)
 
     def test_legacy_int_members_still_work(self):
-        # back-compat: an int list (a legacy fetch / an existing test) yields no
-        # stale sub-clause and still names the parked members
-        t = owr._nudge_text(None, [41, 43], now=1000.0,
-                            w_seen={"41": 1000.0, "43": 1000.0})
-        self.assertIn("#41", t)
-        self.assertIn("#43", t)
+        # back-compat: an int list yields no stale flag; the nudge is a compact
+        # W count, never a member enumeration (#714).
+        t = owr._nudge_text(None, [41, 43], now=1000.0)
+        self.assertIn("W=2", t)
+        self.assertNotIn("#41", t)
         self.assertNotIn("STALE", t)
 
 

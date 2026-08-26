@@ -56,6 +56,27 @@ armed loops, and env-tunable via `AIRULESET_OPS_WAIT_RECHECK_CADENCE_S` (floored
 the ticket's own §3), so the interruption/token cost is the accepted price of never
 letting the montalu3 inflated-`I` drift recur silently.
 
+BUSY-PANE GATE + COMPACT TRIGGER (#714, owner 2026-08-26, david2@subdev). Two
+coupled defects made the nudge TYPE into the prompt and NEVER submit — the text
+parked orphaned ("neda sa tam teraz pracovat"). (1) NO BUSY-PANE GATE: the
+orchestrator delivered via `send_verified` with no check for CC's "Waiting for N
+background agents to finish" state — a submit into that transient mid-turn state
+is swallowed and the text parks (`pane_at_idle_prompt` misses it — the box shows
+a free bare `❯`, the Waiting spinner is a row ABOVE it). FIX = `_pane_busy_waiting`
+(the caller's `captured`, `watchdog._BG_AGENTS_WAIT_RX`, NARROWED to the Waiting
+line only — NOT the `◯` strip rows an armed loop always carries, #605): defer
+WITHOUT a keystroke, retry a later sweep. (2) UNBOUNDED NUDGE: `_nudge_text`
+enumerated every W member with per-member ages and stacked full-doctrine
+sub-clauses (thousands of chars), which collapses into a `[Pasted text …]`
+placeholder the send/undo/janitor machinery cannot recover (the `stuck-check:`
+prefix is swallowed inside it). FIX = a compact TRIGGER (I=%d/W=%d COUNTS + the
+commands `slice-quals --audit`/`--ops-wait` + compact flag counts with doctrine
+pointers), hard-capped at NUDGE_MAX_CHARS; the members live in the command
+OUTPUT, the doctrine in the session's modules — the #578 named I-member audit +
+its watchdog fetch were REMOVED (the session runs `--audit` itself). (3) BOUNDED
+RETRY (MAX_SEND_FAILS): a persistently-swallowing NON-busy pane backs off a full
+cadence instead of typing every 60s sweep forever.
+
 DESIGN (#486 reuse, ZERO new delivery/fetch primitives): this rides
 `goal_lane_sweep`'s EXISTING armed-candidate-pane loop (which already resolves
 pid/cwd/sid/tpath/loc + the `glance`, reads the structured `state["goal_mark"]`
@@ -106,7 +127,7 @@ Full evidence: issue #550.
 HODINOVÝ THREAD-CHECK (#607, owner 2026-08-21) — the owner's contract is that an
 armed loop reads its client Discuss threads AT LEAST 1×/hour so a reply never
 sits unnoticed. The DUTY is a fleet rule (statusline-vocabulary.md W bullet) and
-is NAMED in the `_W_CLAUSE` nudge; the watchdog-side ENFORCEMENT is the SAME as
+is NAMED in the `_W_TRIGGER` nudge (#714 compact); the watchdog-side ENFORCEMENT is the SAME as
 #570's — the weekend-aware `stale!` freshness result (`cli_quals.
 _stale_ops_wait_flagged`, now `working_time`-based), which surfaces WHICH W
 tickets have gone >24h WORKING with no stream push (i.e. the hourly-check +
@@ -121,7 +142,7 @@ SAME T1/T2/T3 above. Full evidence: issue #607.
 RELEASE-LANDED ESCALATION (#698, owner hard-fail 2026-08-25 — ~25 release-gated
 W tickets hung parked long after their release landed). The W clause's release
 re-check used to be WORDING only (the #588 deployed-state doctrine is NAMED in
-`_W_CLAUSE`, but no code path ever READ any release state), so a session skims
+the W trigger, but no code path ever READ any release state), so a session skims
 the same ~daily reminder and a landed release never re-enters mechanically.
 Now, in the nudge branch only: when a parked W member's TITLE names a
 release/version/stage (`_release_shaped_numbers` — the `--ops-wait` fetch now
@@ -132,9 +153,9 @@ _cached_release_state` (the SHARED #616 per-repo TTL cache in
 job-20 consumers, never a parallel query) and IFF the train is PROVEN drained
 (`train` True — the staging branch verified to exist, so a 2-branch repo with a
 stray `develop` never counts — AND ahead == 0 AND no release in flight) the W
-clause gains `_W_RELEASE_LANDED_CLAUSE`: "release LANDOL — verify per the #588
-deployed-state doctrine and clear `ops-wait` WITH evidence TODAY", naming the
-members; above RELEASE_LANDED_OWNER_ASK_N members it additionally instructs the
+nudge gains a compact `RELEASE LANDOL` flag (#714 — a COUNT, not a member
+enumeration): "release LANDOL — verify per the #588 deployed-state doctrine and
+clear `ops-wait` WITH evidence TODAY"; above RELEASE_LANDED_OWNER_ASK_N members it additionally instructs the
 SESSION to summarise to the owner via the standard ❓ channel (never a new alarm
 class, #546/#688 — the session pings, the watchdog never does). HONEST
 BOUNDARY: 2-branch repos (`train` False), fork-no-merge boxes (origin = the
@@ -198,6 +219,50 @@ OPS_WAIT_FETCH_TTL_MIN_S = 5 * 60
 # hiccup re-checks soon rather than suppressing detection for a whole TTL —
 # mirrors BACKLOG_CHECK_FAILURE_TTL_S.
 OPS_WAIT_FETCH_FAIL_TTL_S = 60
+
+# #714 — the nudge is a TRIGGER, not a textbook. Hard cap on the keystroke so it
+# never grows into the multi-KB wall the incident produced (full doctrine + a
+# named list of 53 W tickets), which (a) collapses into a `[Pasted text …]`
+# placeholder the send/undo/janitor machinery cannot recover — the `stuck-check:`
+# own-payload prefix is swallowed INSIDE the placeholder, so the janitor never
+# reclaims the orphan — and (b) is unreadable. The doctrine lives in the
+# session's own modules (statusline-vocabulary.md); the W/I member lists live in
+# the `slice-quals --ops-wait` / `--audit` OUTPUT (tagged per member) — so the
+# nudge carries COUNTS + the commands + doctrine-ticket pointers, never the
+# enumeration. The mandatory I/W trigger core is a fixed template + two small
+# numbers, always well under this cap; optional flag/discuss detail is appended
+# greedily only while it fits.
+NUDGE_MAX_CHARS = 700
+
+# #714 -- BOUNDED RETRY. A genuine swallow (typed, submit unconfirmed, box NOT
+# cleared) leaves `last_nudge` unadvanced so the nudge retries next sweep -- the
+# #594 dedup covers only the delivered-unconfirmed race, NOT a persistent
+# swallow, so a NON-busy pane that keeps swallowing would be TYPED into every 60s
+# sweep forever (the reported retry storm — "neda sa tam teraz pracovat"). After
+# this many CONSECUTIVE undelivered sends, back off a full cadence instead of
+# retrying every sweep, bounding the storm to ≤MAX_SEND_FAILS keystrokes per
+# cadence. Reset to 0 on any delivered send. (The busy-pane gate below is the
+# PRIMARY fix — it defers WITHOUT typing, so a Waiting-state pane never even
+# reaches a send and never contributes to this counter.)
+MAX_SEND_FAILS = 3
+
+
+def _pane_busy_waiting(captured):
+    """True iff the pane shows CC's "Waiting for N background agents to finish"
+    spinner (#714 — the david2@subdev incident state): the supervisor turn has
+    ENDED and is blocked waiting for a background worker to complete before
+    re-invocation, so a submitted Enter is swallowed/queued and the nudge parks
+    orphaned in the input box (`pane_at_idle_prompt` does not catch it — the box
+    still shows a free bare `❯`, the Waiting spinner is a row ABOVE it).
+
+    Reuses `watchdog._BG_AGENTS_WAIT_RX` — the SAME signal job-20 goal re-arm
+    already gates on via `_pane_has_bg_agent` — but NARROWED to the Waiting line
+    only, NOT the agent-strip `◯` worker rows: an armed autopilot loop ALWAYS
+    carries those, so gating on them would DEFER the nudge on every sweep and
+    starve it forever (the #611 dead-letter class). The Waiting state is
+    transient, so the nudge simply defers to a later sweep, when the pane is
+    genuinely idle at `❯` and the submit lands. Fail-safe False on empty/None."""
+    return bool(captured) and bool(watchdog._BG_AGENTS_WAIT_RX.search(captured))
 
 
 def _env_int(key, default_s):
@@ -270,16 +335,6 @@ def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
     `state["ops_wait_cache"]` (#547). Thin wrapper over `_cached_member_fetch`."""
     return _cached_member_fetch(cwd, ops_wait_fetch, state, now,
                                 "ops_wait_cache", ttl, fail_ttl)
-
-
-def _cached_i_members(cwd, i_members_fetch, state, now, ttl=None, fail_ttl=None):
-    """The WORKABLE (I) member RECORDS (`{number, createdAt, labels}`) for the
-    repo at `cwd`, CACHED per-cwd in `state["i_members_cache"]` (#578). Thin
-    wrapper over `_cached_member_fetch` — read only inside the ~daily nudge
-    branch so the `--audit` subprocess fires at most once per repo per TTL AND
-    only when actually nudging, never every sweep (#547 "cache the FETCH")."""
-    return _cached_member_fetch(cwd, i_members_fetch, state, now,
-                                "i_members_cache", ttl, fail_ttl)
 
 
 def _fmt_age(seconds):
@@ -409,22 +464,6 @@ def _members_line(members):
     return " ".join("#%d" % n for n in sorted(_member_numbers(members)))
 
 
-def _members_line_aged(members, w_seen, now):
-    """`#A (~ageA) #B (~ageB)` for the W clause (#594) — each member aged from
-    ITS OWN `w_seen` entry (when the watchdog first observed it in W, ≈ the
-    `ops-wait` label-add within one fetch TTL), never a single stale partition-
-    level anchor. Oldest-number-first for stable reading. A member absent from
-    `w_seen`, or an unusable map (a state/fetch edge), ages `?` — never a
-    fabricated age (#539 fail-safe bias)."""
-    seen = w_seen if isinstance(w_seen, dict) else {}
-    parts = []
-    for n in sorted(_member_numbers(members)):
-        ts = seen.get(str(n))
-        age = _fmt_age(now - ts) if isinstance(ts, (int, float)) else "?"
-        parts.append("#%d (%s)" % (n, age))
-    return " ".join(parts)
-
-
 def _partition_sig(i_count, w_members):
     """A stable signature of the whole partition-audit set — the I count and the
     sorted W numbers — stored for observability (a reader sees what a rec is
@@ -526,184 +565,63 @@ def _recheck_decision(rec, i_count, w_members, now, cadence):
     return ("wait", new_rec, "grace")
 
 
-# The GENERIC I→W/U re-audit clause (#552): the FALLBACK when the per-member
-# audit list cannot be fetched (fetch failed / not wired). Instructs the loop to
-# re-audit its `I` list against the #526/#539 parking shapes. The word
-# "re-audituj" is the stable token the wiring test keys on.
-_I_CLAUSE = (
-    "I→W/U: re-audituj každý `I` tiket proti #526/#539 tvarom — fix-class čakajúci "
-    "na externú udalosť → `ops-wait` s dôkazom (W); odoslaný acceptance thread → "
-    "`ops-wait` (W); deferred-thread na pomenovanú udalosť → `ops-wait` (W); "
-    "doručená živá owner-otázka → needs-answer/needs-decision (U); owner fyzický/"
-    "manuálny krok pri rigu → `needs-owner-action` (U, #601 — owner nie je tretia "
-    "strana); bare `needs-acceptance` queued na owner-schválenie → `U` (#622 — "
-    "nikdy `I`); HOTOVÝ tiket (merged/released/akceptovaný) čakajúci UŽ LEN na "
-    "gatekeepera aby ho ZAVREL → `GATEKEEPER-ACTION:` (`needs-gatekeeper`) → gk N, "
-    "NIE `ops-wait` (gatekeeper nie je tretia strana, #636); len reálne "
-    "dispatchovateľná kódová práca ostáva `I`.")
+# #714 -- the compact partition-audit TRIGGER text. The nudge NAMES doctrine
+# tickets + the commands the session runs itself (`slice-quals --audit` /
+# `--ops-wait`), carries only COUNTS, and NEVER enumerates members or restates
+# the full doctrine -- the doctrine lives in the session's own modules
+# (statusline-vocabulary.md) and the tagged member lists in the command output.
+_NUDGE_HEAD = ("stuck-check: partition-audit -- over `I`/`W` labely `/goal` "
+               "partition proti doktríne #526/#539. ")
+_NUDGE_TAIL = " Label mení supervisor s dôkazom, nikdy automaticky."
 
-# #578 — the NAMED per-I-member audit. The gk `I 16` incident showed the generic
-# clause above is too weak: the session COULD enumerate its I members and STILL
-# left them mislabelled (a 7-ticket release-tail bare, a `ready-for-review` review
-# lane mis-called "stream-owned"). So when the member list IS available
-# (`_watchdog_i_members_fetch` via `--audit`), the nudge NAMES each member with
-# age + labels + a SHAPE-specific instruction, making "I know but I don't label"
-# impossible to sustain silently. Judgment stays in the session (no
-# auto-labelling); the supervisor still sets/clears every label with evidence.
-_I_MEMBER_MAX = 12   # bound the keystroke — name the oldest N, summarise the rest
-# labels that make a member DEFINITIVELY a gk review lane (the #4497 shape): only
-# this box can review/merge/close it, so it is DISPATCHED, never parked.
-_REVIEW_LANE_LABELS = ("ready-for-review", "needs-gatekeeper")
+# The I→W/U trigger (#552/#578): re-audit the whole I list against the parking
+# shapes by running `slice-quals --audit` (it enumerates each member with labels
+# + a shape hint -- the #578 named audit moved SESSION-side, out of the keystroke
+# payload, #714). "re-audituj" is the stable token the wiring test keys on.
+# `%d` = the I count.
+_I_TRIGGER = (
+    "I=%d: spusti `slice-quals --audit`, re-audituj tvary (gated → ops-wait W; "
+    "owner-otázka/krok → needs-owner-action U #601/#607; gk-close → "
+    "needs-gatekeeper #636; acceptance → U #622); len dispatchovateľná ostáva I.")
+
+# The W→I trigger (#547/#588/#607): re-check the parked external events. COUNT
+# only -- the members + their stale!/recheck!/gk-handoff! tags are in the
+# `slice-quals --ops-wait` OUTPUT, never the keystroke. `%d` = the W count.
+_W_TRIGGER = (
+    "W=%d parknutých: spusti `slice-quals --ops-wait`, Discuss 1×/hod (#607), "
+    "over blockery (release = #588 deployed-state, nie run-terminal), zlož "
+    "`ops-wait` s dôkazom; mis-shape → owner needs-owner-action U #601 / gk #636.")
 
 
-def _member_age_s(created_at, now):
-    """Age in seconds of an ISO-8601 `createdAt` (`2026-08-03T00:00:00Z`), or
-    None when unparsable/blank. Tolerant of the trailing `Z` (older Pythons'
-    `fromisoformat` needs `+00:00`); a clock-skew future createdAt returns a
-    negative age which `_fmt_age` clamps to 0."""
-    if not isinstance(created_at, str) or not created_at.strip():
-        return None
-    import datetime
-    s = created_at.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        dt = datetime.datetime.fromisoformat(s)
-    except ValueError:
-        return None
-    try:
-        return now - dt.timestamp()
-    except (OverflowError, OSError, ValueError):
-        return None
-
-
-def _i_member_line(rec, now):
-    """One named audit line: `#N (~age) [labels] → <short shape tag>`. The FULL
-    shape instructions live once in the clause HEADER (`_i_clause_named`); the
-    per-member tag is a short pointer so the keystroke stays bounded even at 12
-    members. A `ready-for-review`/`needs-gatekeeper` member is a review lane
-    (dispatch); any other is a bare/other member (ops-wait if gated)."""
-    labels = [lb for lb in (rec.get("labels") or []) if isinstance(lb, str)]
-    age_s = _member_age_s(rec.get("createdAt"), now)
-    age = _fmt_age(age_s) if age_s is not None else "?"
-    lbl = ",".join(labels) if labels else "bez labelov"
-    tag = ("review lane → DISPATCHNI"
-           if any(lb in _REVIEW_LANE_LABELS for lb in labels)
-           else "bare/other → ops-wait ak gated")
-    return "#%s (%s) [%s] %s" % (rec.get("number"), age, lbl, tag)
-
-
-def _i_clause_named(i_members, now):
-    """The named I→W/U audit clause — the two shape instructions once in the
-    header, then each valid member spelled out (oldest first) with a short tag,
-    capped at `_I_MEMBER_MAX` with a `(+K ďalších)` tail so the keystroke stays
-    bounded. `; `-joined (never a raw newline — a newline in a typed keystroke can
-    submit prematurely)."""
-    valid = [r for r in (i_members or [])
-             if isinstance(r, dict) and isinstance(r.get("number"), int)]
-    ordered = sorted(valid, key=lambda r: r.get("createdAt") or "")
-    shown = ordered[:_I_MEMBER_MAX]
-    body = "; ".join(_i_member_line(r, now) for r in shown)
-    tail = len(ordered) - len(shown)
-    tail_str = ("; (+%d ďalších `I` tiketov — re-audituj aj tie)" % tail
-                if tail > 0 else "")
-    return ("I→W/U (menovite): re-audituj tieto `I` tikety proti #526/#539 — "
-            "`ready-for-review`/`needs-gatekeeper` člen JE tvoja review lane, "
-            "DISPATCHNI ju (neparkuj); bare/umbrella člen gated na release/"
-            "checklist/iný ticket → olabeluj `ops-wait` s pomenovaným eventom "
-            "(supervisor, s dôkazom); label mení supervisor s dôkazom, nikdy "
-            "automaticky. Členovia: %s%s; bare `needs-acceptance` queued na "
-            "owner-schválenie → `U` (#622); len reálne dispatchovateľná kódová "
-            "práca ostáva `I`." % (body, tail_str))
-
-# The W→I re-check clause (#547, preserved as a subset of the combined nudge):
-# names the parked W numbers each with ITS OWN park age (#594 — per-ticket, not a
-# single stale partition anchor), instructs re-checking the external event the
-# park comment records.
-_W_CLAUSE = (
-    "W→I: parknuté `ops-wait` tikety %s — klientske Discuss vlákna čítaj ASPOŇ "
-    "1×/hodinu (či neprišla odpoveď, #607) a over externý stav ktorý si "
-    "pri parkovaní zapísal do komentára (odpoveď vo vlákne / vyšlý release = verzia "
-    "ŽIVÁ na cieli: deploy-set zelený + priame čítanie verzie, NIE run-terminal — "
-    "#588): ak už dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa "
-    "stále čaká, potvrď to. MIS-SHAPE (#601): ak je blocker OWNER (fyzický krok "
-    "pri rigu / jeho prítomnosť / manuálna akcia), NIE JE to W — prelabeluj "
-    "`needs-owner-action` a tiket sa presunie do U (owner nie je tretia strana). "
-    "MIS-SHAPE (#607): ak re-entry event je ROZHODNUTIE/ODPOVEĎ OWNERA (nie tretej "
-    "strany, nie fyzický krok), tiež NIE JE to W — „na U sa vždy pýtam“: prelabeluj "
-    "`needs-answer`/`needs-decision` a DORUČ otázku (❓ ping), tiket sa presunie do U. "
-    "MIS-SHAPE (#636): ak je blocker GATEKEEPER (review / release / ZAVRIEŤ po "
-    "release+akceptácii), NIE JE to W — gatekeeper NIE JE tretia strana, je to "
-    "menovaný fleet aktér s vlastnou hand-off lane: podaj `GATEKEEPER-ACTION:` "
-    "(auto-label `needs-gatekeeper`) A ZLOŽ `ops-wait` — tiket sa presunie do gk N "
-    "(stream) / do I gk-boxu, nie visí vo W ktoré nikto netlačí.")
-
-# The #570 stale sub-clause — appended to the W clause when any parked W member
-# has gone COLD (no fresh ≤24h stream-push evidence: `stale!` in `--ops-wait`,
-# parsed by `_watchdog_ops_wait_fetch` into `member["stale"]`). NAMES the stale
-# members and states the doctrine action: re-verify the blocker by RE-READING
-# the referenced ticket + remind the third party TODAY with a ticket comment
-# (that comment IS the freshness evidence — #570 bod 3 "tlač dopredu každý deň").
-_W_STALE_CLAUSE = (
-    "STALE (>24h pracovných dní bez odpovede, víkend sa nepočíta — #607) %s: "
-    "kontrakt už nie je len tag — MUSÍ ísť DNES do klientskeho Discuss vlákna "
-    "VECNÁ pripomienka (mention + partner_ids + konkrétna vec čo čakáš, nie "
-    "prázdny ack), over blocker RE-ČÍTANÍM referencovaného tiketu a na tikete "
-    "komentárom zaznač že pripomienka odišla (ten komentár JE evidencia).")
-
-# The #636 gk-handoff sub-clause — appended to the W clause when any parked W
-# member ALSO carries a gk hand-off label (`gk-handoff!` in `--ops-wait`, parsed
-# into `member["gk_handoff"]`). NAMES the contradictory members and states the
-# doctrine action: this is post-release limbo — the ticket is a gk hand-off the
-# stale `ops-wait` HIDES from gk N (stream) / the gk box's I, so DROP the
-# `ops-wait` (the gatekeeper is not a third party, #601 parallel); if it is not
-# yet in the gk queue, also add `needs-gatekeeper` (GATEKEEPER-ACTION: close #N).
-_W_GK_HANDOFF_CLAUSE = (
-    "GK-HANDOFF (post-release limbo, #636) %s: tento W tiket NESIE aj "
-    "needs-gatekeeper/ready-for-review — je to gk hand-off, NIE tretia strana. "
-    "ZLOŽ `ops-wait` (a ak ešte nie je v gk fronte, podaj `GATEKEEPER-ACTION:` → "
-    "`needs-gatekeeper`), aby sa presunul do gk N / do I gk-boxu a gatekeeper ho "
-    "zavrel — nesmie visieť vo W, ktoré nikto netlačí. Label mení supervisor.")
-
-# The #699 release-recheck sub-clause — appended when a RELEASE-parked W member
-# is OVERDUE for its hourly deployed-state re-check (`recheck!` in `--ops-wait`,
-# parsed into `member["release_recheck"]`). NAMES the overdue members + states the
-# cadence DUTY: the OWNING session re-checks deployed-state (#588) EVERY work
-# cycle, min 1x/hour — never left to THIS daily backstop. Makes NO "landed" claim
-# (that stays `_W_RELEASE_LANDED_CLAUSE`, #698 proof-only) — only "re-check
-# overdue" (directly falsifiable from the title + the own-comment age).
-_W_RELEASE_RECHECK_CLAUSE = (
-    "RELEASE-RECHECK (#699) %s: tieto W tikety majú v titulku release/verziu a "
-    "NEMAJÚ zaznamenaný re-check za poslednú hodinu. Deployed-state re-check "
-    "(#588: deploy-set zelený + priame čítanie verzie na cieli, NIE run-terminal) "
-    "rob KAŽDÝ pracovný cyklus, min 1×/hod — NEČAKAJ na tento denný nudge; pri "
-    "~5 release/deň to znamená unpark v ráde minút–hodiny, nie celý deň parknuté. "
-    "Ak release už dorazil, over podľa #588 a zlož `ops-wait` s dôkazom; ak nie, "
-    "zapíš na tiket že wait stále platí.")
-
-
-# The #698 release-landed sub-clause — appended when a release-SHAPED W member
-# (title names a release/version/stage) is parked while the repo's OWN release
-# train is PROVEN drained (`_release_train_drained` over the #616 fetch). The
-# claim states exactly WHAT was mechanically observed (train drained), demands
-# #588 deployed-state EVIDENCE for the clear, and keeps the honesty branch for
-# a member actually waiting on a foreign/other release. Label changes stay the
-# SUPERVISOR's, with evidence — this clause only escalates the WORDING.
-_W_RELEASE_LANDED_CLAUSE = (
-    "RELEASE LANDOL (#698) %s: tieto W tikety majú v titulku release/verziu a "
-    "MECHANICKÁ kontrola release vlaku TOHTO repa hovorí, že vlak je VYPUSTENÝ "
-    "— integračná vetva nie je pred produkciou a nebeží žiadny release PR ani "
-    "deploy. Ak tiket čakal na interný release tohto repa, event už NASTAL: "
-    "over podľa #588 (deploy-set zelený + priame čítanie verzie na cieli) a "
-    "zlož `ops-wait` s dôkazom EŠTE DNES — tiket sa vráti do práce. Ak čaká na "
-    "iný/cudzí release alebo kontrola nesedí, zapíš na tiket PREČO wait stále "
-    "platí.")
-# The >N owner-ask tail (#698 bod 2): the SESSION escalates via its standard ❓
-# channel — never a new watchdog alarm class (#546/#688).
-_W_RELEASE_LANDED_OWNER_TAIL = (
-    " Je ich %d (nad %d na jednom boxe): zhrň stav ownerovi štandardným ❓ "
-    "kanálom — ktoré tikety čakali na už-vypustený release a kedy ich zložíš "
-    "(žiadna nová alarm trieda, #546).")
+def _flag_items(w_members, release_landed):
+    """Self-contained compact flag sentences for the fired W sub-categories
+    (#714) -- each carries its identifying token + doctrine ticket # + a COUNT,
+    NEVER a member enumeration (the session gets WHICH members, tagged, from
+    `slice-quals --ops-wait`). Ordered most-urgent first. The #698 release-landed
+    escalation keeps its >N owner-ask tail. Returns a list of standalone
+    sentences; the caller appends as many as fit under NUDGE_MAX_CHARS."""
+    items = []
+    stale = len(_stale_numbers(w_members))
+    if stale:
+        items.append("STALE %d (#607 -- pošli vecnú pripomienku "
+                     "DNES)." % stale)
+    recheck = len(_release_recheck_numbers(w_members))
+    if recheck:
+        items.append("RELEASE-RECHECK %d (#699 -- deployed-state 1×/hod)."
+                     % recheck)
+    gk = len(_gk_handoff_numbers(w_members))
+    if gk:
+        items.append("gk-handoff %d (#636 -- zlož ops-wait → "
+                     "needs-gatekeeper)." % gk)
+    landed = [n for n in (release_landed or [])
+              if isinstance(n, int) and not isinstance(n, bool)]
+    if landed:
+        it = ("RELEASE LANDOL %d (#698 -- over #588 + zlož ops-wait DNES)"
+              % len(landed))
+        if len(landed) > RELEASE_LANDED_OWNER_ASK_N:
+            it += ", nad %d zhrň ownerovi ❓" % RELEASE_LANDED_OWNER_ASK_N
+        items.append(it + ".")
+    return items
 
 
 def _discuss_audit_scope(cwd):
@@ -722,99 +640,70 @@ def _discuss_audit_scope(cwd):
         return False
 
 
-# #695 -- the DISCUSS-AUDIT clause: a CLOSED thread-bound ticket (the manual
-# `Discuss-thread:` mark OR the #657-mandated `discuss.channel_<N>` deep URL)
-# with no `Discuss-closed:`/`Discuss-defer:` disposition means a client thread
-# is rotting with no closing note (montalu5: 4 tickets, threads rotted for
-# days). The watchdog structurally CANNOT do this audit itself -- it has no
-# Discuss credential and per-ticket gh reads of CLOSED tickets on the sweep
-# path are the #507/#550-rejected shape -- so, exactly like the #607 hourly
-# thread-check, the DUTY is named in the daily nudge with the exact command,
-# and the session's own judgment + gh does the read. Doctrine-only: no count
-# changes, no new fetch, the supervisor still posts/records everything itself.
-_DISCUSS_ORPHAN_CLAUSE = (
-    "DISCUSS-AUDIT (#695): ZAVRETÝ thread-bound tiket (nesie `Discuss-thread:` "
-    "značku alebo discuss.channel_<N> deep URL) bez `Discuss-closed:`/"
-    "`Discuss-defer:` = klientske vlákno hnije bez záverečnej správy. Spusti "
-    "audit: `gh issue list -s closed -S \"Discuss-thread OR discuss.channel_\" "
-    "-L 30`, over dispozíciu každého; kde chýba, POŠLI záverečnú správu do "
-    "vlákna (handover-compose.md) a zapíš `Discuss-closed: msg <id>` na tiket.")
+# #695 -- the DISCUSS-AUDIT trigger (odoo-erp only): a CLOSED thread-bound ticket
+# without a `Discuss-closed:`/`Discuss-defer:` disposition means a client thread
+# is rotting with no closing note (montalu5). The watchdog cannot read Discuss
+# (#550), so the DUTY is named with the exact command; the session's own gh does
+# the read. Doctrine-only, no count change.
+_DISCUSS_TRIGGER = (
+    "DISCUSS-AUDIT (#695): zavri tikety bez `Discuss-closed:` -- "
+    "`gh issue list -s closed -S \"discuss.channel_\" -L 30`.")
 
 
-def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
+def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
                 release_landed=None, discuss_audit=False):
-    """The partition-audit keystroke injected into the armed loop. Carries the
-    shared `stuck-check: ` prefix (own-payload recognition + machine-prompt
-    exclusion — see the module docstring) and composes ONE ping from whichever
-    direction(s) apply: the I→W/U re-audit clause when I>0, the W→I re-check clause
-    (naming the parked W numbers each with ITS OWN per-ticket park age from
-    `w_seen`, #594) when W is non-empty. When ONLY W applies (I==0), the text
-    degrades to #547's W-only nudge; when both apply, both clauses ride one
-    keystroke. Three W SUB-clauses are appended when their flags fire: the #699
-    `recheck!` sub-clause (a RELEASE-parked member OVERDUE for its hourly
-    deployed-state re-check — names the cadence duty), the #636 `gk-handoff!`
-    sub-clause (a W member ALSO carrying needs-gatekeeper/ready-for-review — the
-    post-release-limbo contradiction; drop ops-wait) and the #570 `stale!`
-    sub-clause. The label change is always the SUPERVISOR's with evidence, never
-    an auto-unlabel by the watchdog.
+    """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
+    per-member enumeration + full-doctrine wall that parked orphaned in the
+    incident). Carries the `stuck-check: ` prefix (janitor own-payload
+    recognition + machine-prompt exclusion, see the module docstring), the
+    I->W/U and W->I triggers as COUNTS + the commands the session runs itself
+    (`slice-quals --audit` / `--ops-wait`), and compact flag sentences for the
+    fired W sub-categories (#570/#636/#698/#699/#695).
 
-    `w_seen` (#594): the PER-TICKET first-seen map ({str(number): ts}) that ages
-    each W member from its OWN W entry, never a single stale partition-level
-    anchor. A member missing from the map, or an unusable map, ages `?` (never a
-    fabricated age).
+    HARD-CAPPED at NUDGE_MAX_CHARS: the mandatory I/W trigger core (a fixed
+    template + two small numbers) always fits; the optional flag/discuss detail
+    is appended GREEDILY, keeping only the items that fit, so an incident-scale
+    pathological partition (all flags on 53 members) never breaches the cap --
+    the dropped detail stays recoverable via the commands. The W/I MEMBERS
+    themselves live in the command output, NEVER the keystroke; the doctrine
+    lives in the session's own modules.
 
-    `i_members` (#578): the fetched WORKABLE (I) member records (`{number,
-    createdAt, labels}`, via `_cached_i_members`). When present + non-empty, the
-    I clause NAMES each member with age + labels + a shape-specific instruction
-    (`_i_clause_named`); when None (fetch failed / not wired) or empty it degrades
-    to the generic `_I_CLAUSE` — never a crash, never a bare count.
-
-    `release_landed` (#698): the release-SHAPED W member numbers whose repo's
-    own release train the caller PROVED drained (`_release_train_drained` over
-    the cached #616 fetch). Non-empty -> the `_W_RELEASE_LANDED_CLAUSE`
-    sub-clause names them with the clear-today action (plus the owner-ask tail
-    above RELEASE_LANDED_OWNER_ASK_N members); None/empty -> the text is
-    byte-identical to the pre-#698 nudge (never a false "landed" claim).
-
+    `w_seen` is accepted and IGNORED (the compact nudge no longer renders
+    per-member ages -- the actionable freshness signal is the `stale!` tag in
+    `slice-quals --ops-wait`, #714). `release_landed` (#698): the release-shaped
+    W numbers whose repo's release train the caller PROVED drained -- non-empty
+    fires the RELEASE-LANDOL flag; None/empty is byte-identical to no flag.
     `discuss_audit` (#695): True appends the odoo-erp-scoped DISCUSS-AUDIT
-    clause (closed thread-bound tickets without a closing-note disposition) —
-    the caller resolves it via `_discuss_audit_scope(cwd)` in the nudge branch."""
+    trigger."""
     i_pos = isinstance(i_count, int) and i_count > 0
-    w_pos = isinstance(w_members, list) and bool(w_members)
-    clauses = []
+    w_list = w_members if isinstance(w_members, list) else []
+    w_count = len(_member_numbers(w_list))
+    core = []
     if i_pos:
-        valid = [r for r in (i_members or [])
-                 if isinstance(r, dict) and isinstance(r.get("number"), int)]
-        clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
-    if w_pos:
-        clauses.append(_W_CLAUSE % _members_line_aged(w_members, w_seen, now))
-        recheck = _release_recheck_numbers(w_members)
-        if recheck:
-            clauses.append(_W_RELEASE_RECHECK_CLAUSE
-                           % " ".join("#%d" % n for n in sorted(recheck)))
-        landed = [n for n in (release_landed or [])
-                  if isinstance(n, int) and not isinstance(n, bool)]
-        if landed:
-            clause = _W_RELEASE_LANDED_CLAUSE % " ".join(
-                "#%d" % n for n in sorted(landed))
-            if len(landed) > RELEASE_LANDED_OWNER_ASK_N:
-                clause += _W_RELEASE_LANDED_OWNER_TAIL % (
-                    len(landed), RELEASE_LANDED_OWNER_ASK_N)
-            clauses.append(clause)
-        gk_handoff = _gk_handoff_numbers(w_members)
-        if gk_handoff:
-            clauses.append(_W_GK_HANDOFF_CLAUSE
-                           % " ".join("#%d" % n for n in sorted(gk_handoff)))
-        stale = _stale_numbers(w_members)
-        if stale:
-            clauses.append(_W_STALE_CLAUSE
-                           % " ".join("#%d" % n for n in sorted(stale)))
+        core.append(_I_TRIGGER % i_count)
+    if w_count:
+        core.append(_W_TRIGGER % w_count)
+    core_body = " ".join(core)
+    # optional detail (self-contained flag/audit sentences), appended greedily
+    # while under the cap -- the members stay in the command output, not here.
+    optional = []
+    if w_count:
+        optional.extend(_flag_items(w_list, release_landed))
     if discuss_audit:
-        clauses.append(_DISCUSS_ORPHAN_CLAUSE)
-    return (
-        "stuck-check: partition-audit — over či `I`/`W` labely tvojho `/goal` "
-        "partition sedia s doktrínou #526/#539. %s Label mení supervisor s "
-        "dôkazom, nikdy automaticky." % " ".join(clauses))
+        optional.append(_DISCUSS_TRIGGER)
+    detail = []
+    for item in optional:
+        cand = (_NUDGE_HEAD + core_body + " "
+                + " ".join(detail + [item]) + _NUDGE_TAIL)
+        if len(cand) <= NUDGE_MAX_CHARS:
+            detail.append(item)
+    body = core_body + ((" " + " ".join(detail)) if detail else "")
+    text = _NUDGE_HEAD + body + _NUDGE_TAIL
+    if len(text) <= NUDGE_MAX_CHARS:
+        return text
+    # Defensive (unreachable with the fixed template + the greedy append above):
+    # truncate at a word boundary, preserving the `stuck-check:` prefix.
+    return text[:NUDGE_MAX_CHARS - 1].rsplit(" ", 1)[0] + "…"
 
 
 # --- ORPHAN REAPER ---------------------------------------------------------
@@ -841,12 +730,35 @@ def _prune_ops_wait_orphans(wrecs, visited_sids, now,
         wrecs.pop(sid, None)
 
 
+def _book_unverified_send(rec, new_rec, loc, sig, now):
+    """#714 bounded retry: book ONE undelivered send onto the persisted rec
+    (`new_rec` IS `wrecs[sid]`, so mutation persists). Under MAX_SEND_FAILS it
+    increments the consecutive-failure counter and retries next sweep; at
+    MAX_SEND_FAILS it BACKS OFF one full cadence (advance last_nudge, reset the
+    counter) so a persistently-swallowing NON-busy pane is not typed into every
+    60s sweep forever. The counter crosses the JSON persistence boundary, so a
+    corrupt/legacy non-int reads as 0 and never raises (the module's own
+    persisted-state discipline, cf. `_cached_member_fetch`'s `ts` guard).
+    Returns the decision log line."""
+    prior = rec.get("send_fails")
+    fails = (prior if isinstance(prior, int) and not isinstance(prior, bool)
+             else 0) + 1
+    if fails >= MAX_SEND_FAILS:
+        new_rec["last_nudge"] = now
+        new_rec["send_fails"] = 0
+        return ("ops-wait-recheck %s -> submit-unverified x%d — backing off one "
+                "cadence (bounded retry #714, partition %s)" % (loc, fails, sig))
+    new_rec["send_fails"] = fails
+    return ("ops-wait-recheck %s -> submit-unverified (attempt %d/%d, retry next "
+            "sweep, partition %s)" % (loc, fails, MAX_SEND_FAILS, sig))
+
+
 # --- ORCHESTRATOR ----------------------------------------------------------
 
 def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                           dry_run, handled, ops_wait_fetch, state,
                           sleep_fn=None, cadence=None, i_count=None,
-                          i_members_fetch=None, release_state_fetch=None):
+                          release_state_fetch=None, captured=None):
     """Audit ONE armed candidate pane's partition (I→W/U + W→I) and, on cadence,
     deliver ONE verified re-audit nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -877,20 +789,25 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     nudge already typed is deferred to next sweep, and a nudge WE send claims the
     sid so any keystroke job later in the SAME sweep skips it).
 
-    `i_members_fetch(cwd)` (#578): the injected I-member seam — the WORKABLE
-    member records (`{number, createdAt, labels}`) for the NAMED audit clause,
-    read through `_cached_i_members` (per-repo TTL cache) and ONLY inside the
-    nudge branch, so the `--audit` subprocess fires at most once per repo per TTL
-    AND only when actually nudging (~daily), never every sweep. None (not wired /
-    fetch failed) degrades the nudge to the generic `_I_CLAUSE` — never a crash.
+    `captured` (#714): the pane capture the caller already read for the lane
+    nudge (ZERO new capture) — the BUSY-PANE GATE. When it shows CC's "Waiting
+    for N background agents to finish" state (`_pane_busy_waiting`), the nudge is
+    DEFERRED (no keystroke, last_nudge unadvanced, `handled` unclaimed) so it
+    retries a later sweep: a submit into that transient mid-turn state is
+    swallowed and parks the text orphaned in the input box (the incident). None
+    (unwired / older caller) skips the gate — the send's own bare/collapsed
+    checks still apply. The compact nudge (#714) is small enough that a genuine
+    swallow is cleanly undone by `send_verified` and the `stuck-check:` prefix
+    stays visible for the janitor reclaim (it no longer collapses into a
+    `[Pasted text]` placeholder the way the old multi-KB wall did).
 
     `release_state_fetch(cwd)` (#698): the SAME injected seam the #616
     release-gap rider uses, read here ONLY inside the nudge branch and ONLY
     when a release-SHAPED W member exists, through `release_gap.
     _cached_release_state` (the SHARED `state["release_state_cache"]` per-repo
     TTL cache — one gh fetch per repo per TTL across BOTH job-20 consumers). A
-    PROVEN drained train escalates the W clause's wording
-    (`_W_RELEASE_LANDED_CLAUSE`); None / not wired / not drained keeps the
+    PROVEN drained train fires the compact `RELEASE LANDOL` flag (#714 — a
+    COUNT, via `release_landed`); None / not wired / not drained keeps the
     pre-#698 generic wording — the escalation fails safe, never invents a
     "landed" claim, and never touches a label (supervisor-only, with
     evidence)."""
@@ -942,18 +859,21 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
         logs.append("ops-wait-recheck %s -> skip:already-handled (another sweep "
                     "job typed this pane; retry next sweep)" % loc)
         return logs
+    # #714 BUSY-PANE GATE (the primary fix): NEVER type into a pane showing CC's
+    # "Waiting for N background agents to finish" state — the submit is swallowed
+    # and the text parks ORPHANED in the input box (the david2 incident). Defer
+    # WITHOUT a keystroke (no type-and-fail loop, no send_fails increment); the
+    # transient Waiting state clears between turns and a later sweep delivers into
+    # the genuinely-idle `❯`. last_nudge stays unadvanced (the persisted rec above
+    # keeps first_seen/w_seen/sig), the pane is NOT claimed in `handled`.
+    if _pane_busy_waiting(captured):
+        logs.append("ops-wait-recheck %s -> skip:busy-bg-agent (pane waiting on a "
+                    "background agent — deferred, retry next sweep)" % loc)
+        return logs
     if dry_run:
         logs.append("ops-wait-recheck %s -> WOULD-NUDGE partition %s" % (loc, sig))
         return logs
 
-    # #578: fetch the WORKABLE I members (cached, once per repo per TTL) ONLY here
-    # in the nudge branch, so the `--audit` subprocess never fires on a wait/skip
-    # sweep. AND only when the I direction is actually active (`i_count > 0`) — a
-    # W-only nudge (i_count 0/None) would not render the I clause, so the fetch
-    # would be wasted (#578 review 🔵). None (not wired / fetch failed / W-only)
-    # degrades to the generic clause.
-    i_members = (_cached_i_members(cwd, i_members_fetch, state, now)
-                 if isinstance(i_count, int) and i_count > 0 else None)
     # #698: the release-landed escalation — read the repo's release-train state
     # ONLY here in the nudge branch, ONLY when a release-shaped W member exists
     # (title names a release/version/stage), through the SHARED #616 per-repo
@@ -987,8 +907,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # #695: the DISCUSS-AUDIT clause scope is resolved HERE, in the nudge
     # branch only (a per-cwd git-remote read at most ~once a day per pane),
     # never on the per-sweep hot path.
-    text = _nudge_text(i_count, members, now, new_rec["w_seen"],
-                       i_members=i_members, release_landed=landed,
+    text = _nudge_text(i_count, members, now, release_landed=landed,
                        discuss_audit=_discuss_audit_scope(cwd))
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
@@ -1007,14 +926,19 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                                 logs=logs, out=send_out)
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
-        # Genuinely unverified (swallowed / aborted / unreadable) — transient,
-        # retried next sweep. Do NOT advance last_nudge (else a swallowed send
-        # silently skips a whole cadence), do NOT claim the pane in `handled`.
-        logs.append("ops-wait-recheck %s -> submit-unverified (partition %s, "
-                    "retry next sweep)" % (loc, sig))
+        # #714 BOUNDED RETRY: a genuine swallow leaves last_nudge unadvanced so it
+        # retries next sweep — but a PERSISTENTLY-swallowing NON-busy pane would
+        # then be typed into every 60s sweep forever (the retry storm; the #594
+        # dedup covers only the delivered-unconfirmed race, not a persistent
+        # swallow). `_book_unverified_send` counts the failure on the persisted
+        # rec (new_rec IS wrecs[sid]) and backs off a full cadence after
+        # MAX_SEND_FAILS. send_verified already backed our text OUT of the box on
+        # a genuine swallow, so nothing parks, and the pane is NOT claimed.
+        logs.append(_book_unverified_send(rec, new_rec, loc, sig, now))
         return logs
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now
+    new_rec["send_fails"] = 0
     wrecs[sid] = new_rec
     if handled is not None:
         handled.add(sid)

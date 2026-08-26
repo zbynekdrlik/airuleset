@@ -1,16 +1,18 @@
 """#607 časti 1 + 4 (+ časť 2 nudge escalation) — job-20 W-clause content + fleet rule.
 
 Part 1 (hodinový thread-check): the fleet W-doctrine (statusline-vocabulary.md)
-+ the job-20 `_W_CLAUSE` name the ≥1×/hodinu Discuss-thread-read duty; the
-watchdog cannot verify Discuss reads itself (#550), so the module docstring
-DEFERS the hourly-granularity verification with named reopen triggers, and the
-observable proxy is the weekend-aware `stale!` (part 2).
++ the job-20 `_W_TRIGGER` name the ≥1×/hodinu Discuss-thread-read duty (#714:
+the full doctrine moved to the modules, the compact trigger carries the #607
+pointer); the watchdog cannot verify Discuss reads itself (#550), so the module
+docstring DEFERS the hourly-granularity verification with named reopen triggers,
+and the observable proxy is the weekend-aware `stale!` (part 2).
 
-Part 2 escalation: `_W_STALE_CLAUSE` escalates from "a `stale!` tag exists" to
-"a substantive reminder MUST be SENT into the client thread TODAY" (working-day
-24h passed).
+Part 2 escalation (#714: now a compact `STALE` flag count + #607 pointer + DNES,
+the members in `slice-quals --ops-wait`): the `stale!` tag surfaces "a
+substantive reminder MUST be SENT into the client thread TODAY" (working-day 24h
+passed) — the full doctrine lives in the session's modules.
 
-Part 4 (W-hides-owner-decision): `_W_CLAUSE` names the owner-DECISION mis-shape —
+Part 4 (W-hides-owner-decision): the `_W_TRIGGER` names the owner mis-shape —
 a W member whose re-entry event is the OWNER's answer/decision (not a third
 party, not a physical rig step) is buried wrong ("na U sa vždy pýtam"): relabel
 `needs-answer`/`needs-decision` (U) with a DELIVERED question.
@@ -62,43 +64,44 @@ class FleetRuleContentLock(unittest.TestCase):
 
 
 class WClauseHourlyAndOwnerDecision(unittest.TestCase):
-    """`_W_CLAUSE` names the hourly thread-check (part 1) + owner-decision
-    mis-shape (part 4)."""
+    """#714: the full W→I doctrine (ROZHODNUTIE/DORUČ/hourly-check) now lives in
+    the session's MODULES (statusline-vocabulary.md, content-locked by the
+    Status* tests above); the compact `_W_TRIGGER` carries the TRIGGER — the
+    hourly-check pointer (#607, 1×/hod) + the owner mis-shape label (#601)."""
 
-    def test_w_clause_names_hourly_thread_check(self):
-        self.assertIn("1×/hodinu", owr._W_CLAUSE)
+    def test_w_trigger_names_hourly_thread_check(self):
+        self.assertIn("1×/hod", owr._W_TRIGGER)
+        self.assertIn("#607", owr._W_TRIGGER)
 
-    def test_w_clause_names_owner_decision_misshape(self):
-        c = owr._W_CLAUSE
-        # the owner ANSWER/DECISION variant (distinct from the #601 physical-step
-        # variant already present) -> U with a delivered question
-        self.assertIn("ROZHODNUTIE", c)
-        self.assertIn("needs-answer", c)
-        self.assertIn("needs-decision", c)
-        self.assertIn("DORUČ", c)          # deliver the question ("na U sa vždy pýtam")
+    def test_w_trigger_names_owner_misshape_pointer(self):
+        c = owr._W_TRIGGER
+        self.assertIn("needs-owner-action", c)   # owner-blocked -> U #601
+        self.assertIn("#601", c)
 
-    def test_owner_decision_rendered_in_nudge_text(self):
-        # a W-only nudge carries the owner-decision mis-shape instruction
-        t = owr._nudge_text(None, [41], now=1000.0, w_seen={"41": 1000.0})
-        self.assertIn("ROZHODNUTIE", t)
+    def test_owner_misshape_rendered_in_nudge_text(self):
+        # a W-only nudge carries the owner mis-shape re-label pointer
+        t = owr._nudge_text(None, [41], now=1000.0)
+        self.assertIn("needs-owner-action", t)
+        self.assertIn("#601", t)
 
 
 class WStaleClauseEscalation(unittest.TestCase):
-    """`_W_STALE_CLAUSE` escalates tag -> SEND a reminder into the thread (part 2)."""
+    """#714: the STALE escalation is a compact flag (count + #607 pointer +
+    DNES) — the full 'send a reminder into the thread' doctrine lives in the
+    session's modules; the tag still SURFACES in the nudge as a count."""
 
-    def test_stale_clause_escalates_to_send_into_thread(self):
-        c = owr._W_STALE_CLAUSE
-        self.assertIn("MUSÍ", c)           # a reminder MUST be sent
-        self.assertIn("vlákna", c)         # into the client Discuss thread
-        self.assertIn("pracovných", c)     # 24h working-day window
-        # existing #570 assertions must survive (NudgeNamesStaleMembers locks these)
-        self.assertIn("DNES", c)
-
-    def test_stale_subclause_still_fires_in_nudge(self):
+    def test_stale_flag_fires_in_nudge_with_pointer(self):
         members = [{"number": 41, "stale": True}]
-        t = owr._nudge_text(None, members, now=1000.0, w_seen={"41": 1000.0})
-        self.assertIn("STALE", t)
-        self.assertIn("#41", t)
+        t = owr._nudge_text(None, members, now=1000.0)
+        self.assertIn("STALE", t)          # the flag fires
+        self.assertIn("#607", t)           # the 24h working-day contract pointer
+        self.assertIn("DNES", t)           # act today
+
+    def test_no_stale_flag_when_none_stale(self):
+        members = [{"number": 41, "stale": False}]
+        t = owr._nudge_text(None, members, now=1000.0)
+        self.assertNotIn("STALE", t)
+        self.assertIn("W=1", t)            # #714 compact count, no member name
 
 
 class ModuleDocstringDefersHourlyVerification(unittest.TestCase):

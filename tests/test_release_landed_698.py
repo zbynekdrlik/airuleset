@@ -262,14 +262,17 @@ class NudgeCarriesReleaseLandedClause(unittest.TestCase):
                _mem(43, "klient nepotvrdil")]
     SEEN = {"4600": float(NOW), "43": float(NOW)}
 
-    def test_landed_members_named_with_clear_today_action(self):
+    def test_landed_flag_fires_with_clear_today_action(self):
+        # #714: the release-landed sub-clause is a compact COUNT flag (members
+        # in `slice-quals --ops-wait`), keeping RELEASE LANDOL + #698 + #588 +
+        # DNES — no member enumeration.
         t = owr._nudge_text(0, self.MEMBERS, NOW, self.SEEN,
                             release_landed=[4600])
-        self.assertIn("RELEASE LANDOL", t)
-        self.assertIn("#4600", t)
+        self.assertIn("RELEASE LANDOL 1", t)   # the flag fires (count=1)
+        self.assertIn("#698", t)           # doctrine pointer
         self.assertIn("#588", t)           # the deployed-state doctrine anchor
-        self.assertIn("DNES", t)           # clear ops-wait TODAY, with evidence
-        self.assertIn("dôkaz", t)
+        self.assertIn("DNES", t)           # clear ops-wait TODAY
+        self.assertNotIn("#4600", t)       # no member enumeration (#714)
 
     def test_no_release_landed_degrades_to_generic(self):
         base = owr._nudge_text(0, self.MEMBERS, NOW, self.SEEN)
@@ -286,19 +289,23 @@ class NudgeCarriesReleaseLandedClause(unittest.TestCase):
         members = [_mem(n, "release 2.180") for n in many]
         seen = {str(n): float(NOW) for n in many}
         t = owr._nudge_text(0, members, NOW, seen, release_landed=many)
-        self.assertIn("zhrň stav ownerovi", t)
+        self.assertIn("zhrň ownerovi", t)
         few = many[:owr.RELEASE_LANDED_OWNER_ASK_N]
         t2 = owr._nudge_text(0, members, NOW, seen, release_landed=few)
-        self.assertNotIn("zhrň stav ownerovi", t2)
+        self.assertNotIn("zhrň ownerovi", t2)
 
     def test_threshold_constant(self):
         self.assertEqual(owr.RELEASE_LANDED_OWNER_ASK_N, 5)
 
-    def test_landed_members_render_numerically_sorted(self):
+    def test_landed_flag_is_a_count_not_an_enumeration(self):
+        # #714: the flag is a COUNT — two landed members render "RELEASE LANDOL
+        # 2", never "#7 #50" (the members live in `slice-quals --ops-wait`).
         members = [_mem(50, "release v2.1"), _mem(7, "release v2.1")]
         seen = {"50": float(NOW), "7": float(NOW)}
         t = owr._nudge_text(0, members, NOW, seen, release_landed=[50, 7])
-        self.assertIn("#7 #50", t.split("RELEASE LANDOL", 1)[1])
+        self.assertIn("RELEASE LANDOL 2", t)
+        self.assertNotIn("#7", t)
+        self.assertNotIn("#50", t)
 
     def test_bool_landed_member_is_dropped(self):
         t = owr._nudge_text(0, self.MEMBERS, NOW, self.SEEN,
@@ -361,7 +368,7 @@ class OrchestratorEscalation(_OrchBase):
         self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
         typed = "".join(tmux.typed_texts())
         self.assertIn("RELEASE LANDOL", typed)
-        self.assertIn("#4600", typed)
+        self.assertIn("W=1", typed)                 # #714 compact W count
 
     def test_undetermined_state_falls_back_to_generic(self):
         wrecs, tmux = self._due(), self._tmux()
@@ -372,7 +379,7 @@ class OrchestratorEscalation(_OrchBase):
         self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
         typed = "".join(tmux.typed_texts())
         self.assertNotIn("RELEASE LANDOL", typed)   # never a false claim
-        self.assertIn("#4600", typed)               # generic W clause delivered
+        self.assertIn("W=1", typed)                 # generic W trigger delivered
 
     def test_not_drained_falls_back_to_generic(self):
         wrecs, tmux = self._due(), self._tmux()

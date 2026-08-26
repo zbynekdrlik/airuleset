@@ -3696,7 +3696,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
-                    i_members_fetch=None, release_state_fetch=None):
+                    release_state_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -3837,8 +3837,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
-                i_count=glance.backlog, i_members_fetch=i_members_fetch,
-                release_state_fetch=release_state_fetch)  # #578 + #698
+                i_count=glance.backlog, captured=captured,
+                release_state_fetch=release_state_fetch)  # #698 + #714 busy-gate
         # #616 -- release-gap re-check for this SAME armed pane. Runs AFTER the
         # lane nudge + ops-wait recheck so a pane they already typed (sid in
         # `handled`) is deferred to next sweep; it owns its own `handled` check +

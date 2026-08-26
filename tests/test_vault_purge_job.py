@@ -212,10 +212,11 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # (#547 re-pin: `ops_wait_fetch=None` was inserted on its own NEW line
         # right after the `backlog_fetch=None,` line — the anchor grew a middle
         # line; the mutation target `vault_purge=None` is untouched.)
-        # (#578 re-pin: `i_members_fetch=None` (the job-20 named-audit I-member
-        # fetch seam) was appended AFTER `ops_wait_fetch=None,` on that same
-        # line — the anchor's middle line grew; the mutation target
-        # `vault_purge=None` is untouched.)
+        # (#714 re-pin: `i_members_fetch=None` was REMOVED (the job-20 nudge is
+        # now a compact COUNT trigger that points the session at `slice-quals
+        # --audit` instead of the watchdog fetching + naming the I members), so
+        # `ops_wait_fetch=None,` now sits alone on that line; the anchor's middle
+        # line shrank, the mutation target `vault_purge=None` is untouched.)
         # (#551 re-pin: `gkorphan_fetch=None` (job 36's fetch) was appended on
         # its own NEW trailing line, so the closing `):` moved off the
         # `conformance_hb_enabled=False` line — the anchor grew a last line;
@@ -229,7 +230,7 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
-               "             ops_wait_fetch=None, i_members_fetch=None,\n"
+               "             ops_wait_fetch=None,\n"
                "             progress_dir=None, questions_path=None,\n"
                "             gk_selfservice_fetch=None,\n"
                "             u_reconcile_clear=None, conformance_root=None,\n"

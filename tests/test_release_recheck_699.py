@@ -140,15 +140,17 @@ class NudgeNamesRecheckMembers(unittest.TestCase):
     """The job-20 nudge text NAMES the recheck W members with the cadence duty
     (deployed-state re-check #588 every work cycle, min 1×/hour)."""
 
-    def test_recheck_members_named_with_cadence(self):
+    def test_recheck_flag_fires_with_cadence(self):
+        # #714: the recheck sub-clause is now a compact COUNT flag (the members
+        # live in `slice-quals --ops-wait`, tagged `recheck!`), not a member
+        # enumeration — but it keeps its identifying token + the cadence duty.
         members = [{"number": 41, "release_recheck": True},
                    {"number": 43, "release_recheck": False}]
-        t = owr._nudge_text(None, members, now=1000.0,
-                            w_seen={"41": 1000.0, "43": 1000.0})
-        self.assertIn("#41", t)
-        self.assertIn("RELEASE-RECHECK", t)      # the recheck sub-clause fires
+        t = owr._nudge_text(None, members, now=1000.0)
+        self.assertIn("RELEASE-RECHECK 1", t)    # the recheck flag fires (count=1)
         self.assertIn("1×/hod", t)               # the cadence duty
-        self.assertNotIn("#43", t.split("RELEASE-RECHECK", 1)[1])
+        self.assertIn("#699", t)                 # the doctrine pointer
+        self.assertNotIn("#41", t)               # no member enumeration (#714)
 
     def test_legacy_int_members_no_recheck_clause(self):
         t = owr._nudge_text(None, [41, 43], now=1000.0,
