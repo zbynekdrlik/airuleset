@@ -300,7 +300,11 @@ class TruncatedTypeUndone617(unittest.TestCase):
                                       sleep_fn=lambda *_a: None, logs=logs)
         self.assertFalse(ok)
         self.assertIn("BSpace", _tails(fake.sent))          # the undo happened
-        self.assertTrue(any("undone" in ln for ln in logs), logs)
+        # #720 -- the type-verify + undo moved into the shared `_type_literal_
+        # verified` primitive (a CORRUPT give-up leaves the box bare, the #617
+        # never-a-poison invariant preserved), so `_send_goal_verified` now logs
+        # its own abort as `type-not-verified` rather than the old `undone`.
+        self.assertTrue(any("type-not-verified" in ln for ln in logs), logs)
 
     def test_confirmed_type_is_never_undone(self):
         # Control: a type that DOES land + submits must NOT trigger the undo.

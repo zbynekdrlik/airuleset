@@ -52,6 +52,9 @@ DRAFT_CAP = "● turn done\n❯\xa0" + DRAFT_TEXT + "\n  ctx ░░\n"
 BARE_CAP = "● turn done\n❯\xa0\n  ctx ░░\n"
 STASHED_BARE = "● turn done\n❯\xa0\n  ctx ░░  › stashed\n"
 BARE_AFTER_SUBMIT = "● turn done\n❯\xa0\n  ctx ░░\n"
+# #720 -- the pane after CC ARMS the submitted /goal: a bare box with the
+# `◎ /goal` footer, what `_send_goal_verified`'s arm-confirm poll reads.
+ARMED_AFTER_SUBMIT = "● turn done\n❯\xa0\n  ctx ░░  ◎ /goal active\n"
 GOAL_TEXT = "/goal " + "STOP CONDITIONS " + "x" * 40
 
 
@@ -390,8 +393,11 @@ class TestSendGoalVerifiedRescue(_RescueIsolated):
     def test_a_bare_box_creates_no_rescue_file(self):
         # #271: the function re-captures FRESH immediately before typing —
         # the first queued capture answers THAT re-check (still bare), the
-        # rest serve the type/submit verify polls as before.
-        run = _Recorder([BARE_CAP, _typed_boundary(GOAL_TEXT), BARE_AFTER_SUBMIT])
+        # rest serve the type/submit verify polls as before. #720 adds the
+        # final ARM-confirm poll, so the last queued capture shows the armed
+        # `◎ /goal` footer.
+        run = _Recorder([BARE_CAP, _typed_boundary(GOAL_TEXT),
+                         BARE_AFTER_SUBMIT, ARMED_AFTER_SUBMIT])
         ok = wdgoal._send_goal_verified("%9", GOAL_TEXT, run, captured=BARE_CAP,
                                     sleep_fn=lambda s: None)
         self.assertTrue(ok)

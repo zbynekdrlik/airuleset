@@ -569,15 +569,27 @@ def _await_typed(pid, text, run, sleep_fn, want=True):
     return not want
 
 
-def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None):
+def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
+                        verify_armed=True):
     """Type a LONG `/goal ...` into a BARE input box and submit it,
     verifying every step against a fresh capture -- the same protocol
     `deliver_with_stash` uses for its own type/submit steps, minus the
     stash (there is no draft here).
 
     NEVER presses Enter after a type-verify failure. NEVER sends two
-    consecutive Escapes (#35). Returns True only when the box is provably
-    empty again after the submit.
+    consecutive Escapes (#35).
+
+    #720 -- the type is verified HEAD-INCLUSIVELY via the #670 shared primitive
+    `_type_literal_verified` (undo+retype a first-byte swallow, abort a HOLD box
+    with ZERO keystrokes), REPLACING the head-BLIND tail-only `_await_typed`
+    check that submitted a head-swallowed /goal CC then read as a plain prompt.
+    And when `verify_armed` (the ARM path), the box clearing after Enter is NOT
+    enough -- `pane_goal_armed` is CONFIRMED before returning True, so a submit
+    read as a plain prompt (box clears, goal never arms) returns False instead
+    of a silent "sent". The `/goal clear` DISARM caller passes verify_armed=False
+    (a successful disarm leaves pane_goal_armed False -- not a failure).
+    Returns True only when the box is provably empty again after the submit
+    (and, on the arm path, the goal is confirmed armed).
 
     A SECOND, FRESH capture is taken immediately before typing (job 20's
     own re-capture-right-before-send pattern, #176-F3) -- the race this
@@ -603,26 +615,17 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
         watchdog._draft_rescue_persist(pid, fresh, logs=logs)
         _log("goal-verify-abort: raced-busy")
         return False                       # raced -- a draft appeared since the caller's own check
-    watchdog._type_literal(pid, run, text, sleep_fn)
-    if not _await_typed(pid, text, run, sleep_fn, want=True):
-        if watchdog._pane_shows_collapsed_paste(
-                watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))):
-            _log("goal-verify-abort: collapsed-paste")
-        # #617 -- NEVER leave our own TRUNCATED type in the box: it becomes a
-        # poisoned draft the next sweep can neither submit nor clear (the live
-        # montalu1 674-char stuck /goal). The box was verified BARE
-        # immediately above (entry gate + fresh re-capture), so backspacing
-        # len(text) provably reaches nothing of the user's -- a surplus
-        # backspace lands on an empty box (`_undo_typed_text`'s own proof).
-        # The #322 `paste again to expand` collapse also lands here (logged
-        # above): backspacing len(text) over that short placeholder render is
-        # the same safe over-backspace, and the fail direction (an
-        # unconverged "typed-NOT-undone" log) is exactly the pre-#617
-        # behaviour, never a regression. Never a submit here.
-        watchdog._undo_and_release_slot(pid, run, text, False, _log,
-                                        "goal-verify-abort: truncated-type",
-                                        sleep_fn=sleep_fn)
-        return False                       # never rendered -- never submit it
+    # #720 -- HEAD-INCLUSIVE verified type (the #670 `_type_literal_verified`
+    # shared primitive): it head+tail-verifies the box, undoes+retypes a
+    # first-byte swallow (CORRUPT, box left BARE on give-up -- the #617
+    # never-leave-a-poison invariant), and on an unreadable/collapsed box (HOLD)
+    # aborts with ZERO keystrokes (the #372 janitor backstops any residue,
+    # #670-review R2). This REPLACES the head-BLIND tail-only `_await_typed`
+    # check that passed a head-swallowed /goal to Enter -- CC then read the text
+    # as a plain prompt and the goal never armed (#720). Never a submit on False.
+    if not watchdog._type_literal_verified(pid, run, text, sleep_fn):
+        _log("goal-verify-abort: type-not-verified")
+        return False                       # not byte-exact -- never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if _await_typed(pid, text, run, sleep_fn, want=False):
         # STILL in the box after the same bounded settle window -- a
@@ -636,7 +639,21 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
                                             "swallowed-submit-not-recovered",
                                             sleep_fn=sleep_fn)
             return False
-    return True
+    if not verify_armed:
+        return True                        # `/goal clear` disarm -- box-cleared IS the signal (#522)
+    # #720 -- the box cleared, but that alone does NOT prove the goal ARMED: a
+    # submit CC read as a plain prompt also clears it (the incident's "sent"-but-
+    # dark tail). CONFIRM the `◎ /goal` footer (`pane_goal_armed`) before "sent".
+    # An unarmed verdict returns False -> deliver_goal keeps the request pending
+    # and a later sweep re-arms (its own `armed is True` check makes a render-lag
+    # false-negative a `drop:already-armed`, never a double-arm).
+    for i in range(GOAL_TYPE_SETTLE_POLLS):
+        if watchdog.pane_goal_armed(watchdog.capture_pane(pid, run, lines=40)) is True:
+            return True
+        if i < GOAL_TYPE_SETTLE_POLLS - 1:
+            sleep_fn(GOAL_TYPE_SETTLE_S)
+    _log("goal-verify-abort: not-armed-after-submit")
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -1115,7 +1132,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if kind == "no-input-line":
         _log_goal_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
         return "skip:no-input-line"
-    if kind == "busy":
+    # `_pane_busy_waiting`: a "Waiting for N background agents" pane reads
+    # kind="input" (bare `❯`, spinner a row above) so a submit is swallowed and
+    # the /goal parks orphaned -- defer, no keystroke (#720/#714 primitive).
+    if kind == "busy" or _ops_wait_recheck._pane_busy_waiting(captured):
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
 
@@ -2170,13 +2190,18 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs):
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
         return "skip:no-input-line"
-    if kind == "busy":
+    # #720/#714 -- the disarm keystroke path shares the arm path's busy-Waiting
+    # gap: never submit `/goal clear` into a "Waiting for N background agents"
+    # pane (the submit is swallowed). Defer, retry next sweep.
+    if kind == "busy" or _ops_wait_recheck._pane_busy_waiting(captured):
         return "skip:busy"
     if draft:
         return "skip:draft"          # user is composing -- never disturb, retry next sweep
     watchdog._janitor_mark_watch(state, pid, now)
+    # verify_armed=False -- a `/goal clear` DISARMS, so the #720 arm-confirm must
+    # NOT run (a successful disarm leaves pane_goal_armed False, not a failure).
     ok = _send_goal_verified(pid, text, run, captured=captured,
-                             sleep_fn=sleep_fn, logs=logs)
+                             sleep_fn=sleep_fn, logs=logs, verify_armed=False)
     if ok:
         watchdog._janitor_clear_watch(state, pid)
         return "sent"
