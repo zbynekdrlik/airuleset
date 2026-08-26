@@ -402,6 +402,7 @@ class TestDeliverGoal(unittest.TestCase):
 
         def _fake_stash(pid, text, run, **kw):
             calls.append((pid, text, kw.get("captured")))
+            run._armed = True          # #720 -- a real stash submit ARMS the goal
             return True
 
         with m.patch.object(wd, "deliver_with_stash", side_effect=_fake_stash):
@@ -419,7 +420,12 @@ class TestDeliverGoal(unittest.TestCase):
         # (so a stuck send stays recoverable by the shared #372 janitor)
         # and clears only once success is verified.
         state = {}
-        with m.patch.object(wd, "deliver_with_stash", return_value=True):
+
+        def _armed_stash(pid, text, run, **kw):
+            run._armed = True          # #720 -- a real stash submit ARMS the goal
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_armed_stash):
             word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
         self.assertEqual(word, "sent")
         self.assertNotIn("%9", state.get("janitor_watch", {}))
@@ -446,6 +452,7 @@ class TestDeliverGoal(unittest.TestCase):
 
         def _fake_stash(pid, text, run, **kw):
             seen_marked_at_call_time.append(pid in state.get("janitor_watch", {}))
+            run._armed = True          # #720 -- a real stash submit ARMS the goal
             return True
 
         with m.patch.object(wd, "deliver_with_stash", side_effect=_fake_stash):

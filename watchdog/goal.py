@@ -569,6 +569,32 @@ def _await_typed(pid, text, run, sleep_fn, want=True):
     return not want
 
 
+def _await_goal_armed(pid, run, sleep_fn):
+    """#720 -- poll (bounded) until the pane footer shows the `◎ /goal` armed
+    glyph (`pane_goal_armed is True`). A render-settle poll like `_await_typed`:
+    CC arms a submitted /goal a moment after Enter, so the glyph lags the box
+    clearing. Returns True the instant it reads armed, False if the bounded
+    window elapses -- a submit CC read as a plain prompt clears the box (and
+    appends a `user` turn) but never arms, so box-cleared / transcript-confirmed
+    is NOT proof the goal armed (the #720 silent-'sent' tail). On False the
+    caller keeps the request pending; the next sweep's own `armed is True` check
+    turns a render-lag false-negative into `drop:already-armed`, never a
+    double-arm. Shared by all three arm routes (bare / stash / stranded).
+
+    KNOWN BLIND SPOT (#720-review 🔵): a stale-rearm REPLACE types past an
+    ALREADY-armed footer, so this confirm reads the still-lit OLD `◎ /goal` and
+    passes even if the replace-submit was consumed as a plain prompt -- it cannot
+    tell old-armed from new-armed. Bounded: `goal_dark_watch` re-detects the
+    still-stale marker under its 24h/2 cap. The confirm's real teeth are on a
+    FRESH arm (armed was False before -> a True read is genuinely ours)."""
+    for i in range(GOAL_TYPE_SETTLE_POLLS):
+        if watchdog.pane_goal_armed(watchdog.capture_pane(pid, run, lines=40)) is True:
+            return True
+        if i < GOAL_TYPE_SETTLE_POLLS - 1:
+            sleep_fn(GOAL_TYPE_SETTLE_S)
+    return False
+
+
 def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
                         verify_armed=True):
     """Type a LONG `/goal ...` into a BARE input box and submit it,
@@ -641,17 +667,10 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
             return False
     if not verify_armed:
         return True                        # `/goal clear` disarm -- box-cleared IS the signal (#522)
-    # #720 -- the box cleared, but that alone does NOT prove the goal ARMED: a
-    # submit CC read as a plain prompt also clears it (the incident's "sent"-but-
-    # dark tail). CONFIRM the `◎ /goal` footer (`pane_goal_armed`) before "sent".
-    # An unarmed verdict returns False -> deliver_goal keeps the request pending
-    # and a later sweep re-arms (its own `armed is True` check makes a render-lag
-    # false-negative a `drop:already-armed`, never a double-arm).
-    for i in range(GOAL_TYPE_SETTLE_POLLS):
-        if watchdog.pane_goal_armed(watchdog.capture_pane(pid, run, lines=40)) is True:
-            return True
-        if i < GOAL_TYPE_SETTLE_POLLS - 1:
-            sleep_fn(GOAL_TYPE_SETTLE_S)
+    # #720 -- box-cleared does NOT prove the goal ARMED (a submit CC read as a
+    # plain prompt also clears it -- the incident's "sent"-but-dark tail).
+    if _await_goal_armed(pid, run, sleep_fn):
+        return True
     _log("goal-verify-abort: not-armed-after-submit")
     return False
 
@@ -1157,6 +1176,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
                                      run, state, now, sleep_fn, logs):
             watchdog._janitor_clear_watch(state, pid)
+            if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
+                _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
+                return "skip:verify-failed"
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         # #488: thread `state` so deliver_with_stash can DURABLY record a park
@@ -1170,6 +1192,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                          state=state)
         if ok:
             watchdog._janitor_clear_watch(state, pid)
+            if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
+                _log_goal_sync("SKIP not-armed(stash) sid=%s cwd=%s" % (sid, cwd))
+                return "skip:verify-failed"
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         _log_goal_sync("SKIP stash-abort sid=%s cwd=%s" % (sid, cwd))

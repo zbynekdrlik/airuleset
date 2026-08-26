@@ -112,10 +112,12 @@ class DeliverGoalFakeTmux:
         self._cap_calls = 0
         self.sent = []
         # #720 — model CC arming/clearing a goal on a `/goal` submit so a
-        # POST-submit `pane_goal_armed` read is truthful (what `_send_goal_
-        # verified`'s #720 arm-confirm polls): a `/goal <cond>` submit sets it
-        # True, a `/goal clear` submit False, a plain nudge leaves it untouched.
-        self._armed = False
+        # POST-submit `pane_goal_armed` read is truthful (what the #720 arm-
+        # confirm polls). Tri-state: None = untouched (the seed capture's own
+        # armed state governs); True = a `/goal <cond>` submit (INJECT the
+        # `◎ /goal` glyph); False = a `/goal clear` submit (STRIP it — model the
+        # disarm, not just the arm). A plain nudge leaves it None.
+        self._armed = None
         self.model_type = model_type
         # #490 — model the two facts `send_verified` verifies against: an
         # ACCEPTED submit appends a real `user` turn to `transcript_path` and
@@ -162,7 +164,9 @@ class DeliverGoalFakeTmux:
 
     def _render(self):
         if not self.model_type or self._bare_line is None:
-            return self.captured
+            # #720 -- still reflect a modelled arm/disarm on a draft/armed seed
+            # (no bare `❯` line to type into); `_armed=None` returns it unchanged.
+            return self._with_arm(self.captured)
         if not self.box:
             return self._with_arm(self.captured)   # #720 post-submit armed footer
         if self.wrap_width:
@@ -171,12 +175,18 @@ class DeliverGoalFakeTmux:
         return self.captured.replace(self._bare_line, new_line, 1)
 
     def _with_arm(self, base):
-        """#720 — append CC's `◎ /goal active` footer glyph to the ctx line when
-        `self._armed` (a `/goal <cond>` was submitted), so a post-submit
-        `pane_goal_armed` read is truthful. `arm_on_submit`-off / a `/goal clear`
-        submit leave the flag False — the 'submitted but never armed' shape the
-        #720 arm-confirm guards against."""
-        if not self._armed or "◎ /goal" in base:
+        """#720 — reflect a `/goal` submit on the footer so a post-submit
+        `pane_goal_armed` read is truthful for BOTH arm and disarm: `_armed`
+        True INJECTS the `◎ /goal active` glyph, False (a `/goal clear`) STRIPS
+        it, None leaves the seed capture untouched (its own armed state governs).
+        `arm_on_submit=False` keeps it None — the 'submitted but never armed'
+        shape the #720 arm-confirm guards against."""
+        if self._armed is None:
+            return base
+        if not self._armed:
+            return base.replace("  ◎ /goal active", "").replace(
+                "◎ /goal active", "")
+        if "◎ /goal" in base:
             return base
         lines = base.split("\n")
         for i, ln in enumerate(lines):

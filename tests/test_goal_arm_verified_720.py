@@ -29,10 +29,11 @@ from tempfile import TemporaryDirectory
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+import watchdog as wd  # noqa: E402
 import watchdog.goal as goal  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
-    DeliverGoalFakeTmux, GOAL_IDLE_CAP, _SwallowFirstCharFake,
-    _write_marker_transcript, _isolate_goal_state,
+    DeliverGoalFakeTmux, GOAL_IDLE_CAP, GOAL_ARMED_CAP, GOAL_DRAFT_CAP,
+    _SwallowFirstCharFake, _write_marker_transcript, _isolate_goal_state,
 )
 
 PID = "%9"
@@ -103,6 +104,7 @@ class HeadSwallowedGoalArmNeverSubmitted(unittest.TestCase):
         # ~3900-char template byte-exact and THAT is what gets submitted +
         # (with the pane arming) returns "sent".
         self.assertGreater(len(GOAL_ARM_3900), 3800)     # the incident scale
+        self.assertLess(len(GOAL_ARM_3900), 4000)        # under CC's cap (#720-review)
         p = _tpath(self)
         tmux = self._fake(p, swallow_budget=1)
         ok = goal._send_goal_verified(PID, GOAL_ARM_3900, tmux,
@@ -192,6 +194,77 @@ class BusyWaitingPaneDefers(unittest.TestCase):
         # still delivers — the gate is narrow, it does not block a real arm.
         word, tmux = self._deliver(GOAL_IDLE_CAP)
         self.assertEqual(word, "sent")
+
+
+class ArmConfirmPollIterates(unittest.TestCase):
+    # #720-review 🔵5 — the arm-confirm poll must ITERATE for a LATE arm (CC
+    # arms a moment after Enter), and give up False on a never-arming submit.
+    def test_a_late_arm_is_confirmed(self):
+        tmux = DeliverGoalFakeTmux(
+            [(PID, "s", "1", "1")], GOAL_IDLE_CAP,
+            cap_seq=[GOAL_IDLE_CAP, GOAL_IDLE_CAP, GOAL_ARMED_CAP])
+        self.assertTrue(goal._await_goal_armed(PID, tmux, lambda s: None))
+
+    def test_a_never_arming_submit_gives_up_false(self):
+        tmux = DeliverGoalFakeTmux([(PID, "s", "1", "1")], GOAL_IDLE_CAP,
+                                   cap_seq=[GOAL_IDLE_CAP])
+        self.assertFalse(goal._await_goal_armed(PID, tmux, lambda s: None))
+
+
+class ClearPathViaDeliverGoalClear(unittest.TestCase):
+    # #720-review 🟡1 — teeth for the CLEAR path's two #720 fix lines.
+    def setUp(self):
+        _isolate_goal_state(self)
+
+    def test_disarm_returns_sent_without_an_arm_confirm(self):
+        # A `/goal clear` DISARMS (footer goes dark). `_deliver_goal_clear` passes
+        # verify_armed=False, so the #720 arm-confirm is SKIPPED — else a
+        # successful disarm (fake strips ◎ on the clear submit) would read as
+        # skip:verify-failed. Teeth for the verify_armed=False call-site wiring.
+        p = _tpath(self)
+        tmux = DeliverGoalFakeTmux([(PID, "s", "1", "1")], GOAL_ARMED_CAP,
+                                   model_type=True, transcript_path=p)
+        word = goal._deliver_goal_clear(PID, "/goal clear", tmux, GOAL_ARMED_CAP,
+                                        {}, 1_000_000, lambda s: None, [])
+        self.assertEqual(word, "sent")
+        self.assertIn("/goal clear", _submitted_turns(p))
+
+    def test_disarm_defers_on_a_waiting_pane_without_keystroke(self):
+        # Teeth for the _deliver_goal_clear busy-Waiting gate: never type
+        # `/goal clear` into a "Waiting for N background agents" pane.
+        tmux = DeliverGoalFakeTmux([(PID, "s", "1", "1")], GOAL_WAITING_CAP,
+                                   model_type=True)
+        word = goal._deliver_goal_clear(PID, "/goal clear", tmux,
+                                        GOAL_WAITING_CAP, {}, 1_000_000,
+                                        lambda s: None, [])
+        self.assertEqual(word, "skip:busy")
+        self.assertEqual(tmux.sent, [])
+
+
+class StashArmRouteConfirmsArmed(unittest.TestCase):
+    # #720-review 🟡2 (A-2) — the stash arm route also confirms the goal armed,
+    # closing the silent-"sent" hole on the draft route (not just the bare box).
+    SID = "sess-720-stash"
+    CWD = "/home/newlevel/devel/goal720stash"
+
+    def setUp(self):
+        _isolate_goal_state(self)
+
+    def test_stash_submit_that_never_arms_is_not_reported_sent(self):
+        import unittest.mock as m
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name)
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_DRAFT_CAP, model_type=True)
+        # deliver_with_stash "succeeds" but the pane never arms (CC read the
+        # submitted /goal as a plain prompt) -> must be skip:verify-failed.
+        with m.patch.object(wd, "deliver_with_stash", return_value=True):
+            word = goal.deliver_goal(self.SID, self.CWD, "/goal STOP CONDITIONS x",
+                                     "full", run=tmux, projects_dir=proj,
+                                     sleep_fn=lambda s: None)
+        self.assertEqual(word, "skip:verify-failed")
 
 
 if __name__ == "__main__":
