@@ -127,3 +127,8 @@ follow the canonical cross-stream rules in the companion file
 **`handover-compose.md`** (same directory). That file auto-loads at proposal
 time via its own situational trigger; kept separate from this recipe so the
 recipe stays lean.
+
+## Reading a message with an attachment
+
+See companion `read-with-attachments.md` — attachments are read BEFORE the
+text, always.
