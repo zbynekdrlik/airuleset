@@ -1214,8 +1214,10 @@ from watchdog.goal_scan import (  # noqa: E402
     scan_goal_markers as scan_goal_markers,
     seed_goal_marker as seed_goal_marker,
     pane_goal_armed as pane_goal_armed,
+    _tmux_client_recent_input as _tmux_client_recent_input,
     GOAL_MARK_TAIL_BYTES as GOAL_MARK_TAIL_BYTES,
     GOAL_MARK_SEED_CAP_BYTES as GOAL_MARK_SEED_CAP_BYTES,
+    GOAL_CLIENT_INPUT_VETO_S as GOAL_CLIENT_INPUT_VETO_S,
 )
 
 # #486 G3 -- the G1 session-heartbeat reader + reaper, now CONSUMED (G1/G2 left

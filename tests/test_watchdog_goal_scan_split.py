@@ -68,8 +68,10 @@ MOVED_FUNCTIONS = [
     "scan_goal_markers",
     "seed_goal_marker",
     "pane_goal_armed",
+    "_tmux_client_recent_input",    # #731 -- signal 3 (attached tmux client input)
 ]
-MOVED_CONSTANTS = ["GOAL_MARK_TAIL_BYTES", "GOAL_MARK_SEED_CAP_BYTES"]
+MOVED_CONSTANTS = ["GOAL_MARK_TAIL_BYTES", "GOAL_MARK_SEED_CAP_BYTES",
+                   "GOAL_CLIENT_INPUT_VETO_S"]   # #731
 MOVED_NAMES = MOVED_FUNCTIONS + MOVED_CONSTANTS
 
 
