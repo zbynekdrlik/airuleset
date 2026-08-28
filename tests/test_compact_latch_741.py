@@ -9,7 +9,6 @@ store, so each keeps typing / re-arming into a pane with a pending /compact.
 
 import unittest
 import unittest.mock as m
-import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
