@@ -254,7 +254,8 @@ def _janitor_prune_parks(state, live_pids):
 
 
 def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
-                          dry_run, sleep_fn, state=None, now=None):
+                          dry_run, sleep_fn, state=None, now=None,
+                          own_payload=None):
     """#372 — the shared, generic per-pane janitor recovery driver, relocated
     beside `_janitor_watch_seen`/`_janitor_mark_watch`/`_janitor_clear_watch`
     by #403 (it used to be hosted inside goal_rearm, now deleted). Called
@@ -315,6 +316,19 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # still left untouched (`_draft_rescue_persist` snapshots before any clear).
     itext = watchdog._input_box_head_text(captured)
     occupied = watchdog.STASH_MARKER in (captured or "")
+    # #737 -- a SCROLLED long own /goal renders only its TAIL rows, so its
+    # `/goal ` prefix is off-screen and `_looks_like_own_stuck_content(head)`
+    # (head/tail only) cannot recognize it -> occupied+scrolled reads as a
+    # foreign occupant and the stash slot never releases (the montalu6/montalu3
+    # `stash-abort-slot-occupied` livelock). When the CALLER supplies the
+    # candidate `own_payload` (the pending request's own text, or the current
+    # /goal template -- NEVER a rescue snapshot of the box, #737 design fork),
+    # the WHOLE visible box being a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous
+    # SUBSTRING of it is the missing proof. A foreign draft is never a substring
+    # of our own /goal, so the fail-safe (no proof -> untouched) still holds; the
+    # provenance gate below is UNCHANGED and stays the ownership decision.
+    own_leftover = bool(own_payload) and watchdog._box_is_own_leftover(
+        captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
 
     # #488 -- the DURABLE, age-unbounded park record. Written by
     # `deliver_with_stash` itself the instant it DEFINITIVELY parks a draft
@@ -353,12 +367,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     if occupied:
         if itext == "":
             action = "pop"
-        elif watchdog._looks_like_own_stuck_content(itext):
-            action = "clear-and-pop"
+        elif watchdog._looks_like_own_stuck_content(itext) or own_leftover:
+            action = "clear-and-pop"        # #737: scrolled own /goal counts
         else:
             return logs                     # a genuine foreign occupant
-    elif watchdog._looks_like_own_stuck_content(itext):
-        action = "clear"
+    elif watchdog._looks_like_own_stuck_content(itext) or own_leftover:
+        action = "clear"                    # #737: scrolled own /goal counts
     else:
         return logs                         # nothing recognizable stuck
 
