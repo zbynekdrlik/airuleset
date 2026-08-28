@@ -881,13 +881,11 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     text, _auth = (rearm_fn or _default_rearm_fn)(cwd)
     if not text:
         return [], False
-    rows = watchdog._input_box_rows_raw(captured)
-    if not rows:
+    # #737 -- the SAME head-first whole-box reconstruction `_goal_box_kind` uses
+    # (single-sourced in `_box_norm_from_capture`, never a second inline copy).
+    box_norm = watchdog._box_norm_from_capture(captured)
+    if not box_norm:
         return [], False
-    box_full = rows[0].lstrip("❯").strip()
-    if len(rows) > 1:
-        box_full = (box_full + " " + " ".join(rows[1:])).strip()
-    box_norm = " ".join(box_full.split())
     text_norm = " ".join(text.split())
     if not (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
             and len(box_norm) < len(text_norm)
@@ -1982,8 +1980,10 @@ def _dark_awaiting_user_veto(tpath):
     transcript is STATIC until the owner answers), so this tail-marker read is
     the only awaiting-user signal. The montalu6 incident: one-glance classified
     the pane awaiting-user while dark-watch declared CONFIRMED-DEAD and re-armed a
-    truncated /goal into it. Vetoing here for EVERY armed state (True/None/False)
-    also stops a stale-rearm REPLACE clobbering the owner's answer box. Bounded
+    truncated /goal into it. The caller invokes this BEFORE every re-arm path
+    (auth-rearm AND the armed True/None/False branches), so an awaiting-user
+    session is never re-armed by any of them, and a stale-rearm REPLACE never
+    clobbers the owner's answer box. Bounded
     tail read (#599): a parked-on-❓ session has that turn as its LAST real
     assistant message, well inside the 2 MB tail (a false-negative would only be a
     single >2 MB entry sitting AFTER the ❓ turn -- vanishingly rare)."""
@@ -2410,6 +2410,19 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         if vetoed:
             continue
 
+        # #737 C -- a session PARKED on a ❓ question is ALIVE-waiting; never
+        # re-arm/ping/stale-replace it (see `_dark_awaiting_user_veto`). Placed
+        # BEFORE the mark-state / auth-rearm block below so it covers EVERY re-arm
+        # path -- auth-rearm (state!="set") AND the armed True/None/False branches
+        # -- so the "never re-arm an awaiting-user session" invariant is literal.
+        if _dark_awaiting_user_veto(tpath):
+            if confirm_state.pop(sid, None) is not None:
+                logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
+                            "(❓ marker, confirmation run reset)" % (loc, sid))
+            seen_state.pop(sid, None)
+            pinged_state.pop(sid, None)
+            continue
+
         armed = watchdog.pane_goal_armed(captured)
 
         if mark is None or mark.get("state") != "set":
@@ -2431,16 +2444,6 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             confirm_state.pop(sid, None)   # #524 -- episode over (clear/no marker)
             continue
         mark_ts = mark.get("ts")
-
-        # #737 C -- a session PARKED on a ❓ question is ALIVE-waiting; never
-        # re-arm/ping/stale-replace it (see `_dark_awaiting_user_veto`).
-        if _dark_awaiting_user_veto(tpath):
-            if confirm_state.pop(sid, None) is not None:
-                logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
-                            "(❓ marker, confirmation run reset)" % (loc, sid))
-            seen_state.pop(sid, None)
-            pinged_state.pop(sid, None)
-            continue
 
         if armed is True:
             seen_state.pop(sid, None)

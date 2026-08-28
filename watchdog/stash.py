@@ -1177,11 +1177,16 @@ def _looks_like_own_stuck_content(itext):
 
 # #737 -- the minimum contiguous NORMALIZED-char overlap a box-vs-payload
 # SUBSTRING match must clear to count as our own leftover. A real scrolled /goal
-# leftover is 2500+ chars; 80 is the safety floor that stops a short human draft
-# sharing a few words with the template from ever false-positiving (a human never
-# types 80 consecutive chars byte-identical to the /goal template). Lower than
-# `GOAL_STRANDED_MIN_MATCH` (200, the WHOLE-box exact/prefix floor) on purpose --
-# a substring proof is strictly tighter than a whole-box match at the same length.
+# leftover is 2500+ chars; 80 is the safety floor whose SOLE justification is
+# empirical + provenance-backed: a human never types 80 consecutive chars
+# byte-identical to the /goal template, and every consumer of this proof is ALSO
+# gated by janitor provenance (`_janitor_watch_seen`/park record) or first-person
+# provenance (the arm-confirm cleanup proved the box bare seconds before typing).
+# NOTE: a substring match is LOOSER, not tighter, than the `GOAL_STRANDED_MIN_
+# MATCH` (200) exact/prefix window at equal length -- it accepts any payload
+# window, not only the head -- so the floor + those gates are what keep it safe,
+# never "substring is stricter". Do NOT re-derive the floor from a tightness
+# argument (#562/#563 honesty bar).
 GOAL_ARM_LEFTOVER_MIN_SUBSTR = 80
 
 

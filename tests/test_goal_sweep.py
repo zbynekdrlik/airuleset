@@ -2806,6 +2806,23 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
         self.assertTrue(any("would attempt clear-and-pop" in ln for ln in logs),
                         logs)
 
+    def test_janitor_scrolled_leftover_without_provenance_is_untouched(self):
+        # #737 CONTROL -- the `own_payload` substring proof only decides WHICH
+        # action; the provenance gate still decides WHETHER to act. A scrolled
+        # own /goal with NO janitor watch mark + NO park record is left completely
+        # untouched (no recovery ordered), even though it IS a substring of the
+        # payload. Locks the fail-safe direction of the new own_payload path.
+        cap = ("● Hotovo.\n────\n❯ %s\n────\n  ctx ░░  %s\n"
+               % (_SCROLLED_737, wd.STASH_MARKER))
+        logs = wd._janitor_recover(
+            lambda *a, **k: "", {}, "%9", self.CWD, cap, "loc:0.0",
+            None, True, lambda *a, **k: None,
+            state={}, now=2000,               # NO janitor_watch / stash_parks
+            own_payload=_GOAL_PAYLOAD_737)
+        self.assertEqual(logs, [],
+                         "no provenance -> the janitor must not act, even on a "
+                         "recognized own scrolled leftover")
+
     def test_delivery_attempt_cap_constant_is_a_small_debounce(self):
         self.assertEqual(goal.GOAL_DELIVERY_ATTEMPT_CAP, 3)
         self.assertIn("skip:verify-failed", goal._GOAL_KEYSTROKE_SKIPS)
