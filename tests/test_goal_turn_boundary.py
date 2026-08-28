@@ -46,29 +46,29 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
             self.assertNotIn("immediately pick the next assigned issue.", line)
 
     def test_every_template_ends_the_turn_before_the_next_ticket(self):
-        # #723 BATCH mode reconciled the tail again: the compact now fires ONLY
-        # at the DRAINED batch boundary (whole batch returned + integrated =
-        # zero live tasks), REPLACING the #621 "compact boundary paces ONE
-        # integration per turn / do NOT integrate a SECOND branch this turn"
-        # continuous framing. The armed goal still fires the next turn.
+        # #723 BATCH mode reconciled the tail: the compact fires ONLY at the
+        # DRAINED batch boundary (whole batch returned + integrated = zero live
+        # tasks). #741 REVERSES the ordering half: the armed goal no longer
+        # "fires the NEXT TURN, compacting then dispatching the next batch" (an
+        # order nothing enforced); it HOLDS until the compact is delivered.
         # Its twin in test_goal_backlog_proof.py was reconciled the same way.
         for line in goal_lines():
             self.assertIn("END the turn", line)
             self.assertIn("WHOLE batch has returned", line)
             self.assertIn("ZERO live tasks", line)
-            self.assertIn("NEXT TURN", line)
+            self.assertIn("HOLD each later goal turn until that compact runs", line)
             self.assertIn("✅ DONE:", line)
-            self.assertIn("ARMED GOAL", line)
             # the superseded serializing/continuous tails must be gone
             self.assertNotIn("do NOT integrate a SECOND branch this turn", line)
             self.assertNotIn("do NOT hand off a SECOND branch this turn", line)
 
     def test_every_template_explains_the_compaction_benefit(self):
-        # #723: the benefit is now stated as compacting THEN dispatching the
-        # next batch at the drained boundary (the only safe moment), not the
-        # old "lets the context compact" tail.
+        # #741: the tail no longer asserts the unenforced "compacting then
+        # dispatching the next batch" ordering; it HOLDS each later goal turn
+        # until the compact runs, dispatching no next batch first.
         for line in goal_lines():
-            self.assertIn("compacting then dispatching the next batch", line)
+            self.assertIn("no next batch first", line)
+            self.assertNotIn("compacting then dispatching the next batch", line)
 
     def test_full_authority_references_completion_report(self):
         full = goal_lines()[0]

@@ -2044,11 +2044,14 @@ class TestCompactHoldExtend727(unittest.TestCase):
         self.assertEqual(entry["cwd"], self.CWD)
         self.assertEqual(entry["origin"], "self-callback")
 
-    def test_727_busy_word_does_not_refresh_the_hold(self):
-        # `skip:busy` is NOT a hold-extend word -- a busy pane with no live task
-        # is a NEW turn whose boundary supersedes, so it must NEVER refresh `ts`.
-        # (Mutation target: adding "skip:busy" to _COMPACT_HOLD_EXTEND_WORDS, or
-        # refreshing on every skip, fails this.)
+    def test_741_busy_word_now_refreshes_the_hold(self):
+        # #741 REVERSES #727's "NEVER on skip:busy": under the hold-turn doctrine
+        # a pending compact makes every goal-fired turn a cheap HOLD turn, so a
+        # transiently-busy pane is the boundary being HELD (waiting for its idle
+        # window), NOT a superseding new turn. `skip:busy` is now a hold-extend
+        # word -> the sweep REFRESHES `ts` so an actively-held boundary never ages
+        # out. (Mutation target: removing "skip:busy" from
+        # _COMPACT_HOLD_EXTEND_WORDS fails this.)
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         T = 1_000_000.0
@@ -2056,9 +2059,27 @@ class TestCompactHoldExtend727(unittest.TestCase):
                                        path=self.reqp, origin="self-callback")
         logs, _ = self._sweep(proj, T + 5 * 60, cap=CB_BUSY_CAP)
         self.assertTrue(any("skip:busy" in ln for ln in logs), logs)
-        self.assertFalse(any("HOLD" in ln for ln in logs), logs)
+        self.assertTrue(any("HOLD" in ln and "skip:busy" in ln for ln in logs),
+                        logs)
         self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(T), "skip:busy must NOT refresh ts")
+                         int(T + 5 * 60), "skip:busy must NOW refresh ts (#741)")
+
+    def test_741_recent_human_now_refreshes_the_hold(self):
+        # #741: recent-human is nearly always true in an interactive session
+        # while the owner watches, so a `skip:recent-human` boundary must be a
+        # DEFERRAL (hold), not a discard -- the sweep REFRESHES `ts` so the
+        # held boundary delivers once the human goes quiet, never ages out.
+        proj = self._dir()
+        now = time.time()
+        compact.record_compact_request(self.SID, self.CWD, now=now - 100,
+                                       path=self.reqp, origin="self-callback")
+        _write_human_transcript(proj, self.CWD, self.SID, now - 5)
+        logs, _ = self._sweep(proj, now)
+        self.assertTrue(any("skip:recent-human" in ln for ln in logs), logs)
+        self.assertTrue(
+            any("HOLD" in ln and "skip:recent-human" in ln for ln in logs), logs)
+        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
+                         int(now), "skip:recent-human must refresh ts (#741)")
 
     def test_727_hold_log_line_carries_boundary_held(self):
         # The HOLD decision line names the word AND how long the boundary has
@@ -2142,6 +2163,46 @@ class TestCompactHoldExtend727(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 6b. #741 writer-side latch reader — `has_pending_request`.
+# --------------------------------------------------------------------------- #
+
+class TestHasPendingRequest741(unittest.TestCase):
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+
+    def test_absent_file_is_false(self):
+        # _isolate_compact_state points compact_requests_path at a not-yet-
+        # written temp file: the fail-safe read returns {} -> False, never raises.
+        self.assertFalse(compact.has_pending_request("sid-x"))
+
+    def test_blank_sid_is_false(self):
+        self.assertFalse(compact.has_pending_request(""))
+        self.assertFalse(compact.has_pending_request(None))
+
+    def test_pending_sid_is_true_other_sid_false(self):
+        compact.record_compact_request("sid-yes", "/cwd", now=1000,
+                                       path=self.reqp, origin="self-callback")
+        self.assertTrue(compact.has_pending_request("sid-yes"))
+        self.assertFalse(compact.has_pending_request("sid-no"))
+
+    def test_cleared_request_is_false(self):
+        compact.record_compact_request("sid-c", "/cwd", now=1000,
+                                       path=self.reqp, origin="self-callback")
+        self.assertTrue(compact.has_pending_request("sid-c"))
+        compact.clear_compact_request("sid-c", path=self.reqp)
+        self.assertFalse(compact.has_pending_request("sid-c"))
+
+    def test_explicit_path_is_honoured(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "cr.json"
+        self.assertFalse(compact.has_pending_request("sid-p", path=p))
+        compact.record_compact_request("sid-p", "/cwd", now=1000, path=p,
+                                       origin="self-callback")
+        self.assertTrue(compact.has_pending_request("sid-p", path=p))
+
+
+# --------------------------------------------------------------------------- #
 # 7. CLI wiring — `airuleset.py compact-request`.
 # --------------------------------------------------------------------------- #
 
@@ -2152,6 +2213,7 @@ def _args(**kw):
     # that has nothing to do with the code under test.
     kw.setdefault("self", False)
     kw.setdefault("record", False)
+    kw.setdefault("status", False)   # #741 read-only HOLD probe
     kw.setdefault("session", "")
     kw.setdefault("cwd", "")
     kw.setdefault("origin", "")
@@ -2249,6 +2311,47 @@ class TestCompactRequestCli(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 airuleset.cmd_compact_request(_args())
         self.assertNotEqual(cm.exception.code, 0)
+
+    # -- #741 read-only HOLD probe -------------------------------------- #
+
+    def test_status_prints_none_when_no_pending_request(self):
+        buf = []
+        with m.patch("sys.stdout") as out:
+            out.write = lambda s: buf.append(s)
+            airuleset.cmd_compact_request(_args(status=True, session="no-such"))
+        self.assertEqual("".join(buf), "NONE")
+
+    def test_status_prints_pending_with_sid_and_age(self):
+        compact.record_compact_request("sess-st", "/cwd", now=time.time() - 12,
+                                       path=self.reqp, origin="self-callback")
+        buf = []
+        with m.patch("sys.stdout") as out:
+            out.write = lambda s: buf.append(s)
+            airuleset.cmd_compact_request(_args(status=True, session="sess-st"))
+        line = "".join(buf)
+        self.assertTrue(line.startswith("PENDING sid=sess-st age="), line)
+        self.assertTrue(line.endswith("s"), line)
+
+    def test_status_resolves_self_pane_when_no_session_given(self):
+        compact.record_compact_request("sess-self-st", "/cwd", now=time.time(),
+                                       path=self.reqp, origin="self-callback")
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%3", "/cwd", "sess-self-st")):
+            buf = []
+            with m.patch("sys.stdout") as out:
+                out.write = lambda s: buf.append(s)
+                airuleset.cmd_compact_request(_args(status=True))
+        self.assertTrue("".join(buf).startswith("PENDING sid=sess-self-st"), buf)
+
+    def test_status_records_and_types_nothing(self):
+        # a read-only probe must NEVER record a request or touch a pane.
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%3", "/cwd", "sess-probe")):
+            with m.patch.object(compact, "record_compact_request") as rec:
+                with m.patch("sys.stdout"):
+                    airuleset.cmd_compact_request(_args(status=True))
+        rec.assert_not_called()
+        self.assertEqual(compact.load_compact_requests(self.reqp), {})
 
 
 # --------------------------------------------------------------------------- #
