@@ -1173,3 +1173,51 @@ def _looks_like_own_stuck_content(itext):
         return False
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip())) \
         or watchdog._looks_like_own_payload(itext)
+
+
+# #737 -- the minimum contiguous NORMALIZED-char overlap a box-vs-payload
+# SUBSTRING match must clear to count as our own leftover. A real scrolled /goal
+# leftover is 2500+ chars; 80 is the safety floor whose SOLE justification is
+# empirical + provenance-backed: a human never types 80 consecutive chars
+# byte-identical to the /goal template, and every consumer of this proof is ALSO
+# gated by janitor provenance (`_janitor_watch_seen`/park record) or first-person
+# provenance (the arm-confirm cleanup proved the box bare seconds before typing).
+# NOTE: a substring match is LOOSER, not tighter, than the `GOAL_STRANDED_MIN_
+# MATCH` (200) exact/prefix window at equal length -- it accepts any payload
+# window, not only the head -- so the floor + those gates are what keep it safe,
+# never "substring is stricter". Do NOT re-derive the floor from a tightness
+# argument (#562/#563 honesty bar).
+GOAL_ARM_LEFTOVER_MIN_SUBSTR = 80
+
+
+def _box_norm_from_capture(captured):
+    """#737 -- the whole VISIBLE input-box content, whitespace-normalized,
+    reconstructed HEAD-FIRST from every wrapped row (`_input_box_rows_raw`, the
+    `❯`/NBSP glyph stripped off the head row). '' when no box is located. A
+    SCROLLED long draft renders only its TAIL rows, so this is strictly the
+    visible box -- never the full off-screen payload."""
+    rows = watchdog._input_box_rows_raw(captured)
+    if not rows:
+        return ""
+    head = rows[0].lstrip("❯").strip()
+    full = (head + " " + " ".join(rows[1:])).strip() if len(rows) > 1 else head
+    return " ".join(full.split())
+
+
+def _box_is_own_leftover(captured, payload, min_chars):
+    """#737 -- True when the VISIBLE input-box content is a contiguous SUBSTRING
+    of `payload`, at least `min_chars` normalized chars long: the render
+    signature of a SCROLLED long own /goal (head rows scrolled off, only the
+    tail visible, so the `/goal ` prefix `_looks_like_own_stuck_content` keys on
+    is gone). A short human draft (< `min_chars`) never matches, and a genuine
+    foreign draft is never a contiguous substring of our own frozen payload --
+    so the fail-safe direction (no proof -> untouched, foreign draft nikdy) is
+    preserved. `payload` is the request's own `text` / the /goal template the
+    caller supplies -- NEVER a rescue snapshot of the box itself (that would be
+    a tautology and could match a raced-in foreign draft, #737 design fork)."""
+    if not payload:
+        return False
+    box_norm = _box_norm_from_capture(captured)
+    if not box_norm or len(box_norm) < min_chars:
+        return False
+    return box_norm in " ".join(payload.split())

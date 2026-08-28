@@ -881,13 +881,11 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     text, _auth = (rearm_fn or _default_rearm_fn)(cwd)
     if not text:
         return [], False
-    rows = watchdog._input_box_rows_raw(captured)
-    if not rows:
+    # #737 -- the SAME head-first whole-box reconstruction `_goal_box_kind` uses
+    # (single-sourced in `_box_norm_from_capture`, never a second inline copy).
+    box_norm = watchdog._box_norm_from_capture(captured)
+    if not box_norm:
         return [], False
-    box_full = rows[0].lstrip("❯").strip()
-    if len(rows) > 1:
-        box_full = (box_full + " " + " ".join(rows[1:])).strip()
-    box_norm = " ".join(box_full.split())
     text_norm = " ".join(text.split())
     if not (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
             and len(box_norm) < len(text_norm)
@@ -982,21 +980,27 @@ def _goal_box_kind(captured, text):
         return "empty"
     if occupied or watchdog._looks_like_own_stuck_content(head):
         return "ours"
-    rows = watchdog._input_box_rows_raw(captured)
-    if rows:
-        box_full = rows[0].lstrip("❯").strip()
-        if len(rows) > 1:
-            box_full = (box_full + " " + " ".join(rows[1:])).strip()
-        box_norm = " ".join(box_full.split())
-        text_norm = " ".join((text or "").split())
-        if (box_norm and text_norm and len(box_norm) >= GOAL_STRANDED_MIN_MATCH
+    box_norm = watchdog._box_norm_from_capture(captured)
+    text_norm = " ".join((text or "").split())
+    if box_norm and text_norm:
+        if (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
                 and (box_norm == text_norm or text_norm.startswith(box_norm))):
+            return "ours"
+        # #737 -- a SCROLLED long /goal renders only its TAIL rows, so the
+        # reconstructed whole-box content is a contiguous SUBSTRING of the
+        # payload (not a prefix -- the head with the `/goal ` marker scrolled
+        # off). >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous normalized chars of
+        # the request's OWN frozen `text` is the missing proof; a short human
+        # draft (below the floor) or a foreign draft (never a substring of the
+        # template) can never false-positive.
+        if (len(box_norm) >= watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR
+                and box_norm in text_norm):
             return "ours"
     return "other"
 
 
 def _resolve_stash_abort_livelock(sid, cwd, run, projects_dir, state, now,
-                                  send_fn, dry_run, sleep_fn):
+                                  send_fn, dry_run, sleep_fn, own_payload=None):
     """#566 case (b) -- a PENDING goal request has hit
     `GOAL_STASH_ABORT_LIVELOCK` consecutive identical `stash-abort: slot
     occupied` aborts: order the shared janitor recovery NOW (from job 9, which
@@ -1044,7 +1048,8 @@ def _resolve_stash_abort_livelock(sid, cwd, run, projects_dir, state, now,
                 % (sid, cwd, loc))
     jlogs = watchdog._janitor_recover(run, jrec, pid, cwd, captured, loc,
                                       send_fn, dry_run, sleep_fn,
-                                      state=state, now=now)
+                                      state=state, now=now,
+                                      own_payload=own_payload)  # #737
     logs += jlogs
     if not dry_run and any(ln.startswith("RECOVERED (janitor)") for ln in jlogs):
         state.get("janitor_watch", {}).pop(pid, None)
@@ -1098,7 +1103,8 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
                     jlogs = watchdog._janitor_recover(run, jrec, pid2, cwd,
                                                       captured, loc, send_fn,
                                                       dry_run, sleep_fn,
-                                                      state=state, now=now)
+                                                      state=state, now=now,
+                                                      own_payload=text)  # #737
                     logs += jlogs
                     # READ the verdict back, never assert it (#731-review): a
                     # RECOVERED line means the box was cleared; an ESCALATED line
@@ -1143,7 +1149,7 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
     return logs, leftover, loc
 
 
-def _log_arm_confirm_fail(sid, cwd, text, pid, run):
+def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None):
     """#731 D -- ONE structured diagnostic line at an arm-confirm failure, from a
     FRESH TALLER capture (the 40-row delivery capture may not show a busy render
     a row above the box). The next incident's discriminator between the #720
@@ -1173,6 +1179,34 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run):
     _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s boundary=%s busywait=%s "
                    "armed=%s box=%s" % (sid, cwd, boundary, busy, armed, box))
     watchdog._draft_rescue_persist(pid, cap)
+    # #737 A -- DELIVERY-TIME self-cleanup: a verify-failed / arm-confirm-fail
+    # arm can strand our OWN /goal in the box (a swallowed submit whose len-based
+    # undo did not converge, the montalu6/montalu3/gk leftover). Clean it NOW so
+    # it never becomes an unrecognizable "foreign draft" that jams the single
+    # stash slot forever. FIRST-PERSON provenance makes this safe without the
+    # janitor's `_janitor_watch_seen` gate: the delivery proved the box BARE
+    # seconds ago and typed our own text into it. Own-leftover proof = the box is
+    # a >= 80-char contiguous SUBSTRING of `text` (a SCROLLED /goal) OR the
+    # own-shape head (`_looks_like_own_stuck_content`: `/goal ` prefix / collapsed
+    # placeholder). A CLEAN idle input boundary only (never Escape/clear a live
+    # turn's render). Every outcome is falsifiable in goal-sync.log (design D).
+    head = watchdog._input_box_head_text(cap)
+    own = (watchdog._box_is_own_leftover(cap, text,
+                                         watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
+           or watchdog._looks_like_own_stuck_content(head))
+    if not own:
+        _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s cleanup=declined "
+                       "(box not our own leftover)" % (sid, cwd))
+        return
+    if boundary != "input" or busy:
+        _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s cleanup=declined "
+                       "(non-input boundary)" % (sid, cwd))
+        return
+    cleared = watchdog._janitor_clear_box(
+        pid, run, sleep_fn or time.sleep,
+        lambda _r: None)   # janitor-internal log line -> swallowed here
+    _log_goal_sync("ARM-CONFIRM-CLEANUP sid=%s cwd=%s cleared=%s"
+                   % (sid, cwd, cleared))
 
 
 def _goal_client_active_skip(sid, cwd, pid, run, now, out):
@@ -1456,7 +1490,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
-                _log_arm_confirm_fail(sid, cwd, text, pid, run)   # #731 D
+                _log_arm_confirm_fail(sid, cwd, text, pid, run,
+                                      sleep_fn=sleep_fn)  # #731 D + #737 A
                 return "skip:verify-failed"
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
@@ -1473,7 +1508,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stash) sid=%s cwd=%s" % (sid, cwd))
-                _log_arm_confirm_fail(sid, cwd, text, pid, run)   # #731 D
+                _log_arm_confirm_fail(sid, cwd, text, pid, run,
+                                      sleep_fn=sleep_fn)  # #731 D + #737 A
                 return "skip:verify-failed"
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
@@ -1496,7 +1532,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("SEND typed sid=%s cwd=%s" % (sid, cwd))
         return "sent"
     _log_goal_sync("SKIP verify-failed sid=%s cwd=%s" % (sid, cwd))
-    _log_arm_confirm_fail(sid, cwd, text, pid, run)   # #731 D
+    _log_arm_confirm_fail(sid, cwd, text, pid, run,
+                                      sleep_fn=sleep_fn)  # #731 D + #737 A
     return "skip:verify-failed"
 
 
@@ -1685,7 +1722,7 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             if n >= GOAL_STASH_ABORT_LIVELOCK:
                 logs += _resolve_stash_abort_livelock(
                     sid, cwd, run, projects_dir, state, now, send_fn,
-                    dry_run, sleep_fn)
+                    dry_run, sleep_fn, own_payload=text)  # #737
                 if handled is not None:
                     handled.add(sid)
         else:
@@ -1934,6 +1971,23 @@ def _dark_rearm_attempt_ok(attempts, now):
     pruned = [t for t in (attempts or [])
               if isinstance(t, (int, float)) and 0 <= (now - t) <= day]
     return (len(pruned) < GOAL_DARK_REARM_MAX_PER_DAY), pruned
+
+
+def _dark_awaiting_user_veto(tpath):
+    """#737 C -- True when the session's LAST real assistant turn ended with a
+    ❓ marker: it is PARKED on a question to the owner, ALIVE-waiting, not a dead
+    loop. `goal_dark_watch`'s mtime-advance liveness veto cannot see it (the
+    transcript is STATIC until the owner answers), so this tail-marker read is
+    the only awaiting-user signal. The montalu6 incident: one-glance classified
+    the pane awaiting-user while dark-watch declared CONFIRMED-DEAD and re-armed a
+    truncated /goal into it. The caller invokes this BEFORE every re-arm path
+    (auth-rearm AND the armed True/None/False branches), so an awaiting-user
+    session is never re-armed by any of them, and a stale-rearm REPLACE never
+    clobbers the owner's answer box. Bounded
+    tail read (#599): a parked-on-❓ session has that turn as its LAST real
+    assistant message, well inside the 2 MB tail (a false-negative would only be a
+    single >2 MB entry sitting AFTER the ❓ turn -- vanishingly rare)."""
+    return watchdog.transcript_last_marker_bounded(tpath) == "❓"
 
 
 def _dark_record_rearm(sid, cwd, text, auth, now, loc, open_n, dry_run,
@@ -2259,9 +2313,21 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         loc = watchdog._pane_location(pid, run) or pid
 
         jrec = janitor_recs.setdefault(pid, {})
+        # #737 -- heal an EXISTING scrolled /goal leftover (montalu6/montalu3
+        # after re-enable) even with no pending request: pass the current /goal
+        # TEMPLATE as `own_payload` so the janitor recognizes a scrolled leftover
+        # (box is a >= 80-char SUBSTRING of the template) and clears/pops it. The
+        # template (never a rescue snapshot) keeps "foreign draft nikdy": a human
+        # draft is never a contiguous substring of the /goal template. Resolved
+        # ONLY when the box is non-bare (a possible leftover) so a bare pane pays
+        # nothing extra; the provenance gate inside `_janitor_recover` is
+        # unchanged and still decides WHETHER to act.
+        _own = None
+        if watchdog._input_box_head_text(captured):
+            _own = (rearm_fn or _default_rearm_fn)(cwd)[0]
         jlogs = watchdog._janitor_recover(run, jrec, pid, cwd, captured, loc,
                                           send_fn, dry_run, sleep_fn,
-                                          state=state, now=now)
+                                          state=state, now=now, own_payload=_own)
         if jlogs:
             logs += jlogs
             if (not dry_run and any(ln.startswith("RECOVERED (janitor)")
@@ -2342,6 +2408,19 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         if vlog:
             logs.append(vlog)
         if vetoed:
+            continue
+
+        # #737 C -- a session PARKED on a ❓ question is ALIVE-waiting; never
+        # re-arm/ping/stale-replace it (see `_dark_awaiting_user_veto`). Placed
+        # BEFORE the mark-state / auth-rearm block below so it covers EVERY re-arm
+        # path -- auth-rearm (state!="set") AND the armed True/None/False branches
+        # -- so the "never re-arm an awaiting-user session" invariant is literal.
+        if _dark_awaiting_user_veto(tpath):
+            if confirm_state.pop(sid, None) is not None:
+                logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
+                            "(❓ marker, confirmation run reset)" % (loc, sid))
+            seen_state.pop(sid, None)
+            pinged_state.pop(sid, None)
             continue
 
         armed = watchdog.pane_goal_armed(captured)
