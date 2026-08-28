@@ -751,6 +751,49 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "a user-waiting-only backlog must never be re-armed")
 
+    def _dark_awaiting(self, sid, tail="❓ NEEDS YOU: mám pokračovať?"):
+        """#737 C -- a dark-armed loop whose LAST assistant turn ended with a
+        `tail` marker (default a ❓ awaiting-user question). The transcript mtime
+        stays frozen (written once), so the mtime liveness veto cannot see it --
+        the tail marker is the ONLY awaiting-user signal."""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid, marker_text=tail)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        return proj, tmux
+
+    def test_awaiting_user_dark_loop_is_never_re_armed(self):
+        # #737 C -- a session PARKED on a ❓ question to the owner is ALIVE-
+        # waiting, not a dead loop (its transcript is static so the mtime veto
+        # cannot see it). dark-watch must NEVER re-arm/ping it, however workable
+        # the backlog (the montalu6 incident: one-glance said awaiting-user while
+        # dark-watch declared CONFIRMED-DEAD + re-armed). RED: pre-fix a workable
+        # confirmed-dead run records a re-arm.
+        proj, tmux = self._dark_awaiting("sess-737-await")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(5, 900)          # WORKABLE -> would re-arm without the veto
+        for t in range(40):
+            self._sweep(tmux, proj, state, sent, 1000 + t * 100, obl, _rearm_ok, reqs)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a session parked on ❓ must NEVER be re-armed")
+        self.assertEqual(sent, [], "and never pinged -- the owner is already there")
+        self.assertEqual(tmux.sent, [], "and never a keystroke")
+
+    def test_non_question_dark_tail_still_re_arms(self):
+        # #737 C CONTROL -- the veto is ❓-SPECIFIC: a genuinely dead loop whose
+        # last turn was a ✅ DONE (not awaiting the user) is STILL re-armed.
+        proj, tmux = self._dark_awaiting("sess-737-done", tail="✅ DONE: hotovo")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(5, 900)
+        for t in range(40):
+            self._sweep(tmux, proj, state, sent, 1000 + t * 100, obl, _rearm_ok, reqs)
+            if goal.load_goal_requests(reqs):
+                break
+        self.assertIn("sess-737-done", goal.load_goal_requests(reqs),
+                      "a non-awaiting dead loop must still be re-armed")
+
     def test_stale_or_missing_cache_is_never_re_armed(self):
         # A stale (older than GOAL_DARK_CACHE_MAX_AGE_S) or absent obligation
         # cache is NOT trusted -> never re-arm (fail toward no keystroke).
@@ -2389,6 +2432,20 @@ class _ClientActiveFake(DeliverGoalFakeTmux):
         return super().__call__(argv, timeout)
 
 
+# #737 -- a long /goal renders only its TAIL rows once the input box scrolls, so
+# the VISIBLE box is a mid-payload contiguous SUBSTRING with no `/goal ` prefix
+# (the montalu6/montalu3/gk "text zaciname uprostred vety" signature). These
+# constants drive the substring-ownership + cleanup tests below.
+_GOAL_PAYLOAD_737 = "/goal " + " ".join(
+    ("STOP CONDITIONS all issues closed AND CI all-green AND PR mergeable clean "
+     "work every issue one at a time until the backlog is empty".split()) * 8)
+_SCROLLED_737 = " ".join(_GOAL_PAYLOAD_737.split()[30:80])    # >=80 chars, no prefix
+_SHORT_HUMAN_737 = " ".join(_GOAL_PAYLOAD_737.split()[30:34])  # a <80-char substring
+_FOREIGN_737 = ("toto je moja vlastna dlha sprava pre kolegu ktoru pisem uz "
+                "dvadsat minut a rozhodne nechcem aby mi ju nejaky watchdog "
+                "automaticky zmazal lebo to je moj cisto osobny text a nie goal")
+
+
 class TestGoalDeliveryAttemptCap731(unittest.TestCase):
     CWD = "/home/newlevel/devel/capdrop"
 
@@ -2641,6 +2698,130 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
                                sleep_fn=lambda *a, **k: None)
         self.assertTrue(any("drop:attempt-cap" in ln for ln in logs), logs)
         self.assertEqual(goal.load_goal_requests(self.reqp), {})
+
+    # ================ #737 substring ownership + arm-confirm cleanup ======= #
+    def _preseed_payload_at_cap(self, sid, box, payload=_GOAL_PAYLOAD_737):
+        """A request AT the cap whose OWN text is the full `payload`, with `box`
+        sitting in the pane (a SCROLLED substring / foreign draft / short human
+        draft) and janitor provenance present."""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, payload, "full",
+                                 now=1000, path=self.reqp, origin="self-callback")
+        d = goal.load_goal_requests(self.reqp)
+        d[sid]["dl_fails"] = self._cap()
+        Path(self.reqp).write_text(json.dumps(d))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True, initial_box=box)
+        return proj, tmux, {"janitor_watch": {"%9": 2000}}
+
+    def _cap_drop(self, proj, tmux, state):
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            return goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                                   requests_path=self.reqp, state=state,
+                                   send_fn=lambda m, **k: None,
+                                   sleep_fn=lambda *a, **k: None)
+
+    def test_cap_drop_clears_scrolled_own_leftover(self):
+        # #737 B -- a SCROLLED long /goal is a mid-payload SUBSTRING (no /goal
+        # prefix). Pre-fix `_goal_box_kind` reads it "other" -> livelock, box
+        # dirty forever. The substring proof recognizes it as ours -> the
+        # #731 cap-drop CLEARS it (heals the montalu6/montalu3 leftover).
+        sid = "sess-737-scroll"
+        proj, tmux, state = self._preseed_payload_at_cap(sid, _SCROLLED_737)
+        logs = self._cap_drop(proj, tmux, state)
+        self.assertEqual(tmux.box, "",
+                         "a SCROLLED own /goal leftover must be recognized + cleared")
+        self.assertTrue(any("leftover=cleared" in ln for ln in logs), logs)
+
+    def test_cap_drop_leaves_scrolled_foreign_untouched(self):
+        # #737 CONTROL -- a long FOREIGN draft is NOT a substring of our /goal,
+        # so it is never recognized as ours -> left completely untouched even
+        # with provenance present (fail-safe: foreign draft nikdy).
+        sid = "sess-737-foreign"
+        proj, tmux, state = self._preseed_payload_at_cap(sid, _FOREIGN_737)
+        logs = self._cap_drop(proj, tmux, state)
+        self.assertEqual(tmux.box, _FOREIGN_737,
+                         "a foreign draft is never a substring of our /goal")
+        self.assertTrue(any("leftover=not-ours" in ln for ln in logs), logs)
+
+    def test_cap_drop_leaves_short_human_substring_untouched(self):
+        # #737 CONTROL -- a SHORT human draft sharing words with the template is
+        # BELOW the >=80-char substring floor -> never a false positive.
+        sid = "sess-737-short"
+        proj, tmux, state = self._preseed_payload_at_cap(sid, _SHORT_HUMAN_737)
+        self.assertLess(len(_SHORT_HUMAN_737), 80, "control must be sub-threshold")
+        logs = self._cap_drop(proj, tmux, state)
+        self.assertEqual(tmux.box, _SHORT_HUMAN_737,
+                         "a sub-threshold human draft must be left untouched")
+        self.assertFalse(any("leftover=cleared" in ln for ln in logs), logs)
+
+    def test_arm_confirm_fail_cleans_own_scrolled_leftover(self):
+        # #737 A -- after a verify-failed arm the box holds our SCROLLED /goal.
+        # `_log_arm_confirm_fail` must CLEAN it (first-person provenance: the box
+        # was proven bare just before we typed) and log ARM-CONFIRM-CLEANUP. RED:
+        # pre-fix it is forensics-only, the box stays dirty, no cleanup line.
+        proj = self._dir()
+        sid = "sess-737-armclean"
+        _write_marker_transcript(proj, self.CWD, sid)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   initial_box=_SCROLLED_737)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            goal._log_arm_confirm_fail(sid, self.CWD, _GOAL_PAYLOAD_737, "%9", tmux)
+        self.assertEqual(tmux.box, "",
+                         "arm-confirm-fail must clean our own scrolled /goal leftover")
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("ARM-CONFIRM-CLEANUP", log)
+
+    def test_arm_confirm_fail_declines_foreign_leftover(self):
+        # #737 A/D CONTROL -- a foreign draft in the box after an arm-fail is NOT
+        # a substring of our /goal, so cleanup DECLINES and the draft survives.
+        proj = self._dir()
+        sid = "sess-737-armforeign"
+        _write_marker_transcript(proj, self.CWD, sid)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   initial_box=_FOREIGN_737)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            goal._log_arm_confirm_fail(sid, self.CWD, _GOAL_PAYLOAD_737, "%9", tmux)
+        self.assertEqual(tmux.box, _FOREIGN_737,
+                         "a foreign draft must be left untouched after arm-fail")
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("cleanup=declined", log)
+
+    def test_janitor_recognizes_scrolled_leftover_in_occupied_slot(self):
+        # #737 B -- the livelock exit: an OCCUPIED stash slot + a SCROLLED own
+        # /goal in the box (`stash-abort-slot-occupied` forever) is recognized
+        # via `own_payload` -> clear-and-pop (dry-run READY line). Pre-fix the
+        # janitor has no `own_payload` param and reads the scrolled head as a
+        # foreign occupant -> no recovery ordered.
+        cap = ("● Hotovo.\n────\n❯ %s\n────\n  ctx ░░  %s\n"
+               % (_SCROLLED_737, wd.STASH_MARKER))
+        logs = wd._janitor_recover(
+            lambda *a, **k: "", {}, "%9", self.CWD, cap, "loc:0.0",
+            None, True, lambda *a, **k: None,
+            state={"janitor_watch": {"%9": 2000}}, now=2000,
+            own_payload=_GOAL_PAYLOAD_737)
+        self.assertTrue(any("would attempt clear-and-pop" in ln for ln in logs),
+                        logs)
+
+    def test_janitor_scrolled_leftover_without_provenance_is_untouched(self):
+        # #737 CONTROL -- the `own_payload` substring proof only decides WHICH
+        # action; the provenance gate still decides WHETHER to act. A scrolled
+        # own /goal with NO janitor watch mark + NO park record is left completely
+        # untouched (no recovery ordered), even though it IS a substring of the
+        # payload. Locks the fail-safe direction of the new own_payload path.
+        cap = ("● Hotovo.\n────\n❯ %s\n────\n  ctx ░░  %s\n"
+               % (_SCROLLED_737, wd.STASH_MARKER))
+        logs = wd._janitor_recover(
+            lambda *a, **k: "", {}, "%9", self.CWD, cap, "loc:0.0",
+            None, True, lambda *a, **k: None,
+            state={}, now=2000,               # NO janitor_watch / stash_parks
+            own_payload=_GOAL_PAYLOAD_737)
+        self.assertEqual(logs, [],
+                         "no provenance -> the janitor must not act, even on a "
+                         "recognized own scrolled leftover")
 
     def test_delivery_attempt_cap_constant_is_a_small_debounce(self):
         self.assertEqual(goal.GOAL_DELIVERY_ATTEMPT_CAP, 3)
