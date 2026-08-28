@@ -183,6 +183,58 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
             self.assertNotIn("keep building", cb)
 
 
+class TestCompactBoundaryHoldTurn741(TestCase):
+    """#741: after `compact-request --self` at a drained boundary the loop HOLDS
+    until the compact is delivered — it does NOT dispatch the next batch first.
+    The buggy pre-#741 ORDERING claim (the armed goal 'fires the NEXT TURN,
+    compacting then dispatching the next batch' — an order nothing enforced) is
+    removed from every profile's clause, and the terse HOLD pointer is present."""
+
+    def _cb(self, p):
+        return next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
+
+    def test_hold_sentence_present_in_every_profile(self):
+        for p in gr.PROFILES:
+            cb = self._cb(p)
+            self.assertIn("HOLD each later goal turn until that compact runs", cb,
+                          "%s missing the #741 hold sentence" % p)
+            self.assertIn("no next batch first", cb)
+
+    def test_old_ordering_claim_removed_from_every_profile(self):
+        # TEETH: a revert to the pre-#741 wording re-introduces exactly these.
+        for p in gr.PROFILES:
+            cb = self._cb(p)
+            self.assertNotIn("compacting then dispatching", cb)
+            self.assertNotIn("fires the NEXT TURN", cb)
+
+    def test_old_ordering_gone_from_the_rendered_skill_lines(self):
+        # the 3 rendered `/goal` lines in SKILL.md carry the clause verbatim.
+        t = skill_text()
+        self.assertNotIn("compacting then dispatching", t)
+
+    def test_skill_prose_carries_the_hold_turn_mechanism(self):
+        # the full mechanism lives in the NON-capped Step-5 doctrine (the char cap
+        # keeps it out of the rendered lines): the status probe, the exact ⏳ WORKING
+        # line, and the writer-side latch decision word.
+        t = skill_text()
+        self.assertIn("compact-request --status", t)
+        self.assertIn("čakám na compact hranice várky", t)
+        self.assertIn("hold:compact-pending", t)
+
+    def test_old_ordering_gone_from_the_autopilot_master_skill_too(self):
+        # #741 doctrine-drift lock (the #618/#623/#726 "deployed≠effective" class
+        # this ticket targets): the gatekeeper MASTER loop skill must NOT still
+        # assert the removed "compacting then dispatching the next batch" ordering,
+        # and must carry the hold-turn probe.
+        master = (ROOT / "skills/autopilot-master/SKILL.md").read_text(
+            encoding="utf-8")
+        self.assertNotIn("compacting then dispatching", master)
+        # whitespace-collapse so the assertion is line-wrap-robust.
+        flat = " ".join(master.split())
+        self.assertIn("compact-request --status", flat)
+        self.assertIn("čakám na compact hranice várky", flat)
+
+
 class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):
     """Belt-and-suspenders: the composed render must still carry every
     load-bearing token the shipped `/goal` line always had (the same invariants
