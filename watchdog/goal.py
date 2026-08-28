@@ -1602,6 +1602,16 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("DRY-RUN goal-sweep %s would evaluate sid=%s"
                         % (watchdog.project_label(cwd), sid))
             continue
+        # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
+        # goal-arm keystroke -- never push a new batch's /goal into the pane while
+        # a drained-boundary compact is still waiting for its quiet window. Leave
+        # the request PENDING (goal_sweep re-tries once the compact is delivered
+        # and the latch clears); log the hold, never a silent skip.
+        if _compact.has_pending_request(sid):
+            logs.append("HOLD (goal-sweep) %s sid=%s -> hold:compact-pending "
+                        "(pending /compact; no goal-arm keystroke until it "
+                        "delivers)" % (watchdog.project_label(cwd), sid))
+            continue
         # #731 -- the per-request delivery-attempt CAP, checked BEFORE deliver_goal
         # so a request that already failed CAP keystroke deliveries is DROPPED
         # terminally (never a CAP+1 keystroke): clean up any leftover /goal text
@@ -2273,6 +2283,18 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         if _cleared:
             continue
 
+        # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
+        # dark RE-ARM below (a re-arm WRITE schedules a next-batch /goal for job
+        # 9 to type). The janitor recovery + stranded-truncated clear ABOVE
+        # already ran deliberately -- they UNBLOCK the pane so the compact can
+        # deliver, they never push new work -- so only the re-arm decisions are
+        # held. Leave it; the next sweep re-arms once the compact clears.
+        if _compact.has_pending_request(sid):
+            logs.append("dark-watch %s sid=%s -> hold:compact-pending "
+                        "(pending /compact; no re-arm until it delivers)"
+                        % (loc, sid))
+            continue
+
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None
         prior_mark = rec.get("mark") if isinstance(rec, dict) else None
@@ -2668,6 +2690,14 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
             logs.append("qrepoke %s sid=%s -> CONFIRMED stuck but ATTEMPT-CAP "
                         "(%d/24h) -- ping-free skip" % (loc, sid,
                                                         GOAL_QDISARM_MAX_PER_DAY))
+            continue
+        # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
+        # `/goal clear` disarm keystroke -- keep the pane pristine so job 14 can
+        # deliver the boundary /compact; the stuck-❓ disarm resumes once the
+        # compact clears (or ages out at the ❓ not-a-boundary, then this re-fires).
+        if _compact.has_pending_request(sid):
+            logs.append("qrepoke %s sid=%s -> hold:compact-pending "
+                        "(pending /compact; disarm deferred)" % (loc, sid))
             continue
         if dry_run:
             logs.append("qrepoke %s sid=%s -> CONFIRMED stuck (%d re-pokes) -- "
@@ -3612,6 +3642,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         return logs, False
     if watchdog._pane_compacting(captured):
         _lane_skip(logs, loc, "skip:compacting (pane is mid-/compact, transient)")
+        return logs, False
+    if _compact.has_pending_request(sid):   # #741 writer-side latch
+        _lane_skip(logs, loc, "hold:compact-pending (pending /compact -- hold "
+                              "the start-a-NEW-batch nudge until it delivers)")
         return logs, False
     if handled is not None and sid in handled:
         _lane_skip(logs, loc, "skip:already-handled (another sweep job already "

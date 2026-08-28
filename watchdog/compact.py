@@ -58,11 +58,13 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             (e) the request itself is not older than
                 `COMPACT_REQUEST_MAX_AGE_S`, whose `ts` REFRESHES both on every
                 re-record (#599 supersede, REVERSING #400's non-refreshable
-                anchor) AND on every structured live-own-task veto during the
-                periodic sweep (#727 hold-extend), so the cap measures "time
+                anchor) AND on every hold-extend veto during the periodic sweep
+                (#727 live-own-task holds; #741 actively-held-boundary holds —
+                recent-human / busy / client-active), so the cap measures "time
                 since the claim was last JUSTIFIED" (a genuine boundary OR a
-                measured live own-task hold) — a busy/mid-batch loop holds until
-                delivered, a gone-quiet session ages out after 30 min.
+                measured live own-task hold OR an actively-held boundary) — a
+                busy/mid-batch/held loop holds until delivered, a gone-quiet
+                session ages out after 30 min.
             Two more checks ride along, both closing real previously-live
             production incidents scoped to the two proven origins, not
             merely the 5 named above: the user must not be actively
@@ -91,10 +93,12 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             except an EXPIRED request (condition e) or one that is already
             otherwise handled (already-queued, in cooldown), which is
             DISCARDED outright. "No infinite waiting" is the hard age cap's
-            job — EXCEPT while a structured live-own-task veto keeps refreshing
-            the claim (#727 hold-extend: a mid-batch loop holds past 30 min by
-            design; the wedge-bound + the named forever-live residual bound it,
-            see `_COMPACT_HOLD_EXTEND_WORDS`). A request that arrives while a
+            job — EXCEPT while a hold-extend veto keeps refreshing the claim
+            (#727 a mid-batch loop holds past 30 min by design; #741 an
+            actively-held boundary — recent-human / busy / client-active — holds
+            until a quiet window delivers it; the wedge-bound, the ❓-not-a-
+            boundary escape, and the named forever-live residual bound it, see
+            `_COMPACT_HOLD_EXTEND_WORDS`). A request that arrives while a
             sibling task is finishing (the autopilot-batch common case) still
             compacts once the sweep observes a quiet moment, never lost to a race.
 
@@ -232,6 +236,28 @@ def clear_compact_request(session, path=None):
         d.pop(session, None)
         return _save_compact_requests(d, path)
     return False
+
+
+def has_pending_request(sid, path=None):
+    """#741 WRITER-SIDE LATCH: True iff `sid` has a pending `/compact` request
+    in `~/.claude/compact-requests.json`. EVERY work-pushing watchdog writer
+    (goal_sweep goal-arm delivery, the job-20 lane-occupancy nudge, goal_dark_
+    watch re-arm, goal_question_repoke_watch disarm) consults this BEFORE typing
+    into that session's pane and HOLDS (logs `hold:compact-pending`, types
+    nothing) while it returns True, so a drained-boundary compact is delivered in
+    a quiet pane before any next-batch work is pushed in — the owner's "callback
+    v pokojovom stave, pokračovanie až po compacte" model. Job 7 (a human's
+    Discord answer, `watchdog/discord_replies.py`) is the SOLE exception — it
+    delivers regardless, the human's answer wins.
+
+    Fail-safe: a blank sid, a missing/unreadable file, or any error → False
+    (never raises, via `load_compact_requests`), so a latch read that cannot see
+    the store never wedges a writer — the writer proceeds exactly as it did
+    before #741, and job 14's own delivery veto remains the backstop."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    return sid in load_compact_requests(path)
 
 
 def _touch_compact_request_ts(sid, now, path=None):
@@ -1052,22 +1078,41 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 # rather than leaving it pending for the next sweep.
 _COMPACT_TERMINAL_WORDS = frozenset(("sent", "expired", "already-queued", "cooldown"))
 
-# #727 hold-extend: the four STRUCTURED live-own-task veto words. While one is
-# the SWEEP's verdict, the session is PROVABLY mid-batch (a measured live worker
-# lane or a live run_in_background bash job vetoed delivery, correctly — CC
-# #29193), NOT gone-quiet, so `compact_sweep` REFRESHES the request's `ts`. NEVER
-# on `skip:busy` (a busy pane with no live task is a NEW turn whose boundary
-# supersedes) and NEVER on a pane-render signal. A wedged lane goes stale -> the
-# veto stops firing -> ts stops refreshing -> the age cap resumes (wedge-bound).
+# #727/#741 hold-extend: the STRUCTURED live-own-task veto words PLUS the #741
+# ACTIVELY-HELD-BOUNDARY words. While one is the SWEEP's verdict, `compact_sweep`
+# REFRESHES the request's `ts` so an actively-held boundary never ages out of the
+# 30-min cap while it waits for a quiet window. Two families:
+#   * live-own-task (#727) -- a measured live worker lane / live run_in_background
+#     bash job vetoed delivery, correctly (CC #29193): the session is mid-batch,
+#     not gone-quiet.
+#   * actively-held boundary (#741) -- `skip:recent-human`/`skip:busy`/`skip:client-
+#     active`. Under the #741 hold-turn doctrine a pending compact makes every
+#     goal-fired turn a HOLD turn (cheap `compact-request --status` -> `⏳ WORKING:
+#     čakám na compact hranice várky`, zero dispatches), so the pane transiently
+#     reads busy / a human is transiently active while the boundary is being held
+#     for delivery, NOT superseded. This REVERSES #727's "NEVER on skip:busy" (a
+#     busy pane during a HOLD turn is the held boundary, not a new turn) and makes
+#     `recent-human` a DEFERRAL rather than a discard (the owner's directive: in an
+#     interactive session recent-human is nearly always true while the owner
+#     watches, so it must postpone the compact, not throw it away).
+# NEVER a pane-render signal, and NEVER `skip:not-a-boundary` (a ❓-blocked session
+# is a legitimate END of the boundary -- the request may correctly age out there,
+# so `expired` still fires for a request with no ACTIVE hold). A wedged lane / a
+# session that goes genuinely quiet stops emitting a hold word -> ts stops
+# refreshing -> the age cap resumes (wedge-bound).
 _COMPACT_HOLD_EXTEND_WORDS = frozenset((
     "skip:live-tasks", "skip:live-bg-bash",
-    "skip:live-tasks-raced", "skip:live-bg-bash-raced"))
-# RESIDUAL (design #727 §5): a genuinely-forever-live own task holds the claim
-# forever -- a 24/7 bg job, or a #604 launched-then-vanished bg-bash orphan on a
-# gone-quiet session (its START never scrolls out of the tail AND skip:live-bg-bash
-# now refreshes past the age cap). Bounded (1-pending-per-session + every new
-# boundary supersedes + delivery is re-vetoed each sweep), NOT a delivery risk;
-# reopen trigger = a HOLD journal line whose `boundary held` exceeds hours.
+    "skip:live-tasks-raced", "skip:live-bg-bash-raced",
+    "skip:recent-human", "skip:busy", "skip:client-active"))
+# RESIDUAL (design #727 §5 + #741): a genuinely-forever-live own task OR a session
+# that stays busy/human-active forever holds the claim -- a 24/7 bg job, a #604
+# launched-then-vanished bg-bash orphan, or a pane that never returns to an idle
+# window. Bounded (1-pending-per-session + every new boundary supersedes + delivery
+# is re-vetoed each sweep + a genuinely-blocked ❓ turn is NOT extended and ages
+# out), NOT a delivery risk; reopen trigger = a HOLD journal line whose `boundary
+# held` exceeds hours. (`skip:client-active` is a goal-arm verdict, not currently
+# a `deliver_compact` return; it is kept here for parity so the set stays the
+# single source of truth if compact delivery ever gains that gate.)
 
 # A small margin over `COMPACT_MIN_REQUEST_AGE_S` so a `time.sleep()` that
 # very slightly undershoots its requested duration (never observed on this
@@ -1133,8 +1178,8 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
     replacement for the old job 14) — wired at the SAME `run_once()` slot.
     Re-checks each still-pending request's SAME unmodified conditions
     every sweep; nothing here overrides a hard DELIVERY condition, but the
-    #727 hold branch below DOES refresh the request's `ts` on the four
-    hold-extend words. Otherwise a request that keeps failing a condition sits
+    #727/#741 hold branch below DOES refresh the request's `ts` on any
+    hold-extend word. Otherwise a request that keeps failing a condition sits
     until it clears (delivered) or the age cap (condition e) discards it — "no
     infinite waiting" is the cap's job, bounded per `_COMPACT_HOLD_EXTEND_WORDS`.
 
@@ -1182,9 +1227,10 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
                         "(age > cap, discarded)" % (sid, origin or "-"))
         elif word in _COMPACT_HOLD_EXTEND_WORDS:
-            # #727 hold-extend: a structured live-own-task veto PROVES the
-            # session is mid-batch -> REFRESH `ts` so the 30-min cap never
-            # expires a still-held boundary out from under a >30-min batch.
+            # #727/#741 hold-extend: a live-own-task veto (mid-batch) OR an
+            # actively-held-boundary veto (recent-human / busy — the #741 hold
+            # turn) PROVES the boundary is being HELD -> REFRESH `ts` so the
+            # 30-min cap never expires a still-held boundary out from under it.
             # `bts` (the ORIGINAL boundary) is untouched, so the line reports
             # how long the boundary has been held; a refresh WRITE failure (or a
             # vanished entry) logs HOLD-FAIL and behaves as an ordinary SKIP --

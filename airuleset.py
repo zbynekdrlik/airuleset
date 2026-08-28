@@ -4807,6 +4807,13 @@ def cmd_compact_request(args):
     `stop-check-prose-violations.sh` fires it (`--origin self-callback`); #610
     retired the `subagent-stop` producer (still accepted generically).
 
+    `--status` (#741): a read-only HOLD probe — resolves the session like
+    `--self` (or an explicit `--session <sid>`), prints one line (`PENDING
+    sid=<sid> age=<n>s` / `NONE`) and exits 0. Records nothing, types nothing;
+    the hold-turn doctrine's first action so a goal-fired turn can PROVE from the
+    transcript whether the drained-boundary compact is still pending (hold) or
+    done (dispatch the next batch).
+
     Prints the disposition word verbatim (`sent` / `expired` /
     `already-queued` / `cooldown` / `skip:<reason>` — `skip:no-session`
     covers BOTH a blank session id and a genuine record-time disk-write
@@ -4814,6 +4821,29 @@ def cmd_compact_request(args):
     the calling hook's own decision log stays a faithful trace of what
     actually happened."""
     from watchdog import compact
+    if getattr(args, "status", False):
+        # #741 read-only HOLD probe. Resolves the session like `--self` (via
+        # $TMUX_PANE) or takes an explicit `--session <sid>`; prints exactly one
+        # line — `PENDING sid=<sid> age=<n>s` (a `/compact` request is still
+        # pending for this session) or `NONE` — and always exits 0. The hold-turn
+        # doctrine (skills/autopilot Step 5) runs this as a goal-fired turn's
+        # FIRST action: PENDING -> end the turn immediately with one `⏳ WORKING`
+        # line and ZERO dispatches; NONE -> the boundary compact is done, the next
+        # batch may be dispatched. Transcript-provable, no pane keystroke.
+        sid = (getattr(args, "session", "") or "").strip()
+        if not sid:
+            _pane_id, _cwd, sid = compact.resolve_self_pane()
+        entry = compact.load_compact_requests().get(sid) if sid else None
+        if isinstance(entry, dict):
+            import time as _time
+            ts = entry.get("ts")
+            age = "?"
+            if isinstance(ts, (int, float)):
+                age = "%d" % max(0, int(_time.time() - ts))
+            sys.stdout.write("PENDING sid=%s age=%ss" % (sid, age))
+        else:
+            sys.stdout.write("NONE")
+        return
     if getattr(args, "self", False):
         pane_id, cwd, sid = compact.resolve_self_pane()
         if not sid:
@@ -5905,6 +5935,14 @@ def main():
                              "itself. Call this as your OWN last tool call "
                              "right after finishing a ticket, before "
                              "dispatching anything else.")
+    p_creq.add_argument("--status", action="store_true",
+                        help="#741 read-only HOLD probe: resolve THIS session "
+                             "(via $TMUX_PANE, or --session <sid>) and print one "
+                             "line -- `PENDING sid=<sid> age=<n>s` or `NONE` -- "
+                             "then exit 0. The hold-turn doctrine's first action: "
+                             "PENDING => end the turn `⏳ WORKING` with ZERO "
+                             "dispatches; NONE => the boundary compact is done. "
+                             "Records + types nothing.")
 
     p_garm = sub.add_parser(
         "goal-arm",
