@@ -155,8 +155,11 @@ batch is open), bounded by real resource signals (below).
   background Bash (any CI waiter — a RE-DERIVABLE one is `TaskStop`ped first per the #730
   waiver below, never left holding the boundary open)** — exactly what `watchdog/compact.py`'s
   live-tasks veto measures (READ-ONLY reference here — the veto is NOT changed) — run `python3
-  ~/devel/airuleset/airuleset.py compact-request --self` (#402) as the last tool call; the
-  armed `/goal` fires the next turn, compacting then dispatching the next batch. NON-blocking
+  ~/devel/airuleset/airuleset.py compact-request --self` (#402) as the last tool call; then
+  every later goal turn is a HOLD turn until the compact runs — first action `compact-request
+  --status`, and while it prints `PENDING` the turn ends `⏳ WORKING: čakám na compact hranice
+  várky` with ZERO dispatches; the next batch is dispatched only after the compact runs (#741,
+  the watchdog's own writers HOLD the same way). NON-blocking
   (they never hold the boundary): a FOREGROUND sleep-poll, an armed window-wait, a pending
   `❓ ASKED`. During the DRAIN WINDOW a LANE 1 hand-off that arrives QUEUES one compact cycle
   (dispatched only after the compact; running reviews finish + integrate, never preempted); a

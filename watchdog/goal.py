@@ -1602,16 +1602,6 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("DRY-RUN goal-sweep %s would evaluate sid=%s"
                         % (watchdog.project_label(cwd), sid))
             continue
-        # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
-        # goal-arm keystroke -- never push a new batch's /goal into the pane while
-        # a drained-boundary compact is still waiting for its quiet window. Leave
-        # the request PENDING (goal_sweep re-tries once the compact is delivered
-        # and the latch clears); log the hold, never a silent skip.
-        if _compact.has_pending_request(sid):
-            logs.append("HOLD (goal-sweep) %s sid=%s -> hold:compact-pending "
-                        "(pending /compact; no goal-arm keystroke until it "
-                        "delivers)" % (watchdog.project_label(cwd), sid))
-            continue
         # #731 -- the per-request delivery-attempt CAP, checked BEFORE deliver_goal
         # so a request that already failed CAP keystroke deliveries is DROPPED
         # terminally (never a CAP+1 keystroke): clean up any leftover /goal text
@@ -1636,6 +1626,20 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
                         % (loc, sid, dl_fails, dl_last, leftover))
             if handled is not None:
                 handled.add(sid)
+            continue
+        # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
+        # goal-arm keystroke -- never push a new batch's /goal into the pane while
+        # a drained-boundary compact is still waiting for its quiet window. Placed
+        # AFTER the #731 cap-drop (which CLEANS a stranded /goal draft out of the
+        # prompt -- a pane-UNBLOCKING keystroke that pushes no work, exactly like
+        # goal_dark_watch's janitor/stranded-clear before ITS latch): the cleanup
+        # frees the pane so the pending compact can DELIVER, then this holds the
+        # actual re-arm keystroke. Leave the request PENDING (goal_sweep re-tries
+        # once the compact clears); log the hold, never a silent skip.
+        if _compact.has_pending_request(sid):
+            logs.append("HOLD (goal-sweep) %s sid=%s -> hold:compact-pending "
+                        "(pending /compact; no goal-arm keystroke until it "
+                        "delivers)" % (watchdog.project_label(cwd), sid))
             continue
         # a fresh per-request log list so the stash-abort REASON is derivable
         # (deliver_goal returns `skip:stash-abort-slot-occupied` only for the

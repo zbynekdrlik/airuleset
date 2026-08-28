@@ -60,7 +60,9 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
                 re-record (#599 supersede, REVERSING #400's non-refreshable
                 anchor) AND on every hold-extend veto during the periodic sweep
                 (#727 live-own-task holds; #741 actively-held-boundary holds —
-                recent-human / busy / client-active), so the cap measures "time
+                recent-human / busy; the set also carries the goal-arm
+                `skip:client-active` for parity though `deliver_compact` never
+                returns it), so the cap measures "time
                 since the claim was last JUSTIFIED" (a genuine boundary OR a
                 measured live own-task hold OR an actively-held boundary) — a
                 busy/mid-batch/held loop holds until delivered, a gone-quiet
@@ -204,9 +206,10 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     HOLDS until delivered or SUPERSEDED, not discarded by an arbitrary timeout a
     24/7 loop's boundaries never align with (cambox: 244 SKIP / 0 SEND). The
     30-min cap stays but with `ts` refreshing (every genuine boundary #599, AND
-    every structured live-own-task veto #727) it measures "time since the claim
-    was last JUSTIFIED": a busy/mid-batch loop never expires (holds until
-    delivered), a GONE-QUIET session ages out after 30 min. The #400 text-sniff
+    every hold-extend veto — #727 live-own-task holds, #741 actively-held-boundary
+    holds: recent-human / busy) it measures "time since the claim was last
+    JUSTIFIED": a busy/mid-batch/held loop never expires (holds until delivered), a
+    GONE-QUIET session ages out after 30 min. The #400 text-sniff
     trigger that could refresh forever is structurally gone (a permanent no-op);
     the only re-records now are genuine boundaries, which SHOULD supersede.
 
@@ -253,11 +256,15 @@ def has_pending_request(sid, path=None):
     Fail-safe: a blank sid, a missing/unreadable file, or any error → False
     (never raises, via `load_compact_requests`), so a latch read that cannot see
     the store never wedges a writer — the writer proceeds exactly as it did
-    before #741, and job 14's own delivery veto remains the backstop."""
+    before #741, and job 14's own delivery veto remains the backstop. A pending
+    entry counts ONLY when it is a well-formed dict — the SAME shape `--status`
+    and `deliver_compact`/`compact_sweep` require — so a CORRUPT non-dict entry
+    (which `compact_sweep` drops loudly, never delivers or expires) can never
+    latch every writer forever while the session's own `--status` reads NONE."""
     sid = str(sid or "").strip()
     if not sid:
         return False
-    return sid in load_compact_requests(path)
+    return isinstance(load_compact_requests(path).get(sid), dict)
 
 
 def _touch_compact_request_ts(sid, now, path=None):
@@ -653,12 +660,15 @@ COMPACT_TEXT = "/compact"
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
 # first-seen" — #400's non-refreshable anchor is reversed). `ts` REFRESHES on
 # a genuine boundary re-record (#599 supersede — `record_compact_request`) AND
-# on a structurally-measured live own-task hold during the sweep (#727
-# hold-extend — `_touch_compact_request_ts`). So a busy/mid-batch loop NEVER
-# bites (the claim HOLDS until it delivers at the first safe moment, fixing
-# cambox's 244 SKIP / 0 SEND and #727's mid-batch expiry); a GONE-QUIET session
-# (neither fires) ages out after 30 min; a WEDGED lane goes stale -> the veto
-# stops -> the hold stops -> expiry resumes (the wedge-bound). The "late
+# on any hold-extend veto during the sweep (#727 a structurally-measured live
+# own-task hold; #741 an actively-held boundary — recent-human / busy — via
+# `_touch_compact_request_ts`). So a busy/mid-batch/held loop NEVER bites (the
+# claim HOLDS until it delivers at the first safe moment, fixing cambox's 244
+# SKIP / 0 SEND and #727's mid-batch expiry); a GONE-QUIET session (no hold word
+# fires) ages out after 30 min — including a ❓-blocked session, whose
+# `skip:not-a-boundary` is deliberately NOT hold-extended (#741); a WEDGED lane
+# goes stale -> the veto stops -> the hold stops -> expiry resumes (the
+# wedge-bound). The "late
 # inappropriate moment" hazard #400 guarded is now handled by the DIRECT
 # delivery conditions (pane idle, no live worker/bg-bash, no draft/recent-human,
 # not `❓`), never by this cap.
@@ -1195,6 +1205,16 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
     reqs = load_compact_requests(requests_path)
     for sid, entry in list(reqs.items()):
         if not isinstance(entry, dict):
+            # #741 -- a corrupt NON-dict entry can never be delivered or expired
+            # (the age cap reads `entry.get("ts")` inside the dict branch), so a
+            # silent `continue` would leave it pending FOREVER -- and since #741
+            # the writer-side latch would then HOLD every goal writer for that sid
+            # forever while `--status`/`has_pending_request` (both dict-guarded)
+            # read NONE. DROP it loudly + clear, the goal_sweep #624 precedent, so
+            # writers and session agree the store is empty for that sid.
+            if not dry_run:
+                clear_compact_request(sid, path=requests_path)
+            logs.append("DROP (compact-sweep) sid=%s -> drop:non-dict-entry" % sid)
             continue
         cwd = entry.get("cwd", "")
         origin = entry.get("origin") or None

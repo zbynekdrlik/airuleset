@@ -25,6 +25,7 @@ boundaries, not off a low `autoCompactWindow`).
 
 import json
 import os
+import re
 import sys
 import time
 import types
@@ -2081,6 +2082,44 @@ class TestCompactHoldExtend727(unittest.TestCase):
         self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
                          int(now), "skip:recent-human must refresh ts (#741)")
 
+    def test_741_not_a_boundary_does_not_extend_the_hold(self):
+        # THE #741 ESCAPE BOUND: a ❓-blocked session's `skip:not-a-boundary` is
+        # deliberately NOT a hold-extend word (a blocked question is a legitimate
+        # END of the boundary, so the request must age out there, never hold
+        # forever). Mutation target: adding "skip:not-a-boundary" to
+        # _COMPACT_HOLD_EXTEND_WORDS makes this test fail.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "❓ NEEDS YOU: schváliš reštart?")
+        T = 1_000_000.0
+        compact.record_compact_request(self.SID, self.CWD, now=T,
+                                       path=self.reqp, origin="self-callback")
+        logs1, _ = self._sweep(proj, T + 5 * 60)
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs1), logs1)
+        self.assertFalse(any("HOLD" in ln for ln in logs1),
+                         "a ❓ boundary must NOT hold-extend: %r" % logs1)
+        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
+                         int(T), "not-a-boundary must NOT refresh ts")
+        # T+31min: the un-held claim ages out at the 30-min cap.
+        logs2, tmux2 = self._sweep(proj, T + 31 * 60)
+        self.assertTrue(any("LAPSE" in ln for ln in logs2),
+                        "the un-held ❓ claim must expire: %r" % logs2)
+        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
+        self.assertNotIn("/compact", tmux2.typed_texts())
+
+    def test_741_corrupt_non_dict_entry_is_dropped_loudly_not_latched(self):
+        # #741 review: a corrupt NON-dict entry can never be delivered/expired, so
+        # compact_sweep must DROP it loudly (not silently `continue` forever) and
+        # has_pending_request must read it as absent -- else it would latch every
+        # goal writer for that sid forever while --status reads NONE.
+        Path(self.reqp).write_text(json.dumps({"sess-nd": "not-a-dict"}))
+        self.assertFalse(compact.has_pending_request("sess-nd"))
+        proj = self._dir()
+        logs, _ = self._sweep(proj, 1000)
+        self.assertTrue(any("non-dict" in ln for ln in logs), logs)
+        self.assertEqual(compact.load_compact_requests(self.reqp), {},
+                         "the corrupt entry is cleared, never re-skipped forever")
+
     def test_727_hold_log_line_carries_boundary_held(self):
         # The HOLD decision line names the word AND how long the boundary has
         # been held (now - bts), so triage reads the hold from the journal.
@@ -2319,18 +2358,21 @@ class TestCompactRequestCli(unittest.TestCase):
         with m.patch("sys.stdout") as out:
             out.write = lambda s: buf.append(s)
             airuleset.cmd_compact_request(_args(status=True, session="no-such"))
-        self.assertEqual("".join(buf), "NONE")
+        self.assertEqual("".join(buf).strip(), "NONE")
 
-    def test_status_prints_pending_with_sid_and_age(self):
+    def test_status_prints_pending_with_sid_and_numeric_age(self):
         compact.record_compact_request("sess-st", "/cwd", now=time.time() - 12,
                                        path=self.reqp, origin="self-callback")
         buf = []
         with m.patch("sys.stdout") as out:
             out.write = lambda s: buf.append(s)
             airuleset.cmd_compact_request(_args(status=True, session="sess-st"))
-        line = "".join(buf)
-        self.assertTrue(line.startswith("PENDING sid=sess-st age="), line)
-        self.assertTrue(line.endswith("s"), line)
+        line = "".join(buf).strip()
+        # exact shape: PENDING sid=<sid> age=<int>s -- the age must be NUMERIC
+        # (a `?` fallback would slip past a bare startswith/endswith check).
+        mobj = re.fullmatch(r"PENDING sid=sess-st age=(\d+)s", line)
+        self.assertIsNotNone(mobj, line)
+        self.assertGreaterEqual(int(mobj.group(1)), 10)
 
     def test_status_resolves_self_pane_when_no_session_given(self):
         compact.record_compact_request("sess-self-st", "/cwd", now=time.time(),

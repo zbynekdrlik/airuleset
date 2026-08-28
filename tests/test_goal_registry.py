@@ -221,6 +221,19 @@ class TestCompactBoundaryHoldTurn741(TestCase):
         self.assertIn("čakám na compact hranice várky", t)
         self.assertIn("hold:compact-pending", t)
 
+    def test_old_ordering_gone_from_the_autopilot_master_skill_too(self):
+        # #741 doctrine-drift lock (the #618/#623/#726 "deployed≠effective" class
+        # this ticket targets): the gatekeeper MASTER loop skill must NOT still
+        # assert the removed "compacting then dispatching the next batch" ordering,
+        # and must carry the hold-turn probe.
+        master = (ROOT / "skills/autopilot-master/SKILL.md").read_text(
+            encoding="utf-8")
+        self.assertNotIn("compacting then dispatching", master)
+        # whitespace-collapse so the assertion is line-wrap-robust.
+        flat = " ".join(master.split())
+        self.assertIn("compact-request --status", flat)
+        self.assertIn("čakám na compact hranice várky", flat)
+
 
 class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):
     """Belt-and-suspenders: the composed render must still carry every

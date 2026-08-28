@@ -4840,9 +4840,12 @@ def cmd_compact_request(args):
             age = "?"
             if isinstance(ts, (int, float)):
                 age = "%d" % max(0, int(_time.time() - ts))
-            sys.stdout.write("PENDING sid=%s age=%ss" % (sid, age))
+            # Trailing newline (UNLIKE the hook-captured --self/--record words):
+            # --status is read by the SESSION from its own transcript, so it
+            # renders cleanly on its own line.
+            sys.stdout.write("PENDING sid=%s age=%ss\n" % (sid, age))
         else:
-            sys.stdout.write("NONE")
+            sys.stdout.write("NONE\n")
         return
     if getattr(args, "self", False):
         pane_id, cwd, sid = compact.resolve_self_pane()
