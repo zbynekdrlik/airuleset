@@ -94,7 +94,9 @@ class TestAutopilotSkillLoopBody(TestCase):
         t = read(self.SKILL)
         self.assertIn("ARMED GOAL", t)
         self.assertIn("◎ /goal", t)
-        self.assertIn("re-enters Step 1 for the next batch", t)
+        # #741 reworded the loop-continuation clause into the HOLD-turn doctrine:
+        # the next fire re-enters Step 1 ONLY after the boundary compact runs.
+        self.assertIn("Re-enter Step 1 for the NEXT batch ONLY once", t)
 
     def test_old_immediately_assemble_language_is_gone(self):
         t = read(self.SKILL)
