@@ -100,7 +100,8 @@ class DeliverGoalFakeTmux:
 
     def __init__(self, panes, captured, in_mode=False, cap_seq=(),
                 model_type=False, enters_swallowed=0, transcript_path=None,
-                initial_box="", wrap_width=None, arm_on_submit=True):
+                initial_box="", wrap_width=None, arm_on_submit=True,
+                visible_rows=None):
         self.panes = panes
         # #720 — arm the modelled pane after a `/goal <cond>` submit (default).
         # `False` models the #720 incident: the /goal was submitted but CC read
@@ -143,6 +144,15 @@ class DeliverGoalFakeTmux:
         # `_input_box_head_text`-based recognition. Mirrors
         # `tests/test_wrapped_draft.py::render_box`.
         self.wrap_width = wrap_width
+        # #746 -- when set (with `wrap_width`), a box whose wrapped height
+        # EXCEEDS `visible_rows` renders SCROLLED: only the LAST `visible_rows`
+        # wrapped rows are shown, the prompt glyph (`❯`+NBSP) moved onto the
+        # first VISIBLE row (mid-payload), so `_input_box_head_text` reads a
+        # mid-payload row and head-is-prefix is structurally False -- exactly
+        # the live gk state a long `/goal` produces (issue #746). A box short
+        # enough to fit (<= `visible_rows` rows -- e.g. a checkpoint chunk)
+        # renders UNSCROLLED, head visible, so head-is-prefix still holds.
+        self.visible_rows = visible_rows
         self._bare_line = None
         if model_type:
             for ln in captured.splitlines():
@@ -214,6 +224,14 @@ class DeliverGoalFakeTmux:
             else:
                 cur = cand
         rows.append(prefix + cur)
+        if self.visible_rows and len(rows) > self.visible_rows:
+            # #746 -- SCROLLED: keep only the last `visible_rows` wrapped rows;
+            # the first VISIBLE row carries the prompt glyph (mid-payload), the
+            # rest keep their continuation indent. `_find_input_box` locates the
+            # box by that glyph row, so head/tail come from the visible window
+            # only -- a contiguous mid..tail SUBSTRING of the full payload.
+            rows = rows[-self.visible_rows:]
+            rows[0] = "❯\xa0" + rows[0].lstrip("❯ \xa0")
         ctx = "  ctx ███░  caveman:lite  ◎ /goal active"
         return "\n".join(
             ["● Hotovo.", "", "─" * 60] + rows + ["─" * 60, ctx]) + "\n"
