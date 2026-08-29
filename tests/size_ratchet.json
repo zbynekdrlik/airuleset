@@ -405,7 +405,7 @@
     "watchdog/release_gap.py": 433,
     "watchdog/repo_health.py": 906,
     "watchdog/session_status.py": 400,
-    "watchdog/stash.py": 1223,
+    "watchdog/stash.py": 1294,
     "watchdog/sweep_jobs.py": 325,
     "watchdog/tmux_io.py": 1042,
     "watchdog/transcripts.py": 1547,
