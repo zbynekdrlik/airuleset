@@ -196,15 +196,25 @@ TYPE_VERIFY_SETTLE_S = 1
 # #746 -- a payload at/above this length can WRAP past the input box's visible
 # height and CC SCROLLS it, so the head row scrolls off-screen and head-is-prefix
 # becomes structurally unsatisfiable. `_type_literal_verified` runs the two-phase
-# HEAD-CHECKPOINT (below) only for such a payload -- comfortably above the
-# 700-char nudge cap (#714) so every nudge stays on the byte-identical pre-#746
-# single-phase path, and below the ~3-4k /goal template that is the only shape
-# that actually scrolls in practice.
+# HEAD-CHECKPOINT (below) only for such a payload. This is a scroll-length PROXY,
+# not an "is-a-/goal" test: it sits above EVERY current `send_verified` nudge
+# payload (all short by construction -- the #714 ops-wait cap is 700, the other
+# card/reply/cross_stream keystrokes are short fixed strings), and below the
+# ~3-4k /goal template that is the only shape that actually scrolls in practice,
+# so every nudge stays on the byte-identical pre-#746 single-phase path. If a
+# future nudge/card ever crossed 1000 it would harmlessly get the checkpoint too
+# -- two-phase is SAFE for any payload (it never junk-submits; a scrolled non-goal
+# nudge verifies identically), so a proxy-length switch degrades correctness in
+# no direction.
 GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD = 1000
 # #746 -- the checkpoint types this many chars as the FIRST burst (a single
 # sub-`GOAL_TYPE_CHUNK_THRESHOLD` send-keys, so the first-byte race applies to
 # exactly this burst) into the still-UNSCROLLED box, then head-is-prefix proves
-# the leading `/` landed before the box ever scrolls.
+# the leading `/` landed before the box ever scrolls. The proof assumes 120 chars
+# do NOT themselves scroll the box -- true at any realistic pane width; on a
+# pathologically narrow pane (<~10 cols) even the checkpoint could scroll, which
+# only DEGRADES to a safe denial (head-not-prefix -> CORRUPT -> undo+retry -> give
+# up, the goal simply not armed), NEVER a junk submit.
 GOAL_TYPE_CHECKPOINT_CHARS = 120
 
 # #670-review R2 -- the three shapes `_type_verify_class` distinguishes so the

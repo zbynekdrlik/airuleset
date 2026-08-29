@@ -194,5 +194,34 @@ class TypeVerifyClassScrolledGating(unittest.TestCase):
             "a checkpointed caller must accept the scrolled own-substring")
 
 
+# CC's 'paste again to expand' collapse hint -> `_type_verify_class` reads HOLD
+# (an unreadable/collapsed box no `_undo_typed_text` may backspace).
+COLLAPSE_CAP = ("● Hotovo.\n\n" + "─" * 40 + "\n❯ paste again to expand\n"
+                + "─" * 40 + "\n  ctx ███░  caveman:lite\n")
+
+
+class CheckpointHoldAbortsWithZeroFurtherKeystrokes(unittest.TestCase):
+    """The two-phase checkpoint's HOLD branch: if the box goes unreadable /
+    collapsed right after the FIRST chunk (a turn/dialog/collapse racing in),
+    `_type_literal_verified` must abort with ZERO further keystrokes -- the
+    remainder is NEVER typed and Enter is NEVER pressed (the #233/#322/#372
+    'no keystrokes into a HOLD box' discipline the fix's docstring promises).
+    Locks the branch Reviewer 2 found untested (mutating it to `pass` submits
+    the remainder into an unreadable box)."""
+
+    def test_checkpoint_hold_types_only_the_checkpoint_chunk_never_more(self):
+        tmux = DeliverGoalFakeTmux(
+            [(PID, "sess", "1234", "1234")], GOAL_IDLE_CAP, model_type=True,
+            cap_seq=(COLLAPSE_CAP,))     # every capture reads collapsed -> HOLD
+        ok = stash._type_literal_verified(PID, tmux, GOAL_SCROLLED,
+                                          sleep_fn=lambda *_a: None)
+        self.assertFalse(ok)
+        self.assertEqual(
+            tmux.typed_texts(),
+            [GOAL_SCROLLED[:stash.GOAL_TYPE_CHECKPOINT_CHARS]],
+            "the remainder was typed into a HOLD box after the checkpoint")
+        self.assertNotIn("Enter", tmux.keys())
+
+
 if __name__ == "__main__":
     unittest.main()
