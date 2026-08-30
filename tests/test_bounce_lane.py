@@ -112,8 +112,19 @@ class TestReviewWatchLifecycle(TestCase):
         # the maintainer" as the (B) precondition -- but neither proof
         # command in this template ever checked GitHub's closed state, so
         # the phrase was an unproven claim, not a fact. Replaced with the
-        # honest statement: hand-off is genuinely MINE-done; closing the
-        # ticket afterward is the maintainer's job, never proven from here.
+        # honest statement: hand-off is genuinely MINE-done; the later close
+        # is not part of the (B) proof.
+        #
+        # #761 (round-2 odoo-erp#5378 ripple): the old wording ("closing it
+        # after is the maintainer's job, not mine to prove") asserted a
+        # now-FALSE absolute for odoo-erp streams -- on odoo-erp the
+        # delivering STREAM self-closes after the gk review-verdict + queue-
+        # label drop (odoo-erp#5378 / #756). True-making reword: "a later
+        # close is not my (B) proof" is literally true for BOTH maintainer-
+        # close and stream-self-close, and still says closure is not the (B)
+        # gate. The odoo-erp HOW lives in the uncapped **AUTHORITY:
+        # fork-no-merge** header + the block-fork-no-merge-issue-close.sh
+        # #756 carve-out, never in the char-capped condition.
         #
         # #395 adversarial-review MAJOR-1: the REVIEW-WATCH lifecycle this
         # class exists to lock was ALSO reworded here (not just the (B)
@@ -126,7 +137,8 @@ class TestReviewWatchLifecycle(TestCase):
         # fallback) is PREFERRED, never a hard precondition any more.
         _, fk = self.reduced_goal_lines()
         self.assertIn("REVIEW-WATCH", fk)
-        self.assertIn("closing it after is the maintainer's job", fk)
+        self.assertIn("a later close is not my (B) proof", fk)
+        self.assertNotIn("the maintainer's job", fk)        # #761: false absolute gone
         self.assertNotIn("CLOSED by the maintainer", fk)
         self.assertIn("never blocks", fk)
 
