@@ -381,7 +381,7 @@
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_worktree_write_guard.py": 416,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 4312,
+    "watchdog/__init__.py": 4314,
     "watchdog/burn_jobs.py": 338,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
@@ -405,7 +405,7 @@
     "watchdog/release_gap.py": 433,
     "watchdog/repo_health.py": 906,
     "watchdog/session_status.py": 400,
-    "watchdog/stash.py": 1304,
+    "watchdog/stash.py": 1409,
     "watchdog/sweep_jobs.py": 325,
     "watchdog/tmux_io.py": 1042,
     "watchdog/transcripts.py": 1547,
@@ -440,7 +440,7 @@
     "watchdog/goal.py::goal_dark_watch": 398,
     "watchdog/goal.py::goal_lane_occupancy_nudge": 408,
     "watchdog/ops_wait_recheck.py::goal_ops_wait_recheck": 191,
-    "watchdog/stash.py::deliver_with_stash": 229,
+    "watchdog/stash.py::deliver_with_stash": 292,
     "watchdog/wedge.py::prompt_wedge_check": 235
   },
   "rule_bytes": {
