@@ -92,7 +92,9 @@ through a callback in the /autopilot command." Concretely:
              under a 24h attempt cap -- and NEVER on an idle-but-ALIVE session
              (glyph merely flickering; montalu 2026-08-16). An idle/dark loop
              the watchdog cannot self-heal still gets the #459 ping, keystroke-
-             free. See `goal_dark_watch()` below.
+             free -- EXCEPT a 🏁-PROVEN achieved loop with a fresh open==0 cache
+             (#766), which is FULFILLED, not dead, so the ping is VETOed. See
+             `goal_dark_watch()` below.
 
   JANITOR -- the shared stuck-stash-slot recovery driver (`#372`,
              `watchdog._janitor_recover` -- renamed from
@@ -263,6 +265,15 @@ _GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN, _GOAL_STALE_REARM_ORIGIN,
 # preserve, never to refresh). RULE: every NEW origin string MUST be added to
 # exactly ONE of these two tuples.
 _GOAL_USER_CALLBACK_ORIGINS = (_GOAL_SELF_CALLBACK_ORIGIN,)
+# #766 -- a distinguishable THIRD return state from `_fulfilled_rearm_decide`
+# (alongside handled True/False): a 🏁-PROVEN achieved loop with a FRESH open==0
+# cache (backlog genuinely drained) is FULFILLED, not silently-dead, so the sweep
+# site VETOes the #459 dead-loop ping instead of falling through to it. NOT an
+# origin -- it never becomes a `record_goal_request` origin string, so it joins
+# NEITHER partition tuple above (the "every NEW origin joins exactly one tuple"
+# RULE does not apply to a sweep-site return sentinel). A truthy value so the
+# caller must test `is _FULFILLED_SILENT` BEFORE the generic `if handled:`.
+_FULFILLED_SILENT = "fulfilled-silent"
 # #675 -- bumped whenever the marker PARSER gains a new recognizer. A persisted
 # `state["goal_mark"]` entry stamped with an OLDER version is RESEEDED (first-
 # sight reverse-scan) on the next dark_watch sweep, so a marker the old parser
@@ -2097,7 +2108,9 @@ def _fulfilled_rearm_ok(recs, now):
       * `reason == "cap"`  -- GOAL_FULFILLED_REARM_MAX_PER_DAY records already in
         the rolling 24 h: stop THIS lane's fast re-arms and fall through to the
         dead-loop machinery (a still-workable loop then escalates via its own
-        slower confirmed dark-rearm, 2/day; a non-workable one gets the #459 ping);
+        slower confirmed dark-rearm, 2/day; a non-workable one gets the #459
+        ping -- UNLESS it is a 🏁-proven, freshly-drained achieved loop, which
+        the #766 FULFILLED-SILENT veto catches upstream of this rate limiter);
       * `("", ok=True)`    -- record allowed.
     `pruned` is the 24h-pruned list; the caller appends `now` only on a real
     record. Same fail-safe posture as the dark cap (records, not landed
@@ -2128,9 +2141,17 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
       * handled=True  -- the caller must `continue` (a re-arm recorded, a dry-run
         would-record, or a TRANSIENT min-gap hold -- in every case the loop is
         NOT dead, so the dead-loop debounce/confirmation below must not run);
+      * handled=_FULFILLED_SILENT -- #766: a 🏁-PROVEN achieved loop with a FRESH
+        open==0 cache (backlog genuinely DRAINED, the correct final state). NOT a
+        dead loop: the caller VETOes the #459 dead-loop ping (clears the ping/
+        confirm escalation state, logs FULFILLED-SILENT once, and `continue`s)
+        instead of falling through to the unconditional fallback. A truthy
+        sentinel, so the caller MUST test it BEFORE the generic `if handled:`;
       * handled=False -- FALL THROUGH to the dead-loop machinery: not fulfilled
-        (no 🏁 / 🏁 predates the arm), not workable (empty/stale backlog), no
-        template, OR the daily cap is exhausted (12 fast fulfilled-rearms in 24h
+        (no 🏁 / 🏁 predates the arm), not workable AND not proven-drained (a
+        STALE/UNREADABLE cache -- a FRESH open==0 is the FULFILLED-SILENT sentinel
+        above, #766), no template, OR the daily cap is exhausted (12 fast
+        fulfilled-rearms in 24h
         -> hand to the dead-loop machinery, which escalates a still-workable loop
         via its slower confirmed dark-rearm and pings a non-workable one).
 
@@ -2150,13 +2171,22 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
 
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = (cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
+    if isinstance(open_n, int) and open_n == 0 and fresh:
+        # #766 -- 🏁 proven AFTER the arm AND a FRESH cache reading open==0: the
+        # backlog is genuinely DRAINED (the correct achieved final state). This
+        # is a FULFILLED loop, NOT a silently-dead one, so return the
+        # distinguishable FULFILLED-SILENT sentinel -> the sweep site VETOes the
+        # #459 dead-loop ping (which "fires ALWAYS" otherwise, misreading the
+        # achieved loop as dead ~70 s after completion). NEVER a re-arm (the
+        # backlog is empty), NEVER a keystroke -- a pure ping veto.
+        return None, _FULFILLED_SILENT
     if not (isinstance(open_n, int) and open_n > 0 and fresh):
-        # 🏁 seen but backlog NOT refilled (open==0 = the correct achieved final
-        # state) OR the cache is stale/unreadable (unprovable). Hand to the
-        # dead-loop machinery below (it stays SILENT for a non-workable achieved
-        # loop -- transcript-identical to a stall). No per-sweep log here: this
-        # is the steady idle state of every completed loop, and logging it every
-        # sweep would flood the journal the existing machinery keeps quiet.
+        # 🏁 seen but the cache is STALE / UNREADABLE (open==0-but-not-fresh, or
+        # unreadable) -> UNPROVABLE achieved. FAIL SAFE: hand to the dead-loop
+        # machinery below -- today's behavior (a genuinely dark loop without a
+        # PROVEN drained backlog still pings; #766 vetoes ONLY the proven case
+        # above). No per-sweep log here: this is the steady idle state of a
+        # completed loop, and logging it every sweep would flood the journal.
         return None, False
 
     text, auth = (rearm_fn or _default_rearm_fn)(cwd)
@@ -2202,6 +2232,46 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     return ("dark-watch %s sid=%s -> FULFILLED-REARM: recording re-arm "
             "(open=%s authority=%s records=%d per 24h)"
             % (loc, sid, open_n, auth, len(fulfilled_state[sid]))), True
+
+
+def _fulfilled_silent_veto(sid, mark_ts, loc, dry_run,
+                           seen_state, pinged_state, confirm_state):
+    """#766 -- apply the FULFILLED-SILENT ping veto for a 🏁-PROVEN achieved loop
+    (fresh open==0, the `_FULFILLED_SILENT` sentinel from `_fulfilled_rearm_
+    decide`). Clears the ping + death-CONFIRMATION escalation state (its
+    accumulation IS the #459 trigger) so the caller's `continue` skips the ping
+    FALLBACK, and MARKS the episode FULFILLED in `seen_state` so the decision
+    logs ONCE, not every 60 s sweep for the HOURS a completed loop sits idle (the
+    #764 journal-flood concern) -- mirroring the transition-only "first
+    observation" / VETO-ALIVE logging, deliberately NOT the workable branch's
+    blanket `seen_state.pop` (which, re-derived every sweep, would flood). A
+    later backlog refill re-flips `_fulfilled_rearm_decide` to the workable
+    re-arm; if unarmable, the dead-loop machinery re-detects from a FRESH confirm
+    run (confirm_state is popped here). Returns the decision logline (once per
+    episode) or None; all mutations guarded on `not dry_run` (the #502/#511
+    module-level-helper pattern, keeping goal_dark_watch under its ceiling).
+
+    NOTE (review 🔵, the set-marker deviation's bounded consequence): the
+    `{"mark_ts": …, "fulfilled": True}` marker satisfies the dead-loop debounce's
+    `prior.get("mark_ts") == mark_ts` check, so if the SAME episode later goes
+    fresh->STALE (cache ages past GOAL_DARK_CACHE_MAX_AGE_S) the loop skips the
+    "first observation, debouncing" sweep and reaches the #459 fallback one sweep
+    (~60 s) sooner than a pristine episode; and because this veto pops
+    `pinged_state` on every fresh sweep, a fresh<->stale oscillation re-fires a
+    "first" ping each cycle, bounded in production only by the notify-layer dedup
+    on the constant `goal-dark:sid:mark` key. Negligible live (the cache max age
+    is 3 days) -- documented so a future reader does NOT "restore" the pop."""
+    prior = seen_state.get(sid)
+    fresh_episode = not (isinstance(prior, dict) and prior.get("fulfilled")
+                         and prior.get("mark_ts") == mark_ts)
+    if not dry_run:
+        seen_state[sid] = {"mark_ts": mark_ts, "fulfilled": True}
+        pinged_state.pop(sid, None)
+        confirm_state.pop(sid, None)
+    if fresh_episode:
+        return ("dark-watch %s sid=%s -> FULFILLED-SILENT (achieved, open=0)"
+                % (loc, sid))
+    return None
 
 
 def _dark_awaiting_user_veto(tpath):
@@ -2744,13 +2814,28 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # request; the keystroke + all its gates live in deliver_goal. Placed
         # AFTER the mtime liveness veto (never re-arm a still-writing loop) and
         # BEFORE the dead-loop debounce (a fulfilled+refilled loop re-arms fast,
-        # never through the 8-read/2-per-day confirmation).
+        # never through the 8-read/2-per-day confirmation). #766: the SAME decide
+        # call also detects a fulfilled loop whose backlog is genuinely DRAINED
+        # (fresh open==0) and returns the FULFILLED-SILENT sentinel -> the branch
+        # below VETOes the #459 dead-loop ping for it (an achieved final state is
+        # not a dead loop), so a legitimately-completed loop is never pinged.
         _frline, _frhandled = _fulfilled_rearm_decide(
             sid, cwd, tpath, mark_ts, now, loc, dry_run, rearm_fn,
             obligation_fn, requests_path, fulfilled_state, seen_state,
             pinged_state, confirm_state)
         if _frline:
             logs.append(_frline)
+        if _frhandled is _FULFILLED_SILENT:
+            # #766 -- a 🏁-proven achieved loop (fresh open==0) is FULFILLED, not
+            # silently-dead: VETO the #459 ping (the FALLBACK below fires it
+            # ALWAYS otherwise) and `continue` BEFORE the debounce -- never a
+            # ping, never a keystroke. Logs once per episode (helper, #764 flood).
+            _vline = _fulfilled_silent_veto(sid, mark_ts, loc, dry_run,
+                                            seen_state, pinged_state,
+                                            confirm_state)
+            if _vline:
+                logs.append(_vline)
+            continue
         if _frhandled:
             continue
 
@@ -2815,7 +2900,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # backlog, an unresolvable template, OR an exhausted attempt cap -- the
         # cases the watchdog cannot self-heal, so the human must act. The FIRST
         # ping fires ALWAYS; a LATER re-ping needs a fresh workable cache -- else
-        # stay SILENT (an achieved loop is transcript-identical to a stall).
+        # stay SILENT (a NON-🏁 dark loop is transcript-identical to a stall).
+        # #766: a 🏁-PROVEN achieved loop (fresh open==0) is DISTINGUISHABLE and
+        # never reaches here -- it is vetoed FULFILLED-SILENT above; only a dark
+        # loop WITHOUT a proven drained backlog falls through to this ping.
         prec = pinged_state.get(sid)
         is_first = not (isinstance(prec, dict) and prec.get("mark_ts") == mark_ts)
         if is_first:

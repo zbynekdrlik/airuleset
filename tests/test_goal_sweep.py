@@ -355,6 +355,26 @@ class TestGoalDarkWatch(unittest.TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
         return proj, tmux
 
+    def _dark_flag(self, sid, flag_ts=600):
+        """#766: the `_dark` dark-goal fixture PLUS a `🏁 BACKLOG EMPTY:`
+        completion turn AFTER the arm (ts_epoch=500) -- a genuinely-ACHIEVED
+        loop, distinct from `_dark` (no 🏁 -> transcript-identical to a stall)."""
+        from datetime import datetime, timezone
+        proj = self._dir()
+        tpath = _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        iso = datetime.fromtimestamp(flag_ts, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z")
+        with open(tpath, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "type": "assistant", "timestamp": iso,
+                "message": {"id": "msg_done",
+                            "content": "🏁 BACKLOG EMPTY: 0 open, main green"}})
+                    + "\n")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        return proj, tmux
+
     def _sweep(self, tmux, proj, state, sent, now, obl, rearm=None, reqs=None):
         # `rearm`/`reqs` are only forwarded when set, so a caller that omits
         # them exercises the production defaults path unchanged (#478).
@@ -621,6 +641,52 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent,
                     2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
         self.assertEqual(len(sent), 1, "an achieved backlog (open==0) must never nag")
+
+    def test_766_achieved_with_backlog_flag_is_never_pinged(self):
+        # #766 SIBLING to the pin above: the SAME open==0 achieved state, but
+        # this loop printed a `🏁 BACKLOG EMPTY:` proof AFTER the arm -> it is
+        # provably FULFILLED, not a silent stall. The non-🏁 pin still pings once
+        # (achieved is transcript-identical to a stall WITHOUT the 🏁); this
+        # 🏁-carrying loop gets ZERO pings + an explicit FULFILLED-SILENT log --
+        # the veto. Two sweeps: sweep1 open==0 but the cache reads not-fresh
+        # (now<cts), sweep2 fresh -> the veto fires exactly when open==0 AND
+        # fresh, never on the pre-fix #459 second-sweep ping.
+        proj, tmux = self._dark_flag("sess-766-flag")
+        obl = self._obl(0, 1500)                     # backlog empty -> achieved
+        state, pings, logs = {}, [], []
+        for now in (1000, 2000):
+            logs += goal.goal_dark_watch(
+                now, run=tmux, send_fn=lambda mm, **k: pings.append(mm),
+                projects_dir=proj, state=state, sleep_fn=lambda s: None,
+                obligation_fn=obl,
+                rearm_fn=lambda cwd: ("/goal x", "full"))
+        self.assertEqual(pings, [],
+                         "a 🏁-proven achieved loop must never be pinged")
+        self.assertTrue(any("FULFILLED-SILENT" in ln for ln in logs),
+                        "the veto emits an explicit FULFILLED-SILENT log")
+        self.assertEqual(tmux.sent, [], "the veto types no keystroke")
+
+    def test_766_stale_open_zero_with_flag_still_pings(self):
+        # #766 FAIL-SAFE TEETH (review 🟡): a 🏁 loop whose open==0 cache is
+        # STALE (aged past GOAL_DARK_CACHE_MAX_AGE_S) is UNPROVABLE-achieved ->
+        # today's behavior, the #459 ping STILL fires; the FULFILLED-SILENT veto
+        # needs a FRESH open==0. Locks the `and fresh` conjunct of the sentinel
+        # gate (dropping it would silence a stale-cache 🏁 loop forever). Mutant:
+        # remove `and fresh` from the open==0 branch -> this test goes RED.
+        proj, tmux = self._dark_flag("sess-766-stale")
+        base = 1_700_000_000
+        stale = base - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
+        obl = self._obl(0, stale)                    # open==0 but STALE cache
+        state, pings, logs = {}, [], []
+        for now in (base, base + 1000):
+            logs += goal.goal_dark_watch(
+                now, run=tmux, send_fn=lambda mm, **k: pings.append(mm),
+                projects_dir=proj, state=state, sleep_fn=lambda s: None,
+                obligation_fn=obl, rearm_fn=lambda cwd: ("/goal x", "full"))
+        self.assertEqual(len(pings), 1,
+                         "a STALE open==0 cache is unprovable -> the #459 ping fires")
+        self.assertFalse(any("FULFILLED-SILENT" in ln for ln in logs),
+                         "an unproven (stale) achieved state must NOT be vetoed")
 
     def test_unavailable_obligation_cache_does_not_re_ping(self):
         # #459 fail-safe — cache absent/unreadable => cannot confirm work

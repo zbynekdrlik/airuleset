@@ -182,6 +182,60 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertNotIn("sess-empty", reqs,
                          "open==0 is the correct achieved final state")
 
+    # --- #766: a 🏁-proven achieved loop (open==0) VETOes the #459 ping ------ #
+    def _sweep_capturing(self, proj, tmux, now, obl, state, reqs, pings):
+        """A sweep with a CAPTURING send_fn (the #764 `_sweep` uses a no-op, so
+        it structurally cannot see the false #459 ping this test locks)."""
+        return goal.goal_dark_watch(
+            now, run=tmux, send_fn=lambda mm, **k: pings.append((mm, k)),
+            projects_dir=proj,
+            state=state, sleep_fn=lambda s: None, obligation_fn=lambda cwd: obl,
+            rearm_fn=lambda cwd: ("/goal DONE or stop after 50", "full"),
+            requests_path=reqs, dry_run=False)
+
+    def test_achieved_open_zero_vetoes_the_459_ping_across_two_sweeps(self):
+        # THE #766 REGRESSION: a legitimately-ACHIEVED loop (🏁 BACKLOG EMPTY in
+        # its last turn, AFTER the arm; obligation cache fresh with open==0) must
+        # NOT get the "💀 /goal loop zomrelo potichu" ping. On PRE-fix code the
+        # sweep falls through to the unconditional #459 fallback and pings on the
+        # SECOND sweep (the first is "first observation, debouncing"). The fix
+        # returns a FULFILLED-SILENT sentinel from _fulfilled_rearm_decide so the
+        # sweep site VETOes the ping. Two sweeps + a CAPTURING send_fn are
+        # required to observe (and, on the fix, disprove) the second-sweep ping.
+        proj, tmux = self._fixture("sess-achieved-766")
+        state = {}
+        reqs = self._dir() / "goal-requests.json"
+        pings = []
+        logs1 = self._sweep_capturing(proj, tmux, 100000, (0, 100000),
+                                      state, reqs, pings)
+        logs2 = self._sweep_capturing(proj, tmux, 100060, (0, 100060),
+                                      state, reqs, pings)
+        self.assertEqual(pings, [],
+                         "an achieved (🏁, open==0) loop must NEVER be pinged")
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "an achieved loop records NO re-arm (backlog empty)")
+        self.assertEqual(tmux.sent, [], "the veto types no keystroke")
+        self.assertTrue(
+            any("FULFILLED-SILENT" in ln for ln in (logs1 + logs2)),
+            "the veto emits an explicit FULFILLED-SILENT decision log")
+
+    def test_fulfilled_silent_logs_once_per_episode_not_every_sweep(self):
+        # a completed loop sits dark for HOURS -> the FULFILLED-SILENT decision
+        # must log ONCE per episode (mirroring "first observation, debouncing"),
+        # never every 60s sweep (the #764-documented journal-flood concern).
+        proj, tmux = self._fixture("sess-once-766")
+        state = {}
+        reqs = self._dir() / "goal-requests.json"
+        pings = []
+        n = 0
+        for i in range(4):
+            logs = self._sweep_capturing(proj, tmux, 100000 + i * 60,
+                                         (0, 100000 + i * 60), state, reqs, pings)
+            n += sum(1 for ln in logs if "FULFILLED-SILENT" in ln)
+        self.assertEqual(n, 1,
+                         "FULFILLED-SILENT logs exactly once across four sweeps")
+        self.assertEqual(pings, [], "still never pinged")
+
     # --- 🏁 that PREDATES the current arm never fires ----------------------- #
     def test_backlog_proof_before_the_mark_never_rearms(self):
         # a re-armed-then-died loop whose LAST turn is a PRE-rearm 🏁: the mark
