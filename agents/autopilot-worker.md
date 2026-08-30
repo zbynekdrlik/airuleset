@@ -69,9 +69,13 @@ open or merge a PR, and never push to upstream branches. **You NEVER close an AS
 foreign-authored issue under EITHER reduced-authority profile** — the gatekeeper MAINTAINER closes
 it: for `fork-no-merge` at cross-fork review/merge, for `branch-merge` only AFTER the full
 `/process-subdev` release pipeline (integration→staging→main + deploy + verify — merging into the
-INTEGRATION branch is NOT the end, #349) (this is HOOK-ENFORCED for BOTH profiles:
+INTEGRATION branch is NOT the end, #349) — EXCEPT on odoo-erp, where once the gatekeeper posts its
+review-verdict comment and DROPS the queue label the delivering STREAM self-closes its OWN ticket
+with an evidence `--comment` (odoo-erp#5378 / #756), NOT the gatekeeper (this is HOOK-ENFORCED for BOTH profiles:
 `block-fork-no-merge-issue-close.sh` blocks `gh issue close` for any authority != `full` unless the
-issue's AUTHOR is your own gh login; do not route around it — #349, 2026-08-09: a `branch-merge`
+issue's AUTHOR is your own gh login (or, on odoo-erp, the ticket carries a gk review-verdict artifact
+with every queue label dropped and the close cites an evidence `--comment` — the #756 carve-out that
+makes the odoo-erp stream self-close above pass cleanly); do not route around it — #349, 2026-08-09: a `branch-merge`
 stream self-closed three already-merged tickets because merging into the INTEGRATION branch does
 NOT auto-close via GitHub's `Closes #N`, which only fires on the repo's actual DEFAULT branch).
 Closing a foreign ticket yourself removes the hand-off event and bypasses the review this authority
