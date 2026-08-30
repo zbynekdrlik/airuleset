@@ -133,11 +133,16 @@ def _scoped_connect_argv(entry, sock):
     is not what #613 REOPEN-3's fix touches (the fix is inside
     `_ATTACH_BODY`, shared by both shapes)."""
     argv = list(w.build_connect_argv(entry))
-    assert argv[:2] == ["sh", "-c"], (
+    # #736: a local connect is now scope-detached (`systemd-run --user --scope
+    # ... sh -c <body>`). These isolated-server pty tests exercise the
+    # _ATTACH_BODY against a socket-scoped fake tmux — NOT the scope wrapper
+    # (tested in test_webterm.py) — so run the body directly under a bare
+    # `sh -c`, dropping the systemd-run prefix.
+    assert "sh" in argv and "-c" in argv, (
         "build_connect_argv() shape changed -- update this scoping helper: %r"
         % (argv,))
-    argv[2] = _socket_scope(argv[2], sock)
-    return argv
+    body = _socket_scope(argv[argv.index("-c") + 1], sock)
+    return ["sh", "-c", body]
 
 
 def _visible(raw):

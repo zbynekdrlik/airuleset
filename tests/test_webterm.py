@@ -358,9 +358,12 @@ class TestConnectArgv(unittest.TestCase):
 
     def test_preferred_is_shell_quoted(self):
         # A pathological preferred value must be shell-quoted, never injected.
+        # #736: the local child is scope-wrapped, so the body is the arg after
+        # `-c`, not a fixed index.
         e = {"id": "x", "local": True, "preferred": "a; rm -rf /"}
         argv = w.build_connect_argv(e)
-        self.assertIn("'a; rm -rf /'", argv[2])
+        body = argv[argv.index("-c") + 1]
+        self.assertIn("'a; rm -rf /'", body)
 
 
 class TestConnectAllowlist(unittest.TestCase):
@@ -396,8 +399,11 @@ class TestConnectAllowlist(unittest.TestCase):
             w.connect_main(["dev1"], inventory_path=p)
         ex.assert_called_once()
         cmd = ex.call_args[0][1]
-        self.assertEqual(cmd[0], "sh")
-        self.assertIn("P=zbynek", cmd[2])
+        # #736: local connect is scope-detached via systemd-run --user --scope.
+        self.assertEqual(cmd[0], "systemd-run")
+        self.assertIn("--scope", cmd)
+        self.assertIn("sh", cmd)
+        self.assertIn("P=zbynek", cmd[cmd.index("-c") + 1])
 
     def test_unreadable_inventory_is_refused(self):
         with m.patch.object(w.os, "execvp",
