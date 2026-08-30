@@ -661,17 +661,24 @@ class TestOpus5GrepGate(TestCase):
 
 
 class TestUltracodeStandingDefault(TestCase):
-    """#445: user directive 2026-08-13 ("chcel by som aby by default vzdy bol
-    ultracode... maximalna akceleracia... paralelne, ak to uloha dovoli") —
-    ultracode is a STANDING opt-in on every managed session, and maximum
-    acceleration (worktree fleet, disjoint lanes, serial-only integration)
-    is the default doctrine. The settings/launcher halves are locked in
-    tests/test_airuleset.py; these lock the policy PROSE."""
+    """#751 (owner directive 2026-08-30, verbatim: "Chcel by som este aby sa
+    claude v targetoch nespustali s zapnutym ultracode ale s effort high"):
+    REVERSES the LAUNCH-FLAG half of #445 — managed sessions no longer launch
+    with ultracode and the effort baseline drops `xhigh` → `high`. ONLY the
+    launch flags reversed; the max-acceleration doctrine (worktree fleet,
+    disjoint lanes, serial-only integration) and per-phase model tiering are
+    UNCHANGED. The settings/launcher halves are locked in tests/test_airuleset.py;
+    these lock the policy PROSE."""
 
-    def test_tooling_records_the_directive_verbatim(self):
+    def test_tooling_records_the_2026_08_30_reversal_verbatim(self):
         t = read(TOOLING)
-        self.assertIn("chcel by som aby by default vzdy bol ultracode", t)
-        self.assertIn("STANDING DEFAULT", t)
+        self.assertIn(
+            "Chcel by som este aby sa claude v targetoch nespustali s zapnutym "
+            "ultracode ale s effort high", t)
+        self.assertIn("NO LONGER a managed launch flag", t)
+        # the #445 standing-default claim must be gone:
+        self.assertNotIn("Ultracode is the STANDING DEFAULT on every managed session", t)
+        self.assertNotIn("managed STANDING DEFAULT", t)
 
     def test_stop_and_ask_step_is_retired(self):
         t = read(TOOLING)
@@ -679,15 +686,18 @@ class TestUltracodeStandingDefault(TestCase):
         self.assertNotIn("The agent CANNOT enable ultracode itself", t)
 
     def test_max_acceleration_doctrine_is_explicit(self):
+        # UNCHANGED by #751 — only the launch flags reversed, not the doctrine.
         t = read(TOOLING)
         self.assertIn("disjoint lanes", t)
         self.assertIn("integration strictly serial", t)
         self.assertIn("single-worker only when the task genuinely cannot parallelize", t)
 
-    def test_module_effort_baseline_is_xhigh_plus_ultracode(self):
+    def test_module_effort_baseline_is_high_no_ultracode(self):
         m = read(MODULE)
-        self.assertIn("managed MAIN-session baseline is `xhigh` + standing ultracode", m)
-        self.assertNotIn("managed MAIN-session baseline is `high`", m)
+        self.assertIn(
+            "managed MAIN-session baseline is `high` with NO standing ultracode "
+            "launch flag", m)
+        self.assertNotIn("managed MAIN-session baseline is `xhigh` + standing ultracode", m)
 
 
 if __name__ == "__main__":
