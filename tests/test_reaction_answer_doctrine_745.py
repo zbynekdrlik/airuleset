@@ -222,6 +222,32 @@ class TestFunctionalInjection(TestCase):
             "comprehensive-logging did not inject on the same .py write",
         )
 
+    def test_three_way_cofire_all_inject(self):
+        """#745 review finding: a `.py` write touching BOTH `attachment_ids`
+        AND `mail.message.reaction` co-fires THREE rows (comprehensive-logging
+        + read-attachments + read-reactions). Drive the REAL hook (a FRESH
+        session so nothing is pre-marked) and assert ALL THREE inject — the
+        read-reactions body must be lean enough that it does NOT defer at the
+        exact moment a session reads a client message fully (#521/#598)."""
+        with tempfile.TemporaryDirectory() as td:
+            r = run_hook(
+                {
+                    "file_path": "/repo/readfull.py",
+                    "content": "a = ex(db,uid,k,'mail.message','search_read',"
+                               "[[['id','=',mid]]],{'fields':['attachment_ids']})\n"
+                               "rx = ex(db,uid,k,'mail.message.reaction',"
+                               "'search_read',[[['message_id','=',mid]]])",
+                },
+                session_id="cofit-745-threeway",
+                tmpdir=td,
+            )
+        self.assertEqual(r.returncode, 0, "injector must never block: %r" % r.stderr)
+        self.assertIn("Comprehensive Logging", r.stdout, "comp deferred on the 3-way")
+        self.assertIn("Reading a client Discuss message", r.stdout,
+                      "read-attachments deferred on the 3-way")
+        self.assertIn("Reading a client's REACTION", r.stdout,
+                      "read-reactions DEFERRED on the 3-way — trim it leaner")
+
     def test_companion_cofits_comprehensive_logging_arithmetic(self):
         # #576/#598 early-warning arithmetic guard (the functional test above
         # is the one with real teeth).
