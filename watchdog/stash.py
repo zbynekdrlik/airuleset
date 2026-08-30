@@ -357,6 +357,12 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn):
     # checkpoint settles CORRUPT forever (fleet-wide zero `SEND typed`). The
     # TYPED text stays the exact `head_chunk` (the rest continues at the same
     # offset); only what the settle-verify compares against is normalised.
+    # Inherent residual: a type dropping exactly the chunk's TRAILING space
+    # now reads LANDED (the stripped pane read renders "typed the space" and
+    # "dropped it" identically) — undetectable in principle at this layer,
+    # no known last-byte drop vector (#670's race is first-byte), and the
+    # pre-#763 code offered no protection either (it CORRUPTed even a
+    # perfect type).
     hc = _settle_type_verify(pid, run, head_chunk.rstrip(), sleep_fn)
     if hc != _TV_LANDED:
         return hc

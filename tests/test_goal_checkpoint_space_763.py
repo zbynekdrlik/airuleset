@@ -131,8 +131,14 @@ class EveryRealTemplateDelivers(unittest.TestCase):
     template edit whose chunk boundary re-lands on whitespace."""
 
     def test_all_authority_templates_type_verified(self):
+        # Review-fix (#763 🔴): resolve templates from the REPO source, never
+        # the installed ~/.claude copy — CI runs with a fresh HOME (no
+        # installed skills), and the repo copy is the `goal-inventory --write`
+        # render source the installed one is pushed from, so this locks the
+        # actual fleet-facing artifact.
+        skill = REPO / "skills" / "autopilot" / "SKILL.md"
         for auth in ("full", "branch-merge", "fork-no-merge"):
-            text = goal.goal_template_for_authority(auth)
+            text = goal.goal_template_for_authority(auth, path=skill)
             self.assertTrue(text, "template for %s must resolve" % auth)
             p = _tpath(self)
             tmux = _fake(self, p)
