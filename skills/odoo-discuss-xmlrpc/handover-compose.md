@@ -116,8 +116,9 @@ a reason).
   PROD first.
 - **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
   čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Stream navrhol
-  klientovi (vlákno 263) budúci sľub ("od zajtra bude pri každej položke aj kód
-  dodávateľa") kým sľúbený artefakt (digest e-mail) ešte neexistoval. Keď je
+  klientovi (vlákno 263) budúci sľub („od zajtrajšieho ranného e-mailu bude
+  pri každej položke aj kód dodávateľa") kým sľúbený artefakt (digest e-mail)
+  ešte neexistoval. Keď je
   viditeľný výstup funkcie plánovaný ARTEFAKT (digest e-mail, report, cron
   výsledok), máš dve legálne cesty — obe končia správou v MINULOM ČASE: (1)
   spusti artefakt TERAZ (vlastnou právomocou, alebo `GATEKEEPER-ACTION:`) a
@@ -243,7 +244,10 @@ a reason).
   `airuleset:discuss-close-ok` in the close command.
 
 - **One thread = one topic — now the WHOLE lifecycle, not just addressing
-  (airuleset #728, owner directive 2026-08-26).** The pre-#728 rule below
+  (airuleset #728, owner directive 2026-08-26).** Verbatim: „treba vlakna
+  drzat maximalne atomicke a ak sa otvori nejaka nova tema vo vlakne tak
+  radsej vytvorit nove vlakno/ticket a spravu ktora temu vyvolala
+  prekopirovat, presunut do toho noveho vlakna". The pre-#728 rule below
   ("one thread = one topic, a sub-thread under the channel the owner named")
   covered only ADDRESSING at creation — it now covers the thread's ENTIRE
   lifecycle: every follow-up, reminder and reply posted into an EXISTING
@@ -256,7 +260,8 @@ a reason).
   client thread is NEVER developed there.** The stream creates a NEW ticket
   immediately — and, once it reaches client communication, a NEW thread once
   the owner approves its exact name + text (the SAME per-message approval
-  doctrine as the FIRST bullet of this file) — and COPIES/quotes the
+  doctrine as the FIRST bullet of this file — a new-topic split is never an
+  excuse to skip approval) — and COPIES/quotes the
   triggering message into the new ticket/thread WITH A CITATION (msg id +
   author + date), so the context is never torn away from its origin. When the
   new ticket binds its new thread, record it with the SAME
