@@ -238,8 +238,8 @@ class TestWatchdogLaneNudgeIsBatch(TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
-        # #726: the nudge no longer consults _mem_available_mb (the memory gate
-        # was under-saturated-only and is retired), so no mem patch is needed.
+        # #726/#729: the nudge consults no memory gate (the memory OOM subsystem
+        # was under-saturated-only and is now deleted), so no mem patch is needed.
         with m.patch("airuleset.resolve_authority", return_value="full"), \
              m.patch.object(wd, "count_live_workers",
                             return_value=(workers, [])):

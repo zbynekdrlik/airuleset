@@ -3077,39 +3077,17 @@ GOAL_LANE_NUDGE_TEXT = (
 # floor >= 1 and workers==0 is always < floor (the empty-lane branch is reachable).
 GOAL_LANE_SATURATION_WORKERS = 5      # batch ceiling: >= min(5, backlog) live workers -> "saturated" skip (#726: a running batch, no refill)
 
-# #726 DORMANT-via-nudge: the whole low-mem OOM subsystem below (this constant +
+# #729 -- the whole low-mem OOM subsystem (GOAL_LANE_MIN_MEM_AVAIL_MB +
 # GOAL_LANE_LOWMEM_SURFACE_STREAK + _mem_available_mb + _lane_min_mem_avail_mb +
-# _lane_lowmem_skip + one_glance.lane_low_mem_surface_decision) gated the RETIRED
-# under-saturated fill nudge, so the NUDGE never reaches it now. RETAINED (not
-# deleted): the empty-lane "start a NEW batch" nudge also dispatches, so whether
-# batch-start should gate on memory headroom is an UNSETTLED design question (see
-# the #726 design comment); its pure decision cores stay unit-tested
-# (_lane_min_mem_avail_mb, lane_low_mem_surface_decision). Removal is folded into
-# the dormant-machinery cleanup follow-up (#729). Historical rationale below.
-# #442 re-fix 2 (owner directive 2026-08-14: "vsak ak na to mas watcher tak ten
-# si vie aj pamet na boxe overit") -- the fill-lanes nudge (which tells the
-# supervisor to dispatch MORE parallel workers) fires only when the box has real
-# memory headroom. Below this many MB of MemAvailable, another worktree worker
-# risks tipping a memory-tight box into the #448 pressure-reap zone (a reaped bg
-# shell / OOM-killed worker is worse than a briefly under-filled lane), so the
-# guard stays silent and journals the measured value. The 0-worker EMPTY-lane
-# nudge is UNAFFECTED -- a fully stalled box must always be nudged.
-#
-# #574 -- EVIDENCE-BASED DEFAULT + per-box override. The original 1536 was an
-# uncalibrated #442 implementation constant (born c703967d, ZERO cited OOM
-# evidence) that blocked gk's HISTORICALLY-WORKING saturation: gk (3.8 GB, main
-# claude ~1.4 GB RSS) ran 5+ lanes at ~1.2-1.4 GB MemAvailable with no reported
-# OOM before this gate existed, yet the 1536 floor fires skip:low-mem at
-# 1405-1480 MB -- exactly that state. Recalibrated to 1024: it admits gk's
-# evidenced 5-lane state (1.2 GB+, comfortably above 1024) and no more, while
-# keeping ~1 GB reserve still well clear of the swap-thrash zone where #448's
-# reaper culls. NOT removed -- the memoryPressure-reap class is real; a box that
-# needs a different floor sets AIRULESET_LANE_MIN_MEM_MB via the watchdog unit's
-# EnvironmentFile (read at CALL time by _lane_min_mem_avail_mb, #545). The
-# CAPACITY-CAPPED surface (#571) still escalates to the owner when even the
-# recalibrated floor blocks saturation with a real backlog. This constant is the
-# DEFAULT only -- read the effective floor via _lane_min_mem_avail_mb().
-GOAL_LANE_MIN_MEM_AVAIL_MB = 1024
+# _lane_lowmem_skip + _lane_lowmem_reset + one_glance.lane_low_mem_surface_
+# decision) gated the #726-RETIRED under-saturated fill nudge and was kept DORMANT
+# by #726 pending one design question: should the empty-lane "start a NEW batch"
+# nudge gate on memory headroom? #729 ROZHODNUTÉ: NO. The empty-lane nudge stays
+# memory-EXEMPT (a fully stalled 0-worker box has no worker RAM pressure to
+# protect against and MUST always be nudged), and memory back-off WITHIN a batch
+# is already delegated to the supervisor (the nudge text: "back off len na REÁLNY
+# resource signál -- ... memory pressure boxu ..."). So the subsystem is DELETED,
+# not re-wired -- net-LOC down (#486), zero change to the nudge's runtime behavior.
 
 # #571 -- max CONSECUTIVE working-no-tasks defers (a ⏳ marker with 0 render task
 # badges AND 0 structured live lanes) before the branch STOPS deferring and
@@ -3117,13 +3095,6 @@ GOAL_LANE_MIN_MEM_AVAIL_MB = 1024
 # identical skip loop (the #566 livelock class) without nudging a genuinely-idle
 # ⏳ box before a few sweeps confirm it. Each sweep is ~60-70s, so 3 ~= 3-4 min.
 GOAL_LANE_WNT_MAX_DEFERS = 3
-# #571 -- consecutive low-mem skips (under-saturated fill blocked by MemAvailable
-# < the effective floor _lane_min_mem_avail_mb()) with a genuine backlog before
-# the ONE owner-facing CAPACITY-CAPPED decision line fires (deduped once per
-# episode). ~5 sweeps (~5-6 min) confirms a PERSISTENT ceiling, not a transient
-# dip; the OOM skip itself is UNCHANGED (its threshold is the #574 effective,
-# env-overridable floor, no longer a hardcoded 1536).
-GOAL_LANE_LOWMEM_SURFACE_STREAK = 5
 # #662 -- consecutive one-glance `stuck` sweeps (armed /goal + 0 workers +
 # backlog + idle over GOAL_LANE_IDLE_S) before the ONE per-episode alert record
 # fires (deduped once per episode). #688: that record is now MACHINE-CHANNEL
@@ -3135,15 +3106,15 @@ GOAL_LANE_LOWMEM_SURFACE_STREAK = 5
 # episode (any non-stuck decider verdict, or a definite goal-clear) resets the
 # streak, so a transient lull never alarms. THE DEFAULT; the effective value is
 # read at CALL time by `_stuck_alert_streak()` so a malformed env value can
-# never crash `import watchdog.goal` (the #545/#574 rule the sibling
-# `_lane_min_mem_avail_mb` documents -- a bare module-level `int(env)` raised
-# ValueError fleet-wide on garbage input, and `-2` fired on the FIRST sweep).
+# never crash `import watchdog.goal` (the #545/#574 read-at-call-time rule -- a
+# bare module-level `int(env)` raised ValueError fleet-wide on garbage input, and
+# `-2` fired on the FIRST sweep).
 GOAL_LANE_STUCK_ALERT_STREAK = 8
 
 
 def _stuck_alert_streak():
     """#662 -- the effective stuck-alert streak, read at CALL time with a
-    malformed-value fallback (mirrors `_lane_min_mem_avail_mb`, #545/#574): a
+    malformed-value fallback (the #545/#574 read-at-call-time rule): a
     garbage `AIRULESET_GOAL_LANE_STUCK_ALERT_STREAK` never crashes import, and a
     non-positive value can never disable the transient-stuck guard (floors at
     the GOAL_LANE_STUCK_ALERT_STREAK default)."""
@@ -3161,207 +3132,72 @@ def _stuck_alert_streak():
 # skip:batch-running instead. GOAL_LANE_UNDERSAT_NUDGE_TEXT/_SURPLUS are removed.
 
 
-def _mem_available_mb():
-    """MemAvailable from /proc/meminfo in MEGABYTES, or None if it can't be
-    read/parsed (#442 re-fix 2). Fail-OPEN (None -> the caller does NOT block the
-    nudge): this guard's whole purpose is that a stalled box is too SILENT, and
-    every managed box is Linux with /proc/meminfo -- an unreadable meminfo is an
-    anomaly that must not re-silence the guard, so only the memory PROTECTION is
-    skipped, never the nudge itself.
-
-    #726: DORMANT -- with the under-saturated fill nudge retired (batch mode, no
-    mid-drain refill), the nudge's memory-headroom gate is gone, so this + the
-    low-mem helpers below are currently UNCALLED. Retained (not deleted): the
-    OOM-protection subsystem may be re-wired to the empty-lane batch-start nudge
-    (which also dispatches) -- an unsettled question (see the #726 design comment).
-    Its pure decision core is still unit-tested (one_glance.lane_low_mem_surface_
-    decision, _lane_min_mem_avail_mb)."""
-    try:
-        with open("/proc/meminfo", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) // 1024
-    except Exception:
-        return None
-    return None
+# #726 -- GOAL_LANE_UNDERSAT_NUDGE_TEXT / _SURPLUS (the retired under-saturated
+# "fill lanes to floor" nudge text + its #509 surplus floor) are removed: a
+# running batch is never refilled under batch mode (#723/#724), so there is no
+# "push for more lanes" decision. #729 -- the #509 effectiveness backoff that
+# shaped that fill nudge (GOAL_LANE_INEFFECTIVE_BACKOFF_S + _lane_effective_
+# interval + _lane_effectiveness + the under_saturated branch of the cooldown
+# gate) went with it: it was reachable ONLY from the retired fill nudge (a running
+# batch skips at skip:batch-running before delivery), so it is DELETED, leaving the
+# hourly cap (#530) + #670 dedup as the single un-branched cadence gate below.
 
 
-def _lane_min_mem_avail_mb():
-    """The EFFECTIVE lane-fill memory floor in MB (#574): env
-    AIRULESET_LANE_MIN_MEM_MB overrides GOAL_LANE_MIN_MEM_AVAIL_MB, read at
-    CALL time. Never frozen at import (#545: an import-time env constant fires
-    on every airuleset invocation incl. the 60s watchdog, double-warns
-    fleet-wide, and cannot be per-box overridden via the watchdog unit's
-    EnvironmentFile). A malformed / non-positive value falls back to the
-    default -- the OOM guard is recalibrated, never silently disabled. The
-    per-box knob is set in ~/.claude/watchdog.env (see the
-    settings/api-watchdog.service.template EnvironmentFile)."""
-    raw = os.environ.get("AIRULESET_LANE_MIN_MEM_MB")
-    if raw is None:
-        return GOAL_LANE_MIN_MEM_AVAIL_MB
-    try:
-        v = int(raw)
-    except (TypeError, ValueError):
-        return GOAL_LANE_MIN_MEM_AVAIL_MB
-    return v if v > 0 else GOAL_LANE_MIN_MEM_AVAIL_MB
+def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
+    """#530/#670 -- the lane-nudge cadence gate. Returns (skip, logline): whether
+    to hold this sweep and its decision line. Two gates, in order:
 
+    #530 HARD HOURLY CAP: no sid gets a second lane-nudge within
+    GOAL_LANE_INTERVAL_S (1h) of its last landed one (`llast` is set only on a
+    landed nudge and no reset touches it).
 
-# #726 -- GOAL_LANE_UNDERSAT_SURPLUS (the #509 fill-more-lanes surplus floor) is
-# RETIRED with the under-saturated fill nudge: a running batch is never refilled
-# under batch mode, so there is no "push for more lanes" decision to floor.
-
-# #726 DORMANT-via-nudge: the #509 effectiveness backoff (GOAL_LANE_INEFFECTIVE_
-# BACKOFF_S + _lane_effective_interval + _lane_effectiveness, and the
-# under_saturated branches of _lane_cooldown_decision/_lane_record_nudge below)
-# shaped the RETIRED under-saturated fill nudge, so the NUDGE never reaches it now
-# (a running batch skips at skip:batch-running). It is NOT deleted: those two
-# helpers stay GENERAL utilities whose under_saturated path is directly unit-
-# tested by tests/test_lane_dedup_670.py (both branches), and removing it is
-# folded into the dormant-machinery cleanup follow-up (#729). Historical rationale below.
-# #509 -- effectiveness (feedback) backoff for the UNDER-SATURATED fill nudge. The
-# fixed 15-min cooldown re-nudged "fill more lanes" every 15 min for HOURS even
-# when every nudge produced NO new lane (the supervisor answering "everything
-# covered, nothing to lift" -- the live incident). A nudge is EFFECTIVE iff the
-# STRUCTURED live-worker count (`count_live_workers` -- wedged-excluding, #486 G2,
-# NEVER pane text) ROSE since it fired; an ineffective nudge widens the NEXT
-# interval along this schedule, holding at the widest stage (#134 anti-silence).
-# #670 REFINES this: an EXACTLY-unchanged (workers, backlog) signature is now
-# DEDUPED before this backoff (permanently silent until the state moves -- owner
-# directive); the staged re-probe governs only a CHANGED-but-ineffective state
-# (a shrinking backlog, workers flat). Mirrors the repo's
-# staged-schedule PATTERN (GOAL_LANE_STASH_ABORT_BACKOFF_S / #502 limit-backoff):
-# an explicit tuple of widening intervals, min(streak, len-1) indexing. The FIRST
-# stage equals GOAL_LANE_INTERVAL_S so the first repeat is unchanged; the streak
-# resets the moment a nudge DID produce a lane (the worker count ROSE) or the
-# backlog GREW. A bare lane DROP does NOT reset -- a worker completing on an
-# un-liftable backlog with nothing to replace it is the normal "nothing to lift"
-# churn, and resetting on it would re-open the burn (#509 adversarial review). NO
-# phone ping (unlike the
-# stash-abort give-up): a fleet as full as its workable backlog allows is the
-# healthy steady state, not an error -- pinging it would be the exact noise this
-# fix removes; the journalled decision line every sweep is the anti-silence.
-# #530: the FIRST stage EQUALS GOAL_LANE_INTERVAL_S (the 1h hourly cap), so an
-# EFFECTIVE under-saturated fleet is bounded to 1 nudge/hour like the empty-lane
-# branch; consecutive INEFFECTIVE nudges widen to 2h then 4h -- never permanently
-# silent (re-probes at the widest stage). Bumped from the pre-#530 15/30/60/120min.
-GOAL_LANE_INEFFECTIVE_BACKOFF_S = (60 * 60, 120 * 60, 240 * 60)
-
-
-def _lane_effective_interval(ineffective_streak):
-    """#509 -- cooldown seconds before the next UNDER-SATURATED fill nudge, given
-    the count of consecutive nudges that produced no new lane. Widens with the
-    streak and holds at the final stage forever -- see
-    GOAL_LANE_INEFFECTIVE_BACKOFF_S."""
-    sched = GOAL_LANE_INEFFECTIVE_BACKOFF_S
-    idx = min(max(int(ineffective_streak), 0), len(sched) - 1)
-    return sched[idx]
-
-
-def _lane_effectiveness(rec, eff_workers, backlog_n):
-    """#509 -- did the LAST under-saturated nudge make PROGRESS worth re-probing?
-    None when there is no comparable prior nudge (rec carries no baseline). Else
-    True when a lane genuinely APPEARED (the structured live-worker count ROSE --
-    the nudge worked) OR the backlog GREW (genuine new work): reset the streak.
-    False otherwise -- workers flat, OR a lane DROPPED, AND the backlog did not
-    grow -> the nudge produced no new lane, keep backing off.
-
-    A bare DROP deliberately does NOT reset (#509 adversarial review, both
-    reviewers converged): on a large un-liftable backlog a worker COMPLETING with
-    nothing to replace it (count N->N-1) is the normal "nothing to lift" churn, so
-    resetting on it would re-open the every-15-min burn this fix exists to kill.
-    Genuinely-new work is caught by the backlog-grow arm; a freed lane the
-    supervisor keeps declining to fill is not new dispatchable work, and the
-    120-min cap re-probe bounds how long a newly-liftable backlog waits."""
-    prev_w = rec.get("lnw")
-    prev_b = rec.get("lnb")
-    if prev_w is None or prev_b is None:
-        return None
-    return (eff_workers > prev_w) or (backlog_n > prev_b)
-
-
-def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
-                            loc, live_workers, waiters):
-    """#509/#530 -- effectiveness-aware cooldown gate. Returns (skip, logline,
-    moved): whether to hold this sweep, its decision line, and the prior nudge's
-    effectiveness verdict (`_lane_effectiveness`, handed back so the CALLER
-    advances the streak ONLY on a real delivery, never a delivery abort).
-
-    #530 HARD HOURLY CAP: the FIRST timing check applies to BOTH branches -- no
-    sid gets a second lane-nudge within GOAL_LANE_INTERVAL_S (1h) of its last
-    landed one, regardless of branch or any counter reset (`llast` is set only on
-    a landed nudge and no reset touches it). It subsumes the old empty-lane fixed
-    cooldown, so the empty-lane branch is now fully governed by it.
-
-    Under-saturated: PAST the hourly cap the interval widens FURTHER along
-    GOAL_LANE_INEFFECTIVE_BACKOFF_S per consecutive ineffective nudge; a nudge
-    that MOVED the fleet resets the streak to 0 (so the interval narrows back).
-    The effectiveness reset is computed BEFORE the hourly-cap early-return so a
-    mid-cooldown recovery still resets the streak (#509 semantics preserved).
-
-    #670 DEDUP: past the hourly cap, an EXACTLY-unchanged (eff_workers, backlog_n)
+    #670 DEDUP: past the hourly cap, an EXACTLY-unchanged (live_workers, backlog_n)
     signature to the last landed nudge (`rec["lsw"]`/`rec["lsb"]`, stamped by
     `_lane_record_nudge`) returns `skip:dedup-unchanged` -- deliberately
     PERMANENTLY SILENT until the state MOVES (owner directive: rovnaký počet lán
     + rovnaký backlog ⇒ žiadny nový prompt ani po hodine). This subsumes the
     empty-lane MAX_NUDGES give-up on a frozen state (a correctly-declining
-    supervisor is not a stall) and preempts the under-saturated backoff below for
-    the exactly-unchanged case; the backoff still governs a CHANGED-but-
-    ineffective state (shrinking backlog / workers flat, #509 preserved)."""
+    supervisor is not a stall). Only a genuinely CHANGED state re-nudges (still
+    under the 1h floor).
+
+    #729: the under-saturated effectiveness backoff branch is gone -- only the
+    empty-lane (batch-CLOSED) nudge reaches delivery under batch mode, so
+    live_workers is the (0-valued) dedup signature, never a fill-effectiveness
+    input."""
     last = rec.get("llast")
     if last is None:
-        return False, None, None
-    # #530 -- under-saturated effectiveness: an EFFECTIVE prior nudge (a lane
-    # appeared) resets the streak so the interval narrows back. Computed before
-    # the hourly cap so a recovery observed inside the cooldown still resets.
-    moved = _lane_effectiveness(rec, eff_workers, backlog_n) if under_saturated \
-        else None
-    if moved is True:
-        rec["lineff"] = 0
-    # #530 -- HARD HOURLY CAP, both branches.
+        return False, None
+    # #530 -- HARD HOURLY CAP.
     if (now - last) < GOAL_LANE_INTERVAL_S:
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                       "skip:hourly-cap remaining=%ds"
                       % (loc, live_workers, waiters, backlog_n,
-                         int(GOAL_LANE_INTERVAL_S - (now - last)))), moved
+                         int(GOAL_LANE_INTERVAL_S - (now - last))))
     # #670 -- DEDUP on UNCHANGED lane state (owner 2026-08-24). PAST the hourly
     # cap, an IDENTICAL (workers, backlog) signature to the last LANDED nudge
     # never re-nudges: the supervisor already saw+acted-on (or correctly
     # DECLINED -- e.g. file-deps on unmerged branches) this exact state, so
-    # repeating the same "fill your lanes" line every hour is the "kazdu chvilu"
-    # spam. Only a genuinely CHANGED state re-nudges (still under the 1h floor).
-    # lsw/lsb are stamped by `_lane_record_nudge` on a LANDED nudge ONLY (both
-    # branches), so: a never-nudged sid (last is None) returned above and always
-    # fires its first; a pre-#670 rec (llast set, no lsw/lsb) sees None != int
-    # -> one grace nudge, then dedup engages. Applies to BOTH branches, which
-    # subsumes the empty-lane MAX_NUDGES give-up on a FROZEN state (a correctly-
-    # declining supervisor is not a stall -- an explicit decision, #620/#670).
-    if rec.get("lsw") == eff_workers and rec.get("lsb") == backlog_n:
+    # repeating the same "start a NEW batch" line every hour is the "kazdu
+    # chvilu" spam. lsw/lsb are stamped by `_lane_record_nudge` on a LANDED nudge
+    # ONLY, so: a never-nudged sid (last is None) returned above and always fires
+    # its first; a pre-#670 rec (llast set, no lsw/lsb) sees None != int -> one
+    # grace nudge, then dedup engages. This subsumes the empty-lane MAX_NUDGES
+    # give-up on a FROZEN state (a correctly-declining supervisor is an explicit
+    # decision, not a stall -- #620/#670).
+    if rec.get("lsw") == live_workers and rec.get("lsb") == backlog_n:
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                       "skip:dedup-unchanged (workers+backlog unchanged since "
                       "last nudge)"
-                      % (loc, live_workers, waiters, backlog_n)), moved
-    if not under_saturated:
-        return False, None, moved
-    streak = rec.get("lineff", 0)
-    interval = _lane_effective_interval(streak)
-    if (now - last) < interval:
-        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "skip:ineffective-backoff remaining=%ds "
-                      "(streak=%d interval=%dm eff_workers=%d)"
-                      % (loc, live_workers, waiters, backlog_n,
-                         int(interval - (now - last)), streak, interval // 60,
-                         eff_workers)), moved
-    return False, None, moved
+                      % (loc, live_workers, waiters, backlog_n))
+    return False, None
 
 
-def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, now):
-    """#479/#509 -- commit a LANDED nudge's state. Clears the abort-backoff (#479),
-    and for the under-saturated fill nudge advances the #509 ineffective streak
-    when the PREVIOUS nudge produced no new lane (`moved is False`) and records
-    this nudge's effectiveness baseline (eff_workers/backlog for the next sweep to
-    measure against), then stamps the nudge counter + cooldown clock. The advance
-    lives HERE (a real delivery), never in the cooldown decision, so a delivery
-    ABORT never over-advances the effectiveness streak (that has its own `lna`)."""
+def _lane_record_nudge(rec, live_workers, backlog_n, n, now):
+    """#479/#670 -- commit a LANDED nudge's state. Clears the abort-backoff (#479),
+    stamps the nudge counter + cooldown clock, and records the #670 dedup
+    signature (live_workers/backlog for the next sweep to compare against).
+    #729: the #509 under-saturated effectiveness baseline (lnw/lnb + the ineffective
+    streak) is gone -- only the empty-lane nudge reaches delivery under batch mode."""
     rec.pop("lna", None)
     rec.pop("lnpark", None)
     # #511 -- a LANDED nudge means the delivery-mechanics failure that drove the
@@ -3369,30 +3205,12 @@ def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, n
     # ping flag: a genuinely-new future abort storm must be able to re-escalate
     # to the owner, never re-probe silently forever behind a stale lpinged.
     rec.pop("lpinged", None)
-    if under_saturated:
-        if moved is False:
-            rec["lineff"] = rec.get("lineff", 0) + 1
-        rec["lnw"] = eff_workers
-        rec["lnb"] = backlog_n
     rec["ln"] = n + 1
     rec["llast"] = now
-    # #670 -- stamp the dedup signature on BOTH branches (unlike the under-
-    # saturated-only lnw/lnb effectiveness baseline): the next sweep suppresses
-    # an identical (workers, backlog) past the cooldown (skip:dedup-unchanged).
-    rec["lsw"] = eff_workers
+    # #670 -- stamp the dedup signature: the next sweep suppresses an identical
+    # (workers, backlog) past the cooldown (skip:dedup-unchanged).
+    rec["lsw"] = live_workers
     rec["lsb"] = backlog_n
-
-
-def _lane_clear_effectiveness(rec):
-    """#509 -- drop the effectiveness-backoff baseline/streak (`lineff`/`lnw`/
-    `lnb`). #726: those keys are the under-saturated fill nudge's dampening state,
-    which the nudge no longer SETS (a running batch skips at skip:batch-running),
-    so this is now a defensive clear of any pre-#726 leftover -- called on every
-    reachable branch (saturated / batch-running / empty-lane). Retained as a
-    general helper (the shared `_lane_cooldown_decision`/`_lane_record_nudge` still
-    accept the under_saturated path, directly unit-tested by test_lane_dedup_670)."""
-    for k in ("lineff", "lnw", "lnb"):
-        rec.pop(k, None)
 
 
 def _lane_count_giveup_reset(rec):
@@ -3632,52 +3450,13 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     return wnt.defer, log, live_workers, backlog_n
 
 
-def _lane_lowmem_reset(rec, dry_run):
-    """#571 -- clear the low-mem CAPACITY-CAPPED surface episode. #726: the
-    episode is only ever SET by `_lane_lowmem_skip`, which was the retired
-    under-saturated memory-headroom gate, so this is now a defensive clear of any
-    pre-#726 leftover -- called on the saturated + batch-running skips (the caller
-    that used to be the under-saturated mem-OK path). ``dry_run`` mutates nothing
-    (#516: a diagnostic sweep must not wipe a real episode's latch)."""
-    if dry_run:
-        return
-    rec.pop("lms", None)
-    rec.pop("lmsurf", None)
-
-
-def _lane_lowmem_skip(rec, live_workers, waiters, backlog_n, mem_mb, loc, dry_run):
-    """#571 -- the low-mem skip handling, extracted. The OOM-protection
-    ``skip:low-mem`` line is UNCHANGED except that its threshold is now the
-    EFFECTIVE floor ``_lane_min_mem_avail_mb()`` (#574: env-overridable per box,
-    default recalibrated 1024), printed in the message instead of a hardcoded
-    literal. After ``GOAL_LANE_LOWMEM_SURFACE_STREAK`` consecutive skips with a
-    genuine backlog this ALSO emits ONE deduped CAPACITY-CAPPED owner-decision
-    line (the persistent-RAM-ceiling surface: upgrade the box vs accept a lower
-    saturation). Returns the list of log lines. Episode state (``lms`` streak +
-    ``lmsurf`` fired-flag) rides in the existing goal_lane rec (#531-reaped) and
-    is advanced ONLY on a REAL sweep -- ``dry_run`` logs the OOM skip but mutates
-    nothing and never latches the one-shot surface (#516)."""
-    min_mem = _lane_min_mem_avail_mb()   # #574: effective (env-overridable) floor
-    out = ["lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-           "skip:low-mem MemAvailable=%dMB (< %dMB)"
-           % (loc, live_workers, waiters, backlog_n, mem_mb, min_mem)]
-    if dry_run:
-        return out
-    dec = _one_glance.lane_low_mem_surface_decision(
-        backlog=backlog_n, min_backlog=GOAL_LANE_MIN_BACKLOG,
-        streak=rec.get("lms", 0), max_streak=GOAL_LANE_LOWMEM_SURFACE_STREAK,
-        already_surfaced=bool(rec.get("lmsurf")))
-    rec["lms"] = dec.streak
-    rec["lmsurf"] = dec.surfaced
-    if dec.surface:
-        out.append(
-            "lane-occupancy %s -> CAPACITY-CAPPED: %d consecutive low-mem skips, "
-            "MemAvailable=%dMB < %dMB with backlog=%d and only %d live lane(s) -- "
-            "PERSISTENT RAM ceiling, OWNER DECISION needed (upgrade box vs accept "
-            "lower saturation). %dMB threshold NOT auto-changed."
-            % (loc, dec.streak, mem_mb, min_mem, backlog_n,
-               live_workers, min_mem))
-    return out
+# #729 -- _lane_lowmem_reset + _lane_lowmem_skip (the low-mem CAPACITY-CAPPED
+# surface episode + the OOM skip:low-mem handler) are DELETED with the rest of the
+# memory OOM subsystem: they were reachable only from the #726-retired
+# under-saturated fill nudge, and the empty-lane batch-start nudge stays
+# memory-EXEMPT (see the GOAL_LANE_SATURATION_WORKERS block above). A pre-#729 rec
+# carrying stale `lms`/`lmsurf` keys is harmless (never read; the #531 orphan
+# reaper ages the whole rec out within 24h).
 
 
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
@@ -3844,8 +3623,6 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # ~30s FINISH_SETTLE_S debounce. Any live_workers>0 = a running batch = skip.
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
     if live_workers >= floor:
-        _lane_clear_effectiveness(rec)   # #509: a full batch -> re-probe fresh next dip
-        _lane_lowmem_reset(rec, dry_run)   # #571: box filled -> low-mem episode over
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "saturated (>= %d workers), skip"
                     % (loc, live_workers, waiters, backlog_n, floor))
@@ -3859,12 +3636,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # "fill to floor" nudge is RETIRED: ANY mid-batch fire violates NO-refill,
         # regardless of wording. Skip -- the nudge fires ONLY for a CLOSED batch
         # (the live_workers==0 branch below): "should have started a NEW batch and
-        # did not". The #509 effectiveness backoff + #571/#574 low-mem headroom gate
-        # that shaped the fill nudge are retired with it; the memory helpers stay --
-        # the empty-lane batch-start also dispatches, so whether it should gate on
-        # memory is a separate, unsettled question (see the #726 design comment).
-        _lane_clear_effectiveness(rec)   # #509: a batch is running -> re-probe fresh
-        _lane_lowmem_reset(rec, dry_run)   # #571: not a fill path -> episode over
+        # did not". #729: the #509 effectiveness backoff + the #571/#574 low-mem
+        # headroom gate that shaped the retired fill nudge are DELETED, not kept
+        # dormant (the empty-lane batch-start stays memory-EXEMPT -- the decided
+        # answer to #726's open question), so there is nothing left to reset here.
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "skip:batch-running (batch open/draining; NO refill while a "
                     "batch runs, #723)"
@@ -3872,7 +3647,6 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         return logs, False
     # live_workers == 0 -> the batch is CLOSED; the empty-lane "start a NEW batch"
     # nudge. #530 empty-lane floor: a lone/tiny backlog is not batch-worthy.
-    _lane_clear_effectiveness(rec)   # #509: a lane-drop reset condition
     if backlog_n < GOAL_LANE_MIN_BACKLOG:
         _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
                    % (backlog_n, GOAL_LANE_MIN_BACKLOG))
@@ -3927,15 +3701,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, live_workers, waiters, backlog_n,
                        int(park - now), aborts, int(park)))
         return logs, True
-    # #509 -- STRUCTURED effectiveness signal + effectiveness-aware cooldown.
-    # #518: live_workers IS count_live_workers now (the gating count converted),
-    # so eff_workers == live_workers by construction -- the pre-#518
-    # under-saturated re-sample of the identical call (a redundant per-sweep
-    # subagents disk scan) is dropped.
-    eff_workers = live_workers
-    cd_skip, cd_log, cd_moved = _lane_cooldown_decision(
-        rec, now, under_saturated, eff_workers, backlog_n, loc, live_workers,
-        waiters)
+    # #530/#670 -- hourly cap + dedup-on-unchanged cadence gate. #729: the #509
+    # effectiveness backoff branch is gone (it was reachable only from the retired
+    # under-saturated fill nudge; only the empty-lane nudge reaches delivery here,
+    # so live_workers is 0 and is the dedup signature, never a fill-effectiveness
+    # input).
+    cd_skip, cd_log = _lane_cooldown_decision(
+        rec, now, backlog_n, loc, live_workers, waiters)
     if cd_log:
         logs.append(cd_log)
     if cd_skip:
@@ -4074,10 +3846,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
         mode = "typed"
-    # #479/#509 -- commit the LANDED nudge; see _lane_record_nudge (under_saturated
-    # is provably False here -- only the empty-lane branch reaches delivery, #726).
-    _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, cd_moved, n,
-                       now)
+    # #479/#670 -- commit the LANDED nudge; see _lane_record_nudge. Only the
+    # empty-lane branch reaches delivery (#726/#729), so live_workers is 0 here.
+    _lane_record_nudge(rec, live_workers, backlog_n, n, now)
     # #442 THIRD GAP: the give-up counter bounds this 0-worker empty-lane branch,
     # so it logs "(n/MAX)". #726 removed the under-saturated "(fill)" variant + the
     # MemAvailable suffix (both were the retired fill nudge's).

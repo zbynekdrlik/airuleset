@@ -1322,23 +1322,6 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:working-no-tasks" in ln for ln in logs), logs)
 
-    def test_571_low_mem_recovered_resets_the_capacity_episode(self):
-        # #571/#726: with the under-saturated fill nudge retired, a running batch
-        # (2 workers) takes the skip:batch-running path, which still calls
-        # `_lane_lowmem_reset` -> any low-mem surface episode (lms/lmsurf cleared),
-        # so a FUTURE persistent low-mem run re-surfaces.
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
-                   WorkerLane("w2", "live", 100.0, None, "")]
-        rec = {"lms": 3, "lmsurf": True}
-        # #726: the skip:batch-running path never consults _mem_available_mb (the
-        # memory gate was under-saturated-only, retired), so no mem patch needed.
-        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)):
-            self._call(GOAL_ARMED_CAP, lambda cwd: 12, now, tmtime, rec=rec)
-        self.assertEqual(rec.get("lms", 0), 0)
-        self.assertFalse(rec.get("lmsurf", False))
-
     def test_input_box_not_idle_logs_skip_not_silent(self):
         # kind=="input", no draft, but not at an idle prompt -> the ONE
         # previously-silent _boundary_ok sub-case (every other not-ok shape
@@ -1439,8 +1422,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # 5 workers >= GOAL_LANE_SATURATION_WORKERS -> saturated -> silent.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "count_live_workers", return_value=(5, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+        with m.patch.object(wd, "count_live_workers", return_value=(5, [])):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
         self.assertFalse(owns)
@@ -1497,8 +1479,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         with m.patch.object(wd, "_count_live_subagents", return_value=5), \
-             m.patch.object(wd, "count_live_workers", return_value=(5, [])), \
-             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+             m.patch.object(wd, "count_live_workers", return_value=(5, [])):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
         self.assertFalse(owns)
@@ -2347,53 +2328,11 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         self.assertIn("rate-limit", low)
         self.assertNotIn("8", rendered)
 
-    def test_min_mem_threshold_is_a_named_constant_documented(self):
-        # #442 re-fix 2 / #574: the memory floor is a named, sane default
-        # (~1 GB after the #574 evidence-based recalibration from the
-        # uncalibrated 1536; effective floor is env-overridable via
-        # _lane_min_mem_avail_mb).
-        self.assertGreaterEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 1024)
-        self.assertLessEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 4096)
+    def test_saturation_workers_is_a_named_constant(self):
+        # #481: the batch ceiling is a named constant. #729 removed the
+        # memory floor constant (GOAL_LANE_MIN_MEM_AVAIL_MB) that this test
+        # used to also assert -- the memory OOM subsystem is gone.
         self.assertEqual(goal.GOAL_LANE_SATURATION_WORKERS, 5)
-
-    def test_mem_available_mb_reads_proc_meminfo(self):
-        # On any managed Linux box this reads a real positive MB value that is
-        # genuinely in MEGABYTES -- i.e. below the box's own MemTotal expressed
-        # in MB. A mutant dropping the kB->MB `// 1024` returns a raw-kB value
-        # (~thousands of times MemTotal-in-MB), which fails the `< total_mb`
-        # bound below (#442-review M1: the conversion must have teeth).
-        val = goal._mem_available_mb()
-        self.assertIsInstance(val, int)
-        self.assertGreater(val, 0)
-        total_kb = None
-        with open("/proc/meminfo", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    total_kb = int(line.split()[1])
-                    break
-        self.assertIsNotNone(total_kb, "/proc/meminfo has no MemTotal line")
-        self.assertLess(val, total_kb // 1024)
-
-    def test_mem_available_mb_converts_kb_to_mb(self):
-        # #442-review M1: deterministic teeth for the kB->MB `// 1024` step,
-        # independent of the box's real memory. MemAvailable 8388608 kB is
-        # exactly 8192 MB; a mutant returning raw kB would report 8388608.
-        meminfo = (
-            "MemTotal:       16384000 kB\n"
-            "MemFree:          512000 kB\n"
-            "MemAvailable:    8388608 kB\n"
-            "Buffers:          128000 kB\n"
-        )
-        with m.patch("builtins.open", m.mock_open(read_data=meminfo)):
-            val = goal._mem_available_mb()
-        self.assertEqual(val, 8192)
-
-    def test_mem_available_mb_fails_open_on_read_error(self):
-        # Fail-OPEN: unreadable meminfo -> None, so the caller does NOT block.
-        def boom(*a, **k):
-            raise OSError("no /proc/meminfo")
-        with m.patch("builtins.open", side_effect=boom):
-            self.assertIsNone(goal._mem_available_mb())
 
     def test_lane_live_convo_window_is_minutes_not_the_30min_blanket(self):
         self.assertLessEqual(goal.GOAL_LANE_LIVE_CONVO_S, 5 * 60)

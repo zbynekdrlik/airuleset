@@ -313,38 +313,12 @@ def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
         % (streak, max_defers))
 
 
-LaneLowMemSurface = namedtuple("LaneLowMemSurface", "surface streak surfaced")
-
-
-def lane_low_mem_surface_decision(*, backlog, min_backlog,
-                                  streak, max_streak, already_surfaced):
-    """#571 — the persistent-low-mem CAPACITY-CEILING surface decider.
-
-    Called ONLY inside the low-mem skip branch (a low-mem skip is firing THIS
-    sweep — so there is no not-low-mem case here; the mem-recovered / box-filled
-    episode RESET is a SEPARATE ``_lane_lowmem_reset``). The OOM protection (the
-    ``skip:low-mem`` itself and its memory threshold) is UNCHANGED — this decider
-    takes no threshold value and only decides whether to ALSO emit the ONE
-    owner-facing CAPACITY-CAPPED signal
-    (a persistent RAM ceiling is an OWNER DECISION: upgrade the box vs accept a
-    lower saturation).
-
-    Verdict (`LaneLowMemSurface(surface, streak, surfaced)` — ``streak`` and
-    ``surfaced`` are the caller's NEW persisted episode state):
-
-      * ``already_surfaced``: keep counting, ``surface=False`` (deduped — the
-        signal fires EXACTLY once per episode).
-      * ``streak+1 >= max_streak`` AND ``backlog >= min_backlog`` AND not yet
-        surfaced → ``surface=True`` (a PERSISTENT ceiling, not a transient dip /
-        thin backlog), ``surfaced=True``.
-      * otherwise (accumulating, or a thin backlog): ``surface=False``.
-    """
-    streak = streak + 1
-    if already_surfaced:
-        return LaneLowMemSurface(False, streak, True)
-    if streak >= max_streak and backlog >= min_backlog:
-        return LaneLowMemSurface(True, streak, True)
-    return LaneLowMemSurface(False, streak, False)
+# #729 -- LaneLowMemSurface + lane_low_mem_surface_decision (the persistent-
+# low-mem CAPACITY-CEILING surface decider) are DELETED with the rest of the
+# memory OOM subsystem in watchdog/goal.py: they were consumed ONLY by the
+# #726-retired under-saturated fill nudge's `_lane_lowmem_skip`, and the
+# empty-lane batch-start nudge stays memory-EXEMPT (#729 decision -- see the
+# GOAL_LANE_SATURATION_WORKERS comment block in goal.py).
 
 
 # --- #662: the persistent-STUCK -> owner-ALERT decider -------------------------

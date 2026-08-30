@@ -1,6 +1,6 @@
-"""#571 -- lane-occupancy working-no-tasks + low-mem surfacing.
+"""#571 -- lane-occupancy working-no-tasks decision.
 
-Regression locks for the two defects the ticket fixes:
+Regression lock for RC1 of the #571 ticket:
 
   RC1 -- the `working-no-tasks` defer read the FLAPPING render badge count
   (`_pane_live_task_count`), so a worker mid-long-tool-call (render-invisible but
@@ -10,8 +10,10 @@ Regression locks for the two defects the ticket fixes:
   and may defer only BOUNDED (escalate after N identical defers -- the #566
   livelock class).
 
-  RC2 -- the `low-mem` skip is silent; after M consecutive skips with a genuine
-  backlog it must emit ONE deduped owner-facing CAPACITY-CAPPED signal.
+#729: the #571 RC2 low-mem CAPACITY-CAPPED surface decider
+(`lane_low_mem_surface_decision`) was DELETED with the rest of the memory OOM
+subsystem (reachable only from the #726-retired under-saturated fill nudge), so
+its `TestLowMemSurfaceDecision` locks are gone.
 
 The deciders are PURE (facts in / verdict out), so these lock every branch with
 mutation teeth. Time is injected (mtimes via os.utime); no sleeps.
@@ -102,47 +104,6 @@ class TestWorkingNoTasksDecision(unittest.TestCase):
         d = self._d(structured_live=False, defer_streak=2, max_defers=3)
         self.assertFalse(d.defer)   # still stops deferring -> reaches the nudge path
         self.assertIn("ESCALATE", d.log)
-
-
-# --- RC2: the low-mem surface pure decider ------------------------------------
-
-class TestLowMemSurfaceDecision(unittest.TestCase):
-    """`lane_low_mem_surface_decision` -- fires ONE owner signal after M
-    consecutive low-mem skips with a genuine backlog, deduped once per episode."""
-
-    def _d(self, **over):
-        base = dict(backlog=12, min_backlog=3, streak=0,
-                    max_streak=5, already_surfaced=False)
-        base.update(over)
-        return og.lane_low_mem_surface_decision(**base)
-
-    def test_accumulates_then_surfaces_exactly_once(self):
-        # LOCK (d): Mth consecutive skip -> surface; the very next skip is
-        # deduped (surfaced already), so the signal fires EXACTLY once.
-        d = self._d(streak=4, max_streak=5)            # streak becomes 5 == max
-        self.assertTrue(d.surface)
-        self.assertTrue(d.surfaced)
-        self.assertEqual(d.streak, 5)
-        d2 = self._d(streak=5, already_surfaced=True)  # next sweep, still low-mem
-        self.assertFalse(d2.surface)                   # deduped -- fired once
-        self.assertTrue(d2.surfaced)
-
-    def test_below_streak_accumulates_without_surfacing(self):
-        d = self._d(streak=1, max_streak=5)
-        self.assertFalse(d.surface)
-        self.assertEqual(d.streak, 2)
-
-    def test_thin_backlog_never_surfaces(self):
-        d = self._d(streak=9, backlog=2, min_backlog=3)   # backlog < min
-        self.assertFalse(d.surface)
-
-    def test_backlog_exactly_min_backlog_surfaces(self):
-        # BOUNDARY: the gate is `backlog >= min_backlog`, so backlog == min
-        # (a genuine, if minimal, backlog) DOES surface -- locks the >= against a
-        # `>` off-by-one that would silence a box capped at exactly min tickets.
-        d = self._d(streak=4, max_streak=5, backlog=3, min_backlog=3)
-        self.assertTrue(d.surface)
-        self.assertTrue(d.surfaced)
 
 
 # --- the #565 shared evidence predicate ---------------------------------------

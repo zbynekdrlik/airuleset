@@ -1,25 +1,17 @@
-"""#574 — evidence-based recalibration of the lane-fill memory gate.
+"""#574 wiring seam — the api-watchdog systemd unit's optional per-box
+EnvironmentFile.
 
-Locks the four deliverables of #574:
-  1. a CALL-TIME env override `AIRULESET_LANE_MIN_MEM_MB` on the lane-fill
-     memory floor (never frozen at import — #545), malformed/non-positive
-     falling back to the default;
-  2. an evidence-based DEFAULT lowered from the uncalibrated #442 1536 to
-     1024 (so gk's historically-working 5-lane state at ~1.2GB MemAvailable
-     passes the fill gate);
-  3. the `skip:low-mem` + `CAPACITY-CAPPED` messages printing the EFFECTIVE
-     threshold, not a hardcoded 1536;
-  4. the api-watchdog systemd unit carrying an optional per-box
-     `EnvironmentFile` so the override is reachable by the timer's env.
-
-The goal.py gate/message tests reuse the `TestGoalLaneOccupancyNudge`
-harness shape (shared `_goal_arm_helpers`), driving the REAL
-`goal_lane_occupancy_nudge`.
+#729 REMOVED the #574 lane-fill memory floor (`_lane_min_mem_avail_mb` /
+`GOAL_LANE_MIN_MEM_AVAIL_MB` / the `AIRULESET_LANE_MIN_MEM_MB` override) with the
+rest of the dormant memory OOM subsystem, so this file no longer locks that
+threshold. What it STILL locks is the GENERIC per-box override seam #574 built:
+the api-watchdog `--user` unit carries an optional `EnvironmentFile` so ANY
+per-box `AIRULESET_*` watchdog knob (e.g. `AIRULESET_GOAL_LANE_STUCK_ALERT_STREAK`,
+#662) is reachable by the timer's env. That seam is still live and validated by
+`_validate_watchdog()` (see cli_config.py), so its wiring lock stays.
 """
 
-import os
 import unittest
-import unittest.mock as m
 from pathlib import Path
 
 import sys
@@ -27,71 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent))          # tests/
 
 import airuleset                                        # noqa: E402
-from watchdog import goal                               # noqa: E402
-
-
-class LaneMinMemEffectiveThreshold(unittest.TestCase):
-    """`_lane_min_mem_avail_mb()` — the effective lane-fill memory floor:
-    env `AIRULESET_LANE_MIN_MEM_MB` overrides the recalibrated default,
-    read at CALL time, malformed/non-positive falling back."""
-
-    ENV = "AIRULESET_LANE_MIN_MEM_MB"
-
-    def setUp(self):
-        # Never let a real box env leak into the pure-unit assertions.
-        self._saved = os.environ.pop(self.ENV, None)
-        self.addCleanup(self._restore)
-
-    def _restore(self):
-        if self._saved is None:
-            os.environ.pop(self.ENV, None)
-        else:
-            os.environ[self.ENV] = self._saved
-
-    def test_default_is_recalibrated_1024(self):
-        # #574: lowered from the uncalibrated #442 1536 (born c703967d,
-        # zero cited OOM evidence) so gk's historically-working 5-lane
-        # state (~1.2GB MemAvailable) passes the under-saturated fill gate.
-        self.assertEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 1024)
-
-    def test_no_env_returns_default(self):
-        self.assertEqual(goal._lane_min_mem_avail_mb(),
-                         goal.GOAL_LANE_MIN_MEM_AVAIL_MB)
-
-    def test_env_override_read_at_call_time(self):
-        with m.patch.dict(os.environ, {self.ENV: "1400"}):
-            self.assertEqual(goal._lane_min_mem_avail_mb(), 1400)
-        # unset -> back to default, PROVING the read is at call time, not a
-        # value cached at import (#545: an import-time env constant fires on
-        # every airuleset invocation incl. the 60s watchdog and cannot be
-        # per-box overridden via the unit EnvironmentFile).
-        self.assertEqual(goal._lane_min_mem_avail_mb(),
-                         goal.GOAL_LANE_MIN_MEM_AVAIL_MB)
-
-    def test_two_different_envs_two_different_results(self):
-        # A mutant that froze the value at import (`_X = _lane_min_...()`)
-        # would return the SAME number for both — this fails it.
-        with m.patch.dict(os.environ, {self.ENV: "900"}):
-            a = goal._lane_min_mem_avail_mb()
-        with m.patch.dict(os.environ, {self.ENV: "1300"}):
-            b = goal._lane_min_mem_avail_mb()
-        self.assertEqual((a, b), (900, 1300))
-
-    def test_malformed_or_nonpositive_env_falls_back_to_default(self):
-        for bad in ("", "abc", "0", "-512", "12.5", "  "):
-            with m.patch.dict(os.environ, {self.ENV: bad}):
-                self.assertEqual(
-                    goal._lane_min_mem_avail_mb(),
-                    goal.GOAL_LANE_MIN_MEM_AVAIL_MB,
-                    "bad value %r must fall back to the default (never "
-                    "silently disable the OOM guard)" % bad)
 
 
 class WatchdogUnitCarriesEnvironmentFile(unittest.TestCase):
     """#574 wiring-seam lock: the api-watchdog systemd --user unit carries an
-    OPTIONAL per-box EnvironmentFile so `AIRULESET_LANE_MIN_MEM_MB` (and any
-    other AIRULESET_* watchdog knob) is reachable by the timer's env. The `-`
-    prefix keeps it optional; `%h` is systemd's user-home specifier."""
+    OPTIONAL per-box EnvironmentFile so a per-box `AIRULESET_*` watchdog knob is
+    reachable by the timer's env. The `-` prefix keeps it optional; `%h` is
+    systemd's user-home specifier."""
 
     def _template(self):
         return (airuleset.REPO_DIR / "settings"
