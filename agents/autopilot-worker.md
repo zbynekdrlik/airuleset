@@ -415,7 +415,8 @@ round-scope dispatch lock) — and releases it the moment that cycle's push has 
 deploy, your own run-card).** In `isolation: "worktree"` mode (the default — see WORKTREE
 AWARENESS above), you STOP after step 4 once every member is committed on your OWN worktree
 branch and local `/review` + `/requesting-code-review` + the local test suite are clean — via ONE
-self-contained fresh-context `general-purpose` review dispatch, NEVER the built-in review/
+self-contained fresh-context `general-purpose` review dispatch — dispatched FOREGROUND, never with
+`run_in_background: true`, per CYCLE step 6's wait doctrine (#738) — NEVER the built-in review/
 code-review Skill (#363, CYCLE step 6 below) — do NOT push, open a PR, merge, wait for CI, deploy,
 or fire a run-card yourself. Report your branch name + worktree path and RETURN; the supervisor's
 Step 4 (`skills/autopilot/SKILL.md`) does steps 5–10 below for your branch as it returns — one
@@ -459,6 +460,30 @@ push / PR / merge / deploy, never that backup.
    hard-task escalation already uses, `model-awareness.md`) — never a background `Skill` call. This
    is the shape that has reliably worked (#353, #354, #358, #359, #361, #362); the built-in review
    skill has not.**
+   **WAIT ON THE REVIEW DISPATCH SAFELY — dispatch it FOREGROUND (#738/#569).** You are yourself a
+   SUBAGENT (worktree isolation is the default), so if you dispatch the review async and END YOUR TURN
+   while it is still outstanding you TERMINATE — the completion notification then fires to your PARENT,
+   not to you (the SAME bg-CI-poll termination class already warned at CYCLE step 5's CI wait). So
+   dispatch the review FOREGROUND: do NOT pass `run_in_background: true` — a foreground `Agent`
+   dispatch blocks inside the tool call and returns the verdict AS its tool_result, leaving no
+   outstanding background work to wait on, so the turn-end termination class never triggers. If your
+   platform build surfaces the dispatch async anyway (notify-on-completion rather than blocking), ride
+   it out FOREGROUND — NEVER a bare/standalone `sleep` (harness-blocked; its "use Monitor" hint is a
+   dead end here — `Monitor` itself then counts as outstanding work / is refused for a worktree worker,
+   #506), NEVER `Bash(run_in_background=True)` (that terminates the subagent — the exact bg-CI-poll
+   bug), NEVER `TaskStop` on your OWN dispatch (refused: "Task X owned by Y; agent Z cannot stop it"),
+   and there is no `TaskOutput`/status tool for an Agent dispatch. Use bounded `inotifywait -e
+   close_write -t <secs> <task.output>` event-waits on the dispatch result's own `output_file` (one
+   path per outstanding dispatch), and read "done" ONLY by PARSING the LAST JSON object of that file —
+   `tail -n 1 <task.output>` piped to a one-line `python3 -c` that prints its `type` + content-block
+   types: a final `assistant ['text']` = DONE, a trailing `user ['tool_result']` / `assistant
+   ['thinking'|'tool_use']` = still running (never trust the file's `stat` size/mtime — they read
+   stale, #569). Do NOT wholesale-Read or tail the `.output` JSONL content (context overflow — the
+   dispatch metadata itself warns of it). The real completion notification also lands between your tool calls, exactly
+   like a foreground CI poll returning. **Rejected:** handing the review back to the supervisor — the
+   worktree stop-point contract requires YOU to prove `/review` + `/requesting-code-review` clean
+   locally before returning your branch, and deferring it onto the supervisor's serial integration
+   mutex moves review off the parallel lanes the fleet model exists to keep.
    **MODEL for the review dispatch (2026-08-26 per-phase revision — `model-awareness.md`): CYCLE
    step 6 IS the REVIEW phase, and the review of a NON-TRIVIAL change is judgment-content work →
    gated Fable.** For any diff that itself carried judgment content (design decisions, more than one

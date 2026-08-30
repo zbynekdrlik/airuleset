@@ -785,7 +785,8 @@ gap in either.
    > (RED→GREEN, each member committed with its own `Closes #<n>`) → local `/review` +
    > `/requesting-code-review` + the local test suite, ALL on its OWN worktree branch — via ONE
    > self-contained fresh-context `general-purpose` review dispatch per `agents/autopilot-worker.md`
-   > CYCLE step 6, NEVER the built-in review/code-review Skill (#363) — then
+   > CYCLE step 6 — dispatched FOREGROUND (never `run_in_background: true`) per that step's wait
+   > doctrine (#738) — NEVER the built-in review/code-review Skill (#363) — then
    > RETURNS (branch name + worktree path in its evidence block). It does **NOT** push to the
    > INTEGRATION flow, does
    > **NOT** open or merge the PR, does **NOT** deploy, and does **NOT** fire its own run-card —
