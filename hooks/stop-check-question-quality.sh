@@ -212,7 +212,11 @@ VIOLATION=""
 # Check 1 — the briefing line. The block must open the question with
 # '**Otázka — projekt <meno> (<čo to je>):** …' so a phone reader with zero
 # terminal context understands WHAT project and WHAT is going on.
-if ! grep -qiE '^[[:space:]]*\**[[:space:]]*Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt' <<<"$BLOCK"; then
+# #735 — LC_ALL=C.UTF-8 forced (same convention as Check 6 below): this
+# bracket class contains multibyte chars ([áa], [—–-]) and, under a
+# POSIX/C-locale calling env with no locale forced, grep splits them into
+# raw bytes and the class silently stops matching a genuine diacritic head.
+if ! LC_ALL=C.UTF-8 grep -qiE '^[[:space:]]*\**[[:space:]]*Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt' <<<"$BLOCK"; then
     VIOLATION="briefing"
 fi
 
@@ -221,7 +225,9 @@ fi
 # STEP descriptions with a single final '?' stay allowed.
 if [ -z "$VIOLATION" ]; then
     QMARKS=$(printf '%s' "$BLOCK" | tr -cd '?' | wc -c)
-    if grep -qiE 'ktor[éú]ko[ľl]vek[[:space:]]+z' <<<"$BLOCK"; then
+    # #735 — LC_ALL=C.UTF-8 forced: [éú]/[ľl] are multibyte bracket classes,
+    # broken under a POSIX-locale calling env exactly like Check 1's above.
+    if LC_ALL=C.UTF-8 grep -qiE 'ktor[éú]ko[ľl]vek[[:space:]]+z' <<<"$BLOCK"; then
         VIOLATION="pile"
     elif grep -q '(1)' <<<"$BLOCK" \
             && grep -q '(2)' <<<"$BLOCK" \
@@ -269,7 +275,10 @@ fi
 # the full question after an intervening conversation. Banned Slovak
 # referencing phrases (user-questions-slovak.md), all rewordings apply.
 if [ -z "$VIOLATION" ]; then
-    if grep -qiE \
+    # #735 — LC_ALL=C.UTF-8 forced: every alternative below carries multibyte
+    # bracket classes ([ýy], [ôo], [žz], [šs], [íi], [áa], [čc], [ďd], [ée]) —
+    # same broken-under-POSIX-locale bug as Check 1/2 above.
+    if LC_ALL=C.UTF-8 grep -qiE \
         '(p[ýy]tal[a]?[[:space:]]+som[[:space:]]+sa[[:space:]]+(sk[ôo]r|u[žz]|vy[šs][šs]ie))'\
 '|(ako[[:space:]]+som[[:space:]]+(sa[[:space:]]+)?(u[žz][[:space:]]+)?(p[ýy]tal|spom[íi]nal|p[íi]sal|uviedol))'\
 '|(vr[áa][ťt].{0,12}(sa[[:space:]]+)?k[[:space:]].{0,20}ot[áa]zke)'\

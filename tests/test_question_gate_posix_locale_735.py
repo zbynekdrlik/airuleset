@@ -33,7 +33,6 @@ a reimplementation of its regexes.
 import json
 import os
 import subprocess
-import sys
 import uuid
 from pathlib import Path
 from unittest import TestCase, main
