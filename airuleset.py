@@ -4259,6 +4259,50 @@ def _watchdog_ops_wait_fetch(cwd):
     return members
 
 
+def _watchdog_queue_fetch(cwd):
+    """#733 — the gk QUEUE UNION (`ready-for-review ∪ needs-gatekeeper ∪
+    prio:bounce`) open issue numbers for the repo at `cwd`, or None on any
+    failure/refusal. The job-20 queue-arrival rider reads this to detect a NEW
+    hand-off landing while an armed FULL-authority session is parked on a waiter.
+
+    FULL-authority ONLY: only a gk/full box PROCESSES this cross-stream union (a
+    reduced stream hands off to gk; its own returned `prio:bounce` is job 8's).
+    Resolved against `_repo_root(cwd=cwd)` so the authority matches what the
+    session's own pane would resolve — a non-full box returns None (the rider
+    also gates, so this is belt-and-suspenders).
+
+    Uses the ticket's OWN proven shape: THREE exact-match `--label` queries
+    (never a `label:a,b,c` search string — `prio:bounce` carries a colon that a
+    search qualifier mis-parses), unioned + deduped + sorted. Any query error →
+    None (the #181 fail-safe: an auth/network hiccup must never look like 'no
+    queue'). Wired HERE, like every other network call in this file, so
+    run_once's unit tests stay network-free."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    if authority != "full":
+        return None
+    nums = set()
+    for label in ("ready-for-review", "needs-gatekeeper", "prio:bounce"):
+        try:
+            r = subprocess.run(
+                ["gh", "issue", "list", "--state", "open", "--label", label,
+                 "-L", "200", "--json", "number"],
+                cwd=cwd, capture_output=True, text=True, timeout=15)
+        except Exception:
+            return None
+        if r.returncode != 0:
+            return None
+        try:
+            nums.update(int(x["number"]) for x in json.loads(r.stdout or "[]"))
+        except (ValueError, KeyError, TypeError):
+            return None
+    return sorted(nums)
+
+
 def _parse_origin_slug(url):
     """owner/name from a git remote URL, or None. Pure + testable (#616). Handles
     the https form (`https://github.com/owner/name[.git]`), the scp form
@@ -4746,6 +4790,11 @@ def cmd_watchdog(args):
                     # release-landed escalation (nudge-branch-only, shared
                     # cache) — TWO job-20 consumers, one fetch.
                     release_state_fetch=_watchdog_release_state_fetch,
+                    # #733 — job 20's gk queue-arrival rider reads the queue
+                    # union per repo (3 exact-label `gh` queries), cached per
+                    # repo per TTL (~5 min) inside the module, FULL-authority
+                    # only. Wired on EVERY box; the rider self-gates authority.
+                    queue_fetch=_watchdog_queue_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.

@@ -119,7 +119,10 @@ class TestQueueDecision(unittest.TestCase):
 class TestCachedQueue(unittest.TestCase):
     def test_second_read_within_ttl_hits_cache(self):
         calls = []
-        f = lambda cwd: (calls.append(cwd) or [1, 2])
+
+        def f(cwd):
+            calls.append(cwd)
+            return [1, 2]
         st = {}
         qa._cached_queue("/r", f, st, NOW, ttl=100)
         qa._cached_queue("/r", f, st, NOW + 50, ttl=100)
@@ -127,7 +130,10 @@ class TestCachedQueue(unittest.TestCase):
 
     def test_read_past_ttl_refetches(self):
         calls = []
-        f = lambda cwd: (calls.append(cwd) or [1])
+
+        def f(cwd):
+            calls.append(cwd)
+            return [1]
         st = {}
         qa._cached_queue("/r", f, st, NOW, ttl=100)
         qa._cached_queue("/r", f, st, NOW + 200, ttl=100)
@@ -135,7 +141,10 @@ class TestCachedQueue(unittest.TestCase):
 
     def test_none_failure_cached_only_for_fail_ttl(self):
         calls = []
-        f = lambda cwd: (calls.append(1) or None)
+
+        def f(cwd):
+            calls.append(1)
+            return None
         st = {}
         qa._cached_queue("/r", f, st, NOW, ttl=10000, fail_ttl=30)
         qa._cached_queue("/r", f, st, NOW + 10, ttl=10000, fail_ttl=30)
@@ -155,7 +164,10 @@ class TestCachedQueue(unittest.TestCase):
 
     def test_per_cwd_keyed(self):
         calls = []
-        f = lambda cwd: (calls.append(cwd) or [1])
+
+        def f(cwd):
+            calls.append(cwd)
+            return [1]
         st = {}
         qa._cached_queue("/a", f, st, NOW)
         qa._cached_queue("/b", f, st, NOW)

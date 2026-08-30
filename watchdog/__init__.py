@@ -1984,7 +1984,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
-             release_state_fetch=None):
+             release_state_fetch=None, queue_fetch=None):
     """Scan every `claude` pane once. 36 numbered jobs per poll — 30 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2200,28 +2200,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           "wired = on" convention as job 16 (cmd_watchdog computes the
           dev1-only gate; this module stays host-agnostic).
       (20) (only when `goal_jobs_enabled` is truthy) GOAL DARK-WATCH + LANE
-          NUDGE (#403, collapsing the old 968-line goal_rearm's re-arm/
-          drift/outage-forensics/untracked-recovery machinery into
-          `watchdog/goal.py`, whose own module docstring is the single
-          source of truth): TWO independent halves.
-          `goal.goal_dark_watch` runs the shared janitor recovery for every
-          live candidate pane first (unchanged shared primitives,
-          `_janitor_watch_seen`/`_janitor_mark_watch`/`_janitor_clear_watch`
-          / the renamed `_janitor_recover`), then cross-checks the SAME two
-          independent sources #76 established — the transcript marker
-          (INTENT, `scan_goal_markers`) against CC's own `◎ /goal` footer
-          indicator (REALITY, `pane_goal_armed`) — but NEVER retypes a
-          mismatch: it debounces the dark observation across >= 2 sweeps,
-          then sends ONE Discord ping asking the user to re-run
-          `/autopilot`, which re-arms via the SAME proven callback job 9
-          already uses. The re-arm/ping path types nothing (the #617
+          NUDGE (#403, collapsing the old 968-line goal_rearm machinery into
+          `watchdog/goal.py`, whose own module docstring is the single source
+          of truth): TWO independent halves. `goal.goal_dark_watch` runs the
+          shared janitor recovery for every live candidate pane first, then
+          cross-checks the SAME two independent sources #76 established — the
+          transcript marker (INTENT, `scan_goal_markers`) against CC's own `◎
+          /goal` footer indicator (REALITY, `pane_goal_armed`) — but NEVER
+          retypes a mismatch: it debounces the dark observation across >= 2
+          sweeps, then sends ONE Discord ping asking the user to re-run
+          `/autopilot`, which re-arms via the SAME proven callback job 9 already
+          uses. The re-arm/ping path types nothing (the #617
           stranded-truncated-/goal CLEAR is the one keystroke it makes,
           Escape+BSpace via `_clear_stranded_truncated_goal`), so none of the
-          old re-arm delivery-discipline machinery (retry caps, streak
-          windows, template-drift detection, achieved-marker forensics,
-          `❓`-blocked suppression) is needed any more — a false ping just
-          costs the user one glance
-          and a cheap re-run.
+          old re-arm delivery-discipline machinery is needed any more — a false
+          ping just costs the user one glance and a cheap re-run.
           `goal.goal_lane_sweep` is the ONE watchdog-INITIATED keystroke
           left in the whole family (#365/#351's own lane-occupancy nudge,
           functionally unchanged) and needs `compact_handled_this_sweep`
@@ -2238,7 +2231,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           integration branch is ahead of prod, a `staging` branch exists, and
           NO release is in flight, it keystrokes the armed loop to run its
           release pipeline (the recurring "merged into develop but never
-          released").
+          released"). And, when `queue_fetch` is wired, the gk QUEUE-ARRIVAL
+          watcher (#733, `queue_arrival_recheck.goal_queue_arrival_recheck`) —
+          FULL-authority only, snapshots the union `ready-for-review ∪
+          needs-gatekeeper ∪ prio:bounce` per repo and, on a SET DELTA (a NEW
+          member vs the baseline), keystrokes the armed-but-WAITING loop to
+          re-derive + process its gk backlog (the "parked on a waiter, blind to
+          new hand-offs" incident).
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
@@ -4083,7 +4082,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             backlog_fetch=backlog_fetch, send_fn=send_fn,
             sleep_fn=sleep_fn, time_fn=time_fn,
             sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
-            release_state_fetch=release_state_fetch)     # #616
+            release_state_fetch=release_state_fetch,     # #616
+            queue_fetch=queue_fetch)                     # #733
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 
