@@ -112,6 +112,15 @@ class UnparkReleaseDecider(unittest.TestCase):
         self.assertEqual(set(), cli_quals._unpark_release_flagged(
             _plain_rows(41), authority="full", release_fetch=lambda: DRAINED))
 
+    def test_acceptance_reason_release_title_untagged(self):
+        # #753 review 🟡: an acceptance-reason (client-blocked) member with a
+        # release-shaped title belongs to the (b) UNPARK-AUDIT branch, NOT a
+        # release-landed `unpark?` — its blocker is a client reply, not a release.
+        acc = {41: {"number": 41, "title": "release v2.226.0 nasadenie",
+                    "labels": [{"name": "needs-acceptance"}]}}
+        self.assertEqual(set(), cli_quals._unpark_release_flagged(
+            acc, authority="full", release_fetch=lambda: DRAINED))
+
     def test_fetch_error_untagged(self):
         def _boom():
             raise RuntimeError("gh down")
@@ -182,8 +191,11 @@ class SummaryLineUnpark(unittest.TestCase):
         self.assertIn("unpark=0", line)
 
 
-class WatchdogFetchParsesUnpark(unittest.TestCase):
-    def test_parses_unpark_and_acceptance(self):
+class WatchdogFetchParsesAcceptance(unittest.TestCase):
+    def test_parses_acceptance_and_ignores_unpark_token(self):
+        # #753 (b): `acceptance` is parsed (feeds the UNPARK-AUDIT count); the
+        # `unpark?` (a) token is a session-facing CLI tag with no watchdog
+        # consumer, so it is NOT parsed (no `unpark` key) and never breaks parsing.
         out = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait unpark?\ttitle\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tacceptance\ttitle\n"
                "45\t2026-01-01T00:00:00Z\taction-only\tops-wait\ttitle\n")
@@ -194,10 +206,10 @@ class WatchdogFetchParsesUnpark(unittest.TestCase):
                                   lambda cwd=None: "full"):
             members = airuleset._watchdog_ops_wait_fetch("/r")
         by = {m["number"]: m for m in members}
-        self.assertTrue(by[41]["unpark"])
-        self.assertFalse(by[43]["unpark"])
         self.assertTrue(by[43]["acceptance"])
         self.assertFalse(by[45]["acceptance"])
+        self.assertNotIn("unpark", by[41])   # session-facing tag, not parsed
+        self.assertEqual(3, len(members))     # the unpark? token never broke parsing
 
 
 class FlagSetsReturnsUnpark(unittest.TestCase):

@@ -1270,7 +1270,9 @@ def _unpark_release_flagged(rows, authority=None, release_fetch=None):
     """The set of release-parked ops-wait (W) member numbers to tag `unpark?`
     (#753 part 1a) — a member whose blocker (a release) has PROVABLY landed, so
     the OWNING session should verify per #588 and clear `ops-wait`. Flagged iff:
-      - the TITLE names a release/version/stage (`_RELEASE_RECHECK_TITLE_RX`), AND
+      - the TITLE names a release/version/stage (`_RELEASE_RECHECK_TITLE_RX`) AND
+        the member's reason is `ops-wait` (NOT `acceptance` — a client-blocked
+        member with a release-ish title belongs to the (b) UNPARK-AUDIT branch), AND
       - `authority` ∈ {full, branch-merge} (origin == the canonical repo), AND
       - the repo's release train is PROVEN drained (`_release_train_drained` over
         the origin state `release_fetch()` returns).
@@ -1285,10 +1287,16 @@ def _unpark_release_flagged(rows, authority=None, release_fetch=None):
     rejected option B), so the tag can never count inconsistently between them."""
     if authority not in _UNPARK_AUTHORITIES:
         return set()
+    # Scope to `ops-wait`-reason members (parked on an external event) — EXCLUDE
+    # an `acceptance`-reason member (client-blocked) that merely happens to carry
+    # a release-shaped title (`nasadenie`/`deploy`/`v2.1`): its blocker is a CLIENT
+    # reply, not a release, so it belongs to the (b) UNPARK-AUDIT branch, never a
+    # release-landed `unpark?`. Labels are already in the rows (zero extra gh).
     shaped = {n for n, row in rows.items()
               if isinstance(row, dict)
               and isinstance(row.get("title"), str)
-              and _RELEASE_RECHECK_TITLE_RX.search(row["title"])}
+              and _RELEASE_RECHECK_TITLE_RX.search(row["title"])
+              and _ops_wait_reason(row.get("labels")) == "ops-wait"}
     if not shaped:
         return set()
     try:
