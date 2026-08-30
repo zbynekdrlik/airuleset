@@ -505,6 +505,49 @@ def transcript_last_assistant_text(path):
     return ""
 
 
+# #764 -- the `🏁 BACKLOG EMPTY:` fulfilled-completion PROOF the goal
+# fulfilled-rearm lane keys on. CC never persists a "fulfilled" marker, so a
+# stop-(B) COMPLETED /goal loop is transcript-identical to a silently-dead one
+# (`mark=="set"`, footer dark) EXCEPT for this line -- both authority profiles
+# render the `🏁 BACKLOG EMPTY:` prefix (goal_registry.py). A stop-(A)
+# ❓-blocked completion prints NO 🏁 line, so its last turn never matches ->
+# the trigger structurally never fires on it (no re-poke on an unanswered
+# question).
+_BACKLOG_EMPTY_RX = re.compile(r"🏁\s*BACKLOG EMPTY")
+
+
+def transcript_last_backlog_empty_ts(path, tail_bytes=2_000_000,
+                                     max_entries=200):
+    """Epoch seconds of the session's LAST real assistant turn IFF that turn
+    carries a `🏁 BACKLOG EMPTY:` completion claim, else None. Same
+    genuine-turn skip semantics as `transcript_last_assistant_text`
+    (synthetic/tool-only `_SENTINELS` and an `isApiErrorMessage` entry are
+    skipped). BOUNDED-SEEK read (`_read_jsonl_byte_tail`, never a whole-file
+    `f.read()`) -- the fulfilled-rearm rider runs against real supervisor
+    transcripts that reach hundreds of MB, so the tail is bounded by BYTES
+    like `transcript_last_marker_bounded`. Fail-safe None on ANY error / a
+    🏁 turn whose `timestamp` is missing or unparseable (the rider then cannot
+    prove the 🏁 came AFTER the arm -> no re-arm, the safe direction)."""
+    for entry in reversed(_read_jsonl_byte_tail(path, tail_bytes, max_entries)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            return None
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue
+        # The FIRST real assistant turn (newest) decides: no 🏁 here -> None.
+        if not _BACKLOG_EMPTY_RX.search(text):
+            return None
+        raw = entry.get("timestamp")
+        try:
+            return datetime.fromisoformat(
+                str(raw).replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
 # #522 -- the BLOCKED-on-my-answer status marker line the `/goal` stop-condition
 # (A) keys on: an assistant turn whose LAST marker is `❓ NEEDS YOU`. Deliberately
 # NOT a bare `❓` (that also matches a `❓ ASKED:` body line — but an ask-and-
