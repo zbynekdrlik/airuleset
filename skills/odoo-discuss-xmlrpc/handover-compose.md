@@ -172,6 +172,36 @@ is the FIRST rule for a reason).
   reálneho artefaktu odčítal, kde a kedy; holá značka bez referencie neplatí
   (model `airuleset:owner-approved`). Iná budúca formulácia mimo zoznamu
   vzorov hookom prejde — táto doktrína platí na KAŽDÉ preformulovanie.
+- **A client message NEVER tells the client what WE lack — it reports ONLY
+  what is delivered and working (airuleset #742).** "Chýba nám X" / "nemáme
+  prístup k Y" / "nevieme to overiť" / "nestihli sme Z" — any framing that
+  surfaces OUR internal gap (missing data, missing access, an unfinished
+  step, an uncertainty on our side) into a client-facing message — is
+  unprofessional and leaves the client with nothing actionable to do with
+  it ("čo s tým mám ako klient robiť?"). When something is missing or
+  unfinished on OUR side, there are exactly two legal paths, mirroring the
+  #696 verified-past-events rule above: (1) FIX it first — get the
+  access/data from the owner, self-service verify it
+  (`autonomous-verification.md`'s "What's on PROD?" decision tree), finish
+  the step — THEN message the client about the COMPLETED result; or (2)
+  DON'T message yet — wait until there is something real to report. The one
+  legitimate exception is a genuine REQUEST for something FROM the client
+  (a missing input, a decision, an access grant only they can give) — that
+  is not our deficiency, it is a normal ask, so phrase it as a concrete
+  request for what you need from them, never as a complaint about what is
+  missing: "Potrebovali by sme od vás X, aby sme mohli pokračovať" — never
+  "Nemáme od vás X". The other carve-out is the mandated self-blame
+  reassurance in the closing template below ("chyba je na našej strane a
+  hneď to opravíme") — that is a HYPOTHETICAL fault-path ("if you don't see
+  it, blame us, not yourself"), never an admission of an actual current
+  gap, so it is NOT the banned shape and stays mandatory as-is. Like the
+  atomic-thread doctrine below, this is a
+  JUDGMENT call on message CONTENT, not something a phrase-matching hook
+  can gate without a real false-positive risk (blocking exactly that
+  legitimate client-facing request), so it stays a prose doctrine enforced
+  through the existing per-message owner-approval gate (the first bullet of
+  this file) — the owner reviewing the exact text before it is posted is
+  the backstop.
 - **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
   `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
   Verbatim: „extremne mi vadi ze posles spravu a peta neoznacis takze ak ma
@@ -311,6 +341,19 @@ is the FIRST rule for a reason).
   owner approval as any other. Precedent: odoo-erp #5319 (the new topic
   from msg 1724252/1724253 split out with the triggering messages copied
   across), closure of thread 257 via msg 1743448.
+- **Atomicity also applies at CREATION, not only to organic growth
+  (airuleset #742).** #728 above covers a topic that emerges INSIDE an
+  already-open thread; this closes the other half — when YOU are drafting
+  a brand-new proposal and it would need to cover MORE THAN ONE topic
+  (two unrelated features, a feature plus an unrelated status update, two
+  separate client asks), split it into SEPARATE threads from the start —
+  never bundle them into one opening message "to save a round of owner
+  approval". One thread = one topic is the rule at every point in a
+  thread's life, including message zero. Each split-out thread still gets
+  its own name (ending in the stream number, ≤ 30 chars — the naming rule
+  above), its own `Discuss-ticket:` (the #695 message-post binding marker,
+  `hooks/block-discuss-thread-name.sh`)/`Discuss-thread:` binding, and its
+  own owner approval — never a shortcut around any of those.
 
 Every thread this file governs still follows the existing channel
 placement rule: a sub-thread under the channel the owner named (montalu:
