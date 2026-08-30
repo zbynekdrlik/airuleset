@@ -1454,10 +1454,23 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("SKIP undeterminable sid=%s cwd=%s" % (sid, cwd))
         return "skip:undeterminable"
 
-    # #731 -- PRE-KEYSTROKE client-input DEFER for EVERY origin (incl. normal).
-    _cskip = _goal_client_active_skip(sid, cwd, pid, run, now, out)
-    if _cskip:
-        return _cskip
+    # #752 -- the pre-keystroke client-input DEFER is now ORIGIN-SCOPED, on the
+    # SAME partition as the recent-human gate above. The user's OWN
+    # `self-callback` /autopilot arm IS the owner having just typed the command,
+    # so their presence at the keyboard is NEVER a reason to defer it (owner
+    # ruling 2026-08-30) -- the request proceeds on the first idle sweep;
+    # safety is carried by the idle-box/busy gate below + deliver_with_stash
+    # draft protection (#35, stashes+restores the owner's just-typed text) +
+    # #737/#746 verified typing. A WATCHDOG-initiated re-arm (dark/stale/auth)
+    # keeps the 5-min veto: an unexpected /goal keystroke into a human-active
+    # pane is the injection hazard (the gk login-cancel class). This is NOT
+    # dead for those origins -- it is a LATER re-read of `#{client_activity}`
+    # closest to the keystroke, catching a human who began typing AFTER the
+    # recent-human gate passed but BEFORE the keystroke (the #731 rationale).
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+        _cskip = _goal_client_active_skip(sid, cwd, pid, run, now, out)
+        if _cskip:
+            return _cskip
 
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":

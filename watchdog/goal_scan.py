@@ -89,6 +89,15 @@ def _tmux_client_recent_input(pane_target, run, now, veto_s=None, skew_s=None):
         return False, ""            # 0 clients -> fail OPEN
     age = now - max(epochs)
     if -skew_s <= age < veto_s:
+        # #752 -- CLAMP a FUTURE-skewed client_activity to 0. tmux's attached-
+        # client epoch can briefly LEAD our own `now` read (a sub-second clock
+        # desync), giving a negative `age`; that value is never real elapsed
+        # time, and `_human_age_desc` renders it as the confusing "Ns in the
+        # future". Render "now" instead and carry the raw skew as a one-off
+        # diagnostic token. The veto DECISION bound above is unchanged (a small
+        # future value is still "recent" -> more veto, the fail-safe direction).
+        if age < 0:
+            return True, "client input now (future-skew %ds)" % int(-age)
         return True, "client input %s" % watchdog._human_age_desc(age)
     return False, ""
 
