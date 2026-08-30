@@ -4198,11 +4198,15 @@ def _watchdog_ops_wait_fetch(cwd):
     below SKIPS (a `#`-prefixed comment is not a member row); field 0 is the
     issue number, field 3 the reason
     (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
-    push — #570 — and/or a ` gk-handoff!` warning for a member ALSO carrying a
-    gk hand-off label — #636). Returns a list of `{"number": int, "stale": bool,
-    "gk_handoff": bool, "title": str}` so the job 20 nudge can NAME the stale +
-    gk-handoff members and detect release-SHAPED titles (#698 — field 4, which
-    `--ops-wait` already prints; a degraded short line reads as title "");
+    push — #570 — a ` gk-handoff!` warning for a member ALSO carrying a gk
+    hand-off label — #636 — a ` recheck!` warning — #699 — and/or a ` unpark?`
+    candidate for a release-parked member whose release provably landed — #753).
+    Returns a list of `{"number": int, "stale": bool, "gk_handoff": bool,
+    "release_recheck": bool, "unpark": bool, "acceptance": bool, "title": str}`
+    so the job 20 nudge can NAME the stale + gk-handoff members, count the
+    acceptance-parked members (the #753 (b) UNPARK-AUDIT), and detect
+    release-SHAPED titles (#698 — field 4, which `--ops-wait` already prints; a
+    degraded short line reads as title "");
     the sibling `ops_wait_recheck` helpers accept BOTH this dict shape
     AND a legacy bare `int` (back-compat). A None
     return (non-zero exit — the #181 untrustworthy-empty refusal — or an
@@ -4263,9 +4267,15 @@ def _watchdog_ops_wait_fetch(cwd):
         # #698: the TITLE (field 4, tab-joined in case a title itself carries a
         # tab) feeds the job-20 release-shaped detection — zero new gh calls.
         title = "\t".join(parts[4:]) if len(parts) >= 5 else ""
+        # #753: `unpark?` (release provably landed) + the base `acceptance`
+        # reason (client-thread-parked, for the job-20 (b) UNPARK-AUDIT count) —
+        # both parsed from the SAME reason field, zero new gh calls. No flag token
+        # contains "acceptance", so the substring test is unambiguous.
         members.append({"number": num, "stale": "stale!" in reason,
                         "gk_handoff": "gk-handoff!" in reason,
                         "release_recheck": "recheck!" in reason,
+                        "unpark": "unpark?" in reason,
+                        "acceptance": "acceptance" in reason,
                         "title": title})
     return members
 
@@ -5398,6 +5408,8 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _release_recheck_flagged as _release_recheck_flagged,
+    _release_train_drained as _release_train_drained,
+    _unpark_release_flagged as _unpark_release_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,

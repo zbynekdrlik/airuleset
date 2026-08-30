@@ -397,6 +397,17 @@ def _release_recheck_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _acceptance_numbers(members):
+    """The subset of `_member_numbers` whose base reason is `acceptance` (#753
+    (b)) — a client-thread-parked W member the session must re-audit for a newer
+    client reply/reaction. Only the #753 structured shape carries the flag, so a
+    legacy int list yields an EMPTY list (no UNPARK-AUDIT sub-clause — the
+    safe/unchanged direction, exactly like `_stale_numbers`)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("acceptance")
+            and isinstance(m.get("number"), int)]
+
+
 # #698 — above this many release-landed-flagged W members on one box, the
 # escalated sub-clause additionally instructs the session to summarise the
 # state to the owner via the standard ❓ channel (the ticket's own >N=5; never
@@ -676,8 +687,21 @@ _DISCUSS_TRIGGER = (
     "`gh issue list -s closed -S \"discuss.channel_\" -L 30`.")
 
 
+# #753 (b) -- the UNPARK-AUDIT clause (odoo-erp only, the SAME scope as
+# DISCUSS-AUDIT): a client-thread-parked (`acceptance`) W member may have a newer
+# client reply/reaction than our last push. The watchdog cannot read Discuss
+# (#550/#695), so the DUTY is session-delegated: re-read the cited threads and,
+# on a newer client reply/reaction, clear `ops-wait` WITH a citation. A COUNT
+# (the members are in `slice-quals --ops-wait`, reason `acceptance`), never a
+# member enumeration (#714). `%d` = the acceptance-parked W count.
+_UNPARK_AUDIT_TRIGGER = (
+    "UNPARK-AUDIT %d (#753): re-read cited Discuss threads of acceptance-W "
+    "members (aj reakcie #745) -- novšia klientska odpoveď po našom pushi ⇒ "
+    "zlož `ops-wait` s citáciou.")
+
+
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
-                release_landed=None, discuss_audit=False):
+                release_landed=None, discuss_audit=False, unpark_audit_n=0):
     """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
     per-member enumeration + full-doctrine wall that parked orphaned in the
     incident). Carries the `stuck-check: ` prefix (janitor own-payload
@@ -700,7 +724,10 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     W numbers whose repo's release train the caller PROVED drained -- non-empty
     fires the RELEASE-LANDOL flag; None/empty is byte-identical to no flag.
     `discuss_audit` (#695): True appends the odoo-erp-scoped DISCUSS-AUDIT
-    trigger."""
+    trigger. `unpark_audit_n` (#753 (b)): a POSITIVE count appends the
+    odoo-erp-scoped UNPARK-AUDIT trigger (re-read the acceptance-parked members'
+    cited Discuss threads for a newer client reply/reaction); 0/non-int → no
+    clause (byte-identical to the pre-#753 nudge)."""
     i_pos = isinstance(i_count, int) and i_count > 0
     w_list = w_members if isinstance(w_members, list) else []
     w_count = len(_member_numbers(w_list))
@@ -717,6 +744,11 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
         optional.extend(_flag_items(w_list, release_landed))
     if discuss_audit:
         optional.append(_DISCUSS_TRIGGER)
+    # #753 (b): the acceptance-unpark audit — only when there ARE acceptance-parked
+    # W members (a positive count), so a repo with none never carries the clause.
+    if isinstance(unpark_audit_n, int) and not isinstance(unpark_audit_n, bool) \
+            and unpark_audit_n > 0:
+        optional.append(_UNPARK_AUDIT_TRIGGER % unpark_audit_n)
     detail = []
     for item in optional:
         cand = (_NUDGE_HEAD + core_body + " "
@@ -933,8 +965,14 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # #695: the DISCUSS-AUDIT clause scope is resolved HERE, in the nudge
     # branch only (a per-cwd git-remote read at most ~once a day per pane),
     # never on the per-sweep hot path.
+    # #753 (b): the same odoo-erp scope gates the UNPARK-AUDIT clause; its count
+    # is the acceptance-parked W members from the ALREADY-fetched rows (zero new
+    # gh calls), so the session re-audits their cited Discuss threads.
+    _dscope = _discuss_audit_scope(cwd)
     text = _nudge_text(i_count, members, now, release_landed=landed,
-                       discuss_audit=_discuss_audit_scope(cwd))
+                       discuss_audit=_dscope,
+                       unpark_audit_n=(len(_acceptance_numbers(members))
+                                       if _dscope else 0))
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

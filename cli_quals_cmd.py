@@ -54,7 +54,8 @@ def _row_action(row, own_stream=None):
 
 def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       stale_numbers=None, queued_numbers=None,
-                      gk_handoff_numbers=None, recheck_numbers=None):
+                      gk_handoff_numbers=None, recheck_numbers=None,
+                      unpark_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -106,12 +107,22 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     several warnings (order: gk-handoff! then stale! then recheck!). The tag
     surfaces that a release-parked member is OVERDUE for its hourly deployed-state
     re-check (#588) — a session DUTY at every work cycle, never left to the daily
-    nudge."""
+    nudge.
+
+    `unpark_numbers` (#753 part 1a, `--ops-wait` only): a set of release-parked
+    W-member numbers whose blocker (a release) has PROVABLY landed (origin train
+    drained, full/branch-merge authority) — ` unpark?` is APPENDED LAST (after
+    `recheck!`), the SAME within-field-3 mechanism as `stale_numbers`. The `?`
+    (vs the `!` warning family) marks a session-verify CANDIDATE: verify per the
+    #588 deployed-state doctrine and clear `ops-wait` WITH evidence. Only
+    meaningful alongside `reason_fn`; a member can carry several warnings + this
+    (order: gk-handoff! then stale! then recheck! then unpark?)."""
     flag_numbers = flag_numbers or set()
     stale_numbers = stale_numbers or set()
     queued_numbers = queued_numbers or set()
     gk_handoff_numbers = gk_handoff_numbers or set()
     recheck_numbers = recheck_numbers or set()
+    unpark_numbers = unpark_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -134,17 +145,22 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                 reason = (reason + " stale!").strip()
             if n in recheck_numbers:
                 reason = (reason + " recheck!").strip()
+            # #753: `unpark?` LAST — the `?` marks a session-verify CANDIDATE
+            # (release provably landed → verify per #588 + clear ops-wait),
+            # distinct from the `!` accusation family before it.
+            if n in unpark_numbers:
+                reason = (reason + " unpark?").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                           action, reason,
                                           row.get("title") or ""))
 
 
 def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
-                           gk_handoff_numbers):
+                           gk_handoff_numbers, unpark_numbers=None):
     """#754 — a single `#`-prefixed AGGREGATE summary of the parked-W bucket,
     appended after the `--ops-wait` member rows: total count, the OLDEST member
-    (by createdAt), and the stale!/recheck!/gk-handoff! flag counts, plus an
-    ` OVER-THRESHOLD >N` marker when |W| exceeds `OPS_WAIT_WDRAIN_THRESHOLD`.
+    (by createdAt), and the stale!/recheck!/gk-handoff!/unpark? flag counts, plus
+    an ` OVER-THRESHOLD >N` marker when |W| exceeds `OPS_WAIT_WDRAIN_THRESHOLD`.
     The goal state of the loop is I0 ∧ U0 ∧ W0 — W is a DEBT bucket with a strop,
     not a terminal ticket state — so the session/owner needs the bucket-level
     picture (not just per-member rows) to decide a W-drain pass.
@@ -165,10 +181,11 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
     marker = (" OVER-THRESHOLD >%d" % airuleset.OPS_WAIT_WDRAIN_THRESHOLD
               if over else "")
     return ("# W-summary: total=%d oldest=#%s (%s) stale=%d recheck=%d "
-            "gk-handoff=%d%s" % (total, oldest, created,
-                                 len(stale_numbers or set()),
-                                 len(recheck_numbers or set()),
-                                 len(gk_handoff_numbers or set()), marker))
+            "gk-handoff=%d unpark=%d%s" % (total, oldest, created,
+                                           len(stale_numbers or set()),
+                                           len(recheck_numbers or set()),
+                                           len(gk_handoff_numbers or set()),
+                                           len(unpark_numbers or set()), marker))
 
 
 def _print_audit_rows(rows, own_stream=None):
@@ -421,11 +438,18 @@ def _handoff_label_mechanism_health(cwd=None):
 
 
 def _ops_wait_flag_sets(ops_wait, root):
-    """#699 — the (stale, recheck, gk_handoff) flag sets for the `--ops-wait`
-    reason column, SHARING ONE per-member comment-age fetch between the #570
-    `stale!` (24h) and #699 `recheck!` (1h release cadence) tags so the reason
-    column never DOUBLES the gh reads (margin for the 35s
-    `_watchdog_ops_wait_fetch` timeout). `gk-handoff!` is pure-label (no gh)."""
+    """#699 — the (stale, recheck, gk_handoff, unpark) flag sets for the
+    `--ops-wait` reason column, SHARING ONE per-member comment-age fetch between
+    the #570 `stale!` (24h) and #699 `recheck!` (1h release cadence) tags so the
+    reason column never DOUBLES the gh reads (margin for the 35s
+    `_watchdog_ops_wait_fetch` timeout). `gk-handoff!` is pure-label (no gh).
+
+    #753 part 1a — `unpark?`: ONE per-repo ORIGIN release-train read (via
+    `_watchdog_release_state_fetch`), fired lazily by `_unpark_release_flagged`
+    ONLY when a release-shaped member exists AND `resolve_authority(root)` ∈
+    {full, branch-merge}; a repo with no release-parked member does ZERO extra
+    work, so the #570 per-member budget is untouched. Any failure (authority
+    unresolvable / fetch error / not-drained) → the empty set (fail-safe)."""
     import airuleset
     self_login = airuleset._stream_self_login()
     ages_cache = {}
@@ -439,7 +463,14 @@ def _ops_wait_flag_sets(ops_wait, root):
     stale = airuleset._stale_ops_wait_flagged(ops_wait, ages_fn=_ages)
     recheck = airuleset._release_recheck_flagged(ops_wait, ages_fn=_ages)
     gk_handoff = airuleset._gk_handoff_ops_wait_flagged(ops_wait)
-    return stale, recheck, gk_handoff
+    try:
+        authority = airuleset.resolve_authority(root)
+    except Exception:
+        authority = None
+    unpark = airuleset._unpark_release_flagged(
+        ops_wait, authority=authority,
+        release_fetch=lambda: airuleset._watchdog_release_state_fetch(root))
+    return stale, recheck, gk_handoff, unpark
 
 
 def cmd_slice_quals(args):
@@ -608,13 +639,17 @@ def cmd_slice_quals(args):
         # check, no gh; drop the stale ops-wait so it enters gk N / the gk box's I).
         # #699: also tag `recheck!` a RELEASE-parked member with no fresh (<=1h
         # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
-        _stale, _recheck, _gkh = _ops_wait_flag_sets(ops_wait, root)
+        # #753: also tag `unpark?` a release-parked member whose release has
+        # PROVABLY landed (origin train drained, full/branch-merge authority) —
+        # ONE per-repo origin read, only when a release-shaped member exists.
+        _stale, _recheck, _gkh, _unpark = _ops_wait_flag_sets(ops_wait, root)
         _print_issue_rows(ops_wait, own_stream=user,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
-                          gk_handoff_numbers=_gkh)
+                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark)
         # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
-        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh)
+        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
+                                          unpark_numbers=_unpark)
         if _summary:
             print(_summary)
         return
@@ -815,13 +850,16 @@ def cmd_core_quals(args):
         # stale ops-wait hides from THIS box's own I; drop the ops-wait to close it.
         # #699: also tag `recheck!` a RELEASE-parked member with no fresh (<=1h
         # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
-        _stale, _recheck, _gkh = _ops_wait_flag_sets(ops_wait, root)
+        # #753: also tag `unpark?` a release-parked member whose release has
+        # PROVABLY landed (origin train drained, full/branch-merge authority).
+        _stale, _recheck, _gkh, _unpark = _ops_wait_flag_sets(ops_wait, root)
         _print_issue_rows(ops_wait, own_stream=None,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
-                          gk_handoff_numbers=_gkh)
+                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark)
         # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
-        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh)
+        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
+                                          unpark_numbers=_unpark)
         if _summary:
             print(_summary)
         return
