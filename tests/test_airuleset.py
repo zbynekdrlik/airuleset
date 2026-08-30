@@ -3603,6 +3603,12 @@ class TestManagedSettingsDefaults(TestCase):
         twice = airuleset.apply_managed_settings_defaults(once)
         self.assertEqual(once, twice)
         self.assertEqual(twice["effortLevel"], "high")  # raises a lower default
+        # #751 fleet migration: every deployed box currently holds
+        # effortLevel="xhigh"; the unconditional set must LOWER it to high
+        # (a "keep-if-higher" regression would leave xhigh live fleet-wide).
+        self.assertEqual(
+            airuleset.apply_managed_settings_defaults(
+                {"effortLevel": "xhigh"})["effortLevel"], "high")
 
     def test_does_not_mutate_input(self):
         src = {"hooks": {}}

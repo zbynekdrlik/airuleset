@@ -968,10 +968,10 @@ def cmd_install(args):
     # takes effect in every already-running shell IMMEDIATELY -- no `source
     # ~/.bashrc`, no relaunch, no restart (a bashrc FUNCTION, by contrast, is
     # frozen in a shell's memory at startup forever, which is exactly how
-    # ultracode kept resurrecting after #53). Ultracode can't live in
-    # settings.json (session-only, GH #64817) — the script passes it in every
-    # mode except `plain` (standing default, directive 2026-08-13, #445 —
-    # reversing #53); effortLevel above is the settings half of that default.
+    # ultracode kept resurrecting after #53). Owner directive 2026-08-30 (#751)
+    # REVERSED the launch-flag half of #445: the script bakes ultracode into NO
+    # mode (effortLevel above dropped `xhigh` → `high` in the same reversal);
+    # `claude-ultracode` is retained only as a muscle-memory alias of `default`.
     try:
         changed = apply_ultracode_launcher()
         print(f"  Updated:   {CLAUDE_LAUNCH_SCRIPT_DEST} (claude launcher script — "
