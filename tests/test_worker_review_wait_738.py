@@ -89,12 +89,14 @@ class TestWorkerReviewWaitDoctrine(unittest.TestCase):
 
     def test_warns_ending_the_turn_terminates_the_subagent(self):
         # The termination hazard is the whole reason this exists -- it must
-        # be named as the SAME class already warned at CYCLE step 5.
+        # be named as the SAME class already warned at CYCLE step 5. Scope
+        # this to the wait-doctrine WINDOW: asserting on the whole file would
+        # false-pass on step 5's own pre-existing "TERMINATES" (review nit 4a).
         self.assertRegex(
-            self.norm,
+            self.window,
             r"(?i)TERMINATE",
-            "the doctrine must warn that ending the turn with the dispatch "
-            "outstanding TERMINATES the subagent")
+            "the wait-doctrine paragraph itself must warn that ending the "
+            "turn with the dispatch outstanding TERMINATES the subagent")
         self.assertRegex(
             self.window,
             r"(?i)(bg-CI-poll|CI-poll|step 5|terminat)",
@@ -112,10 +114,13 @@ class TestWorkerReviewWaitDoctrine(unittest.TestCase):
     def test_bans_the_unsafe_wait_primitives(self):
         # A bare sleep is harness-blocked; Bash(run_in_background) terminates
         # a subagent; TaskStop refuses to stop one's OWN Agent dispatch.
+        # Require the NEGATION next to a BARE/STANDALONE sleep (review nit 4b):
+        # a bare `(bare |standalone )?sleep` degenerates to "any 'sleep'".
         self.assertRegex(
             self.window,
-            r"(?i)(bare |standalone )?sleep",
-            "the doctrine must name a bare `sleep` as a banned/blocked wait")
+            r"(?i)never[^.]{0,25}(bare|standalone)[^.]{0,20}sleep",
+            "the doctrine must name a bare/standalone `sleep` as a banned "
+            "wait -- not merely mention the word 'sleep' somewhere")
         self.assertIn(
             "TaskStop", self.window,
             "the doctrine must name `TaskStop` as unusable on your OWN "

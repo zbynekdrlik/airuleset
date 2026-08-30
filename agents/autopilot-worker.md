@@ -468,15 +468,18 @@ push / PR / merge / deploy, never that backup.
    dispatch blocks inside the tool call and returns the verdict AS its tool_result, leaving no
    outstanding background work to wait on, so the turn-end termination class never triggers. If your
    platform build surfaces the dispatch async anyway (notify-on-completion rather than blocking), ride
-   it out FOREGROUND — NEVER a bare `sleep` (harness-blocked, "use Monitor"), NEVER
-   `Bash(run_in_background=True)` (that terminates the subagent — the exact bg-CI-poll bug), NEVER
-   `TaskStop` on your OWN dispatch (refused: "Task X owned by Y; agent Z cannot stop it"), and there is
-   no `TaskOutput`/status tool for an Agent dispatch. Use bounded `inotifywait -e close_write -t <secs>
-   <task.output> <task.output>` event-waits on the dispatch result's own `output_file`, and read "done"
-   ONLY from the LAST JSON object — `tail -n 1 <task.output>` → a final `assistant ['text']` line =
-   DONE, a trailing `user ['tool_result']` / `assistant ['thinking'|'tool_use']` = still running; do
-   NOT wholesale-Read or tail the `.output` JSONL content (context overflow — the dispatch metadata
-   itself warns of it). The real completion notification also lands between your tool calls, exactly
+   it out FOREGROUND — NEVER a bare/standalone `sleep` (harness-blocked; its "use Monitor" hint is a
+   dead end here — `Monitor` itself then counts as outstanding work / is refused for a worktree worker,
+   #506), NEVER `Bash(run_in_background=True)` (that terminates the subagent — the exact bg-CI-poll
+   bug), NEVER `TaskStop` on your OWN dispatch (refused: "Task X owned by Y; agent Z cannot stop it"),
+   and there is no `TaskOutput`/status tool for an Agent dispatch. Use bounded `inotifywait -e
+   close_write -t <secs> <task.output>` event-waits on the dispatch result's own `output_file` (one
+   path per outstanding dispatch), and read "done" ONLY by PARSING the LAST JSON object of that file —
+   `tail -n 1 <task.output>` piped to a one-line `python3 -c` that prints its `type` + content-block
+   types: a final `assistant ['text']` = DONE, a trailing `user ['tool_result']` / `assistant
+   ['thinking'|'tool_use']` = still running (never trust the file's `stat` size/mtime — they read
+   stale, #569). Do NOT wholesale-Read or tail the `.output` JSONL content (context overflow — the
+   dispatch metadata itself warns of it). The real completion notification also lands between your tool calls, exactly
    like a foreground CI poll returning. **Rejected:** handing the review back to the supervisor — the
    worktree stop-point contract requires YOU to prove `/review` + `/requesting-code-review` clean
    locally before returning your branch, and deferring it onto the supervisor's serial integration
