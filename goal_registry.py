@@ -108,7 +108,7 @@ CLAUSES = [
     Clause("obligation", PROFILES, {
         "full": "Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved,",
         "branch-merge": "Every open issue ASSIGNED TO ME here not labeled autopilot-skip is MERGED via my own PR into the project's INTEGRATION branch (develop unless the project CLAUDE.md names another), no open prio:bounce for my stream,",
-        "fork-no-merge": "Every issue ASSIGNED TO ME here not labeled autopilot-skip is HANDED OFF — closing it after is the maintainer's job, not mine to prove —",
+        "fork-no-merge": "Every issue ASSIGNED TO ME here not labeled autopilot-skip is HANDED OFF — a later close is not my (B) proof —",
     }),
     Clause("proof", PROFILES, {
         "full": "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker.",
@@ -137,7 +137,7 @@ CLAUSES = [
     }),
     Clause("authority-ends", ("branch-merge", "fork-no-merge"), {
         "branch-merge": "My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'.",
-        "fork-no-merge": "My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, never close the issue, never touch other streams'.",
+        "fork-no-merge": "My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'.",
     }),
     Clause("irreversible", PROFILES, {
         "full": "Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts.",
