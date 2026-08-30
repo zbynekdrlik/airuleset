@@ -194,7 +194,7 @@
     "tests/test_meeting_analysis_skill.py": 88,
     "tests/test_merge_drivers.py": 431,
     "tests/test_model_tiering.py": 704,
-    "tests/test_module_machinery_offload.py": 62,
+    "tests/test_module_machinery_offload.py": 71,
     "tests/test_no_conflict_markers.py": 72,
     "tests/test_no_question_flag.py": 578,
     "tests/test_no_session_kill.py": 550,

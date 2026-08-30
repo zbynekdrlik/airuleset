@@ -52,10 +52,19 @@ class TestScriptFailurePolicyKeepsOnlyTheActionableRule(TestCase):
             self.assertNotIn(machinery, t, machinery)
 
     def test_hook_internals_moved_verbatim_to_the_path_scoped_surface(self):
-        internals = read(".claude/rules/internals-hooks.md")  # #482: pre-write-script-check moved here
+        # #641 rotation lifecycle: internals-hooks.md rotates its OLDEST
+        # lessons verbatim into the on-demand archive once it nears its byte
+        # cap (never deleted) — #750 rotated this exact section out to make
+        # room for its own new lesson. A relocation to the sanctioned archive
+        # is NOT the silent DROP this lock guards against, so it spans BOTH
+        # tiers of the durable store, same as the #419 lock in
+        # test_plugin_marketplace_payload_defer_419.py.
+        internals = read(".claude/rules/internals-hooks.md")
+        archive = read(".claude/rules-reference/internals-archive.md")
+        combined = internals + archive
         for machinery in ("pycodestyle E722", "S110", "24 pre-existing",
                           "pre-write-script-check.sh"):
-            self.assertIn(machinery, internals, machinery)
+            self.assertIn(machinery, combined, machinery)
 
 
 if __name__ == "__main__":
