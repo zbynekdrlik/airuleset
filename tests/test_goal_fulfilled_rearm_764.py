@@ -392,6 +392,52 @@ class TestFulfilledRearmLane(unittest.TestCase):
                          "dry-run consumes no rate-limit slot")
         self.assertTrue(any("would record" in ln for ln in logs), logs)
 
+    # ===================================================================== #
+    # #767 -- post-achieve chores SHADOW the 🏁 proof (newest-turn-only read).
+    # A completed loop that keeps working after 🏁 leaves a non-🏁 NEWEST turn;
+    # `transcript_last_backlog_empty_ts` (newest-turn-only) then returns None and
+    # both the fulfilled-rearm lane AND the #766 veto silently fail. These lock
+    # the backward-scan fix. RED on current code (newest=chore -> bts None).
+    # ===================================================================== #
+    _CHORE = "pokračujem po dokončení...\n✅ DONE: server lockdown KB2003"
+
+    def _shadowed_fixture(self, sid, mark_ts=500, done_ts=600, chore_ts=700,
+                          cap=GOAL_IDLE_CAP):
+        """A FULFILLED fixture (🏁 at done_ts, AFTER the mark) whose NEWEST turn
+        is a later NON-🏁 chore (chore_ts) -- the #767 shadowing shape."""
+        proj, tmux = self._fixture(sid, mark_ts=mark_ts, done_ts=done_ts, cap=cap)
+        tpath = next(proj.rglob(sid + ".jsonl"))
+        _append_assistant(tpath, self._CHORE, chore_ts)
+        return proj, tmux
+
+    def test_shadowed_flag_still_records_a_rearm(self):
+        # THE #767 REGRESSION: 🏁 is still inside the 2 MB tail but SHADOWED by a
+        # later chore turn; the fulfilled-rearm lane must find it and re-arm.
+        proj, tmux = self._shadowed_fixture("sess-shadow")
+        reqs, logs, _ = self._sweep(proj, tmux, 100000, (7, 100000))
+        req = reqs.get("sess-shadow")
+        self.assertIsInstance(req, dict,
+                              "a shadowed 🏁 (chore turn newest) must still re-arm")
+        self.assertEqual(req.get("origin"), self.ORIGIN)
+        self.assertTrue(any("FULFILLED-REARM" in ln for ln in logs), logs)
+
+    def test_shadowed_flag_open_zero_still_vetoes_the_ping(self):
+        # the #766 veto keys on the SAME detection: a shadowed 🏁 with a fresh
+        # open==0 must STILL veto the 💀 dead-loop ping (never a false death).
+        proj, tmux = self._shadowed_fixture("sess-shadow-veto")
+        state = {}
+        reqs = self._dir() / "goal-requests.json"
+        pings = []
+        l1 = self._sweep_capturing(proj, tmux, 100000, (0, 100000),
+                                   state, reqs, pings)
+        l2 = self._sweep_capturing(proj, tmux, 100060, (0, 100060),
+                                   state, reqs, pings)
+        self.assertEqual(pings, [],
+                         "a shadowed-🏁 achieved loop must NEVER be pinged")
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "an achieved loop records no re-arm (backlog empty)")
+        self.assertTrue(any("FULFILLED-SILENT" in ln for ln in (l1 + l2)), l1 + l2)
+
 
 if __name__ == "__main__":
     unittest.main()
