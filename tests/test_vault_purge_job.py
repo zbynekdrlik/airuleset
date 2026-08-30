@@ -245,8 +245,12 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # gkorphan_handoff_fetch=None, so the closing `):` moved off that
                # line again; the anchor's LAST line grew, the mutation target
                # vault_purge=None is untouched.
+               # #733 re-pin: queue_fetch=None (job 20's gk queue-arrival
+               # rider seam) joined release_state_fetch on the trailing line,
+               # so the closing `):` moved along it; the anchor's LAST line
+               # grew again, the mutation target vault_purge=None is untouched.
                "             gkorphan_fetch=None, gkorphan_handoff_fetch=None,\n"
-               "             release_state_fetch=None):")
+               "             release_state_fetch=None, queue_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
