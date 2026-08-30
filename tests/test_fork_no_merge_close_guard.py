@@ -60,11 +60,22 @@ case "$1 $2" in
       { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
     echo "${FAKE_GH_ME:-}";;
   "issue view")
+    # #756: the verdict carve-out reads labels+comments in ONE `--json
+    # labels,comments` call (raw JSON, no -q) — must be checked BEFORE the
+    # `--json labels` substring branch (which it also matches). Emits a JSON
+    # object the hook parses with jq: labels from FAKE_GH_LABELS (space-sep),
+    # ONE comment whose body is FAKE_GH_COMMENTS. FAKE_GH_VERDICT_FAIL=1 makes
+    # this read fail (models an unreadable ticket → fail-SAFE block).
+    if printf '%s ' "$@" | grep -q -- '--json labels,comments'; then
+      [ "${FAKE_GH_VERDICT_FAIL:-0}" = "1" ] && exit 1
+      jq -n --arg labels "${FAKE_GH_LABELS:-}" --arg comments "${FAKE_GH_COMMENTS:-}" \
+        '{labels: ($labels|split(" ")|map(select(length>0)|{name:.})),
+          comments: (if ($comments|length)>0 then [{body:$comments}] else [] end)}'
     # #533: distinguish the labels read (`--json labels -q .labels[].name`) from
     # the author read (`--json author -q .author.login`). The labels read honors
     # FAKE_GH_LABELS_FAIL (an unreadable label set) and emits one name per line,
     # exactly what gh's own -q '.labels[].name' produces.
-    if printf '%s ' "$@" | grep -q -- '--json labels'; then
+    elif printf '%s ' "$@" | grep -q -- '--json labels'; then
       [ "${FAKE_GH_LABELS_FAIL:-0}" = "1" ] && exit 1
       for lbl in ${FAKE_GH_LABELS:-}; do echo "$lbl"; done
     else
@@ -92,7 +103,7 @@ def _fake_gh_dir():
 
 def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
         app_token_dir=None, api_user_403=False, labels="", labels_fail=False,
-        user=None):
+        user=None, comments="", verdict_fail=False):
     payload = json.dumps({"tool_input": {"command": cmd}})
     env = dict(os.environ)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
@@ -111,6 +122,8 @@ def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
     env["FAKE_GH_API_USER_403"] = "1" if api_user_403 else "0"
     env["FAKE_GH_LABELS"] = labels
     env["FAKE_GH_LABELS_FAIL"] = "1" if labels_fail else "0"
+    env["FAKE_GH_COMMENTS"] = comments
+    env["FAKE_GH_VERDICT_FAIL"] = "1" if verdict_fail else "0"
     if app_token_dir is not None:
         # An existing dir here makes cli_quals._is_gh_app_token_box() true, so
         # `authority --self-login` returns STREAM_APP_BOT_LOGIN with no gh call
@@ -770,6 +783,207 @@ class TestIsCloseDetectorHardening(TestCase):
         # boundary does not over-block every quoted gh command.
         r = run("bash -c 'gh issue list --state open'", self.branch,
                 me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestGkVerdictArtifactClose(TestCase):
+    """#756 — a reduced-authority stream may CLOSE a foreign-authored ODOO-ERP
+    ticket that carries a gatekeeper REVIEW-VERDICT artifact, WITH an evidence
+    `--comment` (odoo-erp owner ruling #5378: gatekeeper reviews+merges, posts its
+    verdict, DROPS the queue label, hands the ticket BACK; the delivering STREAM
+    closes it after review — the gatekeeper no longer closes stream tickets).
+
+    The signal is the SAME artifact odoo-erp's `subdev-self-close-guard.yml`
+    (#3784) keys on — never WHO pressed close: a case-insensitive H1-H3 heading
+    that STARTS (after non-word decoration) with `gatekeeper` and carries a verdict
+    word (review|verification|verdict), OR a line-start `GATEKEEPER-CLOSE:` marker
+    (#3712). That reopen-guard (POST-close, precise time-window) is the second net;
+    this hook (PRE-close) just stops blocking a reviewed close.
+
+    Additive carve-out (author + #533 acceptance carve-outs BYTE-UNTOUCHED). Every
+    failure fails toward hand-off: no artifact / non-odoo-erp repo / a re-hand-off/
+    bounce/acceptance override label / no --comment / unreadable ticket / the
+    `gh api PATCH` form → BLOCK. Live incident it fixes: montalu3 2026-08-30, gk
+    PASS verdicts on odoo-erp #5345/#5522, the stream told to close per #5378, the
+    hook blocked both `gh issue close` and `gh api PATCH` → close-ready tickets rot.
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.full = _cwd_with_authority("full")
+        self.branch = _cwd_with_authority("branch-merge")
+        self.M = airuleset.MAINTAINER_GH_LOGIN
+        self.HEADING = "## Gatekeeper cross-fork review - CLEAN\n\nDiff read, CI green."
+        self.MARKER = "GATEKEEPER-CLOSE: released 2.221, verified on PROD."
+
+    # --- ALLOW: the live post-review stream self-close ---
+
+    def test_allows_reviewed_close_with_verdict_heading(self):
+        # THE live case (odoo-erp #5345): foreign author, no acceptance label; the
+        # ticket carries a gk review-verdict heading + the close carries --comment.
+        # RED on current code (foreign author → BLOCK); GREEN allows.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp "
+                "--comment 'merged 38e38b2, gk verdict CLEAN'",
+                self.branch, me=self.M, author=self.M,
+                labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_reviewed_close_with_gatekeeper_close_marker(self):
+        # The line-start `GATEKEEPER-CLOSE:` marker (#3712) is the other artifact.
+        r = run("gh issue close 5522 -R zbynekdrlik/odoo-erp --comment 'done, ref verdict'",
+                self.branch, me=self.M, author=self.M,
+                labels="", comments=self.MARKER)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_reviewed_close_with_emoji_decorated_heading(self):
+        # #5089: gatekeeper's real cold-review headings carry a leading emoji —
+        # the `[^[:alnum:]_#]*` decoration class must tolerate it.
+        c = "## 🔎 Gatekeeper cold review — CLEAN\n\nall good"
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=c)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_reviewed_close_with_verification_verdict_words(self):
+        # #4280: the verdict word may be `verification`/`verdict`, not only `review`.
+        for c in ("## GATEKEEPER VERIFICATION - PASS\n",
+                  "### gatekeeper re-review verdict - CLEAN\n"):
+            r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                    self.branch, me=self.M, author=self.M, labels="", comments=c)
+            self.assertEqual(r.returncode, 0, "%s\n%s" % (c, r.stderr))
+
+    def test_allows_reviewed_close_under_fork_no_merge_too(self):
+        r = run("gh issue close 4006 -R zbynekdrlik/odoo-erp --comment ok",
+                self.fork, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_reviewed_close_with_short_c_flag(self):
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp -c 'gk CLEAN'",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_reviewed_close_resolving_repo_from_cwd_remote(self):
+        # No -R flag: the repo is resolved from the cwd git remote. Point the cwd's
+        # origin at odoo-erp so the odoo-erp scope engages without an explicit -R.
+        subprocess.run(["git", "init", "-q"], cwd=self.branch)
+        subprocess.run(["git", "remote", "add", "origin",
+                        "https://github.com/zbynekdrlik/odoo-erp.git"], cwd=self.branch)
+        r = run("gh issue close 5345 --comment 'gk CLEAN'",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- BLOCK: every failure fails toward hand-off ---
+
+    def test_blocks_close_without_verdict_artifact(self):
+        # The #349 replay: merged into integration, NO gk review yet → no artifact
+        # → BLOCK. The exact review-bypass the guard exists to prevent stays closed.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=self.M, author=self.M,
+                labels="", comments="Merged into develop. Tests green on my box.")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_reviewed_close_without_comment_and_hints_the_recipe(self):
+        # Verdict artifact present but NO --comment → BLOCK, and the stderr NAMES
+        # the #756 evidence-citation recipe (fires for no other block reason).
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("756", r.stderr)
+        self.assertIn("--comment", r.stderr)
+
+    def test_blocks_reviewed_close_with_ready_for_review_still_present(self):
+        # gk drops the queue label at hand-back; if `ready-for-review` is STILL
+        # present the gk owns it again → BLOCK.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M,
+                labels="ready-for-review", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_with_needs_gatekeeper_still_present(self):
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M,
+                labels="needs-gatekeeper", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_with_prio_bounce(self):
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M,
+                labels="prio:bounce", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_verdict_carveout_defers_needs_acceptance_to_the_acceptance_path(self):
+        # A `needs-acceptance` ticket is closed via the #533 acceptance carve-out
+        # (which REQUIRES --comment for the client-confirmation citation). The
+        # verdict carve-out must EXCLUDE needs-acceptance so it can't bypass that
+        # --comment requirement: a needs-acceptance ticket + verdict artifact + NO
+        # --comment must still BLOCK.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp",
+                self.branch, me=self.M, author=self.M,
+                labels="stream:%s needs-acceptance" % airuleset._current_user(),
+                comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_on_non_odoo_erp_repo(self):
+        # Same verdict artifact, but a NON-odoo-erp repo → the carve-out never
+        # engages (odoo-erp is where #5378 applies AND the reopen-guard is the
+        # second net) → BLOCK.
+        r = run("gh issue close 5345 -R kvaskodev/other-repo --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_when_verdict_is_a_bare_prose_line(self):
+        # Self-exemption immunity (reopen-guard #4224): a prose line "gatekeeper
+        # review comment landed ..." with NO leading `#` heading is NOT an artifact.
+        c = "gatekeeper review comment landed earlier, closing now"
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=c)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_when_heading_is_stream_readiness_line(self):
+        # A stream's own "## Ready for gatekeeper cross-fork review" readiness line
+        # STARTS with "Ready" (a word char stops the decoration class), so it is
+        # NOT a gatekeeper verdict heading → BLOCK.
+        c = "## Ready for gatekeeper cross-fork review\n\nplease review"
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=c)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_when_heading_is_h4(self):
+        # `#{1,3}` only — an H4+ `#### Gatekeeper review` is NOT a match (mirrors
+        # the reopen-guard's own H1-H3 restriction).
+        c = "#### Gatekeeper review - CLEAN\n"
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=c)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_patch_form_even_with_verdict_artifact(self):
+        # The `gh api PATCH` form is NEVER exempted — even a perfect verdict artifact
+        # cannot allow it (ISSUE_NUM is empty for a pure PATCH).
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/5345 -f state=closed",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_batch_smuggle_after_a_verdict_close(self):
+        # A second top-level close makes it NOT a single close action → the
+        # single-action guard blanks ISSUE_NUM → no carve-out fires → BLOCK.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok "
+                "&& gh issue close 5346 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reviewed_close_when_ticket_read_fails(self):
+        # A gh error reading the ticket must fail SAFE (BLOCK), never exempt on an
+        # unverifiable ticket (the #349/#463 fail direction).
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="",
+                comments=self.HEADING, verdict_fail=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_reviewed_close_never_engages_under_full_authority(self):
+        # A full-authority box already closes freely (AUTH==full → exit 0 before the
+        # carve-out) — the verdict path is reduced-authority only.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp --comment ok",
+                self.full, me=self.M, author=self.M, labels="", comments=self.HEADING)
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
