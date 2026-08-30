@@ -141,11 +141,18 @@ _labels_contain() {
 # each comparison site (`,,`), exactly as before. The `%/`-`%.git`-`%/` order is
 # #627's OWN pre-#760 normalisation → the #627 basename is byte-for-byte for every
 # input it handles, and #756 is byte-for-byte for every realistic + tested input
-# (owner/repo, https, scp, cwd remote). Documented residual (#319): the two ORIGINAL
-# parses already DIFFERED on a hand-typed `owner/repo.git/` (#627 stripped .git, #756
-# kept it); the unified helper strips it — a strict correctness improvement, a value
-# `git remote get-url` never emits, and both carve-outs still need their own
-# thread/verdict evidence on top of the repo match.
+# (owner/repo, https, scp, cwd remote). Documented residual (#319, widened by the
+# #760 review): the two ORIGINAL parses already DIFFERED on any TRAILING `/`+`.git`
+# JUNK combination — a hand-typed `owner/repo.git/`, a double slash `owner/repo//`,
+# and the `.git/` URL variants (`https://…/repo.git/`, `git@…:owner/repo.git/`) —
+# where the old #756 (one `%/`, `.git` first) kept the junk while the old #627 (two
+# `%/` around `.git`) stripped it; the unified helper strips the whole class. This is
+# a strict correctness improvement and NOT a reachable wrong-ALLOW: such a value is
+# never emitted by `git remote get-url`, and passed via `-R` it is REJECTED by `gh`
+# pre-network ("expected the OWNER/REPO format") → the carve-out's VGH_RC/`gh` fail-
+# safe BLOCKS exactly as the old code did; via a hand-mangled cwd remote the owner
+# must still literally match, so the strip cannot transmute a fork into the target,
+# and both carve-outs still need their own thread/verdict evidence on top.
 _repo_owner_repo_of() {
     local _r="$1"
     if [ -z "$_r" ]; then
