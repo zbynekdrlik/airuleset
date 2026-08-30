@@ -428,6 +428,7 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_last_marker_line as transcript_last_marker_line,
     transcript_last_marker_bounded as transcript_last_marker_bounded,   # #599 bounded ❓-veto read
     transcript_last_assistant_text as transcript_last_assistant_text,
+    transcript_last_backlog_empty_ts as transcript_last_backlog_empty_ts,   # #764 fulfilled-rearm 🏁 proof
     session_live_bg_bash as session_live_bg_bash,             # #599 pure bg-bash pairing
     session_has_live_bg_bash as session_has_live_bg_bash,     # #599 bg-bash veto (compact-only)
     live_bg_bash_ids as live_bg_bash_ids,                     # #605 pure bg-bash live ids (log detail)
