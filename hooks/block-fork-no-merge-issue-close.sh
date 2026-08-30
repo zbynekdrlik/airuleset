@@ -96,6 +96,73 @@ _has_gk_verdict_artifact() {
     return 1
 }
 
+# #760: shared primitives factored out of the four near-parallel carve-out
+# blocks below (author / #533 acceptance / #627 Discuss gate / #756 gk-verdict),
+# which each used to re-implement these by COPY — the drift surface the
+# #533/#540 lessons warn about (a fix to one parse had to be mirrored by hand to
+# the others). Behaviour is BYTE-FOR-BYTE unchanged; only the duplication moves
+# up here. Each helper is called ONLY from an `if`/`&&`/`!` condition (or a
+# `$(...)` capture whose failure is swallowed by `|| echo ""`), so `set -e`
+# never aborts the hook on a grep no-match — the same discipline the two helpers
+# above already follow.
+
+# The `--comment`/`-c` presence check (a static presence test, deliberately no
+# content grading) shared by the #533 acceptance and #756 verdict carve-outs.
+_cmd_has_comment_flag() {
+    printf '%s' "$CMD" | grep -qE -- '--comment([[:space:]=]|$)' \
+      || printf '%s' "$CMD" | grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)'
+}
+
+# The `-R`/`--repo`-present-but-unparseable fail-safe shared by the #533/#756
+# carve-outs ($1 = the extracted REPO_ARG). True (0) iff a -R/--repo FLAG is
+# present in $CMD but the arg came back EMPTY (a glued `-Rowner/repo`, or a form
+# the REPO_ARG parser cannot read) — the label/comment reads would then fall
+# back to the CWD repo, so the carve-out must refuse (fail SAFE). A parseable -R
+# yields a non-empty arg, so a legit close is unaffected.
+_repo_flag_unparseable() {
+    printf '%s' "$CMD" | grep -qE '(^|[[:space:]])(-R|--repo)' && [ -z "$1" ]
+}
+
+# Whole-line fixed-string label membership ($1 = newline-separated label list,
+# $2 = exact label name). Label names carry `:`, so this is `grep -qxF` (whole
+# line, fixed string), never a regex. Shared by the #533 (`_has_label`) and #756
+# (`_v_has_label`) carve-outs, which differ ONLY in which list they pass.
+_labels_contain() {
+    printf '%s\n' "$1" | grep -qxF "$2"
+}
+
+# Reduce a -R/--repo VALUE (or, when $1 is empty, the CWD git remote URL) to a
+# full `owner/repo`. Handles the three URL shapes — gh's `owner/repo` -R value,
+# https://host/owner/repo[.git], scp `git@host:owner/repo[.git]` — stripping a
+# trailing slash + `.git`, then scheme://, user@ and (scp) the host: prefix, then
+# keeping the LAST two `/`-separated segments. Shared by the #756 verdict carve-out
+# (compares the FULL owner/repo to `zbynekdrlik/odoo-erp`) and the #627 Discuss gate
+# (takes `${result##*/}` for its odoo-erp BASENAME compare); lowercasing stays at
+# each comparison site (`,,`), exactly as before. The `%/`-`%.git`-`%/` order is
+# #627's OWN pre-#760 normalisation → the #627 basename is byte-for-byte for every
+# input it handles, and #756 is byte-for-byte for every realistic + tested input
+# (owner/repo, https, scp, cwd remote). Documented residual (#319): the two ORIGINAL
+# parses already DIFFERED on a hand-typed `owner/repo.git/` (#627 stripped .git, #756
+# kept it); the unified helper strips it — a strict correctness improvement, a value
+# `git remote get-url` never emits, and both carve-outs still need their own
+# thread/verdict evidence on top of the repo match.
+_repo_owner_repo_of() {
+    local _r="$1"
+    if [ -z "$_r" ]; then
+        _r=$(git remote get-url origin 2>/dev/null || echo "")
+    fi
+    _r="${_r%/}"
+    _r="${_r%.git}"
+    _r="${_r%/}"
+    _r="${_r#*://}"                                # drop scheme:// (https/ssh)
+    _r="${_r##*@}"                                 # drop user@ (ssh)
+    case "$_r" in *:*) _r="${_r##*:}" ;; esac      # scp host: prefix
+    local _repo="${_r##*/}"
+    local _rest="${_r%/*}"
+    local _owner="${_rest##*/}"
+    printf '%s' "${_owner}/${_repo}"
+}
+
 # #540 (was #533 review M3): the `gh issue close` boundary class now includes the
 # quote chars ' and " (widened SYMMETRICALLY on the opening AND closing anchor per
 # the #471 lesson) so a close opening an interpreter's quoted argument
@@ -192,18 +259,12 @@ if [ "$_d_run_gate" = "1" ]; then
         # odoo-erp repo-scope (Odoo Discuss threads are an odoo-erp / client
         # thing): a non-odoo-erp close never engages the gate, killing the
         # cross-repo meta false-positive (e.g. this very airuleset ticket #627,
-        # whose prose names these markers). Resolve the repo from -R, else the
-        # cwd git remote; basename, strip trailing slash + .git, compare
-        # case-insensitively (the #477 _is_camera_box_repo parse order).
-        _D_REPONAME="$_D_REPO_ARG"
-        if [ -z "$_D_REPONAME" ]; then
-            _D_REPONAME=$(git remote get-url origin 2>/dev/null || echo "")
-        fi
-        _D_REPONAME="${_D_REPONAME%/}"
-        _D_REPONAME="${_D_REPONAME%.git}"
-        _D_REPONAME="${_D_REPONAME%/}"
+        # whose prose names these markers). Resolve the repo from _D_REPO_ARG
+        # (this gate's OWN glued-tolerant -R extraction above), else the cwd git
+        # remote, via the shared #760 _repo_owner_repo_of helper, then take the
+        # BASENAME and compare case-insensitively.
+        _D_REPONAME=$(_repo_owner_repo_of "$_D_REPO_ARG")
         _D_REPONAME="${_D_REPONAME##*/}"
-        _D_REPONAME="${_D_REPONAME##*:}"
         if [ "${_D_REPONAME,,}" = "odoo-erp" ]; then
             # Check EACH close target (numbers are pure digits — safe to word-split).
             # Block on the FIRST bound-no-disposition target found.
@@ -426,10 +487,9 @@ if [ -n "$ISSUE_NUM" ]; then
     # Detect a -R/--repo FLAG token in ANY form — separated (`-R foo`, `-R=foo`),
     # end-of-string, OR GLUED (`-Rfoo`, which the REPO_ARG parser cannot read). If
     # such a flag is present but REPO_ARG is empty, the labels read would fall back
-    # to the cwd repo → fail SAFE.
+    # to the cwd repo → fail SAFE (shared #760 _repo_flag_unparseable helper).
     REPO_UNPARSEABLE=0
-    if printf '%s' "$CMD" | grep -qE '(^|[[:space:]])(-R|--repo)' \
-       && [ -z "$REPO_ARG" ]; then
+    if _repo_flag_unparseable "$REPO_ARG"; then
         REPO_UNPARSEABLE=1
     fi
     if [ -n "$STREAM_LABEL" ] && [ "$REPO_UNPARSEABLE" -eq 0 ]; then
@@ -443,10 +503,11 @@ if [ -n "$ISSUE_NUM" ]; then
         # label set (mirror of the empty-AUTH / empty-AUTHOR fail direction).
         if [ "$GH_RC" -eq 0 ]; then
             # Whole-line fixed-string membership (label names carry `:`; never a
-            # regex). Defined here (reachable, LABEL_NAMES in scope); only ever
-            # called inside `if`/`&&`/`!` conditions, so `set -e` never aborts on
-            # a grep no-match.
-            _has_label() { printf '%s\n' "$LABEL_NAMES" | grep -qxF "$1"; }
+            # regex) — a thin wrapper over the shared #760 _labels_contain helper,
+            # bound to THIS block's LABEL_NAMES so _has_own_stream_label stays
+            # byte-untouched. Only ever called inside `if`/`&&`/`!` conditions, so
+            # `set -e` never aborts on a grep no-match.
+            _has_label() { _labels_contain "$LABEL_NAMES" "$1"; }
             # #564: STREAM_LABEL may be MULTIPLE newline-separated equivalents.
             # A base-stream rename (montalu -> montalu1) means this box's own
             # tickets can still carry the OLD `stream:montalu` label during the
@@ -470,9 +531,9 @@ if [ -n "$ISSUE_NUM" ]; then
                && ! _has_label "ready-for-review" \
                && ! _has_label "needs-gatekeeper" \
                && ! _has_label "prio:bounce"; then
-                # Conditions 1+2 hold; condition 3 (--comment/-c) is the last gate.
-                if printf '%s' "$CMD" | grep -qE -- '--comment([[:space:]=]|$)' \
-                   || printf '%s' "$CMD" | grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)'; then
+                # Conditions 1+2 hold; condition 3 (--comment/-c) is the last gate
+                # (shared #760 _cmd_has_comment_flag helper).
+                if _cmd_has_comment_flag; then
                     exit 0   # acceptance close WITH evidence citation — allowed (#533)
                 else
                     ACCEPTANCE_MISSING_COMMENT=1
@@ -510,32 +571,19 @@ fi
 # no verdict artifact (gk has not reviewed it) → condition 2 fails → still blocks.
 VERDICT_MISSING_COMMENT=0
 if [ -n "$ISSUE_NUM" ]; then
-    # Repo for the close: -R, else the cwd git remote. Reduce to a FULL lowercased
-    # `owner/repo` and require EXACTLY `zbynekdrlik/odoo-erp` — a basename-only match
-    # (the #627 gate's parse) would engage the carve-out for `anyowner/odoo-erp` (a
-    # fork or a same-named repo) whose safety net (the reopen-guard) does NOT exist,
-    # so the carve-out would GRANT an exemption where #627 only fails OPEN. Handle the
-    # three URL shapes: gh's `owner/repo` -R value, https://host/owner/repo[.git], and
-    # scp `git@host:owner/repo[.git]` — strip scheme://, user@, and (scp) the host:
-    # prefix, then keep the LAST two `/`-separated segments.
-    VERDICT_REPOFULL="$REPO_ARG"
-    if [ -z "$VERDICT_REPOFULL" ]; then
-        VERDICT_REPOFULL=$(git remote get-url origin 2>/dev/null || echo "")
-    fi
-    VERDICT_REPOFULL="${VERDICT_REPOFULL%.git}"
-    VERDICT_REPOFULL="${VERDICT_REPOFULL%/}"
-    VERDICT_REPOFULL="${VERDICT_REPOFULL#*://}"   # drop scheme:// (https/ssh)
-    VERDICT_REPOFULL="${VERDICT_REPOFULL##*@}"    # drop user@ (ssh)
-    case "$VERDICT_REPOFULL" in *:*) VERDICT_REPOFULL="${VERDICT_REPOFULL##*:}" ;; esac  # scp host: prefix
-    _vr_repo="${VERDICT_REPOFULL##*/}"
-    _vr_rest="${VERDICT_REPOFULL%/*}"
-    _vr_owner="${_vr_rest##*/}"
-    VERDICT_REPOFULL="${_vr_owner}/${_vr_repo}"
+    # Repo for the close: -R, else the cwd git remote. Reduce to a FULL `owner/repo`
+    # (via the shared #760 _repo_owner_repo_of helper) and require EXACTLY
+    # `zbynekdrlik/odoo-erp` (compared lowercased) — a basename-only match (the #627
+    # gate's compare) would engage the carve-out for `anyowner/odoo-erp` (a fork or a
+    # same-named repo) whose safety net (the reopen-guard) does NOT exist, so the
+    # carve-out would GRANT an exemption where #627 only fails OPEN. The helper handles
+    # the three URL shapes (gh's `owner/repo` -R value, https, scp `git@host:`).
+    VERDICT_REPOFULL=$(_repo_owner_repo_of "$REPO_ARG")
     # #533 review m5 mirror: a -R flag present but REPO_ARG empty (a glued
-    # `-Rowner/repo`) → the reads below would target the CWD repo → fail SAFE.
+    # `-Rowner/repo`) → the reads below would target the CWD repo → fail SAFE
+    # (shared #760 _repo_flag_unparseable helper).
     VERDICT_REPO_UNPARSEABLE=0
-    if printf '%s' "$CMD" | grep -qE '(^|[[:space:]])(-R|--repo)' \
-       && [ -z "$REPO_ARG" ]; then
+    if _repo_flag_unparseable "$REPO_ARG"; then
         VERDICT_REPO_UNPARSEABLE=1
     fi
     if [ "${VERDICT_REPOFULL,,}" = "zbynekdrlik/odoo-erp" ] && [ "$VERDICT_REPO_UNPARSEABLE" -eq 0 ]; then
@@ -560,17 +608,18 @@ if [ -n "$ISSUE_NUM" ]; then
             V_LABELS=$(printf '%s' "$VERDICT_JSON" | jq -r '.labels[].name' 2>/dev/null || true)
             V_COMMENTS=$(printf '%s' "$VERDICT_JSON" | jq -r '.comments[].body' 2>/dev/null || true)
             # Whole-line fixed-string membership (label names carry `:`; never a
-            # regex). Only ever called inside `if`/`!` conditions, so `set -e`
-            # never aborts on a grep no-match.
-            _v_has_label() { printf '%s\n' "$V_LABELS" | grep -qxF "$1"; }
+            # regex) — a thin wrapper over the shared #760 _labels_contain helper,
+            # bound to THIS block's V_LABELS. Only ever called inside `if`/`!`
+            # conditions, so `set -e` never aborts on a grep no-match.
+            _v_has_label() { _labels_contain "$V_LABELS" "$1"; }
             if _has_gk_verdict_artifact "$V_COMMENTS" \
                && ! _v_has_label "ready-for-review" \
                && ! _v_has_label "needs-gatekeeper" \
                && ! _v_has_label "prio:bounce" \
                && ! _v_has_label "needs-acceptance"; then
-                # Conditions 1+2+3 hold; condition 4 (--comment/-c) is the last gate.
-                if printf '%s' "$CMD" | grep -qE -- '--comment([[:space:]=]|$)' \
-                   || printf '%s' "$CMD" | grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)'; then
+                # Conditions 1+2+3 hold; condition 4 (--comment/-c) is the last gate
+                # (shared #760 _cmd_has_comment_flag helper).
+                if _cmd_has_comment_flag; then
                     exit 0   # post-gk-review stream self-close WITH evidence — allowed (#756)
                 else
                     VERDICT_MISSING_COMMENT=1
