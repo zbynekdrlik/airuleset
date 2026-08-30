@@ -1240,6 +1240,74 @@ def _release_recheck_flagged(rows, cwd=None, now=None, self_login=None,
     return flagged
 
 
+# #753 part 1a — the mechanical `unpark?` signal for a release-parked W member
+# whose release has PROVABLY landed. `_release_train_drained` is the SAME
+# proof-only predicate the #698 nudge uses; duplicated here — NOT imported — to
+# keep cli_quals free of a watchdog import (the pattern `_RELEASE_RECHECK_TITLE_RX`
+# already follows), drift-locked to
+# `watchdog.ops_wait_recheck._release_train_drained` by test.
+def _release_train_drained(rstate):
+    """True IFF `rstate` proves a real, fully-drained 3-branch release train:
+    `train` True (staging verified to exist), `ahead` == 0 (integration not ahead
+    of prod), `in_flight` False (no open release PR / running deploy). Anything
+    else — None/undetermined, a missing/False `train`, a live gap, a bool `ahead`
+    — is False (the escalated "unpark" claim never rides an unproven state)."""
+    if not isinstance(rstate, dict):
+        return False
+    ahead = rstate.get("ahead")
+    return (rstate.get("train") is True
+            and isinstance(ahead, int) and not isinstance(ahead, bool)
+            and ahead == 0 and rstate.get("in_flight") is False)
+
+
+# authorities whose ORIGIN is the canonical repo, so an origin release-train read
+# is trustworthy. A fork-no-merge box's origin is the FORK, whose frozen branches
+# could read "drained" forever — the #698 false-claim the guard exists for.
+_UNPARK_AUTHORITIES = ("full", "branch-merge")
+
+
+def _unpark_release_flagged(rows, authority=None, release_fetch=None):
+    """The set of release-parked ops-wait (W) member numbers to tag `unpark?`
+    (#753 part 1a) — a member whose blocker (a release) has PROVABLY landed, so
+    the OWNING session should verify per #588 and clear `ops-wait`. Flagged iff:
+      - the TITLE names a release/version/stage (`_RELEASE_RECHECK_TITLE_RX`) AND
+        the member's reason is `ops-wait` (NOT `acceptance` — a client-blocked
+        member with a release-ish title belongs to the (b) UNPARK-AUDIT branch), AND
+      - `authority` ∈ {full, branch-merge} (origin == the canonical repo), AND
+      - the repo's release train is PROVEN drained (`_release_train_drained` over
+        the origin state `release_fetch()` returns).
+    `release_fetch` is a 0-arg callable read AT MOST ONCE, and ONLY when a
+    release-shaped member exists AND `authority` qualifies (so a repo with no
+    release-parked member does ZERO extra work — the #570 budget is untouched, no
+    per-member read). Fail-safe UNTAGGED (the #539/#570 never-false-accuse bias):
+    a non-qualifying/absent authority, a fetch error/None, a not-drained/
+    undetermined state, or no release-shaped member → the EMPTY set. Consistent
+    between the session's on-demand `--ops-wait` call and the watchdog subprocess:
+    both read the SAME origin state (never a credless PROD/Discuss read — the
+    rejected option B), so the tag can never count inconsistently between them."""
+    if authority not in _UNPARK_AUTHORITIES:
+        return set()
+    # Scope to `ops-wait`-reason members (parked on an external event) — EXCLUDE
+    # an `acceptance`-reason member (client-blocked) that merely happens to carry
+    # a release-shaped title (`nasadenie`/`deploy`/`v2.1`): its blocker is a CLIENT
+    # reply, not a release, so it belongs to the (b) UNPARK-AUDIT branch, never a
+    # release-landed `unpark?`. Labels are already in the rows (zero extra gh).
+    shaped = {n for n, row in rows.items()
+              if isinstance(row, dict)
+              and isinstance(row.get("title"), str)
+              and _RELEASE_RECHECK_TITLE_RX.search(row["title"])
+              and _ops_wait_reason(row.get("labels")) == "ops-wait"}
+    if not shaped:
+        return set()
+    try:
+        rstate = release_fetch() if release_fetch is not None else None
+    except Exception:
+        rstate = None
+    if not _release_train_drained(rstate):
+        return set()
+    return shaped
+
+
 # #636: the gk hand-off labels that CONTRADICT an `ops-wait` park. Either means
 # "parked with the gatekeeper for a gk ACTION" — the gatekeeper is a named fleet
 # actor with a dedicated hand-off lane, NOT a third party (the exact parallel of

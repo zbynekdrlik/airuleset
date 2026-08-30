@@ -4198,11 +4198,16 @@ def _watchdog_ops_wait_fetch(cwd):
     below SKIPS (a `#`-prefixed comment is not a member row); field 0 is the
     issue number, field 3 the reason
     (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
-    push — #570 — and/or a ` gk-handoff!` warning for a member ALSO carrying a
-    gk hand-off label — #636). Returns a list of `{"number": int, "stale": bool,
-    "gk_handoff": bool, "title": str}` so the job 20 nudge can NAME the stale +
-    gk-handoff members and detect release-SHAPED titles (#698 — field 4, which
-    `--ops-wait` already prints; a degraded short line reads as title "");
+    push — #570 — a ` gk-handoff!` warning for a member ALSO carrying a gk
+    hand-off label — #636 — a ` recheck!` warning — #699 — and/or a ` unpark?`
+    candidate for a release-parked member whose release provably landed — #753,
+    a SESSION-facing tag with no watchdog consumer, so it is not parsed).
+    Returns a list of `{"number": int, "stale": bool, "gk_handoff": bool,
+    "release_recheck": bool, "acceptance": bool, "title": str}` so the job 20
+    nudge can NAME the stale + gk-handoff members, count the acceptance-parked
+    members (the #753 (b) UNPARK-AUDIT), and detect release-SHAPED titles (#698 —
+    field 4, which `--ops-wait` already prints; a degraded short line reads as
+    title "");
     the sibling `ops_wait_recheck` helpers accept BOTH this dict shape
     AND a legacy bare `int` (back-compat). A None
     return (non-zero exit — the #181 untrustworthy-empty refusal — or an
@@ -4256,16 +4261,25 @@ def _watchdog_ops_wait_fetch(cwd):
         # `--ops-wait` always prints the FULL 5-field form (reason_fn is always
         # given), so field 3 IS the reason column (`ops-wait`/`acceptance` +
         # optional ` gk-handoff!` (#636) + optional ` stale!` + optional
-        # ` recheck!` (#699)). Require >=5 fields so a hypothetical degraded
+        # ` recheck!` (#699) + optional ` unpark?` (#753)). Require >=5 fields so
+        # a hypothetical degraded
         # 4-field line (title at index 3) can never be misread as a flag (#570
         # review nit); anything shorter -> no flag.
         reason = parts[3] if len(parts) >= 5 else ""
         # #698: the TITLE (field 4, tab-joined in case a title itself carries a
         # tab) feeds the job-20 release-shaped detection — zero new gh calls.
         title = "\t".join(parts[4:]) if len(parts) >= 5 else ""
+        # #753 (b): the base `acceptance` reason (client-thread-parked) feeds the
+        # job-20 UNPARK-AUDIT count — parsed from the reason field, zero new gh
+        # calls. No flag token contains "acceptance", so the substring test is
+        # unambiguous. (The `unpark?` (a) token is a SESSION-facing CLI tag with no
+        # watchdog consumer — RELEASE LANDOL stays the nudge's release-landed
+        # signal — so it is deliberately NOT parsed here; a future RELEASE-LANDOL/
+        # unpark? unification, #753 Approach 4, would re-add it.)
         members.append({"number": num, "stale": "stale!" in reason,
                         "gk_handoff": "gk-handoff!" in reason,
                         "release_recheck": "recheck!" in reason,
+                        "acceptance": "acceptance" in reason,
                         "title": title})
     return members
 
@@ -4382,11 +4396,15 @@ def _watchdog_release_state_fetch(cwd):
     release train (#698)>}`, or None on any TRANSIENT failure/refusal
     (undetermined -> both job-20 consumers fail safe: the release-gap rider to
     no-nudge, the release-landed escalation to the generic wording). This RAW
-    fetch is uncached; the callers read it
-    through `release_gap._cached_release_state` (a per-repo TTL cache, the sibling
-    of `_cached_ops_wait`) so it fires at most once per repo per TTL, never every
-    sweep per pane. Wired HERE like every network call so run_once's unit tests
-    stay network-free.
+    fetch is uncached; the WATCHDOG callers read it through
+    `release_gap._cached_release_state` (a per-repo TTL cache, the sibling of
+    `_cached_ops_wait`) so it fires at most once per repo per TTL, never every
+    sweep per pane. The #753 `unpark?` CLI caller (`cli_quals_cmd._ops_wait_flag_
+    sets` via a `lambda: _watchdog_release_state_fetch(root)`) calls this RAW fetch
+    DIRECTLY — but only lazily, when a release-shaped W member exists, and the
+    whole `--ops-wait` subprocess it runs in is itself the watchdog's TTL-bounded
+    `_cached_ops_wait` (so it too fires at most once per repo per ops-wait TTL).
+    Wired HERE like every network call so run_once's unit tests stay network-free.
 
     Repo slug comes from the LOCAL `remote.origin.url` (no network). It is used
     ONLY when the URL names an allowed host (default github.com,
@@ -5398,6 +5416,8 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _release_recheck_flagged as _release_recheck_flagged,
+    _release_train_drained as _release_train_drained,
+    _unpark_release_flagged as _unpark_release_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
