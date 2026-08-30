@@ -2621,13 +2621,19 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
         self.assertTrue(any("drop:attempt-cap" in ln for ln in logs), logs)
         self.assertTrue(any("leftover=skipped" in ln for ln in logs), logs)
 
-    # -------- D3: tmux client input is a human signal for ALL origins ---- #
-    def test_client_active_defers_delivery(self):
+    # -------- D3: tmux client input defers a WATCHDOG re-arm (#752) ------- #
+    def test_client_active_defers_watchdog_rearm(self):
+        # #752 -- the client-input human signal now vetoes ONLY a watchdog-
+        # initiated re-arm (dark/stale/auth), never the user's own
+        # `self-callback` /autopilot arm. A `dark-rearm` into a pane whose
+        # attached client typed recently is deferred (via the recent-human
+        # gate, which since #731 includes the SAME client-input signal), so no
+        # keystroke lands and the request stays pending.
         proj = self._dir()
         sid = "sess-cap-client"
         _write_marker_transcript(proj, self.CWD, sid)
         goal.record_goal_request(sid, self.CWD, "/goal x", "full",
-                                 now=1000, path=self.reqp, origin="self-callback")
+                                 now=2000, path=self.reqp, origin="dark-rearm")
         # an attached client with input 10 s ago -> a live human -> defer.
         tmux = _ClientActiveFake([("%9", "claude", self.CWD, "111")],
                                  GOAL_IDLE_CAP, model_type=True,
@@ -2637,10 +2643,10 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
                                send_fn=lambda m, **k: None,
                                sleep_fn=lambda *a, **k: None)
         self.assertEqual(tmux.typed_texts(), [],
-                         "a live tmux client vetoes the keystroke")
-        self.assertTrue(any("skip:client-active" in ln for ln in logs), logs)
+                         "a live tmux client vetoes a watchdog re-arm keystroke")
+        self.assertTrue(any("skip:" in ln for ln in logs), logs)
         self.assertIn(sid, goal.load_goal_requests(self.reqp),
-                      "a client-active defer leaves the request pending")
+                      "a deferred re-arm leaves the request pending")
 
     def test_no_clients_does_not_veto(self):
         proj = self._dir()

@@ -59,13 +59,16 @@ through a callback in the /autopilot command." Concretely:
              structurally-always-refuses bug, not a safety net. That
              transcript gate stays exactly where it already earns its keep:
              the watchdog-INITIATED re-arm origins + the lane-occupancy
-             nudge below. But #731 adds ONE pre-keystroke defer that DOES
-             apply to every origin here (`_goal_client_active_skip` ->
-             `skip:client-active`): an ATTACHED tmux client's OWN input
-             within a SEPARATE 5-min window (not the 30-min transcript
-             one), so a human physically typing/deleting in this pane NOW
-             defers the type -- the montalu4 blind spot. It is a zero-
-             keystroke soft defer, never counts toward the attempt cap.
+             nudge below. #731 added a pre-keystroke defer -- an ATTACHED
+             tmux client's OWN input within a SEPARATE 5-min window (not
+             the 30-min transcript one), the montalu4 blind spot -- but
+             #752 SCOPED it to the SAME watchdog-INITIATED re-arm origins
+             (owner ruling 2026-08-30): a `self-callback` arm is the owner
+             having just typed `/autopilot`, so their keyboard presence is
+             NEVER a reason to defer it, and it is NOT client-active
+             vetoed here (`_goal_client_active_skip` is called only for
+             `_GOAL_WATCHDOG_REARM_ORIGINS`). It is a zero-keystroke soft
+             defer, never counts toward the attempt cap.
 
   RE-ARM  -- a genuine `/autopilot` invocation (the SAME `goal-arm --self`
              callback, called fresh), OR -- since #478/#524 -- the watchdog
@@ -1214,9 +1217,12 @@ def _goal_client_active_skip(sid, cwd, pid, run, now, out):
     (architecture-first: keep the delivery function lean). An ATTACHED human
     typing/deleting in this pane NOW vetoes the type even when they submit
     nothing -- the montalu4 blind spot the transcript-based recent-human gate
-    cannot see. The transcript gate stays watchdog-only (its 30-min window
-    structurally-always-refuses a normal arm); this is the SEPARATE 5-min client
-    window, a zero-keystroke DEFER that never counts toward the attempt cap.
+    cannot see. Since #752 this is called ONLY for the watchdog-INITIATED
+    re-arm origins (`_GOAL_WATCHDOG_REARM_ORIGINS`), the SAME partition the
+    transcript recent-human gate uses: a `self-callback` /autopilot arm is
+    never client-active vetoed (owner ruling 2026-08-30). For a re-arm it is
+    the SEPARATE 5-min client window (not the 30-min transcript one), a
+    zero-keystroke DEFER that never counts toward the attempt cap.
     Returns "skip:client-active" (logged, out['detail'] set) or None (proceed)."""
     cactive, creason = watchdog._tmux_client_recent_input(pid, run, now)
     if not cactive:
@@ -1454,10 +1460,28 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("SKIP undeterminable sid=%s cwd=%s" % (sid, cwd))
         return "skip:undeterminable"
 
-    # #731 -- PRE-KEYSTROKE client-input DEFER for EVERY origin (incl. normal).
-    _cskip = _goal_client_active_skip(sid, cwd, pid, run, now, out)
-    if _cskip:
-        return _cskip
+    # #752 -- the pre-keystroke client-input DEFER is now ORIGIN-SCOPED, on the
+    # SAME partition as the recent-human gate above. The user's OWN
+    # `self-callback` /autopilot arm IS the owner having just typed the command,
+    # so their presence at the keyboard is NEVER a reason to defer it (owner
+    # ruling 2026-08-30) -- the request proceeds on the first idle sweep;
+    # safety is carried by the idle-box/busy gate below + deliver_with_stash
+    # draft protection (#35, stashes+restores the owner's just-typed text) +
+    # #737/#746 verified typing. ACCEPTED RESIDUAL (owner-ruled): an owner
+    # typing CONCURRENTLY with this self-callback type gets interleaved
+    # keystrokes, and a corrupt-type undo (len-based backspaces) can eat the
+    # human's interleaved chars -- stash+verified-typing BOUND, not eliminate,
+    # that window; the owner accepts it (never deferring their own arm).
+    # A WATCHDOG-initiated re-arm (dark/stale/auth)
+    # keeps the 5-min veto: an unexpected /goal keystroke into a human-active
+    # pane is the injection hazard (the gk login-cancel class). This is NOT
+    # dead for those origins -- it is a LATER re-read of `#{client_activity}`
+    # closest to the keystroke, catching a human who began typing AFTER the
+    # recent-human gate passed but BEFORE the keystroke (the #731 rationale).
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+        _cskip = _goal_client_active_skip(sid, cwd, pid, run, now, out)
+        if _cskip:
+            return _cskip
 
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
