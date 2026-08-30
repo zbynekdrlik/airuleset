@@ -139,6 +139,98 @@ class GoalRequestState(unittest.TestCase):
                                  path=p, origin="dark-rearm")
         self.assertEqual(goal.load_goal_requests(p)["sess-1"]["ts"], 1000)
 
+    def test_self_callback_re_record_gets_a_fresh_ts(self):
+        # #757 — a same-origin self→self re-record (owner re-runs /autopilot
+        # while the prior arm is still pending) is a GENUINE fresh user
+        # callback and must get a FRESH ts anchor, exactly like the dark→user
+        # UPGRADE and the dl_fails reset already do. Reverses the #400
+        # self-callback anchor invariant: a user callback needs a human
+        # /autopilot each time, so it can never drive the refresh-forever
+        # shape the anchor guards against.
+        p = self._p()
+        goal.record_goal_request("sess-1", "/x", "/goal a", "full", now=1000,
+                                 path=p, origin="self-callback")
+        goal.record_goal_request("sess-1", "/y", "/goal b", "full", now=5000,
+                                 path=p, origin="self-callback")
+        e = goal.load_goal_requests(p)["sess-1"]
+        self.assertEqual(e["ts"], 5000, "fresh user re-record resets the anchor")
+        self.assertEqual(e["cwd"], "/y")
+        self.assertEqual(e["text"], "/goal b")
+
+    def test_repeated_autopilot_does_not_expire_early(self):
+        # #757 end-to-end incident repro (the actual bug, not a unit proxy):
+        # owner arms at t0, re-runs /autopilot at t0+25m, and the expiry
+        # sweep runs at t0+40m. The fresh arm is only 15m old and must NOT be
+        # judged expired against the FIRST arm's stale anchor.
+        p = self._p()
+        t0 = 1_000_000
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=t0,
+                                 path=p, origin="self-callback")
+        goal.record_goal_request("s", "/x", "/goal a", "full",
+                                 now=t0 + 25 * 60, path=p, origin="self-callback")
+        ts = goal.load_goal_requests(p)["s"]["ts"]
+        age_at_sweep = goal._safe_age(t0 + 40 * 60, ts)
+        self.assertLessEqual(
+            age_at_sweep, goal.GOAL_REQUEST_MAX_AGE_S,
+            "fresh re-armed request must not be expired inside its own window")
+
+    def test_unknown_origin_re_record_preserves_ts_failsafe(self):
+        # #757 fail-safe lock — the allowlist (not a denylist) direction:
+        # an UNKNOWN novel origin re-recording over a user prior must PRESERVE
+        # the anchor, so a future automatic origin nobody classified can never
+        # silently gain refresh-forever rights and reopen #400.
+        p = self._p()
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=1000,
+                                 path=p, origin="self-callback")
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=9000,
+                                 path=p, origin="some-future-origin")
+        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000,
+                         "unknown origin must fail safe to preserve")
+
+    def test_empty_origin_re_record_over_user_prior_preserves_ts(self):
+        # #757 — a None/empty new origin (legacy/hand-edited store) is not in
+        # the user-callback allowlist, so it PRESERVES the anchor.
+        p = self._p()
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=1000,
+                                 path=p, origin="self-callback")
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=9000,
+                                 path=p, origin=None)
+        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000)
+
+    def test_self_callback_re_record_resets_both_dl_fails_and_ts(self):
+        # #757 coherence — one same-origin self→self re-record must reset the
+        # WHOLE episode: both the #731 dl_fails counter AND the #400 ts anchor.
+        # The two were inconsistent before this fix (dl_fails reset, ts frozen).
+        p = self._p()
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=1000,
+                                 path=p, origin="self-callback")
+        goal._bump_goal_delivery_fail("s", "skip:busy", path=p)
+        self.assertEqual(goal.load_goal_requests(p)["s"]["dl_fails"], 1)
+        goal.record_goal_request("s", "/x", "/goal a", "full", now=5000,
+                                 path=p, origin="self-callback")
+        e = goal.load_goal_requests(p)["s"]
+        self.assertNotIn("dl_fails", e, "dl_fails reset on a fresh episode")
+        self.assertEqual(e["ts"], 5000, "ts reset on the same fresh episode")
+
+    def test_stale_rearm_re_record_preserves_ts(self):
+        # #757 — a watchdog stale-rearm re-record PRESERVES the anchor (an
+        # automatic re-arm must never refresh the cap forever).
+        p = self._p()
+        goal.record_goal_request("s", "/wd", "/goal a", "full", now=1000,
+                                 path=p, origin="stale-rearm")
+        goal.record_goal_request("s", "/wd", "/goal a", "full", now=5000,
+                                 path=p, origin="stale-rearm")
+        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000)
+
+    def test_auth_rearm_re_record_preserves_ts(self):
+        # #757 — a watchdog auth-rearm re-record PRESERVES the anchor too.
+        p = self._p()
+        goal.record_goal_request("s", "/wd", "/goal a", "full", now=1000,
+                                 path=p, origin="auth-rearm")
+        goal.record_goal_request("s", "/wd", "/goal a", "full", now=5000,
+                                 path=p, origin="auth-rearm")
+        self.assertEqual(goal.load_goal_requests(p)["s"]["ts"], 1000)
+
     def test_clear_removes_one_request_only(self):
         p = self._p()
         goal.record_goal_request("sess-1", "/x", "/goal a", "full", path=p)
