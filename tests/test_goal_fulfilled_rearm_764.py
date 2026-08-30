@@ -93,6 +93,44 @@ class TestBacklogEmptyProofReader(unittest.TestCase):
         self.assertIsNone(
             wd.transcript_last_backlog_empty_ts(self._tmp() / "nope.jsonl"))
 
+    # --- #767: backward scan finds a 🏁 shadowed by later chore turns --------- #
+    def test_scan_back_finds_shadowed_flag_default_does_not(self):
+        p = self._tmp() / "s.jsonl"
+        _append_assistant(p, "warmup", 100)
+        _append_assistant(p, _BACKLOG_DONE, 600)     # the REAL completion 🏁
+        _append_assistant(p, "chore ✅ DONE", 700)    # a later NON-🏁 chore turn
+        # default (newest-turn-only) is SHADOWED by the chore turn -> None:
+        self.assertIsNone(wd.transcript_last_backlog_empty_ts(p),
+                          "newest-turn-only is shadowed by the chore turn")
+        # scan_back skips the chore and finds the LAST 🏁:
+        self.assertEqual(
+            wd.transcript_last_backlog_empty_ts(p, scan_back=True), 600.0,
+            "scan_back returns the 🏁 behind post-achieve chores")
+
+    def test_scan_back_returns_the_NEWEST_flag_when_several(self):
+        p = self._tmp() / "s.jsonl"
+        _append_assistant(p, _BACKLOG_DONE, 300)     # an OLD 🏁
+        _append_assistant(p, "chore ✅ DONE", 400)
+        _append_assistant(p, _BACKLOG_DONE, 600)     # a NEWER 🏁
+        _append_assistant(p, "chore ✅ DONE", 700)
+        self.assertEqual(
+            wd.transcript_last_backlog_empty_ts(p, scan_back=True), 600.0,
+            "scan_back returns the NEWEST 🏁, not the oldest")
+
+    def test_scan_back_skips_a_later_api_error_turn(self):
+        p = self._tmp() / "s.jsonl"
+        _append_assistant(p, _BACKLOG_DONE, 600)
+        entry = {"type": "assistant", "timestamp": _iso(700),
+                 "isApiErrorMessage": True,
+                 "message": {"id": "err", "content": "API error"}}
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        # default: a newest api-error turn is terminal -> None
+        self.assertIsNone(wd.transcript_last_backlog_empty_ts(p))
+        # scan_back: an api-error turn is never a completion, so skip it -> 🏁
+        self.assertEqual(
+            wd.transcript_last_backlog_empty_ts(p, scan_back=True), 600.0)
+
 
 # --------------------------------------------------------------------------- #
 # 2. The fulfilled-rearm lane inside goal_dark_watch.
@@ -437,6 +475,64 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "an achieved loop records no re-arm (backlog empty)")
         self.assertTrue(any("FULFILLED-SILENT" in ln for ln in (l1 + l2)), l1 + l2)
+
+    def test_proof_cache_carries_a_rearm_when_flag_scrolled_out(self):
+        # heavy post-achieve output BURIES the 🏁 past the 200-entry bounded tail;
+        # a proof recorded on an EARLIER sweep of the SAME arm still re-arms.
+        now = 1_000_000
+        mark_ts = now - 100
+        done_ts = now - 50
+        proj, tmux = self._fixture("sess-cache", mark_ts=mark_ts, done_ts=done_ts)
+        tpath = next(proj.rglob("sess-cache.jsonl"))
+        for i in range(260):                      # bury the 🏁 past the tail
+            _append_assistant(tpath, "chore %d ✅ DONE" % i, done_ts + 1 + i)
+        # the scan alone can no longer see the 🏁 (out of the 200-entry window):
+        self.assertIsNone(
+            wd.transcript_last_backlog_empty_ts(tpath, scan_back=True),
+            "the 🏁 must be scrolled out of the bounded tail for this test")
+        # pre-seed the cache as an EARLIER sweep of THIS arm would have:
+        state = {"goal_fulfilled_proof":
+                 {"sess-cache": {"mark_ts": mark_ts, "bts": done_ts}}}
+        reqs, logs, _ = self._sweep(proj, tmux, now, (7, now), state)
+        self.assertEqual(reqs.get("sess-cache", {}).get("origin"), self.ORIGIN,
+                         "the per-episode cache carries the proof when 🏁 scrolled out")
+        self.assertTrue(any("FULFILLED-REARM" in ln for ln in logs), logs)
+
+    def test_proof_cache_from_a_different_arm_is_ignored(self):
+        # a cache entry recorded under a PREVIOUS arm (mark_ts M1); the current
+        # arm is M2 and its transcript carries NO 🏁 -> the stale cache must NOT
+        # re-arm (no cross-episode leak).
+        now = 1_000_000
+        m2 = now - 100
+        proj, tmux = self._fixture("sess-stalecache",
+                                   last_text="bežný ✅ DONE (žiadne 🏁)",
+                                   mark_ts=m2, done_ts=now - 50)
+        state = {"goal_fulfilled_proof":
+                 {"sess-stalecache": {"mark_ts": m2 - 5000, "bts": now - 4000}}}
+        reqs, _logs, _ = self._sweep(proj, tmux, now, (7, now), state)
+        self.assertEqual(reqs, {},
+                         "a cache from a DIFFERENT arm (mark mismatch) never re-arms")
+
+    def test_proof_cache_is_written_on_a_rearm_sweep(self):
+        # a 🏁-in-window rearm sweep persists the proof for the current arm.
+        proj, tmux = self._shadowed_fixture("sess-writecache")
+        state = {}
+        self._sweep(proj, tmux, 100000, (7, 100000), state)
+        proof = state.get("goal_fulfilled_proof", {}).get("sess-writecache")
+        self.assertIsInstance(proof, dict, "the sweep persists the 🏁 proof")
+        self.assertEqual(proof.get("mark_ts"), 500)
+        self.assertEqual(proof.get("bts"), 600.0)
+
+    def test_non_flag_dead_loop_still_falls_through_unchanged(self):
+        # a genuinely-dead loop (NO 🏁 anywhere, no cache) is NOT this lane:
+        # records no fulfilled-rearm and debounces on its first observation.
+        proj, tmux = self._fixture("sess-dead", last_text="pracujem... (žiadne 🏁)")
+        state = {}
+        reqs, logs, _ = self._sweep(proj, tmux, 100000, (7, 100000), state)
+        self.assertEqual(reqs, {}, "no 🏁 -> the fulfilled lane never fires")
+        self.assertNotIn("sess-dead", state.get("goal_fulfilled_proof", {}),
+                         "no 🏁 -> no proof cache entry written")
+        self.assertTrue(any("first observation" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":

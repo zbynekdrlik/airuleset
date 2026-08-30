@@ -2127,8 +2127,8 @@ def _fulfilled_rearm_ok(recs, now):
 
 def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
                             rearm_fn, obligation_fn, requests_path,
-                            fulfilled_state, seen_state, pinged_state,
-                            confirm_state):
+                            fulfilled_state, fulfilled_proof, seen_state,
+                            pinged_state, confirm_state):
     """#764 -- for a footer-DARK, mark=="set" loop (`goal_dark_watch`'s
     `armed is False` branch), decide whether it is a FULFILLED (stop-(B)
     completed) loop whose backlog REFILLED and, if so, RECORD a `fulfilled-rearm`
@@ -2158,9 +2158,25 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     All state mutations are guarded on `not dry_run`. Never raises via the pure
     helpers it calls; a `record_goal_request` / rearm_fn / obligation_fn failure
     degrades to a fall-through (the safe, no-keystroke direction)."""
-    bts = watchdog.transcript_last_backlog_empty_ts(tpath)
-    if bts is None:
-        return None, False                       # no 🏁 proof -> not this lane
+    # #767 -- BACKWARD-scan the bounded tail (scan_back=True) so a genuine 🏁 is
+    # not SHADOWED by later non-🏁 post-achieve chore turns (the live gk failure:
+    # a completed loop kept working ~18 min after 🏁 and its newest turn hid the
+    # proof forever). Then fall back to the per-episode PROOF CACHE: heavy
+    # post-achieve output can scroll the 🏁 clean out of the 2 MB / 200-entry
+    # window, but a proof recorded on an EARLIER sweep of the SAME arm still
+    # counts. A cache entry from a DIFFERENT arm (mark_ts mismatch) is IGNORED,
+    # so there is no cross-episode re-arm leak; the reader tolerates a malformed
+    # entry (read fail -> as if no cache, the safe direction).
+    bts = watchdog.transcript_last_backlog_empty_ts(tpath, scan_back=True)
+    cached = fulfilled_proof.get(sid)
+    cbts = None
+    if (isinstance(cached, dict) and cached.get("mark_ts") == mark_ts
+            and isinstance(cached.get("bts"), (int, float))):
+        cbts = cached["bts"]
+    proofs = [x for x in (bts, cbts) if isinstance(x, (int, float))]
+    if not proofs:
+        return None, False                       # no 🏁 proof (found nor cached)
+    bts = max(proofs)
     # The 🏁 MUST be provably AFTER the current arm. Fail CLOSED: an unparseable
     # `mark_ts` (`_newest_marker` sets ts=None on any timestamp parse failure)
     # means the ordering is UNPROVEN, so do NOT re-arm on a possibly-stale 🏁
@@ -2168,6 +2184,12 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     # _empty_ts takes for its own unparseable-ts case (never a false re-arm).
     if not (isinstance(mark_ts, (int, float)) and bts >= mark_ts):
         return None, False                       # 🏁 unproven-after-arm -> no re-arm
+    # #767 -- PERSIST the proof for THIS arm so a later 🏁-scrolled-out sweep can
+    # still see it (the veto AND rearm branches BOTH reach here). Guarded on not
+    # dry_run: an honest dry-run mutates no state (mirrors the fulfilled_state
+    # write below). goal_dark_watch's 24h reaper prunes an abandoned entry.
+    if not dry_run:
+        fulfilled_proof[sid] = {"mark_ts": mark_ts, "bts": bts}
 
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = (cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
@@ -2568,6 +2590,13 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # #764 -- the per-sid fulfilled-rearm record timestamps (rate limiter), a
     # JSON list per sid; reaped below exactly like `attempts_state`.
     fulfilled_state = state.setdefault("goal_fulfilled_rearm", {})
+    # #767 -- the per-episode 🏁 PROOF cache `{sid: {"mark_ts", "bts"}}`. Written
+    # on ANY 🏁-after-mark sighting (both the fulfilled-rearm AND the #766 veto
+    # branch) so heavy post-achieve output that scrolls the 🏁 out of the 2 MB
+    # tail cannot erase the proof; used only when its mark_ts matches the current
+    # arm (no cross-episode leak). Reaped below on `bts` age, mirroring
+    # `fulfilled_state`.
+    fulfilled_proof = state.setdefault("goal_fulfilled_proof", {})
     # #522 -- the disarm-on-question veto (written by goal_question_repoke_watch,
     # READ + re-entry-popped here). Reaped by that job; setdefault only so a pop
     # below always targets the real state dict even on the first sweep.
@@ -2598,6 +2627,15 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                           and any(isinstance(t, (int, float))
                                   and 0 <= (now - t) <= _day for t in v))]:
         fulfilled_state.pop(_fsid, None)
+    # #767 -- same 24h REAPER for the proof cache: reap a sid whose 🏁 (`bts`) is
+    # older than the window or malformed. A live fulfilled loop re-writes a fresh
+    # bts each 🏁-in-window sighting, so it is never reaped; once the 🏁 scrolls
+    # out the entry ages out (rate limits deliver the re-arm long before 24h).
+    for _psid in [k for k, v in list(fulfilled_proof.items())
+                  if not (isinstance(v, dict)
+                          and isinstance(v.get("bts"), (int, float))
+                          and 0 <= (now - v["bts"]) <= _day)]:
+        fulfilled_proof.pop(_psid, None)
 
     # #488 review-1 -- GC the age-unbounded stash_parks records for panes that
     # no longer exist. The per-pane marker-gone backstop below only sees panes
@@ -2821,8 +2859,8 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # not a dead loop), so a legitimately-completed loop is never pinged.
         _frline, _frhandled = _fulfilled_rearm_decide(
             sid, cwd, tpath, mark_ts, now, loc, dry_run, rearm_fn,
-            obligation_fn, requests_path, fulfilled_state, seen_state,
-            pinged_state, confirm_state)
+            obligation_fn, requests_path, fulfilled_state, fulfilled_proof,
+            seen_state, pinged_state, confirm_state)
         if _frline:
             logs.append(_frline)
         if _frhandled is _FULFILLED_SILENT:
