@@ -30,7 +30,10 @@ through a callback in the /autopilot command." Concretely:
              "please compact." One origin is honest, not a shortcut.
 
   DELIVERY -- ONE function, `deliver_goal()`. It checks, in order: the
-             owner kill-switch; a hard, non-refreshable age cap (an expired
+             owner kill-switch; a hard age cap non-refreshable by any
+             AUTOMATIC path (#757: only a fresh human `/autopilot` re-record
+             replaces the request with a fresh anchor, via
+             `record_goal_request`'s user-callback allowlist) (an expired
              request pings once -- "arm failed, re-run /autopilot" -- since
              a silently-undeliverable arm request is a dark-autopilot
              failure, not a harmless drop like compact's); pane resolution;
@@ -231,6 +234,19 @@ _GOAL_AUTH_REARM_ORIGIN = "auth-rearm"
 # own `self-callback` arm, whose origin IS the user.
 _GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN, _GOAL_STALE_REARM_ORIGIN,
                                 _GOAL_AUTH_REARM_ORIGIN)
+# #757 -- the genuine USER-callback origins: a request written because a HUMAN
+# typed `/autopilot` (the only such origin today is `self-callback`, produced
+# ONLY by the CLI `goal-arm --self` -- never auto-refired in a loop). This is
+# the SYMMETRIC counterpart of `_GOAL_WATCHDOG_REARM_ORIGINS`: together the two
+# tuples partition every origin into "a human made this request" vs "an
+# automatic watchdog re-arm made it". `record_goal_request` refreshes the #400
+# age-cap anchor ONLY for a user-callback origin (a human action is needed each
+# time, so it can never drive the #400 refresh-forever shape); every automatic
+# re-arm AND every unknown/empty origin PRESERVES the anchor (fail-safe: this
+# is an ALLOWLIST, so a future automatic origin nobody classified defaults to
+# preserve, never to refresh). RULE: every NEW origin string MUST be added to
+# exactly ONE of these two tuples.
+_GOAL_USER_CALLBACK_ORIGINS = (_GOAL_SELF_CALLBACK_ORIGIN,)
 # #675 -- bumped whenever the marker PARSER gains a new recognizer. A persisted
 # `state["goal_mark"]` entry stamped with an OLDER version is RESEEDED (first-
 # sight reverse-scan) on the next dark_watch sweep, so a marker the old parser
@@ -256,14 +272,31 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
         text/authority AND subject the user's explicit arm to the
         recent-human gate (which the active user always trips) -> silent
         expiry of the user's arm. The prior entry is kept entirely intact.
-      * `ts` is otherwise the #400 non-refreshable age-cap anchor: set ONCE
-        on create, preserved on every same-origin re-record (a request whose
-        anchor can be refreshed by an ordinary automatic re-record never
-        ages out). The ONE exception is an UPGRADE from `dark-rearm` to a
-        real user callback: an explicit user `/autopilot` is a genuinely new
-        request and gets a FRESH ts, so it is never judged expired against
-        the stale watchdog anchor -- and it cannot drive the #400
-        refresh-forever shape because it needs a human action each time.
+      * `ts` is otherwise the #400 age-cap anchor: set ONCE on create and
+        preserved on every AUTOMATIC (watchdog) re-record (a request whose
+        anchor could be refreshed by an ordinary automatic re-record would
+        never age out -- the anti-refresh-forever invariant). The exception
+        (#757, generalizing the earlier dark->user UPGRADE) is any genuine
+        USER-callback re-record (`new_origin in _GOAL_USER_CALLBACK_ORIGINS`):
+        an explicit user `/autopilot` -- whether it lands on a pending
+        watchdog `dark-rearm` OR on the user's own still-pending
+        `self-callback` (the owner re-running /autopilot) -- is a genuinely
+        new request and gets a FRESH ts, so its own 30-min window is never
+        judged against a stale earlier anchor. It cannot drive the #400
+        refresh-forever shape because a user callback needs a HUMAN action
+        each time (the origin is produced ONLY by the CLI `goal-arm --self`,
+        never auto-refired in a loop). This mirrors `_bump_goal_delivery_fail`,
+        which already RESETS `dl_fails` on the same self->self re-record for
+        the identical "a genuine fresh /autopilot is a NEW episode" reason.
+        This is an ALLOWLIST (user-callback origins refresh; everything else
+        -- every watchdog re-arm AND every unknown/empty origin -- preserves),
+        so it fails SAFE for a future origin nobody classified. Note it is
+        also STRICTER than the old `dark-rearm`-exclusion rule in one
+        practically-unreachable direction: a `stale-rearm`/`auth-rearm`/
+        unknown origin landing over a `dark-rearm` prior used to get a fresh
+        ts and now PRESERVES -- the correct safe direction (those are all
+        automatic re-arms, and stale/auth-rearm already defer to any pending
+        request, so this path is not normally reached).
 
     `cwd`/`origin`/`authority`/`text` otherwise take the newest call's
     values. Fail-safe (never raises). Returns True on success (INCLUDING a
@@ -284,12 +317,13 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
             and prior_origin != _GOAL_REARM_ORIGIN:
         return True                              # user's arm stands, untouched
 
-    # UPGRADE (dark-rearm -> a real user callback) gets a FRESH ts anchor;
-    # every other re-record preserves the #400 non-refreshable anchor.
-    upgrade_from_rearm = (prior_origin == _GOAL_REARM_ORIGIN
-                          and new_origin and new_origin != _GOAL_REARM_ORIGIN)
+    # #757 -- a genuine USER-callback re-record (dark->user UPGRADE OR
+    # self->self owner-re-run-of-/autopilot) gets a FRESH ts anchor; every
+    # AUTOMATIC watchdog re-arm AND every unknown/empty origin preserves the
+    # #400 anti-refresh-forever anchor. ALLOWLIST => fails safe to preserve.
+    new_is_user_callback = new_origin in _GOAL_USER_CALLBACK_ORIGINS
     if isinstance(prior, dict) and prior.get("ts") is not None \
-            and not upgrade_from_rearm:
+            and not new_is_user_callback:
         ts = prior.get("ts")
     else:
         ts = int(now)
@@ -333,7 +367,11 @@ def _bump_goal_delivery_fail(session, word, path=None):
     min) BEFORE a re-record can happen mid-livelock -- so a re-record never
     defeats the cap for the montalu4 case; carrying dl_fails across a same-origin
     self-callback re-record would instead risk prematurely capping a genuinely
-    fresh user arm, so it is deliberately NOT carried forward."""
+    fresh user arm, so it is deliberately NOT carried forward. #757 aligned the
+    #400 age-cap `ts` anchor with this same "new episode" model: a same-origin
+    self->self re-record now ALSO resets `ts` (via `record_goal_request`'s
+    user-callback allowlist), so `dl_fails` and `ts` are no longer
+    inconsistent -- both reset on a genuine fresh /autopilot re-run."""
     session = str(session or "").strip()
     if not session:
         return 0
