@@ -293,14 +293,48 @@ class TestInventory(unittest.TestCase):
 
 class TestConnectArgv(unittest.TestCase):
     def test_local_is_sh_c_with_attach_snippet(self):
+        # #736: the OLD shape asserted here was `argv[0] == "sh"` — a bare
+        # `sh -c` whose `tmux new-session` forked the tmux SERVER into
+        # webterm-ttyd.service's cgroup (the fleet-kill bug). The local child
+        # is now scope-detached (see test_local_spawn_is_scope_detached_...),
+        # but the tmux attach BODY it carries is unchanged, which is what this
+        # test still locks: an `sh -c` running the P=<preferred> attach body.
         e = {"id": "dev1", "local": True, "preferred": "zbynek"}
         argv = w.build_connect_argv(e)
-        self.assertEqual(argv[0], "sh")
-        self.assertEqual(argv[1], "-c")
-        self.assertIn("P=zbynek", argv[2])
-        self.assertIn("new-session -A -s", argv[2])
+        self.assertIn("sh", argv)
+        # `-c` immediately precedes the attach-body string.
+        ci = argv.index("-c")
+        body = argv[ci + 1]
+        self.assertIn("P=zbynek", body)
+        self.assertIn("new-session -A -s", body)
         # No ssh for a local target.
         self.assertNotIn("ssh", argv)
+
+    def test_local_spawn_is_scope_detached_from_ttyd_cgroup(self):
+        # #736: a local (dev1/subdev) connect must fork the tmux SERVER into
+        # its OWN transient systemd scope, NOT the webterm-ttyd.service cgroup —
+        # else a ttyd unit restart (KillMode=control-group) SIGKILLs the whole
+        # fleet and the unit's MemoryMax/TasksMax throttle it. The wrapper is
+        # `systemd-run --user --scope`, which places the child (and anything it
+        # forks) in a sibling `run-*.scope`, verified live on dev1.
+        e = {"id": "dev1", "local": True, "preferred": "zbynek"}
+        argv = w.build_connect_argv(e)
+        self.assertEqual(argv[0], "systemd-run")
+        self.assertIn("--user", argv)
+        self.assertIn("--scope", argv)
+        # the wrapped command still runs the tmux attach body under sh -c
+        self.assertIn("sh", argv)
+        self.assertIn("new-session -A -s", " ".join(argv))
+
+    def test_remote_spawn_is_not_scope_wrapped(self):
+        # #736: a REMOTE target runs its tmux server under the remote host's
+        # sshd session — never dev1's ttyd cgroup — so it is already safe and
+        # must NOT be systemd-run wrapped (that would scope the local ssh
+        # client, pointlessly).
+        e = {"local": False, "user": "newlevel", "host": "10.0.0.2",
+             "identity": None, "preferred": "zbynek"}
+        argv = w.build_connect_argv(e)
+        self.assertNotIn("systemd-run", argv)
 
     def test_identity_host_uses_ssh_i_with_pty(self):
         e = {"local": False, "user": "david", "host": "10.0.0.5",
@@ -482,6 +516,111 @@ case "$cmd" in
 esac
 exit 0
 """
+
+
+# #736: a fake `systemd-run` for the scope-detach functional test — LOG the
+# argv, strip our own leading flags, then exec the wrapped command so the REAL
+# attach body still runs (against the fake tmux above).
+_FAKE_SYSTEMD_RUN = r"""#!/usr/bin/env bash
+echo "$*" >> "$FAKE_SDRUN_LOG"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --user|--scope|--quiet|-q|--collect|-G) shift ;;
+    --unit=*|--property=*|-p) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+"""
+
+
+class TestLocalScopeDetach(unittest.TestCase):
+    """#736: the LOCAL connect child is wrapped in `systemd-run --user --scope`
+    so the tmux server forks OUT of the webterm-ttyd.service cgroup. Drive the
+    REAL build_connect_argv through a fake systemd-run + fake tmux and prove the
+    wrapper is invoked with --user --scope AND the attach body still reaches
+    tmux."""
+
+    def setUp(self):
+        import subprocess
+        self.subprocess = subprocess
+        self.d = tempfile.mkdtemp()
+        for name, body in (("systemd-run", _FAKE_SYSTEMD_RUN), ("tmux", _FAKE_TMUX)):
+            p = Path(self.d) / name
+            p.write_text(body, encoding="utf-8")
+            os.chmod(p, 0o755)
+        self.sdlog = Path(self.d) / "sdlog"
+        self.tmuxlog = Path(self.d) / "tmuxlog"
+
+    def _run(self, sessions=""):
+        e = {"id": "dev1", "local": True, "preferred": "zbynek"}
+        argv = w.build_connect_argv(e)
+        env = dict(os.environ, PATH=self.d + ":" + os.environ["PATH"],
+                   FAKE_SDRUN_LOG=str(self.sdlog),
+                   FAKETMUX_SESSIONS=sessions, FAKETMUX_LOG=str(self.tmuxlog))
+        self.subprocess.run(argv, capture_output=True, text=True, env=env, timeout=10)
+
+    def test_fake_systemd_run_wraps_and_body_still_runs(self):
+        self._run(sessions="")  # no existing session -> fresh new-session path
+        sd = self.sdlog.read_text(encoding="utf-8") if self.sdlog.exists() else ""
+        self.assertIn("--user", sd)
+        self.assertIn("--scope", sd)
+        tmux = self.tmuxlog.read_text(encoding="utf-8") if self.tmuxlog.exists() else ""
+        # the wrapped sh body reached tmux -> the fresh-create fallback
+        self.assertIn("new-session", tmux)
+
+
+class TestFileContentDiffers(unittest.TestCase):
+    """#736: the pure diff used to make the ttyd restart change-conditional."""
+
+    def test_absent_file_differs(self):
+        p = Path(tempfile.mkdtemp()) / "nope"
+        self.assertTrue(w._file_content_differs(p, "x"))
+
+    def test_identical_content_does_not_differ(self):
+        p = Path(tempfile.mkdtemp()) / "f"
+        p.write_text("hello", encoding="utf-8")
+        self.assertFalse(w._file_content_differs(p, "hello"))
+
+    def test_changed_content_differs(self):
+        p = Path(tempfile.mkdtemp()) / "f"
+        p.write_text("hello", encoding="utf-8")
+        self.assertTrue(w._file_content_differs(p, "HELLO"))
+
+
+class TestWebtermApplyRestarts(unittest.TestCase):
+    """#736: webterm-ttyd.service is restarted ONLY when its launcher/unit
+    changed — a ttyd restart SIGKILLs its cgroup, so a webterm-untouched install
+    must NEVER restart it (the v0.1.91 ~01:05 fleet-kill). The gateway holds no
+    tmux server (proven harmless in the incident) and is always (re)started."""
+
+    def _record(self):
+        calls = []
+
+        def fake(argv):
+            calls.append(list(argv))
+            return (0, "", "")
+        return calls, fake
+
+    def test_ttyd_not_restarted_when_unchanged(self):
+        calls, fake = self._record()
+        w._webterm_apply_restarts(fake, ttyd_changed=False)
+        self.assertIn(["enable", "--now", "webterm-ttyd.service"], calls)
+        self.assertNotIn(["restart", "webterm-ttyd.service"], calls)
+        # the gateway is still (re)started regardless
+        self.assertIn(["restart", "webterm-gateway.service"], calls)
+
+    def test_ttyd_restarted_when_changed(self):
+        calls, fake = self._record()
+        w._webterm_apply_restarts(fake, ttyd_changed=True)
+        self.assertIn(["restart", "webterm-ttyd.service"], calls)
+
+    def test_returns_false_when_an_enable_fails(self):
+        def fake(argv):
+            if argv[:2] == ["enable", "--now"]:
+                return (1, "", "boom")
+            return (0, "", "")
+        self.assertFalse(w._webterm_apply_restarts(fake, ttyd_changed=True))
 
 
 class TestAttachSnippetBehavior(unittest.TestCase):
