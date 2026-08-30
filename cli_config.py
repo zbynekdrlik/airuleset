@@ -228,11 +228,11 @@ def merge_hooks_into_settings(hooks_config: dict, existing_settings: dict) -> di
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
-    - `effortLevel = xhigh` (#445, 2026-08-13) — the settings half of the standing
-      ultracode default, so deep adaptive reasoning is persistent in every managed
-      project without the user remembering to raise it; the launch script carries
-      the orchestration half (`--settings '{"ultracode":true}'`). The user can
-      still override per session with `/effort`.
+    - `effortLevel = high` (owner directive 2026-08-30, reverses the launch-flag
+      half of #445) — managed sessions no longer launch with ultracode and the
+      effort baseline drops `xhigh` → `high`; the launch script no longer bakes
+      `--settings '{"ultracode":true}'` into any mode (user raises per session with
+      `/effort`). Only the launch flags reversed — the doctrine/tiering are unchanged.
     - `disableAgentView = true` HARD-disables Claude Code's `claude agents` / fleet /
       `claude --bg` background daemon (the on-demand supervisor that spawns DETACHED
       background sessions which SURVIVE `/exit` and keep running/pinging untracked).

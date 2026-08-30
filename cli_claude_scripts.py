@@ -60,26 +60,27 @@ CLAUDE_DIR = Path.home() / ".claude"
 #
 # Fix: .bashrc holds ONLY thin one-line wrapper functions with NO flag
 # literals -- each just execs the managed SCRIPT (CLAUDE_LAUNCH_SCRIPT_DEST),
-# which carries ALL the actual logic (continue-or-new, --model, skip-perms,
-# the standing ultracode flag). A script is read fresh from disk
+# which carries ALL the actual logic (continue-or-new, --model, skip-perms).
+# A script is read fresh from disk
 # on EVERY invocation, so a `push` that rewrites the script changes behavior
 # in every already-running shell IMMEDIATELY -- no `source ~/.bashrc`, no
 # relaunch, no restart. Same shape as the caveman stable statusline shim
 # (render_caveman_shim() below) -- read that first before changing this.
 CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # --- the script content itself -----------------------------------------------
-# Ultracode is the STANDING DEFAULT (user directive 2026-08-13, #445 -- "by
-# default vzdy ultracode... maximalna akceleracia"): every mode except the
-# deliberate vanilla `plain` escape hatch bakes the flag in. This knowingly
-# REVERSES #53 (2026-07-25), which made ultracode session-only opt-in after it
-# kept silently resurrecting against the user's wishes -- back then the
-# resurrection was UNWANTED drift; now the always-on behavior is the user's
-# explicit dated instruction, so the reversal is faithful, not a regression.
-# `claude-ultracode()` stays as an explicit alias (identical behavior to the
-# default mode); `plain` is the only ultracode-free launch.
-#   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
-#       accepted in settings.json — GH #64817); --settings is the only doc-blessed
-#       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
+# Ultracode is NO LONGER a managed launch flag (owner directive 2026-08-30 --
+# "Chcel by som este aby sa claude v targetoch nespustali s zapnutym ultracode
+# ale s effort high"): this REVERSES the launch-flag half of #445, which had made
+# `--settings '{"ultracode":true}'` the standing default in every mode but `plain`.
+# No managed mode bakes ultracode any more (absent from default/new/ultracode/
+# fullscreen alike), and the effort baseline drops `xhigh` → `high`
+# (MANAGED_EFFORT_LEVEL). Only the LAUNCH FLAGS reversed: the max-acceleration /
+# parallel-worktree doctrine and the per-phase model tiering are UNCHANGED.
+# Without the session ultracode flag, Workflow-tool use follows its standard
+# opt-in (the user invokes it in their own words; a user wanting ultracode passes
+# `--settings '{"ultracode":true}'` by hand). `claude-ultracode()` is RETAINED
+# for muscle-memory but now behaves like `default`; `plain` stays the vanilla
+# no-managed-flags escape hatch.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
 #   --model '{{MANAGED_MODEL}}'     : baked in at RENDER time so EVERY mode except
@@ -92,13 +93,12 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
 # FRESH branch (worse case: a new session instead of a cryptic error).
-# Modes: `default` (claude — continue-or-new, skip-perms, model, ultracode),
-# `new` (claude-new — always FRESH, skip-perms, model, ultracode — force a
-# clean start), `ultracode` (claude-ultracode — alias of the default mode, kept
-# for muscle memory: continue-or-new + skip-perms + ultracode + model), `plain`
-# (claude-plain — vanilla, no flags — the ONLY ultracode-free launch, #445),
-# `fullscreen` (claude-fullscreen — continue-or-new + skip-perms + model +
-# ultracode, PLUS CLAUDE_CODE_NO_FLICKER=1).
+# Modes (no managed mode carries ultracode any more — owner directive 2026-08-30):
+# `default` (claude — continue-or-new, skip-perms, model), `new` (claude-new —
+# always FRESH, skip-perms, model), `ultracode` (claude-ultracode — RETAINED alias
+# of the default mode for muscle-memory, NO ultracode flag now), `plain`
+# (claude-plain — vanilla, no managed flags), `fullscreen` (claude-fullscreen —
+# continue-or-new + skip-perms + model, PLUS CLAUDE_CODE_NO_FLICKER=1).
 #   CLAUDE_CODE_NO_FLICKER=1 : #376 REVERSED the `apply_managed_settings_defaults`
 #       pin from `"tui": "default"` (classic) to `"tui": "fullscreen"` fleet-wide
 #       (see that function's own docstring for the full history/tradeoff/citation)
@@ -150,7 +150,7 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 # a swap-thrashing box, #448) so the long-wait background-waiter pattern survives
 # fleet-wide. Exported into the CLI process env (inherited across the exec claude)
 # for every managed mode; the vanilla `plain` escape hatch is left uncontaminated,
-# mirroring how --model/ultracode apply to every mode except plain. ROLLBACK =
+# mirroring how --model applies to every mode except plain. ROLLBACK =
 # delete this one line (rollback criterion in the #448 section of
 # .claude/rules/airuleset-internals.md; dev1 camera-box build pressure is the
 # named risk, tracked as #470).
@@ -174,34 +174,34 @@ case "$mode" in
     ;;
   new)
     exec claude --dangerously-skip-permissions \
-      --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+      --model '{{MANAGED_MODEL}}' "$@"
     ;;
   ultracode)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
   fullscreen)
     export CLAUDE_CODE_NO_FLICKER=1
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
   *)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
 esac

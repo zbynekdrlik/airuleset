@@ -69,6 +69,10 @@ _LEGACY_WINDOW_MENU_SCRIPT_NAME = "airuleset-tmux-window-menu.sh"
 # Canonical dup of the two ultracode marker sentinels -- byte-identical to
 # airuleset.ULTRACODE_MARK_* (which stay resident for tests). Needed at
 # import time by ULTRACODE_BASHRC_BLOCK below; see the module docstring.
+# The "ultracode" in the marker NAME is now HISTORICAL and FROZEN (owner
+# directive 2026-08-30, #751, removed the ultracode launch flag): renaming these
+# sentinels would orphan the existing block in every deployed ~/.bashrc and make
+# a `push` double-write a second block, so the name stays as-is. Do NOT "tidy".
 ULTRACODE_MARK_START = "# >>> airuleset: ultracode default >>>"
 ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 

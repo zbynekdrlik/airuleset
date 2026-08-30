@@ -44,17 +44,17 @@ MANAGED_MARKER = "<!-- airuleset-managed -->"
 # its guidance block here — preserve it so a `push` doesn't silently delete it.
 EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")]
 
-# Managed default effort: `xhigh` — the settings-representable HALF of the
-# standing ultracode default the user directed 2026-08-13 ("chcem aby by
-# default vzdy bol ultracode... maximalna akceleracia"), reversing #56's
-# `high` baseline on that explicit dated instruction. `effortLevel` accepts
-# only low|medium|high|xhigh (docs: `max`/`ultracode` are session-only and
-# not valid here), so managed ultracode is COMPOSED of two parts: this key
-# at `xhigh` + the launch script baking `--settings '{"ultracode":true}'`
-# (the orchestration half) into every mode except the deliberate vanilla
-# `plain` escape hatch — see CLAUDE_LAUNCH_SCRIPT_CONTENT. The user can
-# still raise/lower per session with `/effort`.
-MANAGED_EFFORT_LEVEL = "xhigh"
+# Managed default effort: `high` — owner directive 2026-08-30 ("Chcel by som
+# este aby sa claude v targetoch nespustali s zapnutym ultracode ale s effort
+# high") REVERSES the launch-flag half of #445 (which had set `xhigh` + a
+# standing ultracode launch flag): managed sessions no longer launch with
+# ultracode, and the effort baseline drops `xhigh` → `high`. `effortLevel`
+# accepts only low|medium|high|xhigh (docs: `max`/`ultracode` session-only);
+# the launch script (CLAUDE_LAUNCH_SCRIPT_CONTENT) no longer bakes
+# `--settings '{"ultracode":true}'` into any mode. Only the LAUNCH FLAGS
+# reversed — max-acceleration doctrine + per-phase model tiering UNCHANGED.
+# User can still raise per session with `/effort`, or opt into ultracode by hand.
+MANAGED_EFFORT_LEVEL = "high"
 
 # Managed default MAIN-session model (user directive 2026-08-13): **Opus 5
 # is BANNED everywhere** ("opus 5 sa nesmie pouzivat... by default pri
@@ -968,10 +968,10 @@ def cmd_install(args):
     # takes effect in every already-running shell IMMEDIATELY -- no `source
     # ~/.bashrc`, no relaunch, no restart (a bashrc FUNCTION, by contrast, is
     # frozen in a shell's memory at startup forever, which is exactly how
-    # ultracode kept resurrecting after #53). Ultracode can't live in
-    # settings.json (session-only, GH #64817) — the script passes it in every
-    # mode except `plain` (standing default, directive 2026-08-13, #445 —
-    # reversing #53); effortLevel above is the settings half of that default.
+    # ultracode kept resurrecting after #53). Owner directive 2026-08-30 (#751)
+    # REVERSED the launch-flag half of #445: the script bakes ultracode into NO
+    # mode (effortLevel above dropped `xhigh` → `high` in the same reversal);
+    # `claude-ultracode` is retained only as a muscle-memory alias of `default`.
     try:
         changed = apply_ultracode_launcher()
         print(f"  Updated:   {CLAUDE_LAUNCH_SCRIPT_DEST} (claude launcher script — "
