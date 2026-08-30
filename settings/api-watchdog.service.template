@@ -23,9 +23,9 @@ Type=oneshot
 # in behavior; `%h` is systemd's user-home specifier (no CLI substitution needed).
 # systemd re-reads it on each oneshot start, so editing a value needs no
 # daemon-reload (adding this line the first time does). This is how any
-# AIRULESET_* watchdog knob is set per-box — e.g. AIRULESET_LANE_MIN_MEM_MB=1024
-# to raise/lower the lane-fill memory floor (watchdog/goal.py
-# _lane_min_mem_avail_mb, #574).
+# AIRULESET_* watchdog knob is set per-box — e.g.
+# AIRULESET_GOAL_LANE_STUCK_ALERT_STREAK=8 to tune the persistent-stuck alert
+# streak (watchdog/goal.py _stuck_alert_streak, #662).
 EnvironmentFile=-%h/.claude/watchdog.env
 # Reads ~/.claude transcripts, talks to the user's tmux server (default socket
 # /tmp/tmux-<uid>/), and POSTs to Discord — so NO network/socket sandbox here.

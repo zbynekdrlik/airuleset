@@ -2842,12 +2842,13 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
 
 GOAL_LANE_IDLE_S = 15 * 60
 # #530 -- HARD HOURLY CAP: no single sid gets a second lane-nudge within this
-# window of its last landed one, on EITHER branch. Bumped 15min->1h (owner
-# directive: "nesmie sa to diať častejšie ako raz za hodinu"). The empty-lane
-# cooldown and the under-saturated ineffective-backoff ladder's FIRST stage both
-# equal this value, so the cap is one shared check in `_lane_cooldown_decision`
-# (`skip:hourly-cap`), never a new layer -- `llast` is written only on a landed
-# nudge and no counter reset touches it, so the cap holds regardless of resets.
+# window of its last landed one. Bumped 15min->1h (owner directive: "nesmie sa to
+# diať častejšie ako raz za hodinu"). #729: with the under-saturated
+# ineffective-backoff ladder deleted, this cap is the SOLE cadence floor for the
+# empty-lane nudge (paired with the #670 dedup) -- one shared check in
+# `_lane_cooldown_decision` (`skip:hourly-cap`), never a new layer -- `llast` is
+# written only on a landed nudge and no counter reset touches it, so the cap holds
+# regardless of resets.
 GOAL_LANE_INTERVAL_S = 60 * 60
 GOAL_LANE_MAX_NUDGES = 2
 # #530 -- EMPTY-LANE MIN-BACKLOG floor: a fully-stalled box (0 dispatched
@@ -2903,10 +2904,9 @@ GOAL_LANE_MAX_STASH_ABORTS = 5
 
 # #531 -- orphan-reap TTL for state["goal_lane"] per-sid records. Same 24h
 # magnitude as GOAL_MARK_ORPHAN_TTL_S, deliberately well above the 1h nudge
-# interval + the 4h max ineffective backoff, so a live armed pane -- whose rec
-# is re-stamped (`lts`) on every ~60s sweep it is visited-and-armed -- is never
-# reaped by the SECONDARY age gate; only a genuinely gone session's aged,
-# not-visited entry is.
+# interval, so a live armed pane -- whose rec is re-stamped (`lts`) on every ~60s
+# sweep it is visited-and-armed -- is never reaped by the SECONDARY age gate; only
+# a genuinely gone session's aged, not-visited entry is.
 GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
 
 # #479 -- escalating backoff for a lane whose stash delivery keeps ABORTING
@@ -3455,8 +3455,8 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
 # memory OOM subsystem: they were reachable only from the #726-retired
 # under-saturated fill nudge, and the empty-lane batch-start nudge stays
 # memory-EXEMPT (see the GOAL_LANE_SATURATION_WORKERS block above). A pre-#729 rec
-# carrying stale `lms`/`lmsurf` keys is harmless (never read; the #531 orphan
-# reaper ages the whole rec out within 24h).
+# carrying stale `lms`/`lmsurf` keys is harmless (never read; they ride inertly
+# until the session's rec is eventually orphan-reaped, #531).
 
 
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
@@ -3587,8 +3587,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # both silent-death modes (api-error + text-toolcall-stall), so a box whose
     # "workers" are all dead reads 0 and fires the empty-lane recovery nudge --
     # the render floor's stale-strip over-count used to SUPPRESS exactly that
-    # (#486-G2 dangerous direction). It is the SAME structured count the #509
-    # effectiveness signal already uses below, so the two now agree by construction.
+    # (#486-G2 dangerous direction). #729: the #509 effectiveness re-consumer below
+    # is deleted; live_workers now feeds only saturation + the #670 dedup signature.
     # #571 -- live_workers/backlog_n resolved ABOVE (reused, one pass per sweep).
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
