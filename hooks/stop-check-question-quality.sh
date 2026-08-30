@@ -216,6 +216,10 @@ VIOLATION=""
 # bracket class contains multibyte chars ([áa], [—–-]) and, under a
 # POSIX/C-locale calling env with no locale forced, grep splits them into
 # raw bytes and the class silently stops matching a genuine diacritic head.
+# Residual (adversarial review, shared by Check 6): a box with NO C.utf8
+# locale installed at all makes grep silently fall back to plain C, which
+# reopens this same byte-splitting bug with zero warning — accepted, same
+# exposure Check 6 already carries fleet-wide.
 if ! LC_ALL=C.UTF-8 grep -qiE '^[[:space:]]*\**[[:space:]]*Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt' <<<"$BLOCK"; then
     VIOLATION="briefing"
 fi
