@@ -206,9 +206,13 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
             w.connect_main(["marek-subdev"])
         ex.assert_called_once()
         argv = ex.call_args[0][1]
-        # A local attach — `sh -c <tmux>`, never ssh, and it attaches marek's
-        # tmux group (never a broader target).
-        self.assertEqual(argv[0], "sh")
+        # A local attach — never ssh, attaches marek's tmux group (never a
+        # broader target). #736: marek's LOCAL subdev tmux is scope-detached
+        # too (`systemd-run --user --scope ... sh -c <tmux>`), so its server
+        # never lands in the subdev ttyd cgroup either.
+        self.assertEqual(argv[0], "systemd-run")
+        self.assertIn("--scope", argv)
+        self.assertIn("sh", argv)
         self.assertNotIn("ssh", argv)
         self.assertIn("marek", " ".join(argv))
 

@@ -492,12 +492,26 @@ def _ssh_interactive_prefix(entry):
     return ["sshpass", "-p", "newlevel", "ssh"] + common
 
 
+# #736: a LOCAL connect's `sh -c <attach-body>` runs as a direct child of
+# webterm-ttyd.service, so its `tmux new-session` (first-client case) forks the
+# tmux SERVER into that cgroup (fork-inherited, unchanged by tmux's daemonize) --
+# and the whole fleet then lives under the unit's MemoryMax/TasksMax caps AND
+# default KillMode=control-group, so a unit restart SIGKILLs / the caps throttle
+# EVERYTHING (2x dev1 fleet-kill, incident 2026-08-27; design comment on #736).
+# `systemd-run --user --scope` forks the server into a sibling `run-*.scope`
+# under the user slice instead (verified live on dev1), so a ttyd restart/limit
+# can no longer touch it; `--quiet` hides the scope banner, `--collect` GCs the
+# transient unit when no server survives. REMOTE targets run their server under
+# the remote host's sshd session, never dev1's ttyd cgroup -- left unwrapped.
+_SYSTEMD_RUN_SCOPE = ["systemd-run", "--user", "--scope", "--quiet", "--collect"]
+
+
 def build_connect_argv(entry):
-    """The argv the ttyd child execs for `entry`: a local `sh -c` (dev1) or an
-    interactive `ssh -t <target> <remote-command>`."""
+    """The argv the ttyd child execs for `entry`: a local scope-detached
+    `sh -c` (#736) or an interactive `ssh -t <target> <remote-command>`."""
     cmd = _remote_command(entry["preferred"])
     if entry.get("local"):
-        return ["sh", "-c", cmd]
+        return _SYSTEMD_RUN_SCOPE + ["sh", "-c", cmd]
     prefix = _ssh_interactive_prefix(entry)
     target = "%s@%s" % (entry["user"], entry["host"])
     return prefix + [target, cmd]
@@ -1421,6 +1435,62 @@ def is_webterm_gateway():
     return os.uname().nodename == WEBTERM_GATEWAY_HOST
 
 
+def _file_content_differs(path, new_content):
+    """#736: True if `path` is absent/unreadable or its current text differs
+    from `new_content`. The signal for change-conditional restarts: a re-install
+    that renders byte-identical launcher/unit content must NOT restart the
+    service."""
+    try:
+        return Path(path).read_text(encoding="utf-8") != new_content
+    except (OSError, ValueError):
+        return True
+
+
+def _webterm_apply_restarts(run_systemctl, services, log_prefix="webterm"):
+    """#736: enable + CHANGE-CONDITIONALLY restart a set of webterm units.
+
+    `services` is an ordered iterable of `(service_name, changed_bool)`. Every
+    unit is `enable --now`'d; a unit is `restart`ed ONLY when its `changed_bool`
+    is truthy -- i.e. the content that unit depends on (its launcher and/or its
+    own unit file) actually changed this install. This is the fix's core: a ttyd
+    restart SIGKILLs its cgroup (default KillMode=control-group), so an install
+    that did not touch webterm must NEVER restart it (the v0.1.91 ~01:05
+    fleet-kill: a webterm-untouched push restarted ttyd and took the whole
+    in-cgroup fleet with it). Fleet-wide -- the SAME helper serves the owner
+    (dev1) units AND the subdev lane units (marek/david), whose cgroups have the
+    identical exposure (#736 review 🟡1).
+
+    Self-heal (#736 review 🟡3): a restart that returns non-zero is printed
+    loudly, and the NEXT install's `enable --now` (which runs FIRST, before the
+    conditional restart) STARTS an inactive/failed unit with the current on-disk
+    config -- so a failed restart that left the unit DOWN is repaired on the next
+    install without any extra machinery. The one residual gap (the install
+    PROCESS dying between the file write and the restart, with the old unit still
+    UP) is inherent to any change-gated restart and cannot be closed in-process.
+
+    Returns True iff every `enable --now` succeeded (mirrors the old `ok_all`)."""
+    ok_all = True
+    for svc, changed in services:
+        rc, _o, err = run_systemctl(["enable", "--now", svc])
+        if rc != 0:
+            print("  %s: systemctl enable --now %s FAILED: %s\n"
+                  "    Manual: XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user "
+                  "enable --now %s" % (log_prefix, svc, (err or "").strip(), svc),
+                  file=sys.stderr)
+            ok_all = False
+            continue
+        if not changed:
+            continue
+        # `enable --now` is a no-op for an already-running service, so a unit
+        # whose launcher/config changed needs an explicit restart to take effect.
+        rc, _o, err = run_systemctl(["restart", svc])
+        if rc != 0:
+            print("  %s: systemctl restart %s FAILED (new config may not be "
+                  "live; next install's enable --now will retry if it is down): "
+                  "%s" % (log_prefix, svc, (err or "").strip()), file=sys.stderr)
+    return ok_all
+
+
 def setup_webterm_service(run=None):
     """dev1-only: provision + enable the ttyd web-terminal gateway + static
     dashboard, both bound DIRECTLY to dev1's tailscale IP (#579). Idempotent.
@@ -1498,14 +1568,26 @@ def setup_webterm_service(run=None):
             ttyd_socket_basename=WEBTERM_TTYD_SOCK_BASENAME)
     else:
         launch = render_webterm_launch_script()
+    ttyd_unit = _render_webterm_unit()
+    gateway_unit = _render_webterm_gateway_unit(bind_ip, access_mode=access_mode)
+    # #736: decide BEFORE overwriting the files whether each unit's own config
+    # actually changed. A ttyd restart SIGKILLs its cgroup, so it must fire ONLY
+    # on a real change (see _webterm_apply_restarts) — comparing the freshly
+    # rendered content against what is on disk is that signal. The gateway holds
+    # no tmux server but restarting it drops every live webterm tab (forces
+    # re-login) — and it serves the dashboard/PWA by re-reading the files PER
+    # REQUEST (cli_webterm_gateway.py Gateway.*read_bytes), so ONLY a change to
+    # its own unit needs a restart; a dashboard/inventory change is picked up
+    # with no restart at all (#736 review 🔵5).
+    ttyd_changed = (_file_content_differs(WEBTERM_LAUNCH_PATH, launch)
+                    or _file_content_differs(WEBTERM_SERVICE_DEST, ttyd_unit))
+    gateway_changed = _file_content_differs(WEBTERM_GATEWAY_SERVICE_DEST, gateway_unit)
     WEBTERM_LAUNCH_PATH.write_text(launch, encoding="utf-8")
     os.chmod(WEBTERM_LAUNCH_PATH, 0o755)
 
     WEBTERM_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
-    WEBTERM_SERVICE_DEST.write_text(_render_webterm_unit(), encoding="utf-8")
-    WEBTERM_GATEWAY_SERVICE_DEST.write_text(
-        _render_webterm_gateway_unit(bind_ip, access_mode=access_mode),
-        encoding="utf-8")
+    WEBTERM_SERVICE_DEST.write_text(ttyd_unit, encoding="utf-8")
+    WEBTERM_GATEWAY_SERVICE_DEST.write_text(gateway_unit, encoding="utf-8")
 
     try:
         run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
@@ -1524,23 +1606,13 @@ def setup_webterm_service(run=None):
         print("  webterm: systemctl daemon-reload FAILED: %s" % (err or "").strip(),
               file=sys.stderr)
 
-    ok_all = True
-    for svc in ("webterm-ttyd.service", "webterm-gateway.service"):
-        rc, _o, err = _run_systemctl(["enable", "--now", svc])
-        if rc != 0:
-            print("  webterm: systemctl enable --now %s FAILED: %s\n"
-                  "    Manual: XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user "
-                  "enable --now %s" % (svc, (err or "").strip(), svc),
-                  file=sys.stderr)
-            ok_all = False
-            continue
-        # `enable --now` is a no-op for an already-running service, so a
-        # re-install that changed the launcher/unit (new ttyd flags, new bind IP,
-        # new dashboard/gateway) needs an explicit restart to take effect.
-        rc, _o, err = _run_systemctl(["restart", svc])
-        if rc != 0:
-            print("  webterm: systemctl restart %s FAILED (new config may not be "
-                  "live): %s" % (svc, (err or "").strip()), file=sys.stderr)
+    # #736: each unit is restarted ONLY when its own config changed (a ttyd
+    # restart SIGKILLs its cgroup — the fleet-kill this ticket fixes; a gateway
+    # restart drops every live tab). See _webterm_apply_restarts.
+    ok_all = _webterm_apply_restarts(
+        _run_systemctl,
+        [("webterm-ttyd.service", ttyd_changed),
+         ("webterm-gateway.service", gateway_changed)])
 
     # #635: in Access mode the public front is the MANAGED cloudflared tunnel —
     # provision it here (prereq-gated no-op until the creds JSON exists) so a routine

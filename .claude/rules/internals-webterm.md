@@ -10,6 +10,39 @@ The webterm sizing area has been reopened many times (#584/#586/#613×3/#615/#64
 Non-obvious, hard-won invariants (deep detail lives in the code comments of the named symbols,
 which auto-load when you read `cli_webterm.py`):
 
+- **#736 (incident 2026-08-27, 2× dev1 fleet-kill) — the LOCAL connect must scope-detach the
+  tmux server from the ttyd cgroup, and install must NOT restart ttyd gratuitously.** A `local`
+  entry's connect child is `sh -c <_ATTACH_BODY>`, execed DIRECTLY by `webterm-ttyd.service`;
+  when it is the FIRST tmux client, `tmux new-session` forks the tmux SERVER into the ttyd
+  cgroup (cgroup membership is fork-inherited and tmux's daemonize does NOT change it). The
+  whole fleet then lives under the unit's `MemoryMax=512M`/`TasksMax=512` + default
+  `KillMode=control-group`, so a `systemctl restart webterm-ttyd.service` SIGKILLs everything and
+  the caps throttle/OOM it. TWO fixes, both in `cli_webterm.py`: (1) `build_connect_argv` wraps
+  every LOCAL child in `_SYSTEMD_RUN_SCOPE` (`systemd-run --user --scope --quiet --collect`) so
+  the server forks into a sibling `app.slice/run-*.scope` (verified live: `/proc/<srv>/cgroup`
+  is the scope, NOT the service) — a ttyd restart/limit can no longer touch it. Fleet-wide by
+  keying on `entry["local"]`: the ONLY local direct-spawn entries are dev1's owner entry AND
+  marek's own subdev local attach (`cli_webterm_profiles.marek_inventory`, `local: True`);
+  david's entries are ALL loopback-ssh (`local: False`, server anchored under sshd) and correctly
+  stay unwrapped, as does every REMOTE entry. (2) the restart is CHANGE-CONDITIONAL fleet-wide:
+  `setup_webterm_service` (owner) AND `write_artifacts`+`setup_service` (subdev marek/david lanes
+  — same fleet-kill exposure, fixed together; review 🟡1) compute each unit's
+  `_file_content_differs` on its launcher/unit BEFORE overwriting, and the SHARED
+  `_webterm_apply_restarts(run_systemctl, [(svc, changed), …])` restarts a unit ONLY when its own
+  config changed — a webterm-untouched push (the v0.1.91 ~01:05 trigger) no longer restarts ttyd.
+  The gateway is conditional too: it serves the dashboard/PWA by re-reading the files PER REQUEST
+  (`cli_webterm_gateway.py` `read_bytes`), so ONLY a gateway UNIT change needs a restart (a
+  dashboard/inventory change reaches clients with no restart / no tab-drop / no re-login). Self-heal
+  on a FAILED restart: the next install's `enable --now` (which runs BEFORE the conditional restart)
+  STARTS a down/failed unit with current config; the one residual gap (the install PROCESS dying
+  between write and restart with the old unit still up) is inherent to any change-gated restart.
+  Gotchas: pty-driven `_ATTACH_BODY` tests (test_webterm_ctrlbw_darkening.py's
+  `_scoped_connect_argv`) must STRIP the systemd-run prefix (they exercise the body, not the scope
+  wrapper — covered in test_webterm.py); a lane `write_artifacts_fn` returning `None` (an old stub)
+  is treated as "changed" (fail-safe: restart, never silently skip). Rollout verify: after a fresh
+  webterm connect on dev1 AND on marek@subdev, `/proc/$(tmux server pid)/cgroup` = `run-*.scope`;
+  then retire the runtime mitigations (`set-property` overrides + `tmux-detach-anchor.service`).
+
 - **#672 REWORK (owner ruling 2026-08-25) — ONE canonical grid for EVERY tab; the per-tab
   browser stream grid is REVERSED, the crop is a TMUX-side fix, and #648 is REVERSED too.**
   The original #672 gave a foreign-stream tab a LARGER browser grid (`WEBTERM_STREAM_TERM_GRID`

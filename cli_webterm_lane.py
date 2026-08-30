@@ -244,15 +244,25 @@ def write_artifacts(spec):
     cli_webterm_pwa.write_pwa_assets(spec.dash_dir, spec.profile)
     if spec.retire_credential_path is not None:
         retire_credential(spec.retire_credential_path, spec.log_prefix)
-    spec.launch_path.write_text(
-        w.render_webterm_launch_script(
-            inventory_path=spec.inventory_path,
-            ttyd_socket_basename=spec.ttyd_sock_basename),  # #663 UNIX socket
-        encoding="utf-8")
+    launch = w.render_webterm_launch_script(
+        inventory_path=spec.inventory_path,
+        ttyd_socket_basename=spec.ttyd_sock_basename)  # #663 UNIX socket
+    ttyd_unit = render_ttyd_unit(spec)
+    gateway_unit = render_gateway_unit(spec)
+    # #736: compute BEFORE overwriting whether each unit's own config changed, so
+    # setup_service restarts a lane unit ONLY on a real change. A lane ttyd
+    # restart SIGKILLs its cgroup exactly like the owner's (#736 review 🟡1: the
+    # subdev marek/david lanes had the same fleet-kill exposure, unconditionally
+    # restarting their ttyd on every push). Returns (ttyd_changed, gateway_changed).
+    ttyd_changed = (w._file_content_differs(spec.launch_path, launch)
+                    or w._file_content_differs(spec.ttyd_service_dest, ttyd_unit))
+    gateway_changed = w._file_content_differs(spec.gateway_service_dest, gateway_unit)
+    spec.launch_path.write_text(launch, encoding="utf-8")
     os.chmod(spec.launch_path, 0o755)
     spec.ttyd_service_dest.parent.mkdir(parents=True, exist_ok=True)
-    spec.ttyd_service_dest.write_text(render_ttyd_unit(spec), encoding="utf-8")
-    spec.gateway_service_dest.write_text(render_gateway_unit(spec), encoding="utf-8")
+    spec.ttyd_service_dest.write_text(ttyd_unit, encoding="utf-8")
+    spec.gateway_service_dest.write_text(gateway_unit, encoding="utf-8")
+    return ttyd_changed, gateway_changed
 
 
 def _ttyd_available():
@@ -346,7 +356,17 @@ def setup_service(spec, run=None, *, prereq_fn, write_artifacts_fn, tunnel_fn):
     # raise into cmd_install (the "never raises" contract).
     try:
         from cli_filedrop_watchdog import _run_systemctl, _whoami
-        write_artifacts_fn()
+        # #736: write_artifacts_fn reports whether each lane unit's own config
+        # changed, so a webterm-untouched push does NOT restart the lane ttyd
+        # (whose restart SIGKILLs its cgroup exactly like the owner's — review
+        # 🟡1). A lane wrapper that predates this (or a test stub) may still
+        # return None → treat as "changed" (fail-safe: restart, never silently
+        # skip a needed one).
+        changed = write_artifacts_fn()
+        if changed is None:
+            ttyd_changed = gateway_changed = True
+        else:
+            ttyd_changed, gateway_changed = changed
 
         try:
             run(["loginctl", "enable-linger", _whoami()], capture_output=True,
@@ -359,15 +379,11 @@ def setup_service(spec, run=None, *, prereq_fn, write_artifacts_fn, tunnel_fn):
         if rc != 0:
             print("  %s: daemon-reload FAILED: %s"
                   % (spec.log_prefix, (err or "").strip()), file=sys.stderr)
-        ok_all = True
-        for svc in (spec.ttyd_service_name, spec.gateway_service_name):
-            rc, _o, err = _run_systemctl(["enable", "--now", svc])
-            if rc != 0:
-                print("  %s: enable --now %s FAILED: %s"
-                      % (spec.log_prefix, svc, (err or "").strip()), file=sys.stderr)
-                ok_all = False
-                continue
-            _run_systemctl(["restart", svc])
+        ok_all = w._webterm_apply_restarts(
+            _run_systemctl,
+            [(spec.ttyd_service_name, ttyd_changed),
+             (spec.gateway_service_name, gateway_changed)],
+            log_prefix=spec.log_prefix)
         # Bring the public HTTPS front up too — but ONLY once the loopback gateway/
         # ttyd came up (ok_all), so the tunnel never fronts a dead origin. Prereq-
         # gated no-op if the creds JSON is not present.
