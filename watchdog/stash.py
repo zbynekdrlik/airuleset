@@ -350,7 +350,14 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn):
     CHECKPOINT_THRESHOLD`); a short payload never reaches here."""
     head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
     _type_literal(pid, run, head_chunk, sleep_fn)
-    hc = _settle_type_verify(pid, run, head_chunk, sleep_fn)
+    # #763 -- the verify REFERENCE is the chunk sans trailing whitespace: an
+    # arbitrary [:120] slice can end mid-whitespace (ALL three real templates
+    # do -- '...MY '), and `_input_line_text` STRIPS the box read, so verifying
+    # against the raw chunk fails `endswith` on a perfectly-typed box and the
+    # checkpoint settles CORRUPT forever (fleet-wide zero `SEND typed`). The
+    # TYPED text stays the exact `head_chunk` (the rest continues at the same
+    # offset); only what the settle-verify compares against is normalised.
+    hc = _settle_type_verify(pid, run, head_chunk.rstrip(), sleep_fn)
     if hc != _TV_LANDED:
         return hc
     _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn)
