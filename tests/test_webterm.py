@@ -532,7 +532,8 @@ echo "$*" >> "$FAKE_SDRUN_LOG"
 while [ $# -gt 0 ]; do
   case "$1" in
     --user|--scope|--quiet|-q|--collect|-G) shift ;;
-    --unit=*|--property=*|-p) shift ;;
+    --unit=*|--property=*) shift ;;
+    -p|--property) shift 2 ;;    # #736 review 🔵6: -p takes a separate value
     *) break ;;
   esac
 done
@@ -595,10 +596,11 @@ class TestFileContentDiffers(unittest.TestCase):
 
 
 class TestWebtermApplyRestarts(unittest.TestCase):
-    """#736: webterm-ttyd.service is restarted ONLY when its launcher/unit
-    changed — a ttyd restart SIGKILLs its cgroup, so a webterm-untouched install
-    must NEVER restart it (the v0.1.91 ~01:05 fleet-kill). The gateway holds no
-    tmux server (proven harmless in the incident) and is always (re)started."""
+    """#736: a webterm unit is `enable --now`'d always but `restart`ed ONLY when
+    its own config changed — a ttyd restart SIGKILLs its cgroup, so a
+    webterm-untouched install must NEVER restart it (the v0.1.91 ~01:05
+    fleet-kill); a gateway restart drops every live tab. The SAME helper serves
+    the owner and the subdev lanes (review 🟡1)."""
 
     def _record(self):
         calls = []
@@ -608,25 +610,33 @@ class TestWebtermApplyRestarts(unittest.TestCase):
             return (0, "", "")
         return calls, fake
 
-    def test_ttyd_not_restarted_when_unchanged(self):
+    def test_unchanged_unit_is_enabled_but_not_restarted(self):
         calls, fake = self._record()
-        w._webterm_apply_restarts(fake, ttyd_changed=False)
+        w._webterm_apply_restarts(fake, [("webterm-ttyd.service", False),
+                                         ("webterm-gateway.service", True)])
         self.assertIn(["enable", "--now", "webterm-ttyd.service"], calls)
-        self.assertNotIn(["restart", "webterm-ttyd.service"], calls)
-        # the gateway is still (re)started regardless
-        self.assertIn(["restart", "webterm-gateway.service"], calls)
+        self.assertNotIn(["restart", "webterm-ttyd.service"], calls)   # unchanged
+        self.assertIn(["restart", "webterm-gateway.service"], calls)    # changed
 
-    def test_ttyd_restarted_when_changed(self):
+    def test_changed_unit_is_restarted(self):
         calls, fake = self._record()
-        w._webterm_apply_restarts(fake, ttyd_changed=True)
+        w._webterm_apply_restarts(fake, [("webterm-ttyd.service", True)])
         self.assertIn(["restart", "webterm-ttyd.service"], calls)
+
+    def test_lane_prefix_and_service_names_are_honored(self):
+        # review 🟡1: the lane reuses this helper with its own service names.
+        calls, fake = self._record()
+        w._webterm_apply_restarts(fake, [("webterm-marek-ttyd.service", False)],
+                                  log_prefix="webterm-marek")
+        self.assertNotIn(["restart", "webterm-marek-ttyd.service"], calls)
 
     def test_returns_false_when_an_enable_fails(self):
         def fake(argv):
             if argv[:2] == ["enable", "--now"]:
                 return (1, "", "boom")
             return (0, "", "")
-        self.assertFalse(w._webterm_apply_restarts(fake, ttyd_changed=True))
+        self.assertFalse(
+            w._webterm_apply_restarts(fake, [("webterm-ttyd.service", True)]))
 
 
 class TestAttachSnippetBehavior(unittest.TestCase):
@@ -1189,6 +1199,39 @@ class TestSetupWiring(unittest.TestCase):
             self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
             self.assertEqual(first, pt["WEBTERM_DASH_INDEX"].read_text())
             self.assertEqual(first_unit, pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text())
+
+    def test_ttyd_restart_is_change_conditional(self):
+        # #736 review 🟡2: LOCK the actual wiring end-to-end (not just the helper).
+        # An install that renders a byte-identical ttyd launcher/unit must NOT
+        # restart webterm-ttyd.service (a ttyd restart SIGKILLs its cgroup — the
+        # v0.1.91 ~01:05 fleet-kill). First install (files absent -> changed)
+        # restarts it; a second identical install does not. This fails if the
+        # ttyd_changed computation is ever moved AFTER the write_text calls, or if
+        # the restart is made unconditional again.
+        import contextlib
+        import cli_filedrop_watchdog as fw
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            self._isolate(st, tmp)
+            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", False))
+            sc_calls = []
+
+            def rec_sc(args):
+                sc_calls.append(list(args))
+                return (0, "", "")
+            # override _isolate's unrecorded _run_systemctl stub (later patch wins)
+            st.enter_context(m.patch.object(fw, "_run_systemctl", rec_sc))
+
+            # first install: launcher/unit absent -> changed -> restart fires
+            self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
+            self.assertIn(["restart", "webterm-ttyd.service"], sc_calls)
+
+            # second IDENTICAL install: content unchanged -> enable --now yes,
+            # restart NO (for BOTH the ttyd and the tab-dropping gateway, #736 🔵5)
+            sc_calls.clear()
+            self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
+            self.assertIn(["enable", "--now", "webterm-ttyd.service"], sc_calls)
+            self.assertNotIn(["restart", "webterm-ttyd.service"], sc_calls)
+            self.assertNotIn(["restart", "webterm-gateway.service"], sc_calls)
 
     def test_access_mode_binds_loopback_retires_cred_needs_no_tailscale_ip(self):
         # #635/#663: with the go-live flag ON, the owner gateway provisions in
