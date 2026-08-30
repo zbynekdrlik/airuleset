@@ -197,7 +197,7 @@
     "tests/test_module_machinery_offload.py": 62,
     "tests/test_no_conflict_markers.py": 72,
     "tests/test_no_question_flag.py": 578,
-    "tests/test_no_session_kill.py": 653,
+    "tests/test_no_session_kill.py": 663,
     "tests/test_notify_ask_and_continue_delivery.py": 196,
     "tests/test_notify_auto_dedup_559.py": 155,
     "tests/test_notify_dedup_long_key.py": 159,

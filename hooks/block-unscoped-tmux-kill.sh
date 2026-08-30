@@ -30,8 +30,10 @@ set -euo pipefail
 #
 # BLOCKED (per shell clause, after heredoc-body strip + segment split +
 # `bash -c` recursion):
-#   * `tmux ... kill-server`  with NO `-S`/`-L` selector in that clause;
-#   * `tmux ... kill-session ...` with NO `-S`/`-L` selector in that clause;
+#   * `tmux ... <kill-server|kill-session|kill-pane|kill-window|kill-client>`
+#     with NO `-S`/`-L` selector in that clause (the whole destructive-kill
+#     family — pane/window/client destroy the owner's live pane on the
+#     default socket just as kill-server destroys the whole thing);
 #   * `pkill`/`killall` whose target references `tmux` (bare name, or a `-f`
 #     pattern containing whole-word `tmux`) with NO socket selector — it can
 #     still match the owner's default server process;
@@ -57,7 +59,12 @@ set -euo pipefail
 # then EXECUTED is stripped as documentation and not classified; (b) shell
 # variable / command substitution building the command or pattern is invisible
 # to token-based parsing; (c) prefixes beyond sudo/env are not stripped — all
-# fail toward ALLOW, matching every sibling token-based hook.
+# fail toward ALLOW, matching every sibling token-based hook; (d) the pkill
+# selector check is a loose `-S`/`-L` substring, so a MALFORMED
+# `pkill -f tmux -L` (invalid to pkill, `-L` is not a pkill flag) reads as
+# scoped and allows — reachable only with a broken command, same residual
+# class as (b) (#734 review 🔵-3). tmux respawn-* / other non-kill mutations
+# are out of scope — this guard is the KILL family only.
 
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
@@ -65,7 +72,7 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null ||
 
 # Cheap pre-filter: nothing of interest -> nothing to classify.
 case "$CMD" in
-  *kill-server*|*kill-session*|*pkill*|*killall*|*pgrep*) : ;;
+  *kill-server*|*kill-session*|*kill-pane*|*kill-window*|*kill-client*|*pkill*|*killall*|*pgrep*) : ;;
   *) exit 0 ;;
 esac
 
@@ -110,6 +117,14 @@ LOOP_BODY_KEYWORDS = ("do", "then", "else", "elif")
 DASH_C_RE = re.compile(r'^-[A-Za-z]*c$')
 SHELL_WRAPPERS = ("bash", "sh", "zsh", "dash")
 TMUX_WORD_RE = re.compile(r'\btmux\b')
+# The tmux subcommands that DESTROY a live session's server/session/pane/
+# window/client on the resolved socket — the whole "kill" family, not just
+# the server (#734 review 🟡: `kill-pane`/`kill-window`/`kill-client` destroy
+# the owner's live Claude pane/window/client on the DEFAULT socket, the same
+# incident class as `kill-server`). Each stays UNGUARDED only with an explicit
+# `-S`/`-L` socket selector.
+DESTRUCTIVE_SUBCOMMANDS = (
+    "kill-server", "kill-session", "kill-pane", "kill-window", "kill-client")
 
 
 def tokens_of(segment):
@@ -176,11 +191,7 @@ def classify(script):
             continue
         name = os.path.basename(tk[0])  # /usr/bin/tmux == tmux
         if name == "tmux":
-            sub = None
-            if "kill-server" in tk:
-                sub = "kill-server"
-            elif "kill-session" in tk:
-                sub = "kill-session"
+            sub = next((s for s in DESTRUCTIVE_SUBCOMMANDS if s in tk), None)
             if sub is not None and not any(is_cli_selector_token(t) for t in tk):
                 return "tmux " + sub
         elif name in ("pkill", "killall"):
@@ -224,8 +235,9 @@ PYEOF
 cat >&2 <<'MSG'
 BLOCKED: UNSCOPED destructive tmux kill (#734).
 
-A bare kill-server or kill-session (or `pkill tmux`) with no socket selector
-targets the DEFAULT/inherited socket — the owner's LIVE server, every session
+A bare kill-server / kill-session / kill-pane / kill-window / kill-client (or
+`pkill tmux`) with no socket selector targets the DEFAULT/inherited socket —
+that is the owner's LIVE server, every session
 and pane, and any Claude Code session running inside it. This is the exact
 dev1 2026-08-27 00:21 incident: a subagent's unscoped kill-server (no -S/-L)
 killed the owner's whole desktop.

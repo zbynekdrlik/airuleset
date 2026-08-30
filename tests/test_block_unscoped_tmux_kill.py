@@ -86,6 +86,17 @@ class TestHookBlocksUnscopedKills(TestCase):
     def test_bare_kill_session(self):
         self.assertBlocked("tmux kill-session -t r731test")
 
+    def test_bare_kill_pane(self):
+        # #734 review 🟡: kill-pane on the default socket destroys the owner's
+        # live pane — same incident class as kill-server.
+        self.assertBlocked("tmux kill-pane -t 0")
+
+    def test_bare_kill_window(self):
+        self.assertBlocked("tmux kill-window -t 0")
+
+    def test_bare_kill_client(self):
+        self.assertBlocked("tmux kill-client")
+
     def test_sudo_prefix_does_not_hide_it(self):
         self.assertBlocked("sudo tmux kill-server")
 
@@ -137,6 +148,10 @@ class TestHookAllowsScopedAndUnrelated(TestCase):
 
     def test_socket_name_scoped_kill_session(self):
         self.assertAllowed("tmux -L iso376 kill-session -t t376")
+
+    def test_socket_scoped_kill_pane_and_window(self):
+        self.assertAllowed("tmux -L iso376 kill-pane -t 0")
+        self.assertAllowed("tmux -S /tmp/iso376/sock kill-window -t 0")
 
     def test_glued_socket_name_selector(self):
         self.assertAllowed("tmux -Liso376 kill-server")
