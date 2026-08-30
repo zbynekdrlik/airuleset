@@ -56,7 +56,7 @@ A stream with `airuleset.py authority` != full has no PR-to-main / merge / deplo
 ```
 ✅ Lokálne overenie: <tests + lint result on the fork/integration branch>
 ✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta   ← fork-no-merge AND branch-merge (SAME hand-off comment convention for both, posted once the profile's own end-point is reached — branch-merge: after its integration-branch merge; fork-no-merge: after the fork branch push, no merge exists there at all; repo automation labels it `ready-for-review`; NEVER a self-close)
-✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there; ticket stays OPEN — gatekeeper closes it only after the full `/process-subdev` release pipeline, #349)
+✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there; ticket stays OPEN — gatekeeper closes it only after the full `/process-subdev` release pipeline, #349; EXCEPT on odoo-erp, where after the gk review-verdict + every queue label dropped the delivering STREAM self-closes with an evidence `--comment`, odoo-erp#5378 / #756)
 ```
 
 No 🌐/Deploy lines (nothing deployed by this stream); Goal + What changed stay mandatory and plain-language — and so does `✅ Výstup:` (the artifact read-back runs on the local/integration environment: the rendered email from the test DB, the local UI screen, the generated document).
