@@ -245,16 +245,34 @@ class TestHistoryAllusionBlocked(TestCase):
         self.assertNotIn('"block"', r.stdout, r.stdout)
 
     def test_verbatim_repeat_of_the_same_blocked_question_still_passes(self):
-        # First ask: the reference-shaped message would normally block, so
-        # use the full re-ask message as the FIRST delivered question, then
-        # simulate the dedup state notify-discord-pending.sh would have
-        # written (lastq file) and repeat the SAME marker line byte-identical
-        # — the VERBATIM-repeat bypass must still short-circuit before Check 5.
+        # REFERENCE_MSG normally HARD-BLOCKS (the Check-5 allusion detector,
+        # proven by test_allusion_to_an_old_question_is_hard_blocked). When it
+        # is a byte-identical VERBATIM repeat of the already-delivered
+        # question, the bypass must short-circuit BEFORE Check 5 and let it
+        # pass. Running the gate on a would-BLOCK message is what makes this
+        # test non-tautological: it can pass ONLY via the bypass, so a
+        # deleted/broken bypass makes it FAIL (sabotage-verified, #758).
+        #
+        # The dedup key notify-discord-pending.sh writes, and the gate's
+        # KEYLINE re-derives (strip_md), is the marker line with its label
+        # prefix STRIPPED — NEEDS YOU:/Question:/DONE: at the KEYLINE step
+        # (hook line 127), while an ❓ ASKED: body-marker is stripped one step
+        # earlier when MARKER_RAW is extracted (hook line 105). For this
+        # NEEDS YOU fixture the key is the decision text alone. Seeding the RAW
+        # label-prefixed line ("NEEDS YOU: …") never equals KEYLINE, so the
+        # bypass never fires and the "pass" was a tautology — the exact defect
+        # this test had (#758: it stayed green even with the bypass deleted,
+        # because FULL_REASK_MSG independently cleared the ordinary shape
+        # checks). Derive the seed FROM REFERENCE_MSG's marker line by dropping
+        # the NEEDS YOU: prefix, so it always equals the KEYLINE the gate
+        # computes and stays in sync with the fixture text (the split is safe
+        # only while the fixture keeps a plain, unbolded NEEDS YOU: marker).
         sid = new_hook_sid(self, "test-qq-verbatim", ["*test-qq-verbatim-*"])
-        marker_line = "NEEDS YOU: mám zapnúť ultracode pre tento beh?"
+        marker = REFERENCE_MSG.strip().splitlines()[-1]      # "❓ NEEDS YOU: …?"
+        keyline = marker.split("NEEDS YOU:", 1)[1].strip()   # strip_md dedup key
         with open("/tmp/claude-discord-lastq-" + sid, "w") as f:
-            f.write(marker_line)
-        r = self._run_gate(FULL_REASK_MSG, sid)
+            f.write(keyline)
+        r = self._run_gate(REFERENCE_MSG, sid)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('"block"', r.stdout, r.stdout)
 
