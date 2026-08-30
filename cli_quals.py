@@ -986,6 +986,52 @@ def _parse_iso_ts(s):
         return None
 
 
+# #753 — a source citation the W-push doctrine mandates: a version, a release
+# stage, an Odoo Discuss thread/msg id, or a `#N` ticket/PR reference. A
+# content-free "still waiting" push carries none. Erring slightly LOOSE (any real
+# anchor counts) is the #539 never-false-accuse direction — a too-tight test
+# would flag a validly-pushed ticket as stale. The 3-part-semver arm's components
+# are bounded `\d{1,3}` so a 4-digit-year date ("30.8.2026") no longer matches
+# (`2.226.0` still does — the #698 live-probe lesson); RESIDUAL (accepted, the
+# fail-safe-loose direction): a 2-digit-year date ("30.8.26") or an IP
+# ("100.82.64.27") can still match — rare, and matching over-generously only
+# UNDER-flags (never a false accusation).
+_CITATION_RX = re.compile(
+    r"#\d+"                                       # a ticket / PR reference
+    r"|discuss\.channel_\d+|\bchannel[_ ]\d+"     # an Odoo Discuss thread
+    r"|\bmsg\b[\s:#-]*\d{3,}|\bmessage\b[\s:#-]*\d{3,}"  # a message id
+    r"|\bstage-\d+\b"                             # a release stage (#578/#588)
+    r"|\bv\d+\.\d+(?:\.\d+)*\b"                   # a v-prefixed version
+    r"|\b\d{1,3}\.\d{1,3}\.\d{1,3}\b",            # a 3-part semver (date-bounded)
+    re.IGNORECASE)
+
+
+def _comment_has_citation(body):
+    """True iff `body` cites a source per the #753 W-push doctrine (version /
+    Discuss thread or msg-id / `#N` ref). None/empty/non-str → False."""
+    if not isinstance(body, str) or not body.strip():
+        return False
+    return bool(_CITATION_RX.search(body))
+
+
+def _norm_ages(res):
+    """Normalize `_issue_comment_ages` output (or an injected fake) to the
+    `{own, any, own_cited, own_oldest}` dict (#753). A legacy 2-tuple
+    `(own, any)` — the #699/#607 fakes — carries no body/citation info, so its
+    `own` is treated as the CITED anchor (`own_cited = own`), which reproduces
+    the PRE-#753 tuple semantics EXACTLY (own was the freshness anchor) — the
+    fail-safe direction (a legacy own counts as a valid push, never a false
+    accusation). None/malformed → None (fail-safe, no flag)."""
+    if res is None:
+        return None
+    if isinstance(res, dict):
+        return res
+    if isinstance(res, (tuple, list)) and len(res) >= 2:
+        return {"own": res[0], "any": res[1],
+                "own_cited": res[0], "own_oldest": None}
+    return None
+
+
 def _stream_self_login():
     """THIS box's own gh identity in the FORM a `gh issue view --json comments`
     comment `author.login` renders it (#463): the fixed App-bot login on an
@@ -1000,17 +1046,28 @@ def _stream_self_login():
 
 
 def _issue_comment_ages(number, self_login, now, cwd=None):
-    """Evidence ages for issue `number`, the #570 freshness fallback: returns
-    `(own_ts, any_ts)` — the createdAt epoch of the most recent comment AUTHORED
-    by `self_login`, and of the most recent comment of ANY author. Either is
-    None when absent. Returns None (the WHOLE tuple) when the gh fetch FAILED or
-    was unusable → the caller does NOT flag (fail-safe, "nikdy falošný", #539).
+    """Evidence ages for issue `number`, the #570 freshness fallback (#753
+    extends it citation-aware). Returns the DICT
+    `{own, any, own_cited, own_oldest}`:
+      - `own`      — createdAt of the newest comment authored by `self_login`;
+      - `any`      — createdAt of the newest comment of ANY author;
+      - `own_cited`— createdAt of the newest own comment that CITES a source
+                     (`_comment_has_citation` — the #753 reset anchor);
+      - `own_oldest`— createdAt of the OLDEST own comment (sustained-engagement
+                     proxy — the montalu3 bare-push case).
+    Each is None when absent. Returns None (the WHOLE dict) when the gh fetch
+    FAILED or was unusable → the caller does NOT flag (fail-safe, "nikdy
+    falošný", #539). The DICT (over the pre-#753 2-tuple) is the extensible
+    shape the #698 lesson prefers; `_norm_ages` keeps legacy 2-tuple fakes
+    working, so the #699/#607 tests are untouched.
 
     `airuleset._gh_out` returns "" on ANY failure OR empty result, but a
     successful `gh issue view <n> --json comments` always prints a JSON object
     (`{"comments": [...]}`, non-empty even with zero comments), so "" is
-    unambiguously a FAILURE here → None. `now` is unused for the read itself; it
-    is passed for signature symmetry with the injectable seam the caller uses."""
+    unambiguously a FAILURE here → None. The `--json comments` payload already
+    carried `body` (the gh invocation is UNCHANGED) — #753 only newly READS it to
+    detect each own comment's citation; `now` is unused for the read itself
+    (passed for signature symmetry with the injectable seam the caller uses)."""
     import airuleset
     raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
                             cwd=cwd, timeout=15)
@@ -1023,7 +1080,7 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     comments = obj.get("comments") if isinstance(obj, dict) else None
     if not isinstance(comments, list):
         return None
-    own_ts = any_ts = None
+    own_ts = any_ts = own_cited = own_oldest = None
     for c in comments:
         if not isinstance(c, dict):
             continue
@@ -1034,9 +1091,16 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
             any_ts = ts
         author = c.get("author")
         login = author.get("login") if isinstance(author, dict) else None
-        if self_login and login == self_login and (own_ts is None or ts > own_ts):
-            own_ts = ts
-    return (own_ts, any_ts)
+        if self_login and login == self_login:
+            if own_ts is None or ts > own_ts:
+                own_ts = ts
+            if own_oldest is None or ts < own_oldest:
+                own_oldest = ts
+            if _comment_has_citation(c.get("body")) and (
+                    own_cited is None or ts > own_cited):
+                own_cited = ts
+    return {"own": own_ts, "any": any_ts,
+            "own_cited": own_cited, "own_oldest": own_oldest}
 
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
@@ -1045,27 +1109,37 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
     WORKING time; Sat/Sun in Europe/Bratislava excluded, #607 —
     `working_time.working_deadline_passed`).
 
-    Evidence = the last comment AUTHORED BY THE STREAM'S OWN gh account — the
-    daily push / third-party reminder / blocker re-verification the W doctrine
-    mandates IS a ticket comment (#570 bod 3), so an OWN comment is the direct
-    mechanization of "push forward every day". A member is flagged iff the gh
-    fetch SUCCEEDS AND either:
-      - the newest OWN comment is older than 24h, OR
-      - there is NO own comment but the newest comment of ANY author is also
-        older than 24h (a ticket parked/left untouched >24h).
+    Evidence = the last CITED own push (#753). The daily push / third-party
+    reminder / blocker re-verification the W doctrine mandates IS a ticket
+    comment (#570 bod 3), but a content-free "čakáme" comment reset the 24h
+    clock without the session ever reading the source (the montalu3 W-34
+    degeneration) — so ONLY a comment that CITES a source (`_comment_has_
+    citation`: a version / Discuss thread or msg-id / `#N` ref) counts as a
+    reset. A member is flagged iff the gh fetch SUCCEEDS AND its freshness
+    ANCHOR is older than 24h working time, where the anchor is, in order:
+      - `own_cited` — the newest CITED own push (the mechanized "valid push"), else
+      - `own_oldest` — the OLDEST own comment (the stream has engaged only with
+        BARE pushes; if that engagement is itself >24h old the ticket is stale —
+        the montalu3 sustained-bare-push case), else
+      - `any` — the newest comment of ANY author (the pre-#753 untouched-park
+        fallback: the stream never engaged and even the newest comment is old).
 
     Never a false accusation ("nikdy falošný", the #539 no-question! pattern):
-    a gh failure / unusable read (ages_fn → None), zero comments at all
-    (own_ts AND any_ts both None), or a member beyond OPS_WAIT_STALE_MAX_FETCHES
-    is NOT flagged. When `self_login` is unresolvable (None — e.g. a PAT-box gh
-    hiccup), the check DEGRADES to the any-comment definition, which UNDER-flags
-    (misses "third party replied but the stream never pushed") — the safe
-    direction, a false negative, never a false positive.
+    a gh failure / unusable read (ages_fn → None or `_norm_ages` → None), zero
+    comments at all (every anchor None), or a member beyond
+    OPS_WAIT_STALE_MAX_FETCHES is NOT flagged. RESIDUAL (documented, fail-safe):
+    a freshly-parked ticket with a single BARE own comment <24h old (own_cited
+    None, own_oldest recent) is NOT flagged — its park age is not in this fetch,
+    so it under-flags rather than false-accuse (the watchdog's `w_seen`
+    per-ticket park age could disambiguate, but that is not on this path). When
+    `self_login` is unresolvable (None — a PAT-box gh hiccup), `_issue_comment_
+    ages` resolves NO own comment (own/own_cited/own_oldest all None) so the check
+    DEGRADES to the `any` fallback — the safe direction, a false negative, never
+    a false positive.
 
-    Deliberately keyed on OWN comment, NOT "last comment at all": a third
-    party's reply would otherwise reset the clock and HIDE the very staleness
-    this exists to surface (montalu3: a blocker cited a day after it was
-    resolved — a reply had landed, but the session never looked)."""
+    Deliberately keyed on the CITED own push, NOT "last comment at all": a
+    third party's reply — or the stream's own bare "čakáme" — would otherwise
+    reset the clock and HIDE the very staleness this exists to surface."""
     now = time.time() if now is None else now
     if self_login is None and ages_fn is None:
         self_login = _stream_self_login()
@@ -1076,22 +1150,24 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
             res = ages(number)
         except Exception:
             res = None
+        res = _norm_ages(res)
         if res is None:
             continue                             # gh failed / unusable -> no flag
-        own_ts, any_ts = res
+        own_cited = res.get("own_cited")
+        own_oldest = res.get("own_oldest")
+        any_ts = res.get("any")
+        # #753: reset only on a CITED own push; else the oldest own (bare)
+        # engagement; else the newest any-author comment (untouched park).
+        anchor = (own_cited if own_cited is not None
+                  else own_oldest if own_oldest is not None else any_ts)
         # #607: the 24h window is WORKING days — Saturday/Sunday (Europe/
         # Bratislava) do not count, so a Friday-parked ticket is not falsely
         # flagged over the weekend (the shared `working_time` helper, used by
         # the gk-lane freshness push too). tz-error fails safe to the flat span.
-        if own_ts is not None:
-            if working_time.working_deadline_passed(own_ts, now,
-                                                    OPS_WAIT_EVIDENCE_MAX_S):
-                flagged.add(number)
-        elif any_ts is not None:
-            if working_time.working_deadline_passed(any_ts, now,
-                                                    OPS_WAIT_EVIDENCE_MAX_S):
-                flagged.add(number)
-        # zero comments (own_ts AND any_ts None) -> ambiguous -> never flag (safe)
+        if anchor is not None and working_time.working_deadline_passed(
+                anchor, now, OPS_WAIT_EVIDENCE_MAX_S):
+            flagged.add(number)
+        # zero comments (every anchor None) -> ambiguous -> never flag (safe)
     return flagged
 
 
@@ -1152,9 +1228,10 @@ def _release_recheck_flagged(rows, cwd=None, now=None, self_login=None,
             res = ages(number)
         except Exception:
             res = None
+        res = _norm_ages(res)                    # #753 dict / legacy 2-tuple
         if res is None:
             continue                             # gh failed / unusable -> no flag
-        own_ts, _any_ts = res
+        own_ts = res.get("own")
         if own_ts is None:
             continue                             # no own re-check evidence -> safe
         if working_time.working_deadline_passed(own_ts, now,
