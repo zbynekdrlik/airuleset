@@ -557,8 +557,10 @@ gap in either.
      threads). So at the START of every batch (a turn with NO batch open), read
      `python3 ~/devel/airuleset/airuleset.py core-quals --ops-wait` (reduced authority:
      `slice-quals --ops-wait`) and check its trailing `# W-summary:` line: **if it carries
-     `OVER-THRESHOLD` (`|W| > 8 = OPS_WAIT_WDRAIN_THRESHOLD`) OR the `oldest=` member is long-parked,
-     do a W-DRAIN PASS BEFORE dispatching any new I lane.** The drain pass is a per-member verdict on
+     `OVER-THRESHOLD` (`|W| > 8 = OPS_WAIT_WDRAIN_THRESHOLD` — the mechanical trigger) OR the `oldest=`
+     member is judged long-parked (SUPERVISOR JUDGMENT — there is no mechanical age bar; the
+     `oldest=` field surfaces the candidate, the session decides), do a W-DRAIN PASS BEFORE
+     dispatching any new I lane.** The drain pass is a per-member verdict on
      the `--ops-wait` members (the job-20 `W-OVERFLOW` nudge names the same duty): CLOSE it (the
      external event/confirmation already landed — cite the evidence), UNPARK it (clear `ops-wait`
      WITH evidence so it re-enters `I`), or RE-CITE the still-holding blocker with a fresh push

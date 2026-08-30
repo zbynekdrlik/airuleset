@@ -168,13 +168,16 @@ class WOverflowFlag(unittest.TestCase):
 
     def test_overflow_survives_cap_worst_case(self):
         # The aggregate drain signal must NEVER be the item the greedy
-        # NUDGE_MAX_CHARS cap drops — even at I>0 with every per-category flag
-        # firing on a release-shaped, all-stale, all-recheck, all-gk bucket.
-        members = [{"number": 100 + i, "title": "release 2.180 stage-3",
+        # NUDGE_MAX_CHARS cap drops — even at 3-DIGIT I/W counts (the true
+        # numeric worst case for the fixed I/W trigger templates + head/tail)
+        # with every per-category flag firing on a release-shaped, all-stale,
+        # all-recheck, all-gk bucket. 3-digit counts (not 1-digit) so the lock
+        # covers the widest the fixed templates ever render (#754 review 🔵).
+        members = [{"number": 1000 + i, "title": "release 2.180 stage-3",
                     "stale": True, "gk_handoff": True, "release_recheck": True}
-                   for i in range(owr.WDRAIN_ESCALATE_N + 1)]
+                   for i in range(150)]  # |W| = 150 (3 digits)
         seen = {str(mm["number"]): float(NOW) for mm in members}
-        t = owr._nudge_text(5, members, NOW, seen,
+        t = owr._nudge_text(999, members, NOW, seen,   # I = 999 (3 digits)
                             release_landed=[mm["number"] for mm in members],
                             discuss_audit=True)
         self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)

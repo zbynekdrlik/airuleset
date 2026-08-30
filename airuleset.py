@@ -4193,7 +4193,10 @@ def _watchdog_ops_wait_fetch(cwd):
     long-parked W ticket into an armed loop's attention.
 
     `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
-    per member (oldest-first); field 0 is the issue number, field 3 the reason
+    per member (oldest-first), plus a trailing `# W-summary:` aggregate line
+    (total / oldest / flag counts / OVER-THRESHOLD marker, #754) which the loop
+    below SKIPS (a `#`-prefixed comment is not a member row); field 0 is the
+    issue number, field 3 the reason
     (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
     push — #570 — and/or a ` gk-handoff!` warning for a member ALSO carrying a
     gk hand-off label — #636). Returns a list of `{"number": int, "stale": bool,

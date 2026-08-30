@@ -624,8 +624,8 @@ def _flag_items(w_members, release_landed):
         # when I>0 and every per-category flag also fires — the aggregate drain
         # signal must never be the item that gets dropped).
         items.append(
-            "W-OVERFLOW %d>%d (#754 -- W je DLH: W-drain PRED I "
-            "(zavri/odparkuj/cituj blocker); nedá sa → zhrň ownerovi ❓)."
+            "W-OVERFLOW %d>%d (#754 -- W-drain PRED I: "
+            "zavri/odparkuj/cituj; nedá sa → zhrň ownerovi ❓)."
             % (w_total, WDRAIN_ESCALATE_N))
     stale = len(_stale_numbers(w_members))
     if stale:
