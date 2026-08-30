@@ -986,6 +986,24 @@ class TestGkVerdictArtifactClose(TestCase):
                 self.full, me=self.M, author=self.M, labels="", comments=self.HEADING)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_blocks_reviewed_close_on_same_name_foreign_owner_repo(self):
+        # #756 review F4: a same-BASENAME but foreign-OWNER repo (`otherowner/odoo-erp`
+        # — a fork or an unrelated same-named repo) has NO reopen-guard second net, so
+        # the carve-out must require the FULL `zbynekdrlik/odoo-erp`, not just the
+        # `odoo-erp` basename → BLOCK.
+        r = run("gh issue close 5345 -R otherowner/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_backtick_smuggle_after_a_verdict_close(self):
+        # #756 review F6: a backtick command-substitution nested close is a smuggle the
+        # HAS_INTERP grep and the N_CLOSE boundary class both miss — it must blank
+        # ISSUE_NUM so the verdict carve-out cannot ride it → BLOCK.
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp "
+                "--comment x`gh issue close 9999 -R zbynekdrlik/odoo-erp -c y`",
+                self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
 
 if __name__ == "__main__":
     main()
