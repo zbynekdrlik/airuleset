@@ -79,17 +79,26 @@ class GoalRequestState(unittest.TestCase):
         self.assertFalse(goal.record_goal_request("", "/x", "/goal x", "full", path=p))
         self.assertEqual(goal.load_goal_requests(p), {})
 
-    def test_ts_is_never_refreshed_across_a_re_record(self):
-        # #400's own invariant, mirrored for goal-arm requests: the age-cap
-        # anchor is set ONCE, never refreshed by a later re-record for the
-        # same still-pending session.
+    def test_ts_is_never_refreshed_by_an_automatic_re_record(self):
+        # #757 DELIBERATE REVERSAL of the #400/#478 invariant this test used
+        # to assert. The old form ("the anchor is NEVER refreshed by a later
+        # re-record, incl. a self→self one") was too broad: it froze the anchor
+        # even when the owner re-ran /autopilot, so a fresh user arm expired
+        # early. The SURVIVING invariant is narrower and is what still guards
+        # #400: an AUTOMATIC (watchdog) re-record never refreshes the cap —
+        # only a genuine human /autopilot callback (self-callback) does (it
+        # needs a human action each time, so it can never refresh-forever).
+        # The self→self fresh-ts case is now locked by
+        # test_self_callback_re_record_gets_a_fresh_ts. Here we lock that a
+        # dark-rearm re-record still preserves, while latest cwd/text/authority
+        # still win.
         p = self._p()
         goal.record_goal_request("sess-1", "/x", "/goal a", "full", now=1000,
-                                 path=p, origin="self-callback")
+                                 path=p, origin="dark-rearm")
         goal.record_goal_request("sess-1", "/y", "/goal b", "branch-merge",
-                                 now=5000, path=p, origin="self-callback")
+                                 now=5000, path=p, origin="dark-rearm")
         d = goal.load_goal_requests(p)
-        self.assertEqual(d["sess-1"]["ts"], 1000)          # frozen at first-seen
+        self.assertEqual(d["sess-1"]["ts"], 1000)          # anchor frozen on an automatic re-record
         self.assertEqual(d["sess-1"]["cwd"], "/y")          # latest cwd wins
         self.assertEqual(d["sess-1"]["text"], "/goal b")    # latest text wins
         self.assertEqual(d["sess-1"]["authority"], "branch-merge")
