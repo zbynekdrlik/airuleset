@@ -6541,15 +6541,28 @@ class TestClaudeHistoryPopupScript(TestCase):
         own process environment carries a genuine $TMUX pointing at a
         live session on this box), so env is built EXPLICITLY here,
         never `{**os.environ}`, and the "TMUX" key is never included at
-        all. `session_argv` runs directly as the session's own command."""
+        all. `session_argv` runs directly as the session's own command.
+
+        #734: both the `new-session` and the teardown `kill-server` carry
+        an EXPLICIT `-S <sock>` selector (never a bare, default-socket
+        kill), so the #613 lock's now-#734-extended scanner sees them and
+        confirms them scoped -- not merely hidden behind the TMUX_TMPDIR /
+        no-"TMUX"-key invariant the scanner can't verify. `sock` is set to
+        the exact path TMUX_TMPDIR default-resolution produces
+        (`$TMUX_TMPDIR/tmux-$UID/default`, verified live), so the popup
+        script under test -- which resolves its socket via TMUX_TMPDIR, no
+        -S -- still attaches to the very same server."""
+        sock = os.path.join(scratch, "tmux-%d" % os.getuid(), "default")
+        os.makedirs(os.path.dirname(sock), exist_ok=True)
         env = {"TMUX_TMPDIR": scratch, "PATH": "/usr/local/bin:/usr/bin:/bin"}
         r = subprocess.run(
-            ["tmux", "new-session", "-d", "-s", "t376", "-x", "80", "-y", "24"]
+            ["tmux", "-S", sock, "new-session", "-d", "-s", "t376",
+             "-x", "80", "-y", "24"]
             + session_argv,
             env=env, capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.addCleanup(subprocess.run, ["tmux", "kill-server"], env=env,
-                         capture_output=True, text=True, timeout=10)
+        self.addCleanup(subprocess.run, ["tmux", "-S", sock, "kill-server"],
+                         env=env, capture_output=True, text=True, timeout=10)
         return env
 
     def test_real_execution_falls_back_to_real_capture_pane(self):

@@ -27,6 +27,7 @@ pane heuristics: the capability is gone, and these tests fail if anything
 reintroduces it.
 """
 
+import json
 import re
 import subprocess
 import unittest
@@ -77,6 +78,17 @@ _ISOLATED_EXPERIMENT_HARNESSES = (
     "scripts/measure_scrollback_events.py",
 )
 
+# #734: a PreToolUse GUARD hook that NAMES the pane-destroying subcommands
+# (in a `case` glob pre-filter, an embedded Python classifier heredoc, and
+# its BLOCKED-message heredoc) solely to DETECT and DENY them -- it never
+# INVOKES tmux/pkill at all. Structurally the opposite of a session-killer,
+# so it is exempt from the destroy/send-keys scan, and re-validated directly
+# by TestUnscopedTmuxKillGuardInspectsNeverInvokes below (same narrow,
+# self-re-verifying pattern as _ISOLATED_EXPERIMENT_HARNESSES / #267).
+_KILL_GUARD_HOOKS = (
+    "hooks/block-unscoped-tmux-kill.sh",
+)
+
 
 def _code_files():
     """Every tracked Python/shell file that could actually SEND something —
@@ -87,7 +99,9 @@ def _code_files():
     out = subprocess.run(["git", "ls-files", "-z", "*.py", "*.sh"],
                          cwd=REPO, capture_output=True, text=True, check=True)
     for rel in out.stdout.split("\0"):
-        if not rel or rel.startswith("tests/") or rel in _ISOLATED_EXPERIMENT_HARNESSES:
+        if (not rel or rel.startswith("tests/")
+                or rel in _ISOLATED_EXPERIMENT_HARNESSES
+                or rel in _KILL_GUARD_HOOKS):
             continue
         p = REPO / rel
         if p.is_file():
@@ -544,6 +558,105 @@ class TestWatchdogTimerDisableMarker(unittest.TestCase):
             any("disable" in c for c in calls),
             "the marker must also DISABLE the unit — a stopped-but-enabled "
             "timer comes back at the next boot (#132)")
+
+
+class TestUnscopedTmuxKillGuardInspectsNeverInvokes(unittest.TestCase):
+    """#734: every `_KILL_GUARD_HOOKS` member is exempted from the
+    destroy/send-keys scan because it NAMES the pane-destroying subcommands
+    only to DETECT and DENY them in a PreToolUse guard -- it never INVOKES
+    tmux/pkill. This class re-verifies that 'inspector, not invoker' claim
+    DIRECTLY against each exempted file's own source, so the exemption cannot
+    silently rot into a real session-killer if a hook is edited later (same
+    guard #267 put on its own exemption). The checks ITERATE over the whole
+    `_KILL_GUARD_HOOKS` tuple (#734 review 🔵-2), so a future second entry is
+    forced to carry the same inspector-proof, never a per-file hardcode."""
+
+    # The destructive tmux/kill tokens that may appear in an exempted guard
+    # ONLY as a `case` glob pattern, never as an executed command (#734
+    # review 🟡: the whole kill family, not just server/session).
+    _KILL_TOKENS = ("kill-server", "kill-session", "kill-pane", "kill-window",
+                    "kill-client", "pkill", "killall", "pgrep")
+
+    def test_the_exemption_is_non_empty(self):
+        self.assertTrue(_KILL_GUARD_HOOKS)
+
+    @staticmethod
+    def _executable_shell(text):
+        """`text` with `#`-comment lines AND heredoc BODIES removed. The
+        destructive subcommand names live only in those (the embedded Python
+        classifier heredoc + the BLOCKED-message heredoc + comments) and in
+        `case` glob patterns -- never in an executed command. Same
+        heredoc-strip shape the sibling guard hooks' own parsers use."""
+        lines = text.split("\n")
+        hd = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+        out, i, n = [], 0, len(lines)
+        while i < n:
+            line = lines[i]
+            i += 1
+            out.append(line)
+            m = hd.search(line)
+            if not m:
+                continue
+            delim = m.group(2)
+            while i < n and lines[i].strip() != delim:
+                i += 1
+            if i < n:
+                out.append(lines[i])  # keep the closing delimiter line itself
+                i += 1
+        return "\n".join(ln for ln in out if not ln.lstrip().startswith("#"))
+
+    def _each_guard(self):
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
+        wired = [h["command"]
+                 for g in cfg["hooks"]["PreToolUse"] if g.get("matcher") == "Bash"
+                 for h in g["hooks"]]
+        for rel in _KILL_GUARD_HOOKS:
+            path = REPO / rel
+            self.assertTrue(path.is_file(), rel)
+            yield rel, path.read_text(encoding="utf-8"), wired
+
+    def test_each_is_a_wired_pretooluse_deny_hook(self):
+        for rel, text, wired in self._each_guard():
+            # a guard that exits 2 to DENY -- wired under PreToolUse(Bash).
+            self.assertIn("exit 2", text, rel)
+            base = rel.split("/")[-1]
+            self.assertTrue(any(base in c for c in wired),
+                            "%s not wired under PreToolUse(Bash)" % rel)
+
+    def test_none_sends_keystrokes(self):
+        # not a keystroke sender -- the actual pz-server #132 vector. Checked
+        # against the EXECUTABLE shell (comments/heredocs stripped).
+        for rel, text, _ in self._each_guard():
+            self.assertNotIn("send-keys", self._executable_shell(text), rel)
+
+    def test_executable_shell_never_invokes_tmux(self):
+        # destroying a pane/session REQUIRES invoking tmux; a guard never does.
+        # Every `tmux` mention lives in a comment or a heredoc body -- stripped.
+        for rel, text, _ in self._each_guard():
+            self.assertNotIn(
+                "tmux", self._executable_shell(text),
+                "%s: a guard's executable shell must never INVOKE tmux" % rel)
+
+    def test_kill_tokens_only_appear_as_case_globs(self):
+        # In the executable remainder the destructive tokens occur ONLY as
+        # `*<tok>*` glob patterns in the cheap pre-filter `case`, never as a
+        # command that could actually kill anything.
+        for rel, text, _ in self._each_guard():
+            code = self._executable_shell(text)
+            for tok in self._KILL_TOKENS:
+                j = 0
+                while True:
+                    j = code.find(tok, j)
+                    if j == -1:
+                        break
+                    before = code[j - 1] if j > 0 else ""
+                    after = code[j + len(tok)] if j + len(tok) < len(code) else ""
+                    self.assertTrue(
+                        before == "*" and after == "*",
+                        "%s: %s must appear only as a *glob* pre-filter, never "
+                        "as an executed command: %r"
+                        % (rel, tok, code[max(0, j - 6):j + len(tok) + 6]))
+                    j += len(tok)
 
 
 if __name__ == "__main__":

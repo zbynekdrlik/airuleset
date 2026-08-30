@@ -79,6 +79,7 @@ already-established self-exclusion for the same reason.
 import ast
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -165,6 +166,48 @@ def _is_real_exec_call(node):
     return False
 
 
+# #734 -- a subprocess exec passed as a REFERENCE to a DEFERRED wrapper runs
+# for real later (teardown / interpreter exit), so its argv needs the same
+# `-S`/`-L` guard as a direct call. `self.addCleanup(...)` (unittest) and
+# `atexit.register(...)` -- and the bare `register(...)` after
+# `from atexit import register` -- are the wrappers; the argv is their SECOND
+# positional arg because the FIRST is the exec function itself.
+_DEFERRED_WRAPPERS = {"addCleanup", "register"}
+
+
+def _is_exec_reference(node):
+    """True if `node` is a bare REFERENCE to `subprocess.run/Popen/...`
+    (an `ast.Attribute` passed as a CALLABLE, never called here). Requires
+    the `subprocess.` prefix for the SAME reason `_is_real_exec_call` does:
+    a bare `run`/`Popen` name is this repo's dependency-injected FAKE, and
+    exempting it is what keeps the ~19-false-positive corpus out."""
+    return (isinstance(node, ast.Attribute)
+            and node.attr in _EXEC_CALL_NAMES
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "subprocess")
+
+
+def _exec_argv_node(node):
+    """The AST node holding the argv of a REAL process spawn reachable from
+    `node` (an ast.Call), or None:
+      * DIRECT   `subprocess.run(ARGV, ...)`                      -> args[0]
+      * DEFERRED `self.addCleanup(subprocess.run, ARGV, ...)` /
+                 `atexit.register(subprocess.run, ARGV, ...)`     -> args[1]
+    The deferred form (#734 blind spot) is an `addCleanup`/`register` Call
+    whose FIRST positional arg is the exec REFERENCE and whose argv is the
+    SECOND -- so `_is_real_exec_call` (which matches only a direct
+    `subprocess.<exec>(...)` Call) never sees it."""
+    if _is_real_exec_call(node) and node.args:
+        return node.args[0]
+    f = node.func
+    wrapper = f.attr if isinstance(f, ast.Attribute) else (
+        f.id if isinstance(f, ast.Name) else None)
+    if (wrapper in _DEFERRED_WRAPPERS and len(node.args) >= 2
+            and _is_exec_reference(node.args[0])):
+        return node.args[1]
+    return None
+
+
 def _string_elements(list_or_tuple):
     return [e.value for e in list_or_tuple.elts
             if isinstance(e, ast.Constant) and isinstance(e.value, str)]
@@ -189,10 +232,11 @@ def _py_violations(py_path):
     tree = ast.parse(py_path.read_text(encoding="utf-8"))
     violations = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and node.args
-                and _is_real_exec_call(node)):
+        if not isinstance(node, ast.Call):
             continue
-        first = node.args[0]
+        first = _exec_argv_node(node)  # direct arg0 OR deferred-wrapped arg1 (#734)
+        if first is None:
+            continue
         line_no = getattr(node, "lineno", 0)
         if isinstance(first, (ast.List, ast.Tuple)):
             elts = _string_elements(first)
@@ -250,6 +294,73 @@ class TestNoUnguardedDestructiveTmuxInvocation(unittest.TestCase):
             "invocation -- exactly the #613 incident shape (a test harness "
             "that killed the box's REAL live tmux server via inherited "
             "$TMUX). Fix each:\n" + "\n".join(violations))
+
+
+class TestDeferredExecWrappedCallsAreScanned(unittest.TestCase):
+    """#734 -- a subprocess exec passed as a REFERENCE to a DEFERRED wrapper
+    (`self.addCleanup(subprocess.run, argv, ...)` /
+    `atexit.register(subprocess.run, argv)`) is a REAL process spawn at
+    teardown/exit, but the OUTER Call node is `addCleanup`/`register`, so
+    `_is_real_exec_call` (which only matches a direct
+    `subprocess.<exec>(...)` Call) never sees it -- the exact blind spot the
+    dev1 2026-08-27 00:21 incident's `addCleanup(subprocess.run, ['tmux',
+    'kill-server'], ...)` teardown class sat in. `_py_violations` must scan
+    the argv of these wrapped calls (the SECOND positional arg) too, while
+    keeping the same false-positive discipline as the direct path (a BARE,
+    non-`subprocess.`-prefixed fake `run` reference stays exempt)."""
+
+    def _violations_for(self, src):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "snippet_734.py"
+            p.write_text(src, encoding="utf-8")
+            return _py_violations(p)
+
+    def test_addcleanup_wrapped_unguarded_killserver_is_flagged(self):
+        src = (
+            "import subprocess\n"
+            "class T:\n"
+            "    def t(self):\n"
+            "        env = {'TMUX_TMPDIR': '/tmp/x'}\n"
+            "        self.addCleanup(subprocess.run, ['tmux', 'kill-server'],\n"
+            "                        env=env, capture_output=True, timeout=10)\n"
+        )
+        self.assertTrue(
+            self._violations_for(src),
+            "addCleanup(subprocess.run, [..kill-server]) must be flagged (#734)")
+
+    def test_atexit_register_wrapped_unguarded_killserver_is_flagged(self):
+        src = (
+            "import subprocess, atexit\n"
+            "atexit.register(subprocess.run, ['tmux', 'kill-server'])\n"
+        )
+        self.assertTrue(
+            self._violations_for(src),
+            "atexit.register(subprocess.run, [..kill-server]) must be flagged")
+
+    def test_socket_scoped_addcleanup_is_not_flagged(self):
+        src = (
+            "import subprocess\n"
+            "class T:\n"
+            "    def t(self):\n"
+            "        self.addCleanup(subprocess.run,\n"
+            "                        ['tmux', '-S', '/tmp/x/sock', 'kill-server'])\n"
+        )
+        self.assertEqual(
+            self._violations_for(src), [],
+            "a socket-scoped (-S) addCleanup kill must NOT be flagged")
+
+    def test_injected_fake_run_reference_is_not_flagged(self):
+        # A dependency-injected fake exec (`addCleanup(run, argv)` with a BARE
+        # `run`, no `subprocess.` prefix) stays exempt, exactly as the
+        # direct-call classifier already exempts a bare `run(argv)` fake --
+        # the ~19-false-positive corpus that shaped `_is_real_exec_call`.
+        src = (
+            "def t(self, run):\n"
+            "    self.addCleanup(run, ['tmux', 'kill-server'])\n"
+        )
+        self.assertEqual(
+            self._violations_for(src), [],
+            "a bare (non-subprocess) fake run reference must NOT be flagged")
 
 
 if __name__ == "__main__":  # pragma: no cover
