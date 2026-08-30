@@ -30,7 +30,10 @@ through a callback in the /autopilot command." Concretely:
              "please compact." One origin is honest, not a shortcut.
 
   DELIVERY -- ONE function, `deliver_goal()`. It checks, in order: the
-             owner kill-switch; a hard, non-refreshable age cap (an expired
+             owner kill-switch; a hard age cap non-refreshable by any
+             AUTOMATIC path (#757: only a fresh human `/autopilot` re-record
+             replaces the request with a fresh anchor, via
+             `record_goal_request`'s user-callback allowlist) (an expired
              request pings once -- "arm failed, re-run /autopilot" -- since
              a silently-undeliverable arm request is a dark-autopilot
              failure, not a harmless drop like compact's); pane resolution;
@@ -287,7 +290,13 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
         the identical "a genuine fresh /autopilot is a NEW episode" reason.
         This is an ALLOWLIST (user-callback origins refresh; everything else
         -- every watchdog re-arm AND every unknown/empty origin -- preserves),
-        so it fails SAFE for a future origin nobody classified.
+        so it fails SAFE for a future origin nobody classified. Note it is
+        also STRICTER than the old `dark-rearm`-exclusion rule in one
+        practically-unreachable direction: a `stale-rearm`/`auth-rearm`/
+        unknown origin landing over a `dark-rearm` prior used to get a fresh
+        ts and now PRESERVES -- the correct safe direction (those are all
+        automatic re-arms, and stale/auth-rearm already defer to any pending
+        request, so this path is not normally reached).
 
     `cwd`/`origin`/`authority`/`text` otherwise take the newest call's
     values. Fail-safe (never raises). Returns True on success (INCLUDING a
