@@ -40,7 +40,8 @@ snapshot silently advances the baseline — no nudge. So it fires ONCE per disti
 arrival wave — the fast wake the incident needed — while the persistent-
 unprocessed-queue case stays covered by jobs 8/11.
 
-FULL-authority gate (the #618/#616 MIRROR): only a gk/full box PROCESSES this
+FULL-authority gate (full-only, the SAME gate as `release_gap` (#616); the
+INVERSE of #618's WIDENED lane gate): only a gk/full box PROCESSES this
 cross-stream union; a reduced-authority stream HANDS OFF to gk and its own
 returned `prio:bounce` is already job-8's concern. Cheap, before any fetch. An
 unresolvable authority fails safe to skip (never a false nudge).
@@ -58,14 +59,19 @@ bounded-retry + orphan-reaper shapes. The verdict logic is a PURE
 `_queue_decision`; all I/O lives in `goal_queue_arrival_recheck` behind the same
 injectable seams the sibling jobs use, and `dry_run` mutates nothing.
 
-CADENCE: the FETCH is cached per repo for QUEUE_ARRIVAL_FETCH_TTL_S (~5 min,
-env-tunable, floored) — the arrival-detection latency. Bounded to at most 3 gh
-calls per repo per TTL (the ticket's proven 3-label union), never every sweep per
-pane.
+CADENCE: unlike the sibling riders there is NO per-sid time cadence — the rate is
+bounded only by the FETCH cache TTL (QUEUE_ARRIVAL_FETCH_TTL_S, ~5 min,
+env-tunable, floored at 60s), the arrival-detection latency. Bounded to at most 3
+gh calls per repo per TTL (the ticket's proven 3-label union), never every sweep
+per pane. Event-driven-per-arrival is the ticket's intent; the residual is that a
+queue label FLAPPING (automation add→remove→re-add) produces one nudge per flap
+per TTL — real flap sources are rare, and each flap is a genuine re-arrival worth
+surfacing.
 """
 import os
 
 import watchdog
+from watchdog import ops_wait_recheck as _ops_wait_recheck
 
 # env AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S — how long a queue-union snapshot is
 # CACHED per repo (`state["queue_arrival_cache"]`, keyed by cwd). ~5 min: the
@@ -94,17 +100,6 @@ MAX_NAMED_ARRIVALS = 12
 MAX_SEND_FAILS = 3
 
 
-def _pane_busy_waiting(captured):
-    """True iff the pane shows CC's "Waiting for N background agents to finish"
-    spinner (#714): the supervisor turn has ENDED and is blocked waiting for a
-    background worker before re-invocation, so a submitted Enter is swallowed and
-    the nudge parks orphaned. Reuses `watchdog._BG_AGENTS_WAIT_RX` — the SAME
-    signal `ops_wait_recheck._pane_busy_waiting` gates on, NARROWED to the Waiting
-    line only (NOT the agent-strip `◯` worker rows an armed loop always carries).
-    Fail-safe False on empty/None."""
-    return bool(captured) and bool(watchdog._BG_AGENTS_WAIT_RX.search(captured))
-
-
 def _env_int(key, default_s):
     try:
         return int(os.environ.get(key, default_s))
@@ -120,42 +115,21 @@ def _fetch_ttl():
 
 
 def _cached_queue(cwd, fetch, state, now, ttl=None, fail_ttl=None):
-    """A per-cwd TTL cache over the queue-union `fetch` — the faithful sibling of
-    `ops_wait_recheck._cached_member_fetch` / `release_gap._cached_release_state`.
-    Without it the fetch would spawn its 3-label gh union EVERY 60s sweep for
-    EVERY armed pane on the 120s-budgeted sweep's critical path. Bounds it to at
-    most one union per repo per TTL, shared across every armed pane there.
+    """A per-cwd TTL cache over the queue-union `fetch` (a `list` of ints or
+    None). Without it the fetch would spawn its 3-label gh union EVERY 60s sweep
+    for EVERY armed pane on the 120s-budgeted sweep's critical path — this bounds
+    it to at most one union per repo per TTL, shared across every armed pane.
 
-    `fetch is None` (not wired) -> None, no cache write (the "wired = on"
-    convention). A fetch exception -> None. A `ts` crossing the JSON persistence
-    boundary is type-checked (a malformed/legacy entry reads as EXPIRED, never
-    raises). None (unmeasurable) is cached only for `fail_ttl` so a transient gh
-    hiccup re-checks soon. Returns a `list` (of ints) or None — never a guessed
-    []."""
-    if fetch is None:
-        return None
-    ttl = _fetch_ttl() if ttl is None else ttl
-    fail_ttl = QUEUE_ARRIVAL_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl
-    cache = state.setdefault("queue_arrival_cache", {})
-    entry = cache.get(cwd)
-    if isinstance(entry, dict):
-        try:
-            age = now - float(entry.get("ts", 0))
-        except (TypeError, ValueError):
-            age = None
-        if age is not None:
-            members = entry.get("members")
-            entry_ttl = ttl if isinstance(members, list) else fail_ttl
-            if age < entry_ttl:
-                return members if isinstance(members, list) else None
-    try:
-        members = fetch(cwd)
-    except Exception:
-        members = None
-    if not (members is None or isinstance(members, list)):
-        members = None
-    cache[cwd] = {"ts": now, "members": members}
-    return members
+    REUSES `ops_wait_recheck._cached_member_fetch` (#486 net-LOC-down — that
+    helper is `cache_key`-parameterized precisely so ONE implementation serves
+    every list-shaped fetch consumer), with this module's OWN cache namespace +
+    ttl/fail_ttl. All its guarantees carry: `fetch is None` -> None with no cache
+    write, a fetch exception / non-list return -> None, a malformed `ts` reads as
+    expired (never raises), None cached only for `fail_ttl`."""
+    return _ops_wait_recheck._cached_member_fetch(
+        cwd, fetch, state, now, "queue_arrival_cache",
+        _fetch_ttl() if ttl is None else ttl,
+        QUEUE_ARRIVAL_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl)
 
 
 # --- PURE DECIDER ----------------------------------------------------------
@@ -306,7 +280,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     verdict logged, never a silent skip). `dry_run` mutates no persistent state
     and sends nothing.
 
-    FULL-authority gate (the #616 MIRROR): only a gk/full box PROCESSES this
+    FULL-authority gate (full-only, the SAME gate as `release_gap` (#616); the
+    INVERSE of #618's widened lane gate): only a gk/full box PROCESSES this
     cross-stream union. Cheap, BEFORE any fetch. An unresolvable authority fails
     safe to skip (never a false nudge into a reduced-authority stream box).
 
@@ -329,7 +304,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     nudge / ops-wait / release-gap riders in the loop, so a pane those already
     typed is deferred to next sweep, and a nudge WE send claims the sid)."""
     logs = []
-    # FULL-authority gate (#616 MIRROR), cheap, before any fetch.
+    # FULL-authority gate (full-only, same gate as release_gap #616; the INVERSE
+    # of #618's widened lane gate), cheap, before any fetch.
     try:
         import airuleset
         authority = airuleset.resolve_authority(cwd)
@@ -375,6 +351,14 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     cur_sorted = sorted({int(x) for x in cur})
     if not dry_run:
         new_rec["lts"] = now
+        # Carry the consecutive-swallow counter forward (#733 review 🔵): this
+        # persist runs BEFORE the handled/busy gates, so a deferral sweep between
+        # two swallow sweeps must NOT silently reset it — else an alternating
+        # busy/swallow pane never reaches MAX_SEND_FAILS. `_book_unverified_send`
+        # reads the OLD rec, so this only preserves it across a deferral.
+        prior_fails = rec.get("send_fails")
+        if isinstance(prior_fails, int) and not isinstance(prior_fails, bool):
+            new_rec["send_fails"] = prior_fails
         qrecs[sid] = new_rec
 
     if handled is not None and sid in handled:
@@ -386,7 +370,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # background agents to finish" state — the submit is swallowed and parks
     # orphaned. Defer WITHOUT a keystroke (no send_fails increment, base
     # unadvanced); the transient state clears and a later sweep delivers.
-    if _pane_busy_waiting(captured):
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         logs.append("queue-arrival %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep, %d new)"
                     % (loc, len(arrivals)))

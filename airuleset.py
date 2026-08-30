@@ -4288,6 +4288,11 @@ def _watchdog_queue_fetch(cwd):
     nums = set()
     for label in ("ready-for-review", "needs-gatekeeper", "prio:bounce"):
         try:
+            # `-L 200` is a per-label truncation window (#616 LIMIT-TRUNCATION
+            # class), but the failure direction here is MILD: a new arrival sorts
+            # into the newest window, and a long-tail member (>200 open of ONE
+            # label) that falls out then re-enters reads as a spurious re-arrival
+            # — a redundant nudge, never a wrong keystroke or a missed arrival.
             r = subprocess.run(
                 ["gh", "issue", "list", "--state", "open", "--label", label,
                  "-L", "200", "--json", "number"],
