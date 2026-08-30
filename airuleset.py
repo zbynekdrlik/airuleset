@@ -4193,7 +4193,10 @@ def _watchdog_ops_wait_fetch(cwd):
     long-parked W ticket into an armed loop's attention.
 
     `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
-    per member (oldest-first); field 0 is the issue number, field 3 the reason
+    per member (oldest-first), plus a trailing `# W-summary:` aggregate line
+    (total / oldest / flag counts / OVER-THRESHOLD marker, #754) which the loop
+    below SKIPS (a `#`-prefixed comment is not a member row); field 0 is the
+    issue number, field 3 the reason
     (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
     push — #570 — and/or a ` gk-handoff!` warning for a member ALSO carrying a
     gk hand-off label — #636). Returns a list of `{"number": int, "stale": bool,
@@ -4236,6 +4239,14 @@ def _watchdog_ops_wait_fetch(cwd):
     for line in (r.stdout or "").splitlines():
         line = line.strip()
         if not line:
+            continue
+        # #754: `--ops-wait` appends a `#`-prefixed aggregate SUMMARY line
+        # (total / oldest / flag counts / OVER-THRESHOLD marker) after the member
+        # rows. Skip it here so it never trips the malformed→None guard below —
+        # a comment line is not an undetermined member set, it is not a member at
+        # all. (The summary is a human/session report line; the members come from
+        # the int-prefixed rows.)
+        if line.startswith("#"):
             continue
         parts = line.split("\t")
         try:
@@ -5327,6 +5338,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _no_question_flagged as _no_question_flagged,
     OPS_WAIT_EVIDENCE_MAX_S as OPS_WAIT_EVIDENCE_MAX_S,
     OPS_WAIT_STALE_MAX_FETCHES as OPS_WAIT_STALE_MAX_FETCHES,
+    OPS_WAIT_WDRAIN_THRESHOLD as OPS_WAIT_WDRAIN_THRESHOLD,
     _stream_self_login as _stream_self_login,
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,

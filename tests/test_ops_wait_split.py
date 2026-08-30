@@ -231,9 +231,17 @@ class CoreQualsExcludesOpsWait(unittest.TestCase):
             self._prep(home, repo, bindir)
             r = _run_quals("core-quals", "--ops-wait", repo, home, bindir)
             self.assertEqual(r.returncode, 0, r.stderr)
-            nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines() if ln.strip()}
+            # #754: `--ops-wait` now appends a `#`-prefixed aggregate summary
+            # line after the member rows — skip `#`-lines when collecting members
+            # (the SAME contract `_watchdog_ops_wait_fetch` applies).
+            lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+            nums = {ln.split("\t", 1)[0] for ln in lines
+                    if not ln.startswith("#")}
             self.assertEqual(nums, {"4", "5"},
                              "core-quals --ops-wait must list ONLY the ops-wait tickets")
+            # #754: the summary line is present and LAST.
+            self.assertTrue(lines[-1].startswith("# W-summary:"),
+                            "the aggregate #-summary must be the last line: %r" % lines[-1])
 
     def test_waiting_still_lists_only_user_waiting(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
@@ -296,6 +304,8 @@ class OpsWaitListingTagsAcceptance(unittest.TestCase):
             for ln in r.stdout.splitlines():
                 if not ln.strip():
                     continue
+                if ln.startswith("#"):   # #754: skip the aggregate #-summary line
+                    continue
                 parts = ln.split("\t")
                 # number<TAB>createdAt<TAB>action<TAB>reason<TAB>title
                 self.assertGreaterEqual(len(parts), 5,
@@ -353,7 +363,9 @@ class SliceQualsExcludesOpsWait(unittest.TestCase):
             r = _run_quals("slice-quals", "--ops-wait", repo, home, bindir,
                            marker="<!-- airuleset:authority=fork-no-merge -->")
             self.assertEqual(r.returncode, 0, r.stderr)
-            nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines() if ln.strip()}
+            # #754: skip the trailing `#`-summary line when collecting members.
+            nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines()
+                    if ln.strip() and not ln.startswith("#")}
             self.assertEqual(nums, {"4"},
                              "slice-quals --ops-wait must list ONLY the ops-wait ticket (#4)")
 

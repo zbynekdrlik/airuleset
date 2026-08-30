@@ -959,6 +959,16 @@ OPS_WAIT_EVIDENCE_MAX_S = 24 * 3600
 # correctness bug. The cap + a modest 35s timeout keep it rare.
 OPS_WAIT_STALE_MAX_FETCHES = 25
 
+# #754 — the W-drain threshold. The goal state of the /goal loop is I0 ∧ U0 ∧
+# W0: W is a DEBT bucket, not a terminal ticket state. When the parked-W set
+# exceeds this size the CLI `--ops-wait` summary line flags `OVER-THRESHOLD` and
+# the job-20 nudge escalates to an aggregate W-OVERFLOW clause (drain the bucket
+# BEFORE new I work; if it cannot be consolidated, summarise to the owner ❓).
+# CANONICAL value — the watchdog's local `WDRAIN_ESCALATE_N` is locked equal to
+# this by tests/test_wdrain_lane_754.py so the CLI marker and the escalation fire
+# at the SAME |W| (live incident: odoo-erp montalu3 grew to W 34 unchecked).
+OPS_WAIT_WDRAIN_THRESHOLD = 8
+
 
 def _parse_iso_ts(s):
     """Epoch seconds for an ISO-8601 `createdAt` (gh renders `...Z`), or None on

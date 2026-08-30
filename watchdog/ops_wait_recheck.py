@@ -403,6 +403,18 @@ def _release_recheck_numbers(members):
 # a new alarm class — the session pings, the watchdog never does, #546/#688).
 RELEASE_LANDED_OWNER_ASK_N = 5
 
+# #754 — the aggregate W-drain escalation threshold. When the parked-W set
+# exceeds this size, `_flag_items` prepends a W-OVERFLOW clause instructing the
+# session to run a W-drain pass (zavri / odparkuj / cituj blocker) BEFORE
+# dispatching new I work, and to summarise a consolidation proposal to the owner
+# ❓ if the bucket cannot be drained. The goal state of the loop is I0 ∧ U0 ∧ W0
+# — W is a DEBT bucket with a strop, not a terminal ticket state. LOCKED equal to
+# the canonical `cli_quals.OPS_WAIT_WDRAIN_THRESHOLD` by
+# tests/test_wdrain_lane_754.py (kept local here to preserve this module's
+# hermeticity, the same convention as RELEASE_LANDED_OWNER_ASK_N), so the CLI
+# `--ops-wait` OVER-THRESHOLD marker and this escalation fire at the SAME |W|.
+WDRAIN_ESCALATE_N = 8
+
 # #698 — a release-SHAPED title: a release keyword (release/vydanie/
 # nasadenie/deploy), a `stage-N` token, or a v-PREFIXED version (`v2.181`).
 # The ticket-body heuristic scoped to the TITLE (the only member text the
@@ -601,6 +613,20 @@ def _flag_items(w_members, release_landed):
     escalation keeps its >N owner-ask tail. Returns a list of standalone
     sentences; the caller appends as many as fit under NUDGE_MAX_CHARS."""
     items = []
+    # #754 — the AGGREGATE W-OVERFLOW clause, FIRST so it survives the greedy
+    # NUDGE_MAX_CHARS cap. The goal state is I0 ∧ U0 ∧ W0: W is a DEBT bucket, and
+    # an over-threshold |W| is a strop breach the loop must act on BEFORE new I
+    # work — never a passive parking lot (live: odoo-erp montalu3 grew to W 34
+    # while the armed loop kept dispatching I lanes).
+    w_total = len(_member_numbers(w_members))
+    if w_total > WDRAIN_ESCALATE_N:
+        # Compact (kept short so it survives the greedy NUDGE_MAX_CHARS cap even
+        # when I>0 and every per-category flag also fires — the aggregate drain
+        # signal must never be the item that gets dropped).
+        items.append(
+            "W-OVERFLOW %d>%d (#754 -- W-drain PRED I: "
+            "zavri/odparkuj/cituj; nedá sa → zhrň ownerovi ❓)."
+            % (w_total, WDRAIN_ESCALATE_N))
     stale = len(_stale_numbers(w_members))
     if stale:
         items.append("STALE %d (#607 -- pošli vecnú pripomienku "

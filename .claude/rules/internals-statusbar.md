@@ -76,6 +76,17 @@ parking reason — an external event/evidence instead of the user's answer):
   New footer flags: `entry["ops_wait"]` + a `statusbar._ops_wait_sfx` (`· W N`,
   grey 245, hidden at 0) + `--ops-wait` list flags on both quals subcommands
   (parallel to `--waiting`, which stays user-waiting-only — a #468 test locks that).
+- **The `--ops-wait` STDOUT format has FOUR parsers, not one — any shape change
+  (a new line, a new column) MUST run `tests/test_ops_wait_split.py`, not only the
+  `ops_wait_recheck`/`stale` suites (#754, caught in the review pass, not the first
+  gate run).** Adding a trailing `# W-summary:` aggregate line to
+  `cmd_slice_quals`/`cmd_core_quals --ops-wait` broke THREE `test_ops_wait_split.py`
+  tests that parse EVERY non-empty stdout line as a member row. The consumers to
+  sweep: `airuleset._watchdog_ops_wait_fetch` (the watchdog parser — returns None
+  on a non-int field-0, which SILENTLY KILLS the whole job-20 nudge) PLUS the three
+  `test_ops_wait_split.py` listing tests. Contract for a NON-member line: prefix it
+  `#` and make every parser `skip startswith("#")` — then a summary/comment line is
+  safe on the machine-parsed stream.
 - **The `/goal STOP CONDITIONS` templates in `skills/autopilot/SKILL.md` have TWO
   caps, not one — a 4000-char HARD cap AND a ≥150-char HEALTHY-HEADROOM floor
   (`test_goal_backlog_proof.py::TheTemplatesHaveHealthyCapHeadroom`, MIN_HEADROOM
