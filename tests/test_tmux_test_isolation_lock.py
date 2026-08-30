@@ -166,6 +166,48 @@ def _is_real_exec_call(node):
     return False
 
 
+# #734 -- a subprocess exec passed as a REFERENCE to a DEFERRED wrapper runs
+# for real later (teardown / interpreter exit), so its argv needs the same
+# `-S`/`-L` guard as a direct call. `self.addCleanup(...)` (unittest) and
+# `atexit.register(...)` -- and the bare `register(...)` after
+# `from atexit import register` -- are the wrappers; the argv is their SECOND
+# positional arg because the FIRST is the exec function itself.
+_DEFERRED_WRAPPERS = {"addCleanup", "register"}
+
+
+def _is_exec_reference(node):
+    """True if `node` is a bare REFERENCE to `subprocess.run/Popen/...`
+    (an `ast.Attribute` passed as a CALLABLE, never called here). Requires
+    the `subprocess.` prefix for the SAME reason `_is_real_exec_call` does:
+    a bare `run`/`Popen` name is this repo's dependency-injected FAKE, and
+    exempting it is what keeps the ~19-false-positive corpus out."""
+    return (isinstance(node, ast.Attribute)
+            and node.attr in _EXEC_CALL_NAMES
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "subprocess")
+
+
+def _exec_argv_node(node):
+    """The AST node holding the argv of a REAL process spawn reachable from
+    `node` (an ast.Call), or None:
+      * DIRECT   `subprocess.run(ARGV, ...)`                      -> args[0]
+      * DEFERRED `self.addCleanup(subprocess.run, ARGV, ...)` /
+                 `atexit.register(subprocess.run, ARGV, ...)`     -> args[1]
+    The deferred form (#734 blind spot) is an `addCleanup`/`register` Call
+    whose FIRST positional arg is the exec REFERENCE and whose argv is the
+    SECOND -- so `_is_real_exec_call` (which matches only a direct
+    `subprocess.<exec>(...)` Call) never sees it."""
+    if _is_real_exec_call(node) and node.args:
+        return node.args[0]
+    f = node.func
+    wrapper = f.attr if isinstance(f, ast.Attribute) else (
+        f.id if isinstance(f, ast.Name) else None)
+    if (wrapper in _DEFERRED_WRAPPERS and len(node.args) >= 2
+            and _is_exec_reference(node.args[0])):
+        return node.args[1]
+    return None
+
+
 def _string_elements(list_or_tuple):
     return [e.value for e in list_or_tuple.elts
             if isinstance(e, ast.Constant) and isinstance(e.value, str)]
@@ -190,10 +232,11 @@ def _py_violations(py_path):
     tree = ast.parse(py_path.read_text(encoding="utf-8"))
     violations = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and node.args
-                and _is_real_exec_call(node)):
+        if not isinstance(node, ast.Call):
             continue
-        first = node.args[0]
+        first = _exec_argv_node(node)  # direct arg0 OR deferred-wrapped arg1 (#734)
+        if first is None:
+            continue
         line_no = getattr(node, "lineno", 0)
         if isinstance(first, (ast.List, ast.Tuple)):
             elts = _string_elements(first)
