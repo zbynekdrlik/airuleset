@@ -4132,7 +4132,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _release_gap.goal_release_gap_recheck(
                 now, run, rrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 release_state_fetch=release_state_fetch, state=state,
-                sleep_fn=sleep_fn)
+                sleep_fn=sleep_fn, captured=captured)  # #749 busy-pane gate
     if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_lane_orphans(recs, visited_sids, now)
         # #547 -- the same orphan prune for the ops-wait re-check namespace.

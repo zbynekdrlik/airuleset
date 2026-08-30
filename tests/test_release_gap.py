@@ -468,6 +468,59 @@ class TestOrchestrator(_OrchBase):
         self.assertIsNone(rrecs[self.sid]["last_nudge"])
         self.assertNotIn(self.sid, handled)
 
+    def test_persistent_swallow_backs_off_after_max_fails(self):
+        # #749 — a pane whose submit is persistently swallowed (verify fails
+        # every sweep) MUST back off after a bounded number of consecutive failed
+        # sends instead of re-typing every ~60s sweep forever (the user-visible
+        # "dokolecka promptuje"). Mirrors ops_wait_recheck's #714 bound.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+
+        def fetch(cwd):
+            return {"ahead": 5, "in_flight": False}
+        state = {}
+        max_fails = getattr(rg, "MAX_SEND_FAILS", 3)
+        for _ in range(max_fails):
+            logs = self._run(rrecs, fetch, self._tmux(enters_swallowed=5),
+                             handled=set(), state=state)
+            self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        # After MAX_SEND_FAILS consecutive failures the anchor is advanced one
+        # full cadence (back off), so the NEXT sweep produces a WAIT verdict with
+        # NO keystroke — the storm is bounded, not per-sweep-forever.
+        self.assertEqual(rrecs[self.sid]["last_nudge"], NOW)
+        tmux = self._tmux(enters_swallowed=5)
+        logs = self._run(rrecs, fetch, tmux, handled=set(), state=state)
+        self.assertTrue(any("-> wait" in ln for ln in logs))
+        self.assertEqual(tmux.typed_texts(), [])
+
+    def test_corrupt_send_fails_counter_tolerated(self):
+        # #749 — the persisted send_fails counter crosses the JSON boundary, so a
+        # corrupt/legacy non-int (or a bool) must read as 0 and never raise; the
+        # first failure then counts as attempt 1, not a crash.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None,
+                            "send_fails": "not-an-int"}}
+        logs = self._run(rrecs, lambda cwd: {"ahead": 5, "in_flight": False},
+                         self._tmux(enters_swallowed=5), handled=set(), state={})
+        self.assertTrue(any("attempt 1/" in ln for ln in logs))
+        self.assertEqual(rrecs[self.sid]["send_fails"], 1)
+
+    def test_busy_pane_defers_without_keystroke(self):
+        # #749/#714 — a pane showing CC's "Waiting for N background agents to
+        # finish" must NOT be typed into (the submit is swallowed and parks
+        # orphaned). Defer without a keystroke; last_nudge unadvanced.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        tmux = self._tmux()
+        captured = "some ui rows\nWaiting for 2 background agents to finish\n❯ "
+        with m.patch("airuleset.resolve_authority", return_value="full"):
+            logs = rg.goal_release_gap_recheck(
+                NOW, tmux, rrecs, self.sid, self.CWD, "%9", self.tpath, "sess:0",
+                False, set(),
+                release_state_fetch=lambda cwd: {"ahead": 5, "in_flight": False},
+                state={}, sleep_fn=lambda *a, **k: None, cadence=CAD,
+                min_ahead=MIN, captured=captured)
+        self.assertTrue(any("busy" in ln.lower() for ln in logs))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIsNone(rrecs[self.sid]["last_nudge"])
+
 
 # --------------------------------------------------------------------------- #
 # 7. Integration regression — the wiring into goal_lane_sweep.
@@ -499,7 +552,7 @@ class TestLaneSweepWiring(unittest.TestCase):
                        % (sid, NOW, self.CWD), encoding="utf-8")
 
     def _armed_sweep(self, state, *, release_state_fetch, dry_run=False,
-                     handled=None, authority="full"):
+                     handled=None, authority="full", captured=GOAL_ARMED_CAP):
         proj = Path(self._proj.name)
         tpath = _write_marker_transcript(proj, self.CWD, "sess-616-lane")
         sid = tpath.stem
@@ -509,7 +562,7 @@ class TestLaneSweepWiring(unittest.TestCase):
         gmarks = state.setdefault("goal_mark", {})
         gmarks[sid] = {"off": 0, "mark": {"state": "set", "ts": NOW}}
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP, model_type=True,
+                                   captured, model_type=True,
                                    transcript_path=tpath)
         with m.patch("airuleset.resolve_authority", return_value=authority), \
                 m.patch.object(wd, "_owner_disabled", return_value=False):
@@ -536,6 +589,21 @@ class TestLaneSweepWiring(unittest.TestCase):
                       "wires goal_release_gap_recheck)")
         self.assertIn("release-gap", typed)
         self.assertEqual(state["release_gap"][sid]["last_nudge"], NOW)
+
+    def test_busy_bg_agent_pane_not_nudged_wiring(self):
+        # #749 — locks the `captured=captured` wiring at goal.py's release-gap
+        # call site: an armed pane whose capture carries CC's "Waiting for N
+        # background agents to finish" line must reach the rider's busy-pane gate
+        # via goal_lane_sweep and produce NO keystroke. Reverting `captured=
+        # captured` makes the rider read None (fail-open) and this test types.
+        busy_cap = "Waiting for 2 background agents to finish\n" + GOAL_ARMED_CAP
+        state = {"release_gap": {
+            "sess-616-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}}}
+        sid, tmux = self._armed_sweep(
+            state, captured=busy_cap,
+            release_state_fetch=lambda cwd: {"ahead": 99, "in_flight": False})
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIsNone(state["release_gap"][sid]["last_nudge"])
 
     def test_release_in_flight_not_nudged(self):
         state = {"release_gap": {

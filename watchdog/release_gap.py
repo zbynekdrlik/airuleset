@@ -106,6 +106,16 @@ RELEASE_STATE_FETCH_FAIL_TTL_S = 60
 # budget-deferred pane.
 RELEASE_GAP_ORPHAN_TTL_S = 24 * 3600
 
+# #749 — bounded retry, mirroring ops_wait_recheck.MAX_SEND_FAILS (#714). A pane
+# whose submit is persistently swallowed (verify fails every sweep — e.g. it sat
+# in CC's "Waiting for N background agents" state, or was otherwise un-typeable)
+# would otherwise be re-typed every ~60s sweep forever, since `last_nudge` only
+# advances on a CONFIRMED send: type -> head/tail verify fails -> undo -> retype,
+# endlessly (the owner's "dokolecka promptuje"). After MAX_SEND_FAILS consecutive
+# undelivered sends the nudge backs off one full cadence (advance `last_nudge`),
+# bounding the storm to <= MAX_SEND_FAILS keystrokes per cadence.
+MAX_SEND_FAILS = 3
+
 
 def _env_int(key, default_s):
     try:
@@ -215,8 +225,10 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 #   "wait"     -- gap, no release in flight, still inside the grace/reping window
 #                 -> persist (seed first_seen, refresh sig), no nudge;
 #   "nudge"    -- gap, no release in flight, past the cadence -> the caller
-#                 ATTEMPTS a verified send and advances last_nudge only on a
-#                 CONFIRMED submit.
+#                 ATTEMPTS a verified send and advances last_nudge on a CONFIRMED
+#                 submit, OR (#749) after MAX_SEND_FAILS consecutive UNDELIVERED
+#                 attempts (the bounded-retry back-off — one cadence, so a
+#                 persistently-swallowing pane is not re-typed every sweep).
 
 def _release_decision(rec, rstate, now, cadence, min_ahead):
     """Pure verdict for ONE armed session's release-gap state. `rec` is the
@@ -234,9 +246,11 @@ def _release_decision(rec, rstate, now, cadence, min_ahead):
     (last_nudge or first_seen) >= cadence` — `first_seen` gives the initial grace
     (never nudge a gap that JUST appeared) and becomes the reping anchor via
     `last_nudge` afterwards. `last_nudge` is PRESERVED unchanged here (a "nudge"
-    verdict is an INTENT; the caller sets last_nudge=now only after a
-    transcript-confirmed submit, so a swallowed send retries next sweep rather
-    than skipping a whole cadence). `first_seen` is seeded to `now` on first
+    verdict is an INTENT; the caller sets last_nudge=now after a
+    transcript-confirmed submit — so a swallowed send retries next sweep rather
+    than skipping a whole cadence — OR, per #749, after MAX_SEND_FAILS consecutive
+    UNDELIVERED sends (the bounded-retry back-off, so a persistently-swallowing
+    pane is not re-typed every sweep forever). `first_seen` is seeded to `now` on first
     sight — so a long-pre-existing gap is first nudged one cadence after deploy,
     the safe cold-start."""
     if not isinstance(rstate, dict):
@@ -310,9 +324,35 @@ def _prune_release_gap_orphans(rrecs, visited_sids, now,
 
 # --- ORCHESTRATOR ----------------------------------------------------------
 
+def _book_unverified_send(rec, new_rec, loc, ahead, now):
+    """#749 bounded retry (faithful mirror of `ops_wait_recheck._book_unverified_
+    send`, #714): book ONE undelivered release-gap send. The consecutive-failure
+    counter is READ from the OLD persisted `rec` (last sweep's value) and WRITTEN
+    to `new_rec` (which `_release_decision` rebuilds fresh each sweep from
+    first_seen/last_nudge/sig, so the counter must be carried across explicitly);
+    `new_rec` IS `rrecs[sid]`, so the write persists. Under MAX_SEND_FAILS it
+    increments and retries next sweep; at MAX_SEND_FAILS it BACKS OFF one full
+    cadence (advance `last_nudge`, reset the counter) so a persistently-swallowing
+    pane is not re-typed every ~60s sweep forever. The counter crosses the JSON
+    persistence boundary, so a corrupt/legacy non-int reads as 0 and never raises.
+    Returns the decision log line."""
+    prior = rec.get("send_fails") if isinstance(rec, dict) else None
+    fails = (prior if isinstance(prior, int) and not isinstance(prior, bool)
+             else 0) + 1
+    if fails >= MAX_SEND_FAILS:
+        new_rec["last_nudge"] = now
+        new_rec["send_fails"] = 0
+        return ("release-gap %s -> submit-unverified x%d — backing off one "
+                "cadence (bounded retry #749, ahead=%d)" % (loc, fails, ahead))
+    new_rec["send_fails"] = fails
+    return ("release-gap %s -> submit-unverified (attempt %d/%d, retry next "
+            "sweep, ahead=%d)" % (loc, fails, MAX_SEND_FAILS, ahead))
+
+
 def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                              dry_run, handled, release_state_fetch, state,
-                             sleep_fn=None, cadence=None, min_ahead=None):
+                             sleep_fn=None, cadence=None, min_ahead=None,
+                             captured=None):
     """Audit ONE armed candidate pane's release-gap and, on cadence, deliver ONE
     verified nudge into that session. Called from `goal.goal_lane_sweep`'s
     existing armed-pane loop with the already-resolved pane context (ZERO new
@@ -333,12 +373,23 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     subprocess fires at most once per repo per TTL, never every sweep per pane.
 
     Keystroke coordination reuses the sibling machinery verbatim: `send_verified`
-    (transcript-proof submit; a swallowed Enter is NOT booked, its text
-    restored), `_janitor_mark_watch`/`_janitor_clear_watch`, and the per-sweep
+    (transcript-proof submit; a swallowed Enter is NOT booked delivered, its text
+    restored — and #749 bounds the RETRY: after MAX_SEND_FAILS consecutive
+    undelivered sends the nudge backs off one full cadence),
+    `_janitor_mark_watch`/`_janitor_clear_watch`, and the per-sweep
     `handled` set (at most ONE keystroke per pane per sweep across the keystroke
     jobs — this job runs AFTER the lane nudge and the ops-wait recheck in the
     loop, so a pane those already typed is deferred to next sweep, and a nudge WE
-    send claims the sid)."""
+    send claims the sid).
+
+    `captured` (#749/#714): the pane capture the caller already read for the
+    lane nudge (ZERO new capture) — the BUSY-PANE GATE. When it shows CC's
+    "Waiting for N background agents to finish" state (`watchdog._BG_AGENTS_WAIT_
+    RX`), the nudge is DEFERRED (no keystroke, `last_nudge` unadvanced, `handled`
+    unclaimed) so it retries a later sweep: a submit into that transient mid-turn
+    state is swallowed and parks the text orphaned in the input box. None
+    (unwired / older caller) skips the gate — the send's own bare/collapsed
+    checks still apply. Mirrors the sibling `ops_wait_recheck` in the SAME loop."""
     logs = []
     cadence = cadence or _cadence()
     min_ahead = _min_ahead() if min_ahead is None else min_ahead
@@ -403,6 +454,22 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
         logs.append("release-gap %s -> skip:already-handled (another sweep job "
                     "typed this pane; retry next sweep)" % loc)
         return logs
+    # #749/#714 BUSY-PANE GATE: NEVER type into a pane showing CC's "Waiting for
+    # N background agents to finish" state — the submit is swallowed and the text
+    # parks ORPHANED in the input box (the head/tail verify then fails every
+    # sweep). Defer WITHOUT a keystroke; the transient Waiting state clears between
+    # turns and a later sweep delivers into the genuinely-idle `❯`. last_nudge
+    # stays unadvanced, the pane is NOT claimed in `handled`, and `send_fails` is
+    # NEITHER incremented NOR carried (this sweep booked no failure) — the fresh
+    # `new_rec` simply omits it, so an alternating busy↔swallow pane restarts the
+    # streak at 1, the accepted #714 residual (exact sibling parity). Inlined
+    # rather than importing `ops_wait_recheck._pane_busy_waiting` (a rider→rider
+    # private reach); both wrappers delegate to the SAME single-sourced signal
+    # `watchdog._BG_AGENTS_WAIT_RX`, so a signal change still lands in one place.
+    if captured and watchdog._BG_AGENTS_WAIT_RX.search(captured):
+        logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
+                    "background agent — deferred, retry next sweep)" % loc)
+        return logs
     if dry_run:
         logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, no release in "
                     "flight)" % (loc, ahead))
@@ -419,11 +486,18 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                                 logs=logs, out=send_out)
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
-        logs.append("release-gap %s -> submit-unverified (ahead=%d, retry next "
-                    "sweep)" % (loc, ahead))
+        # #749 BOUNDED RETRY: a persistently-swallowing pane must not be re-typed
+        # every sweep forever (`last_nudge` never advances on a failed send). Book
+        # the failure; at MAX_SEND_FAILS back off one full cadence. `new_rec` IS
+        # `rrecs[sid]` already (the persist step above ran — dry_run returned at
+        # WOULD-NUDGE, never reaches here), and `_book_unverified_send` mutates it
+        # in place, so the count/back-off persists with no re-assign (sibling
+        # parity: ops_wait_recheck's not-delivered path re-assigns nothing either).
+        logs.append(_book_unverified_send(rec, new_rec, loc, ahead, now))
         return logs
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now
+    new_rec["send_fails"] = 0   # #749: a delivered send clears the failure streak
     rrecs[sid] = new_rec
     if handled is not None:
         handled.add(sid)
