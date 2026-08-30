@@ -1279,5 +1279,101 @@ class HeredocProseFalsePositiveTest(_Runner):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class HeredocInterpreterConsumerReviewFixTest(_Runner):
+    """#750-review CRITICAL: a heredoc fed to an INTERPRETER (`bash`/`sh`/
+    an unrecognized command) is EXECUTED CODE, not inert data -- stripping
+    its body would have opened a genuinely NEW bypass of this hook's one
+    safety property. Confirmed live during review: pre-#750-fix, `bash
+    <<'EOF' ... cargo build --release ... EOF` correctly BLOCKED; the first
+    #750 cut made it pass unblocked. `strip_heredocs()` now only strips a
+    body when its consumer command is confidently classified as
+    NON-executing (`cat`/`tee`/`dd`/`:`/`true`) -- everything else,
+    including every shell/interpreter and any unrecognized command, is
+    fail-safe left untouched (still scanned as ordinary text, still blocks
+    a real compile inside it). Also locks the two companion regex
+    hardenings: `[ \\t]*` (never crossing a newline, so a `<<` at end-of-
+    line can no longer bind a LATER line's token as "the delimiter" and
+    splice out real command text in between) and the unquoted-delimiter
+    boundary (`cat <<EOF; echo hi` no longer swallows `;echo hi` into the
+    delimiter capture, so this common shape's heredoc is now correctly
+    recognized and stripped, closing a residual of the original #750 fix).
+    """
+
+    def test_bash_consumed_heredoc_with_a_real_cargo_build_still_blocks(self):
+        proj = self._mkproj()
+        cmd = "bash <<'EOF'\ncargo build --release\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_sh_consumed_heredoc_with_unquoted_delimiter_still_blocks(self):
+        proj = self._mkproj()
+        cmd = "sh <<EOF\ncargo test --no-run --lib\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_ssh_wrapped_bash_consumed_heredoc_still_blocks(self):
+        # the real interpreter is one hop away (over ssh); "ssh" itself is
+        # not a recognized safe consumer, so this correctly fails safe.
+        proj = self._mkproj()
+        cmd = "ssh dev2 bash <<'EOF'\ncargo build --release\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_dash_form_bash_consumed_heredoc_still_blocks(self):
+        proj = self._mkproj()
+        cmd = "bash <<-'EOF'\n\tcargo build --release\n\tEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cross_newline_delimiter_exploit_still_blocks(self):
+        # a `<<` at end-of-line, with the "delimiter" only on the NEXT
+        # physical line, must NOT be recognized as a heredoc at all -- with
+        # the old `\s*` this could splice out a real command in between as
+        # if it were heredoc body data.
+        proj = self._mkproj()
+        cmd = 'echo "x <<\ny"\ncargo build --release\ny\n'
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_original_750_repro_with_cat_consumer_still_not_blocked(self):
+        # positive control: the ORIGINAL #750 false-positive fix must still
+        # hold for the provably-safe `cat` consumer.
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/msg.txt <<'EOF'\n"
+               "Description: no\n"
+               "cargo compile involved, only a heredoc write.\n"
+               "EOF\n"
+               "echo done\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_colon_block_comment_idiom_with_cargo_prose_not_blocked(self):
+        # `: <<'EOF' ... EOF` is a common "heredoc as a block comment"
+        # idiom -- `:` discards its stdin entirely, never executing it.
+        proj = self._mkproj()
+        cmd = ": <<'EOF'\ncargo compile is only discussed here\nEOF\necho ok\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_unquoted_delimiter_with_trailing_semicolon_is_now_stripped(self):
+        # #750-review residual fix: the unquoted delimiter no longer
+        # swallows a trailing `;` + chained command -- this heredoc's body
+        # (safe `cat` consumer) is now correctly recognized and stripped,
+        # so the trailing prose no longer false-blocks.
+        proj = self._mkproj()
+        cmd = "cat <<EOF; echo hi\ncargo compile mentioned only as prose\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_two_sequential_heredocs_both_safe_consumers_not_blocked(self):
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/a <<'EOF'\ncargo compile prose one\nEOF\n"
+               "cat > /tmp/b <<'EOF'\ncargo compile prose two\nEOF\n"
+               "echo done\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -369,25 +369,136 @@ is_heavy() {
 # untouched, so a real command chained on that same line is unaffected.
 # Handles `<<DELIM`, `<<'DELIM'`, `<<"DELIM"`, and the dash form `<<-DELIM`
 # (leading tabs on the body + the closing delimiter line are stripped before
-# the compare, per POSIX). Fail-safe direction (never weaken the Tier-0
-# allowlist inversion): on ANY parse ambiguity -- a malformed/truncated
-# heredoc with no findable closing delimiter line, or a python3 failure --
-# the ORIGINAL text is returned UNCHANGED, so an unparseable heredoc still
-# over-blocks exactly as it did before #750; this never introduces a NEW
-# false negative. Accepted residuals (documented per the #319 convention):
-# (a) multiple heredocs opened on the SAME line (`cmd <<A <<B`) -- only the
-# FIRST is heredoc-aware-stripped, the second's body is left as ordinary text
-# (a rare shell shape, fail-safe over-block); (b) the delimiter word is
-# matched literally byte-for-byte, never shell-expanded -- exactly what a
-# real shell also requires for the close, so this is never a source of a new
-# false negative.
+# the compare, per POSIX).
+#
+# #750-review CRITICAL: a heredoc's body is DATA only when its CONSUMER
+# doesn't execute it. `bash <<'EOF' ... cargo build --release ... EOF` (or
+# `sh`/`eval`/an unrecognized command) actually RUNS the body as a script --
+# stripping it there would have created a genuinely NEW bypass of this
+# hook's one safety property (verified live during review: pre-#750-fix this
+# shape correctly BLOCKED; a naive strip made it pass unblocked). So the
+# heredoc's body is stripped ONLY when its consumer command is confidently
+# classified as NON-executing (`SAFE_HEREDOC_CONSUMERS` below: `cat`/`tee`/
+# `dd` -- read-and-emit-verbatim -- and `:`/`true`, the common "heredoc as a
+# block comment" idiom, which discard their stdin entirely without ever
+# reading it). Deny-by-default, same allowlist-inversion posture as the
+# #557 cargo-subcommand detection above: an UNRECOGNIZED consumer (including
+# `ssh host bash <<'EOF'`, where the real interpreter is one hop away) is
+# treated as unsafe -- its body is left UNTOUCHED, so it still over-blocks
+# exactly like pre-#750 behavior for that one heredoc, never a new false
+# negative.
+#
+# #750-review: the delimiter match is tightened two ways versus the first
+# cut. (1) `[ \t]*` (not `\s*`) between the operator and the delimiter --
+# `\s*` could cross a NEWLINE, letting a `<<` at end-of-line bind the FOLLOWING
+# line's first token as "the delimiter" and, if some later line happened to
+# equal it, splice out everything between as if it were heredoc data --
+# including real command text (verified live: this let a real `cargo build`
+# slip through). A real shell always requires the delimiter on the SAME
+# line as the operator; `[ \t]*` enforces that, so a cross-newline `<<`
+# simply fails to match as a heredoc at all (fail-safe: falls through to the
+# untouched, pre-#750 detection path). (2) the UNQUOTED delimiter form no
+# longer swallows a trailing shell metacharacter (`([^\s;&|()<>]+)`, not the
+# old `(\S+)`) -- `cat <<EOF; echo hi` previously captured "EOF;" as the
+# delimiter, which a bare `EOF` closing line could never match, so the
+# fail-safe path left the body unstripped (i.e. this exact common shape was
+# still susceptible to the #750 false positive); it is now correctly
+# recognized and stripped.
+#
+# Fail-safe direction preserved throughout (never weaken the Tier-0 allowlist
+# inversion): on ANY parse ambiguity -- an unsafe/unrecognized consumer, a
+# malformed/truncated heredoc with no findable closing delimiter line, a
+# cross-newline `<<` that fails to match at all, or a python3 failure -- the
+# ORIGINAL text for that stretch is left UNCHANGED, so it still over-blocks
+# exactly as it did before #750; none of this can introduce a NEW false
+# negative. Accepted residuals (documented per the #319 convention): (a)
+# multiple heredocs opened on the SAME line (`cmd <<A <<B`) -- only the FIRST
+# is heredoc-aware-processed, the second's body is left as ordinary text (a
+# rare shell shape, fail-safe over-block); (b) the delimiter word is matched
+# literally byte-for-byte, never shell-expanded -- exactly what a real shell
+# also requires for the close, so this is never a source of a new false
+# negative; (c) a heredoc fed to an unrecognized-but-actually-safe consumer
+# (e.g. `wc <<'EOF'`) is fail-safe over-blocked rather than stripped -- widen
+# `SAFE_HEREDOC_CONSUMERS` if a real need appears.
 strip_heredocs() {
     python3 - "$1" 2>/dev/null <<'PYEOF' || printf '%s' "$1"
 import re
 import sys
 
 text = sys.argv[1] if len(sys.argv) > 1 else ""
-HEREDOC_RE = re.compile(r"<<(-?)\s*(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
+HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|()<>]+))")
+
+# Consumers PROVABLY safe to strip a heredoc body from -- they never
+# interpret/execute their stdin as code. `cat`/`tee`/`dd` emit it verbatim;
+# `:`/`true` are the null builtins, discarding stdin without reading it (the
+# common "heredoc as a block comment" idiom). Deny-by-default for anything
+# else (including every shell/interpreter and any unrecognized command) --
+# see the #750-review CRITICAL note above this function.
+SAFE_HEREDOC_CONSUMERS = {"cat", "tee", "dd", ":", "true"}
+_WRAPPER_SKIP = {"sudo", "env", "time", "nice", "timeout", "nohup", "stdbuf",
+                  "setsid", "ionice", "chrt", "command", "exec", "doas"}
+_ASSIGN_RE = re.compile(r"^\w+=")
+
+
+def _last_top_level_sep(prefix):
+    """Index just past the LAST top-level (unquoted) command separator in
+    `prefix` (`;`, `&&`, `||`, `&`, `|`, `(`), or 0 if none -- a quote-aware
+    linear scan, heuristic (not a full shell parser), matching the rigor of
+    the rest of this file's detectors."""
+    quote = None
+    last = 0
+    i = 0
+    n = len(prefix)
+    while i < n:
+        c = prefix[i]
+        if quote:
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if prefix[i:i + 2] in ("&&", "||"):
+            last = i + 2
+            i += 2
+            continue
+        if c in (";", "&", "|", "("):
+            last = i + 1
+            i += 1
+            continue
+        i += 1
+    return last
+
+
+def _heredoc_consumer_command(prefix):
+    """Best-effort command WORD the heredoc attached at the END of `prefix`
+    feeds its stdin to -- e.g. for `... ; cat > f <<'EOF'`, returns "cat".
+    Skips a leading env-assignment / a small set of transparent wrapper
+    commands. Returns "" (never matches SAFE_HEREDOC_CONSUMERS, i.e. treated
+    as unsafe) on anything ambiguous or empty -- fail-safe."""
+    seg = prefix[_last_top_level_sep(prefix):]
+    toks = seg.split()
+    i = 0
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if _ASSIGN_RE.match(t):
+            i += 1
+            continue
+        if t in _WRAPPER_SKIP:
+            i += 1
+            while i < n and toks[i].startswith("-"):
+                i += 1
+            continue
+        break
+    if i >= n:
+        return ""
+    return toks[i].rsplit("/", 1)[-1]   # strip a path prefix to the basename
 
 
 def strip(text):
@@ -399,16 +510,27 @@ def strip(text):
         if not m:
             out.append(text[i:])
             break
+        line_start = text.rfind("\n", 0, m.start()) + 1
         line_end = text.find("\n", m.end())
         if line_end == -1:
             # heredoc operator on the last line, nothing follows it -- no
             # body to strip.
             out.append(text[i:])
             break
-        out.append(text[i:line_end + 1])
         dash = m.group(1) == "-"
         delim = m.group(2) if m.group(2) is not None else (
             m.group(3) if m.group(3) is not None else m.group(4))
+
+        consumer = _heredoc_consumer_command(text[line_start:m.start()])
+        if consumer not in SAFE_HEREDOC_CONSUMERS:
+            # fail-safe: an unrecognized/executing consumer -- do NOT strip
+            # this heredoc's body; keep scanning past just this operator for
+            # any FURTHER heredoc, leaving the body itself untouched.
+            out.append(text[i:m.end()])
+            i = m.end()
+            continue
+
+        out.append(text[i:line_end + 1])
         cursor = line_end + 1
         body_end = None
         while True:

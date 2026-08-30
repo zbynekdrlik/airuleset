@@ -312,7 +312,7 @@
     "tests/test_target_purge.py": 664,
     "tests/test_tester_handoff_slovak.py": 510,
     "tests/test_tickets_cache_sweep_689.py": 134,
-    "tests/test_tier0_local_build_hook.py": 1283,
+    "tests/test_tier0_local_build_hook.py": 1379,
     "tests/test_tmp_litter_548.py": 317,
     "tests/test_tmux_attach_helpers_651.py": 451,
     "tests/test_tmux_socket_recovery.py": 369,
