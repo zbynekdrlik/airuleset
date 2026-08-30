@@ -474,7 +474,9 @@ class TestOrchestrator(_OrchBase):
         # sends instead of re-typing every ~60s sweep forever (the user-visible
         # "dokolecka promptuje"). Mirrors ops_wait_recheck's #714 bound.
         rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
-        fetch = lambda cwd: {"ahead": 5, "in_flight": False}
+
+        def fetch(cwd):
+            return {"ahead": 5, "in_flight": False}
         state = {}
         max_fails = getattr(rg, "MAX_SEND_FAILS", 3)
         for _ in range(max_fails):
