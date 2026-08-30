@@ -207,10 +207,15 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   ticket comment). **A daily reminder must be a SUBSTANTIVE, CONCRETE ask that MOVES the ticket,
   never a content-free ack (#568):** the mandated 1×/day third-party reminder is a real push — a
   specific question, a named blocker, the exact thing you need from them — NEVER a hollow "still
-  working on it" acknowledgement; the `stale!` tag resets its 24h freshness clock on ANY
-  stream-authored comment, so a content-free ack would silence the tag while the third party stays
-  genuinely un-nudged (the exact "never actually nudged them" failure in tag-compliant disguise). A
-  concrete ask is a real povzbudenie, not status noise.
+  working on it" acknowledgement; the `stale!` tag USED TO reset its 24h freshness clock on ANY
+  stream-authored comment, so a content-free ack would silence the tag while the third party stayed
+  genuinely un-nudged (the exact "never actually nudged them" failure in tag-compliant disguise) —
+  until #753 NARROWED the reset to a CITED push. A concrete ask is a real povzbudenie, not status
+  noise. **A W-push resets `stale!` ONLY with a source CITATION (#753):** a bare "čakáme" push no
+  longer resets the clock — `_stale_ops_wait_flagged` now anchors freshness on the newest OWN comment
+  that CITES a source (a version / a Discuss thread or msg-id / a `#N` ref, `_comment_has_citation`),
+  so the daily W-push must END in a STATE CHANGE (close / unpark with evidence) or a CITED blocker
+  re-verification (naming the source it re-read — msg-id / verzia), never a bare waiting comment.
   **Pipeline-gated tail + umbrella = W (#578)** — dva tvary ktoré #526/#539 NEpomenovali, a preto
   sedeli v bare `I` a nafukovali ho (gk `I 16`): (1) **release-gated tail** vlastnej pipeline
   (merged/queued, čaká na pomenovaný INTERNÝ release event — napr. „2.180 stage-3") je `ops-wait` → W

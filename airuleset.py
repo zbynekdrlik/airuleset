@@ -5328,6 +5328,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     OPS_WAIT_EVIDENCE_MAX_S as OPS_WAIT_EVIDENCE_MAX_S,
     OPS_WAIT_STALE_MAX_FETCHES as OPS_WAIT_STALE_MAX_FETCHES,
     _stream_self_login as _stream_self_login,
+    _comment_has_citation as _comment_has_citation,
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _release_recheck_flagged as _release_recheck_flagged,

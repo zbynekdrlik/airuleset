@@ -58,7 +58,12 @@ class StaleDecider(unittest.TestCase):
         self.assertEqual(got, set())
 
     def test_own_comment_older_than_24h_is_stale(self):
-        got = self._run(_rows(41), {41: (self.now - 3 * DAY, self.now - 3600)})
+        # #753: the freshness anchor is the newest CITED own push; a cited push
+        # 3 days old is stale even though a third party commented 1h ago.
+        got = self._run(_rows(41), {41: {"own": self.now - 3 * DAY,
+                                         "own_cited": self.now - 3 * DAY,
+                                         "own_oldest": self.now - 3 * DAY,
+                                         "any": self.now - 3600}})
         self.assertEqual(got, {41})
 
     def test_no_own_but_recent_any_comment_is_not_stale(self):
@@ -109,7 +114,7 @@ class CommentAges(unittest.TestCase):
         ]):
             res = cli_quals._issue_comment_ages(41, "me", 0, cwd=None)
         self.assertIsNotNone(res)
-        own_ts, any_ts = res
+        own_ts, any_ts = res["own"], res["any"]   # #753: dict return
         self.assertIsNotNone(own_ts)
         self.assertIsNotNone(any_ts)
         self.assertGreater(any_ts, own_ts)   # the 'other' comment is newer
