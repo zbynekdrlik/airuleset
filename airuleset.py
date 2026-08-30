@@ -4237,6 +4237,14 @@ def _watchdog_ops_wait_fetch(cwd):
         line = line.strip()
         if not line:
             continue
+        # #754: `--ops-wait` appends a `#`-prefixed aggregate SUMMARY line
+        # (total / oldest / flag counts / OVER-THRESHOLD marker) after the member
+        # rows. Skip it here so it never trips the malformed→None guard below —
+        # a comment line is not an undetermined member set, it is not a member at
+        # all. (The summary is a human/session report line; the members come from
+        # the int-prefixed rows.)
+        if line.startswith("#"):
+            continue
         parts = line.split("\t")
         try:
             num = int(parts[0])
@@ -5327,6 +5335,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _no_question_flagged as _no_question_flagged,
     OPS_WAIT_EVIDENCE_MAX_S as OPS_WAIT_EVIDENCE_MAX_S,
     OPS_WAIT_STALE_MAX_FETCHES as OPS_WAIT_STALE_MAX_FETCHES,
+    OPS_WAIT_WDRAIN_THRESHOLD as OPS_WAIT_WDRAIN_THRESHOLD,
     _stream_self_login as _stream_self_login,
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,

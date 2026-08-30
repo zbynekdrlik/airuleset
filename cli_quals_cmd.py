@@ -139,6 +139,38 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                                           row.get("title") or ""))
 
 
+def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
+                           gk_handoff_numbers):
+    """#754 — a single `#`-prefixed AGGREGATE summary of the parked-W bucket,
+    appended after the `--ops-wait` member rows: total count, the OLDEST member
+    (by createdAt), and the stale!/recheck!/gk-handoff! flag counts, plus an
+    ` OVER-THRESHOLD >N` marker when |W| exceeds `OPS_WAIT_WDRAIN_THRESHOLD`.
+    The goal state of the loop is I0 ∧ U0 ∧ W0 — W is a DEBT bucket with a strop,
+    not a terminal ticket state — so the session/owner needs the bucket-level
+    picture (not just per-member rows) to decide a W-drain pass.
+
+    Returns the line string, or None when the bucket is empty (nothing to
+    summarise). The `#` prefix keeps it OUT of the machine-parsed member set: the
+    sole programmatic consumer, `_watchdog_ops_wait_fetch`, skips `#`-lines
+    (#754), so the summary never trips its malformed→None guard. A member whose
+    `createdAt` is missing/empty sorts LAST (never spuriously wins `oldest=`)."""
+    import airuleset
+    total = len(ops_wait)
+    if not total:
+        return None
+    oldest = min(ops_wait,
+                 key=lambda n: (ops_wait[n].get("createdAt") or "￿", n))
+    created = ops_wait[oldest].get("createdAt") or "?"
+    over = total > airuleset.OPS_WAIT_WDRAIN_THRESHOLD
+    marker = (" OVER-THRESHOLD >%d" % airuleset.OPS_WAIT_WDRAIN_THRESHOLD
+              if over else "")
+    return ("# W-summary: total=%d oldest=#%s (%s) stale=%d recheck=%d "
+            "gk-handoff=%d%s" % (total, oldest, created,
+                                 len(stale_numbers or set()),
+                                 len(recheck_numbers or set()),
+                                 len(gk_handoff_numbers or set()), marker))
+
+
 def _print_audit_rows(rows, own_stream=None):
     """`number<TAB>createdAt<TAB>action<TAB>labels` per WORKABLE (I) member,
     OLDEST first — the `--audit` output the job-20 named partition-audit nudge
@@ -581,6 +613,10 @@ def cmd_slice_quals(args):
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
                           gk_handoff_numbers=_gkh)
+        # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
+        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh)
+        if _summary:
+            print(_summary)
         return
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
@@ -784,6 +820,10 @@ def cmd_core_quals(args):
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
                           gk_handoff_numbers=_gkh)
+        # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
+        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh)
+        if _summary:
+            print(_summary)
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY

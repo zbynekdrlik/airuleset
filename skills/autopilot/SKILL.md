@@ -550,6 +550,23 @@ gap in either.
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
    is the main lever to cut CI cost per worker (fleet dispatch, above, is the lever that cuts
    wall-clock across workers).
+   - **W-DRAIN LANE FIRST — before seeding new I work (#754, goal state = I 0 ∧ U 0 ∧ W 0).**
+     `W` is a DEBT bucket with a STROP, not a terminal ticket state — the loop must DRAIN it, not
+     let it park unboundedly (live: odoo-erp montalu3 grew to `W 34` while the loop kept dispatching
+     I lanes, and half were rotting FINISHED tickets whose client confirmations already sat in the
+     threads). So at the START of every batch (a turn with NO batch open), read
+     `python3 ~/devel/airuleset/airuleset.py core-quals --ops-wait` (reduced authority:
+     `slice-quals --ops-wait`) and check its trailing `# W-summary:` line: **if it carries
+     `OVER-THRESHOLD` (`|W| > 8 = OPS_WAIT_WDRAIN_THRESHOLD`) OR the `oldest=` member is long-parked,
+     do a W-DRAIN PASS BEFORE dispatching any new I lane.** The drain pass is a per-member verdict on
+     the `--ops-wait` members (the job-20 `W-OVERFLOW` nudge names the same duty): CLOSE it (the
+     external event/confirmation already landed — cite the evidence), UNPARK it (clear `ops-wait`
+     WITH evidence so it re-enters `I`), or RE-CITE the still-holding blocker with a fresh push
+     comment (the #570/#607 daily-push duty). If the bucket genuinely cannot be consolidated down,
+     SUMMARISE it to the owner via `❓` with a consolidation proposal (`ask-and-continue`), so the
+     owner never first learns of the debt by seeing `W 34` in the footer himself. This lane is the
+     `W`-side parallel of the `prio:bounce` seeding below — it runs at the same batch-start moment
+     and takes precedence over seeding a NEW I lane while the strop is breached.
    - **Seed — PRIORITY LANE first (`prio:bounce`).** Open non-skip issues labeled `prio:bounce`
      (a reviewer/gatekeeper-INJECTED priority ticket — the bounce lane from odoo-erp #1599, but the
      label is a GENERIC cross-repo convention every repo/stream honors, never an odoo-specific

@@ -166,6 +166,20 @@ class WOverflowFlag(unittest.TestCase):
         seen = {str(mm["number"]): float(NOW) for mm in members}
         self.assertNotIn("W-OVERFLOW", owr._nudge_text(0, members, NOW, seen))
 
+    def test_overflow_survives_cap_worst_case(self):
+        # The aggregate drain signal must NEVER be the item the greedy
+        # NUDGE_MAX_CHARS cap drops — even at I>0 with every per-category flag
+        # firing on a release-shaped, all-stale, all-recheck, all-gk bucket.
+        members = [{"number": 100 + i, "title": "release 2.180 stage-3",
+                    "stale": True, "gk_handoff": True, "release_recheck": True}
+                   for i in range(owr.WDRAIN_ESCALATE_N + 1)]
+        seen = {str(mm["number"]): float(NOW) for mm in members}
+        t = owr._nudge_text(5, members, NOW, seen,
+                            release_landed=[mm["number"] for mm in members],
+                            discuss_audit=True)
+        self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
+        self.assertIn("W-OVERFLOW", t)
+
 
 if __name__ == "__main__":
     unittest.main()
