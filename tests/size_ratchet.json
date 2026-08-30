@@ -113,7 +113,7 @@
     "tests/test_discord_notify_check.py": 108,
     "tests/test_discord_reply.py": 2003,
     "tests/test_discuss_close_binding_695.py": 312,
-    "tests/test_discuss_close_guard.py": 418,
+    "tests/test_discuss_close_guard.py": 434,
     "tests/test_discuss_future_promise_696.py": 236,
     "tests/test_discuss_mention_anchor_702.py": 288,
     "tests/test_discuss_thread_reference_657.py": 333,

@@ -319,6 +319,22 @@ class TestHookIntegration(TestCase):
         )
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_repo_resolves_from_cwd_remote(self):
+        # No -R flag: the odoo-erp scope must resolve from the cwd git remote
+        # (the shared #760 _repo_owner_repo_of helper's cwd-remote branch on the
+        # #627 side — the branch no explicit-R #627 test exercised). A bound,
+        # note-less ticket then still BLOCKS. Characterisation: byte-for-byte
+        # with the pre-#760 inline #627 parse, which had the same fallback.
+        import subprocess as sp
+        cwd = self._authority_cwd("full")
+        sp.run(["git", "init", "-q"], cwd=cwd)
+        sp.run(["git", "remote", "add", "origin",
+                "https://github.com/zbynekdrlik/odoo-erp.git"], cwd=cwd)
+        fx = self._fixture(body="Discuss-thread: 257")
+        r = self._run("gh issue close 4811", cwd, fixture=fx)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Discuss-thread", r.stderr)
+
 
 class TestHookIntegrationCompound(TestCase):
     """A COMPOUND that batch-closes sibling tickets of one thread (the likely
