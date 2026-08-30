@@ -316,7 +316,7 @@
     "tests/test_tmp_litter_548.py": 317,
     "tests/test_tmux_attach_helpers_651.py": 451,
     "tests/test_tmux_socket_recovery.py": 369,
-    "tests/test_tmux_test_isolation_lock.py": 256,
+    "tests/test_tmux_test_isolation_lock.py": 324,
     "tests/test_transcript_compress.py": 631,
     "tests/test_ttyd_installer.py": 211,
     "tests/test_u_labels.py": 384,
