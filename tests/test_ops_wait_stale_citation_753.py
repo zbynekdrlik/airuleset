@@ -44,6 +44,7 @@ class Citation(unittest.TestCase):
         for body in (
             "blocker re-overený vs PROD 2.226.0, stále nenasadené",
             "re-overené proti verzii v0.1.99",
+            "2.180 stage-3 ešte nelandol na PROD",          # release stage (#578)
             "klient neodpovedal vo vlákne discuss.channel_275",
             "pripomienka poslaná, msg 1723308",
             "blocker stále platí — pozri #4980",
@@ -53,6 +54,8 @@ class Citation(unittest.TestCase):
 
     def test_rejects_uncited_comment(self):
         for body in ("blocker re-overený, čakáme", "still waiting on the client",
+                     # a 4-digit-year date is NOT a source citation (#753 review)
+                     "čakáme od 30.8.2026 bez odpovede",
                      "", None):
             self.assertFalse(cli_quals._comment_has_citation(body),
                              "a content-free push carries no citation: %r" % body)

@@ -976,18 +976,23 @@ def _parse_iso_ts(s):
         return None
 
 
-# #753 — a source citation the W-push doctrine mandates: a version, an Odoo
-# Discuss thread/msg id, or a `#N` ticket/PR reference. A content-free "still
-# waiting" push carries none. Erring slightly LOOSE (any real anchor counts) is
-# the #539 never-false-accuse direction — a too-tight test would flag a validly-
-# pushed ticket as stale. The `\d+\.\d+` version arm is deliberately 3-part (or
-# `v`-prefixed) to skip dates/amounts/IPs (the #698 live-probe lesson).
+# #753 — a source citation the W-push doctrine mandates: a version, a release
+# stage, an Odoo Discuss thread/msg id, or a `#N` ticket/PR reference. A
+# content-free "still waiting" push carries none. Erring slightly LOOSE (any real
+# anchor counts) is the #539 never-false-accuse direction — a too-tight test
+# would flag a validly-pushed ticket as stale. The 3-part-semver arm's components
+# are bounded `\d{1,3}` so a 4-digit-year date ("30.8.2026") no longer matches
+# (`2.226.0` still does — the #698 live-probe lesson); RESIDUAL (accepted, the
+# fail-safe-loose direction): a 2-digit-year date ("30.8.26") or an IP
+# ("100.82.64.27") can still match — rare, and matching over-generously only
+# UNDER-flags (never a false accusation).
 _CITATION_RX = re.compile(
     r"#\d+"                                       # a ticket / PR reference
     r"|discuss\.channel_\d+|\bchannel[_ ]\d+"     # an Odoo Discuss thread
     r"|\bmsg\b[\s:#-]*\d{3,}|\bmessage\b[\s:#-]*\d{3,}"  # a message id
+    r"|\bstage-\d+\b"                             # a release stage (#578/#588)
     r"|\bv\d+\.\d+(?:\.\d+)*\b"                   # a v-prefixed version
-    r"|\b\d+\.\d+\.\d+\b",                        # a 3-part semver
+    r"|\b\d{1,3}\.\d{1,3}\.\d{1,3}\b",            # a 3-part semver (date-bounded)
     re.IGNORECASE)
 
 
@@ -1002,15 +1007,18 @@ def _comment_has_citation(body):
 def _norm_ages(res):
     """Normalize `_issue_comment_ages` output (or an injected fake) to the
     `{own, any, own_cited, own_oldest}` dict (#753). A legacy 2-tuple
-    `(own, any)` — the #699/#607 fakes — maps with own_cited/own_oldest unknown
-    (None); None/malformed → None (fail-safe, no flag)."""
+    `(own, any)` — the #699/#607 fakes — carries no body/citation info, so its
+    `own` is treated as the CITED anchor (`own_cited = own`), which reproduces
+    the PRE-#753 tuple semantics EXACTLY (own was the freshness anchor) — the
+    fail-safe direction (a legacy own counts as a valid push, never a false
+    accusation). None/malformed → None (fail-safe, no flag)."""
     if res is None:
         return None
     if isinstance(res, dict):
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
-                "own_cited": None, "own_oldest": None}
+                "own_cited": res[0], "own_oldest": None}
     return None
 
 
@@ -1046,9 +1054,10 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     `airuleset._gh_out` returns "" on ANY failure OR empty result, but a
     successful `gh issue view <n> --json comments` always prints a JSON object
     (`{"comments": [...]}`, non-empty even with zero comments), so "" is
-    unambiguously a FAILURE here → None. `body` is now requested so the citation
-    of each own comment can be read; `now` is unused for the read itself (passed
-    for signature symmetry with the injectable seam the caller uses)."""
+    unambiguously a FAILURE here → None. The `--json comments` payload already
+    carried `body` (the gh invocation is UNCHANGED) — #753 only newly READS it to
+    detect each own comment's citation; `now` is unused for the read itself
+    (passed for signature symmetry with the injectable seam the caller uses)."""
     import airuleset
     raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
                             cwd=cwd, timeout=15)
@@ -1112,7 +1121,11 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
     a freshly-parked ticket with a single BARE own comment <24h old (own_cited
     None, own_oldest recent) is NOT flagged — its park age is not in this fetch,
     so it under-flags rather than false-accuse (the watchdog's `w_seen`
-    per-ticket park age could disambiguate, but that is not on this path).
+    per-ticket park age could disambiguate, but that is not on this path). When
+    `self_login` is unresolvable (None — a PAT-box gh hiccup), `_issue_comment_
+    ages` resolves NO own comment (own/own_cited/own_oldest all None) so the check
+    DEGRADES to the `any` fallback — the safe direction, a false negative, never
+    a false positive.
 
     Deliberately keyed on the CITED own push, NOT "last comment at all": a
     third party's reply — or the stream's own bare "čakáme" — would otherwise

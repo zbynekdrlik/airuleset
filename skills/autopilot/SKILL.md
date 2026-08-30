@@ -201,7 +201,7 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   comment IS the freshness evidence). Owner (2026-08-19, verbatim): "Ak je W 15 tak je 15 veci ktore
   mas pushovat dopredu aby sa to pohlo. Nie ze ... cakas x dni na nejake info v discussion odoo a vobec
   si tych ludi aspon raz denne nepovzbudil." Mechanized: `core-quals`/`slice-quals --ops-wait` tags
-  `stale!` any W member with NO fresh (≤24h) stream-authored push comment (never a false accusation — a
+  `stale!` any W member with NO fresh (≤24h) CITED stream-authored push comment (#753 — a bare push no longer resets; never a false accusation — a
   gh error / zero comments / unresolvable identity leaves it UNTAGGED), and the ~daily nudge NAMES the
   stale members with the required action (re-verify the blocker + remind the third party TODAY, with a
   ticket comment). **A daily reminder must be a SUBSTANTIVE, CONCRETE ask that MOVES the ticket,
