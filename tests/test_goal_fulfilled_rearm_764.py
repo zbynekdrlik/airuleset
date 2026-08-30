@@ -499,16 +499,19 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertTrue(any("FULFILLED-REARM" in ln for ln in logs), logs)
 
     def test_proof_cache_from_a_different_arm_is_ignored(self):
-        # a cache entry recorded under a PREVIOUS arm (mark_ts M1); the current
-        # arm is M2 and its transcript carries NO 🏁 -> the stale cache must NOT
-        # re-arm (no cross-episode leak).
+        # a cache from a PREVIOUS arm (mark_ts M1) whose 🏁 (bts) is RECENT enough
+        # to pass the current arm's bts>=mark_ts ordering gate on its own -> the
+        # ONLY thing preventing a cross-episode false re-arm is the mark_ts match.
+        # (Fixture is chosen so the ordering gate alone does NOT catch it: bts is
+        # AFTER the current arm; the guard's teeth are on the mark_ts mismatch.)
         now = 1_000_000
-        m2 = now - 100
+        m2 = now - 3000                          # the CURRENT arm
         proj, tmux = self._fixture("sess-stalecache",
                                    last_text="bežný ✅ DONE (žiadne 🏁)",
                                    mark_ts=m2, done_ts=now - 50)
         state = {"goal_fulfilled_proof":
-                 {"sess-stalecache": {"mark_ts": m2 - 5000, "bts": now - 4000}}}
+                 {"sess-stalecache":
+                  {"mark_ts": now - 5000, "bts": now - 100}}}  # M1 != M2; bts>M2
         reqs, _logs, _ = self._sweep(proj, tmux, now, (7, now), state)
         self.assertEqual(reqs, {},
                          "a cache from a DIFFERENT arm (mark mismatch) never re-arms")
