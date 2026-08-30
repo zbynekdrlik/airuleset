@@ -202,5 +202,53 @@ class ShortPayloadStashPathUnchanged(unittest.TestCase):
         self.assertEqual(tmux.typed_texts(), [short])
 
 
+class _CollapseAfterFullRenderFake(DeliverGoalFakeTmux):
+    """Renders statefully until the box holds the FULL payload, then returns the
+    collapsed-paste HOLD capture for every capture AFTER the FIRST full render --
+    modelling the box collapsing BETWEEN deliver_with_stash's post-type
+    collapsed-paste guard (1st full-box capture) and the two-phase FINAL settle
+    RE-capture (subsequent captures). #747-review: the final verify must read that
+    HOLD and abort keystroke-free, never undo len(text) backspaces into an
+    unreadable box."""
+
+    def __init__(self, *a, full_text="", **kw):
+        super().__init__(*a, **kw)
+        self._full = full_text
+        self._full_caps = 0
+
+    def __call__(self, argv, timeout=8):
+        if ("capture-pane" in " ".join(argv) and self.model_type
+                and self._full and self.box == self._full):
+            self._full_caps += 1
+            if self._full_caps >= 2:
+                return COLLAPSE_CAP
+        return super().__call__(argv, timeout)
+
+
+class StashFinalVerifyHoldAbortsWithZeroKeystrokes(unittest.TestCase):
+    """#747-review 🟡: the two-phase FINAL verify RE-captures, so a box that
+    collapsed after the post-type collapsed-paste guard reads _TV_HOLD there. It
+    must abort keystroke-free (NO undo backspaces, NO Enter) -- the same 'no
+    keystroke into a HOLD box' discipline the checkpoint-HOLD branch keeps.
+    Pre-fix (bool collapse `== _TV_LANDED`): landed=False -> the undo recovery
+    sprays len(text) BSpace into the HOLD box (RED). Also kills the mutant
+    `!= _TV_CORRUPT` (HOLD accepted as landed -> Enter into a collapsed box)."""
+
+    def test_final_verify_hold_aborts_no_undo_no_enter(self):
+        tmux = _CollapseAfterFullRenderFake(
+            [(PID, "sess", "1234", "1234")], GOAL_IDLE_CAP, model_type=True,
+            wrap_width=WRAP, visible_rows=VIS, full_text=GOAL_SCROLLED)
+        logs = []
+        ok = stash.deliver_with_stash(PID, GOAL_SCROLLED, tmux,
+                                      captured=GOAL_IDLE_CAP, logs=logs,
+                                      sleep_fn=lambda *_a: None)
+        self.assertFalse(ok)
+        self.assertIn("stash-abort: type-verify-hold", logs, logs)
+        self.assertNotIn("Enter", tmux.keys(),
+                         "Enter was pressed into a collapsed/HOLD box")
+        self.assertNotIn("BSpace", tmux.keys(),
+                         "backspaces were sprayed at a HOLD (unreadable) box")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1069,9 +1069,16 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # head-swallowed long /goal (identical own-substring tail) can never slip to a
     # junk submit (#720). DETECTION only -- unlike `_type_literal_verified`, this
     # route does NOT retype a swallow (it protects a parked draft); it aborts to
-    # the next sweep. The UNRESOLVED branch keeps `_typed_exclusively` (a swallow
-    # already fails it) and never scrolls (a wrapped unresolved box is refused
-    # above), so it is `two_phase=False` and byte-identical to pre-#747.
+    # the next sweep. The UNRESOLVED (`pre_text`) branch keeps `_typed_exclusively`
+    # (a swallow already fails it) and stays `two_phase=False`, byte-identical to
+    # pre-#747. HONEST RESIDUAL (#747-review 🔵): a scroll-length /goal typed INTO
+    # a single-row unresolved (ghost) box DOES scroll it AFTER the type (the
+    # branch's own recovery below handles "when our own payload wrapped the box"),
+    # so such a delivery still reads not-landed and aborts every sweep -- bounded
+    # by the #731 `dl_fails` attempt cap. Left unfixed here: the scrolling stash
+    # route the live incident hit is the BARE (PARKED/NOOP) branch (a foreign
+    # draft parked away, then the /goal typed into the now-bare box); the
+    # ghost-branch scroll is a rarer, cap-bounded lane, not this ticket's scope.
     two_phase = (not pre_text) and len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     if two_phase:
         hc = watchdog._type_two_phase_head_checkpoint(pid, run, text, sleep_fn)
@@ -1121,16 +1128,33 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # `allow_scrolled=True` (the head-checkpoint above proved the leading char
     # landed): the ~3.3k-char rest-type renders with lag, so a single immediate
     # capture can read mid-render -- settle-poll before concluding, exactly as
-    # `_type_literal_verified`'s own final verify does. The short (single-phase)
-    # bare branch keeps the pre-#747 single-capture `_type_verify_landed(cap=cap)`.
+    # `_type_literal_verified`'s own final verify does. It keeps the settled
+    # CLASS (not a bool) so an observed HOLD aborts keystroke-free (below). The
+    # short (single-phase) bare branch keeps the pre-#747 single-capture
+    # `_type_verify_landed(cap=cap)`, which shares the collapsed-paste guard's
+    # own snapshot above (a collapse there already aborts keystroke-free).
     if pre_text:
         landed = watchdog._typed_exclusively(text, itext)
+        two_phase_hold = False
     elif two_phase:
-        landed = watchdog._settle_type_verify(
-            pid, run, text, sleep_fn, allow_scrolled=True) == _TV_LANDED
+        cls = watchdog._settle_type_verify(
+            pid, run, text, sleep_fn, allow_scrolled=True)
+        landed = cls == _TV_LANDED
+        # #747-review -- the two-phase settle RE-CAPTURES (a fresh snapshot), so
+        # an observed HOLD here is a DIFFERENT capture than the collapsed-paste
+        # guard above; the ~3.3k-char rest-type is exactly the collapse-prone
+        # payload. A HOLD box takes NO keystroke (#233/#322/#372) -- undoing
+        # len(text) into it is the exact discipline the checkpoint-HOLD branch
+        # and _type_literal_verified both keep -- so branch it out of the undo
+        # recovery below (the #488 park record + janitor reclaim a parked draft).
+        two_phase_hold = cls == _TV_HOLD
     else:
         landed = watchdog._type_verify_landed(pid, run, text, cap=cap)
+        two_phase_hold = False
     if not landed:
+        if two_phase_hold:
+            _log("stash-abort: type-verify-hold")
+            return False
         _log("stash-abort: type-verify-failed")
         if not pre_text:
             # PARKED or NOOP — the settle poll VERIFIED this box bare a moment
