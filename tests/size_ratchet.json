@@ -328,7 +328,7 @@
     "tests/test_vault_disclosures.py": 165,
     "tests/test_vault_durable.py": 361,
     "tests/test_vault_multi.py": 550,
-    "tests/test_vault_purge_job.py": 301,
+    "tests/test_vault_purge_job.py": 305,
     "tests/test_vault_read_guard.py": 1268,
     "tests/test_vault_show.py": 501,
     "tests/test_vault_templates.py": 322,
