@@ -479,8 +479,8 @@ def _validate_watchdog():
         if "watchdog --once" not in t:
             errors.append("api-watchdog service template ExecStart missing `watchdog --once`")
         # #574 wiring seam: the optional per-box EnvironmentFile is what makes
-        # any AIRULESET_* watchdog knob (e.g. AIRULESET_LANE_MIN_MEM_MB) reachable
-        # by the timer's env. The `-` prefix keeps it optional (a box without the
+        # any AIRULESET_* watchdog knob (e.g. AIRULESET_GOAL_LANE_STUCK_ALERT_STREAK)
+        # reachable by the timer's env. The `-` prefix keeps it optional (a box without the
         # file is unaffected); a silent template revert must be caught.
         if "EnvironmentFile=-%h/.claude/watchdog.env" not in t:
             errors.append("api-watchdog service template missing the optional "
