@@ -186,6 +186,17 @@ _is_camera_box_repo() {
 #   - `cargo build --help` / `cargo test --help` OVER-block (they print help, no
 #     compile) -- INFO-flag detection only fires when the info flag PRECEDES the
 #     subcommand; fail-SAFE and pre-#557 (the old hook blocked these too).
+#
+# #750: heredoc BODY text (ordinary prose inside a `cat > file <<'EOF' ... EOF`
+# write, e.g. a commit-message draft) used to be split by `split_top_level()`
+# into its own newline-delimited "segments" exactly like real command text --
+# a prose line starting with the word "cargo" (line-wrapped so "cargo" itself
+# opens a physical line) followed by a word not in NONCOMPILING then read as a
+# literal cargo-compile command. FIXED upstream of this function: `cmd`
+# arrives with every heredoc's BODY + closing delimiter line already blanked
+# out by `strip_heredocs()` (below, applied to $CMD BEFORE `strip_quotes()` --
+# see that function's own comment for why the ordering matters), so this
+# subcommand walk never sees heredoc DATA as command text at all.
 _cargo_compiles() {
     python3 - "$1" 2>/dev/null <<'PYEOF'
 import re
@@ -340,6 +351,211 @@ is_heavy() {
     return 1
 }
 
+# #750: blank out every heredoc's BODY text + its closing delimiter line, so
+# no downstream detector (the cargo subcommand walk in `_cargo_compiles`, and
+# the plain bash greps in `is_heavy` for tauri/trunk/wasm-pack/cmake) ever
+# treats heredoc DATA -- e.g. ordinary prose inside a `cat > file <<'EOF'
+# ... EOF` write drafting a commit message -- as real command text. This MUST
+# run on the RAW `$CMD` and MUST run BEFORE `strip_quotes()`: `strip_quotes()`
+# removes the ENTIRE contents of any `'...'`/`"..."` span (not just the quote
+# marks), so a quoted heredoc delimiter like `<<'EOF'` would otherwise be
+# reduced to a bare `<<` by strip_quotes() FIRST, destroying the very marker
+# this function needs to find where the heredoc's data ends -- confirmed live:
+# with strip_quotes() applied first, a `<<'EOF'` delimiter is unrecoverable
+# and the false-positive reproduces unchanged (issue #750 comment).
+#
+# Only the heredoc's own DATA (the body lines + the closing delimiter line)
+# is removed -- the operator's own line (e.g. `cat > file <<'EOF'`) is kept
+# untouched, so a real command chained on that same line is unaffected.
+# Handles `<<DELIM`, `<<'DELIM'`, `<<"DELIM"`, and the dash form `<<-DELIM`
+# (leading tabs on the body + the closing delimiter line are stripped before
+# the compare, per POSIX).
+#
+# #750-review CRITICAL: a heredoc's body is DATA only when its CONSUMER
+# doesn't execute it. `bash <<'EOF' ... cargo build --release ... EOF` (or
+# `sh`/`eval`/an unrecognized command) actually RUNS the body as a script --
+# stripping it there would have created a genuinely NEW bypass of this
+# hook's one safety property (verified live during review: pre-#750-fix this
+# shape correctly BLOCKED; a naive strip made it pass unblocked). So the
+# heredoc's body is stripped ONLY when its consumer command is confidently
+# classified as NON-executing (`SAFE_HEREDOC_CONSUMERS` below: `cat`/`tee`/
+# `dd` -- read-and-emit-verbatim -- and `:`/`true`, the common "heredoc as a
+# block comment" idiom, which discard their stdin entirely without ever
+# reading it). Deny-by-default, same allowlist-inversion posture as the
+# #557 cargo-subcommand detection above: an UNRECOGNIZED consumer (including
+# `ssh host bash <<'EOF'`, where the real interpreter is one hop away) is
+# treated as unsafe -- its body is left UNTOUCHED, so it still over-blocks
+# exactly like pre-#750 behavior for that one heredoc, never a new false
+# negative.
+#
+# #750-review: the delimiter match is tightened two ways versus the first
+# cut. (1) `[ \t]*` (not `\s*`) between the operator and the delimiter --
+# `\s*` could cross a NEWLINE, letting a `<<` at end-of-line bind the FOLLOWING
+# line's first token as "the delimiter" and, if some later line happened to
+# equal it, splice out everything between as if it were heredoc data --
+# including real command text (verified live: this let a real `cargo build`
+# slip through). A real shell always requires the delimiter on the SAME
+# line as the operator; `[ \t]*` enforces that, so a cross-newline `<<`
+# simply fails to match as a heredoc at all (fail-safe: falls through to the
+# untouched, pre-#750 detection path). (2) the UNQUOTED delimiter form no
+# longer swallows a trailing shell metacharacter (`([^\s;&|()<>]+)`, not the
+# old `(\S+)`) -- `cat <<EOF; echo hi` previously captured "EOF;" as the
+# delimiter, which a bare `EOF` closing line could never match, so the
+# fail-safe path left the body unstripped (i.e. this exact common shape was
+# still susceptible to the #750 false positive); it is now correctly
+# recognized and stripped.
+#
+# Fail-safe direction preserved throughout (never weaken the Tier-0 allowlist
+# inversion): on ANY parse ambiguity -- an unsafe/unrecognized consumer, a
+# malformed/truncated heredoc with no findable closing delimiter line, a
+# cross-newline `<<` that fails to match at all, or a python3 failure -- the
+# ORIGINAL text for that stretch is left UNCHANGED, so it still over-blocks
+# exactly as it did before #750; none of this can introduce a NEW false
+# negative. Accepted residuals (documented per the #319 convention): (a)
+# multiple heredocs opened on the SAME line (`cmd <<A <<B`) -- only the FIRST
+# is heredoc-aware-processed, the second's body is left as ordinary text (a
+# rare shell shape, fail-safe over-block); (b) the delimiter word is matched
+# literally byte-for-byte, never shell-expanded -- exactly what a real shell
+# also requires for the close, so this is never a source of a new false
+# negative; (c) a heredoc fed to an unrecognized-but-actually-safe consumer
+# (e.g. `wc <<'EOF'`) is fail-safe over-blocked rather than stripped -- widen
+# `SAFE_HEREDOC_CONSUMERS` if a real need appears.
+strip_heredocs() {
+    python3 - "$1" 2>/dev/null <<'PYEOF' || printf '%s' "$1"
+import re
+import sys
+
+text = sys.argv[1] if len(sys.argv) > 1 else ""
+HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|()<>]+))")
+
+# Consumers PROVABLY safe to strip a heredoc body from -- they never
+# interpret/execute their stdin as code. `cat`/`tee`/`dd` emit it verbatim;
+# `:`/`true` are the null builtins, discarding stdin without reading it (the
+# common "heredoc as a block comment" idiom). Deny-by-default for anything
+# else (including every shell/interpreter and any unrecognized command) --
+# see the #750-review CRITICAL note above this function.
+SAFE_HEREDOC_CONSUMERS = {"cat", "tee", "dd", ":", "true"}
+_WRAPPER_SKIP = {"sudo", "env", "time", "nice", "timeout", "nohup", "stdbuf",
+                  "setsid", "ionice", "chrt", "command", "exec", "doas"}
+_ASSIGN_RE = re.compile(r"^\w+=")
+
+
+def _last_top_level_sep(prefix):
+    """Index just past the LAST top-level (unquoted) command separator in
+    `prefix` (`;`, `&&`, `||`, `&`, `|`, `(`), or 0 if none -- a quote-aware
+    linear scan, heuristic (not a full shell parser), matching the rigor of
+    the rest of this file's detectors."""
+    quote = None
+    last = 0
+    i = 0
+    n = len(prefix)
+    while i < n:
+        c = prefix[i]
+        if quote:
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if prefix[i:i + 2] in ("&&", "||"):
+            last = i + 2
+            i += 2
+            continue
+        if c in (";", "&", "|", "("):
+            last = i + 1
+            i += 1
+            continue
+        i += 1
+    return last
+
+
+def _heredoc_consumer_command(prefix):
+    """Best-effort command WORD the heredoc attached at the END of `prefix`
+    feeds its stdin to -- e.g. for `... ; cat > f <<'EOF'`, returns "cat".
+    Skips a leading env-assignment / a small set of transparent wrapper
+    commands. Returns "" (never matches SAFE_HEREDOC_CONSUMERS, i.e. treated
+    as unsafe) on anything ambiguous or empty -- fail-safe."""
+    seg = prefix[_last_top_level_sep(prefix):]
+    toks = seg.split()
+    i = 0
+    n = len(toks)
+    while i < n:
+        t = toks[i]
+        if _ASSIGN_RE.match(t):
+            i += 1
+            continue
+        if t in _WRAPPER_SKIP:
+            i += 1
+            while i < n and toks[i].startswith("-"):
+                i += 1
+            continue
+        break
+    if i >= n:
+        return ""
+    return toks[i].rsplit("/", 1)[-1]   # strip a path prefix to the basename
+
+
+def strip(text):
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        m = HEREDOC_RE.search(text, i)
+        if not m:
+            out.append(text[i:])
+            break
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        line_end = text.find("\n", m.end())
+        if line_end == -1:
+            # heredoc operator on the last line, nothing follows it -- no
+            # body to strip.
+            out.append(text[i:])
+            break
+        dash = m.group(1) == "-"
+        delim = m.group(2) if m.group(2) is not None else (
+            m.group(3) if m.group(3) is not None else m.group(4))
+
+        consumer = _heredoc_consumer_command(text[line_start:m.start()])
+        if consumer not in SAFE_HEREDOC_CONSUMERS:
+            # fail-safe: an unrecognized/executing consumer -- do NOT strip
+            # this heredoc's body; keep scanning past just this operator for
+            # any FURTHER heredoc, leaving the body itself untouched.
+            out.append(text[i:m.end()])
+            i = m.end()
+            continue
+
+        out.append(text[i:line_end + 1])
+        cursor = line_end + 1
+        body_end = None
+        while True:
+            next_nl = text.find("\n", cursor)
+            candidate = text[cursor:next_nl if next_nl != -1 else n]
+            check = candidate.lstrip("\t") if dash else candidate
+            if check == delim:
+                body_end = next_nl if next_nl != -1 else n
+                break
+            if next_nl == -1:
+                break
+            cursor = next_nl + 1
+        if body_end is None:
+            # no closing delimiter line found -- fail-safe: leave the rest
+            # of the text untouched rather than guess where the heredoc ends.
+            out.append(text[line_end + 1:])
+            break
+        i = body_end + 1 if body_end < n else body_end
+    return "".join(out)
+
+
+sys.stdout.write(strip(text))
+PYEOF
+}
+
 # Strip quoted substrings, so a build command (or the bypass marker) MENTIONED
 # inside a string (a git commit message, an echo) is NOT matched — only a
 # real command position.
@@ -347,7 +563,7 @@ strip_quotes() {
     printf '%s' "$1" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g"
 }
 
-STRIPPED=$(strip_quotes "$CMD")
+STRIPPED=$(strip_quotes "$(strip_heredocs "$CMD")")
 
 CMD_IS_HEAVY=1
 is_heavy "$STRIPPED" || CMD_IS_HEAVY=0
@@ -390,7 +606,7 @@ PYEOF
                 *)  resolved="$BASE_DIR/$sp" ;;
             esac
             if [ -f "$resolved" ] && [ -r "$resolved" ]; then
-                SCRIPT_STRIPPED=$(strip_quotes "$(cat "$resolved" 2>/dev/null || true)")
+                SCRIPT_STRIPPED=$(strip_quotes "$(strip_heredocs "$(cat "$resolved" 2>/dev/null || true)")")
                 if is_heavy "$SCRIPT_STRIPPED"; then
                     HEAVY_SCRIPT="$resolved"
                     break

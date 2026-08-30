@@ -1127,5 +1127,253 @@ class Tier0ZeroCargoCompilationTest(_Runner):
         self.assertIn("camera-box", out.stderr)
 
 
+class HeredocProseFalsePositiveTest(_Runner):
+    """#750: `split_top_level()` used to split on bare NEWLINE with zero
+    heredoc awareness, so a `cat > file <<'EOF' ... EOF` heredoc's BODY --
+    ordinary prose, e.g. a commit-message draft -- was sliced into its own
+    newline-delimited "command segments" exactly like real command text. A
+    prose sentence line-wrapped so the word "cargo" itself opens a physical
+    line, followed by a word not in NONCOMPILING, was then misread as a real
+    cargo-compile command in command position and the whole (harmless) Bash
+    call was blocked. Reproduced LIVE against the unpatched hook (STEP 0):
+    the exact shape below blocked a real Bash tool call in this session
+    before the fix, and reproduces deterministically here on unpatched HEAD.
+
+    `strip_heredocs()` fixes this by blanking out every heredoc's BODY +
+    closing delimiter line from `$CMD` BEFORE `strip_quotes()` (and
+    everything downstream) ever sees the text -- ordering matters: applying
+    it only inside `_cargo_compiles()` (i.e. on the ALREADY quote-stripped
+    text) does NOT work, because `strip_quotes()` already destroys a quoted
+    heredoc delimiter like `<<'EOF'` (reducing it to a bare `<<`) before
+    that point -- confirmed by an actual first, failed attempt during this
+    ticket's own STEP 0/design work.
+    """
+
+    def test_heredoc_prose_wrapping_cargo_across_a_line_is_not_blocked(self):
+        # the EXACT repro shape from the issue + the live incident: "cargo"
+        # opens the second physical line of an ordinary sentence.
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/msg.txt <<'EOF'\n"
+               "Description: no\n"
+               "cargo compile involved, only a heredoc write.\n"
+               "EOF\n"
+               "echo done\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_heredoc_prose_with_double_quoted_delimiter_is_not_blocked(self):
+        proj = self._mkproj()
+        cmd = ('cat > /tmp/note.txt <<"EOF"\n'
+               'cargo compile is not part of this change\n'
+               'EOF\n'
+               'echo ok\n')
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_heredoc_prose_with_bare_unquoted_delimiter_is_not_blocked(self):
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/note.txt <<EOF\n"
+               "cargo compile mentioned only as prose here\n"
+               "EOF\n"
+               "echo ok\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_dash_form_heredoc_with_tab_indented_prose_is_not_blocked(self):
+        # `<<-'EOF'` -- leading tabs on the body AND the closing delimiter
+        # line are stripped before the delimiter compare (POSIX).
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/note.txt <<-'EOF'\n"
+               "\tcargo compile is only discussed here\n"
+               "\tEOF\n"
+               "echo ok\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_heredoc_used_in_a_worker_commit_message_shape_is_not_blocked(self):
+        # the real-world trigger: a `git commit -F <file>` workflow (per
+        # gh-cli-recipes.md) where the commit-message file is authored via a
+        # heredoc whose body happens to describe avoiding a build.
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/commit-msg.txt <<'EOF'\n"
+               "fix: heredoc write only, no\n"
+               "cargo compile happens in this commit\n"
+               "EOF\n"
+               "git commit -F /tmp/commit-msg.txt\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- real compiles must STILL block, heredoc or not ----
+
+    def test_real_cargo_build_chained_after_a_harmless_heredoc_still_blocks(self):
+        # the heredoc write is inert data; the REAL cargo build that follows
+        # it (outside the heredoc, in real command position) must still block.
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/msg.txt <<'EOF'\n"
+               "just a heredoc write, no cargo mentioned in the body\n"
+               "EOF\n"
+               "cargo build --release\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_real_cargo_build_on_the_heredoc_operator_line_itself_still_blocks(self):
+        # a real cargo compile chained on the SAME line as the heredoc
+        # operator (before the redirect) is real command text, not body data,
+        # and must still block.
+        proj = self._mkproj()
+        cmd = "cargo build --release && cat > /tmp/x <<'EOF'\nsome prose\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_plain_cargo_build_without_any_heredoc_still_blocks(self):
+        # regression net: the fix must not affect commands with no heredoc
+        # at all (the overwhelmingly common case).
+        proj = self._mkproj()
+        out = self.run_hook("cargo build --release", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_heavy_build_hidden_in_a_script_via_heredoc_prose_wrapper_still_blocks(self):
+        # Shape B (a heavy build hidden inside an invoked script) must still
+        # be caught even when the SAME script also happens to contain a
+        # heredoc whose body mentions "cargo" as prose -- the real compile
+        # line, outside the heredoc, must still be found.
+        proj = self._mkproj()
+        s = proj / "install.sh"
+        s.write_text("#!/bin/bash\n"
+                      "cat > /tmp/note.txt <<'EOF'\n"
+                      "no cargo compile happens in this note\n"
+                      "EOF\n"
+                      "cargo build --release\n")
+        out = self.run_hook("bash install.sh", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("install.sh", out.stderr)
+
+    def test_script_with_only_heredoc_prose_and_no_real_compile_is_not_blocked(self):
+        # the Shape-B counterpart of the top-level fix: a script whose ONLY
+        # "cargo"-adjacent text is heredoc prose must not be misclassified.
+        proj = self._mkproj()
+        s = proj / "note.sh"
+        s.write_text("#!/bin/bash\n"
+                      "cat > /tmp/note.txt <<'EOF'\n"
+                      "cargo compile is not invoked by this script\n"
+                      "EOF\n"
+                      "echo done\n")
+        out = self.run_hook("bash note.sh", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_tier1_marker_still_exempts_even_with_heredoc_prose(self):
+        proj = self._mkproj(marker="allowed")
+        cmd = "cat > /tmp/x <<'EOF'\ncargo compile prose\nEOF\ncargo build --release\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_malformed_heredoc_with_no_closing_delimiter_fails_safe_to_block(self):
+        # #750 fail-safe direction: a heredoc with NO findable closing
+        # delimiter line is left UNCHANGED by strip_heredocs() -- the exact
+        # pre-#750 behavior -- so it still over-blocks rather than silently
+        # waiving detection on unparseable input.
+        proj = self._mkproj()
+        cmd = "cat > /tmp/x <<'EOF'\ncargo compile\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
+class HeredocInterpreterConsumerReviewFixTest(_Runner):
+    """#750-review CRITICAL: a heredoc fed to an INTERPRETER (`bash`/`sh`/
+    an unrecognized command) is EXECUTED CODE, not inert data -- stripping
+    its body would have opened a genuinely NEW bypass of this hook's one
+    safety property. Confirmed live during review: pre-#750-fix, `bash
+    <<'EOF' ... cargo build --release ... EOF` correctly BLOCKED; the first
+    #750 cut made it pass unblocked. `strip_heredocs()` now only strips a
+    body when its consumer command is confidently classified as
+    NON-executing (`cat`/`tee`/`dd`/`:`/`true`) -- everything else,
+    including every shell/interpreter and any unrecognized command, is
+    fail-safe left untouched (still scanned as ordinary text, still blocks
+    a real compile inside it). Also locks the two companion regex
+    hardenings: `[ \\t]*` (never crossing a newline, so a `<<` at end-of-
+    line can no longer bind a LATER line's token as "the delimiter" and
+    splice out real command text in between) and the unquoted-delimiter
+    boundary (`cat <<EOF; echo hi` no longer swallows `;echo hi` into the
+    delimiter capture, so this common shape's heredoc is now correctly
+    recognized and stripped, closing a residual of the original #750 fix).
+    """
+
+    def test_bash_consumed_heredoc_with_a_real_cargo_build_still_blocks(self):
+        proj = self._mkproj()
+        cmd = "bash <<'EOF'\ncargo build --release\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_sh_consumed_heredoc_with_unquoted_delimiter_still_blocks(self):
+        proj = self._mkproj()
+        cmd = "sh <<EOF\ncargo test --no-run --lib\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_ssh_wrapped_bash_consumed_heredoc_still_blocks(self):
+        # the real interpreter is one hop away (over ssh); "ssh" itself is
+        # not a recognized safe consumer, so this correctly fails safe.
+        proj = self._mkproj()
+        cmd = "ssh dev2 bash <<'EOF'\ncargo build --release\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_dash_form_bash_consumed_heredoc_still_blocks(self):
+        proj = self._mkproj()
+        cmd = "bash <<-'EOF'\n\tcargo build --release\n\tEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cross_newline_delimiter_exploit_still_blocks(self):
+        # a `<<` at end-of-line, with the "delimiter" only on the NEXT
+        # physical line, must NOT be recognized as a heredoc at all -- with
+        # the old `\s*` this could splice out a real command in between as
+        # if it were heredoc body data.
+        proj = self._mkproj()
+        cmd = 'echo "x <<\ny"\ncargo build --release\ny\n'
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_original_750_repro_with_cat_consumer_still_not_blocked(self):
+        # positive control: the ORIGINAL #750 false-positive fix must still
+        # hold for the provably-safe `cat` consumer.
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/msg.txt <<'EOF'\n"
+               "Description: no\n"
+               "cargo compile involved, only a heredoc write.\n"
+               "EOF\n"
+               "echo done\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_colon_block_comment_idiom_with_cargo_prose_not_blocked(self):
+        # `: <<'EOF' ... EOF` is a common "heredoc as a block comment"
+        # idiom -- `:` discards its stdin entirely, never executing it.
+        proj = self._mkproj()
+        cmd = ": <<'EOF'\ncargo compile is only discussed here\nEOF\necho ok\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_unquoted_delimiter_with_trailing_semicolon_is_now_stripped(self):
+        # #750-review residual fix: the unquoted delimiter no longer
+        # swallows a trailing `;` + chained command -- this heredoc's body
+        # (safe `cat` consumer) is now correctly recognized and stripped,
+        # so the trailing prose no longer false-blocks.
+        proj = self._mkproj()
+        cmd = "cat <<EOF; echo hi\ncargo compile mentioned only as prose\nEOF\n"
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_two_sequential_heredocs_both_safe_consumers_not_blocked(self):
+        proj = self._mkproj()
+        cmd = ("cat > /tmp/a <<'EOF'\ncargo compile prose one\nEOF\n"
+               "cat > /tmp/b <<'EOF'\ncargo compile prose two\nEOF\n"
+               "echo done\n")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
