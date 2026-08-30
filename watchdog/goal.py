@@ -92,7 +92,9 @@ through a callback in the /autopilot command." Concretely:
              under a 24h attempt cap -- and NEVER on an idle-but-ALIVE session
              (glyph merely flickering; montalu 2026-08-16). An idle/dark loop
              the watchdog cannot self-heal still gets the #459 ping, keystroke-
-             free. See `goal_dark_watch()` below.
+             free -- EXCEPT a 🏁-PROVEN achieved loop with a fresh open==0 cache
+             (#766), which is FULFILLED, not dead, so the ping is VETOed. See
+             `goal_dark_watch()` below.
 
   JANITOR -- the shared stuck-stash-slot recovery driver (`#372`,
              `watchdog._janitor_recover` -- renamed from
@@ -2106,7 +2108,9 @@ def _fulfilled_rearm_ok(recs, now):
       * `reason == "cap"`  -- GOAL_FULFILLED_REARM_MAX_PER_DAY records already in
         the rolling 24 h: stop THIS lane's fast re-arms and fall through to the
         dead-loop machinery (a still-workable loop then escalates via its own
-        slower confirmed dark-rearm, 2/day; a non-workable one gets the #459 ping);
+        slower confirmed dark-rearm, 2/day; a non-workable one gets the #459
+        ping -- UNLESS it is a 🏁-proven, freshly-drained achieved loop, which
+        the #766 FULFILLED-SILENT veto catches upstream of this rate limiter);
       * `("", ok=True)`    -- record allowed.
     `pruned` is the 24h-pruned list; the caller appends `now` only on a real
     record. Same fail-safe posture as the dark cap (records, not landed
@@ -2144,8 +2148,10 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
         instead of falling through to the unconditional fallback. A truthy
         sentinel, so the caller MUST test it BEFORE the generic `if handled:`;
       * handled=False -- FALL THROUGH to the dead-loop machinery: not fulfilled
-        (no 🏁 / 🏁 predates the arm), not workable (empty/stale backlog), no
-        template, OR the daily cap is exhausted (12 fast fulfilled-rearms in 24h
+        (no 🏁 / 🏁 predates the arm), not workable AND not proven-drained (a
+        STALE/UNREADABLE cache -- a FRESH open==0 is the FULFILLED-SILENT sentinel
+        above, #766), no template, OR the daily cap is exhausted (12 fast
+        fulfilled-rearms in 24h
         -> hand to the dead-loop machinery, which escalates a still-workable loop
         via its slower confirmed dark-rearm and pings a non-workable one).
 
@@ -2243,7 +2249,18 @@ def _fulfilled_silent_veto(sid, mark_ts, loc, dry_run,
     re-arm; if unarmable, the dead-loop machinery re-detects from a FRESH confirm
     run (confirm_state is popped here). Returns the decision logline (once per
     episode) or None; all mutations guarded on `not dry_run` (the #502/#511
-    module-level-helper pattern, keeping goal_dark_watch under its ceiling)."""
+    module-level-helper pattern, keeping goal_dark_watch under its ceiling).
+
+    NOTE (review 🔵, the set-marker deviation's bounded consequence): the
+    `{"mark_ts": …, "fulfilled": True}` marker satisfies the dead-loop debounce's
+    `prior.get("mark_ts") == mark_ts` check, so if the SAME episode later goes
+    fresh->STALE (cache ages past GOAL_DARK_CACHE_MAX_AGE_S) the loop skips the
+    "first observation, debouncing" sweep and reaches the #459 fallback one sweep
+    (~60 s) sooner than a pristine episode; and because this veto pops
+    `pinged_state` on every fresh sweep, a fresh<->stale oscillation re-fires a
+    "first" ping each cycle, bounded in production only by the notify-layer dedup
+    on the constant `goal-dark:sid:mark` key. Negligible live (the cache max age
+    is 3 days) -- documented so a future reader does NOT "restore" the pop."""
     prior = seen_state.get(sid)
     fresh_episode = not (isinstance(prior, dict) and prior.get("fulfilled")
                          and prior.get("mark_ts") == mark_ts)

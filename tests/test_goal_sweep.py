@@ -666,6 +666,28 @@ class TestGoalDarkWatch(unittest.TestCase):
                         "the veto emits an explicit FULFILLED-SILENT log")
         self.assertEqual(tmux.sent, [], "the veto types no keystroke")
 
+    def test_766_stale_open_zero_with_flag_still_pings(self):
+        # #766 FAIL-SAFE TEETH (review 🟡): a 🏁 loop whose open==0 cache is
+        # STALE (aged past GOAL_DARK_CACHE_MAX_AGE_S) is UNPROVABLE-achieved ->
+        # today's behavior, the #459 ping STILL fires; the FULFILLED-SILENT veto
+        # needs a FRESH open==0. Locks the `and fresh` conjunct of the sentinel
+        # gate (dropping it would silence a stale-cache 🏁 loop forever). Mutant:
+        # remove `and fresh` from the open==0 branch -> this test goes RED.
+        proj, tmux = self._dark_flag("sess-766-stale")
+        base = 1_700_000_000
+        stale = base - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
+        obl = self._obl(0, stale)                    # open==0 but STALE cache
+        state, pings, logs = {}, [], []
+        for now in (base, base + 1000):
+            logs += goal.goal_dark_watch(
+                now, run=tmux, send_fn=lambda mm, **k: pings.append(mm),
+                projects_dir=proj, state=state, sleep_fn=lambda s: None,
+                obligation_fn=obl, rearm_fn=lambda cwd: ("/goal x", "full"))
+        self.assertEqual(len(pings), 1,
+                         "a STALE open==0 cache is unprovable -> the #459 ping fires")
+        self.assertFalse(any("FULFILLED-SILENT" in ln for ln in logs),
+                         "an unproven (stale) achieved state must NOT be vetoed")
+
     def test_unavailable_obligation_cache_does_not_re_ping(self):
         # #459 fail-safe — cache absent/unreadable => cannot confirm work
         # remains => no re-ping (the first ping already went out). Fail
