@@ -32,7 +32,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from watchdog import stash  # noqa: E402
-import watchdog as wd  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_IDLE_CAP, _SwallowFirstCharFake,
 )

@@ -289,14 +289,22 @@ def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False):
     return _TV_CORRUPT                            # head not a prefix -> swallowed first char
 
 
-def _type_verify_landed(pid, run, text, cap=None):
+def _type_verify_landed(pid, run, text, cap=None, allow_scrolled=False):
     """#670 -- thin bool wrapper (`_type_verify_class == LANDED`). Used by
     `deliver_with_stash`'s bare branch for DETECTION only: it aborts to the next
     sweep on not-landed via its OWN `_undo_and_release_slot`, exactly as it did
     with the head-blind `_typed_landed` (a HOLD/CORRUPT both read not-landed, its
     pre-#670 behaviour on a non-suffix box -- unchanged). The undo+retry loop
-    lives in `_type_literal_verified` (send_verified's path) ONLY."""
-    return _type_verify_class(pid, run, text, cap=cap) == _TV_LANDED
+    lives in `_type_literal_verified` (send_verified's path) ONLY.
+
+    #747 -- `allow_scrolled` is forwarded to `_type_verify_class`. It defaults
+    False (every pre-#747 caller stays byte-identical -- a scrolled box is
+    CORRUPT for them). `deliver_with_stash`'s bare branch passes True ONLY for a
+    scroll-length payload it has already run the two-phase head-checkpoint on
+    (`_type_two_phase_head_checkpoint` proved the leading char landed), so the
+    scrolled own-substring acceptance can never mask a #720 head-swallow."""
+    return _type_verify_class(
+        pid, run, text, cap=cap, allow_scrolled=allow_scrolled) == _TV_LANDED
 
 
 def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
@@ -314,6 +322,39 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
         if i < TYPE_VERIFY_SETTLE_POLLS - 1:
             sleep_fn(TYPE_VERIFY_SETTLE_S)
     return cls
+
+
+def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn):
+    """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
+    the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
+    box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
+    -- type the REST. The checkpoint is a cheap first-byte-swallow catch: it
+    proves the leading `/` landed BEFORE the box scrolls the head off-screen, so
+    the caller's FINAL verify can accept the scrolled own-substring
+    (`allow_scrolled=True`) without ever masking a #720 head-swallow.
+
+    Returns the checkpoint VERDICT, leaving the RECOVERY to the caller (the two
+    callers differ):
+      * `_TV_LANDED`  -- checkpoint passed AND the rest was typed; the caller runs
+                         its own FINAL `allow_scrolled=True` verify.
+      * `_TV_CORRUPT` -- the head was swallowed; the box holds `<= head_chunk`
+                         chars of OUR OWN text on a bare-verified box, so the
+                         caller may undo exactly `GOAL_TYPE_CHECKPOINT_CHARS`
+                         (over-backspace safe) -- `_type_literal_verified` undoes
+                         + retypes, `deliver_with_stash` undoes + releases the
+                         slot + aborts to next sweep.
+      * `_TV_HOLD`    -- the box went unreadable / collapsed after the chunk; NO
+                         further keystroke may follow (#233/#322/#372) -- both
+                         callers abort with the head chunk left as CC rendered it.
+    Only ever called for a scroll-length payload (`len >= GOAL_TYPE_SCROLL_
+    CHECKPOINT_THRESHOLD`); a short payload never reaches here."""
+    head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
+    _type_literal(pid, run, head_chunk, sleep_fn)
+    hc = _settle_type_verify(pid, run, head_chunk, sleep_fn)
+    if hc != _TV_LANDED:
+        return hc
+    _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn)
+    return _TV_LANDED
 
 
 def _type_literal_verified(pid, run, text, sleep_fn=None):
@@ -356,15 +397,16 @@ def _type_literal_verified(pid, run, text, sleep_fn=None):
     head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
     for _attempt in range(GOAL_TYPE_VERIFY_RETRIES + 1):
         if two_phase:
-            _type_literal(pid, run, head_chunk, sleep_fn)
-            hc = _settle_type_verify(pid, run, head_chunk, sleep_fn)
+            # #746/#747 -- the two-phase type + head-checkpoint is SHARED with
+            # deliver_with_stash (`_type_two_phase_head_checkpoint`); only the
+            # RECOVERY differs, and here it is undo-the-chunk + RETRY.
+            hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed -> NO keystrokes
             if hc == _TV_CORRUPT:                # head swallowed -> undo the chunk + retry
                 if not _undo_typed_text(pid, run, head_chunk, sleep_fn):
                     return False
                 continue
-            _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn)
         else:
             _type_literal(pid, run, text, sleep_fn)
         cls = _settle_type_verify(pid, run, text, sleep_fn,
@@ -1017,7 +1059,35 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # async auto-restore); a `None` state (a caller/test not threading it)
         # is a no-op, exactly like `_janitor_mark_watch`.
         watchdog._janitor_park_record(state, pid, time.time())
-    watchdog._type_literal(pid, run, text, sleep_fn)
+    # #747 -- a scroll-length own /goal WRAPS past the box height and CC SCROLLS
+    # it, so the head row goes off-screen and head-is-prefix (the default verify)
+    # reads CORRUPT even for a perfect type -- the exact #746 class the BARE route
+    # already fixed, still open on this route. Give the bare (PARKED/NOOP) branch
+    # its OWN two-phase head-checkpoint (the SHARED `_type_two_phase_head_
+    # checkpoint`) so the FINAL verify can pass `allow_scrolled=True` SAFELY: the
+    # checkpoint proves the leading `/` landed BEFORE the box scrolls, so a
+    # head-swallowed long /goal (identical own-substring tail) can never slip to a
+    # junk submit (#720). DETECTION only -- unlike `_type_literal_verified`, this
+    # route does NOT retype a swallow (it protects a parked draft); it aborts to
+    # the next sweep. The UNRESOLVED branch keeps `_typed_exclusively` (a swallow
+    # already fails it) and never scrolls (a wrapped unresolved box is refused
+    # above), so it is `two_phase=False` and byte-identical to pre-#747.
+    two_phase = (not pre_text) and len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
+    if two_phase:
+        hc = watchdog._type_two_phase_head_checkpoint(pid, run, text, sleep_fn)
+        if hc != _TV_LANDED:
+            _log("stash-abort: head-checkpoint-%s" % hc)
+            if hc == _TV_CORRUPT:
+                # the box holds `<= head_chunk` chars of OUR OWN text on a
+                # bare-verified box -> back the chunk off (over-backspace safe) +
+                # pop the parked draft. A HOLD box takes NO keystroke (#233/#322/
+                # #372) -- the #488 park record + janitor reclaim the parked draft.
+                watchdog._undo_and_release_slot(
+                    pid, run, text[:GOAL_TYPE_CHECKPOINT_CHARS], parked, _log,
+                    "stash-abort", sleep_fn=sleep_fn)
+            return False
+    else:
+        watchdog._type_literal(pid, run, text, sleep_fn)
     cap = watchdog.capture_pane(pid, run, lines=30)
     itext = watchdog._input_line_text(cap)
     if watchdog._pane_shows_collapsed_paste(itext):
@@ -1047,8 +1117,19 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # the caller retries next sweep -- never a submitted corruption. The
     # UNRESOLVED (`pre_text`) branch already uses the exact-match
     # `_typed_exclusively`, which a swallow already fails, so it is unchanged.
-    landed = (watchdog._typed_exclusively(text, itext) if pre_text
-              else watchdog._type_verify_landed(pid, run, text, cap=cap))
+    # #747 -- the two-phase (scroll-length) bare branch settle-verifies with
+    # `allow_scrolled=True` (the head-checkpoint above proved the leading char
+    # landed): the ~3.3k-char rest-type renders with lag, so a single immediate
+    # capture can read mid-render -- settle-poll before concluding, exactly as
+    # `_type_literal_verified`'s own final verify does. The short (single-phase)
+    # bare branch keeps the pre-#747 single-capture `_type_verify_landed(cap=cap)`.
+    if pre_text:
+        landed = watchdog._typed_exclusively(text, itext)
+    elif two_phase:
+        landed = watchdog._settle_type_verify(
+            pid, run, text, sleep_fn, allow_scrolled=True) == _TV_LANDED
+    else:
+        landed = watchdog._type_verify_landed(pid, run, text, cap=cap)
     if not landed:
         _log("stash-abort: type-verify-failed")
         if not pre_text:

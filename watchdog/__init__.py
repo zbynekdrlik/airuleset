@@ -767,6 +767,8 @@ from watchdog.stash import (  # noqa: E402
     _type_literal as _type_literal,
     GOAL_TYPE_VERIFY_RETRIES as GOAL_TYPE_VERIFY_RETRIES,
     _type_verify_landed as _type_verify_landed,
+    _settle_type_verify as _settle_type_verify,
+    _type_two_phase_head_checkpoint as _type_two_phase_head_checkpoint,
     _type_literal_verified as _type_literal_verified,
     STASH_VERIFY_SETTLE_POLLS as STASH_VERIFY_SETTLE_POLLS,
     STASH_VERIFY_SETTLE_S as STASH_VERIFY_SETTLE_S,
