@@ -18,7 +18,7 @@ THE MODEL (owner's own words, #403): "prompt only when a real /autopilot
 slash command actually ran and printed the goal line ... should also go
 through a callback in the /autopilot command." Concretely:
 
-  INPUT   -- exactly ONE proven origin creates a pending request:
+  INPUT   -- the ONE HUMAN origin that creates a pending request is
              `record_goal_request(...)`, called from `airuleset.py
              goal-arm --self` -- the /autopilot skill's OWN Step 2, as its
              last tool call right after printing the `/goal` line for the
@@ -27,7 +27,13 @@ through a callback in the /autopilot command." Concretely:
              ONCE-PER-SESSION bootstrap event, not a per-ticket one -- there
              is no ticket-boundary-shaped signal that means "please arm my
              goal" the way a completed autopilot-worker ticket means
-             "please compact." One origin is honest, not a shortcut.
+             "please compact." One HUMAN origin is honest, not a shortcut.
+             (The watchdog LATER added AUTOMATIC re-arm origins that write the
+             SAME store through the SAME deliver_goal gates: `dark-rearm`
+             #478, `stale-rearm` #623, `auth-rearm` #675, and `fulfilled-rearm`
+             #764 -- see `_GOAL_WATCHDOG_REARM_ORIGINS`; none is a human arm,
+             each recovers a specific loop state the human would otherwise
+             have to re-`/autopilot` by hand.)
 
   DELIVERY -- ONE function, `deliver_goal()`. It checks, in order: the
              owner kill-switch; a hard age cap non-refreshable by any
@@ -1186,15 +1192,18 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
                 else:
                     leftover = "none"
     # origin-gated ping -- the SAME gate as the expiry ping (normal / dark-rearm
-    # only; stale-rearm + auth-rearm are SILENT, #623/#675: a stale/auth loop is
-    # ALIVE, so a "re-run /autopilot" ping would go to the very human whose
-    # presence deferred it). Deduped on sid + the REQUEST TS (like the expiry
-    # ping, #731-review): dl_fails is always exactly the cap at drop time, so
-    # keying on it would silence a later capped episode for the SAME sid for the
-    # full 14-day dedup TTL (the #134 silence class); request_ts gives each
+    # only; stale-rearm + auth-rearm + #764 fulfilled-rearm are SILENT: each is a
+    # loop that is ALIVE / self-healing, so a "re-run /autopilot" ping would go
+    # to the very human whose presence deferred it — a fulfilled-rearm most often
+    # fails delivery on skip:recent-human, dark_watch re-detects it next sweep
+    # under the fulfilled min-gap/cap). Deduped on sid + the REQUEST TS (like the
+    # expiry ping, #731-review): dl_fails is always exactly the cap at drop time,
+    # so keying on it would silence a later capped episode for the SAME sid for
+    # the full 14-day dedup TTL (the #134 silence class); request_ts gives each
     # episode its own ping.
     if (send_fn is not None and not dry_run
-            and origin not in (_GOAL_STALE_REARM_ORIGIN, _GOAL_AUTH_REARM_ORIGIN)):
+            and origin not in (_GOAL_STALE_REARM_ORIGIN, _GOAL_AUTH_REARM_ORIGIN,
+                               _GOAL_FULFILLED_REARM_ORIGIN)):
         from notify import stream_redirect
         owner = (stream_redirect(watchdog.pane_owner(pid, run))
                  if pid else None)
@@ -1370,17 +1379,24 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if age is not None and age > GOAL_REQUEST_MAX_AGE_S:
             _log_goal_sync("SKIP expired sid=%s cwd=%s origin=%s"
                            % (sid, cwd, origin))
-            # #623/#675-review -- SILENT expiry for the stale-rearm AND auth-rearm
-            # origins. stale-rearm: the loop is ALIVE+armed (just a stale
-            # condition). auth-rearm: an auth blip is owner-ruled NORMAL, silence
-            # + mechanical recovery only (#662/#676) — never a "re-run /autopilot"
-            # ping (esp. addressed to the very human whose PRESENCE deferred it to
-            # expiry). dark_watch re-detects both next sweep (shared 24h/2 cap).
-            # Only a dark-rearm (a genuinely DEAD autopilot) / normal origin pings.
-            # Still returns "expired" -> goal_sweep clears the request.
+            # #623/#675-review -- SILENT expiry for the stale-rearm, auth-rearm
+            # AND #764 fulfilled-rearm origins. stale-rearm: the loop is
+            # ALIVE+armed (just a stale condition). auth-rearm: an auth blip is
+            # owner-ruled NORMAL, silence + mechanical recovery only (#662/#676).
+            # fulfilled-rearm: a COMPLETED loop whose delivery was deferred (most
+            # often skip:recent-human) is neither dead nor abandoned, and its
+            # request is re-recorded next fulfilled sweep under its own min-gap/
+            # cap — a "re-run /autopilot" ping (esp. to the very human whose
+            # PRESENCE deferred it) is exactly the #675 banned shape, and after
+            # each expiry a FRESH request would give a FRESH goalarm-expired: key
+            # -> a present owner pinged ~every 31 min up to the 12/day cap. Only
+            # a dark-rearm (a genuinely DEAD autopilot) / normal origin pings.
+            # dark_watch re-detects the silenced origins next sweep. Still returns
+            # "expired" -> goal_sweep clears the request.
             if (send_fn is not None and not dry_run
                     and origin not in (_GOAL_STALE_REARM_ORIGIN,
-                                       _GOAL_AUTH_REARM_ORIGIN)):
+                                       _GOAL_AUTH_REARM_ORIGIN,
+                                       _GOAL_FULFILLED_REARM_ORIGIN)):
                 from notify import stream_redirect
                 pid_for_owner = _compact._find_pane_for_session(
                     sid, cwd, run=run, projects_dir=projects_dir)
@@ -1476,6 +1492,13 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # no-pane/in-mode/dialog/no-transcript returns its own skip BEFORE reaching
     # here; those survive to the 30-min GOAL_REQUEST_MAX_AGE_S cap instead (where
     # a dark-rearm pings and an auth-rearm expires SILENTLY).
+    # #764 ACCEPTED RESIDUAL (review 🔵): fulfilled-rearm is DELIBERATELY NOT in
+    # this stale gate. Its trigger read (🏁 + fresh open>0) could be delivered up
+    # to GOAL_REQUEST_MAX_AGE_S (30 min) stale, by which time another box may have
+    # drained the backlog -- but the outcome is benign (the re-armed loop proves 0
+    # and stops), and adding it would DROP terminally at 300s then re-record every
+    # 600s (min-gap) = MORE churn than the silent 30-min expiry + re-record the
+    # fulfilled lane already has. The min-gap/daily cap bound it, not this gate.
     if origin in (_GOAL_REARM_ORIGIN, _GOAL_AUTH_REARM_ORIGIN) and request_ts is not None:
         age = _safe_age(now, request_ts)
         if age is not None and age > GOAL_DARK_REARM_STALE_S:
@@ -2072,8 +2095,9 @@ def _fulfilled_rearm_ok(recs, now):
         record: a request just went out (or is still being delivered), so hold
         this sweep and retry the next (a TRANSIENT hold, the loop is not dead);
       * `reason == "cap"`  -- GOAL_FULFILLED_REARM_MAX_PER_DAY records already in
-        the rolling 24 h: the fulfilled-rearms are not sticking, stop re-arming
-        and let the human be told (the #459 dead-loop ping);
+        the rolling 24 h: stop THIS lane's fast re-arms and fall through to the
+        dead-loop machinery (a still-workable loop then escalates via its own
+        slower confirmed dark-rearm, 2/day; a non-workable one gets the #459 ping);
       * `("", ok=True)`    -- record allowed.
     `pruned` is the 24h-pruned list; the caller appends `now` only on a real
     record. Same fail-safe posture as the dark cap (records, not landed
@@ -2106,8 +2130,9 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
         NOT dead, so the dead-loop debounce/confirmation below must not run);
       * handled=False -- FALL THROUGH to the dead-loop machinery: not fulfilled
         (no 🏁 / 🏁 predates the arm), not workable (empty/stale backlog), no
-        template, OR the daily cap is exhausted (12 fulfilled-rearms did not
-        stick -> the #459 ping should tell the human).
+        template, OR the daily cap is exhausted (12 fast fulfilled-rearms in 24h
+        -> hand to the dead-loop machinery, which escalates a still-workable loop
+        via its slower confirmed dark-rearm and pings a non-workable one).
 
     All state mutations are guarded on `not dry_run`. Never raises via the pure
     helpers it calls; a `record_goal_request` / rearm_fn / obligation_fn failure
@@ -2115,9 +2140,13 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     bts = watchdog.transcript_last_backlog_empty_ts(tpath)
     if bts is None:
         return None, False                       # no 🏁 proof -> not this lane
-    if mark_ts is not None and not (
-            isinstance(mark_ts, (int, float)) and bts >= mark_ts):
-        return None, False                       # 🏁 predates the current arm
+    # The 🏁 MUST be provably AFTER the current arm. Fail CLOSED: an unparseable
+    # `mark_ts` (`_newest_marker` sets ts=None on any timestamp parse failure)
+    # means the ordering is UNPROVEN, so do NOT re-arm on a possibly-stale 🏁
+    # from a previous episode -- the SAME safe direction transcript_last_backlog
+    # _empty_ts takes for its own unparseable-ts case (never a false re-arm).
+    if not (isinstance(mark_ts, (int, float)) and bts >= mark_ts):
+        return None, False                       # 🏁 unproven-after-arm -> no re-arm
 
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = (cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
@@ -2160,6 +2189,14 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     seen_state.pop(sid, None)              # not a dead loop -> reset its state
     pinged_state.pop(sid, None)
     confirm_state.pop(sid, None)
+    # ACCEPTED RESIDUAL (review 🔵): record_goal_request returns True on BOTH a
+    # real write AND a DOWNGRADE-REFUSED no-op (a pending self-callback / sibling
+    # re-arm already in flight), so the two are indistinguishable from the return
+    # -> the log below reads "recording re-arm" even on a refusal. Benign: on a
+    # refusal the pending request delivers the arm anyway, and consuming a
+    # fulfilled slot for a refused sweep only escalates the min-gap/cap sooner
+    # (the same fail-safe direction as the dark cap). Not worth a pre-record
+    # pending-store read on the hot path.
     record_goal_request(sid, cwd, text, auth, now=now,
                         origin=_GOAL_FULFILLED_REARM_ORIGIN, path=requests_path)
     return ("dark-watch %s sid=%s -> FULFILLED-REARM: recording re-arm "

@@ -191,6 +191,28 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertEqual(reqs, {},
                          "🏁 older than the current arm is not a fresh completion")
 
+    # --- an UNPARSEABLE mark_ts fails CLOSED (review 🟡) --------------------- #
+    def test_unparseable_mark_ts_never_rearms(self):
+        # `_newest_marker` sets mark["ts"]=None on any timestamp parse failure;
+        # then the 🏁-after-mark ordering is UNPROVEN, so the lane must NOT fire
+        # (a possibly-stale 🏁 from a previous episode) -- fail closed.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-nots", "warmup")
+        # a `Goal set:` system marker with NO `timestamp` field -> mark_ts None.
+        d = next(proj.rglob("sess-nots.jsonl")).parent
+        p = d / "sess-nots.jsonl"
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "type": "system", "subtype": "local_command",
+                "content": "<local-command-stdout>Goal set: /goal x"
+                           "</local-command-stdout>"}) + "\n")
+        _append_assistant(p, _BACKLOG_DONE, 600)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        reqs, _logs, _ = self._sweep(proj, tmux, 100000, (7, 100000))
+        self.assertEqual(reqs, {},
+                         "an unparseable arm timestamp must fail CLOSED (no re-arm)")
+
     # --- armed footer never fires (already re-armed) ------------------------ #
     def test_armed_footer_never_rearms(self):
         proj, tmux = self._fixture("sess-armed", cap=GOAL_ARMED_CAP)
@@ -262,6 +284,48 @@ class TestFulfilledRearmLane(unittest.TestCase):
                 origin=self.ORIGIN, request_ts=req["ts"], sleep_fn=lambda s: None)
         self.assertEqual(verdict, "skip:recent-human")
         self.assertEqual(tmux.sent, [], "no keystroke while a human is present")
+
+    # --- deliver_goal treats the new origin like a watchdog re-arm ---------- #
+    def _deliver(self, sid, now, request_ts, recent=None, send_fn=None):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid, "warmup")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        ctx = (unittest.mock.patch.object(
+                   wd, "_goal_autoarm_recent_human_activity",
+                   return_value=recent)
+               if recent is not None else None)
+        args = dict(run=tmux, projects_dir=proj, now=now, request_ts=request_ts,
+                    origin=self.ORIGIN, send_fn=send_fn, sleep_fn=lambda s: None)
+        if ctx is None:
+            return goal.deliver_goal(sid, self.CWD, "/goal x", "full", **args), tmux
+        with ctx:
+            return goal.deliver_goal(sid, self.CWD, "/goal x", "full", **args), tmux
+
+    def test_fulfilled_rearm_expiry_is_SILENT(self):
+        # review 🟡: a fulfilled-rearm most often fails delivery on recent-human;
+        # its 30-min expiry must NOT ping the very human whose presence deferred
+        # it (the #675 banned shape) -- unlike a genuinely-dead dark-rearm.
+        now = 1_000_000
+        old = now - goal.GOAL_REQUEST_MAX_AGE_S - 10
+        pings = []
+        word, _ = self._deliver(
+            "sess-exp", now, old, recent=(True, "presence marker 5s old"),
+            send_fn=lambda *a, **k: pings.append(a))
+        self.assertEqual(word, "expired")
+        self.assertEqual(pings, [],
+                         "fulfilled-rearm expiry must be SILENT (self-healing loop)")
+
+    def test_fulfilled_rearm_not_subject_to_the_300s_stale_drop(self):
+        # the GOAL_DARK_REARM_STALE_S drop is dark/auth ONLY (#764 accepted
+        # residual) -- a fulfilled-rearm at a 300s+ (but < 30 min) age still
+        # delivers, bounded by its own min-gap/cap, never drop:stale-rearm.
+        now = 1_000_000
+        stale = now - goal.GOAL_DARK_REARM_STALE_S - 50
+        word, tmux = self._deliver("sess-notstale", now, stale,
+                                   recent=(False, ""))
+        self.assertEqual(word, "sent",
+                         "fulfilled-rearm is not in the dark/auth 300s stale gate")
 
     # --- dry-run records nothing ------------------------------------------- #
     def test_dry_run_never_records(self):

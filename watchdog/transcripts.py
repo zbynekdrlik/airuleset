@@ -508,8 +508,9 @@ def transcript_last_assistant_text(path):
 # #764 -- the `🏁 BACKLOG EMPTY:` fulfilled-completion PROOF the goal
 # fulfilled-rearm lane keys on. CC never persists a "fulfilled" marker, so a
 # stop-(B) COMPLETED /goal loop is transcript-identical to a silently-dead one
-# (`mark=="set"`, footer dark) EXCEPT for this line -- both authority profiles
-# render the `🏁 BACKLOG EMPTY:` prefix (goal_registry.py). A stop-(A)
+# (`mark=="set"`, footer dark) EXCEPT for this line -- ALL authority profiles
+# (full/branch-merge/fork-no-merge) render the `🏁 BACKLOG EMPTY:` prefix
+# (goal_registry.py). A stop-(A)
 # ❓-blocked completion prints NO 🏁 line, so its last turn never matches ->
 # the trigger structurally never fires on it (no re-poke on an unanswered
 # question).
@@ -521,8 +522,10 @@ def transcript_last_backlog_empty_ts(path, tail_bytes=2_000_000,
     """Epoch seconds of the session's LAST real assistant turn IFF that turn
     carries a `🏁 BACKLOG EMPTY:` completion claim, else None. Same
     genuine-turn skip semantics as `transcript_last_assistant_text`
-    (synthetic/tool-only `_SENTINELS` and an `isApiErrorMessage` entry are
-    skipped). BOUNDED-SEEK read (`_read_jsonl_byte_tail`, never a whole-file
+    (synthetic/tool-only `_SENTINELS` entries are skipped; a newest real
+    assistant turn flagged `isApiErrorMessage` returns None terminally -- an
+    error turn is never a completion). BOUNDED-SEEK read
+    (`_read_jsonl_byte_tail`, never a whole-file
     `f.read()`) -- the fulfilled-rearm rider runs against real supervisor
     transcripts that reach hundreds of MB, so the tail is bounded by BYTES
     like `transcript_last_marker_bounded`. Fail-safe None on ANY error / a
