@@ -226,9 +226,20 @@ repo's own CLAUDE.md / playbook is what names the command.
      `odoo-discuss-xmlrpc` skill's `handover-compose.md` companion (the single
      source of truth for handover-proposal completeness, deep-link URL, and
      owner membership).
-     THEN close the stream's tickets with merge evidence and remove whichever hand-off
-     label was applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out
-     stream's hand-off carries `needs-gatekeeper`, not `ready-for-review`).
+     THEN post the review verdict + merge evidence, DROP whichever hand-off label was
+     applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out stream's
+     hand-off carries `needs-gatekeeper`, not `ready-for-review`), and HAND THE TICKET
+     BACK to the delivering stream. **The delivering STREAM closes its OWN ticket after
+     review** (and after client confirmation for a `needs-acceptance` ticket, citing
+     it) — NOT the gatekeeper; the gatekeeper no longer closes stream tickets
+     (odoo-erp#5378), its own `gh issue close` is reserved for its OWN `stream:core`
+     tickets. This is artifact-enforced and account-agnostic: the gatekeeper's
+     review-verdict comment is what BOTH `subdev-self-close-guard.yml` (reopens a
+     PREMATURE self-close) AND `hooks/block-fork-no-merge-issue-close.sh` (permits a
+     post-verdict stream close on odoo-erp — airuleset #756) key on, never WHO pressed
+     close — so a reviewed stream self-close passes cleanly while an unreviewed one
+     still blocks/reopens. Repo-configurable: a repo whose parameters keep the
+     gatekeeper as closer defers to those parameters.
      For a ticket BOUND to an Odoo Discuss thread (a `Discuss-thread:` line on it),
      the OWNING stream must have posted the thread's closing note and recorded
      `Discuss-closed:` (or `Discuss-defer:` for a non-last sibling) on the ticket

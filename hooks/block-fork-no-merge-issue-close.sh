@@ -10,10 +10,14 @@ set -euo pipefail
 # Semantics (refined by the gatekeeper, 2026-07-11; widened to branch-merge #349,
 # 2026-08-09):
 #   - ASSIGNED / foreign-authored tickets: NEVER closed by a reduced-authority
-#     stream itself — the gatekeeper maintainer closes them: for fork-no-merge at
-#     cross-fork review/merge, for branch-merge only AFTER the full
-#     `/process-subdev` release pipeline. Self-closing one removes the
-#     READY-FOR-REVIEW hand-off event and bypasses review.
+#     stream itself BEFORE gatekeeper review — self-closing one removes the
+#     READY-FOR-REVIEW hand-off event and bypasses review. The CLOSER depends on
+#     the repo: on odoo-erp, per owner ruling #5378, once the gatekeeper posts its
+#     review-verdict comment and drops the queue label the DELIVERING STREAM closes
+#     the ticket itself with an evidence --comment (the #756 verdict-artifact
+#     carve-out below permits exactly that); on a repo without that ruling the
+#     gatekeeper maintainer closes it (fork-no-merge at cross-fork review/merge,
+#     branch-merge only AFTER the full `/process-subdev` release pipeline).
 #   - SELF-AUTHORED sub-findings (tickets the stream itself filed while working,
 #     e.g. kvaskodev-authored kiosk sub-issues): closing them WITH evidence is the
 #     stream's normal bookkeeping — ALLOWED, for BOTH profiles. The 2026-07-10
@@ -62,6 +66,33 @@ _is_patch_close_cmd() {
     printf '%s' "$1" | grep -qE 'state=["'\'']?closed' && return 0             # visible (bare or value-quoted, #540 F1)
     printf '%s' "$1" | grep -qE '(^|[[:space:]])--input([[:space:]=]|$)' && return 0  # hidden body (file/-/=file)
     printf '%s' "$1" | grep -qE '(-F|--field)[[:space:]=]+[^[:space:]]*=@' && return 0  # -F state=@file
+    return 1
+}
+
+# #756: the gatekeeper REVIEW-VERDICT artifact — the SAME signal odoo-erp's
+# `subdev-self-close-guard.yml` (#3784) keys on to prove a gk review happened
+# (never WHO closed): a case-INSENSITIVE H1-H3 heading that STARTS (after
+# non-word decoration) with "gatekeeper" and carries a verdict word
+# (review|verification|verdict), OR a line-start GATEKEEPER-CLOSE: marker (#3712).
+# The reopen-guard's jq test is `(^|\n)#{1,3}[^\w#\n]*gatekeeper[^\n]*\b(review|
+# verification|verdict)\b`; here a PER-LINE grep makes its (^|\n) line-anchor a `^`
+# and its [^\n]* stay within one line, so `.*` never spans lines. Requiring an
+# actual #{1,3} heading (never #{0,3}) preserves the reopen-guard's self-exemption
+# immunity — a bare "gatekeeper review ..." prose line with no leading hash never
+# self-satisfies — and #{1,3} (never #{1,6}) mirrors the H1-H3 restriction, so an
+# H4+ heading does not match. `[^[:alnum:]_#]` == the reopen-guard's `[^\w#]`
+# decoration class (\w = alnum + underscore), so a "## Ready for gatekeeper review"
+# readiness line stops at the word char "Ready" and never matches. Called ONLY from
+# an `if` condition, so `set -e` is suspended for its whole body — a `grep && return
+# 0` chain never aborts the hook on a no-match. It matches the SAME time-window-blind
+# artifact the reopen-guard checks; the reopen-guard (POST-close, precise window) is
+# the authoritative second net. A DELIBERATELY forged verdict heading is an accepted
+# residual (this hook is a CONFUSION guard against a well-meaning agent, not
+# adversarial security — the whole system keys on the ARTIFACT, never on WHO closed,
+# per odoo-erp#5378).
+_has_gk_verdict_artifact() {
+    printf '%s\n' "$1" | grep -iqE '^#{1,3}[^[:alnum:]_#]*gatekeeper.*\b(review|verification|verdict)\b' && return 0
+    printf '%s\n' "$1" | grep -qE '^GATEKEEPER-CLOSE:' && return 0
     return 1
 }
 
@@ -315,6 +346,15 @@ HAS_INTERP=0
 if printf '%s' "$CMD" | grep -qE '(^|[;&|[:space:](])(bash|sh|dash|zsh)[[:space:]]+-c([[:space:]]|$)|(^|[;&|[:space:](])(eval|xargs)([[:space:]]|$)'; then
     HAS_INTERP=1
 fi
+# #756 review F6 (pre-existing #533/#540 residual, exposure widened): backtick command
+# substitution is a nested-interpreter smuggle both HAS_INTERP and the N_CLOSE boundary
+# class miss — `(` catches $(…) but a backtick glued to a word char is invisible, so
+# `gh issue close X --comment y`gh issue close Z`` runs a second nested close no counter
+# sees, which a carve-out `exit 0` would allow. Any backtick alongside a close blanks the
+# exemption — fail toward hand-off (a legit close rarely carries a literal backtick).
+if printf '%s' "$CMD" | grep -qF '`'; then
+    HAS_INTERP=1
+fi
 if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ]; then
     ISSUE_NUM=""   # not a single simple close — fail toward hand-off (no exemption)
 fi
@@ -442,6 +482,104 @@ if [ -n "$ISSUE_NUM" ]; then
     fi
 fi
 
+# #756: gk-verdict-artifact carve-out (ADDITIVE — the author carve-out AND the #533
+# acceptance carve-out above are BYTE-UNTOUCHED; the `gh api PATCH` form is NEVER
+# exempted here, since ISSUE_NUM is empty for it and the #533 single-action guard
+# blanks it for a compound/PATCH/interpreter smuggle). Aligns airuleset with the
+# odoo-erp owner ruling #5378: the gatekeeper reviews+merges, posts its verdict,
+# DROPS the queue label, and HANDS THE TICKET BACK — the delivering STREAM closes it
+# after review. A REDUCED-authority stream may CLOSE a foreign-authored ODOO-ERP
+# ticket WITH an evidence --comment IFF ALL of:
+#   (1) the repo is EXACTLY `zbynekdrlik/odoo-erp` (full owner/repo, not just the
+#       `odoo-erp` basename — a fork/same-named repo has no reopen-guard net) — the
+#       ONLY repo where #5378 applies AND where the reopen-guard
+#       `subdev-self-close-guard.yml` (POST-close, precise time-window) provides the
+#       SECOND net; a `-R` present-but-unparseable falls SAFE (block);
+#   (2) the ticket carries a gk review-verdict ARTIFACT in its comments (the SAME
+#       #3784 detection — never WHO closed);
+#   (3) the ticket carries NONE of `ready-for-review`/`needs-gatekeeper` (gk still
+#       owns it), `prio:bounce` (a returned bounce), or `needs-acceptance` (that
+#       state is closed via the #533 acceptance carve-out above, which REQUIRES its
+#       own --comment client-confirmation citation — excluding it here stops the
+#       verdict path from bypassing that requirement);
+#   (4) the command carries --comment/-c (an evidence citation).
+# Every failure (non-odoo-erp, unparseable -R, unreadable ticket, no artifact, any
+# override label, missing --comment) falls through to the BLOCK below — fail toward
+# hand-off, the SAME direction as the author/acceptance carve-outs (#349/#463). Why
+# the #349 hole stays closed: an unreviewed merged-into-integration ticket carries
+# no verdict artifact (gk has not reviewed it) → condition 2 fails → still blocks.
+VERDICT_MISSING_COMMENT=0
+if [ -n "$ISSUE_NUM" ]; then
+    # Repo for the close: -R, else the cwd git remote. Reduce to a FULL lowercased
+    # `owner/repo` and require EXACTLY `zbynekdrlik/odoo-erp` — a basename-only match
+    # (the #627 gate's parse) would engage the carve-out for `anyowner/odoo-erp` (a
+    # fork or a same-named repo) whose safety net (the reopen-guard) does NOT exist,
+    # so the carve-out would GRANT an exemption where #627 only fails OPEN. Handle the
+    # three URL shapes: gh's `owner/repo` -R value, https://host/owner/repo[.git], and
+    # scp `git@host:owner/repo[.git]` — strip scheme://, user@, and (scp) the host:
+    # prefix, then keep the LAST two `/`-separated segments.
+    VERDICT_REPOFULL="$REPO_ARG"
+    if [ -z "$VERDICT_REPOFULL" ]; then
+        VERDICT_REPOFULL=$(git remote get-url origin 2>/dev/null || echo "")
+    fi
+    VERDICT_REPOFULL="${VERDICT_REPOFULL%.git}"
+    VERDICT_REPOFULL="${VERDICT_REPOFULL%/}"
+    VERDICT_REPOFULL="${VERDICT_REPOFULL#*://}"   # drop scheme:// (https/ssh)
+    VERDICT_REPOFULL="${VERDICT_REPOFULL##*@}"    # drop user@ (ssh)
+    case "$VERDICT_REPOFULL" in *:*) VERDICT_REPOFULL="${VERDICT_REPOFULL##*:}" ;; esac  # scp host: prefix
+    _vr_repo="${VERDICT_REPOFULL##*/}"
+    _vr_rest="${VERDICT_REPOFULL%/*}"
+    _vr_owner="${_vr_rest##*/}"
+    VERDICT_REPOFULL="${_vr_owner}/${_vr_repo}"
+    # #533 review m5 mirror: a -R flag present but REPO_ARG empty (a glued
+    # `-Rowner/repo`) → the reads below would target the CWD repo → fail SAFE.
+    VERDICT_REPO_UNPARSEABLE=0
+    if printf '%s' "$CMD" | grep -qE '(^|[[:space:]])(-R|--repo)' \
+       && [ -z "$REPO_ARG" ]; then
+        VERDICT_REPO_UNPARSEABLE=1
+    fi
+    if [ "${VERDICT_REPOFULL,,}" = "zbynekdrlik/odoo-erp" ] && [ "$VERDICT_REPO_UNPARSEABLE" -eq 0 ]; then
+        VGH_RC=0
+        if [ -n "$REPO_ARG" ]; then
+            VERDICT_JSON=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json labels,comments 2>/dev/null) || VGH_RC=$?
+        else
+            VERDICT_JSON=$(gh issue view "$ISSUE_NUM" --json labels,comments 2>/dev/null) || VGH_RC=$?
+        fi
+        # A gh error / empty payload reading the ticket is fail-SAFE (never exempt
+        # on an unverifiable ticket — the #349/#463 fail direction). Documented
+        # residual (#756 review F8, low-confidence, fail-SAFE): `gh issue view --json
+        # comments` returns only the first page (~100), so a verdict comment past #100
+        # on a very long thread is invisible → false BLOCK (never a false allow). If it
+        # ever bites, fetch comments via `gh api …/comments --paginate` like the
+        # reopen-guard; the reopen-guard (POST-close) is the authoritative net anyway.
+        if [ "$VGH_RC" -eq 0 ] && [ -n "$VERDICT_JSON" ]; then
+            # `|| true`: fail-safe by CONSTRUCTION — a jq error (malformed payload)
+            # must leave the vars empty (→ `_has_gk_verdict_artifact` fails → block),
+            # never abort the whole hook mid-way under `set -e` (which would exit with
+            # jq's status and no stderr) (#756 review F5).
+            V_LABELS=$(printf '%s' "$VERDICT_JSON" | jq -r '.labels[].name' 2>/dev/null || true)
+            V_COMMENTS=$(printf '%s' "$VERDICT_JSON" | jq -r '.comments[].body' 2>/dev/null || true)
+            # Whole-line fixed-string membership (label names carry `:`; never a
+            # regex). Only ever called inside `if`/`!` conditions, so `set -e`
+            # never aborts on a grep no-match.
+            _v_has_label() { printf '%s\n' "$V_LABELS" | grep -qxF "$1"; }
+            if _has_gk_verdict_artifact "$V_COMMENTS" \
+               && ! _v_has_label "ready-for-review" \
+               && ! _v_has_label "needs-gatekeeper" \
+               && ! _v_has_label "prio:bounce" \
+               && ! _v_has_label "needs-acceptance"; then
+                # Conditions 1+2+3 hold; condition 4 (--comment/-c) is the last gate.
+                if printf '%s' "$CMD" | grep -qE -- '--comment([[:space:]=]|$)' \
+                   || printf '%s' "$CMD" | grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)'; then
+                    exit 0   # post-gk-review stream self-close WITH evidence — allowed (#756)
+                else
+                    VERDICT_MISSING_COMMENT=1
+                fi
+            fi
+        fi
+    fi
+fi
+
 if [ "$AUTH" = "branch-merge" ]; then
     echo "BLOCKED: branch-merge stream — you may close ONLY your OWN (self-authored) issues." >&2
     echo "" >&2
@@ -453,6 +591,10 @@ if [ "$AUTH" = "branch-merge" ]; then
     echo "  Closing it yourself hides the hand-off and skips that review. (Self-authored" >&2
     echo "  sub-findings ARE closable — the hook verifies author == your gh login; if gh failed" >&2
     echo "  just now, fix auth and retry.)" >&2
+    echo "" >&2
+    echo "  odoo-erp #5378: once the gatekeeper posts its review-verdict comment AND drops the" >&2
+    echo "  queue label, the DELIVERING STREAM closes this ticket itself with an evidence" >&2
+    echo "  --comment (airuleset #756). Until that verdict lands, hand off and wait." >&2
     echo "" >&2
     echo "  HAND OFF instead, leaving the issue OPEN:" >&2
     echo "    - DONE (merged into integration): gh issue comment <N> --body \"READY-FOR-REVIEW: <PR/branch> — <local verify evidence>\"" >&2
@@ -470,6 +612,10 @@ else
     echo "  removes the READY-FOR-REVIEW hand-off event and bypasses the review this authority" >&2
     echo "  stream exists to enforce. (Self-authored sub-findings ARE closable — the hook" >&2
     echo "  verifies author == your gh login; if gh failed just now, fix auth and retry.)" >&2
+    echo "" >&2
+    echo "  odoo-erp #5378: once the gatekeeper posts its review-verdict comment AND drops the" >&2
+    echo "  queue label, the DELIVERING STREAM closes this ticket itself with an evidence" >&2
+    echo "  --comment (airuleset #756). Until that verdict lands, hand off and wait." >&2
     echo "" >&2
     echo "  HAND OFF instead, leaving the issue OPEN:" >&2
     echo "    - DONE ticket:     gh issue comment <N> --body \"READY-FOR-REVIEW: <branch> — <local verify evidence>\"" >&2
@@ -490,5 +636,18 @@ if [ "${ACCEPTANCE_MISSING_COMMENT:-0}" = "1" ]; then
     echo "  re-hand-off/bounce label — a stream ACCEPTANCE close IS allowed, but ONLY WITH" >&2
     echo "  a citation of the acceptance evidence. Re-run adding a --comment:" >&2
     echo "    gh issue close $ISSUE_NUM --comment \"<acceptance evidence — client confirmed, ref …>\"" >&2
+fi
+
+# #756: ONLY condition 4 failed — this odoo-erp ticket carries a gatekeeper
+# review-verdict artifact and no re-hand-off/bounce/acceptance label, so a
+# post-review STREAM self-close IS allowed (odoo-erp#5378) but ONLY WITH an
+# evidence citation. This hint fires for NO other block reason.
+if [ "${VERDICT_MISSING_COMMENT:-0}" = "1" ]; then
+    echo "" >&2
+    echo "  #756 NOTE: this odoo-erp issue carries a gatekeeper review-verdict comment" >&2
+    echo "  and no re-hand-off/bounce/acceptance label — the gatekeeper reviewed+merged" >&2
+    echo "  and handed it back, so a stream self-close IS allowed (odoo-erp#5378), but ONLY" >&2
+    echo "  WITH an evidence citation. Re-run adding a --comment:" >&2
+    echo "    gh issue close $ISSUE_NUM --comment \"<merge + gatekeeper-verdict evidence, ref …>\"" >&2
 fi
 exit 2

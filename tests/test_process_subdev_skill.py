@@ -163,9 +163,13 @@ class TestRunCardFiredOnReleasedSlice(TestCase):
         self.assertIn("one call per ticket", t)
 
     def test_fires_before_closing_tickets(self):
-        t = read(SKILL)
-        i_card = t.index("Fire the per-ticket Discord run-card")
-        i_close = t.index("close the stream's tickets with merge")
+        # #739: the close step is now "gk posts verdict, drops the label, and HANDS
+        # THE TICKET BACK; the stream self-closes after review" (odoo-erp#5378). The
+        # run-card still fires before the ticket leaves the gatekeeper's hands.
+        # Normalize: the "HAND THE TICKET BACK" anchor wraps across a source line.
+        flat = " ".join(read(SKILL).split())
+        i_card = flat.index("Fire the per-ticket Discord run-card")
+        i_close = flat.index("HAND THE TICKET BACK")
         self.assertLess(i_card, i_close)
 
     def test_never_a_hand_fired_reply(self):
@@ -313,11 +317,11 @@ class TestQueueUnionsBothHandoffLabels(TestCase):
 
     def test_close_removes_whichever_handoff_label_was_applied(self):
         # a carve-out hand-off closes under needs-gatekeeper, not
-        # ready-for-review -- the close step must clear the hand-off label
-        # that was actually applied, not only ready-for-review.
+        # ready-for-review -- the gatekeeper must DROP the hand-off label that
+        # was actually applied at hand-back, not only ready-for-review. (#739:
+        # the gatekeeper now DROPS the label + hands back; the stream closes.)
         flat = " ".join(read(SKILL).split())
-        i = flat.index("close the stream's tickets with merge")
-        # the "remove <label>" clause is AFTER the close phrase -> look forward.
+        i = flat.index("DROP whichever hand-off label was applied")
         window = flat[i:i + 220]
         self.assertIn("needs-gatekeeper", window)
 
@@ -349,6 +353,62 @@ class TestCrossStreamProtocolRecordsCarveOutHandoff(TestCase):
         self.assertIn("stream:", flat)
         self.assertIn("handed-by", flat)
         self.assertIn("action-request", flat.lower().replace(" ", "-"))
+
+
+class TestGatekeeperHandsBackStreamSelfCloses(TestCase):
+    """#739 -- align the fleet-wide close step with odoo-erp owner ruling #5378:
+    the gatekeeper reviews+merges, posts its verdict, DROPS the queue label, and
+    HANDS THE TICKET BACK -- the DELIVERING STREAM closes its own ticket after
+    review (and after client confirmation for a needs-acceptance ticket). The
+    gatekeeper no longer closes stream tickets (its own `gh issue close` is for
+    `stream:core` only). The change is artifact-enforced and account-agnostic:
+    the gk review-verdict comment is the signal BOTH the reopen-guard and the
+    airuleset close-guard (#756) key on -- so a reviewed stream self-close passes
+    while an unreviewed one blocks/reopens.
+
+    Window-teeth (#500): bound a normalized window to the close-step bullet (from
+    `HAND THE TICKET BACK` to the next distinct paragraph) so a partial revert to
+    the old "gatekeeper closes the stream's tickets" text FAILS here."""
+
+    def _close_step_window(self):
+        flat = " ".join(read(SKILL).split())
+        i = flat.index("HAND THE TICKET BACK")
+        # the close-step bullet ends where the #627 Discuss-note paragraph starts.
+        j = flat.index("For a ticket BOUND to an Odoo Discuss thread", i)
+        return flat[i:j]
+
+    def test_stream_closes_after_review_not_the_gatekeeper(self):
+        w = self._close_step_window()
+        self.assertIn("delivering STREAM closes its OWN ticket after review", w)
+        self.assertIn("gatekeeper no longer closes stream tickets", w)
+
+    def test_gatekeeper_close_reserved_for_stream_core(self):
+        w = self._close_step_window()
+        self.assertIn("stream:core", w)
+
+    def test_needs_acceptance_closes_after_client_confirmation(self):
+        w = self._close_step_window()
+        self.assertIn("needs-acceptance", w)
+        self.assertIn("client confirmation", w.lower())
+
+    def test_names_the_artifact_enforcement_both_guards(self):
+        # the close step must name that BOTH mechanical guards key on the gk
+        # review-verdict comment (never WHO closed) -- that is what makes the
+        # stream self-close safe.
+        w = self._close_step_window()
+        self.assertIn("subdev-self-close-guard.yml", w)
+        self.assertIn("block-fork-no-merge-issue-close.sh", w)
+        self.assertIn("review-verdict comment", w)
+        self.assertIn("never WHO pressed", w)
+
+    def test_close_step_no_longer_forces_the_gatekeeper_to_close(self):
+        # the old "close the stream's tickets" instruction (gatekeeper closes)
+        # must be gone -- a partial revert reintroducing it FAILS.
+        flat = " ".join(read(SKILL).split())
+        self.assertNotIn("close the stream's tickets with merge", flat)
+
+    def test_references_the_source_ruling(self):
+        self.assertIn("odoo-erp#5378", read(SKILL))
 
 
 if __name__ == "__main__":
