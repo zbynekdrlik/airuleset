@@ -187,7 +187,21 @@ class TestTriggerRow(TestCase):
         self.assertIn("Edit", event)
         self.assertIn("mail", pattern)
         self.assertIn("reaction", pattern)
+        # review finding: the today-path is `psql` on the underscore table
+        # `mail_message_reaction` — the pattern MUST fire on it too, or writing
+        # the psql fallback script never surfaces this recipe.
+        self.assertIn("mail_message_reaction", pattern)
         self.assertEqual(body, "skills/odoo-discuss-xmlrpc/read-reactions.md")
+
+    def test_recipe_reads_guest_id(self):
+        # review finding: a Discuss GUEST reacts with partner_id=False + a set
+        # guest_id; reading only partner_id would misclassify a real client
+        # reaction as no-answer, recreating the incident.
+        t = read(COMPANION)
+        self.assertIn("guest_id", t, "recipe must read guest_id (guest reactor)")
+        # both the XML-RPC fields list and the psql SELECT carry it
+        self.assertIn('"guest_id"', t)
+        self.assertIn("partner_id, guest_id", t)
 
     def test_topic_is_unique(self):
         topics = [r[0] for r in load_conf_rows()]
