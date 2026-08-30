@@ -468,6 +468,46 @@ class TestOrchestrator(_OrchBase):
         self.assertIsNone(rrecs[self.sid]["last_nudge"])
         self.assertNotIn(self.sid, handled)
 
+    def test_persistent_swallow_backs_off_after_max_fails(self):
+        # #749 — a pane whose submit is persistently swallowed (verify fails
+        # every sweep) MUST back off after a bounded number of consecutive failed
+        # sends instead of re-typing every ~60s sweep forever (the user-visible
+        # "dokolecka promptuje"). Mirrors ops_wait_recheck's #714 bound.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        fetch = lambda cwd: {"ahead": 5, "in_flight": False}
+        state = {}
+        max_fails = getattr(rg, "MAX_SEND_FAILS", 3)
+        for _ in range(max_fails):
+            logs = self._run(rrecs, fetch, self._tmux(enters_swallowed=5),
+                             handled=set(), state=state)
+            self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        # After MAX_SEND_FAILS consecutive failures the anchor is advanced one
+        # full cadence (back off), so the NEXT sweep produces a WAIT verdict with
+        # NO keystroke — the storm is bounded, not per-sweep-forever.
+        self.assertEqual(rrecs[self.sid]["last_nudge"], NOW)
+        tmux = self._tmux(enters_swallowed=5)
+        logs = self._run(rrecs, fetch, tmux, handled=set(), state=state)
+        self.assertTrue(any("-> wait" in ln for ln in logs))
+        self.assertEqual(tmux.typed_texts(), [])
+
+    def test_busy_pane_defers_without_keystroke(self):
+        # #749/#714 — a pane showing CC's "Waiting for N background agents to
+        # finish" must NOT be typed into (the submit is swallowed and parks
+        # orphaned). Defer without a keystroke; last_nudge unadvanced.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        tmux = self._tmux()
+        captured = "some ui rows\nWaiting for 2 background agents to finish\n❯ "
+        with m.patch("airuleset.resolve_authority", return_value="full"):
+            logs = rg.goal_release_gap_recheck(
+                NOW, tmux, rrecs, self.sid, self.CWD, "%9", self.tpath, "sess:0",
+                False, set(),
+                release_state_fetch=lambda cwd: {"ahead": 5, "in_flight": False},
+                state={}, sleep_fn=lambda *a, **k: None, cadence=CAD,
+                min_ahead=MIN, captured=captured)
+        self.assertTrue(any("busy" in ln.lower() for ln in logs))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIsNone(rrecs[self.sid]["last_nudge"])
+
 
 # --------------------------------------------------------------------------- #
 # 7. Integration regression — the wiring into goal_lane_sweep.
