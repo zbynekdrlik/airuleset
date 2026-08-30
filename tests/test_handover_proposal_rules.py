@@ -853,6 +853,16 @@ class TestCompanionUnderInjectorBodyCap(TestCase):
             "would TRUNCATE it, dropping the register/reflection rules at the tail. "
             "Condense existing prose; never raise MAX_BODY (fleet-wide blast radius)."
             % (len(body), cap))
+        # #755: the family-acceptance bullet grew this file toward the cap. Keep a
+        # real cushion so the very next small edit cannot silently truncate the
+        # tail. NOTE the injector measures Python str LENGTH (chars, not bytes) —
+        # `len(body)` on a `str` read encoding="utf-8", and this file is
+        # diacritic-heavy, so chars < bytes. Do NOT "fix" this to bytes.
+        self.assertLessEqual(
+            len(body), cap - 300,
+            "handover-compose.md injected body within 300 chars of MAX_BODY "
+            "(%d/%d chars) — condense existing verbose prose before adding more; "
+            "never raise MAX_BODY." % (len(body), cap))
 
 
 class TestApprovalQuestionNamesTargetThreadSeparately(TestCase):

@@ -243,6 +243,29 @@ a reason).
   authority. Bypass only a genuine non-client/meta ticket:
   `airuleset:discuss-close-ok` in the close command.
 
+- **Rodinná (capability-group) akceptácia — jedno vlákno zavrie N ticketov
+  (airuleset #755, owner-request 2026-08-30).** Tickety JEDNEJ capability
+  rodiny (jedna dodaná vec z pohľadu klienta — „SMS z Odoo", „zákaznícke
+  e-maily"; rodina je **ĽUDSKÝ ÚSUDOK** pomenovaný v návrhu, **NIKDY kódová
+  detekcia** — anti-heuristic línia `discuss_close_guard.py`) smú zdieľať JEDNO
+  akceptačné vlákno; klientovo potvrdenie v ňom (správa ALEBO #745 emoji
+  reakcia) je akceptačný dôkaz pre VŠETKY tickety rodiny. „One thread = one
+  topic" platí ďalej — téma je CAPABILITY, nie ticket. **Povinná spätná
+  citácia + same-cycle close:** keď akceptačná udalosť landne, session ju v
+  **TOM ISTOM cykle** cituje na VŠETKÝCH ticketoch rodiny a zavrie ich — NIKDY
+  nečaká na per-ticket udalosť (14× sa to nestalo, montalu3 2026-08-30: dôkaz
+  už ležal v zdieľanom vlákne, len nebol citovaný). Každý close nesie
+  **`Acceptance-cited: vlákno „<meno>" (discuss.channel_<N>) / msg <id> / <kto>
+  <kedy>`**. **`Acceptance-cited:` je DÔKAZ, NIKDY dispozícia:** rodinný close
+  nesie VŽDY AJ svoju #627 dispozíciu — `Discuss-defer:` pre ne-posledný
+  súrodenec, `Discuss-closed: msg <id>` pre POSLEDNÝ ticket rodiny, ktorý
+  zavieraciu nótu reálne postne. Rodina NIKDY nezavrie všetky tickety len
+  citáciou — inak by posledná správa ostala klientova a #627 invariant padol.
+  `discuss_close_guard.py` preto ostáva **NEDOTKNUTÝ**: close len s
+  `Acceptance-cited:` bez #627 dispozície správne BLOKUJE (#516
+  falsifiable-claim; human review citácie je backstop). Batchovanie draftov
+  rodiny v #606 fronte je v `modules/core/statusline-vocabulary.md` (#755).
+
 - **One thread = one topic — now the WHOLE lifecycle, not just addressing
   (airuleset #728, owner directive 2026-08-26).** Verbatim: „treba vlakna
   drzat maximalne atomicke a ak sa otvori nejaka nova tema vo vlakne tak
