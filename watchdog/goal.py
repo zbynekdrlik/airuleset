@@ -164,6 +164,7 @@ from watchdog import one_glance as _one_glance          # #486 G3
 from watchdog import session_status as _session_status  # #486 G3 (reaper)
 from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
 from watchdog import release_gap as _release_gap             # #616 (release gap)
+from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival)
 
 
 # --------------------------------------------------------------------------- #
@@ -3980,7 +3981,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
-                    release_state_fetch=None):
+                    release_state_fetch=None, queue_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -3988,19 +3989,16 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     `rec` dict.
 
     `time_fn`/`sweep_deadline`: the SAME #172/#255 wall-clock self-bound
-    `goal_dark_watch` carries, for the identical reason -- this loop also
-    walks every live candidate pane, unbounded by anything except the
-    box's own pane count. Optional, default None -> unbounded; checked as
-    the first statement of each pane's iteration, mirroring
-    `bounce_backstop`'s placement exactly."""
+    `goal_dark_watch` carries -- this loop also walks every live candidate pane,
+    bounded only by the box's pane count. Optional, default None -> unbounded;
+    checked first in each pane iteration, mirroring `bounce_backstop`."""
     logs = []
     # #486 G3 -- once-per-sweep hygiene: reap heartbeat files of long-dead
-    # sessions (G3 is the CONSUMER of these files, so it owns their retention).
-    # Runs BEFORE the disable/unwired early returns below so heartbeat-dir
-    # retention is independent of whether the goal lane is enabled on this box.
-    # Age-gated (7d), regular-files-only, never raises; the session-status dir is
-    # env-isolated in BOTH test runners (conftest autouse + cmd_push test_env),
-    # so this never touches a real developer home.
+    # sessions (G3 CONSUMES them, so it owns their retention). Runs BEFORE the
+    # disable/unwired early returns so retention is independent of the goal lane
+    # being enabled. Age-gated (7d), regular-files-only, never raises; the
+    # session-status dir is env-isolated in BOTH test runners, so it never
+    # touches a real developer home.
     logs += _session_status.reap_stale_status(now=now)
     if watchdog._owner_disabled("goal"):
         return logs
@@ -4011,12 +4009,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
     recs = state.setdefault("goal_lane", {})
-    # #547 -- the W/ops-wait re-check job's own per-sid namespace, riding this
-    # same armed-pane loop (ZERO new pane walk). Distinct from `goal_lane`.
+    # Each job-20 rider rides this SAME armed-pane loop (ZERO new pane walk) with
+    # its OWN per-sid state namespace, distinct from `goal_lane`: #547 ops-wait,
+    # #616 release-gap, #733 gk queue-arrival.
     wrecs = state.setdefault("ops_wait_recheck", {}) if ops_wait_fetch else {}
-    # #616 -- the release-gap re-check's own per-sid namespace, riding this SAME
-    # armed-pane loop (ZERO new pane walk). Distinct from goal_lane / ops_wait.
     rrecs = state.setdefault("release_gap", {}) if release_state_fetch else {}
+    qrecs = state.setdefault("queue_arrival", {}) if queue_fetch else {}
     # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
@@ -4098,45 +4096,47 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                                        for ln in llogs):
             handled.add(sid)
         # #662 -- route a PERSISTENT structural `stuck` verdict to an owner
-        # ALERT (SILENCE B of the montalu6 9,5h outage). Runs AFTER the lane
-        # nudge on the SAME armed pane, using the ALREADY-cached `glance` (no
-        # fetch). A Discord SEND, not a keystroke, so it never conflicts with a
-        # `handled` keystroke this sweep and is authority-agnostic (a stuck
-        # /goal loop is a coverage outage on ANY box). `rec` is already in
-        # `recs`, so its `soa` streak mutation persists. `stuck_seen` guards the
-        # #645 two-panes-one-cwd shape (same sid twice per sweep) from a
-        # double-advance of the streak.
+        # ALERT (SILENCE B of the montalu6 9,5h outage), using the ALREADY-cached
+        # `glance` (no fetch). A Discord SEND not a keystroke, so it never
+        # conflicts with a `handled` keystroke and is authority-agnostic; `rec`'s
+        # `soa` streak persists via `recs`. `stuck_seen` guards the #645
+        # two-panes-one-cwd double-advance (same sid twice per sweep).
         if sid not in stuck_seen:
             stuck_seen.add(sid)
             logs += _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid,
                                             loc, send_fn, dry_run)
-        # #547 W→I + #552 I→W/U -- partition-audit re-check for this SAME armed
-        # pane. Runs AFTER the lane nudge so a pane the lane nudge already typed
-        # (sid in `handled`) is deferred to next sweep; the orchestrator owns its
-        # own `handled` check + send + state writes (verified delivery, dry-run
-        # safe). The I count is the ALREADY-cached `glance.backlog` the one-glance
-        # verdict resolved above (`_cached_backlog_count`) -- ZERO new fetch; None
-        # on a cheap/awaiting-user verdict, which fails the I direction safe.
+        # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane;
+        # runs AFTER the lane nudge (a pane it already typed is deferred), owns
+        # its own handled check + verified send + dry-run-safe state writes. The
+        # I count is the ALREADY-cached `glance.backlog` (`_cached_backlog_count`)
+        # -- ZERO new fetch; None (cheap/awaiting-user) fails the I direction safe.
         if ops_wait_fetch is not None:
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
                 i_count=glance.backlog, captured=captured,
                 release_state_fetch=release_state_fetch)  # #698 + #714 busy-gate
-        # #616 -- release-gap re-check for this SAME armed pane. Runs AFTER the
-        # lane nudge + ops-wait recheck so a pane they already typed (sid in
-        # `handled`) is deferred to next sweep; it owns its own `handled` check +
-        # send + state writes (verified delivery, dry-run safe, full-authority
-        # gated internally -- the #618 MIRROR).
+        # #616 -- release-gap re-check for this armed pane; runs AFTER the lane +
+        # ops-wait riders (a pane they typed is deferred), owns its own handled
+        # check + verified send + dry-run-safe writes, full-authority gated (#618
+        # MIRROR).
         if release_state_fetch is not None:
             logs += _release_gap.goal_release_gap_recheck(
                 now, run, rrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 release_state_fetch=release_state_fetch, state=state,
                 sleep_fn=sleep_fn, captured=captured)  # #749 busy-pane gate
-    if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
+        # #733 -- gk queue-ARRIVAL watcher for this armed pane; runs LAST (a pane
+        # an earlier keystroke job typed is deferred), owns its own handled +
+        # busy-gate check + verified send + dry-run-safe writes, full-authority
+        # gated (#616 MIRROR).
+        if queue_fetch is not None:
+            logs += _queue_arrival.goal_queue_arrival_recheck(
+                now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
+                queue_fetch=queue_fetch, state=state, sleep_fn=sleep_fn,
+                captured=captured)
+    if not dry_run:   # #531 -- prune each rider namespace for gone+aged sessions
         _prune_goal_lane_orphans(recs, visited_sids, now)
-        # #547 -- the same orphan prune for the ops-wait re-check namespace.
-        _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)
-        # #616 -- the same orphan prune for the release-gap namespace.
-        _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)
+        _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547
+        _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)     # #616
+        _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
     return logs
