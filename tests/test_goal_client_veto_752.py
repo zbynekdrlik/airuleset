@@ -52,6 +52,28 @@ class _ClientFake(DeliverGoalFakeTmux):
         return super().__call__(argv, timeout)
 
 
+class _MidSweepClientFake(DeliverGoalFakeTmux):
+    """`tmux list-clients` returns NO clients on the FIRST call (so the
+    recent-human gate at deliver_goal line ~1381 finds no live human and
+    proceeds) and a FRESH epoch on every LATER call (a human who began typing
+    AFTER that gate passed but BEFORE the keystroke). This isolates the RETAINED
+    watchdog-origin client-active re-check at line ~1458 -- the LATER re-read of
+    `#{client_activity}` closest to the keystroke -- from the earlier gate."""
+
+    def __init__(self, *a, fresh_epoch=None, **kw):
+        super().__init__(*a, **kw)
+        self.fresh_epoch = fresh_epoch
+        self._lc_calls = 0
+
+    def __call__(self, argv, timeout=8):
+        if "list-clients" in " ".join(argv):
+            self._lc_calls += 1
+            if self._lc_calls == 1:
+                return ""                      # no client -> recent-human passes
+            return "%d\n" % int(self.fresh_epoch)   # a human now typing
+        return super().__call__(argv, timeout)
+
+
 class TestSelfCallbackClientVeto752(unittest.TestCase):
     CWD = "/home/newlevel/devel/clientveto"
 
@@ -109,6 +131,33 @@ class TestSelfCallbackClientVeto752(unittest.TestCase):
         self.assertTrue(any("skip:" in ln for ln in logs), logs)
         self.assertIn(sid, goal.load_goal_requests(self.reqp),
                       "a deferred re-arm leaves the request pending")
+
+    def test_retained_watchdog_check_catches_mid_sweep_typing(self):
+        # TEETH for the RETAINED origin-gated client-active check: a human who
+        # starts typing AFTER the recent-human gate passed but BEFORE the
+        # keystroke is caught by the LATER re-read (deliver_goal ~line 1458).
+        # DELETING that gated block makes this test fail (no second read -> the
+        # re-arm types) -- so the "this is NOT dead code" claim has real teeth.
+        proj = self._dir()
+        sid = "sess-dark-midsweep"
+        _write_marker_transcript(proj, self.CWD, sid)
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=2000, path=self.reqp, origin="dark-rearm")
+        # 1st list-clients (recent-human signal 3) -> none; 2nd (the retained
+        # re-check) -> a fresh epoch = a human now typing.
+        tmux = _MidSweepClientFake([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   fresh_epoch=2000)
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=self.reqp,
+                               send_fn=lambda msg, **k: None,
+                               sleep_fn=lambda *a, **k: None)
+        self.assertTrue(any("skip:client-active" in ln for ln in logs),
+                        "the retained watchdog re-check must catch a human who "
+                        "began typing after the recent-human gate: %s" % logs)
+        self.assertEqual(tmux.typed_texts(), [],
+                         "no keystroke lands when the late re-check vetoes")
+        self.assertIn(sid, goal.load_goal_requests(self.reqp))
 
     def test_self_callback_governed_by_max_age_not_stale_rearm(self):
         # Max-age reconcile lock (#752): a self-callback older than
