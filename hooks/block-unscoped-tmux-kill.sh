@@ -222,11 +222,13 @@ PYEOF
 [ "$RC" -eq 2 ] || exit 0
 
 cat >&2 <<'MSG'
-BLOCKED: UNSCOPED destructive tmux kill (#734). A bare `tmux kill-server` /
-`kill-session` (or `pkill tmux`) targets the DEFAULT/inherited socket — the
-owner's LIVE tmux server, every session and pane, and any Claude Code session
-running inside it. This is the exact dev1 2026-08-27 00:21 incident, where a
-subagent's `tmux kill-server 2>/dev/null` killed the owner's whole desktop.
+BLOCKED: UNSCOPED destructive tmux kill (#734).
+
+A bare kill-server or kill-session (or `pkill tmux`) with no socket selector
+targets the DEFAULT/inherited socket — the owner's LIVE server, every session
+and pane, and any Claude Code session running inside it. This is the exact
+dev1 2026-08-27 00:21 incident: a subagent's unscoped kill-server (no -S/-L)
+killed the owner's whole desktop.
 
 Scope EVERY destructive tmux kill to a PRIVATE socket — `-S <path>` or
 `-L <name>` on the SAME invocation (they override $TMUX; nothing else does):
