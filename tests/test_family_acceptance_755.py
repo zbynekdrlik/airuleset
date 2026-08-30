@@ -97,7 +97,9 @@ class FamilyAcceptanceBulletInHandoverCompose(TestCase):
         # mandatory back-citation: cite on ALL family tickets in the SAME
         # cycle and close them, never a per-ticket wait (the 14x failure).
         self.assertIn("TOM ISTOM cykle", w)
-        self.assertIn("per-ticket", w)
+        # strengthen past a bare token: lock the operative "never a per-ticket
+        # wait" semantics so a meaning-inverting reword cannot survive.
+        self.assertIn("nečaká na per-ticket", w)
         # a client emoji reaction is a valid acceptance event too (#745).
         self.assertIn("#745", w)
 
@@ -180,38 +182,12 @@ class CloseGuardTreatsAcceptanceCitedAsEvidenceNotDisposition(TestCase):
                           "a family close that ALSO carries Discuss-defer must ALLOW")
 
 
-class HandoverComposeStaysUnderInjectionBodyCap(TestCase):
-    """#576 guard: handover-compose.md is situational-injected (the
-    `odoo-discuss-handover` trigger) and the injector TRUNCATES a single body
-    over `MAX_BODY`, silently dropping its TAIL (the #742 atomicity bullet is
-    last). The #755 bullet grew the file toward that cap, so lock the injected
-    size < MAX_BODY (read from the REAL hook, never hardcoded — #498/#576) so
-    a future edit cannot silently truncate the file's tail."""
-
-    INJECTOR = ROOT / "hooks" / "inject-situational-rule.sh"
-
-    def _max_body(self):
-        import re
-        m = re.search(r"^MAX_BODY\s*=\s*(\d+)", read(self.INJECTOR), re.M)
-        self.assertIsNotNone(m, "MAX_BODY not found in inject-situational-rule.sh")
-        return int(m.group(1))
-
-    def test_injected_body_under_cap_with_margin(self):
-        # handover-compose.md has NO YAML frontmatter, so the injector's
-        # strip_frontmatter is a no-op and the injected body == file.strip().
-        raw = read(COMPOSE)
-        self.assertFalse(raw.lstrip().startswith("---"),
-                         "handover-compose gained frontmatter; update the injected-size model")
-        body_len = len(raw.strip())
-        cap = self._max_body()
-        self.assertLess(body_len, cap,
-                        "handover-compose injected body (%d) >= MAX_BODY (%d) — its TAIL "
-                        "(#742 bullet) is truncated on inject; CONDENSE, never raise MAX_BODY" % (
-                            body_len, cap))
-        # keep a real cushion so the next small edit does not truncate.
-        self.assertLessEqual(body_len, cap - 300,
-                             "handover-compose within 300 B of MAX_BODY (%d/%d) — condense "
-                             "existing verbose prose before adding more" % (body_len, cap))
+# NOTE: the handover-compose injection-body-cap lock (this #755 bullet grew the
+# file toward MAX_BODY) lives in the SIBLING test
+# `test_handover_proposal_rules.py::TestCompanionUnderInjectorBodyCap` (#628),
+# which already reads MAX_BODY from the real hook — the #755 change only added a
+# 300-char cushion there. Kept single to honour the repo's dedup discipline
+# (adversarial-review NIT); do not re-add a duplicate here.
 
 
 def _jsonstr(s):
