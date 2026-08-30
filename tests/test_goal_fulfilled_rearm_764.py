@@ -1,5 +1,6 @@
 """#764 — a FULFILLED `/goal` loop (stop-(B) completion: footer dark,
-`mark=="set"`, a `🏁 BACKLOG EMPTY:` proof in its last turn) whose obligation
+`mark=="set"`, a `🏁 BACKLOG EMPTY:` proof in the bounded tail — #767 backward
+scan / per-episode cache) whose obligation
 cache has REFILLED (open>0, fresh) must be RE-ARMED FAST via the structured
 `record_goal_request`/`deliver_goal` channel — the cross-stream ping-pong
 re-entry the slow dead-loop confirmation (2/day, 8 clean-dark reads) was never
@@ -490,13 +491,20 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertIsNone(
             wd.transcript_last_backlog_empty_ts(tpath, scan_back=True),
             "the 🏁 must be scrolled out of the bounded tail for this test")
-        # pre-seed the cache as an EARLIER sweep of THIS arm would have:
+        # pre-seed the cache as an EARLIER sweep of THIS arm would have (a fresh
+        # `seen` so the reaper keeps it; a cache-only sweep freezes `seen`):
         state = {"goal_fulfilled_proof":
-                 {"sess-cache": {"mark_ts": mark_ts, "bts": done_ts}}}
+                 {"sess-cache": {"mark_ts": mark_ts, "bts": done_ts,
+                                 "seen": now - 10}}}
         reqs, logs, _ = self._sweep(proj, tmux, now, (7, now), state)
         self.assertEqual(reqs.get("sess-cache", {}).get("origin"), self.ORIGIN,
                          "the per-episode cache carries the proof when 🏁 scrolled out")
         self.assertTrue(any("FULFILLED-REARM" in ln for ln in logs), logs)
+        # a cache-only hit must NOT refresh `seen` (else a scrolled-out proof
+        # would never age out) -- it stays FROZEN at the pre-seeded value:
+        self.assertEqual(
+            state["goal_fulfilled_proof"]["sess-cache"]["seen"], now - 10,
+            "a cache-only sweep freezes `seen` (never refreshes it)")
 
     def test_proof_cache_from_a_different_arm_is_ignored(self):
         # a cache from a PREVIOUS arm (mark_ts M1) whose 🏁 (bts) is RECENT enough
@@ -511,13 +519,15 @@ class TestFulfilledRearmLane(unittest.TestCase):
                                    mark_ts=m2, done_ts=now - 50)
         state = {"goal_fulfilled_proof":
                  {"sess-stalecache":
-                  {"mark_ts": now - 5000, "bts": now - 100}}}  # M1 != M2; bts>M2
+                  {"mark_ts": now - 5000, "bts": now - 100,
+                   "seen": now - 10}}}          # M1 != M2; bts>M2; fresh `seen`
         reqs, _logs, _ = self._sweep(proj, tmux, now, (7, now), state)
         self.assertEqual(reqs, {},
                          "a cache from a DIFFERENT arm (mark mismatch) never re-arms")
 
     def test_proof_cache_is_written_on_a_rearm_sweep(self):
-        # a 🏁-in-window rearm sweep persists the proof for the current arm.
+        # a 🏁-in-window rearm sweep persists the proof for the current arm, with
+        # `seen` refreshed to `now` (the scan re-found the 🏁 this sweep).
         proj, tmux = self._shadowed_fixture("sess-writecache")
         state = {}
         self._sweep(proj, tmux, 100000, (7, 100000), state)
@@ -525,6 +535,49 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertIsInstance(proof, dict, "the sweep persists the 🏁 proof")
         self.assertEqual(proof.get("mark_ts"), 500)
         self.assertEqual(proof.get("bts"), 600.0)
+        self.assertEqual(proof.get("seen"), 100000,
+                         "an in-window scan-find refreshes `seen` to now")
+
+    def test_proof_cache_written_on_the_veto_branch_too(self):
+        # the #766 veto branch (open==0) ALSO persists the proof (the comment
+        # claims "veto AND rearm branches BOTH reach the write").
+        proj, tmux = self._shadowed_fixture("sess-vwrite")
+        state = {}
+        self._sweep(proj, tmux, 100000, (0, 100000), state)
+        proof = state.get("goal_fulfilled_proof", {}).get("sess-vwrite")
+        self.assertIsInstance(proof, dict,
+                              "the open==0 veto sweep persists the 🏁 proof too")
+        self.assertEqual(proof.get("bts"), 600.0)
+
+    def test_malformed_proof_cache_entry_is_ignored_not_crash(self):
+        # a non-dict / bts-non-numeric cache entry degrades to "no cache" (the
+        # isinstance guards), never a crash; with no 🏁 in-transcript -> no rearm.
+        proj, tmux = self._fixture("sess-bad",
+                                   last_text="bežný ✅ DONE (žiadne 🏁)")
+        for bad in ("a string", {"mark_ts": 500, "bts": "nope", "seen": 99999}):
+            state = {"goal_fulfilled_proof": {"sess-bad": bad}}
+            reqs, _logs, _ = self._sweep(proj, tmux, 100000, (7, 100000), state)
+            self.assertEqual(reqs, {},
+                             "a malformed cache entry never re-arms (%r)" % (bad,))
+
+    def test_proof_cache_reaper_prunes_stale_and_malformed(self):
+        # the goal_dark_watch reaper drops entries whose `seen` is missing /
+        # malformed / older than 24h, and keeps a fresh well-formed one.
+        now = 1_000_000
+        day = 24 * 3600
+        proj, tmux = self._fixture("sess-reap",
+                                   last_text="bežný ✅ DONE (žiadne 🏁)")
+        state = {"goal_fulfilled_proof": {
+            "old": {"mark_ts": 1, "bts": 2, "seen": now - day - 100},   # stale
+            "noseen": {"mark_ts": 1, "bts": 2},                         # legacy
+            "badseen": {"mark_ts": 1, "bts": 2, "seen": "x"},           # malformed
+            "notadict": 42,                                             # malformed
+            "fresh": {"mark_ts": 1, "bts": 2, "seen": now - 10},        # kept
+        }}
+        self._sweep(proj, tmux, now, (7, now), state)
+        proof = state.get("goal_fulfilled_proof", {})
+        self.assertEqual(set(proof), {"fresh"},
+                         "reaper keeps only the fresh well-formed entry")
 
     def test_non_flag_dead_loop_still_falls_through_unchanged(self):
         # a genuinely-dead loop (NO 🏁 anywhere, no cache) is NOT this lane:

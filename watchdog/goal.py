@@ -239,8 +239,9 @@ _GOAL_STALE_REARM_ORIGIN = "stale-rearm"
 _GOAL_AUTH_REARM_ORIGIN = "auth-rearm"
 # #764 -- a watchdog-INITIATED re-arm of a FULFILLED (stop-(B) completed) loop
 # whose backlog has REFILLED: footer dark, mark=="set", a `🏁 BACKLOG EMPTY:`
-# proof in its last turn (the missing "fulfilled" marker CC never persists),
-# obligation cache fresh with open>0. The cross-stream ping-pong re-entry the
+# proof somewhere in the bounded tail (#767 backward scan / per-episode cache --
+# the missing "fulfilled" marker CC never persists), obligation cache fresh with
+# open>0. The cross-stream ping-pong re-entry the
 # dead-loop self-heal (8 clean reads / 2-per-day) was never built for. Delivered
 # by the SAME goal_sweep/deliver_goal channel + recent-human + all pane-safety
 # gates -- NEVER a free-text nudge (owner directive #764). Rate-limited (min gap
@@ -2167,13 +2168,13 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     # counts. A cache entry from a DIFFERENT arm (mark_ts mismatch) is IGNORED,
     # so there is no cross-episode re-arm leak; the reader tolerates a malformed
     # entry (read fail -> as if no cache, the safe direction).
-    bts = watchdog.transcript_last_backlog_empty_ts(tpath, scan_back=True)
+    scan_bts = watchdog.transcript_last_backlog_empty_ts(tpath, scan_back=True)
     cached = fulfilled_proof.get(sid)
     cbts = None
     if (isinstance(cached, dict) and cached.get("mark_ts") == mark_ts
             and isinstance(cached.get("bts"), (int, float))):
         cbts = cached["bts"]
-    proofs = [x for x in (bts, cbts) if isinstance(x, (int, float))]
+    proofs = [x for x in (scan_bts, cbts) if isinstance(x, (int, float))]
     if not proofs:
         return None, False                       # no 🏁 proof (found nor cached)
     bts = max(proofs)
@@ -2187,9 +2188,21 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     # #767 -- PERSIST the proof for THIS arm so a later 🏁-scrolled-out sweep can
     # still see it (the veto AND rearm branches BOTH reach here). Guarded on not
     # dry_run: an honest dry-run mutates no state (mirrors the fulfilled_state
-    # write below). goal_dark_watch's 24h reaper prunes an abandoned entry.
+    # write below). `seen` = the last IN-WINDOW sighting (refreshed ONLY when the
+    # scan itself re-found the 🏁 this sweep, NEVER on a cache-only hit -- else a
+    # permanently-scrolled-out proof would refresh forever and never age out); a
+    # cache-only sweep PRESERVES the frozen `seen`, so goal_dark_watch's reaper
+    # (which reaps on `seen`) prunes the proof 24h after the 🏁 last appeared in
+    # the window, not 24h after the immutable 🏁 timestamp itself (review 🟡).
     if not dry_run:
-        fulfilled_proof[sid] = {"mark_ts": mark_ts, "bts": bts}
+        if scan_bts is not None:
+            seen = now
+        elif isinstance(cached, dict) and isinstance(cached.get("seen"),
+                                                     (int, float)):
+            seen = cached["seen"]                 # cache-only hit -> freeze `seen`
+        else:
+            seen = now                            # first sighting w/o a prior seen
+        fulfilled_proof[sid] = {"mark_ts": mark_ts, "bts": bts, "seen": seen}
 
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = (cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
@@ -2590,12 +2603,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # #764 -- the per-sid fulfilled-rearm record timestamps (rate limiter), a
     # JSON list per sid; reaped below exactly like `attempts_state`.
     fulfilled_state = state.setdefault("goal_fulfilled_rearm", {})
-    # #767 -- the per-episode 🏁 PROOF cache `{sid: {"mark_ts", "bts"}}`. Written
-    # on ANY 🏁-after-mark sighting (both the fulfilled-rearm AND the #766 veto
-    # branch) so heavy post-achieve output that scrolls the 🏁 out of the 2 MB
-    # tail cannot erase the proof; used only when its mark_ts matches the current
-    # arm (no cross-episode leak). Reaped below on `bts` age, mirroring
-    # `fulfilled_state`.
+    # #767 -- the per-episode 🏁 PROOF cache `{sid: {"mark_ts", "bts", "seen"}}`.
+    # Written on ANY 🏁-after-mark sighting (both the fulfilled-rearm AND the #766
+    # veto branch) so heavy post-achieve output that scrolls the 🏁 out of the
+    # 2 MB tail cannot erase the proof; used only when its mark_ts matches the
+    # current arm (no cross-episode leak). `seen` (last in-window sighting) is the
+    # reaper key -- see the reaper below.
     fulfilled_proof = state.setdefault("goal_fulfilled_proof", {})
     # #522 -- the disarm-on-question veto (written by goal_question_repoke_watch,
     # READ + re-entry-popped here). Reaped by that job; setdefault only so a pop
@@ -2627,14 +2640,18 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                           and any(isinstance(t, (int, float))
                                   and 0 <= (now - t) <= _day for t in v))]:
         fulfilled_state.pop(_fsid, None)
-    # #767 -- same 24h REAPER for the proof cache: reap a sid whose 🏁 (`bts`) is
-    # older than the window or malformed. A live fulfilled loop re-writes a fresh
-    # bts each 🏁-in-window sighting, so it is never reaped; once the 🏁 scrolls
-    # out the entry ages out (rate limits deliver the re-arm long before 24h).
+    # #767 -- same 24h REAPER for the proof cache, keyed on `seen` (the last
+    # IN-WINDOW 🏁 sighting), NOT the immutable `bts`. A live fulfilled loop whose
+    # 🏁 is still in the bounded tail refreshes `seen`=now every sweep, so it is
+    # never reaped; once the 🏁 scrolls out the frozen `seen` ages the entry out
+    # 24h later (rate limits deliver the re-arm long before that). Reap a sid
+    # whose `seen` is missing/malformed or outside the window (a legacy pre-#767
+    # entry carried no `seen` -> reaped as malformed, the safe direction: the scan
+    # re-finds the 🏁 if still in-window, else no false re-arm).
     for _psid in [k for k, v in list(fulfilled_proof.items())
                   if not (isinstance(v, dict)
-                          and isinstance(v.get("bts"), (int, float))
-                          and 0 <= (now - v["bts"]) <= _day)]:
+                          and isinstance(v.get("seen"), (int, float))
+                          and 0 <= (now - v["seen"]) <= _day)]:
         fulfilled_proof.pop(_psid, None)
 
     # #488 review-1 -- GC the age-unbounded stash_parks records for panes that
@@ -2842,8 +2859,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             pinged_state.pop(sid, None)
             continue
 
-        # #764 FULFILLED-REARM lane: a stop-(B) COMPLETED loop (🏁 proof in its
-        # last turn, AFTER the arm) whose backlog REFILLED is re-armed FAST via
+        # #764 FULFILLED-REARM lane: a stop-(B) COMPLETED loop (🏁 proof in the
+        # bounded tail / proof cache, AFTER the arm -- #767) whose backlog
+        # REFILLED is re-armed FAST via
         # the structured channel -- distinct from the silently-dead machinery
         # below (a fulfilled loop is transcript-identical to a dead one EXCEPT
         # the 🏁 line, so the dead-loop confirmation was never built for it). A

@@ -511,9 +511,9 @@ def transcript_last_assistant_text(path):
 # (`mark=="set"`, footer dark) EXCEPT for this line -- ALL authority profiles
 # (full/branch-merge/fork-no-merge) render the `🏁 BACKLOG EMPTY:` prefix
 # (goal_registry.py). A stop-(A)
-# ❓-blocked completion prints NO 🏁 line, so its last turn never matches ->
-# the trigger structurally never fires on it (no re-poke on an unanswered
-# question).
+# ❓-blocked completion prints NO 🏁 line at all, so even the #767 backward scan
+# finds nothing on it -> the trigger structurally never fires (and the caller's
+# `_dark_awaiting_user_veto` vetoes a ❓-parked session upstream regardless).
 _BACKLOG_EMPTY_RX = re.compile(r"🏁\s*BACKLOG EMPTY")
 
 
@@ -562,6 +562,13 @@ def transcript_last_backlog_empty_ts(path, tail_bytes=2_000_000,
             return datetime.fromisoformat(
                 str(raw).replace("Z", "+00:00")).timestamp()
         except (ValueError, TypeError):
+            # DELIBERATE terminal None in BOTH modes: the newest 🏁's own
+            # timestamp is unparseable, so ordering vs the arm cannot be proven
+            # -> return None (no re-arm, the safe direction), even in scan_back
+            # mode where an older parseable 🏁 might exist. A CC-written timestamp
+            # is effectively never malformed; forfeiting a provable older proof is
+            # preferred over a possibly-false re-arm. Do NOT "fix" this to
+            # `continue` -- the None is the fail-closed choice, not an oversight.
             return None
     return None
 
