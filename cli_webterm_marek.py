@@ -10,15 +10,16 @@ marek's per-user constants (the source of truth tests patch) + a `_spec()` facto
 public-API wrappers delegating to that engine.
 
 Session set (#661 rework, owner ruling 2026-08-25 — the original single-local-attach
-set was owner-REJECTED as incomplete): marek's LOCAL tmux group (the gateway runs AS
-marek on subdev — no ssh, no key, unchanged) PLUS four ssh tabs — montalu4@subdev
-(loopback), his `marek` tmux sessions on dev1 + dev2 (newlevel@<tailscale IP>), and
-his forestshop VPS (admin@forestshop-dev, #679 strict host-key pin) — every ssh tab
-via the DEDICATED `profiles.WEBTERM_MAREK_IDENTITY` key (never the fleet gatekeeper
-key, never the sshpass shared-password branch). The connect allowlist is physically
-this five-member set: it can never resolve another stream's id, a david id, or
-another person's account (stepan). The lane dash renders through the owner-defined
-#661 tab policy (`LaneSpec.dashboard_human="marek"` → WEBTERM_DASHBOARD_TABS).
+set was owner-REJECTED as incomplete; #787 doplnenie 2026-08-31 added montalu2):
+marek's LOCAL tmux group (the gateway runs AS marek on subdev — no ssh, no key,
+unchanged) PLUS five ssh tabs — montalu2@subdev + montalu4@subdev (loopback), his
+`marek` tmux sessions on dev1 + dev2 (newlevel@<tailscale IP>), and his forestshop
+VPS (admin@forestshop-dev, #679 strict host-key pin) — every ssh tab via the
+DEDICATED `profiles.WEBTERM_MAREK_IDENTITY` key (never the fleet gatekeeper key,
+never the sshpass shared-password branch). The connect allowlist is physically this
+six-member set: it can never resolve another stream's id, a david id, or another
+person's account (stepan). The lane dash renders through the owner-defined #661 tab
+policy (`LaneSpec.dashboard_human="marek"` → WEBTERM_DASHBOARD_TABS).
 
 PREREQUISITE-GATED so a normal subdev install (as any other account) is a safe
 NO-OP. #663: the gateway + ttyd bind mode-0700 UNIX sockets in marek's
@@ -28,11 +29,11 @@ one-time-PIN) at the edge; the gateway runs `--trust-access-header` (no
 password/credential), exactly like the david lane.
 
 SECURITY NOTE — the boundary this lane DOES and does NOT provide (honest, #612 R1
-review; reachability widened by the #661 rework). The PUBLIC Access-gated path
-reaches ONLY marek's scoped five-member set — the connect allowlist is physically
-`{marek-subdev, montalu4-subdev, dev1, dev2, forestshop}` (his own owner-granted
-targets, ssh only via the dedicated marek key), so a marek WEB LOGIN can never
-drive another stream's, david's, or stepan's id, and
+review; reachability widened by the #661 rework and #787). The PUBLIC Access-gated
+path reaches ONLY marek's scoped six-member set — the connect allowlist is physically
+`{marek-subdev, montalu2-subdev, montalu4-subdev, dev1, dev2, forestshop}` (his own
+owner-granted targets, ssh only via the dedicated marek key), so a marek WEB LOGIN
+can never drive another stream's, david's, or stepan's id, and
 marek's Access realm/tunnel are separate from every other developer's. HONEST
 TRANSITIVE-REACH consequence (#661 review 🟡): the dev1/dev2 entries ssh as
 `newlevel` — the OWNER's maintainer account, whose home holds the fleet keys — so
@@ -119,15 +120,15 @@ _MAREK_GO_LIVE = (
     "       OTP app fronts marek.newlevel.media — set WEBTERM_ACCESS_APPS['marek']\n"
     "       allow-list and run `airuleset.py webterm-access --apply`. No credential\n"
     "       is delivered.\n"
-    "    5. #661 ssh tabs: deploy the dedicated key %s\n"
+    "    5. #661/#787 ssh tabs: deploy the dedicated key %s\n"
     "       (private key on subdev as marek; pubkey in authorized_keys of\n"
-    "       montalu4@subdev, newlevel@dev1, newlevel@dev2,\n"
+    "       montalu2@subdev, montalu4@subdev, newlevel@dev1, newlevel@dev2,\n"
     "       admin@forestshop-dev). RECOMMENDED DEFAULT (#661 review): a\n"
     "       forced-command entry — restrict,command=\"tmux ...\" — especially\n"
     "       on newlevel@dev1/dev2 (the OWNER account: an unrestricted key\n"
     "       there is a full owner shell with transitive fleet reach). Until\n"
-    "       the key lands the montalu4/dev1/dev2/forestshop tabs fail\n"
-    "       visibly; marek@subdev keeps working.\n"
+    "       the key lands the montalu2/montalu4/dev1/dev2/forestshop tabs\n"
+    "       fail visibly; marek@subdev keeps working.\n"
     % (WEBTERM_MAREK_TUNNEL_UUID, WEBTERM_MAREK_TUNNEL_UUID,
        profiles.WEBTERM_MAREK_IDENTITY))
 
@@ -177,9 +178,10 @@ def _spec():
             name_upper="MAREK", name_lower="marek", account_suffix=" (marek account)",
             runtime_owner="marek's", tunnel_adjective="a SEPARATE",
             hostname=WEBTERM_MAREK_TUNNEL_HOSTNAME,
-            scoped_inventory="Scoped inventory (#661 rework): the LOCAL marek tmux\n"
-                             "# session + montalu4@subdev + marek's dev1/dev2 sessions\n"
-                             "# + admin@forestshop-dev — ssh ONLY via the dedicated\n"
+            scoped_inventory="Scoped inventory (#661 rework, #787 added montalu2): the\n"
+                             "# LOCAL marek tmux session + montalu2@subdev +\n"
+                             "# montalu4@subdev + marek's dev1/dev2 sessions +\n"
+                             "# admin@forestshop-dev — ssh ONLY via the dedicated\n"
                              "# webterm_marek key (never the fleet gatekeeper key,\n"
                              "# never a david account, never stepan's)."),
         go_live=_MAREK_GO_LIVE,
@@ -189,9 +191,9 @@ def _spec():
         # tab is a keyless LOCAL attach, and gating provisioning on the NEW
         # WEBTERM_MAREK_IDENTITY would no-op re-renders of the LIVE lane until
         # the key is provisioned (a #684 parity regression). The ssh tabs
-        # (montalu4/dev1/dev2/forestshop) degrade to a VISIBLE ssh failure
-        # until the key + authorized_keys land (owner-action, _MAREK_GO_LIVE
-        # step 5).
+        # (montalu2/montalu4/dev1/dev2/forestshop) degrade to a VISIBLE ssh
+        # failure until the key + authorized_keys land (owner-action,
+        # _MAREK_GO_LIVE step 5).
         identity_key=None,
         retire_credential_path=None,
         # #661: the marek dash consumes the owner-defined per-domain tab list

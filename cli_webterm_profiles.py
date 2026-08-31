@@ -12,11 +12,11 @@ profily. Doména sa mapuje na (session set + auth realm):
   * ``david`` — subdev, VEREJNÝ HTTPS front (david.newlevel.media, Cloudflare),
     session set = david1..4 (subdev) + codex-bridge (dev2), login ``david``.
   * ``marek`` — subdev (marek účet), VEREJNÝ HTTPS front (marek.newlevel.media,
-    Cloudflare). Session set (#661 rework, owner ruling 2026-08-25) = marek
-    lokálny attach + montalu4 (loopback ssh) + jeho `marek` tmux sessions na
-    dev1/dev2 + jeho forestshop VPS (admin@forestshop-dev) — ssh entries VŽDY
-    cez dedikovaný ``WEBTERM_MAREK_IDENTITY`` kľúč, nikdy gatekeeper kľúč,
-    nikdy sshpass vetva.
+    Cloudflare). Session set (#661 rework, owner ruling 2026-08-25; #787
+    doplnenie 2026-08-31) = marek lokálny attach + montalu2 + montalu4
+    (loopback ssh) + jeho `marek` tmux sessions na dev1/dev2 + jeho forestshop
+    VPS (admin@forestshop-dev) — ssh entries VŽDY cez dedikovaný
+    ``WEBTERM_MAREK_IDENTITY`` kľúč, nikdy gatekeeper kľúč, nikdy sshpass vetva.
 
 Bezpečnostné invarianty (celé v tomto leaf + connect allowliste v cli_webterm):
   1. Davidov inventár = { david1..4, codex-bridge } IBA. Jeho ttyd child dostane
@@ -159,8 +159,9 @@ def david_inventory():
 # marek's gateway runs AS this account on subdev; his own primary session is a
 # LOCAL tmux attach (no ssh, no key). #661 rework: the owner explicitly granted
 # marek FOUR MORE tabs (montalu4, his dev1/dev2 tmux sessions, his forestshop
-# VPS), so the lane is no longer "zero ssh capability" — its ssh reach is
-# exactly the four entries below, always via the DEDICATED marek key.
+# VPS); #787 added a FIFTH (montalu2, mirroring montalu4) — so the lane is no
+# longer "zero ssh capability", its ssh reach is exactly the five entries
+# below, always via the DEDICATED marek key.
 MAREK_GATEWAY_USER = "marek"
 
 # marek's own scoped session id — first member of the owner-defined #661 tab
@@ -169,15 +170,16 @@ MAREK_GATEWAY_USER = "marek"
 MAREK_ID = "marek-subdev"
 
 # Dedicated key for the marek lane's ssh tabs — the WEBTERM_DAVID_IDENTITY
-# shape: authorized ONLY on the four targets below (montalu4@subdev over
-# loopback, newlevel@dev1, newlevel@dev2, admin@forestshop-dev), NEVER the
-# fleet gatekeeper key (`~/.secrets/gatekeeper_access_ed25519`, which reaches
-# every stream — a cross-stream escalation). A live #661 probe showed
-# marek@subdev holds NO key for any of these targets, so a codex-bridge-style
-# "mirror existing access" is impossible — the key + its authorized_keys
-# distribution is a provisioning step (owner-action, see _MAREK_GO_LIVE in
-# cli_webterm_marek.py); until it lands the ssh tabs fail VISIBLY while the
-# local marek-subdev tab keeps working.
+# shape: authorized ONLY on the targets below (montalu2@subdev + montalu4@subdev
+# over loopback, newlevel@dev1, newlevel@dev2, admin@forestshop-dev — #787 added
+# montalu2 to the original #661 four), NEVER the fleet gatekeeper key
+# (`~/.secrets/gatekeeper_access_ed25519`, which reaches every stream — a
+# cross-stream escalation). A live #661 probe showed marek@subdev holds NO key
+# for any of these targets, so a codex-bridge-style "mirror existing access" is
+# impossible — the key + its authorized_keys distribution is a provisioning
+# step (owner-action, see _MAREK_GO_LIVE in cli_webterm_marek.py); until it
+# lands the ssh tabs fail VISIBLY while the local marek-subdev tab keeps
+# working.
 WEBTERM_MAREK_IDENTITY = "~/.secrets/webterm_marek_ed25519"
 
 # marek's dev-box tabs ssh the boxes' tailscale IPs (subdev is on the tailnet;
@@ -211,17 +213,21 @@ MAREK_FORESTSHOP_HOST_KEYS = [
 
 
 def marek_inventory():
-    """marek's SCOPED session set (#661 rework, owner ruling 2026-08-25) — five
-    entries, in the owner-defined tab order (WEBTERM_DASHBOARD_TABS["marek"]):
+    """marek's SCOPED session set (#661 rework, owner ruling 2026-08-25; #787
+    doplnenie 2026-08-31 added montalu2) — SIX entries, in the owner-defined
+    tab order (WEBTERM_DASHBOARD_TABS["marek"]):
 
       1. marek-subdev — his own tmux group, a LOCAL attach (the gateway runs as
          marek; no ssh, no key — unchanged from #612);
-      2. montalu4-subdev — his montalu stream, ssh over loopback with the
+      2. montalu2-subdev — his second montalu stream (#787), ssh over loopback
+         with the dedicated key — mirrors montalu4-subdev exactly except for
+         the account name;
+      3. montalu4-subdev — his montalu stream, ssh over loopback with the
          dedicated key (the david1..4 shape);
-      3./4. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
+      4./5. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
          ssh newlevel@<tailscale IP> with the dedicated key (codex-bridge is
          the cross-box precedent);
-      5. forestshop — his VPS's principal account admin@forestshop-dev with the
+      6. forestshop — his VPS's principal account admin@forestshop-dev with the
          dedicated key + the #679 strict host-key pin (the owner `sb` shape).
 
     This — and ONLY this — is what marek's ttyd is launched against, so it is
@@ -240,6 +246,19 @@ def marek_inventory():
             "identity": None,
             "preferred": MAREK_GATEWAY_USER,   # the local `marek` tmux group
             # #703: marek's OWN gateway account — a LOCAL within-tenant read.
+            "u_tenant": True,
+        },
+        {
+            "id": "montalu2-subdev",
+            "label": "montalu2@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu2",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": "montalu2",
+            # #787: mirrors montalu4-subdev — marek's own montalu stream
+            # account, within-tenant.
             "u_tenant": True,
         },
         {
