@@ -1968,6 +1968,10 @@ from watchdog.reaper import (  # noqa: E402
     default_kill_fn as default_kill_fn,
     REAPER_MIN_AGE_S as REAPER_MIN_AGE_S,
     SHADOW_UGREP_SIGNATURE as SHADOW_UGREP_SIGNATURE,
+    # #778 — Job 38, the heavy-build-toolchain reaper (shared-stream box only).
+    heavy_build_reaper as heavy_build_reaper,
+    default_box_class as default_box_class,
+    is_shared_stream_box as is_shared_stream_box,
 )
 
 
@@ -1999,7 +2003,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
              release_state_fetch=None, queue_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None):
-    """Scan every `claude` pane once. 37 numbered jobs per poll — 31 LIVE and 6
+    """Scan every `claude` pane once. 38 numbered jobs per poll — 32 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2569,6 +2573,28 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           ones from spawning; this reaper (Layer 2) cleans up the already-
           orphaned; #775 (resource caps) is Layer 3. See `shadow_ugrep_reaper`
           in `watchdog/reaper.py`.
+      (38) (only when `reaper_ps_fetch` is given) HEAVY-BUILD-TOOLCHAIN
+          OS-PROCESS REAPER (#778), SHARED-STREAM BOX ONLY — a SIBLING of Job
+          37 with the OPPOSITE gating: kill-on-sight, NO age/CPU gate, because a
+          JVM/Android build daemon is BANNED OUTRIGHT on a shared-stream box
+          (subdev). Root cause: the subdev VPS runs N isolated Claude stream
+          users and exists ONLY for Claude sessions + git + light scripts; two
+          streams self-installed a JDK/Android toolchain and ran Gradle/Kotlin
+          daemons (`-Xmx3072m` × 2 = 13.3 GB RAM), collapsing the box (#774).
+          The owner's standing rule: Android/JVM/RN builds run on dev2, never on
+          a shared-stream box. Each cycle, ONLY on a box whose class marker
+          (`~/.claude/airuleset-box-class`) reads `shared-stream`, it SIGKILLs
+          processes whose argv[0] is a Gradle/Kotlin daemon, `aapt2`, or a
+          `qemu-system*` VM/emulator, and logs the kill. FAIL-SAFE: off a
+          shared-stream box (or on any box-class read error) it kills NOTHING;
+          argv[0]-anchored signatures only (a process merely quoting one never
+          matches); NODE is never matched (it runs Claude Code/MCP/webterm); a
+          pre-kill TOCTOU re-verify; any ps/parse/kill error kills NOTHING;
+          dry_run kills nothing. Log-only self-heal, never a Discord ping
+          (#546). `hooks/block-heavy-build-toolchain.sh` (Layer 1) stops a NEW
+          launch on a shared-stream box; this reaper (Layer 2) cleans up
+          anything already running. See `heavy_build_reaper` in
+          `watchdog/reaper.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4347,6 +4373,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
              dry_run=dry_run),
          "shadow-ugrep-reaper error")
+
+    # Job 38 (#778) — HEAVY-BUILD-TOOLCHAIN OS-PROCESS REAPER, SHARED-STREAM
+    # BOX ONLY. A SIBLING of Job 37 (opposite gating: kill-on-sight, no age/CPU
+    # gate — a JVM/Android build daemon is BANNED OUTRIGHT on a shared-stream
+    # box). Reuses the SAME `reaper_ps_fetch`/`reaper_kill_fn` seams (identical
+    # ps read shape), so it gates on `reaper_ps_fetch is not None` exactly like
+    # Job 37 — the box-class gate lives INSIDE heavy_build_reaper (off a
+    # shared-stream box it reads no process table and kills nothing). Any
+    # ps/parse/kill error kills NOTHING; log-only self-heal, never a Discord
+    # ping (#546). See `heavy_build_reaper` in `watchdog/reaper.py`.
+    _add("heavy_build_reaper", lambda: reaper_ps_fetch is not None,
+         lambda: heavy_build_reaper(
+             ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
+             dry_run=dry_run),
+         "heavy-build-reaper error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

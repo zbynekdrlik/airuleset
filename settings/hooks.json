@@ -98,6 +98,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-heavy-build-toolchain.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-unscoped-tmux-kill.sh",
             "timeout": 5
           },

@@ -824,6 +824,34 @@ def _configure_ratchet_merge_driver(repo_dir=REPO_DIR, run=None):
         return None
 
 
+def _write_box_class_marker():
+    """Write ~/.claude/airuleset-box-class for this box (#778). A SHARED-STREAM
+    box (subdev) — one running N isolated reduced-authority Claude stream users
+    — is Claude-only: heavy JVM/Android/RN build toolchains are banned there and
+    run on dev2. Any OTHER box (dev1/dev2/gatekeeper) is a `workstation`.
+
+    The class is derived from the install-user against the maintained
+    `AUTHORITY_BY_USER` registry (the reduced-authority stream accounts —
+    marek/david*/montalu*/…), so there is no separate hostname list to drift.
+    Both the reaper (`watchdog/reaper.py`) and the PreToolUse hook
+    (`hooks/block-heavy-build-toolchain.sh`) read this durable marker — a bash
+    hook cannot do an at-runtime registry lookup, so the file is the right seam.
+    Best-effort + non-fatal: a write failure never breaks install (and the
+    reaper/hook both fail OPEN on a missing/unreadable marker)."""
+    try:
+        box_class = ("shared-stream"
+                     if _current_user() in AUTHORITY_BY_USER
+                     else "workstation")
+        marker = CLAUDE_DIR / "airuleset-box-class"
+        if not marker.exists() or marker.read_text().strip() != box_class:
+            marker.write_text(box_class + "\n", encoding="utf-8")
+            print(f"  Box class: {box_class} ({marker})")
+        else:
+            print(f"  Box class: {box_class} (unchanged)")
+    except Exception as e:  # never let box-class provisioning crash install
+        print(f"  Box class marker error (non-fatal): {e}", file=sys.stderr)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -834,6 +862,10 @@ def cmd_install(args):
     # Ensure ~/.claude/ exists
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --- Box class marker (#778): shared-stream (subdev) vs workstation. Read
+    # by the heavy-build reaper (Job 38) + block-heavy-build-toolchain.sh hook.
+    _write_box_class_marker()
 
     # --- 1. Generate ~/.claude/CLAUDE.md ---
     modules, global_rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))
