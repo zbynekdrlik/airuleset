@@ -33,6 +33,7 @@ stale-model-after-/model-switch caveat applies ONLY to the model path, never
 to the goal-armed path — the goal-armed tests here never touch `MODEL`).
 """
 
+import inspect
 import json
 import os
 import subprocess
@@ -41,6 +42,7 @@ import unittest
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -2271,11 +2273,19 @@ class CrossUserLogPathCollision492(unittest.TestCase):
     per-user (`-<uid>`) path so each user owns their own accumulating file,
     plus a brace-group redirect so an unwritable log can never leak again.
 
-    #732 note: this class deliberately does NOT set AIRULESET_MAIN_EXEC_LOG_DIR
-    — it asserts the DEFAULT `/tmp/airuleset-main-exec-*-<uid>.log` naming and
-    its EACCES-leak hardening, which is exactly the behaviour the #732 env seam
-    falls back to when unset. All its reads are sid-filtered, so concurrent
-    fleet writes to the shared default log never affect them."""
+    #732/#768 note: only the two FIXED-path leak tests
+    (`test_block_no_permission_denied_leak_when_fixed_path_unwritable`,
+    `test_bypass_no_leak_…when_fixed_unwritable`) stay on the DEFAULT path —
+    they lock #492's per-uid naming AND the OLD fixed-name leak shape by making
+    the pre-#492 fixed `/tmp/airuleset-main-exec-*.log` (no uid, hook-ignored)
+    unwritable and asserting no leak + a sid-filtered per-uid read. The
+    per-uid-path and unwritable-FILE tests (`test_block_logged_to_per_user_path`,
+    `test_hardened_redirect_…`) route through the #732 ISOLATED
+    AIRULESET_MAIN_EXEC_LOG_DIR since #768, because chmod'ing the SHARED real
+    `…-block-<uid>.log` 0444 opened a window that EACCES-dropped a concurrent
+    `-n auto` worker's guarded audit append (see SharedExecLogParallelSafety768).
+    The invariant "no test leaves the shared real per-uid log unwritable" is
+    source-locked there."""
 
     UID = os.getuid()
     BLOCK_LOG = Path("/tmp/airuleset-main-exec-block-%d.log" % UID)
@@ -2286,7 +2296,17 @@ class CrossUserLogPathCollision492(unittest.TestCase):
     def _make_unwritable(self, p):
         """Simulate a first-user-owned unwritable file at `p`: save any real
         content, recreate it 0444, restore on cleanup. Skips as root (root
-        bypasses permission bits, so the EACCES the bug needs cannot arise)."""
+        bypasses permission bits, so the EACCES the bug needs cannot arise).
+
+        #768 residual (accepted, #319 convention): call this ONLY on the
+        pre-#492 FIXED paths (FIXED_BLOCK/FIXED_BYPASS, no uid — hook-ignored,
+        nothing reads them for an assertion). NEVER on a SHARED real per-uid log
+        (self.BLOCK_LOG/BYPASS_LOG) — a 0444 window there EACCES-drops a
+        concurrent worker's audit append (the #768 flake; source-locked in
+        SharedExecLogParallelSafety768). Two CONCURRENT full-suite runs at the
+        same uid can still collide on a FIXED path's write_text/chmod (a rare
+        cross-suite ERROR, pre-existing and unchanged by #768); single-run
+        `-n auto` is immune since each test runs once."""
         if os.geteuid() == 0:
             self.skipTest("root bypasses file permission bits; cannot reproduce EACCES")
         saved = None
@@ -2323,16 +2343,22 @@ class CrossUserLogPathCollision492(unittest.TestCase):
         self.assertNotIn("airuleset-main-exec-block.log", out.stderr, out.stderr)
 
     def test_block_logged_to_per_user_path(self):
-        # RED on old code (per-uid file has no such line / doesn't exist);
-        # GREEN after fix.
+        # #768: route through an ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR and assert
+        # the per-uid-NAMED file (airuleset-main-exec-block-<uid>.log) appears
+        # THERE. This still locks the `-<uid>` naming (#492) but never reads the
+        # SHARED real /tmp log that a concurrent -n auto worker / fleet lane may
+        # be appending to or momentarily holding 0444 — the collision that
+        # flaked this test. RED on old code (no per-uid file); GREEN after fix.
+        logdir, block_log, _byp = _isolated_exec_logs(self)
         sid = "t-492-blockpath-" + uuid.uuid4().hex[:8]
         out = MainImplementationGuard()._run(
             tool="Bash", command="grep -rn 'TODO' .", sid=sid,
-            transcript_text=goal_armed_transcript())
+            transcript_text=goal_armed_transcript(),
+            extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        self.assertTrue(self.BLOCK_LOG.exists(),
-                        "per-user block log not created: %s" % self.BLOCK_LOG)
-        lines = [ln for ln in self.BLOCK_LOG.read_text().splitlines() if sid in ln]
+        self.assertTrue(block_log.exists(),
+                        "per-user block log not created: %s" % block_log)
+        lines = [ln for ln in block_log.read_text().splitlines() if sid in ln]
         self.assertTrue(lines, "block not logged to the per-user path")
 
     def test_bypass_no_leak_and_logged_to_per_user_path_when_fixed_unwritable(self):
@@ -2352,12 +2378,30 @@ class CrossUserLogPathCollision492(unittest.TestCase):
     def test_hardened_redirect_no_leak_even_when_per_user_log_unwritable(self):
         # Guards the brace-group hardening: even the per-uid file itself
         # being unwritable (disk full / hostile precreation on sticky /tmp)
-        # must never leak. GREEN after fix (verifies the redirect form).
-        self._make_unwritable(self.BLOCK_LOG)
+        # must never leak.
+        #
+        # #768: arm the unwritable per-uid file inside an ISOLATED
+        # AIRULESET_MAIN_EXEC_LOG_DIR, NEVER the SHARED real
+        # /tmp/airuleset-main-exec-block-<uid>.log. Chmod'ing that shared file
+        # 0444 (as this test used to) opened a window in which a concurrent
+        # -n auto worker's / fleet lane's guarded audit append EACCES-dropped
+        # its own sid line, flaking the fallback-to-/tmp and per-user-path
+        # tests (the #768 collision). The isolated file exercises the identical
+        # brace-group redirect hardening. GREEN after fix (verifies no leak).
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses file permission bits; cannot reproduce EACCES")
+        logdir, block_log, _byp = _isolated_exec_logs(self)
+        block_log.write_text("")            # created writable by us...
+        os.chmod(block_log, 0o444)          # ...then made unwritable (disk-full proxy)
+        # restore write BEFORE the TemporaryDirectory cleanup (addCleanup is
+        # LIFO, and _isolated_exec_logs registered the dir cleanup first).
+        self.addCleanup(
+            lambda: os.chmod(block_log, 0o644) if block_log.exists() else None)
         sid = "t-492-hardened-" + uuid.uuid4().hex[:8]
         out = MainImplementationGuard()._run(
             tool="Bash", command="grep -rn 'TODO' .", sid=sid,
-            transcript_text=goal_armed_transcript())
+            transcript_text=goal_armed_transcript(),
+            extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
         self.assertNotIn("Permission denied", out.stderr, out.stderr)
 
@@ -2412,6 +2456,98 @@ class LogDirSeamFailSafe732(unittest.TestCase):
         self.assertFalse(
             (Path(d.name) / ("airuleset-main-exec-block-%d.log" % os.getuid())).exists(),
             "nothing must be written into the unwritable override dir")
+
+
+class SharedExecLogParallelSafety768(unittest.TestCase):
+    """#768: the #492/#732 "unwritable log" tests chmod'd the SHARED real
+    per-uid /tmp/airuleset-main-exec-{block,bypass}-<uid>.log to 0444 for the
+    duration of one test. Under `pytest -n auto` a DIFFERENT xdist worker (or a
+    concurrent fleet lane, same uid) meanwhile appends its own audit line to
+    that same shared file; the hook's append is a guarded
+    `{ … >> "$LOG"; } 2>/dev/null || true`, so on the 0444 file the open
+    EACCES-fails and is silently dropped — the block DECISION is unaffected
+    (rc stays 2) but the sid line never lands, so the fallback-to-/tmp /
+    per-user-path assertions (LogDirSeamFailSafe732,
+    CrossUserLogPathCollision492::test_block_logged_to_per_user_path) flake.
+    Deterministically reproduced: writable shared log -> sid line present;
+    the same log held 0444 -> sid line absent, rc still 2.
+
+    (The #768-named AwayEngagement128::test_away_bypass_marker_still_works was
+    a mis-attribution: it honors the one-shot bypass marker and exits BEFORE
+    the AWAY check, writes only the per-uid BYPASS log, and reads no log — so
+    no sibling can flip its rc==0. Reproduced robust: 0 fails / 4000 direct
+    hook runs @160-way + 0 fails / 36 full-file `-n auto` runs.)
+
+    ROOT-CAUSE INVARIANT (this test): no test in this module may leave the
+    SHARED real per-uid block/bypass log unwritable — every "unwritable file"
+    scenario is armed on an ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR file instead.
+    Run the real hardening test under an os.chmod spy and assert it never
+    chmods either shared real path read-only. RED on the old code (the
+    hardening does `_make_unwritable(self.BLOCK_LOG)`); GREEN once isolated."""
+
+    SHARED_BLOCK = "/tmp/airuleset-main-exec-block-%d.log" % os.getuid()
+    SHARED_BYPASS = "/tmp/airuleset-main-exec-bypass-%d.log" % os.getuid()
+    # the exact tests whose "unwritable" setup must never touch a shared path
+    HARDENING_TESTS = (
+        (CrossUserLogPathCollision492,
+         "test_hardened_redirect_no_leak_even_when_per_user_log_unwritable"),
+    )
+
+    def _shared_realpaths(self):
+        return {os.path.realpath(self.SHARED_BLOCK),
+                os.path.realpath(self.SHARED_BYPASS)}
+
+    def test_no_hardening_test_chmods_a_shared_real_log_readonly(self):
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses permission bits; the tests skip their "
+                          "own _make_unwritable, so there is nothing to observe")
+        shared = self._shared_realpaths()
+        bad = []
+        real_chmod = os.chmod
+
+        def spy(path, mode, *a, **k):
+            # a read-only chmod (no owner-write bit) of a shared real log is
+            # the exact 0444 collision window this ticket removes. realpath()
+            # normalises without touching the filesystem and never raises here.
+            rp = os.path.realpath(path)
+            if rp in shared and not (mode & 0o200):
+                bad.append((rp, oct(mode)))
+            return real_chmod(path, mode, *a, **k)
+
+        for cls, meth in self.HARDENING_TESTS:
+            tc = cls(meth)
+            with mock.patch("os.chmod", side_effect=spy):
+                result = tc.run()
+            self.assertTrue(
+                result.wasSuccessful(),
+                "%s.%s did not pass under the chmod spy: %s"
+                % (cls.__name__, meth, result.errors + result.failures))
+        self.assertEqual(
+            bad, [],
+            "an unwritable-log hardening test chmod'd a SHARED real per-uid "
+            "exec log read-only -- that is the #768 `-n auto` collision window "
+            "(a concurrent worker's guarded audit append is EACCES-dropped). "
+            "Arm the unwritable file on an ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR "
+            "dir instead. Offenders: %r" % (bad,))
+
+    def test_no_test_makes_a_shared_per_uid_log_unwritable_in_source(self):
+        # #768: the os.chmod spy above only runs the ONE re-runnable
+        # (isolated-dir) hardening test. This STATIC lock closes the enforcement
+        # gap to match the stated invariant: a future edit that pointed
+        # `_make_unwritable` at `self.BLOCK_LOG`/`self.BYPASS_LOG` (the shared
+        # real per-uid logs — the fixed-name paths *look* stale and invite
+        # exactly this "cleanup") would reintroduce the flake while the runtime
+        # meta test stayed GREEN. Adding those un-re-runnable tests to
+        # HARDENING_TESTS is the WRONG fix (a meta-run + native-run of the same
+        # FIXED-path test would then race each other under `-n auto`); a source
+        # lock is deterministic and double-run-free.
+        src = inspect.getsource(CrossUserLogPathCollision492)
+        self.assertNotRegex(
+            src, r"_make_unwritable\(self\.(?:BLOCK|BYPASS)_LOG\)",
+            "a test chmods a SHARED real per-uid exec log unwritable -- that is "
+            "the #768 `-n auto` collision. Point _make_unwritable at the FIXED "
+            "paths only, and route unwritable-per-uid-file scenarios through an "
+            "ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR dir.")
 
 
 if __name__ == "__main__":
