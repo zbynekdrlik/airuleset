@@ -128,7 +128,7 @@ class TestReaperFailSafe(unittest.TestCase):
     def test_malformed_row_is_skipped(self):
         kill = _Recorder()
         procs = [("not", "a", "triple", "extra"), (5, OLD, RUNAWAY_CMD)]
-        logs = shadow_ugrep_reaper(ps_fetch=lambda: procs, kill_fn=kill)
+        shadow_ugrep_reaper(ps_fetch=lambda: procs, kill_fn=kill)
         # the good row still reaps; the malformed one is skipped, not guessed
         self.assertEqual(kill.killed, [5])
 
