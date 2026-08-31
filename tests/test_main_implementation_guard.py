@@ -2324,16 +2324,22 @@ class CrossUserLogPathCollision492(unittest.TestCase):
         self.assertNotIn("airuleset-main-exec-block.log", out.stderr, out.stderr)
 
     def test_block_logged_to_per_user_path(self):
-        # RED on old code (per-uid file has no such line / doesn't exist);
-        # GREEN after fix.
+        # #768: route through an ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR and assert
+        # the per-uid-NAMED file (airuleset-main-exec-block-<uid>.log) appears
+        # THERE. This still locks the `-<uid>` naming (#492) but never reads the
+        # SHARED real /tmp log that a concurrent -n auto worker / fleet lane may
+        # be appending to or momentarily holding 0444 — the collision that
+        # flaked this test. RED on old code (no per-uid file); GREEN after fix.
+        logdir, block_log, _byp = _isolated_exec_logs(self)
         sid = "t-492-blockpath-" + uuid.uuid4().hex[:8]
         out = MainImplementationGuard()._run(
             tool="Bash", command="grep -rn 'TODO' .", sid=sid,
-            transcript_text=goal_armed_transcript())
+            transcript_text=goal_armed_transcript(),
+            extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
-        self.assertTrue(self.BLOCK_LOG.exists(),
-                        "per-user block log not created: %s" % self.BLOCK_LOG)
-        lines = [ln for ln in self.BLOCK_LOG.read_text().splitlines() if sid in ln]
+        self.assertTrue(block_log.exists(),
+                        "per-user block log not created: %s" % block_log)
+        lines = [ln for ln in block_log.read_text().splitlines() if sid in ln]
         self.assertTrue(lines, "block not logged to the per-user path")
 
     def test_bypass_no_leak_and_logged_to_per_user_path_when_fixed_unwritable(self):
@@ -2353,12 +2359,30 @@ class CrossUserLogPathCollision492(unittest.TestCase):
     def test_hardened_redirect_no_leak_even_when_per_user_log_unwritable(self):
         # Guards the brace-group hardening: even the per-uid file itself
         # being unwritable (disk full / hostile precreation on sticky /tmp)
-        # must never leak. GREEN after fix (verifies the redirect form).
-        self._make_unwritable(self.BLOCK_LOG)
+        # must never leak.
+        #
+        # #768: arm the unwritable per-uid file inside an ISOLATED
+        # AIRULESET_MAIN_EXEC_LOG_DIR, NEVER the SHARED real
+        # /tmp/airuleset-main-exec-block-<uid>.log. Chmod'ing that shared file
+        # 0444 (as this test used to) opened a window in which a concurrent
+        # -n auto worker's / fleet lane's guarded audit append EACCES-dropped
+        # its own sid line, flaking the fallback-to-/tmp and per-user-path
+        # tests (the #768 collision). The isolated file exercises the identical
+        # brace-group redirect hardening. GREEN after fix (verifies no leak).
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses file permission bits; cannot reproduce EACCES")
+        logdir, block_log, _byp = _isolated_exec_logs(self)
+        block_log.write_text("")            # created writable by us...
+        os.chmod(block_log, 0o444)          # ...then made unwritable (disk-full proxy)
+        # restore write BEFORE the TemporaryDirectory cleanup (addCleanup is
+        # LIFO, and _isolated_exec_logs registered the dir cleanup first).
+        self.addCleanup(
+            lambda: os.chmod(block_log, 0o644) if block_log.exists() else None)
         sid = "t-492-hardened-" + uuid.uuid4().hex[:8]
         out = MainImplementationGuard()._run(
             tool="Bash", command="grep -rn 'TODO' .", sid=sid,
-            transcript_text=goal_armed_transcript())
+            transcript_text=goal_armed_transcript(),
+            extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(out.returncode, 2, out.stderr)
         self.assertNotIn("Permission denied", out.stderr, out.stderr)
 
