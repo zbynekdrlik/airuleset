@@ -918,8 +918,10 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # drained-boundary compact waits for its quiet window. Same shape as the
     # goal-family writers (goal.py:1792) and the busy-pane gate below: defer
     # WITHOUT a keystroke (last_nudge unadvanced, `handled` unclaimed) so it
-    # retries a later sweep once the compact delivers. Lazy import (compact imports
-    # watchdog — avoids any import-order cycle); fail-safe False on any error.
+    # retries a later sweep once the compact delivers. Lazy import — a defensive
+    # choice (a top-level import is also fine, goal.py:173 does it), kept local to
+    # avoid any dependence on the watchdog package-init ordering; fail-safe False on
+    # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
     from watchdog import compact as _compact
     if _compact.has_pending_request(sid):
         logs.append("ops-wait-recheck %s -> hold:compact-pending (pending "

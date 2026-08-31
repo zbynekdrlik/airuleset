@@ -33,12 +33,17 @@ and #616 (release-gap). Per repo it snapshots the gk queue UNION
 signal is a SET DELTA, not presence or cadence: the FIRST observation seeds a
 baseline (no nudge — we don't know what was already there); a LATER snapshot that
 ADDS a member (`cur − base ≠ ∅`) delivers ONE verified `stuck-check:` nudge
-naming the new arrival(s), and the baseline is advanced to `cur` only on a
-CONFIRMED delivery (a swallowed submit re-detects the same arrival and retries,
-bounded to MAX_SEND_FAILS then backs off). A member LEAVING / an unchanged
-snapshot silently advances the baseline — no nudge. So it fires ONCE per distinct
-arrival wave — the fast wake the incident needed — while the persistent-
-unprocessed-queue case stays covered by jobs 8/11.
+naming the new arrival(s) — SUBJECT TO the per-sid NUDGE FLOOR (#780, see CADENCE
+below): a delta inside the floor window is HELD (no keystroke) and its members
+ACCUMULATE into the next post-floor nudge, so multiple waves within one window
+fold into a single nudge naming all of them. The baseline is advanced to `cur`
+(and last_nudge to `now`) only on a CONFIRMED delivery (a swallowed submit
+re-detects the same arrival and retries, bounded to MAX_SEND_FAILS then backs
+off). A member LEAVING / an unchanged snapshot silently advances the baseline — no
+nudge. So it fires at most ONCE per floor window, naming every wave accumulated in
+it — the fast wake the incident needed (the FIRST arrival after a seed fires at
+once), rate-limited — while the persistent-unprocessed-queue case stays covered by
+jobs 8/11.
 
 FULL-authority gate (full-only, the SAME gate as `release_gap` (#616); the
 INVERSE of #618's WIDENED lane gate): only a gk/full box PROCESSES this
@@ -356,12 +361,17 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     DEFERRED (no keystroke, base unadvanced, `handled` unclaimed) so it retries a
     later sweep. None (unwired / older caller) skips the gate.
 
-    Keystroke coordination reuses the sibling machinery verbatim: `send_verified`
-    (transcript-proof submit; a swallowed Enter is NOT booked, its text restored),
-    `_janitor_mark_watch`/`_janitor_clear_watch`, and the per-sweep `handled` set
-    (at most ONE keystroke per pane per sweep — this job runs AFTER the lane
-    nudge / ops-wait / release-gap riders in the loop, so a pane those already
-    typed is deferred to next sweep, and a nudge WE send claims the sid)."""
+    Before any keystroke the nudge branch consults the #741 compact latch
+    (`compact.has_pending_request(sid)`, #780) — the FIRST defer-gate: a pending
+    /compact HOLDS the nudge (`hold:compact-pending`, no keystroke, base/last_nudge
+    unadvanced) so a drained-boundary compact delivers in a quiet pane before any
+    new hand-off is pushed in. Keystroke coordination then reuses the sibling
+    machinery verbatim: `send_verified` (transcript-proof submit; a swallowed Enter
+    is NOT booked, its text restored), `_janitor_mark_watch`/`_janitor_clear_watch`,
+    and the per-sweep `handled` set (at most ONE keystroke per pane per sweep —
+    this job runs AFTER the lane nudge / ops-wait / release-gap riders in the loop,
+    so a pane those already typed is deferred to next sweep, and a nudge WE send
+    claims the sid)."""
     logs = []
     # FULL-authority gate (full-only, same gate as release_gap #616; the INVERSE
     # of #618's widened lane gate), cheap, before any fetch.
@@ -436,8 +446,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # goal-family writers (goal.py:1792) and the busy-pane gate below: defer
     # WITHOUT a keystroke (base/last_nudge unadvanced, `handled` unclaimed) so it
     # retries a later sweep once the compact delivers. First delivery gate (the
-    # strongest constraint). Lazy import (compact imports watchdog — avoids any
-    # import-order cycle); fail-safe False on any error (writer proceeds as pre-#741).
+    # strongest constraint). Lazy import — a defensive choice (a top-level import
+    # is also fine, goal.py:173 does it), kept local to avoid any dependence on the
+    # watchdog package-init ordering; fail-safe False on any error (writer proceeds
+    # as pre-#741).
     from watchdog import compact as _compact
     if _compact.has_pending_request(sid):
         logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
