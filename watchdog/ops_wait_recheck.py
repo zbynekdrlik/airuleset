@@ -913,6 +913,18 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
         return logs
 
     # action == "nudge"
+    # #780 WRITER-SIDE LATCH (#741): a pending /compact for this session HOLDS the
+    # partition-audit nudge — never push work into the armed loop while a
+    # drained-boundary compact waits for its quiet window. Same shape as the
+    # goal-family writers (goal.py:1792) and the busy-pane gate below: defer
+    # WITHOUT a keystroke (last_nudge unadvanced, `handled` unclaimed) so it
+    # retries a later sweep once the compact delivers. Lazy import (compact imports
+    # watchdog — avoids any import-order cycle); fail-safe False on any error.
+    from watchdog import compact as _compact
+    if _compact.has_pending_request(sid):
+        logs.append("ops-wait-recheck %s -> hold:compact-pending (pending "
+                    "/compact; no nudge until it delivers)" % loc)
+        return logs
     if handled is not None and sid in handled:
         logs.append("ops-wait-recheck %s -> skip:already-handled (another sweep "
                     "job typed this pane; retry next sweep)" % loc)
