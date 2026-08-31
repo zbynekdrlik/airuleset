@@ -181,6 +181,12 @@ CANONICAL_SWEEP = [
     JobSpec("shadow_ugrep_reaper", "wd", "shadow_ugrep_reaper",
             "reaper_ps_fetch", _stub_fetch, "list",
             "shadow-ugrep-reaper error"),
+    # (38) — #778 heavy-build-toolchain reaper (shared-stream box only); reuses
+    # the SAME reaper_ps_fetch/reaper_kill_fn seams as Job 37, so it gates on
+    # reaper_ps_fetch too (the box-class gate lives inside heavy_build_reaper).
+    JobSpec("heavy_build_reaper", "wd", "heavy_build_reaper",
+            "reaper_ps_fetch", _stub_fetch, "list",
+            "heavy-build-reaper error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

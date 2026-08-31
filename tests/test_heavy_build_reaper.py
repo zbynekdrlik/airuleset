@@ -246,20 +246,45 @@ class TestJob38Wiring(unittest.TestCase):
         self.assertTrue(hasattr(wd, "heavy_build_reaper"))
         self.assertTrue(hasattr(wd, "is_shared_stream_box"))
 
-    def test_run_once_wires_job38_off_the_reaper_seam(self):
+    def _run_once_with_home(self, home, ps, rec):
+        """Drive run_once with a controlled HOME so the box-class marker read
+        by the wired heavy_build_reaper is deterministic (not this box's real
+        marker). Only the reaper seams are wired; every other job is gated off."""
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = home
+        try:
+            wd.run_once(now=1_000_000.0, run=lambda argv, timeout=8: "",
+                        reaper_ps_fetch=ps, reaper_kill_fn=rec)
+        finally:
+            if old is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old
+
+    def test_run_once_job38_no_kill_off_shared_box(self):
         # Job 38 reuses the Job-37 reaper_ps_fetch seam; with a workstation
-        # box-class it kills nothing even when a build daemon is present.
-        recorded = {}
+        # (no marker) box-class it kills nothing even with a build daemon live.
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".claude"))
+            rec = _Recorder()
+            self._run_once_with_home(
+                home, lambda: [(111, 5, 0, GRADLE_CMD)], rec)
+            self.assertEqual(rec.killed, [])
 
-        def fake_ps():
-            recorded["called"] = True
-            return [(111, 5, 0, GRADLE_CMD)]
-
-        rec = _Recorder()
-        # box-class marker absent in the test env → fail-open, no kill
-        wd.run_once(now=1_000_000.0, run=lambda argv, timeout=8: "",
-                    reaper_ps_fetch=fake_ps, reaper_kill_fn=rec)
-        self.assertEqual(rec.killed, [])
+    def test_run_once_job38_shared_box_no_daemon_no_kill(self):
+        # A shared-stream marker flows through run_once → Job 38 runs its full
+        # path (box-class gate consulted, ps read) but with no build daemon in
+        # the process list nothing is killed. The kill/TOCTOU behaviour itself
+        # is covered hermetically in TestHeavyBuildReaper (injected verify_fn).
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, ".claude"))
+            with open(os.path.join(home, ".claude", "airuleset-box-class"),
+                      "w") as fh:
+                fh.write("shared-stream\n")
+            rec = _Recorder()
+            self._run_once_with_home(
+                home, lambda: [(1, 10, 10, "python3 -m pytest")], rec)
+            self.assertEqual(rec.killed, [])
 
 
 if __name__ == "__main__":
