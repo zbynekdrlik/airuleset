@@ -24,31 +24,39 @@ set -euo pipefail
 # invisible to the model); exit 0 = allow. ANY classifier malfunction FAILS
 # OPEN (a hook that blocks legitimate work is worse than the bug it guards).
 # Parser shape is the ESTABLISHED one in this repo (block-broad-pkill.sh /
-# block-gh-invalid-json-flag.sh): heredoc-body strip -> per-segment shlex ->
-# `bash -c` recursion — ONE parser shape, never a second invented one.
+# block-gh-invalid-json-flag.sh): heredoc-body strip -> QUOTE-AWARE per-segment
+# split -> shlex -> `bash -c` recursion — ONE parser shape, never a second
+# invented one. Segment splitting is quote-aware (#776 review) so a `|`/`;`/`&`
+# INSIDE a quoted pattern neither splits a real command (`grep -rEn "a|b" /`
+# would otherwise slip) NOR false-blocks a commit message merely quoting the
+# shape (`git commit -m "...; grep -rn x /home"`).
 #
 # DELIBERATELY NARROW (fail toward ALLOW):
 #   * Only `grep`/`egrep`/`fgrep`/`rgrep`/`ugrep` commands are classified.
 #   * The command must be RECURSIVE: `-r`/`-R`/`--recursive`/`--dereference-
-#     recursive`, or a bundled short-flag group (`-rn`, `-Rl`, `-rIn`, ...)
-#     containing `r`/`R`.
+#     recursive`/`-d recurse`/`--directories=recurse`, a bundled short-flag
+#     group (`-rn`, `-Rl`, `-rIn`, ...) containing `r`/`R`, or `rgrep`
+#     (inherently recursive).
 #   * A blocked ROOT must appear as a PATH positional (the search target, not
 #     the PATTERN): `/`, a top-level system dir (`/home`, `/usr`, `/etc`,
 #     `/var`, `/opt`, `/root`, `/mnt`, `/srv`, `/lib`, `/proc`, `/sys`,
-#     `/boot`, `/dev`, `/run`), a single-component home (`/home/<user>`), or a
-#     bare home shortcut (`~`, `~/`, `$HOME`, `${HOME}`) — with an optional
-#     trailing `/`. A SCOPED root (`.`, `./src`, `src/`, a 2+-component path
-#     under `/home` like a repo checkout, a specific file) passes.
-#   * A recursive grep with NO path (recurses the cwd/repo) passes — that is
-#     the common legitimate case.
+#     `/boot`, `/dev`, `/run`, `/bin`, `/sbin`), a single-component home
+#     (`/home/<user>`), or a bare home shortcut (`~`, `~/`, `$HOME`,
+#     `${HOME}`) — with an optional trailing `/`, and their `/*` glob forms
+#     (`/*`, `~/*`, `/home/*`). A SCOPED root (`.`, `./src`, `src/`, a
+#     2+-component path under `/home` like a repo checkout, a specific file)
+#     passes.
+#   * A recursive grep with NO path (recurses the cwd/repo) passes — the
+#     common legitimate case.
 #
 # The remedy is in the block reason: use the Grep tool (which never shadows
 # to ugrep), or scope the root to the repo/subdir.
 #
-# Bypass (rare, logged): append `# airuleset:root-grep-ok <reason>` to the
-# OFFENDING command itself — SEGMENT/LINE-scoped, same convention as
-# block-broad-pkill.sh (a heredoc doc body or an unrelated segment merely
-# QUOTING the marker does NOT disarm a real root-recursive grep elsewhere).
+# Bypass (rare, reviewed — NOT auto-logged, same honest convention as
+# block-broad-pkill.sh's own bypass): append `# airuleset:root-grep-ok
+# <reason>` to the OFFENDING command as a COMMENT (the marker is honored only
+# AFTER a `#`, so a pattern merely QUOTING the marker text never disarms a
+# real root-recursive grep).
 
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
@@ -87,37 +95,44 @@ HOME_SHORTCUTS = {"~", "$HOME", "${HOME}", "$home", "${home}"}
 # every remaining positional is a PATH (no positional pattern to skip).
 VALUE_SHORT = set("efmABCDd")            # -e -f -m -A -B -C -D -d
 PATTERN_SHORT = set("ef")                # -e / -f provide the pattern
-# Long options that consume the NEXT token as a value (no `=`).
+# Long options that consume the NEXT token as a value (no `=`). NOTE: --color/
+# --colour are DELIBERATELY EXCLUDED — they take an OPTIONAL `=WHEN` arg that
+# is never space-separated, so treating them as value-consuming would swallow
+# the pattern and let the real root through (#776 review 🟡).
 VALUE_LONG = {
     "--regexp", "--file", "--max-count", "--after-context", "--before-context",
-    "--context", "--devices", "--directories", "--binary-files", "--color",
-    "--colour", "--label", "--group-separator", "--include", "--exclude",
-    "--exclude-dir", "--include-dir", "--exclude-from",
+    "--context", "--devices", "--directories", "--binary-files", "--label",
+    "--group-separator", "--include", "--exclude", "--exclude-dir",
+    "--include-dir", "--exclude-from",
 }
 # Long options that ARE the pattern source.
 PATTERN_LONG = {"--regexp", "--file"}
 RECURSIVE_LONG = {"--recursive", "--dereference-recursive"}
+# The value of `-d`/`--directories` that means recurse.
+DIR_RECURSE_VALUES = {"recurse"}
 
 
 def _norm_root(tok):
     """A path token normalized for blocked-root comparison, or None if it is
     obviously not a bare root (contains an inner path component)."""
     t = tok
+    # A `/*`-style glob of a root is a root scan (the shell expands it to
+    # every entry): `/*` -> `/`, `/home/*` -> `/home`, `~/*` -> `~`.
+    if t.endswith("/*"):
+        t = t[:-2] or "/"
     if t in HOME_SHORTCUTS:
         return "~"
     # strip ONE trailing slash (but never turn "/" into "")
     if len(t) > 1 and t.endswith("/"):
         t = t[:-1]
-    if t == "/":
+    if t == "" or t == "/":
         return "/"
     if t in BLOCKED_SYS_ROOTS:
         return t
-    # ~ / $HOME with a trailing slash already handled; ~/ alone:
     if t in ("~", "$HOME", "${HOME}"):
         return "~"
     # /home/<single-component> == a whole user home (no deeper path)
-    m = re.match(r"^/home/([^/]+)$", t)
-    if m:
+    if re.match(r"^/home/[^/]+$", t):
         return t
     return None
 
@@ -134,22 +149,87 @@ def tokens_of(segment):
 
 
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
-LOOP_KEYWORDS = ("do", "then", "else", "elif", "time")
+LOOP_KEYWORDS = ("do", "then", "else", "elif")
 DASH_C_RE = re.compile(r'^-[A-Za-z]*c$')
-SHELL_WRAPPERS = ("bash", "sh", "zsh", "dash", "xargs")
-SEGMENTS_RE = re.compile(r'&&|\|\||[;&|]|\n')
+SHELL_WRAPPERS = ("bash", "sh", "zsh", "dash")
+# Prefix commands that take NO args of their own.
+WRAP_NOARG = {"sudo", "env", "nohup", "command", "builtin", "time"}
+# Prefix commands that carry their OWN option flags (and, for
+# timeout/nice/ionice, a leading duration/niceness positional).
+WRAP_OPTS = {"timeout", "nice", "ionice", "stdbuf"}
+# Short flags of the WRAP_OPTS commands that consume a following value token.
+WRAP_VALUE_FLAGS = {"-k", "--kill-after", "-s", "--signal", "-i", "-o", "-e"}
+
+
+def _split_segments(s):
+    """Split a shell script into command segments on unquoted `&&`/`||`/`;`/
+    `|`/`&`/newline. QUOTE-AWARE (#776 review): an operator inside a single- or
+    double-quoted span does NOT split, so a quoted pattern (`"a|b"`, `"a;b"`)
+    stays inside its own command."""
+    segs = []
+    cur = []
+    i, n = 0, len(s)
+    q = None
+    while i < n:
+        c = s[i]
+        if q is not None:
+            cur.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                cur.append(s[i + 1])
+                i += 2
+                continue
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            q = c
+            cur.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            cur.append(c)
+            cur.append(s[i + 1])
+            i += 2
+            continue
+        if c in ";\n":
+            segs.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        if c == "&":
+            segs.append("".join(cur))
+            cur = []
+            i += 2 if (i + 1 < n and s[i + 1] == "&") else 1
+            continue
+        if c == "|":
+            segs.append("".join(cur))
+            cur = []
+            i += 2 if (i + 1 < n and s[i + 1] == "|") else 1
+            continue
+        cur.append(c)
+        i += 1
+    if cur:
+        segs.append("".join(cur))
+    return segs
 
 
 def strip_prefix(tk):
     i = 0
     while i < len(tk):
         t = tk[i]
-        if t in ("sudo", "env", "timeout", "nice", "ionice", "stdbuf") \
-                or t in LOOP_KEYWORDS or ASSIGN_RE.match(t):
+        if ASSIGN_RE.match(t) or t in WRAP_NOARG or t in LOOP_KEYWORDS:
             i += 1
-            # timeout/nice take one value arg (a duration / niceness) — skip it
+            continue
+        if t in WRAP_OPTS:
+            i += 1
+            while i < len(tk) and tk[i].startswith("-") and tk[i] != "-":
+                takes_value = tk[i] in WRAP_VALUE_FLAGS
+                i += 1
+                if takes_value and i < len(tk):
+                    i += 1
             if t in ("timeout", "nice", "ionice") and i < len(tk) \
-                    and not tk[i].startswith("-"):
+                    and re.match(r'^-?\d', tk[i]):
                 i += 1
             continue
         break
@@ -165,11 +245,11 @@ def shell_dash_c_script(tk):
     return None
 
 
-def grep_is_root_recursive(tk, name):
-    """tk[0] basename == `name` in GREP_NAMES. Return the offending root token
-    if this is a recursive grep whose PATH positional is a blocked root, else
-    None. `rgrep` is `grep -r` — inherently recursive with no explicit flag."""
-    recursive = (name == "rgrep")
+def grep_is_root_recursive(tk, cmdname):
+    """tk[0] basename == `cmdname` in GREP_NAMES. Return the offending root
+    token if this is a recursive grep whose PATH positional is a blocked root,
+    else None. `rgrep` is `grep -r` — inherently recursive with no flag."""
+    recursive = (cmdname == "rgrep")
     pattern_from_flag = False
     positionals = []
     i = 1
@@ -180,27 +260,45 @@ def grep_is_root_recursive(tk, name):
             positionals.extend(tk[i + 1:])
             break
         if t.startswith("--"):
-            name = t.split("=", 1)[0]
-            if name in RECURSIVE_LONG:
+            lname, _, lval = t.partition("=")
+            if lname in RECURSIVE_LONG:
                 recursive = True
-            if name in PATTERN_LONG:
+            if lname == "--directories" and lval in DIR_RECURSE_VALUES:
+                recursive = True
+            if lname in PATTERN_LONG:
                 pattern_from_flag = True
-            if "=" not in t and name in VALUE_LONG:
+            if "=" not in t and lname in VALUE_LONG:
+                nxt = tk[i + 1] if i + 1 < n else ""
+                if lname == "--directories" and nxt in DIR_RECURSE_VALUES:
+                    recursive = True
                 i += 2      # consume the value token
                 continue
             i += 1
             continue
         if t.startswith("-") and t != "-":
             group = t[1:]
-            if "r" in group or "R" in group:
-                recursive = True
-            if any(c in PATTERN_SHORT for c in group):
-                pattern_from_flag = True
-            # a value-consuming short letter at the END with no attached value
-            # eats the next token (`-m 5`, `-e foo`); a value letter with chars
-            # after it carries its own value (`-m5`, `-efoo`) and eats nothing.
-            last = group[-1] if group else ""
-            if last in VALUE_SHORT:
+            consumed_next = False
+            last_value_ch = ""
+            j = 0
+            while j < len(group):
+                ch = group[j]
+                if ch in ("r", "R"):
+                    recursive = True
+                if ch in PATTERN_SHORT:
+                    pattern_from_flag = True
+                if ch in VALUE_SHORT:
+                    # the REST of the group is this flag's attached value
+                    # (`-m5`, `-er` = -e r); with nothing after it, the value
+                    # is the NEXT token. Either way stop scanning flags here.
+                    last_value_ch = ch
+                    if j == len(group) - 1:
+                        consumed_next = True
+                    break
+                j += 1
+            if consumed_next:
+                nxt = tk[i + 1] if i + 1 < n else ""
+                if last_value_ch == "d" and nxt in DIR_RECURSE_VALUES:
+                    recursive = True
                 i += 2
                 continue
             i += 1
@@ -213,20 +311,25 @@ def grep_is_root_recursive(tk, name):
     # Which positionals are PATHS? Without a flag-provided pattern the FIRST
     # positional is the search PATTERN; the rest are paths. With -e/-f every
     # positional is a path.
-    if pattern_from_flag:
-        paths = positionals
-    else:
-        paths = positionals[1:]
+    paths = positionals if pattern_from_flag else positionals[1:]
     for p in paths:
         if _is_blocked_root(p):
             return p
     return None
 
 
+def _bypassed(seg):
+    """The bypass marker disarms a segment ONLY when it appears after a `#`
+    (a real comment), never as a quoted grep PATTERN (#776 review 🔵)."""
+    if "#" not in seg:
+        return False
+    return BYPASS in seg.split("#", 1)[1]
+
+
 def classify(script):
     """The first offending root-recursive grep root token, or None."""
-    for seg in SEGMENTS_RE.split(script):
-        if BYPASS in seg:
+    for seg in _split_segments(script):
+        if _bypassed(seg):
             continue
         tk = strip_prefix(tokens_of(seg))
         inner = shell_dash_c_script(tk)
@@ -237,9 +340,9 @@ def classify(script):
             continue
         if not tk:
             continue
-        name = os.path.basename(tk[0])
-        if name in GREP_NAMES:
-            hit = grep_is_root_recursive(tk, name)
+        cmdname = os.path.basename(tk[0])
+        if cmdname in GREP_NAMES:
+            hit = grep_is_root_recursive(tk, cmdname)
             if hit is not None:
                 return hit
     return None
@@ -293,7 +396,7 @@ Do this instead:
 
 A non-recursive grep, or a recursive grep with a scoped root, passes freely.
 
-Genuine one-off exception (logged): append
-`# airuleset:root-grep-ok <reason>` to the offending command line itself.
+Genuine one-off exception: append `# airuleset:root-grep-ok <reason>` to the
+offending command as a trailing COMMENT.
 MSG
 exit 2

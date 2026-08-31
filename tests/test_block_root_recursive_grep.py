@@ -121,6 +121,58 @@ class TestBlockRootRecursiveGrep(TestCase):
         r = run("")
         self.assertEqual(r.returncode, 0)
 
+    # ---- #776 review regressions -----------------------------------------
+    def test_blocks_quoted_alternation_pattern(self):
+        # #776 review 🟡: `|` inside the quoted PATTERN must not split the
+        # segment and let the root scan slip.
+        self.assertBlocked('grep -rEn "foo|bar" /')
+
+    def test_blocks_quoted_semicolon_pattern(self):
+        self.assertBlocked('grep -rn "a;b" /')
+
+    def test_allows_commit_message_quoting_the_shape_after_semicolon(self):
+        # #776 review 🟡: a `;` inside a quoted commit message must NOT be a
+        # segment split that false-blocks the mention.
+        self.assertAllowed('git commit -m "fix x; grep -rn y /home z"')
+
+    def test_blocks_color_flag_without_equals(self):
+        # #776 review 🟡: --color takes an OPTIONAL =WHEN, never space-sep, so
+        # it must NOT swallow the pattern and let `/` through.
+        self.assertBlocked("grep -r --color pattern /")
+
+    def test_blocks_root_glob(self):
+        self.assertBlocked("grep -rn foo /*")
+
+    def test_blocks_home_glob(self):
+        self.assertBlocked("grep -rn foo /home/*")
+
+    def test_blocks_nohup_prefix(self):
+        self.assertBlocked("nohup grep -rn foo /")
+
+    def test_blocks_command_prefix(self):
+        self.assertBlocked("command grep -rn foo /")
+
+    def test_blocks_timeout_prefix_with_flags(self):
+        self.assertBlocked("timeout -k 5 30 grep -rn foo /")
+
+    def test_blocks_stdbuf_prefix(self):
+        self.assertBlocked("stdbuf -o0 grep -rn foo /")
+
+    def test_blocks_d_recurse_short(self):
+        self.assertBlocked("grep -d recurse foo /")
+
+    def test_blocks_directories_recurse_long(self):
+        self.assertBlocked("grep --directories=recurse foo /")
+
+    def test_allows_attached_e_value_that_looks_recursive(self):
+        # #776 review 🔵: `-er` is `-e` with pattern value `r` (NOT recursive).
+        self.assertAllowed("grep -er foo /")
+
+    def test_bypass_marker_as_pattern_does_not_disarm(self):
+        # #776 review 🔵: the marker only bypasses AFTER a `#`, not as a
+        # quoted grep pattern.
+        self.assertBlocked('grep -rn "airuleset:root-grep-ok" /')
+
 
 if __name__ == "__main__":
     main()
