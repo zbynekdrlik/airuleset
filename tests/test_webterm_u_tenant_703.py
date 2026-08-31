@@ -64,9 +64,10 @@ class TestUTenantSets703(unittest.TestCase):
         self.assertNotIn(profiles.CODEX_ID, ids)
 
     def test_marek_set_excludes_owner_account_boxes(self):
+        # #787: montalu2-subdev joined marek's u_tenant set alongside montalu4.
         ids = {e["id"] for e in profiles.u_tenant_entries(profiles.MAREK)}
-        self.assertEqual(ids, {profiles.MAREK_ID, "montalu4-subdev",
-                               profiles.MAREK_FORESTSHOP_ID})
+        self.assertEqual(ids, {profiles.MAREK_ID, "montalu2-subdev",
+                               "montalu4-subdev", profiles.MAREK_FORESTSHOP_ID})
         # dev1/dev2 = newlevel@ (the OWNER's account) — cross-tenant.
         self.assertNotIn("dev1", ids)
         self.assertNotIn("dev2", ids)
