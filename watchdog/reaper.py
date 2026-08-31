@@ -226,3 +226,187 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
                 "shadow-ugrep-reaper: SIGKILL pid=%s FAILED: %r "
                 "(age=%ss cpu=%ss cmd=%s)" % (pid, e, etimes, cputimes, args))
     return logs
+
+
+# --------------------------------------------------------------------------- #
+# #778 — Job 38: heavy-build-toolchain OS-process reaper, SHARED-STREAM BOX
+# ONLY. A SIBLING of the #776 reaper above, NOT an extension of it — the two
+# have OPPOSITE gating semantics, so folding them into one function would be a
+# patchwork (`architecture-first`):
+#   * shadow_ugrep_reaper: EVERY box, age + CPU gate (a runaway is only a
+#     runaway once it has run long AND stayed CPU-busy).
+#   * heavy_build_reaper:  SHARED-STREAM box only, KILL ON SIGHT (no age, no
+#     CPU gate) — a JVM/Android build daemon is BANNED OUTRIGHT there, so a
+#     young, idle one is killed exactly like an old busy one.
+#
+# WHY (root cause, #778): the subdev VPS runs N isolated reduced-authority
+# Claude stream users; it exists ONLY to run those Claude sessions + git +
+# light scripts/tests + the watchdog. Streams `david1`/`david2` self-installed
+# a JDK + Android toolchain there and ran Gradle/Kotlin daemons (`-Xmx3072m` ×
+# 2 = 13.3 GB of 15.6 GB RAM), collapsing the box (#774). The owner's standing,
+# repeated rule: Android/JVM/RN builds run on dev2 (the build+emulator lane),
+# NEVER on a shared-stream box. `hooks/block-heavy-build-toolchain.sh` (Layer 1)
+# stops a NEW launch on a shared-stream box; this reaper (Layer 2) is the
+# backstop that kills any of these BANNED DAEMONS already running or orphaned.
+# Same #776 pattern.
+#
+# The kill set is DELIBERATELY the persistent daemons / VM backends (the memory
+# hogs #774 named), NOT every build JVM: a transient Gradle WORKER JVM
+# (`org.gradle.process.internal.worker.GradleWorkerMain`) or an ad-hoc
+# `javac`/`java` compile is NOT reaped — those are short-lived and blocking
+# their LAUNCH is Layer 1's job, so anchoring the reaper on the long-lived
+# daemon main-classes keeps it fail-safe (never a false kill) without guessing
+# at every build-JVM shape.
+# --------------------------------------------------------------------------- #
+
+# The box-class marker a `push`/`install` writes on every target (a shared box
+# → `shared-stream`, a workstation dev1/dev2/gk → `workstation`). Read from
+# BOTH the bash hook and this python reaper, so the durable marker file is the
+# right seam (not an at-runtime AUTHORITY_BY_USER lookup a bash hook can't do).
+BOX_CLASS_PATH = "~/.claude/airuleset-box-class"
+SHARED_STREAM = "shared-stream"
+
+# argv[0]-anchored heavy build/VM daemon signatures. Anchored EXACTLY like the
+# #776 SHADOW_UGREP_SIGNATURE (argv[0] basename), so a process merely QUOTING a
+# class name (a `watch`/`pgrep`/`grep`/`git commit` whose argv[0] is not the
+# tool) never matches. The two java daemons are identified by their main-class
+# token (a plain `java -jar app.jar` is NOT a build daemon and is left alone).
+GRADLE_DAEMON_CLASS = "org.gradle.launcher.daemon.bootstrap.GradleDaemon"
+KOTLIN_DAEMON_CLASS = "org.jetbrains.kotlin.daemon.KotlinCompileDaemon"
+
+
+def default_box_class(path=None):
+    """The box-class marker's stripped FIRST line (`shared-stream`/
+    `workstation`/…), or None when the marker is missing/unreadable/empty.
+    Reads the first line (whitespace-stripped) so it agrees byte-for-byte with
+    `block-heavy-build-toolchain.sh`'s `cat | head -1 | tr -d '[:space:]'` on
+    any content, not only the single clean line the writer emits. Fail-open: a
+    read error — OSError OR a non-UTF8/binary marker (UnicodeDecodeError, a
+    ValueError) — is never a shared-stream classification."""
+    p = os.path.expanduser(path or BOX_CLASS_PATH)
+    try:
+        with open(p, "r") as fh:
+            return fh.readline().strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def is_shared_stream_box(box_class_fn=None):
+    """True ONLY when the box-class marker reads EXACTLY `shared-stream`. Any
+    other value, a missing marker, or a read error → False. This is the whole
+    fail-open discriminator: off a shared-stream box (or when the class cannot
+    be read) the heavy-build reaper kills NOTHING."""
+    if box_class_fn is None:
+        box_class_fn = default_box_class
+    try:
+        return box_class_fn() == SHARED_STREAM
+    except Exception:
+        return False
+
+
+def _heavy_build_kind(args):
+    """A short label of the heavy build / VM daemon that `args` (a process
+    cmdline string) IS — `gradle-daemon` / `kotlin-daemon` / `aapt2` /
+    `qemu/emulator` — or None for anything else. argv[0]-ANCHORED: a process
+    merely mentioning a signature in its arguments (argv[0] = watch/pgrep/grep/
+    git) never matches. NODE is DELIBERATELY never matched — node runs Claude
+    Code, MCP servers and the webterm, so a kill-on-sight node reaper would be
+    catastrophic collateral; the hook can discourage a node bundler, the reaper
+    never SIGKILLs one."""
+    toks = (args or "").split()
+    if not toks:
+        return None
+    base = os.path.basename(toks[0])
+    rest = toks[1:]
+    if base == "java":
+        if GRADLE_DAEMON_CLASS in rest:
+            return "gradle-daemon"
+        if KOTLIN_DAEMON_CLASS in rest:
+            return "kotlin-daemon"
+        return None
+    if base == "aapt2":
+        return "aapt2"
+    if base.startswith("qemu-system"):
+        return "qemu/emulator"
+    return None
+
+
+def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
+                       dry_run=False, box_class_fn=None):
+    """Find + SIGKILL heavy build-toolchain / VM daemons (Gradle/Kotlin/aapt2/
+    qemu) — KILL ON SIGHT, no age/CPU gate — but ONLY on a shared-stream box.
+
+    Off a shared-stream box (or when the box-class cannot be read) this kills
+    NOTHING and returns []. On a shared-stream box the fail-safe construction
+    mirrors shadow_ugrep_reaper (#776) exactly: `ps_fetch` returning None (or
+    raising) means "could not read → kill nothing"; a malformed row is skipped;
+    `kill_fn=None` (an unwired seam) logs "would kill" and kills nothing;
+    `dry_run` logs and kills nothing; and a pre-kill TOCTOU re-verify of the
+    pid's live cmdline (`verify_fn`, default reads /proc) means a pid reused by
+    an unrelated process between the ps read and the kill is never SIGKILLed.
+    `ps_fetch` reuses the Job-37 read shape (pid, etimes, cputimes, args) — the
+    heavy reaper reads only pid + args (a build daemon is banned at ANY age, so
+    etimes/cputimes are ignored). Returns the journal log lines; NEVER pings."""
+    # The box-class gate is FIRST — a non-shared-stream box (dev1/dev2/gk) never
+    # even reads its process table here.
+    if not is_shared_stream_box(box_class_fn):
+        return []
+    if ps_fetch is None:
+        ps_fetch = default_ps_fetch
+    if verify_fn is None:
+        verify_fn = default_proc_cmdline
+
+    logs = []
+    try:
+        procs = ps_fetch()
+    except Exception as e:
+        return ["heavy-build-reaper: ps error, killed nothing: %r" % (e,)]
+    if procs is None:
+        return logs
+
+    for entry in procs:
+        try:
+            pid, etimes, cputimes, args = entry
+        except Exception:
+            # malformed row — skip, never guess
+            continue
+        kind = _heavy_build_kind(args)
+        if kind is None:
+            continue
+        if dry_run:
+            logs.append(
+                "heavy-build-reaper: DRY-RUN would SIGKILL pid=%s kind=%s "
+                "cmd=%s" % (pid, kind, args))
+            continue
+        if kill_fn is None:
+            logs.append(
+                "heavy-build-reaper: kill_fn not wired — would SIGKILL pid=%s "
+                "kind=%s cmd=%s (skipped)" % (pid, kind, args))
+            continue
+        # TOCTOU: re-verify the pid still IS a heavy build daemon right before
+        # killing, so a pid reused by an unrelated process is never SIGKILLed.
+        try:
+            live = verify_fn(pid)
+        except Exception:
+            live = None
+        if live is None:
+            logs.append(
+                "heavy-build-reaper: pid=%s vanished before kill, skipped "
+                "(cmd was %s)" % (pid, args))
+            continue
+        if _heavy_build_kind(live) is None:
+            logs.append(
+                "heavy-build-reaper: pid=%s no longer a build daemon (reused?),"
+                " skipped (now %r)" % (pid, live))
+            continue
+        try:
+            kill_fn(pid)
+            logs.append(
+                "heavy-build-reaper: SIGKILL pid=%s kind=%s BANNED heavy build "
+                "toolchain on a shared-stream box (issue 778 — builds run on "
+                "dev2) cmd=%s" % (pid, kind, args))
+        except Exception as e:
+            logs.append(
+                "heavy-build-reaper: SIGKILL pid=%s FAILED: %r (kind=%s cmd=%s)"
+                % (pid, e, kind, args))
+    return logs

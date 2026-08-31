@@ -76,6 +76,7 @@ EXPECTED_STANDALONE = [
     "conformance_heartbeat_check",      # (35) — #543 central dead-box detector
     "gk_orphan_marker_sweep",           # (36) — #551 orphaned gk hand-off marker
     "shadow_ugrep_reaper",              # (37) — #776 runaway shadow-ugrep reaper
+    "heavy_build_reaper",               # (38) — #778 heavy-build-toolchain reaper
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
