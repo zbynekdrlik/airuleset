@@ -176,6 +176,11 @@ CANONICAL_SWEEP = [
     JobSpec("gk_orphan_marker_sweep", "wd", "gk_orphan_marker_sweep",
             "gkorphan_fetch", _stub_fetch, "list",
             "gk-orphan-marker-sweep error"),
+    # (37) — #776 runaway shadow-ugrep OS-process reaper; gated on
+    # reaper_ps_fetch being wired (reaper_kill_fn is a plain seam, not a gate).
+    JobSpec("shadow_ugrep_reaper", "wd", "shadow_ugrep_reaper",
+            "reaper_ps_fetch", _stub_fetch, "list",
+            "shadow-ugrep-reaper error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

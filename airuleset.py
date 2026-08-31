@@ -3811,6 +3811,24 @@ def _watchdog_gkorphan_handoff_fetch(root):
                                       _comment_handoff_window_s())
 
 
+def _watchdog_reaper_ps_fetch():
+    """Job 37's real process-table read (#776) — every process as
+    (pid, etimes, args). Wired here (not inside run_once) so every OTHER
+    job's run_once unit test stays process-free, exactly like the job
+    8/11/31/36 fetches. Returns None on any error (→ the reaper kills
+    nothing that cycle)."""
+    from watchdog import default_ps_fetch
+    return default_ps_fetch()
+
+
+def _watchdog_reaper_kill_fn(pid):
+    """Job 37's real SIGKILL (#776). Kept a wired seam alongside the ps
+    fetch so a run_once unit test can inject a recorder instead of killing
+    a real process."""
+    from watchdog import default_kill_fn
+    return default_kill_fn(pid)
+
+
 def _watchdog_u_reconcile_clear(cwd, num):
     """Job 32's real gh side-effect (#515) — remove needs-answer/needs-decision
     from open ticket #`num` in the repo at `cwd`. Wired here (not inside
@@ -4855,6 +4873,15 @@ def cmd_watchdog(args):
                     # window that never got its label) — wired = on, same
                     # network-free-tests convention.
                     gkorphan_handoff_fetch=_watchdog_gkorphan_handoff_fetch,
+                    # Job 37 (#776) — runaway shadow-ugrep OS-process reaper.
+                    # Runs on EVERY box every cycle (a runaway ugrep can orphan
+                    # anywhere — subdev #774). Gated on these seams being wired
+                    # (process-free tests for every other job, like jobs
+                    # 8/11/31/36). The kill is a separate wired seam so a
+                    # run_once unit test injects a recorder, never a real
+                    # SIGKILL. Log-only self-heal, no Discord ping (#546).
+                    reaper_ps_fetch=_watchdog_reaper_ps_fetch,
+                    reaper_kill_fn=_watchdog_reaper_kill_fn,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

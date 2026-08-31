@@ -1959,6 +1959,18 @@ from watchdog.pane_classify import (  # noqa: E402
 )
 
 
+# #776 — Job 37, the runaway shadow-ugrep OS-process reaper (the FIRST
+# OS-process reaper in the watchdog). Re-exported so run_once's job-37
+# dispatch resolves the bare name, exactly like gk_orphan_marker_sweep.
+from watchdog.reaper import (  # noqa: E402
+    shadow_ugrep_reaper as shadow_ugrep_reaper,
+    default_ps_fetch as default_ps_fetch,
+    default_kill_fn as default_kill_fn,
+    REAPER_MIN_AGE_S as REAPER_MIN_AGE_S,
+    SHADOW_UGREP_SIGNATURE as SHADOW_UGREP_SIGNATURE,
+)
+
+
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
@@ -1985,8 +1997,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
-             release_state_fetch=None, queue_fetch=None):
-    """Scan every `claude` pane once. 36 numbered jobs per poll — 30 LIVE and 6
+             release_state_fetch=None, queue_fetch=None,
+             reaper_ps_fetch=None, reaper_kill_fn=None):
+    """Scan every `claude` pane once. 37 numbered jobs per poll — 31 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2536,6 +2549,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           reports nothing (never a false accusation); the `seen` dedup is
           dry-run-safe (#516 F1). Generous 6h cadence. See
           `gk_orphan_marker_sweep` in `watchdog/cross_stream.py`.
+      (37) (only when `reaper_ps_fetch` is given) RUNAWAY SHADOW-UGREP
+          OS-PROCESS REAPER (#776) — the FIRST OS-process reaper in the
+          watchdog. Claude Code shadows every Bash `grep` into `ugrep -G
+          --ignore-files ...` (shell-snapshots); the bundled ugrep 7.5.0
+          busy-loops at 100% CPU forever on a whole-filesystem recursive scan
+          and orphans when its tool call times out (a 15-day 295%-CPU orphan on
+          subdev, #774; upstream anthropics/claude-code#81916, still OPEN). Runs
+          on EVERY box every cycle (NO cadence gate — a runaway must be reaped
+          within one cycle after 30 min). Each cycle it reads the process table,
+          finds processes whose cmdline NARROWLY carries the exact
+          `ugrep -G --ignore-files` signature AND have run longer than 30 min,
+          SIGKILLs them, and logs kill-reason + cmdline + age. FAIL-SAFE:
+          exact signature only, NEVER a young process (the age gate is the whole
+          discriminator — no legitimate grep runs 30 min), any ps/parse error
+          kills NOTHING, a malformed row is skipped, dry_run kills nothing.
+          Log-only self-heal (like the api-error `continue`), never a Discord
+          ping (#546). `hooks/block-root-recursive-grep.sh` (Layer 1) stops NEW
+          ones from spawning; this reaper (Layer 2) cleans up the already-
+          orphaned; #775 (resource caps) is Layer 3. See `shadow_ugrep_reaper`
+          in `watchdog/reaper.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4299,6 +4332,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              handoff_fetch=gkorphan_handoff_fetch,
              persist=lambda: save_state(state_path, state)),
          "gk-orphan-marker-sweep error")
+
+    # Job 37 (#776) — RUNAWAY SHADOW-UGREP OS-PROCESS REAPER (the FIRST
+    # OS-process reaper in the watchdog). Runs on EVERY box (a runaway ugrep
+    # can orphan anywhere — a 15-day 295%-CPU orphan on subdev, #774); gated on
+    # `reaper_ps_fetch` being wired (network-free tests for every other job,
+    # exactly like jobs 8/11/31/36). NO cadence gate — a runaway must be caught
+    # within one cycle after 30 min. Kills ONLY the exact `ugrep -G
+    # --ignore-files` signature aged > 30 min; NEVER a young process; any
+    # ps/parse/kill error kills NOTHING. Log-only self-heal (like the
+    # api-error `continue`), never a Discord ping (#546).
+    _add("shadow_ugrep_reaper", lambda: reaper_ps_fetch is not None,
+         lambda: shadow_ugrep_reaper(
+             ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
+             dry_run=dry_run),
+         "shadow-ugrep-reaper error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

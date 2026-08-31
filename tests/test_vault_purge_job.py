@@ -249,8 +249,15 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # rider seam) joined release_state_fetch on the trailing line,
                # so the closing `):` moved along it; the anchor's LAST line
                # grew again, the mutation target vault_purge=None is untouched.
+               # #776 re-pin: reaper_ps_fetch=None, reaper_kill_fn=None (job
+               # 37's runaway shadow-ugrep OS-process reaper seams) were
+               # appended on a NEW trailing line after queue_fetch, so the
+               # closing `):` moved off the queue_fetch line onto the new one;
+               # the anchor grew a last line, the mutation target
+               # vault_purge=None is untouched.
                "             gkorphan_fetch=None, gkorphan_handoff_fetch=None,\n"
-               "             release_state_fetch=None, queue_fetch=None):")
+               "             release_state_fetch=None, queue_fetch=None,\n"
+               "             reaper_ps_fetch=None, reaper_kill_fn=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
