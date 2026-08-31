@@ -511,42 +511,64 @@ def transcript_last_assistant_text(path):
 # (`mark=="set"`, footer dark) EXCEPT for this line -- ALL authority profiles
 # (full/branch-merge/fork-no-merge) render the `🏁 BACKLOG EMPTY:` prefix
 # (goal_registry.py). A stop-(A)
-# ❓-blocked completion prints NO 🏁 line, so its last turn never matches ->
-# the trigger structurally never fires on it (no re-poke on an unanswered
-# question).
+# ❓-blocked completion prints NO 🏁 line at all, so even the #767 backward scan
+# finds nothing on it -> the trigger structurally never fires (and the caller's
+# `_dark_awaiting_user_veto` vetoes a ❓-parked session upstream regardless).
 _BACKLOG_EMPTY_RX = re.compile(r"🏁\s*BACKLOG EMPTY")
 
 
 def transcript_last_backlog_empty_ts(path, tail_bytes=2_000_000,
-                                     max_entries=200):
-    """Epoch seconds of the session's LAST real assistant turn IFF that turn
-    carries a `🏁 BACKLOG EMPTY:` completion claim, else None. Same
-    genuine-turn skip semantics as `transcript_last_assistant_text`
-    (synthetic/tool-only `_SENTINELS` entries are skipped; a newest real
-    assistant turn flagged `isApiErrorMessage` returns None terminally -- an
-    error turn is never a completion). BOUNDED-SEEK read
-    (`_read_jsonl_byte_tail`, never a whole-file
-    `f.read()`) -- the fulfilled-rearm rider runs against real supervisor
-    transcripts that reach hundreds of MB, so the tail is bounded by BYTES
-    like `transcript_last_marker_bounded`. Fail-safe None on ANY error / a
-    🏁 turn whose `timestamp` is missing or unparseable (the rider then cannot
-    prove the 🏁 came AFTER the arm -> no re-arm, the safe direction)."""
+                                     max_entries=200, scan_back=False):
+    """Epoch seconds of a session's `🏁 BACKLOG EMPTY:` completion turn, else
+    None. Two modes, selected by `scan_back`:
+
+    * `scan_back=False` (DEFAULT, newest-turn-only) -- the LAST real assistant
+      turn DECIDES: no 🏁 there -> None; a newest real assistant turn flagged
+      `isApiErrorMessage` returns None terminally (an error turn is never a
+      completion). This is the original #764 semantics, PRESERVED for direct
+      callers/tests that encode it (e.g. a 🏁 SHADOWED by a later ❓ block ->
+      None -- a stop-(A) ❓-blocked completion is never re-armed).
+    * `scan_back=True` (#767, the fulfilled-rearm + #766 veto path) -- scan
+      reversed entries for the LAST (newest) real assistant turn carrying 🏁,
+      SKIPPING any later non-🏁 chore turns / api-error turns that would
+      otherwise SHADOW a genuine completion. A completed loop that keeps doing
+      post-achieve chores (the #767 live gk failure) then still exposes its 🏁
+      proof, and heavy post-achieve output no longer permanently hides it.
+      A ❓-parked completion is handled UPSTREAM by `_dark_awaiting_user_veto`
+      before this path runs, so finding a 🏁 behind a ❓ here is harmless.
+
+    Both modes SKIP synthetic/tool-only `_SENTINELS` entries and read via a
+    BOUNDED-SEEK tail (`_read_jsonl_byte_tail`, never a whole-file `f.read()`)
+    -- the rider runs against real supervisor transcripts reaching hundreds of
+    MB, so the tail is bounded by BYTES. Fail-safe None on ANY error / a 🏁 turn
+    whose `timestamp` is missing or unparseable (the rider then cannot prove the
+    🏁 came AFTER the arm -> no re-arm, the safe direction)."""
     for entry in reversed(_read_jsonl_byte_tail(path, tail_bytes, max_entries)):
         if not isinstance(entry, dict) or entry.get("type") != "assistant":
             continue
         if entry.get("isApiErrorMessage") is True:
-            return None
+            if scan_back:
+                continue          # an error turn is never a completion -> skip
+            return None            # newest-turn-only: an error turn is terminal
         text = (_entry_text(entry) or "").strip()
         if text in _SENTINELS:
             continue
-        # The FIRST real assistant turn (newest) decides: no 🏁 here -> None.
         if not _BACKLOG_EMPTY_RX.search(text):
-            return None
+            if scan_back:
+                continue          # a non-🏁 chore turn -> keep scanning back
+            return None            # newest-turn-only: the first real turn decides
         raw = entry.get("timestamp")
         try:
             return datetime.fromisoformat(
                 str(raw).replace("Z", "+00:00")).timestamp()
         except (ValueError, TypeError):
+            # DELIBERATE terminal None in BOTH modes: the newest 🏁's own
+            # timestamp is unparseable, so ordering vs the arm cannot be proven
+            # -> return None (no re-arm, the safe direction), even in scan_back
+            # mode where an older parseable 🏁 might exist. A CC-written timestamp
+            # is effectively never malformed; forfeiting a provable older proof is
+            # preferred over a possibly-false re-arm. Do NOT "fix" this to
+            # `continue` -- the None is the fail-closed choice, not an oversight.
             return None
     return None
 

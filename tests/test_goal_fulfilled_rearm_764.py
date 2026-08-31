@@ -1,5 +1,6 @@
 """#764 — a FULFILLED `/goal` loop (stop-(B) completion: footer dark,
-`mark=="set"`, a `🏁 BACKLOG EMPTY:` proof in its last turn) whose obligation
+`mark=="set"`, a `🏁 BACKLOG EMPTY:` proof in the bounded tail — #767 backward
+scan / per-episode cache) whose obligation
 cache has REFILLED (open>0, fresh) must be RE-ARMED FAST via the structured
 `record_goal_request`/`deliver_goal` channel — the cross-stream ping-pong
 re-entry the slow dead-loop confirmation (2/day, 8 clean-dark reads) was never
@@ -92,6 +93,44 @@ class TestBacklogEmptyProofReader(unittest.TestCase):
     def test_none_on_missing_file(self):
         self.assertIsNone(
             wd.transcript_last_backlog_empty_ts(self._tmp() / "nope.jsonl"))
+
+    # --- #767: backward scan finds a 🏁 shadowed by later chore turns --------- #
+    def test_scan_back_finds_shadowed_flag_default_does_not(self):
+        p = self._tmp() / "s.jsonl"
+        _append_assistant(p, "warmup", 100)
+        _append_assistant(p, _BACKLOG_DONE, 600)     # the REAL completion 🏁
+        _append_assistant(p, "chore ✅ DONE", 700)    # a later NON-🏁 chore turn
+        # default (newest-turn-only) is SHADOWED by the chore turn -> None:
+        self.assertIsNone(wd.transcript_last_backlog_empty_ts(p),
+                          "newest-turn-only is shadowed by the chore turn")
+        # scan_back skips the chore and finds the LAST 🏁:
+        self.assertEqual(
+            wd.transcript_last_backlog_empty_ts(p, scan_back=True), 600.0,
+            "scan_back returns the 🏁 behind post-achieve chores")
+
+    def test_scan_back_returns_the_NEWEST_flag_when_several(self):
+        p = self._tmp() / "s.jsonl"
+        _append_assistant(p, _BACKLOG_DONE, 300)     # an OLD 🏁
+        _append_assistant(p, "chore ✅ DONE", 400)
+        _append_assistant(p, _BACKLOG_DONE, 600)     # a NEWER 🏁
+        _append_assistant(p, "chore ✅ DONE", 700)
+        self.assertEqual(
+            wd.transcript_last_backlog_empty_ts(p, scan_back=True), 600.0,
+            "scan_back returns the NEWEST 🏁, not the oldest")
+
+    def test_scan_back_skips_a_later_api_error_turn(self):
+        p = self._tmp() / "s.jsonl"
+        _append_assistant(p, _BACKLOG_DONE, 600)
+        entry = {"type": "assistant", "timestamp": _iso(700),
+                 "isApiErrorMessage": True,
+                 "message": {"id": "err", "content": "API error"}}
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        # default: a newest api-error turn is terminal -> None
+        self.assertIsNone(wd.transcript_last_backlog_empty_ts(p))
+        # scan_back: an api-error turn is never a completion, so skip it -> 🏁
+        self.assertEqual(
+            wd.transcript_last_backlog_empty_ts(p, scan_back=True), 600.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +430,165 @@ class TestFulfilledRearmLane(unittest.TestCase):
         self.assertNotIn("sess-dry", state.get("goal_fulfilled_rearm", {}),
                          "dry-run consumes no rate-limit slot")
         self.assertTrue(any("would record" in ln for ln in logs), logs)
+
+    # ===================================================================== #
+    # #767 -- post-achieve chores SHADOW the 🏁 proof (newest-turn-only read).
+    # A completed loop that keeps working after 🏁 leaves a non-🏁 NEWEST turn;
+    # `transcript_last_backlog_empty_ts` (newest-turn-only) then returns None and
+    # both the fulfilled-rearm lane AND the #766 veto silently fail. These lock
+    # the backward-scan fix. RED on current code (newest=chore -> bts None).
+    # ===================================================================== #
+    _CHORE = "pokračujem po dokončení...\n✅ DONE: server lockdown KB2003"
+
+    def _shadowed_fixture(self, sid, mark_ts=500, done_ts=600, chore_ts=700,
+                          cap=GOAL_IDLE_CAP):
+        """A FULFILLED fixture (🏁 at done_ts, AFTER the mark) whose NEWEST turn
+        is a later NON-🏁 chore (chore_ts) -- the #767 shadowing shape."""
+        proj, tmux = self._fixture(sid, mark_ts=mark_ts, done_ts=done_ts, cap=cap)
+        tpath = next(proj.rglob(sid + ".jsonl"))
+        _append_assistant(tpath, self._CHORE, chore_ts)
+        return proj, tmux
+
+    def test_shadowed_flag_still_records_a_rearm(self):
+        # THE #767 REGRESSION: 🏁 is still inside the 2 MB tail but SHADOWED by a
+        # later chore turn; the fulfilled-rearm lane must find it and re-arm.
+        proj, tmux = self._shadowed_fixture("sess-shadow")
+        reqs, logs, _ = self._sweep(proj, tmux, 100000, (7, 100000))
+        req = reqs.get("sess-shadow")
+        self.assertIsInstance(req, dict,
+                              "a shadowed 🏁 (chore turn newest) must still re-arm")
+        self.assertEqual(req.get("origin"), self.ORIGIN)
+        self.assertTrue(any("FULFILLED-REARM" in ln for ln in logs), logs)
+
+    def test_shadowed_flag_open_zero_still_vetoes_the_ping(self):
+        # the #766 veto keys on the SAME detection: a shadowed 🏁 with a fresh
+        # open==0 must STILL veto the 💀 dead-loop ping (never a false death).
+        proj, tmux = self._shadowed_fixture("sess-shadow-veto")
+        state = {}
+        reqs = self._dir() / "goal-requests.json"
+        pings = []
+        l1 = self._sweep_capturing(proj, tmux, 100000, (0, 100000),
+                                   state, reqs, pings)
+        l2 = self._sweep_capturing(proj, tmux, 100060, (0, 100060),
+                                   state, reqs, pings)
+        self.assertEqual(pings, [],
+                         "a shadowed-🏁 achieved loop must NEVER be pinged")
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "an achieved loop records no re-arm (backlog empty)")
+        self.assertTrue(any("FULFILLED-SILENT" in ln for ln in (l1 + l2)), l1 + l2)
+
+    def test_proof_cache_carries_a_rearm_when_flag_scrolled_out(self):
+        # heavy post-achieve output BURIES the 🏁 past the 200-entry bounded tail;
+        # a proof recorded on an EARLIER sweep of the SAME arm still re-arms.
+        now = 1_000_000
+        mark_ts = now - 100
+        done_ts = now - 50
+        proj, tmux = self._fixture("sess-cache", mark_ts=mark_ts, done_ts=done_ts)
+        tpath = next(proj.rglob("sess-cache.jsonl"))
+        for i in range(260):                      # bury the 🏁 past the tail
+            _append_assistant(tpath, "chore %d ✅ DONE" % i, done_ts + 1 + i)
+        # the scan alone can no longer see the 🏁 (out of the 200-entry window):
+        self.assertIsNone(
+            wd.transcript_last_backlog_empty_ts(tpath, scan_back=True),
+            "the 🏁 must be scrolled out of the bounded tail for this test")
+        # pre-seed the cache as an EARLIER sweep of THIS arm would have (a fresh
+        # `seen` so the reaper keeps it; a cache-only sweep freezes `seen`):
+        state = {"goal_fulfilled_proof":
+                 {"sess-cache": {"mark_ts": mark_ts, "bts": done_ts,
+                                 "seen": now - 10}}}
+        reqs, logs, _ = self._sweep(proj, tmux, now, (7, now), state)
+        self.assertEqual(reqs.get("sess-cache", {}).get("origin"), self.ORIGIN,
+                         "the per-episode cache carries the proof when 🏁 scrolled out")
+        self.assertTrue(any("FULFILLED-REARM" in ln for ln in logs), logs)
+        # a cache-only hit must NOT refresh `seen` (else a scrolled-out proof
+        # would never age out) -- it stays FROZEN at the pre-seeded value:
+        self.assertEqual(
+            state["goal_fulfilled_proof"]["sess-cache"]["seen"], now - 10,
+            "a cache-only sweep freezes `seen` (never refreshes it)")
+
+    def test_proof_cache_from_a_different_arm_is_ignored(self):
+        # a cache from a PREVIOUS arm (mark_ts M1) whose 🏁 (bts) is RECENT enough
+        # to pass the current arm's bts>=mark_ts ordering gate on its own -> the
+        # ONLY thing preventing a cross-episode false re-arm is the mark_ts match.
+        # (Fixture is chosen so the ordering gate alone does NOT catch it: bts is
+        # AFTER the current arm; the guard's teeth are on the mark_ts mismatch.)
+        now = 1_000_000
+        m2 = now - 3000                          # the CURRENT arm
+        proj, tmux = self._fixture("sess-stalecache",
+                                   last_text="bežný ✅ DONE (žiadne 🏁)",
+                                   mark_ts=m2, done_ts=now - 50)
+        state = {"goal_fulfilled_proof":
+                 {"sess-stalecache":
+                  {"mark_ts": now - 5000, "bts": now - 100,
+                   "seen": now - 10}}}          # M1 != M2; bts>M2; fresh `seen`
+        reqs, _logs, _ = self._sweep(proj, tmux, now, (7, now), state)
+        self.assertEqual(reqs, {},
+                         "a cache from a DIFFERENT arm (mark mismatch) never re-arms")
+
+    def test_proof_cache_is_written_on_a_rearm_sweep(self):
+        # a 🏁-in-window rearm sweep persists the proof for the current arm, with
+        # `seen` refreshed to `now` (the scan re-found the 🏁 this sweep).
+        proj, tmux = self._shadowed_fixture("sess-writecache")
+        state = {}
+        self._sweep(proj, tmux, 100000, (7, 100000), state)
+        proof = state.get("goal_fulfilled_proof", {}).get("sess-writecache")
+        self.assertIsInstance(proof, dict, "the sweep persists the 🏁 proof")
+        self.assertEqual(proof.get("mark_ts"), 500)
+        self.assertEqual(proof.get("bts"), 600.0)
+        self.assertEqual(proof.get("seen"), 100000,
+                         "an in-window scan-find refreshes `seen` to now")
+
+    def test_proof_cache_written_on_the_veto_branch_too(self):
+        # the #766 veto branch (open==0) ALSO persists the proof (the comment
+        # claims "veto AND rearm branches BOTH reach the write").
+        proj, tmux = self._shadowed_fixture("sess-vwrite")
+        state = {}
+        self._sweep(proj, tmux, 100000, (0, 100000), state)
+        proof = state.get("goal_fulfilled_proof", {}).get("sess-vwrite")
+        self.assertIsInstance(proof, dict,
+                              "the open==0 veto sweep persists the 🏁 proof too")
+        self.assertEqual(proof.get("bts"), 600.0)
+
+    def test_malformed_proof_cache_entry_is_ignored_not_crash(self):
+        # a non-dict / bts-non-numeric cache entry degrades to "no cache" (the
+        # isinstance guards), never a crash; with no 🏁 in-transcript -> no rearm.
+        proj, tmux = self._fixture("sess-bad",
+                                   last_text="bežný ✅ DONE (žiadne 🏁)")
+        for bad in ("a string", {"mark_ts": 500, "bts": "nope", "seen": 99999}):
+            state = {"goal_fulfilled_proof": {"sess-bad": bad}}
+            reqs, _logs, _ = self._sweep(proj, tmux, 100000, (7, 100000), state)
+            self.assertEqual(reqs, {},
+                             "a malformed cache entry never re-arms (%r)" % (bad,))
+
+    def test_proof_cache_reaper_prunes_stale_and_malformed(self):
+        # the goal_dark_watch reaper drops entries whose `seen` is missing /
+        # malformed / older than 24h, and keeps a fresh well-formed one.
+        now = 1_000_000
+        day = 24 * 3600
+        proj, tmux = self._fixture("sess-reap",
+                                   last_text="bežný ✅ DONE (žiadne 🏁)")
+        state = {"goal_fulfilled_proof": {
+            "old": {"mark_ts": 1, "bts": 2, "seen": now - day - 100},   # stale
+            "noseen": {"mark_ts": 1, "bts": 2},                         # legacy
+            "badseen": {"mark_ts": 1, "bts": 2, "seen": "x"},           # malformed
+            "notadict": 42,                                             # malformed
+            "fresh": {"mark_ts": 1, "bts": 2, "seen": now - 10},        # kept
+        }}
+        self._sweep(proj, tmux, now, (7, now), state)
+        proof = state.get("goal_fulfilled_proof", {})
+        self.assertEqual(set(proof), {"fresh"},
+                         "reaper keeps only the fresh well-formed entry")
+
+    def test_non_flag_dead_loop_still_falls_through_unchanged(self):
+        # a genuinely-dead loop (NO 🏁 anywhere, no cache) is NOT this lane:
+        # records no fulfilled-rearm and debounces on its first observation.
+        proj, tmux = self._fixture("sess-dead", last_text="pracujem... (žiadne 🏁)")
+        state = {}
+        reqs, logs, _ = self._sweep(proj, tmux, 100000, (7, 100000), state)
+        self.assertEqual(reqs, {}, "no 🏁 -> the fulfilled lane never fires")
+        self.assertNotIn("sess-dead", state.get("goal_fulfilled_proof", {}),
+                         "no 🏁 -> no proof cache entry written")
+        self.assertTrue(any("first observation" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
