@@ -32,7 +32,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import airuleset  # noqa: E402
 import watchdog as wd  # noqa: E402,F401
 from watchdog import queue_arrival_recheck as qa  # noqa: E402
 from watchdog import ops_wait_recheck as ow  # noqa: E402
