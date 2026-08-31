@@ -187,10 +187,11 @@ class TestMarekInventory(unittest.TestCase):
 
 class TestMarekConnectAllowlistScoped(unittest.TestCase):
     """The heart of the boundary: marek's ttyd child reads marek's inventory,
-    so connect_main can ONLY resolve his own five-member set — never another
-    stream's, another person's, or a david id. (#661 rework 2026-08-25: dev1/
-    dev2 moved OUT of the foreign list — the owner explicitly granted marek his
-    own dev1/dev2 session tabs, so those ids are now HIS lane entries.)"""
+    so connect_main can ONLY resolve his own six-member set (#787 added
+    montalu2-subdev) — never another stream's, another person's, or a david
+    id. (#661 rework 2026-08-25: dev1/dev2 moved OUT of the foreign list —
+    the owner explicitly granted marek his own dev1/dev2 session tabs, so
+    those ids are now HIS lane entries.)"""
 
     def _marek_inv_file(self):
         d = tempfile.mkdtemp()
