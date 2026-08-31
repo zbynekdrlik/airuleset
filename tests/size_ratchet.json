@@ -406,7 +406,7 @@
     "watchdog/pane_classify.py": 533,
     "watchdog/pane_text.py": 199,
     "watchdog/questions.py": 678,
-    "watchdog/reaper.py": 399,
+    "watchdog/reaper.py": 412,
     "watchdog/release_gap.py": 507,
     "watchdog/repo_health.py": 906,
     "watchdog/session_status.py": 400,

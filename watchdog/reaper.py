@@ -247,7 +247,16 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
 # repeated rule: Android/JVM/RN builds run on dev2 (the build+emulator lane),
 # NEVER on a shared-stream box. `hooks/block-heavy-build-toolchain.sh` (Layer 1)
 # stops a NEW launch on a shared-stream box; this reaper (Layer 2) is the
-# backstop that kills anything already running or orphaned. Same #776 pattern.
+# backstop that kills any of these BANNED DAEMONS already running or orphaned.
+# Same #776 pattern.
+#
+# The kill set is DELIBERATELY the persistent daemons / VM backends (the memory
+# hogs #774 named), NOT every build JVM: a transient Gradle WORKER JVM
+# (`org.gradle.process.internal.worker.GradleWorkerMain`) or an ad-hoc
+# `javac`/`java` compile is NOT reaped — those are short-lived and blocking
+# their LAUNCH is Layer 1's job, so anchoring the reaper on the long-lived
+# daemon main-classes keeps it fail-safe (never a false kill) without guessing
+# at every build-JVM shape.
 # --------------------------------------------------------------------------- #
 
 # The box-class marker a `push`/`install` writes on every target (a shared box
@@ -267,14 +276,18 @@ KOTLIN_DAEMON_CLASS = "org.jetbrains.kotlin.daemon.KotlinCompileDaemon"
 
 
 def default_box_class(path=None):
-    """The box-class marker's stripped content (`shared-stream`/`workstation`/
-    …), or None when the marker is missing/unreadable/empty. Fail-open: a read
-    error is never a shared-stream classification."""
+    """The box-class marker's stripped FIRST line (`shared-stream`/
+    `workstation`/…), or None when the marker is missing/unreadable/empty.
+    Reads the first line (whitespace-stripped) so it agrees byte-for-byte with
+    `block-heavy-build-toolchain.sh`'s `cat | head -1 | tr -d '[:space:]'` on
+    any content, not only the single clean line the writer emits. Fail-open: a
+    read error — OSError OR a non-UTF8/binary marker (UnicodeDecodeError, a
+    ValueError) — is never a shared-stream classification."""
     p = os.path.expanduser(path or BOX_CLASS_PATH)
     try:
         with open(p, "r") as fh:
-            return fh.read().strip() or None
-    except OSError:
+            return fh.readline().strip() or None
+    except (OSError, ValueError):
         return None
 
 

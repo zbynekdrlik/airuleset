@@ -133,6 +133,26 @@ class TestBoxClass(unittest.TestCase):
             raise RuntimeError("cannot read")
         self.assertFalse(is_shared_stream_box(boom))
 
+    def test_binary_marker_fails_open_not_shared(self):
+        # a non-UTF8 / garbage marker (UnicodeDecodeError is a ValueError, NOT
+        # an OSError) must return None, never raise — matches the docstring.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "airuleset-box-class")
+            with open(p, "wb") as fh:
+                fh.write(b"\xff\xfe\x00garbage")
+            self.assertIsNone(default_box_class(p))
+            self.assertFalse(is_shared_stream_box(lambda: default_box_class(p)))
+
+    def test_multiline_marker_reads_first_line_only(self):
+        # first-line semantics agree with the hook's `head -1`; a trailing junk
+        # line never flips or breaks the classification.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "airuleset-box-class")
+            with open(p, "w") as fh:
+                fh.write("shared-stream\nstale second line\n")
+            self.assertEqual(default_box_class(p), "shared-stream")
+            self.assertTrue(is_shared_stream_box(lambda: default_box_class(p)))
+
 
 class TestHeavyBuildReaper(unittest.TestCase):
     # ---- kill-on-sight ON a shared-stream box --------------------------
