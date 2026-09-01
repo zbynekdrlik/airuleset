@@ -187,6 +187,13 @@ CANONICAL_SWEEP = [
     JobSpec("heavy_build_reaper", "wd", "heavy_build_reaper",
             "reaper_ps_fetch", _stub_fetch, "list",
             "heavy-build-reaper error"),
+    # (39) — #775 shared-stream resource-guard verify (VERIFY-ONLY, shared-stream
+    # box only). A NEW gate seam `resource_guard_gk_request` (the gk-request
+    # filer) — unlike Job 38 it does NOT reuse the reaper seams; the box-class +
+    # cgroup gates live inside resource_guard_verify.
+    JobSpec("resource_guard_verify", "wd", "resource_guard_verify",
+            "resource_guard_gk_request", _stub_fetch, "list",
+            "resource-guard-verify error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

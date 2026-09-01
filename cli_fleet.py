@@ -432,3 +432,33 @@ STREAM_RENAME_ALIASES = {
     "david": "david1",
     "simap": "simap1",
 }
+
+
+# --- #775: shared-stream resource-guard apply targets ----------------------
+# The box(es) that run N isolated reduced-authority Claude stream users
+# (`AUTHORITY_BY_USER`) and therefore need per-user systemd cgroup ceilings so a
+# single stream can never OOM-collapse the whole box (subdev incident
+# 2026-08-31). DATA-ONLY, like REMOTE_HOSTS above.
+#
+# `admin_user`/`identity` = the ROOT apply path: stream accounts are sudo-less,
+# so the guardrail drop-ins (which live in /etc/systemd/system) can only be
+# installed over `ssh root@<host>` — a DIFFERENT connection from the per-user
+# deploy loop. The identity is the SAME pinned operator key the gatekeeper VPS
+# uses; the dev1→root@subdev authorization for it is a one-time GATEKEEPER-ACTION
+# bootstrap (until it lands, `provision_shared_stream_guards` is a fail-loud
+# no-op and the `watchdog.resource_guard` verify job is the backstop).
+#
+# `host` is subdev's TAILSCALE IP (the same 100.118.174.27 the montalu*/david*/
+# marek/simap1/miva1 REMOTE_HOSTS entries above all share) — stable across LAN
+# switches (#1). Every reduced-authority stream in AUTHORITY_BY_USER lives on
+# THIS box, so this single entry covers the whole shared-stream fleet;
+# `tests/test_resource_guards.py` drift-locks that (a new shared-stream host
+# cannot be added to REMOTE_HOSTS without a matching guard entry here).
+SHARED_STREAM_GUARD_HOSTS = [
+    {
+        "name": "subdev",
+        "host": "100.118.174.27",
+        "admin_user": "root",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+]
