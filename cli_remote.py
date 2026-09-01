@@ -1267,3 +1267,21 @@ def cmd_push(args):
             failed.append(("local(dev1)", "install rc=%s" % e.code))
 
     _deploy_to_all_remotes(failed, auth_failed)
+
+    # 4. Shared-stream resource guardrails (#775) — apply per-user systemd cgroup
+    # ceilings on the shared-stream boxes (subdev) over `ssh root@<host>`, so a
+    # single runaway stream can never OOM-collapse the whole box. This is a
+    # SEPARATE root connection from the per-user deploy loop above (stream
+    # accounts are sudo-less). NON-FATAL + LOUD by construction: until the
+    # dev1→root@subdev operator key is authorized (a one-time GATEKEEPER-ACTION)
+    # it is a fail-loud no-op, and the `watchdog.resource_guard` verify job is
+    # the standing backstop. `_deploy_to_all_remotes` already `sys.exit(1)`s on a
+    # failed deploy, so this runs on a clean deploy; a guard failure never fails
+    # the push (best-effort like `provision_owner_sudo`, #659).
+    print(f"\n{'=' * 50}")
+    print("Applying shared-stream resource guardrails (#775)...")
+    try:
+        airuleset.provision_shared_stream_guards()
+    except Exception as e:  # noqa: BLE001 — best-effort, never break the push
+        print("  ⚠ RESOURCE-GUARDS step error (non-fatal): %r" % e,
+              file=sys.stderr)

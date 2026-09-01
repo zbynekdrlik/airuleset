@@ -1973,6 +1973,14 @@ from watchdog.reaper import (  # noqa: E402
     is_shared_stream_box as is_shared_stream_box,
 )
 
+# #775 — Job 39, the VERIFY-ONLY shared-stream resource-guard check. Re-exported
+# so run_once's job-39 dispatch resolves the bare name (and so the docstring's
+# `resource_guard_verify` reference passes the `hasattr(wd, name)` live-job
+# check), exactly like the reaper jobs above.
+from watchdog.resource_guard import (  # noqa: E402
+    resource_guard_verify as resource_guard_verify,
+)
+
 
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
@@ -2001,8 +2009,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
              release_state_fetch=None, queue_fetch=None,
-             reaper_ps_fetch=None, reaper_kill_fn=None):
-    """Scan every `claude` pane once. 38 numbered jobs per poll — 32 LIVE and 6
+             reaper_ps_fetch=None, reaper_kill_fn=None,
+             resource_guard_gk_request=None):
+    """Scan every `claude` pane once. 39 numbered jobs per poll — 33 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2594,6 +2603,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           launch on a shared-stream box; this reaper (Layer 2) cleans up
           anything already running. See `heavy_build_reaper` in
           `watchdog/reaper.py`.
+      (39) (only when `resource_guard_gk_request` is given) SHARED-STREAM
+          RESOURCE-GUARD VERIFY (#775), SHARED-STREAM BOX ONLY — VERIFY-ONLY,
+          no killer logic (#486). Layer 3 of the subdev-OOM fix: #776 (ugrep)
+          and #778 (heavy-build) reap two known runaway signatures; this checks
+          that the mechanical per-user cgroup CEILING (`cli_resource_guards`,
+          applied by `airuleset.py push`) is actually in place, and shouts when
+          it is not. Only on a `shared-stream` box, it reads this account's OWN
+          cgroup `memory.max` (`/sys/fs/cgroup/user.slice/user-<uid>.slice/`,
+          world-readable — no root); a definitively UNLIMITED (`max`) ceiling
+          means the box runs without guardrails → one LOUD journal line + one
+          deduped gk-request per ~day (marker-file throttle). FAIL-SAFE toward
+          SILENCE (#539): off a shared-stream box, an unreadable/missing cgroup,
+          or a finite ceiling → NOTHING; `dry_run` files nothing. Machine
+          channel only, never a Discord ping (#546). See `resource_guard_verify`
+          in `watchdog/resource_guard.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4387,6 +4411,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
              dry_run=dry_run),
          "heavy-build-reaper error")
+
+    # Job 39 (#775) — VERIFY-ONLY shared-stream resource-guard check. Gated on
+    # `resource_guard_gk_request` being wired (the "wired = on" convention,
+    # network-free tests for every other job, like jobs 8/11/31/36/37/38). The
+    # box-class gate lives INSIDE resource_guard_verify (off a shared-stream box
+    # it reads no cgroup and never alarms). NO killer logic (#486) — it reads
+    # this account's own cgroup memory ceiling and, if UNLIMITED, files ONE
+    # deduped gk-request (via the wired seam) + a LOUD journal line. Fail-safe
+    # toward silence (#539); machine-channel only, never a Discord ping (#546).
+    _add("resource_guard_verify", lambda: resource_guard_gk_request is not None,
+         lambda: resource_guard_verify(
+             gk_request_fn=resource_guard_gk_request, dry_run=dry_run),
+         "resource-guard-verify error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

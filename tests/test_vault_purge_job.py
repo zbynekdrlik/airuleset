@@ -255,9 +255,16 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # closing `):` moved off the queue_fetch line onto the new one;
                # the anchor grew a last line, the mutation target
                # vault_purge=None is untouched.
+               # #775 re-pin: resource_guard_gk_request=None (job 39's
+               # VERIFY-ONLY shared-stream resource-guard gk-request seam) was
+               # appended on a NEW trailing line after reaper_kill_fn, so the
+               # closing `):` moved off the reaper line onto the new one; the
+               # anchor grew a last line, the mutation target vault_purge=None
+               # is untouched.
                "             gkorphan_fetch=None, gkorphan_handoff_fetch=None,\n"
                "             release_state_fetch=None, queue_fetch=None,\n"
-               "             reaper_ps_fetch=None, reaper_kill_fn=None):")
+               "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
+               "             resource_guard_gk_request=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
