@@ -4759,8 +4759,21 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _rdue, _ = _resurrect.due(_dentry, now)
         if _rdue:
             _rpane = _resurrect.find_pane(_dcwd, run)
+            # mode-4 -- the HARD recent-human veto on the relaunch keystroke: all
+            # 3 signals (presence marker for the dead sid, its last transcript
+            # human prompt, and the attached tmux client's input on THIS pane).
+            # A dead session's transcript is static, so signal 3 (a human at the
+            # bare-shell pane NOW) is the operative one; signals 1/2 are threaded
+            # for completeness. Only evaluated when a relaunch pane exists.
+            _rhuman, _rreason = (False, "")
+            if _rpane is not None:
+                _rtinfo = watchdog.find_active_transcript(projects_dir, _dcwd)
+                _rhuman, _rreason = watchdog._goal_autoarm_recent_human_activity(
+                    _dentry.get("sid", ""), _rtinfo[0] if _rtinfo else None, now,
+                    pane_target=_rpane, run=run)
             _rlog, _ract = _resurrect.decide(
-                _dentry, _dloc, _rpane, _resurrect.action_enabled(), dry_run)
+                _dentry, _dloc, _rpane, _rhuman, _rreason,
+                _resurrect.action_enabled(), dry_run)
             logs.append(_rlog)
             _dentry["rgts"] = now
             roster_dirty = True

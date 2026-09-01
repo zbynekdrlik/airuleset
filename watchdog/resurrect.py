@@ -92,17 +92,23 @@ def launch_cmd(entry):
     return _LAUNCH_FRESH if fails >= RESURRECT_MAX_FAILS else _LAUNCH_CONTINUE
 
 
-def decide(entry, loc, pane, enabled, dry_run):
+def decide(entry, loc, pane, human_recent, human_reason, enabled, dry_run):
     """PURE mode-5 RESURRECT verdict for a DEAD roster entry the caller already
     found `due`. Returns `(log_line, act)` — a single explicit decision-log line
     (#486 structured state, no pane-render heuristic) plus `act`, True ONLY when
     a live relaunch keystroke should fire. `act` requires ALL of: a bare-shell
-    relaunch pane was found, the opt-in flag ON, and not a dry-run. The CALLER
-    owns the keystroke + the `rgts` cadence anchor (re-spaced on EVERY outcome
-    so a persistent veto never floods); this function only decides and composes
-    the line. `loc` is the human project label; `cmd` is the staged launch
-    command (`claude --continue` until #805's fail-count fallback to a fresh
-    `claude`).
+    relaunch pane was found, NO recent human on it (the mode-4 HARD veto — the
+    owner's hardest rule `feedback_never_touch_stopped_sessions`; never keystroke
+    a human-active pane), the opt-in flag ON, and not a dry-run. The CALLER owns
+    the keystroke + the `rgts` cadence anchor (re-spaced on EVERY outcome so a
+    persistent veto never floods); this function only decides and composes the
+    line. `loc` is the human project label; `cmd` is the staged launch command
+    (`claude --continue` until #805's fail-count fallback to a fresh `claude`).
+
+    Gate order is deliberate: no-pane first (nothing to type into), then the
+    recent-human HARD veto (a human-active pane is NEVER keystroked — logged with
+    the vetoing signal — even with the flag ON), then the opt-in flag, then
+    dry-run.
 
     The relaunch itself is NOT booked as "delivered": a shell-command launch
     into a bare bash prompt is outside `send_verified`'s CC-input-box domain (it
@@ -117,6 +123,10 @@ def decide(entry, loc, pane, enabled, dry_run):
     if pane is None:
         return ("resurrect %s -> skip:no-relaunch-pane "
                 "(no bare-idle shell in the dead cwd)" % loc, False)
+    if human_recent:
+        return ("resurrect %s -> skip:recent-human HARD veto (%s) — never "
+                "keystroke a human-active pane" % (loc, human_reason or "?"),
+                False)
     if not enabled:
         return ("resurrect %s -> would relaunch (%s) -- disabled "
                 "(AIRULESET_RESURRECT_ACTION off)" % (loc, cmd), False)
