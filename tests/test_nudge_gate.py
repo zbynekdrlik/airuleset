@@ -113,6 +113,17 @@ class TestGateOk(unittest.TestCase):
         self.assertTrue(ng.gate_ok({"nudge_cadence": {"s": {"release-gap":
                                     "nan"}}}, "s", "u-freshness", NOW))
 
+    def test_future_skewed_ts_fails_safe_to_allow(self):
+        # a FUTURE / corrupt-huge ts must NOT permanently mute the session (a
+        # clamp-to-now would defer FOREVER, since a re-read future ts re-clamps
+        # to now every call — the worst direction for the owner's ONLY question
+        # surface). It is ignored → the gate ALLOWS, and the next mark_sent
+        # overwrites it with `now`. Both the per-category floor AND the family
+        # gap must self-heal this way.
+        st = {"nudge_cadence": {"s": {"u-freshness": NOW + 10 ** 9}}}
+        self.assertTrue(ng.gate_ok(st, "s", "u-freshness", NOW))   # own floor
+        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW))   # family gap
+
 
 class TestMarkSent(unittest.TestCase):
     def test_mark_sent_records_per_sid_per_category(self):

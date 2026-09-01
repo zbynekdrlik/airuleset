@@ -164,13 +164,18 @@ class TestLaneOccupancyGate(_Base):
                          "a closed family gate must DEFER the lane nudge")
         self.assertTrue(any("cadence-gate" in ln for ln in logs))
 
-    def test_control_open_gate_delivers(self):
+    def test_control_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
-        logs, owns = self._run(tmux, {})
+        state = {}
+        logs, owns = self._run(tmux, state)
         self.assertFalse(any("cadence-gate" in ln for ln in logs), logs)
         self.assertNotEqual(tmux.typed_texts(), [],
                             "with an open gate the lane nudge is delivered "
                             "(control: the defer is the gate, not the harness)")
+        # the delivered lane nudge stamps the shared cadence clock so a sibling
+        # family category defers within the family gap (RED if the lane rider's
+        # mark_sent is reverted — the burst fix would half-die silently).
+        self.assertEqual(state["nudge_cadence"][self.sid]["lane-occupancy"], NOW)
 
 
 if __name__ == "__main__":

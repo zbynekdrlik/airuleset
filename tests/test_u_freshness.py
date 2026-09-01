@@ -251,12 +251,17 @@ class TestOrchestrator(_OrchBase):
     def test_swallowed_send_bounded_retry(self):
         urecs = {self.sid: {"first_seen": NOW - DAY, "last_nudge": None}}
         tmux = self._tmux(enters_swallowed=5)
+        state = {}
         logs = self._run(urecs, lambda cwd: (5, FRESH_TS), tmux, handled=set(),
-                         state={})
+                         state=state)
         # a genuine swallow does NOT advance last_nudge (retries next sweep) and
         # books a failure toward the bounded retry cap.
         self.assertIsNone(urecs[self.sid]["last_nudge"])
         self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        # a swallowed send must NOT stamp the shared cadence clock (else a real
+        # swallow would still start the 1x/hour strop — RED if mark_sent moved
+        # above the delivered check).
+        self.assertNotIn("nudge_cadence", state)
 
 
 # --------------------------------------------------------------------------- #
@@ -330,6 +335,51 @@ class TestLaneSweepWiring(unittest.TestCase):
         state = {}
         sid, tmux = self._armed_sweep(state, u_fetch=lambda cwd: (0, FRESH_TS))
         self.assertEqual(tmux.typed_texts(), [])
+
+
+# --------------------------------------------------------------------------- #
+# 5. run_once + cmd_watchdog wiring (signature + threading + the real fetch).
+#    Mirrors tests/test_queue_arrival_recheck.py::TestRunOnceWiring — without
+#    these the whole rider is mutant-survivable: TestLaneSweepWiring drives
+#    goal_lane_sweep directly, so reverting the run_once/cmd_watchdog seams
+#    silently disables u-freshness in production with no red test (#797 review).
+# --------------------------------------------------------------------------- #
+
+class TestRunOnceWiring(unittest.TestCase):
+    def test_run_once_accepts_u_fetch(self):
+        import inspect
+        self.assertIn("u_fetch",
+                      inspect.signature(wd.run_once).parameters)
+
+    def test_goal_lane_sweep_accepts_u_fetch(self):
+        import inspect
+        self.assertIn("u_fetch",
+                      inspect.signature(goal.goal_lane_sweep).parameters)
+
+    def test_run_once_threads_it_into_the_sweep(self):
+        import inspect
+        self.assertIn("u_fetch=u_fetch", inspect.getsource(wd.run_once))
+
+    def test_cmd_watchdog_wires_the_real_fetch(self):
+        import inspect
+        self.assertIn("u_fetch=_watchdog_u_fetch",
+                      inspect.getsource(airuleset.cmd_watchdog))
+
+    def test_real_fetch_reads_user_waiting_and_ts(self):
+        # `_watchdog_u_fetch` returns (user_waiting, ts) from
+        # statusbar.obligation_partition — the 2nd and 5th of its 5-tuple.
+        with m.patch("statusbar.obligation_partition",
+                     return_value=(7, 4, 2, None, 12345.0)):
+            uw, ts = airuleset._watchdog_u_fetch("/some/cwd")
+        self.assertEqual(uw, 4)
+        self.assertEqual(ts, 12345.0)
+
+    def test_real_fetch_fails_safe_on_error(self):
+        with m.patch("statusbar.obligation_partition",
+                     side_effect=RuntimeError("cache blew up")):
+            uw, ts = airuleset._watchdog_u_fetch("/some/cwd")
+        self.assertIsNone(uw)
+        self.assertIsNone(ts)
 
 
 if __name__ == "__main__":

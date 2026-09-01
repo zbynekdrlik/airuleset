@@ -4529,10 +4529,11 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 now, run, rrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 release_state_fetch=release_state_fetch, state=state,
                 sleep_fn=sleep_fn, captured=captured)  # #749 busy-pane gate
-        # #733 -- gk queue-ARRIVAL watcher for this armed pane; runs LAST (a pane
-        # an earlier keystroke job typed is deferred), owns its own handled +
-        # busy-gate check + verified send + dry-run-safe writes, full-authority
-        # gated (#616 MIRROR).
+        # #733 -- gk queue-ARRIVAL watcher for this armed pane; runs after the
+        # release-gap rider (a pane an earlier keystroke job typed is deferred),
+        # owns its own handled + busy-gate check + verified send + dry-run-safe
+        # writes, full-authority gated (#616 MIRROR). (#797 added the u-freshness
+        # rider AFTER this one — this is no longer the last rider in the loop.)
         if queue_fetch is not None:
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,

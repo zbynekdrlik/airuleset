@@ -177,7 +177,7 @@ def _nudge_text(u_count):
 
 # --- BOUNDED RETRY ---------------------------------------------------------
 
-def _book_unverified_send(rec, new_rec, loc, u_count, now, cadence):
+def _book_unverified_send(rec, new_rec, loc, u_count, now):
     """#714 bounded retry: book ONE undelivered send onto the persisted rec
     (`new_rec` IS `urecs[sid]`, so mutation persists). Under MAX_SEND_FAILS it
     increments the consecutive-failure counter and retries next sweep (last_nudge
@@ -348,8 +348,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
         # bounded so a persistently-swallowing NON-busy pane backs off after
         # MAX_SEND_FAILS. send_verified already backed our text OUT of the box on a
         # genuine swallow, so nothing parks; sid NOT claimed, gate NOT marked.
-        logs.append(_book_unverified_send(rec, new_rec, loc, u_count, now,
-                                          _nudge_gate._u_cadence()))
+        logs.append(_book_unverified_send(rec, new_rec, loc, u_count, now))
         return logs
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now

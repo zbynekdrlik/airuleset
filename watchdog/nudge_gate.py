@@ -125,13 +125,37 @@ def _ts(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def _gate_ts(v, now):
+    """A numeric timestamp that is NOT in the future, else None. A ts strictly
+    greater than `now` cannot be a real 'last delivered' time (you can't have
+    nudged in the future) — it is a corrupt/huge value or cross-clock skew, so it
+    is IGNORED (treated as no-prior-nudge → the gate ALLOWS). This is the module's
+    own fail-safe promise (docstring: 'a malformed/corrupt gate entry reads as no
+    prior nudge → gate_ok ALLOWS … never SUPPRESS a legit nudge') applied to the
+    NUMERIC-skew class, not only the non-numeric one. It genuinely self-heals: the
+    corrupt entry is ignored, the gate allows, and the next real `mark_sent`
+    overwrites it with `now`. NOT a clamp-to-`now` (which would make `now - ts ==
+    0 < floor` → defer FOREVER, since a re-read future ts re-clamps to `now` every
+    call — a permanent mute of u-freshness, the owner's ONLY question surface, the
+    exact worst direction). `_stale_entry` keeps a future ts as fresh (its own safe
+    direction, #519), so this stays local to the gate decision. Within the
+    single-box watchdog `now` is monotone and a real ts is always ≤ `now`, so a
+    future ts never arises from normal operation — ignoring it only affects the
+    genuinely-corrupt case, where ALLOW is correct (a duplicate nudge is far less
+    harmful than a permanent mute; #752 treats future-skew as a real class)."""
+    ts = _ts(v)
+    return None if ts is None or ts > now else ts
+
+
 def gate_ok(state, sid, category, now):
     """True iff a nudge of `category` to `sid` is allowed at `now` — see the
     module docstring for (a) the per-category floor and (b) the family spacing.
-    Fail-safe ALLOWS on any malformed state (never suppress a legit nudge)."""
+    Fail-safe ALLOWS on any malformed state (never suppress a legit nudge) —
+    including a FUTURE-skewed / corrupt-huge numeric ts, which `_gate_ts` ignores
+    so it can never mute a session indefinitely."""
     sess = _session(state, sid)
     # (a) per-category floor — only u-freshness carries a non-zero one.
-    last_cat = _ts(sess.get(category))
+    last_cat = _gate_ts(sess.get(category), now)
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False
     # (b) family spacing — any OTHER gated-family category within the gap defers.
@@ -139,7 +163,7 @@ def gate_ok(state, sid, category, now):
     for cat, raw in sess.items():
         if cat == category:
             continue
-        ts = _ts(raw)
+        ts = _gate_ts(raw, now)
         if ts is not None and now - ts < gap:
             return False
     return True
