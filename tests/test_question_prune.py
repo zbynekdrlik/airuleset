@@ -198,23 +198,13 @@ class TranscriptFoundBySessionId(unittest.TestCase):
 # QuestionMap tests); THIS is what turns an old, still-unanswered `ts` into
 # a fresh re-post instead of a no-op.
 # --------------------------------------------------------------------------- #
-class InSleepWindow(unittest.TestCase):
-    def _at(self, hh, mm=0):
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        tz = ZoneInfo("Europe/Bratislava")
-        return datetime.now(tz).replace(hour=hh, minute=mm, second=0,
-                                        microsecond=0).timestamp()
-
-    def test_midnight_through_559_is_asleep(self):
-        self.assertTrue(wd._in_sleep_window(self._at(0, 0)))
-        self.assertTrue(wd._in_sleep_window(self._at(3, 30)))
-        self.assertTrue(wd._in_sleep_window(self._at(5, 59)))
-
-    def test_six_and_later_is_awake(self):
-        self.assertFalse(wd._in_sleep_window(self._at(6, 0)))
-        self.assertFalse(wd._in_sleep_window(self._at(12, 0)))
-        self.assertFalse(wd._in_sleep_window(self._at(23, 59)))
+class NoSleepWindowGate(unittest.TestCase):
+    # #791: the 00:00-05:59 `_in_sleep_window` helper was DELETED — there is
+    # no night/day difference, so the watchdog carries no night-hour gate at
+    # all. Guard against a re-introduction.
+    def test_in_sleep_window_helper_is_gone(self):
+        self.assertFalse(hasattr(wd, "_in_sleep_window"),
+                         "the night-hour gate must stay removed (#791)")
 
 
 class RepingStaleQuestions(unittest.TestCase):
@@ -225,14 +215,10 @@ class RepingStaleQuestions(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
-        # Pinned to LOCAL NOON of the current day, never bare time.time():
-        # reping_stale_questions defers inside the 00:00-05:59 local sleep
-        # window by design, so a wall-clock `now` made this whole class
-        # time-of-day dependent -- green all day, 6 failures in the first
-        # after-midnight gate run (found live 2026-08-13 00:04 CEST).
-        # Noon is deterministically outside the window in every timezone
-        # offset this fleet runs. The sleep-window branch itself is
-        # covered by its own explicit night-timestamp test.
+        # A deterministic pinned timestamp (local noon of the current day),
+        # kept for reproducibility. #791 removed the night-hour gate, so
+        # reping_stale_questions now re-asks 24/7 with no time-of-day
+        # dependence at all -- the pin is no longer load-bearing, just tidy.
         _lt = time.localtime()
         self.now = time.mktime(
             (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
@@ -271,7 +257,9 @@ class RepingStaleQuestions(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("888001", notify.load_questions(self.qpath))
 
-    def test_sleep_window_defers_without_touching_ts_or_sending(self):
+    def test_due_question_is_reasked_at_night_too(self):
+        # #791: no sleep-window deferral — a due question re-asks regardless
+        # of the hour. A 03:00 timestamp must still POST.
         from datetime import datetime
         from zoneinfo import ZoneInfo
         night_now = datetime.now(ZoneInfo("Europe/Bratislava")).replace(
@@ -279,10 +267,10 @@ class RepingStaleQuestions(unittest.TestCase):
         old_ts = night_now - wd.QUESTION_REPING_S - 10
         self._record("888001", old_ts)
         send_fn, calls = self._fake_send()
+        self._patch_channel()
         logs = wd.reping_stale_questions(night_now, send_fn, path=self.qpath)
-        self.assertEqual(calls, [])
-        self.assertTrue(any("deferred sleep-window" in ln for ln in logs), logs)
-        self.assertIn("888001", notify.load_questions(self.qpath))
+        self.assertEqual(len(calls), 1)                 # posted, not deferred
+        self.assertFalse(any("deferred sleep-window" in ln for ln in logs), logs)
 
     def _patch_channel(self, value="777001"):
         # reping re-resolves notification_channel(env=None) itself, which
@@ -544,7 +532,8 @@ class GhostPairRepingsOnceAfterCollapse(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.projects = Path(self.tmp.name) / "projects"
-        # Same local-noon pin as RepingStaleQuestions (sleep-window safety).
+        # Same deterministic local-noon pin as RepingStaleQuestions (#791
+        # removed the night-hour gate; the pin is just for reproducibility).
         _lt = time.localtime()
         self.now = time.mktime(
             (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))

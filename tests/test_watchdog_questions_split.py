@@ -65,7 +65,6 @@ MOVED_NAMES = [
     "_last_real_turn_ts",
     "_transcript_for_session",
     "prune_answered_questions",
-    "_in_sleep_window",
     "reping_stale_questions",
     # (#707: reping_owner_decision_tickets stays as a permanent no-op
     # tombstone; its _fetch_owner_decision_tickets /
@@ -171,7 +170,10 @@ class CoMovedCrossCallsGoThroughPackageSeam(unittest.TestCase):
             any("answered in-session" in ln and "SENTLBL" in ln for ln in logs),
             logs)
 
-    def test_reping_stale_observes_patched_sleep_window(self):
+    def test_reping_stale_reasks_24_7_no_night_gate(self):
+        # #791: the sleep-window gate was DELETED — a due question re-asks
+        # regardless of the hour. A `now` that used to fall inside the old
+        # 00:00-05:59 window (10**9 == 03:46 CEST) must POST, not defer.
         qmap = {"qdue01": {"session": "s", "cwd": "/c", "ts": 0, "block": "BLK"}}
         sends = []
 
@@ -179,32 +181,22 @@ class CoMovedCrossCallsGoThroughPackageSeam(unittest.TestCase):
             sends.append((a, k))
             return ("sent", "mid")
 
-        # NOON epoch (2024-01-01 12:00 CET, hour 12) -- OUTSIDE the sleep
-        # window, so the REAL _in_sleep_window returns False here. That is what
-        # gives the patch teeth: a bare-revert of `watchdog._in_sleep_window`
-        # inside reping_stale would compute night=False and SEND, failing both
-        # assertions. (A now inside the window, e.g. 10**9 == 03:46 CEST, reads
-        # True for real, so a bare-revert would still defer and the test would
-        # pass -- no teeth; round-1 review MINOR.)
         with mock.patch("notify.load_questions", return_value=dict(qmap)), \
-             mock.patch.object(wd, "_in_sleep_window", return_value=True), \
              mock.patch.object(wd, "project_label", return_value="L"):
-            logs = wd.reping_stale_questions(1704106800, send_fn, path=None)
-        self.assertTrue(any("deferred sleep-window" in ln for ln in logs), logs)
-        self.assertEqual(sends, [])   # night -> nothing sent
+            logs = wd.reping_stale_questions(10 ** 9, send_fn, path=None)
+        self.assertEqual(len(sends), 1)   # posted even at a former-night hour
+        self.assertFalse(any("deferred sleep-window" in ln for ln in logs), logs)
 
     def test_reping_owner_tombstone_touches_no_seams(self):
         # #707: reping_owner_decision_tickets is a PERMANENT NO-OP tombstone —
-        # the two seam tests that used to live here (patched _in_sleep_window /
+        # the seam tests that used to live here (patched _in_sleep_window /
         # _owner_decision_digest_block observation) locked behavior of the
-        # ABOLISHED digest and were removed with it. The tombstone must reach
-        # NO seam at all: neither the sleep window nor _box_authority, even
-        # fully wired.
+        # ABOLISHED digest and were removed with it (#791 deleted the sleep
+        # window entirely). The tombstone must reach NO seam at all: not
+        # _box_authority, even fully wired.
         touched = []
         state = {}
-        with mock.patch.object(wd, "_in_sleep_window",
-                               side_effect=lambda *a, **k: touched.append("sleep")), \
-             mock.patch.object(wd, "_box_authority",
+        with mock.patch.object(wd, "_box_authority",
                                side_effect=lambda: touched.append("auth")):
             out = wd.reping_owner_decision_tickets(
                 10 ** 9, lambda *a, **k: "sent", state,

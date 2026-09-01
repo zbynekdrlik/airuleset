@@ -31,7 +31,6 @@ def read(rel):
 class TestQuestionPolicy(TestCase):
     def test_marker_rule_asks_the_moment_and_always_pings(self):
         t = read("modules/core/message-status-marker.md")
-        self.assertIn("Europe/Bratislava", t)
         self.assertIn("ASKED THE MOMENT", t)
         # A question ALWAYS pings — the core fix (removes the suppression bug).
         self.assertIn("ALWAYS pings the phone", t)
@@ -39,8 +38,11 @@ class TestQuestionPolicy(TestCase):
         self.assertIn("❓ ASKED", t)
         self.assertIn("❓ NEEDS YOU", t)
         self.assertIn("ask-and-continue", t)
-        # Lock the sleep-window hours so a silent window change trips.
-        self.assertIn("00..05", t)
+        # #791: NO night/day difference — the sleep window is GONE. Lock the
+        # 24/7 doctrine and guard against a silent re-introduction.
+        self.assertIn("24/7", t)
+        self.assertNotIn("sleep window", t)
+        self.assertNotIn("00..05", t)
         # The old defer-by-default clause must be gone.
         self.assertNotIn("a per-ticket question is ALWAYS deferred", t)
 
@@ -75,15 +77,15 @@ class TestQuestionPolicy(TestCase):
 
     def test_autopilot_skill_ask_and_continue_with_ping(self):
         t = read("skills/autopilot/SKILL.md")
-        self.assertIn("Europe/Bratislava", t)
         # New model: ASK NOW (it pings) + ask-and-continue OR block.
         self.assertIn("ASK NOW", t)
         self.assertIn("ASK-AND-CONTINUE", t)
         self.assertIn("❓ ASKED", t)
         self.assertIn("needs-answer", t)
-        # Lock the hour boundaries: defer 00..05, ask from 06:00.
-        self.assertIn("00..05", t)
-        self.assertIn("06:00", t)
+        # #791: NO night/day difference — 24/7, no sleep window, no hour gate.
+        self.assertIn("24/7", t)
+        self.assertNotIn("sleep window", t)
+        self.assertNotIn("00..05", t)
         # The reproach / false-stop must be explicitly banned.
         self.assertIn("čakajú na tvoje odpovede", t)
         # The old "ASK NOW and HOLD, block the whole loop" wording must be gone.
@@ -95,8 +97,10 @@ class TestQuestionPolicy(TestCase):
         self.assertIn("ASK THE MOMENT", t)
         self.assertIn("MUST ping the phone", t)
         self.assertIn("❓ ASKED", t)
-        self.assertIn("Europe/Bratislava", t)
-        self.assertIn("00..05", t)
+        # #791: NO night/day difference — 24/7, no sleep window, no hour gate.
+        self.assertIn("24/7", t)
+        self.assertNotIn("sleep window", t)
+        self.assertNotIn("00..05", t)
 
     def test_questions_must_be_self_contained(self):
         # The #1 repeated complaint: questions assume context the away user does not
@@ -134,50 +138,49 @@ if __name__ == "__main__":
     main()
 
 
-class TestSleepWindowNecessaryQuestion(TestCase):
-    """User (2026-07-06): "nezakázal som v noci robiť, len obmedziť otázkovanie
-    ak je čo iné robiť; ak je otázka nutná, treba ju položiť." The sleep window
-    defers a question ONLY while other answer-independent work exists. When
-    nothing else is workable the question is NECESSARY and is asked (❓ NEEDS
-    YOU, it pings) even at night — otherwise a /goal-armed blocked session can
-    neither ask nor stop (condition (A) needs the ❓) and spins '⏳ parked'
-    turns into the 9-consecutive-block cap (camera-box overnight wall,
-    2026-07-06: 8× "sleep window — parked" + forced turn end)."""
+class TestNoNightDayDifference(TestCase):
+    """#791 (owner directive 2026-09-01: "Nech nie je rozdiel medzi nocou a
+    dnom. Claude ma robit 24/7"). ALL night/sleep-window restrictions are
+    REMOVED — a question is asked the moment it arises 24/7, there is no
+    sleep window, no night-hour cutoff, and no question-deferral queue tied
+    to the time of day. These asserts guard against a silent re-introduction
+    of any night gate. Live failure that motivated it: Claude derived from
+    the old sleep-window text that it should rest at night and did NOT work."""
 
-    def test_marker_rule_sleep_defer_conditional(self):
-        t = read("modules/core/message-status-marker.md")
-        self.assertIn("ONLY while other answer-independent work exists", t)
-        self.assertIn("asked NOW even at night", t)
+    NIGHT_TOKENS = ("sleep window", "sleep-window", "00..05", "00:00-05:59",
+                    "00:00–05:59", "even at night", "05:59")
+
+    def _assert_no_night_gate(self, rel):
+        t = read(rel)
+        for tok in self.NIGHT_TOKENS:
+            self.assertNotIn(tok, t, f"{rel}: night gate token {tok!r} must be gone (#791)")
+        self.assertIn("24/7", t, f"{rel}: must state the 24/7 doctrine")
+
+    def test_marker_rule_no_night_gate(self):
+        self._assert_no_night_gate("modules/core/message-status-marker.md")
+
+    def test_autopilot_skill_no_night_gate(self):
+        t = read("skills/autopilot/SKILL.md")
+        for tok in ("00..05", "00:00-05:59", "even at night"):
+            self.assertNotIn(tok, t, f"night gate token {tok!r} must be gone (#791)")
+        self.assertIn("24/7", t)
+        # The idle-park ban survives, now decoupled from night.
         self.assertIn("idle-park", t)
-        # The old unconditional night silence must be gone.
-        self.assertNotIn("during it ONLY, do NOT ping", t)
 
-    def test_autopilot_sleep_section_necessary_question_pings(self):
-        t = read("skills/autopilot/SKILL.md")
-        self.assertIn("a NECESSARY question still pings", t)
-        self.assertIn("NEVER idle-park", t)
-        # Night is not an off-air window: rig/prod tickets stay workable.
-        self.assertIn("workable at night", t)
-        # The /goal paste line must not carry the unconditional no-ping clause
-        # (it made a night-blocked loop unstoppable).
-        self.assertNotIn("then queue it and ask after 06:00, no ping", t)
+    def test_worker_no_night_gate(self):
+        self._assert_no_night_gate("agents/autopilot-worker.md")
 
-    def test_goal_line_night_block_stops_loop(self):
-        t = read("skills/autopilot/SKILL.md")
-        # The paste line itself must say: night defer only while workable
-        # tickets remain; a necessary question is asked and stops the loop.
-        self.assertIn("NECESSARY", t)
-        self.assertIn("even at night", t)
+    def test_milestone_rule_no_night_gate(self):
+        self._assert_no_night_gate("modules/core/milestone-notifications.md")
 
-    def test_worker_sleep_defer_conditional(self):
-        t = read("agents/autopilot-worker.md")
-        self.assertIn("answer-independent work remains", t)
-        self.assertIn("even during the window", t)
-
-    def test_milestone_rule_sleep_defer_conditional(self):
-        t = read("modules/core/milestone-notifications.md")
-        self.assertIn("ONLY while other answer-independent work exists", t)
-        self.assertIn("even at night", t)
+    def test_master_skill_no_night_gate(self):
+        # The autopilot-master LANE 4 must not carry a sleep-window deferral;
+        # the airuleset:release-window DEPLOY window (a repo deploy-timing
+        # param, out of scope) legitimately keeps TZ=Europe/Bratislava.
+        t = read("skills/autopilot-master/SKILL.md")
+        for tok in ("sleep window", "sleep-window", "00:00-06:00", "even at night"):
+            self.assertNotIn(tok, t, f"night gate token {tok!r} must be gone (#791)")
+        self.assertIn("24/7", t)
 
 
 class TestUnansweredQuestionReaskedFull(TestCase):

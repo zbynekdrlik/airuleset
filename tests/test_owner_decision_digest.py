@@ -40,8 +40,8 @@ import watchdog as wd  # noqa: E402
 
 
 def _daytime_now():
-    """An epoch outside the Europe/Bratislava sleep window — the tombstone must
-    be a no-op WITHOUT relying on any sleep-window/cadence gate."""
+    """A fixed daytime epoch — the tombstone must be a no-op unconditionally,
+    relying on no time-of-day / cadence gate (#791 deleted the night gate)."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
     return datetime(2026, 8, 27, 13, 0,

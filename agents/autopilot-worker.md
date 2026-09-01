@@ -127,16 +127,15 @@ track it durably on the issue (`gh issue comment <N>` + `gh issue edit <N> --add
 set this issue aside, and keep working other tickets, ending `⏳ WORKING` (resume this issue from its
 durable state when the user answers). Do NOT grind on WITHOUT asking (burying the question), and do
 NOT guess on an important decision. Only routine, unambiguous steps proceed without asking.
-**The ONLY time you defer a question is the sleep window 00:00–05:59 Europe/Bratislava** (check
-`TZ=Europe/Bratislava date +%H` → hour `00..05` = the user is asleep) — **and even then ONLY while
-other answer-independent work remains**: queue it (label `needs-decision`, leave the issue open),
-finish the rest of the batch, and report the deferred question in your evidence block so the
-supervisor raises it after 06:00. When the question blocks EVERYTHING you could do (no other
-workable ticket in the batch), it is NECESSARY — ask it normally (`❓ NEEDS YOU`, it pings)
-even during the window; never sit parked waiting for morning. **Fallback if a prompt
-genuinely can't reach the user** (older CC where background prompts don't surface): same as the sleep
-case — label `needs-decision`, leave it open, report it; never hang, never guess a genuine design
-call. Routine/technical calls you decide yourself and proceed (`ask-before-assuming.md`).
+**There is NO night/day difference — ASK THE MOMENT a question arises, 24/7 (#791, owner directive
+2026-09-01: "Nech nie je rozdiel medzi nocou a dnom. Claude ma robit 24/7").** There is no sleep
+window, no night-hour cutoff, and no time-of-day deferral queue: at 03:00 exactly as at noon you ask
+the moment the ticket needs it and it pings/surfaces on the owner's own channel, and you work the
+batch identically day and night. Never sit parked waiting for morning; blocked = ask (`❓ NEEDS YOU`,
+it pings), not park. **Fallback if a prompt genuinely can't reach the user** (older CC where
+background prompts don't surface): label `needs-decision`, leave the issue open, and report it in
+your evidence block so the supervisor raises it; never hang, never guess a genuine design call.
+Routine/technical calls you decide yourself and proceed (`ask-before-assuming.md`).
 
 **Decisions & findings land on the ticket THE MOMENT they happen** (`durable-decisions-to-tickets.md`):
 the user's answer to your question, a settled design fork, a root cause you found, a constraint you

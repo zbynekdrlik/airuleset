@@ -97,13 +97,14 @@ STALE_LOCKED_DEAD_MIN_AGE_S = 3 * 24 * 3600    # env AIRULESET_WORKTREE_LOCKED_D
 # prevent one, on top of the existing 0-ahead + clean-tree-refusal criteria
 # (so even the rare clock-skew edge loses zero work).
 # 24h, not 6h (#513 adversarial-review MAJOR): a live 0-ahead+clean worker
-# BLOCKED on a `❓` question the ruleset explicitly supports parking overnight
-# (sleep window 00:00-06:00 -> an evening->morning wait is ~8-15h) has zero
-# git/file activity while it waits; a 6h window let an install/push sweep
-# remove its worktree mid-wait. 24h comfortably exceeds every documented
-# overnight/sleep-window wait yet stays ~100x the measured 13-min live-idle
-# max, so a genuinely-dead worktree (idle days) is still reclaimed. Env-
-# tunable for a one-off aggressive reclaim.
+# BLOCKED on a `❓` question can wait many hours for the owner's answer (an
+# evening->morning wait is easily ~8-15h — questions are asked 24/7, #791,
+# but the owner still answers on their own schedule) with zero git/file
+# activity while it waits; a 6h window let an install/push sweep remove its
+# worktree mid-wait. 24h comfortably exceeds every documented long
+# owner-answer wait yet stays ~100x the measured 13-min live-idle max, so a
+# genuinely-dead worktree (idle days) is still reclaimed. Env-tunable for a
+# one-off aggressive reclaim.
 STALE_WORKTREE_IDLE_MIN_AGE_S = 24 * 3600      # env AIRULESET_WORKTREE_IDLE_MIN_AGE_S
 
 

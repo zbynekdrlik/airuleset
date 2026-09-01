@@ -234,8 +234,10 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
         self.assertIn("⏳", t)
         self.assertIn("FULL completion", t)
         self.assertIn("IMMEDIATELY", t)
-        self.assertIn("ONLY while other answer-independent work exists", t)
-        self.assertIn("even at night", t)
+        # #791: the sleep-window paragraph is gone — 24/7, no night/day diff.
+        self.assertIn("24/7", t)
+        self.assertNotIn("sleep window", t)
+        self.assertNotIn("even at night", t)
 
     def test_exception_still_summarized_inline(self):
         t = read(self.MOD)

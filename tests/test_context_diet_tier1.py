@@ -182,7 +182,7 @@ class TestNotificationInternalsMoved(TestCase):
             "❓ ASKED",
             "ARMED GOAL",
             "Slovak",
-            "Sleep window",
+            "24/7",   # #791: replaces the removed "Sleep window" anchor
         ]:
             self.assertIn(keep, t, f"behaviour must stay always-on: {keep}")
 
