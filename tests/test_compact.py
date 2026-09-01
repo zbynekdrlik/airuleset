@@ -1090,6 +1090,31 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "cooldown")
         self.assertEqual(tmux.sent, [])
 
+    def test_805_self_callback_boundary_supersedes_cooldown(self):
+        # #805 RED -- a DRAINED-batch-boundary `self-callback` request that has
+        # cleared every gate above (idle, no draft, no live lanes, aged) must NOT
+        # be swallowed by an in-window cooldown left by a PRIOR delivery: two
+        # batch boundaries within 30 min BOTH have to compact, else the next
+        # batch starts on a grown context (the owner's report). Before the fix
+        # this returned "cooldown" (a TERMINAL word -> the boundary request was
+        # CLEARED and the compact silently never ran). GREEN: delivered.
+        now = time.time()
+        compact.mark_compact_delivery_ts(self.SID, now=now - 60, path=self.delp)
+        word, tmux, _ = self._go(CB_IDLE_CAP, origin="self-callback", now=now)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertIn("BOUNDARY-PRIORITY", self.syncp.read_text())
+
+    def test_805_non_boundary_origin_still_cooled_down(self):
+        # The supersede is a NARROW allowlist (#757): a non-drained-boundary
+        # origin (here the retired `subagent-stop`, and equally any other) STAYS
+        # subject to the 30-min cooldown -- the anti-storm floor is untouched.
+        now = time.time()
+        compact.mark_compact_delivery_ts(self.SID, now=now - 60, path=self.delp)
+        word, tmux, _ = self._go(CB_IDLE_CAP, origin="subagent-stop", now=now)
+        self.assertEqual(word, "cooldown")
+        self.assertEqual(tmux.sent, [])
+
     # -- kill-switch -------------------------------------------------------- #
 
     def test_owner_disabled_skips(self):
