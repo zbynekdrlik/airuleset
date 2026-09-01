@@ -1601,5 +1601,68 @@ class TestConcreteBlockReason(TestCase):
         self.assertEqual(a3.returncode, 0, a3.stderr)
 
 
+class TestBlockReasonHardening(TestCase):
+    """#802 adversarial-review hardening (2x fresh-context review of the
+    GREEN fix): (1) a whitespace-only title must not empty its field and
+    shift the tab hand-off; (2) an attacker-influenced invalid-criterion
+    value must not carry a `<countingfield>=` decoy token into the
+    free-text `criterion=` field; (3) C0/DEL control bytes (ESC) that `\\s`
+    does not cover must be stripped before reaching stderr / the log."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-blockhardening-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+
+    def _block_line(self, home):
+        log = Path(home) / ".claude" / "scope-gate.log"
+        if not log.exists():
+            return ""
+        for ln in log.read_text(encoding="utf-8").splitlines():
+            if "verdict=BLOCK" in ln:
+                return ln
+        return ""
+
+    def test_whitespace_only_title_does_not_empty_the_field(self):
+        home = tempfile.mkdtemp(prefix="airuleset-blockhardening-h1-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = run("gh issue create -t '   ' -l stream:david2 --body 'no criterion'",
+                home=home, gh_bin=self.gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        line = self._block_line(home)
+        # A whitespace-only title cleans to "" without the guard -> the log
+        # would carry title="" and bash's IFS-tab read would collapse it; the
+        # guard pins "(no title)". The real trailing fields must stay intact.
+        self.assertIn('title="(no title)"', line)
+        self.assertIn("session=test-scope-gate", line)
+
+    def test_invalid_criterion_decoy_token_is_neutralized(self):
+        home = tempfile.mkdtemp(prefix="airuleset-blockhardening-h2-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # An invalid Scope-gate value crafted to spell a `parents=999` decoy;
+        # the surfaced free-text criterion must NOT let a `\bparents=` first
+        # match find the forged value ahead of the real `parents=none` field.
+        r = run("gh issue create -t decoy -l stream:david2 "
+                "--body 'Scope-gate: x-parents=999'",
+                home=home, gh_bin=self.gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        line = self._block_line(home)
+        self.assertNotIn("parents=999", line)          # decoy neutralized
+        self.assertIn("invalid-scope-gate:x-parents:999", line)
+        self.assertIn("parents=none", line)            # real field intact
+
+    def test_control_bytes_in_title_are_stripped(self):
+        home = tempfile.mkdtemp(prefix="airuleset-blockhardening-h3-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # A raw ESC (\x1b) is not whitespace, so \s+ leaves it -- it must be
+        # stripped before reaching the user's terminal (escape injection).
+        r = run("gh issue create -t '\x1b]0;pwn\x07X' -l stream:david2 "
+                "--body 'no criterion'",
+                home=home, gh_bin=self.gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("\x1b", r.stderr)
+        self.assertNotIn("\x1b", self._block_line(home))
+
+
 if __name__ == "__main__":
     main()

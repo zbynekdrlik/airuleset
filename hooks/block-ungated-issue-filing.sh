@@ -742,8 +742,33 @@ def _clean_field(s):
     persistent log) -- an embedded tab/newline in a TITLE would otherwise
     shift every field after it (#329 adversarial-review finding: a title
     containing a real tab/newline corrupted `criterion=`/`session=`/
-    `parents=` in the tab-separated OUT channel bash reads)."""
-    return re.sub(r'\s+', ' ', (s or '')).strip()
+    `parents=` in the tab-separated OUT channel bash reads).
+
+    #802 adversarial-review 🔵: `\\s` does NOT cover the non-whitespace C0
+    control bytes (ESC `\\x1b`, etc.) or DEL `\\x7f`, so an attacker-
+    influenced field (a crafted TITLE or `-F` token) carrying a raw
+    terminal-escape sequence would reach the user's stderr SUMMARY and the
+    log verbatim. Neutralise those to a space FIRST (only the ASCII control
+    range excluding `\\t\\n\\r\\v\\f`, which the `\\s+` collapse already
+    handles -- so UTF-8 multibyte bytes are never touched), then collapse.
+    This hardens EVERY carrier centrally (title, dedup, body_err, crit)."""
+    s = re.sub(r'[\x00-\x08\x0e-\x1f\x7f]', ' ', (s or ''))
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _no_field_decoy(s):
+    """#802 adversarial-review 🟡 -- neutralise `=` to `:` in an
+    ATTACKER-influenced substring that becomes part of a BLOCK line's
+    free-text `criterion=` field, so it can never spell a `<countingfield>=`
+    decoy token (`parents=999`, `session=x`) that a later `\\bfield=(\\S+)`
+    first-match would pick up ahead of the real field. Applied ONLY to
+    attacker-derived text (a crit value, a `-F` token in body_err), NEVER to
+    the author-controlled literal hints whose fixed `body=` is legitimate gh
+    syntax and is not a counting-field name. Harmless today (only
+    `verdict=PASS` lines are ever counted, and this runs on BLOCK lines) --
+    pure defence-in-depth against a future counting change over non-PASS
+    lines. `s` is assumed already `_clean_field`-ed."""
+    return (s or "").replace("=", ":")
 
 
 def _log_pass_count(path, repo, today, parent=None):
@@ -1077,7 +1102,13 @@ for seg in split_top_level(skeleton):
     stream_reason = _stream_routing_block_reason(
         tk, api_call, body, cwd, target_repo, repo_dir)
 
-    clean_title = _clean_field(title)
+    # #802 adversarial-review 🔵: a whitespace-only `-t` title cleans to ""
+    # -- an EMPTY field, which bash's `IFS=$'\t' read` collapses (line ~1220
+    # comment), shifting every field after it. `title = title or "(no
+    # title)"` at line ~1028 only catches a MISSING/empty title, not a
+    # whitespace-only one (truthy). Pin a non-empty clean title at the
+    # source so both the tab-joined print AND the log echo stay aligned.
+    clean_title = _clean_field(title) or "(no title)"
 
     if chain_capped:
         results.append(("BLOCK", clean_title, "chain-depth-cap", parents_str,
@@ -1110,24 +1141,44 @@ for seg in split_top_level(skeleton):
         # crit=None holes (body resolved but no line; body unresolvable with
         # no body_err) rendering `-> none` -- an undiagnosable block. Each
         # gets a concrete reason now:
+        # #802-review 🟡: the `criterion=` field on these BLOCK lines is FREE
+        # TEXT (already so since #483's body_err), so the #329 log-field
+        # invariant "every counting field is written BEFORE the two free-text
+        # fields" no longer holds in the LETTER for BLOCK lines -- a crafted,
+        # ATTACKER-influenced crit / `-F` token like `x-parents=999` (a legal
+        # `\S+` token) would decoy a later `\bparents=(\S+)`/`\bsession=(\S+)`
+        # first-match with a forged value. Harmless TODAY only because
+        # `_log_pass_count` (the ONLY counting consumer) filters `verdict=PASS`
+        # FIRST and BLOCK lines are never counted. Defence-in-depth so a future
+        # counting change over non-PASS lines can never re-open #329:
+        # `_no_field_decoy` neutralises `=` to `:` in the two ATTACKER-derived
+        # substrings only (crit, and the `-F` token embedded in body_err),
+        # never in the author-controlled literal hints below (their fixed
+        # `body=` is legit gh syntax and is not a counting-field name anyway).
         if body is None:
             # body could not be resolved: an unreadable `-F` disk path gives
-            # the explicit #483 reason; any other unreadable shape (no
-            # -F/--body, an unresolvable heredoc, a command-substitution /
-            # $VAR body a static PreToolUse scan cannot execute) gets a
-            # concrete body-unresolved reason instead of the empty `-> none`.
-            reason = _clean_field(body_err) if body_err else (
+            # the explicit #483 reason (attacker `-F` token neutralised); any
+            # other unreadable shape (no -F/--body, an unresolvable heredoc, a
+            # command-substitution / $VAR body a static PreToolUse scan cannot
+            # execute) gets a concrete body-unresolved reason instead of the
+            # empty `-> none`. #802-review 🔵: this branch is ALSO reached by a
+            # `gh api ...issues` POST with no `body=` field, where `-F body.md`
+            # / `--body` are the wrong flags -- name BOTH filing recipes.
+            reason = _no_field_decoy(_clean_field(body_err)) if body_err else (
                 "body-unresolved -- could not read the issue body from this "
-                "command (no readable -F/--body; a $(...) / $VAR body cannot "
-                "be read at PreToolUse -- pass it via a heredoc `cat > body.md "
-                "<<'EOF' ... EOF` then `-F body.md`, or an inline --body \"...\")")
+                "command (no readable body; a $(...) / $VAR body cannot be read "
+                "at PreToolUse -- write it to a file via a heredoc `cat > "
+                "body.md <<'EOF' ... EOF` then `-F body.md`, or pass it inline: "
+                "`--body \"...\"` for `gh issue create`, `-f body=...` / `-F "
+                "body=@body.md` for `gh api`)")
         elif crit is None:
             # body IS readable but carries no `Scope-gate: <criterion>` line
             # at all -- the plain missing-line case.
             reason = "no-scope-gate -- body carries no `Scope-gate: <criterion>` line"
         else:
-            # crit present but not one of ALLOWED -- name the bad value.
-            reason = "invalid-scope-gate:%s" % _clean_field(crit)
+            # crit present but not one of ALLOWED -- name the bad (attacker-
+            # written) value, decoy-neutralised.
+            reason = "invalid-scope-gate:%s" % _no_field_decoy(_clean_field(crit))
         # Defensive: no BLOCK may ever carry an empty reason (would print as
         # `-> none`). Every branch above yields a non-empty string, but pin
         # it so a future edit cannot silently re-open the opaque block.
