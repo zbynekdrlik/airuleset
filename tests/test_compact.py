@@ -3201,6 +3201,24 @@ class TestGoalContinuingGate822(unittest.TestCase):
         self.assertEqual(word, "skip:goal-continuing")
         self.assertEqual(typed, [])            # NEVER typed /compact
 
+    def test_gate_is_origin_scoped_subagent_stop_still_delivers(self):
+        # A NON-drained-boundary origin is NOT gated — it types and sends, proving
+        # the gate is scoped to the self-callback drained-boundary origin only.
+        word, typed = self._deliver("subagent-stop")
+        self.assertEqual(word, "sent")
+        self.assertEqual(typed, [compact.COMPACT_TEXT])
+
+    def test_gate_does_not_fire_on_an_unarmed_pane(self):
+        # Same self-callback origin, but the pane shows NO `◎ /goal` — the compact
+        # delivers normally (the gate is armed-goal-scoped, fail-open otherwise).
+        unarmed = ("● Predošlá várka integrovaná.\n❯ \n"
+                   "────────────────────────────────────────────\n"
+                   "  5h 7%(4h)  wk 1%(4d)  fable  ctx 210K  caveman\n")
+        word, typed = self._deliver(
+            compact._COMPACT_SELF_CALLBACK_ORIGIN, render=unarmed)
+        self.assertEqual(word, "sent")
+        self.assertEqual(typed, [compact.COMPACT_TEXT])
+
 
 if __name__ == "__main__":
     unittest.main()

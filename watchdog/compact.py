@@ -1015,7 +1015,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                            in-window cooldown (#805) and is delivered, never
                            returns "cooldown".
       "skip:<reason>"   — not safe right now; the caller LEAVES the
-                           request pending for the next periodic sweep.
+                           request pending for the next periodic sweep. One
+                           reason is `skip:goal-continuing` (#822): an armed
+                           `/goal` + zero live tasks means a typed `/compact`
+                           would only queue behind the goal continuation, so a
+                           `self-callback` boundary is NOT typed (the session's
+                           hold-turn delivers the boundary compact instead).
 
     Every decision is logged via `_log_compact_sync` from this ONE call
     site, immediately after any real send and BEFORE any other state
@@ -1155,6 +1160,31 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s jobs=%s"
                           % (sid, cwd, bgjobs))
         return "skip:live-bg-bash-raced"
+
+    # #822 (c) — the goal-continuing pre-type gate. Everything above proved the
+    # pane is idle RIGHT NOW with ZERO live tasks (no worker lane, no bg-bash).
+    # If it ALSO shows an armed `/goal` (`◎ /goal active`) AND this is a
+    # DRAINED-boundary request (`self-callback`), a typed `/compact` CANNOT
+    # execute: with no live task to force an accepted Stop, the goal Stop hook
+    # blocks every boundary ("◯ Goal not yet met… continuing") and CC appends the
+    # `/compact` to its type-ahead queue, where it sits until the next accepted
+    # Stop (the owner's 3x-queued incident). So do NOT type — the boundary
+    # compact is delivered by the SESSION's own hold-turn (skills/autopilot
+    # Step 5: a `⏳ WORKING: boundary hold` turn with a live task provides the
+    # accepted Stop). Reuses the already-read pane state (`pane_goal_armed`, on
+    # the fresh capture) + the zero-live-tasks reads above — no new detector. A
+    # NON-drained-boundary origin, or an UNDETERMINABLE goal state
+    # (`pane_goal_armed` -> None / False), never trips this (fail-open, the
+    # pre-#822 path). NON-terminal: the request is LEFT PENDING so the sweep
+    # re-evaluates if the goal disarms; it is NOT hold-extended (a gone-quiet-
+    # under-goal boundary correctly ages out at the 30-min cap, like `skip:not-
+    # a-boundary`, #741).
+    if (origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS
+            and watchdog.pane_goal_armed(fresh) is True):
+        _log_compact_sync("SKIP goal-continuing sid=%s cwd=%s origin=%s "
+                          "(armed /goal + zero live tasks: a typed /compact "
+                          "would queue, not execute)" % (sid, cwd, origin or "-"))
+        return "skip:goal-continuing"
 
     # Mark provenance BEFORE typing so the shared janitor (#372) can
     # recover a stuck send for THIS pane — a delivering job's own
