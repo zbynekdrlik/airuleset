@@ -132,6 +132,48 @@ def drop_lane_for_box(nodename=None):
     return DROP_LANES.get(node)
 
 
+# Unix accounts whose CONSUMER (the human who opens the one-shot URL) has NO
+# tailscale, so the public-TLS drop lane is the DEFAULT delivery channel — even
+# without an explicit --public (#786). Keyed on (nodename, unix-account): subdev
+# hosts david1/david2 (consumer = David's tailscale-less laptop) ALONGSIDE
+# marek/montalu whose consumers DO have tailscale, so the force is per-ACCOUNT,
+# never per-box. This ONLY flips the default from private → public; the live
+# go-live marker + registered-lane gates in `resolve_public_lane` are unchanged,
+# so it can never invent a lane, route to a foreign marker, or fire where there
+# is no live drop lane. Root cause it closes: the channel decision used to key
+# purely on the BOX's own tailscale interface, so a session had to remember
+# --public by hand for every david* delivery, and kept not remembering it.
+NO_TAILSCALE_CONSUMER_ACCOUNTS = {
+    ("subdev", "david1"),
+    ("subdev", "david2"),
+}
+
+
+def _current_username():
+    """The invoking unix account name. Prefers the real (effective-uid) passwd
+    entry over $USER/$LOGNAME so a stale/spoofed env var cannot mis-route the
+    channel decision. Overridable in tests (patched on the module)."""
+    import pwd
+    return pwd.getpwuid(os.geteuid()).pw_name
+
+
+def consumer_forces_public(nodename=None, username=None):
+    """True when THIS (box, unix-account) has a no-tailscale CONSUMER, so the
+    public drop lane is the default even without an explicit --public (#786).
+
+    Keys on the invoking unix account, NOT the box: subdev hosts david1/david2
+    (consumer = David's tailscale-less laptop) alongside marek/montalu (consumers
+    who DO have tailscale). Fail-safe: any error resolving the username → False
+    (today's box-driven behaviour), never a spurious public force."""
+    node = nodename or os.uname().nodename
+    if username is None:
+        try:
+            username = _current_username()
+        except Exception:
+            return False
+    return (node, username) in NO_TAILSCALE_CONSUMER_ACCOUNTS
+
+
 def public_url_line(host, token):
     """The advertised public HTTPS URL + its transport, spelled out — mirrors
     `_secret_url_line`'s labelled shape so the user sees WHAT the channel is."""
@@ -183,7 +225,7 @@ def read_drop_marker(path=None):
 
 
 def resolve_public_lane(want_public, have_encrypted_private, marker_path=None,
-                        nodename=None):
+                        nodename=None, username=None):
     """(host, port) for the public drop lane, or None.
 
     The host+port are the AUTHORITATIVE values from the git-controlled
@@ -194,12 +236,15 @@ def resolve_public_lane(want_public, have_encrypted_private, marker_path=None,
     migration, or a planted file) is refused outright.
 
     The lane is used when this box HAS a registered drop lane, a matching live
-    marker exists, AND either the caller asked for it (`--public`) OR there is no
-    encrypted private lane available (the no-tailscale auto-fallback — the
-    ticket's channel order: tailscale → public). A box WITH an encrypted private
-    lane and NO `--public` keeps today's behaviour untouched (None). No marker /
-    no registered lane / a mismatched marker → None, so `--public` before go-live
-    degrades to today's private path rather than a 404 or a wrong-host URL.
+    marker exists, AND any of: the caller asked for it (`--public`); THIS
+    (box, invoking unix-account) has a no-tailscale CONSUMER so the public lane
+    is the default (`consumer_forces_public` — the #786 fix for david* accounts);
+    OR there is no encrypted private lane available (the no-tailscale auto-fallback
+    — the ticket's channel order: tailscale → public). A box WITH an encrypted
+    private lane, NO `--public`, and a NON-consumer account keeps today's behaviour
+    untouched (None). No marker / no registered lane / a mismatched marker → None,
+    so the consumer force (like `--public`) degrades to today's private path rather
+    than a 404 or a wrong-host URL — it flips only the DEFAULT, never invents a lane.
     """
     lane = drop_lane_for_box(nodename)
     if lane is None:
@@ -210,7 +255,8 @@ def resolve_public_lane(want_public, have_encrypted_private, marker_path=None,
     marker_host, _marker_port = marker
     if marker_host != lane.host:                # stale / foreign marker — refuse
         return None
-    if want_public or not have_encrypted_private:
+    if (want_public or consumer_forces_public(nodename, username)
+            or not have_encrypted_private):
         return lane.host, DROP_PORT             # authoritative, from the registry
     return None
 
