@@ -282,6 +282,67 @@ class CallerProvenOwnDraft806(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(tmux.sent, [])
 
+    def test_caller_proven_foreign_box_is_refused_zero_keystrokes(self):
+        # A genuinely FOREIGN draft raced into the box since the caller's check —
+        # `draft.startswith(head)` is False, so it is refused with ZERO keystrokes.
+        # Teeth for the recognizer: dropping the `draft.startswith(h)` conjunct
+        # (leaving bare `bool(h)`) would blind-Enter this foreign user draft.
+        p = self._tpath()
+        tmux = self._fake("úplne cudzí text ktorý napísal užívateľ sám", p)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=[],
+                                          caller_proven_own=True)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_caller_proven_mid_substring_head_is_refused(self):
+        # A SCROLLED/truncated box (the #737 class) renders a MID-payload chunk:
+        # a substring of `draft` but NOT a leading substring, so it is refused
+        # with ZERO keystrokes. Teeth against a `startswith` -> substring (`h in
+        # draft`) weakening, which would accept-and-Enter this mid-fragment.
+        p = self._tpath()
+        tmux = self._fake(OWN_REPLY[40:140], p)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=[],
+                                          caller_proven_own=True)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_caller_proven_box_bare_after_enter_is_delivered_unconfirmed(self):
+        # #594/#806 — the Enter CLEARED the box (CC accepted/queued the submit) but
+        # the transcript confirm RACED (no `user` turn in the window). The primitive
+        # returns False yet SETS out["delivered_unconfirmed"], so the own_stuck
+        # caller books it delivered and never RE-TYPES the reply next sweep (the
+        # double-delivery the fresh lane already avoids). Model: the fake clears the
+        # box on Enter but writes NOTHING (transcript_path=None), while the primitive
+        # verifies against a real, readable transcript that simply never grows.
+        static = self._tpath()
+        tmux = DeliverGoalFakeTmux([(PID, "claude", "/x", "111")], GOAL_ARMED_CAP,
+                                   model_type=True, transcript_path=None,
+                                   initial_box=OWN_REPLY)
+        out = {}
+        logs = []
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, static,
+                                          sleep_fn=lambda s: None, logs=logs,
+                                          caller_proven_own=True, out=out)
+        self.assertFalse(ok, logs)                          # not transcript-confirmed
+        self.assertEqual(tmux.box, "")                      # box cleared (submit landed)
+        self.assertTrue(out.get("delivered_unconfirmed"), logs)   # <- the #594 flag
+        self.assertFalse(any("-l" in a for a in tmux.sent), tmux.sent)  # never retyped
+
+    def test_caller_proven_default_out_none_is_byte_identical(self):
+        # An existing caller passing NO `out` dict is unaffected: the box-bare
+        # branch's `isinstance(out, dict)` guard makes the flag write a no-op.
+        static = self._tpath()
+        tmux = DeliverGoalFakeTmux([(PID, "claude", "/x", "111")], GOAL_ARMED_CAP,
+                                   model_type=True, transcript_path=None,
+                                   initial_box=OWN_REPLY)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, static,
+                                          sleep_fn=lambda s: None, logs=[],
+                                          caller_proven_own=True)   # out defaults None
+        self.assertFalse(ok)
+        self.assertEqual(tmux.box, "")
+
 
 # --------------------------------------------------------------------------- #
 # 3. lane-guard branching — own-prefix draft submitted in place; a foreign

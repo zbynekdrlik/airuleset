@@ -269,8 +269,9 @@ def compose_reply_prompt(r):
     A reply may land hours/days after the ❓ was asked — a bare '1' is
     meaningless once the session's context no longer holds the question (user
     ask, 2026-07-17), so the prompt carries WHEN + WHAT was asked + the answer.
-    One line only: send_continue types the text literally then presses Enter, a
-    newline would submit early. A legacy map entry without stored question text
+    One line only: the delivery family (`send_verified`/`submit_own_draft_verified`)
+    types the text literally then submits, a newline would submit early. A legacy
+    map entry without stored question text
     falls back to the raw reply (the pre-2026-07-17 behavior)."""
     # The re-arm tail closes the ping-pong: a /goal loop correctly ENDS on a
     # blocked ❓ (stop condition A) — after the answer resolves the ticket the
@@ -373,12 +374,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     ONCE (dedup on reply id + the question is dropped on delivery), only into an
     IDLE-input pane, and reacts ✅ on success. Returns log lines. Never raises.
 
-    2026-07-20 (#1832 incident) hardening:
-    - VERIFY after typing: a swallowed Enter (queued-prompt wedge, airuleset#20)
-      leaves the text sitting at `❯` — up to 2 corrective Enters; still stuck →
-      NOT delivered (the fallback clock keeps ticking), and the next cycle
-      recognizes OUR OWN stuck text (prompt tail at `❯`) and presses Enter only,
-      never retypes (no doubled text).
+    2026-07-20 (#1832 incident) hardening, consolidated onto the transcript-proof
+    delivery family (#806):
+    - VERIFY the SUBMIT via the transcript, never the pane render (#806): a
+      fresh-typed answer via `send_verified`, a pane already holding OUR OWN
+      swallowed reply (own_stuck, `_box_holds_our_own_text`) SUBMITTED IN PLACE
+      via `submit_own_draft_verified(caller_proven_own=True)` — never retyped
+      (#193). Both self-heal one swallow, undo a genuinely-stuck one (never left
+      at `❯`), and read #594's `delivered_unconfirmed` as delivered; a real
+      swallow stays NOT delivered (fallback clock ticking) and retries next cycle.
     - TICKET-FALLBACK: a reply blocked > DREPLY_TICKET_FALLBACK_S (busy pane
       with a foreign draft, dead session, persistent wedge) is delivered as a
       gh comment on the #N parsed from the stored question text — the DURABLE
@@ -739,29 +743,28 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             if watchdog.pane_in_mode(pid, run):
                 continue
             if not dry_run:
-                # #806 — the single transcript-proof delivery family, not a
-                # bespoke render verify: a bare input box after our Enter never
-                # proved a SUBMIT (a swallow under the agent-strip selector, #36,
-                # clears it too, and so does a turn that STARTED under the send),
-                # so book "delivered" only on a TRANSCRIPT-confirmed `user` turn.
-                # `send_verified` TYPES + submits + self-recovers a swallow (one
-                # corrective Escape+Enter) and on a genuine swallow backs its own
-                # text off the box — nothing is ever left stranded; #594's
-                # `delivered_unconfirmed` (box cleared, transcript raced, e.g. a
-                # cycling armed /goal loop) reads as delivered so we never re-type.
-                # A pane holding OUR OWN previously-typed reply (own_stuck, proven
-                # head+tail by `_box_holds_our_own_text`) is SUBMITTED IN PLACE via
-                # the caller-proven family member, never retyped (the doubled-text
-                # corruption, #193) nor stashed-around.
+                # #806 — one transcript-proof delivery family, not a bespoke
+                # render verify: a bare box after our Enter never proved a SUBMIT
+                # (a #36 agent-strip swallow clears it too), so book "delivered"
+                # only on a TRANSCRIPT-confirmed `user` turn. A fresh answer via
+                # `send_verified` (self-heals one swallow, undoes a provable-stuck
+                # one, leaves an unrecognized residue for the #372 janitor — never
+                # a blind backspace, #193); an own_stuck box (holds OUR reply —
+                # `_box_holds_our_own_text` proves the TAIL, the primitive
+                # re-verifies the HEAD) SUBMITTED IN PLACE via the caller-proven
+                # member, never retyped nor stashed-around. BOTH pass `out=send_out`
+                # so #594's `delivered_unconfirmed` (box cleared, transcript raced,
+                # a cycling armed /goal loop) reads as delivered and neither re-types.
                 tpath = watchdog._transcript_for_session(
                     projects_dir, r["session"], r["cwd"])
+                send_out = {}
                 if own_stuck:
                     delivered = watchdog.submit_own_draft_verified(
                         pid, prompt, run, tpath, sleep_fn=sleep_fn, logs=logs,
-                        caller_proven_own=True)
+                        caller_proven_own=True,
+                        out=send_out) or send_out.get("delivered_unconfirmed")
                 else:
                     _record_dreply_typed(state, pid, prompt, now)
-                    send_out = {}
                     delivered = watchdog.send_verified(
                         pid, prompt, run, tpath, sleep_fn=sleep_fn, logs=logs,
                         out=send_out) or send_out.get("delivered_unconfirmed")

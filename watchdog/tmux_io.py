@@ -836,7 +836,8 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
 
 
 def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
-                              sleep_fn=None, logs=None, caller_proven_own=False):
+                              sleep_fn=None, logs=None, caller_proven_own=False,
+                              out=None):
     """#501 — SUBMIT an EXISTING recognized-own nudge draft already sitting in
     the input box, transcript-verified — WITHOUT typing anything. The missing
     "submit an already-composed OWN draft" member of the delivery family
@@ -858,14 +859,18 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     blind Enter on a user's parked draft.
 
     `caller_proven_own` (#806): a CALLER-PROVEN own PLAIN-TEXT draft. When True,
-    the caller has ALREADY established ownership by a full head+tail match
-    against this exact expected `draft` (job 7's `_box_holds_our_own_text` over
-    a recorded `dreply_typed` reply — a STRONGER proof than the unambiguous-
-    nudge prefix, the SAME caller-proven shape `submit_own_goal_verified` (#566)
-    uses), so the prefix gate is SATISFIED by that proof: recognition + the
-    transcript token key on the box HEAD row being a leading substring of
-    `draft` (wrap-safe) rather than on a registered machine prefix. Default
-    False -> byte-identical prefix-gated behavior for every existing caller. The
+    the caller has ALREADY established ownership against this exact expected
+    `draft` (job 7's `_box_holds_our_own_text` over a recorded `dreply_typed`
+    reply — a head+tail check for a WRAPPED box that DEGRADES to a tail/suffix
+    match on a NON-wrapped one), and THIS primitive COMPLETES the proof by
+    re-verifying the box HEAD row is a leading substring of `draft` on its OWN
+    fresh capture — together a STRONGER proof than the unambiguous-nudge prefix,
+    the caller-proven shape `submit_own_goal_verified` (#566) uses (head-only
+    here, the plain-text reply being transcript-confirmable). So the prefix gate
+    is SATISFIED by that combined proof: recognition + the transcript token key
+    on the box HEAD row being a leading substring of `draft` (wrap-safe) rather
+    than on a registered machine prefix. Default False -> byte-identical
+    prefix-gated behavior for every existing caller. The
     two modes never mix: a caller-proven `draft` is PLAIN TEXT (transcript-
     confirmable), never a slash command (`submit_own_goal_verified` owns the
     pane-confirmed `/goal ` path — content proof there is a composite the
@@ -891,6 +896,16 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     genuinely-stuck submit we leave it EXACTLY as it is — a legit pending own
     nudge — and return False; the caller's give-up ping escalates (#193: never
     destroy an unproven buffer).
+
+    `out` (#594/#806, optional): the SAME `delivered_unconfirmed` channel
+    `send_verified` carries, so the own_stuck lane matches the fresh lane. When a
+    dict is passed, a box that went BARE after the Enter (submit not confirmed
+    inside the window but the box CLEARED — CC accepted/queued it, the transcript
+    merely raced, the normal case for an actively-cycling armed `/goal` loop) sets
+    `out["delivered_unconfirmed"] = True`. A caller reads `ok OR
+    out.get("delivered_unconfirmed")` as delivered so it NEVER re-types the reply
+    next sweep (a genuine swallow leaves the draft in place and sets NOTHING, so
+    it is still retried). Default None -> byte-identical for every existing caller.
 
     Returns True ONLY on a transcript-CONFIRMED submit; False = not delivered,
     retryable next sweep (the caller leaves its own budget unconsumed). A
@@ -986,6 +1001,14 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
              "(retryable)")
     elif final == "":
         _log("submit-own unconfirmed: box bare, submit not proven")
+        # #594/#806: the Enter CLEARED the box (CC accepted/queued the submit) —
+        # a DELIVERY whose transcript confirm merely raced (a cycling armed /goal
+        # loop, exactly the population job-7 replies target). NOT a swallow (that
+        # path leaves the draft in place above). Surface it so the own_stuck
+        # caller reads it as delivered and never RE-TYPES the reply next sweep
+        # (the double-delivery the fresh lane already avoids via send_verified).
+        if isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
     else:
         _log("submit-own unconfirmed: box changed, left in place (retryable)")
     return False

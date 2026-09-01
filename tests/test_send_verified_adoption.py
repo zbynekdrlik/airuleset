@@ -71,14 +71,22 @@ class _SubmitOwnDraftRecorder:
     job-7 own_stuck site test asserts it SUBMITS IN PLACE (never retypes) with
     caller-proven ownership, and how it handles True vs False."""
 
-    def __init__(self, result=True):
+    def __init__(self, result=True, unconfirmed=False):
         self.result = result
+        # #594/#806: the own_stuck lane carries the SAME delivered_unconfirmed
+        # channel as the fresh lane — a box that cleared but whose transcript
+        # confirm RACED sets out["delivered_unconfirmed"] and returns False; the
+        # site MUST read it as delivered so the reply is never re-typed next sweep
+        # (the double-delivery this recorder's `unconfirmed` mode locks against).
+        self.unconfirmed = unconfirmed
         self.calls = []
 
     def __call__(self, pid, draft, run=None, tpath=None, sleep_fn=None,
-                 logs=None, caller_proven_own=False):
+                 logs=None, caller_proven_own=False, out=None):
         self.calls.append({"pid": pid, "draft": draft, "tpath": tpath,
                            "caller_proven_own": caller_proven_own})
+        if self.unconfirmed and isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
         return self.result
 
 
@@ -736,6 +744,30 @@ class ReplyTypedAnswerAdoption(unittest.TestCase):
         self.assertEqual(so.calls[0]["draft"], prompt)
         self.assertEqual(len(sv.calls), 0, "must NOT retype via send_verified")
         self.assertNotIn(self.REF, notify.load_questions(self.qpath))
+
+    def test_own_stuck_delivered_unconfirmed_is_treated_as_delivered(self):
+        import notify
+        # #594/#806 — the own_stuck lane must carry the SAME delivered_unconfirmed
+        # channel as the fresh lane: the box cleared (Enter accepted) but the
+        # transcript confirm RACED (the cycling armed /goal loop own_stuck replies
+        # target). submit_own_draft_verified returns False yet sets the flag; the
+        # site MUST book it delivered — else the NEXT sweep finds a bare idle box
+        # and re-types the WHOLE reply via send_verified = DOUBLE delivery into the
+        # session (the exact accounting bug reviewer #2 found).
+        prompt = wd.compose_reply_prompt({
+            "session": self.SID, "cwd": self.CWD, "referenced": self.REF,
+            "reply_id": "repT", "channel": self.CH, "text": "1",
+            "question": "Ticket #99 — pokracovat?", "asked_ts": time.time()})
+        stuck = "──── ultracode ─\n❯\xa0" + prompt + "\n────\n  ctx ██░░  caveman\n"
+        so = _SubmitOwnDraftRecorder(result=False, unconfirmed=True)
+        state, sv, so, _ = self._go({self.SID: ("%2", stuck)}, so=so)
+        self.assertEqual(len(so.calls), 1)
+        self.assertEqual(len(sv.calls), 0, "must NOT fall back to send_verified")
+        self.assertNotIn(self.REF, notify.load_questions(self.qpath),
+                         "delivered_unconfirmed consumes the question")
+        self.assertIn("repT", state.get("dreply_done", []))
+        self.assertNotIn(self.SID, state.get("inputdead", {}),
+                         "a delivered_unconfirmed own_stuck is NOT an inputdead failure")
 
 
 # ------------------------------------------------------------------------- #

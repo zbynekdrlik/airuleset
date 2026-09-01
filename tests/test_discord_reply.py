@@ -55,16 +55,20 @@ class _ReplySendVerifiedRec:
 
 class _ReplySubmitOwnRec:
     """#806 — a per-test stand-in for `submit_own_draft_verified` (the
-    own_stuck in-place submit), recording caller_proven_own + the draft."""
+    own_stuck in-place submit), recording caller_proven_own + the draft. Carries
+    the #594/#806 `out` delivered_unconfirmed channel the own_stuck site passes."""
 
-    def __init__(self, result=True):
+    def __init__(self, result=True, unconfirmed=False):
         self.result = result
+        self.unconfirmed = unconfirmed
         self.calls = []
 
     def __call__(self, pid, draft, run=None, tpath=None, sleep_fn=None,
-                 logs=None, caller_proven_own=False):
+                 logs=None, caller_proven_own=False, out=None):
         self.calls.append({"pid": pid, "draft": draft,
                            "caller_proven_own": caller_proven_own})
+        if self.unconfirmed and isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
         return self.result
 
 
