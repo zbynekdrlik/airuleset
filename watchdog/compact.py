@@ -307,9 +307,11 @@ def compact_delivered_path():
     return Path.home() / ".claude" / "compact-delivered.json"
 
 
-def _load_compact_delivered(path=None):
-    """{session_id: last_real_send_ts}. {} on any error/missing file."""
-    path = path or compact_delivered_path()
+def _load_json_ts_map(path):
+    """{key: ts} JSON map load — the shared body behind the
+    `compact-delivered.json` (last-send, condition (d)) and the #822
+    `compact-queued.json` (queued-since) stores. {} on any error/missing
+    file; never raises."""
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
@@ -318,8 +320,8 @@ def _load_compact_delivered(path=None):
         return {}
 
 
-def _save_compact_delivered(d, path=None):
-    path = path or compact_delivered_path()
+def _save_json_ts_map(d, path):
+    """Atomic write of a `{key: ts}` map (shared by delivered + queued)."""
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         tmp = str(path) + ".tmp"
@@ -329,6 +331,15 @@ def _save_compact_delivered(d, path=None):
         return True
     except OSError:
         return False
+
+
+def _load_compact_delivered(path=None):
+    """{session_id: last_real_send_ts}. {} on any error/missing file."""
+    return _load_json_ts_map(path or compact_delivered_path())
+
+
+def _save_compact_delivered(d, path=None):
+    return _save_json_ts_map(d, path or compact_delivered_path())
 
 
 def mark_compact_delivery_ts(session, now=None, path=None):
@@ -384,6 +395,66 @@ def compact_delivery_in_cooldown(session, now, path=None, interval=None):
     if age is None:
         return False
     return age < _compact_min_delivery_interval(interval)
+
+
+# --------------------------------------------------------------------------- #
+# #822 (e) — the queued-since store. When `deliver_compact` classifies a typed
+# `/compact` as QUEUED (behind a running turn, never executed), it records the
+# instant here so `compact-request --status` reports `QUEUED sid=… since=…` for
+# as long as the `❯ /compact` row still sits unexecuted in the pane — the honest
+# signal the /goal HOLD doctrine (skills/autopilot Step 5) needs instead of a
+# false `NONE` (the request itself was cleared, `queued` being terminal). Same
+# `{sid: ts}` shape + shared load/save as `compact-delivered.json`; the LIVE
+# pane (`_pane_has_queued_compact`) gates the report, so a stale record is never
+# surfaced.
+# --------------------------------------------------------------------------- #
+
+def compact_queued_path():
+    """`~/.claude/compact-queued.json`, resolved at CALL time (same reasoning
+    as `compact_requests_path()` above)."""
+    return Path.home() / ".claude" / "compact-queued.json"
+
+
+def mark_compact_queued_ts(session, now=None, path=None):
+    """#822: record the instant `deliver_compact` classified a typed `/compact`
+    as QUEUED (behind a running turn) for `session` — the durable `since=`
+    anchor `--status` reports while the queued row is still in the pane. A blank
+    session is a no-op. Fail-safe; returns True on success."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    now = now if now is not None else time.time()
+    p = path or compact_queued_path()
+    d = _load_json_ts_map(p)
+    d[session] = float(now)
+    return _save_json_ts_map(d, p)
+
+
+def compact_queued_since(session, path=None):
+    """#822: the durable `since` ts for `session`'s last QUEUED classification,
+    or None (unrecorded / unreadable / non-numeric). Read by `--status` ONLY
+    once the LIVE pane confirms a queued `/compact` row still sits there, so a
+    stale record is never surfaced as QUEUED."""
+    session = str(session or "").strip()
+    if not session:
+        return None
+    ts = _load_json_ts_map(path or compact_queued_path()).get(session)
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return ts
+    return None
+
+
+def compact_queued_in_pane(pane_id, run=None):
+    """#822 (e): True iff pane `pane_id` currently shows a queued `❯ /compact`
+    row — the LIVE half of `--status`'s QUEUED report, reusing the (b) detector
+    `_pane_has_queued_compact` on a fresh capture. A blank pane_id or an
+    unreadable/empty capture reads False (fail-safe: report NONE, never a false
+    QUEUED)."""
+    pane_id = (pane_id or "").strip()
+    if not pane_id:
+        return False
+    cap = watchdog.capture_pane(pane_id, run, lines=40)
+    return bool(cap) and watchdog._pane_has_queued_compact(cap)
 
 
 # --------------------------------------------------------------------------- #
@@ -1205,6 +1276,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("QUEUED sid=%s cwd=%s origin=%s "
                           "(typed, queued behind a running turn, not executed)"
                           % (sid, cwd, origin or "-"))
+        # #822 (e): record the queued-since instant so `compact-request
+        # --status` reports `QUEUED sid=… since=…` (not a false `NONE`) while the
+        # `❯ /compact` row still sits unexecuted in the pane — the request store
+        # is cleared here (`queued` is terminal), so this durable anchor is the
+        # only `since` the read-only /goal HOLD probe can report.
+        mark_compact_queued_ts(sid, now=now)
         return "queued"
     if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed

@@ -101,9 +101,14 @@ def _isolate_compact_state(testcase):
     reqp = Path(d.name) / "compact-requests-test.json"
     delp = Path(d.name) / "compact-delivered-test.json"
     syncp = Path(d.name) / "compact-sync-test.log"
+    # #822 (e): the queued-since store is isolated too (read `compact_queued_path()`
+    # to get the temp path); the return tuple stays 3 so every existing caller is
+    # unaffected.
+    queuedp = Path(d.name) / "compact-queued-test.json"
     for name, path in (("compact_requests_path", reqp),
                        ("compact_delivered_path", delp),
-                       ("compact_sync_log_path", syncp)):
+                       ("compact_sync_log_path", syncp),
+                       ("compact_queued_path", queuedp)):
         patcher = m.patch.object(compact, name, return_value=path)
         patcher.start()
         testcase.addCleanup(patcher.stop)
@@ -2445,6 +2450,60 @@ class TestCompactRequestCli(unittest.TestCase):
                     airuleset.cmd_compact_request(_args(status=True))
         rec.assert_not_called()
         self.assertEqual(compact.load_compact_requests(self.reqp), {})
+
+    # -- #822 (e): --status reports QUEUED while a queued /compact sits in the
+    #    pane (deliver_compact returned the TERMINAL `queued`, clearing the
+    #    request, yet the typed /compact has not drained under the armed /goal).
+    def test_status_reports_queued_when_pane_shows_queued_compact(self):
+        # No pending request in the store, but a queued `❯ /compact` row still
+        # sits unexecuted in the pane (the (b) detector fixture) -> --status must
+        # report QUEUED (not NONE) so the /goal HOLD doctrine drains it via a
+        # boundary-hold turn instead of dispatching the next batch.
+        compact.mark_compact_queued_ts("sess-q", now=time.time() - 20)
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-q")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        line = "".join(buf).strip()
+        mobj = re.fullmatch(r"QUEUED sid=sess-q since=(\d+)s", line)
+        self.assertIsNotNone(mobj, line)
+        self.assertGreaterEqual(int(mobj.group(1)), 10)
+
+    def test_status_reports_none_when_pane_has_no_queued_row(self):
+        # A stale queued record must NOT be reported once the pane no longer
+        # shows a queued /compact (it drained): the LIVE pane gates the report,
+        # so QUEUED vs NONE turns ONLY on the pane, never on the stale record.
+        compact.mark_compact_queued_ts("sess-drained", now=time.time() - 5)
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-drained")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value="● práca hotová.\n❯ \n  ctx caveman\n"):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        self.assertEqual("".join(buf).strip(), "NONE")
+
+    def test_status_pending_wins_over_a_queued_row_in_the_pane(self):
+        # A genuinely PENDING request (not yet delivered) is reported PENDING even
+        # if an older queued row lingers in the pane -- PENDING precedes the
+        # #822 QUEUED check.
+        compact.record_compact_request("sess-pw", "/cwd", now=time.time() - 3,
+                                       path=self.reqp, origin="self-callback")
+        compact.mark_compact_queued_ts("sess-pw", now=time.time() - 3)
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-pw")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        self.assertTrue("".join(buf).startswith("PENDING sid=sess-pw"), buf)
 
 
 # --------------------------------------------------------------------------- #
