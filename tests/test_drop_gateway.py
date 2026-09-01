@@ -181,6 +181,63 @@ class TestResolvePublicLane(unittest.TestCase):
         dg.write_drop_marker("attacker.example.com", 8828, path=wrong)
         self.assertIsNone(self._r(True, False, wrong))
 
+    # --- #786: the CONSUMER, not the box, drives the default channel. ---
+    def test_david_consumer_defaults_to_public_without_flag(self):
+        # subdev HAS tailscale (have_encrypted_private=True) and no --public, but
+        # david1/david2's CONSUMER (David's laptop) has none — so the public lane
+        # is the DEFAULT, no --public needed. THIS is the #786 fix.
+        self.assertEqual(
+            dg.resolve_public_lane(False, True, marker_path=self.present,
+                                   nodename="subdev", username="david1"),
+            ("drop-david.newlevel.media", dg.DROP_PORT))
+        self.assertEqual(
+            dg.resolve_public_lane(False, True, marker_path=self.present,
+                                   nodename="subdev", username="david2"),
+            ("drop-david.newlevel.media", dg.DROP_PORT))
+
+    def test_non_david_consumer_on_subdev_keeps_private(self):
+        # marek/montalu consumers on the SAME box DO have tailscale → unchanged
+        # private-by-default behaviour (the force is per-account, not per-box).
+        self.assertIsNone(
+            dg.resolve_public_lane(False, True, marker_path=self.present,
+                                   nodename="subdev", username="marek"))
+        self.assertIsNone(
+            dg.resolve_public_lane(False, True, marker_path=self.present,
+                                   nodename="subdev", username="montalu"))
+
+    def test_david_consumer_force_still_needs_a_live_marker(self):
+        # The consumer force flips only the DEFAULT — it can NEVER invent a lane:
+        # no live marker on this box → None even for david1 (no 404 URL).
+        self.assertIsNone(
+            dg.resolve_public_lane(False, True, marker_path=self.absent,
+                                   nodename="subdev", username="david1"))
+
+
+class TestConsumerForcesPublic(unittest.TestCase):
+    def test_david_accounts_on_subdev_force_public(self):
+        self.assertTrue(dg.consumer_forces_public("subdev", "david1"))
+        self.assertTrue(dg.consumer_forces_public("subdev", "david2"))
+
+    def test_non_david_account_on_subdev_does_not_force(self):
+        for u in ("marek", "montalu", "newlevel", "gatekeeper"):
+            self.assertFalse(dg.consumer_forces_public("subdev", u), u)
+
+    def test_david_name_on_other_box_does_not_force(self):
+        # The force is keyed on (box, account); a david-named account elsewhere
+        # (were there one) does NOT force — only the registered subdev tuples do.
+        self.assertFalse(dg.consumer_forces_public("dev1", "david1"))
+        self.assertFalse(dg.consumer_forces_public("spinbike", "david1"))
+
+    def test_unresolvable_username_fails_safe_false(self):
+        # Any error resolving the invoking account → False (today's box-driven
+        # behaviour), never a spurious public force.
+        def _boom():
+            raise OSError("no pwd entry")
+        orig = dg._current_username
+        dg._current_username = _boom
+        self.addCleanup(setattr, dg, "_current_username", orig)
+        self.assertFalse(dg.consumer_forces_public("subdev", None))
+
 
 class TestUrlLine(unittest.TestCase):
     def test_https_token_and_label(self):
