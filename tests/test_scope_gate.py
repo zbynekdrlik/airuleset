@@ -1499,5 +1499,170 @@ class TestCorpusReplay(TestCase):
         self.assertGreater(legit_rate, 0.6)
 
 
+class TestConcreteBlockReason(TestCase):
+    """#802 -- every BLOCK must emit a CONCRETE per-item reason; the opaque
+    `-> none` (an empty criterion string) is itself a defect.
+
+    Live incident (montalu1, 2026-09-01, odoo-erp title "Provizie cast 2"):
+    attempt 3 carried `Scope-gate: user-request` inside a `--body
+    "$(printf ...)"` command-substitution, so no real `Scope-gate:` LINE
+    existed for CRITERION_RE to match -> crit=None. The missing-Scope-gate
+    BLOCK branch then computed `_clean_field(crit)` == "" which the print
+    rendered as `-> none`, giving no actionable reason -- the block was
+    undiagnosable and the stream had to fall back to the
+    `# airuleset:scope-gate-ok` bypass. Root cause verified against the
+    shipped hook; the "retry-state" hypothesis was empirically DISPROVEN
+    (see test_compliant_retry_after_blocked_attempts_passes below)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-blockreason-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _block_line_from_log(self, home):
+        """The single BLOCK log line written to this run's scope-gate.log,
+        or "" if none -- used to assert the LOGGED criterion is concrete
+        too, not just the stderr per-item summary."""
+        log = Path(home) / ".claude" / "scope-gate.log"
+        if not log.exists():
+            return ""
+        for ln in log.read_text(encoding="utf-8").splitlines():
+            if "verdict=BLOCK" in ln:
+                return ln
+        return ""
+
+    def test_resolved_body_with_no_scope_gate_gives_concrete_reason(self):
+        # Body IS readable (inline --body) but carries no Scope-gate line;
+        # from a stream account whose OWN label is present (so the #390
+        # stream gate passes and we reach the missing-Scope-gate branch).
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run("gh issue create -t Provizie -l stream:david2 "
+                "--body 'plain finding, no criterion line here'",
+                home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("-> none", r.stderr)
+        self.assertIn("no-scope-gate", r.stderr)
+        self.assertNotIn("criterion=none", self._block_line_from_log(home))
+
+    def test_unresolvable_body_gives_concrete_reason_not_none(self):
+        # No -F / --body at all -> resolve_body returns (None, None): the
+        # exact (body is None AND body_err is None) hole that rendered the
+        # opaque `-> none`. Reason must name that the body was unresolvable.
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-home2-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run("gh issue create -t Provizie -l stream:david2",
+                home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("-> none", r.stderr)
+        self.assertIn("body-unresolved", r.stderr)
+        self.assertNotIn("criterion=none", self._block_line_from_log(home))
+
+    def test_command_substitution_body_is_the_montalu1_shape(self):
+        # The literal montalu1 attempt-3 shape: the Scope-gate line rides
+        # inside a `--body "$(printf ...)"` command-substitution token, so no
+        # newline-anchored `Scope-gate:` LINE exists for CRITERION_RE. It
+        # must still BLOCK (correct -- the gate cannot read a runtime
+        # substitution) but with a CONCRETE reason, never `-> none`.
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-home3-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run("gh issue create -t Provizie -l stream:david2 "
+                "--body \"$(printf 'Scope-gate: user-request')\"",
+                home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("-> none", r.stderr)
+        self.assertNotIn("criterion=none", self._block_line_from_log(home))
+
+    def test_compliant_retry_after_blocked_attempts_passes(self):
+        # #802 requirement 2 (validator "retry-state" hypothesis): a
+        # compliant filing must NOT be blocked by the SESSION's own earlier
+        # BLOCKED attempts. Three attempts share ONE home (== one
+        # scope-gate.log): (1) missing Scope-gate BLOCKS, (2) an unreadable
+        # -F BLOCKS, (3) a fully-compliant heredoc filing of the SAME title
+        # PASSES. Prior BLOCK/NOTFILED lines never charge the daily/width
+        # caps (they count verdict=PASS only) and never manufacture a
+        # near-duplicate (that check reads open issues, never the log).
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-retry-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        a1 = run("gh issue create -t 'Provizie cast 2' -l stream:david2 "
+                 "--body 'plain finding no criterion'",
+                 home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(a1.returncode, 2, a1.stderr)
+        a2 = run("gh issue create -t 'Provizie cast 2' -l stream:david2 -F body.md",
+                 home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(a2.returncode, 2, a2.stderr)
+        a3 = run(body_cmd("Provizie cast 2",
+                          "Stream-routing: belongs to us\nreal work",
+                          scope_gate="user-request", labels=["stream:david2"]),
+                 home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(a3.returncode, 0, a3.stderr)
+
+
+class TestBlockReasonHardening(TestCase):
+    """#802 adversarial-review hardening (2x fresh-context review of the
+    GREEN fix): (1) a whitespace-only title must not empty its field and
+    shift the tab hand-off; (2) an attacker-influenced invalid-criterion
+    value must not carry a `<countingfield>=` decoy token into the
+    free-text `criterion=` field; (3) C0/DEL control bytes (ESC) that `\\s`
+    does not cover must be stripped before reaching stderr / the log."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-blockhardening-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+
+    def _block_line(self, home):
+        log = Path(home) / ".claude" / "scope-gate.log"
+        if not log.exists():
+            return ""
+        for ln in log.read_text(encoding="utf-8").splitlines():
+            if "verdict=BLOCK" in ln:
+                return ln
+        return ""
+
+    def test_whitespace_only_title_does_not_empty_the_field(self):
+        home = tempfile.mkdtemp(prefix="airuleset-blockhardening-h1-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = run("gh issue create -t '   ' -l stream:david2 --body 'no criterion'",
+                home=home, gh_bin=self.gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        line = self._block_line(home)
+        # A whitespace-only title cleans to "" without the guard -> the log
+        # would carry title="" and bash's IFS-tab read would collapse it; the
+        # guard pins "(no title)". The real trailing fields must stay intact.
+        self.assertIn('title="(no title)"', line)
+        self.assertIn("session=test-scope-gate", line)
+
+    def test_invalid_criterion_decoy_token_is_neutralized(self):
+        home = tempfile.mkdtemp(prefix="airuleset-blockhardening-h2-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # An invalid Scope-gate value crafted to spell a `parents=999` decoy;
+        # the surfaced free-text criterion must NOT let a `\bparents=` first
+        # match find the forged value ahead of the real `parents=none` field.
+        r = run("gh issue create -t decoy -l stream:david2 "
+                "--body 'Scope-gate: x-parents=999'",
+                home=home, gh_bin=self.gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        line = self._block_line(home)
+        self.assertNotIn("parents=999", line)          # decoy neutralized
+        self.assertIn("invalid-scope-gate:x-parents:999", line)
+        self.assertIn("parents=none", line)            # real field intact
+
+    def test_control_bytes_in_title_are_stripped(self):
+        home = tempfile.mkdtemp(prefix="airuleset-blockhardening-h3-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # A raw ESC (\x1b) is not whitespace, so \s+ leaves it -- it must be
+        # stripped before reaching the user's terminal (escape injection).
+        r = run("gh issue create -t '\x1b]0;pwn\x07X' -l stream:david2 "
+                "--body 'no criterion'",
+                home=home, gh_bin=self.gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("\x1b", r.stderr)
+        self.assertNotIn("\x1b", self._block_line(home))
+
+
 if __name__ == "__main__":
     main()
