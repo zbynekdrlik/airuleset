@@ -3782,6 +3782,19 @@ from cli_owner_vps import (  # noqa: E402, F401
     _sudoers_install_script as _sudoers_install_script,
 )
 
+# --- #775: shared-stream resource guardrails -- a self-contained leaf, consumed
+# by cmd_push (via `airuleset.provision_shared_stream_guards`, the facade name,
+# so it stays test-patchable) as one non-fatal LOUD step after the deploy loop.
+from cli_resource_guards import (  # noqa: E402, F401
+    provision_shared_stream_guards as provision_shared_stream_guards,
+    build_apply_script as build_apply_script,
+    guard_files as guard_files,
+    render_guard_dropin as render_guard_dropin,
+    render_root_exempt_dropin as render_root_exempt_dropin,
+    render_service_oom_dropin as render_service_oom_dropin,
+    render_sysctl_vm as render_sysctl_vm,
+)
+
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
@@ -3859,6 +3872,30 @@ def _watchdog_reaper_kill_fn(pid):
     a real process."""
     from watchdog import default_kill_fn
     return default_kill_fn(pid)
+
+
+def _watchdog_resource_guard_gk_request(uid):
+    """Job 39's real gk-request side-effect (#775) — file (deduped by the job's
+    own marker) a `needs-gatekeeper` hand-off onto this feature's tracking
+    ticket saying subdev still runs WITHOUT resource guardrails. Wired here (not
+    inside run_once) so every OTHER job's run_once unit test stays network-free,
+    exactly like the reaper/u-reconcile seams. Best-effort: any error is
+    swallowed (the job logs its own gk-request-error line if this raises)."""
+    import subprocess
+    from watchdog.resource_guard import TRACKING_ISSUE, TRACKING_REPO
+    body = (
+        "GATEKEEPER-ACTION: subdev beží BEZ #775 resource guardrails — "
+        "user-%s.slice memory.max=max (UNLIMITED). Watchdog Job 39 "
+        "(resource_guard_verify) to zistil z vlastného cgroupu. Treba "
+        "autorizovať operátorský root@subdev key a spustiť `airuleset.py push` "
+        "(guard krok ich aplikuje). Self-service-checked: watchdog číta VLASTNÝ "
+        "cgroup memory.max bez rootu; aplikácia guardov vyžaduje root@subdev, "
+        "čo stream nemá — preto gk." % uid)
+    subprocess.run(
+        [sys.executable, os.path.join(str(REPO_DIR), "airuleset.py"),
+         "gk-request", "--issue", str(TRACKING_ISSUE), "--repo", TRACKING_REPO,
+         "--comment", body],
+        capture_output=True, text=True, timeout=60)
 
 
 def _watchdog_u_reconcile_clear(cwd, num):
@@ -4914,6 +4951,12 @@ def cmd_watchdog(args):
                     # SIGKILL. Log-only self-heal, no Discord ping (#546).
                     reaper_ps_fetch=_watchdog_reaper_ps_fetch,
                     reaper_kill_fn=_watchdog_reaper_kill_fn,
+                    # Job 39 (#775) — VERIFY-ONLY shared-stream resource-guard
+                    # check. The gk-request is a wired seam so a run_once unit
+                    # test injects a recorder, never a real gh side-effect; the
+                    # box-class + cgroup gates live INSIDE the job (off a
+                    # shared-stream box it reads nothing, alarms nothing).
+                    resource_guard_gk_request=_watchdog_resource_guard_gk_request,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
@@ -5073,6 +5116,7 @@ from cli_fleet import (  # noqa: E402, F401
     AUTHORITY_PROFILES as AUTHORITY_PROFILES,
     AUTHORITY_BY_USER as AUTHORITY_BY_USER,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
+    SHARED_STREAM_GUARD_HOSTS as SHARED_STREAM_GUARD_HOSTS,
 )
 
 
