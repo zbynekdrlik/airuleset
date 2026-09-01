@@ -1218,6 +1218,34 @@ class TestGoalLaneSweep(unittest.TestCase):
         self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
                          "the live relaunch keystroke is opt-in (flag off)")
 
+    def test_804_resurrect_hard_veto_on_human_active_pane_mode4(self):
+        # #804 mode-4 -- the resurrect relaunch keystroke into a dead stream's
+        # bare-shell pane is HARD-VETOED when a human is active on that pane
+        # (signal 3: an attached tmux client's recent input), EVEN with the
+        # opt-in flag ON. "Never keystroke a human-active pane" is the owner's
+        # hardest rule; the veto is logged with its signal and NO send-keys
+        # fires. RED before the recent-human veto is wired into the resurrect
+        # decision -- with the flag ON + no veto, decide() would relaunch and
+        # send-keys into the human's pane.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        # a BARE-shell pane in the dead cwd WITH an attached client whose input
+        # activity is NOW (signal 3 -> a human is at this pane right now).
+        tmux = _ClientActiveFake([("%bash", "bash", cwd, "222")], GOAL_IDLE_CAP,
+                                 client_epochs=[now])
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") and "recent-human" in ln
+                            for ln in logs), logs)
+        # a human-active pane is NEVER keystroked, flag ON notwithstanding.
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "resurrect must HARD-veto a human-active pane")
+
     def test_804_census_skipped_when_the_sweep_budget_broke(self):
         # #804-review 🟡: a sweep budget break leaves deferred panes' cwds OUT of
         # visited_cwds, so the DEAD-SESSION census must NOT run that sweep (it
