@@ -81,11 +81,23 @@ class TestShortViewportStructure798(unittest.TestCase):
         # all rows unclipped:
         self.assertIn("fr.style.height", fn)
         self.assertIn("fr.style.width", fn)
-        # a parent UNIFORM down-scale, origin top-centre (row 0 pinned at slot top):
-        self.assertIn("'50% 0'", fn)
+        # a parent UNIFORM down-scale, top pinned (origin '0 0') + an explicit
+        # translateX that centres in the SLOT -> exact for BOTH axes (a plain
+        # 'scale() origin 50% 0' would clip a width over-fit):
+        self.assertIn("'0 0'", fn)
+        self.assertIn("translate(", fn)
         self.assertIn("scale(", fn)
-        # covers BOTH clip directions (top-align vs centre) -> max(height, bottom):
-        self.assertIn("Math.max(g.height, g.bottom)", fn)
+        self.assertIn("(slot.w - s * boxW) / 2", fn)
+        # the box is sized from the grid's OWN dimensions (placement-independent,
+        # so it never creeps), never the centring-offset-inflated extent:
+        self.assertIn("const natW = g.width, natH = g.height", fn)
+
+    def test_slotof_fallback_line_is_locked(self):
+        # the node harness reproduces slotOf's fallback with a stub; lock the REAL
+        # fallback here so a change to it (e.g. no longer returning win.inner*)
+        # fails a test instead of silently diverging from the stub.
+        self.assertIn("return { w: win.innerWidth, h: win.innerHeight };",
+                      _extract_js_function(self.html, "slotOf"))
 
     def test_self_induced_resize_guard_present(self):
         # the explicit guard: the child 'resize' our own box-grow fires is ignored
@@ -124,7 +136,10 @@ def _playwright_and_browser():
 _CHILD_SRCDOC = """<!doctype html><html><head><meta charset=utf-8><style>
 html,body{margin:0}
 .terminal,.xterm{display:contents}
-.xterm-screen{background:#0a3d0a}
+/* flex-shrink:0 so the over-wide grid keeps its full width (like real xterm's
+   .xterm-screen inside the .xterm flex item) -> a WIDTH over-fit is modelable,
+   not silently clamped to the container by the default flex-shrink:1. */
+.xterm-screen{background:#0a3d0a;flex-shrink:0}
 </style></head><body>
 <div id=terminal-container><div class=terminal><div class=xterm>
 <div class=xterm-screen></div></div></div></div>
@@ -172,8 +187,8 @@ class TestShortViewportRealBrowser798(unittest.TestCase):
             " try{ if(typeof reconcileFrameFit==='function') reconcileFrameFit(win); }catch(e){} };",
         ])
 
-    def _measure(self, viewport_h):
-        """Render the parent + synthetic child at a viewport `viewport_h` tall,
+    def _measure(self, viewport_h, width=723):
+        """Render the parent + synthetic child at a viewport `width` x `viewport_h`,
         run the pipeline against the child, and return the grid's parent-space
         footprint vs the #frames slot."""
         sync_playwright = type(self)._pw  # via the class: a function attr accessed on
@@ -193,7 +208,7 @@ class TestShortViewportRealBrowser798(unittest.TestCase):
         with sync_playwright() as p:
             b = p.chromium.launch(headless=True)
             try:
-                pg = b.new_page(viewport={"width": 723, "height": viewport_h})
+                pg = b.new_page(viewport={"width": width, "height": viewport_h})
                 pg.set_content(parent, wait_until="load")
                 pg.wait_for_function(
                     "() => { const f=document.querySelector('iframe.term');"
@@ -225,13 +240,32 @@ class TestShortViewportRealBrowser798(unittest.TestCase):
                            "the iframe layout box must be grown past the slot")
         self.assertLess(m["scale"], 1.0, "a parent DOWN-scale must be applied")
 
-    def test_tall_viewport_stays_crisp_no_grow(self):
-        # a viewport that fits the grid must NOT grow the box (under-fit path).
-        m = self._measure(760)  # 760 - 37 = 723 slot, comfortably fits the grid
+    def test_narrow_viewport_whole_grid_visible_horizontally(self):
+        # width axis: a viewport NARROWER than the 704px grid at the font floor must
+        # not clip the grid's right side (the #798 review 🟡: origin '50% 0' centres
+        # about the grown box, shifting a width over-fit right into #frames' clip).
+        m = self._measure(760, width=500)  # 500 wide (< 704 grid), tall enough to fit height
+        self.assertGreater(m["gridNatW"], m["slotW"] + 1,
+                           "the synthetic child must actually over-fit the width")
+        self.assertGreaterEqual(m["gridLeft"], m["slotLeft"] - 1.5,
+                                "the grid left must be inside the slot, not off-screen")
+        self.assertLessEqual(m["gridRight"], m["slotRight"] + 1.5,
+                             "the grid right must be inside the slot, not clipped by #frames")
+        # and still top-pinned/whole vertically:
         self.assertGreaterEqual(m["gridTop"], m["slotTop"] - 1.5)
-        self.assertLessEqual(m["gridBottom"], m["slotBottom"] + 1.5)
+
+    def test_tall_viewport_stays_crisp_no_grow(self):
+        # a viewport that fits the grid must NOT grow the box: reconcileFrameFit
+        # detects under-fit, clears any explicit box, and leaves the existing #700
+        # `stretchFrameToFill` transform (a centred fill) untouched. (We assert only
+        # these #798-scoped properties, not the grid's exact footprint -- that is
+        # #700's centred-fill geometry, covered by its own tests, and it uses a
+        # '50% 50%' origin the over-fit mapping here does not model.)
+        m = self._measure(760)  # 760 - 37 = 723 slot, comfortably fits the grid
         self.assertFalse(m["boxExplicit"],
                          "a fitting viewport must leave the box slot-sized (no grow)")
+        self.assertNotIn("translate", m.get("transform", "") or "",
+                         "reconcileFrameFit must not hijack the under-fit transform")
 
 
 def _grab(html, const_name):
@@ -254,13 +288,17 @@ _MEASURE_JS = """() => {
   const ifr = iframe.getBoundingClientRect();           // reflects the transform
   return {
     slotTop: fr.top, slotBottom: fr.bottom, slotH: frames.clientHeight,
+    slotLeft: fr.left, slotRight: fr.right, slotW: frames.clientWidth,
     font: win.term.options.fontSize,
-    gridNatH: g.height,
+    gridNatH: g.height, gridNatW: g.width,
     boxH: parseFloat(iframe.style.height) || win.innerHeight,
     boxExplicit: !!iframe.style.height,
+    transform: iframe.style.transform || '',
     scale: s,
     gridTop: ifr.top + g.top * s,
-    gridBottom: ifr.top + g.bottom * s
+    gridBottom: ifr.top + g.bottom * s,
+    gridLeft: ifr.left + g.left * s,
+    gridRight: ifr.left + g.right * s
   };
 }"""
 

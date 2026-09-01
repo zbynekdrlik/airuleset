@@ -29,7 +29,7 @@
     "cli_vault.py": 1084,
     "cli_webterm.py": 1679,
     "cli_webterm_access.py": 362,
-    "cli_webterm_dash_template.py": 771,
+    "cli_webterm_dash_template.py": 784,
     "cli_webterm_david.py": 195,
     "cli_webterm_gateway.py": 1177,
     "cli_webterm_lane.py": 404,

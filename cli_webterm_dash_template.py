@@ -135,9 +135,12 @@ const WT_FRAME_FILL_MAX_STRETCH = 1.25; // parent-frame residual scale, per axis
 // #798: floor for the parent DOWN-scale in reconcileFrameFit (below). When the fixed
 // 176x51 grid OVERFLOWS a viewport too SHORT to fit it even at fitFixedGrid's 6px font
 // floor (owner's compact window: natural grid ~357px vs a ~312px slot), the iframe is
-// grown to the grid's own extent -- so the child paints ALL 51 rows unclipped -- then
-// scaled DOWN into the slot; this bounds that shrink so a pathological viewport degrades
-// to small-but-whole rather than vanishing.
+// grown to the grid's own size -- so the child paints ALL 51 rows unclipped -- then
+// scaled DOWN into the slot. The floor bounds that shrink for readability: within the
+// floor the WHOLE grid fits; only for a PATHOLOGICALLY short viewport (needing a scale
+// below the floor) does the scaled box still exceed the slot -- and because the top is
+// pinned (origin y=0), what #frames then clips is the BOTTOM, so row 0 (the ticket's
+// casualty) always survives. A deliberate wholeness-vs-readability trade at the extreme.
 const WT_FRAME_FILL_MIN_SHRINK = 0.5;   // parent-frame down-scale floor (over-fit only)
 function themeTerminal(term) {           // idempotent: applied once per terminal
   if (!term || term.__wtThemed) return;
@@ -430,7 +433,7 @@ function fillFixedGrid(win) {
   term.options.lineHeight = 1;
   term.options.letterSpacing = 0;
   const g = el.getBoundingClientRect();            // NATURAL grid (fill just reset)
-  const availW = win.innerWidth, availH = win.innerHeight;
+  const _slot = slotOf(win), availW = _slot.w, availH = _slot.h;  // #798: the SLOT, not a grown box
   if (!g.width || !g.height || !availW || !availH) return false;
   // vertical: taller cells via lineHeight. Target an INTEGER cell height that never
   // overflows -- xterm rounds cell HEIGHT to integer px (same as letterSpacing), so a
@@ -496,7 +499,7 @@ function stretchFrameToFill(win) {
   const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
   if (!el) return false;
   const g = el.getBoundingClientRect();     // CHILD layout coords (settled fill)
-  const availW = win.innerWidth, availH = win.innerHeight;
+  const _slot = slotOf(win), availW = _slot.w, availH = _slot.h;  // #798: the SLOT, not a grown box
   if (!g.width || !g.height || !availW || !availH) return false;
   const sx = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availW / g.width));
   const sy = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availH / g.height));
@@ -539,28 +542,38 @@ function reconcileFrameFit(win) {
   const slot = slotOf(win);                 // the real #frames slot (parent-read)
   const g = el.getBoundingClientRect();      // CHILD coords
   if (!slot.w || !slot.h || !g.width || !g.height) return false;
-  // The box must cover the grid REGARDLESS of how the child places it. When the child
-  // TOP-aligns the over-tall grid (ttyd here: top ~5, clips the BOTTOM), .bottom is the
-  // extent. When it CENTRES it (the owner's env: top NEGATIVE, clips the TOP row-0
-  // prompt), .bottom UNDER-states it and the grid's own HEIGHT is what the box must hold.
-  // max(height, bottom) is correct for both clip directions.
-  const natW = Math.max(g.width, g.right), natH = Math.max(g.height, g.bottom);
+  // The over-fit check + box size use the grid's OWN dimensions (g.width/g.height),
+  // which are font-determined and PLACEMENT-independent -- so the box target is a fixed
+  // function of the (stable) font, never of the child's centring offset. (Using the
+  // extent g.right/g.bottom instead would count the post-grow centring offset and make
+  // the box creep a few px per pass before settling.) The +16 slack absorbs the child's
+  // own top/left padding (ttyd's ~5px), so the grid fits inside the grown box wherever
+  // the child places it (top-aligned OR centred), regardless of clip direction.
+  const natW = g.width, natH = g.height;
   const over = (natW > slot.w + 1) || (natH > slot.h + 1);
   if (!over) {                               // fits crisply -> box = slot, leave #700's transform
     if (fr.style.width || fr.style.height) { fr.style.width = ''; fr.style.height = ''; }
     win.__wtSetBox = null;                   // slot-sized: no self-induced-resize marker
     return true;
   }
-  // OVER-FIT: grow the box to cover the grid (+ slack for any child offset), uniform down-scale.
-  const boxW = Math.max(slot.w, Math.ceil(natW) + 8);
-  const boxH = Math.max(slot.h, Math.ceil(natH) + 8);
+  // OVER-FIT: grow the box to cover the grid (+ slack for the child offset), uniform down-scale.
+  const boxW = Math.max(slot.w, Math.ceil(natW) + 16);
+  const boxH = Math.max(slot.h, Math.ceil(natH) + 16);
   const wpx = boxW + 'px', hpx = boxH + 'px';
   if (fr.style.width !== wpx) fr.style.width = wpx;     // mutate only on change -> idempotent
   if (fr.style.height !== hpx) fr.style.height = hpx;
   win.__wtSetBox = { w: boxW, h: boxH };     // the resize this fires is OUR OWN -> guarded
   const s = Math.max(WT_FRAME_FILL_MIN_SHRINK, Math.min(slot.w / boxW, slot.h / boxH));
-  fr.style.transformOrigin = '50% 0';        // top-centre: row 0 stays pinned at the slot top
-  const t = 'scale(' + s.toFixed(4) + ')';
+  // Pin the TOP at the slot top (row 0 always survives) and CENTRE horizontally in the
+  // SLOT. transformOrigin '0 0' + an explicit translateX is exact for BOTH axes: a plain
+  // 'scale() origin 50% 0' would centre about the GROWN BOX's centre, which only equals
+  // the slot centre when boxW == slot.w -- so a WIDTH over-fit (a viewport narrower than
+  // the 704px grid) would shift the grid right and clip it. translateX = half the slack
+  // between the scaled box and the slot (0 when the width axis is the limiting one -> the
+  // grid fills the width; positive when height-limited -> centred letterbox).
+  const tx = (slot.w - s * boxW) / 2;
+  fr.style.transformOrigin = '0 0';
+  const t = 'translate(' + tx.toFixed(1) + 'px, 0px) scale(' + s.toFixed(4) + ')';
   if (fr.style.transform !== t) fr.style.transform = t;
   return true;
 }
