@@ -307,6 +307,76 @@ class TestForkNoMergeCloseGuard(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("fork-no-merge", r.stderr)
 
+    # --- #773: bot box whose App-token dir is NOT detected -> self-login empty ---
+    #
+    # `app_token_dir` points at a NON-EXISTENT path here, so
+    # `_is_gh_app_token_box()` is False and `authority --self-login` falls to
+    # `_gh_login()` -> `gh api user`, which 403s on an App token (`api_user_403`)
+    # -> ME EMPTY. That is the montalu2 #5560 failure: a bot-authored, own
+    # stream-labeled ticket the stream tries to self-close, blocked because the
+    # identity check could not resolve the box's own login.
+
+    def test_allows_self_close_when_bot_box_selflogin_unresolvable(self):
+        # RED (block) on current code; GREEN after the fallback: a ticket
+        # authored by the shared stream App bot (!= maintainer) is stream-filed,
+        # so a reduced-authority stream may self-close it without resolving ME.
+        self.assertNotEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                            airuleset.MAINTAINER_GH_LOGIN)
+        r = run("gh issue close 5560 --comment 'box recreated + verified'",
+                self.branch, api_user_403=True, me="",
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_blocks_maintainer_authored_close_when_selflogin_unresolvable(self):
+        # The #349 discriminator survives the fallback: a maintainer-ASSIGNED
+        # ticket is authored by the human maintainer, NEVER the App bot, so the
+        # fallback (AUTHOR == the App bot) never fires and it stays BLOCKED even
+        # when ME is unresolvable. The exact review-requiring work the guard
+        # exists to protect.
+        r = run("gh issue close 5561 --comment done",
+                self.branch, api_user_403=True, me="",
+                author=airuleset.MAINTAINER_GH_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_foreign_bot_authored_close_when_selflogin_unresolvable(self):
+        # The fallback compares against the SPECIFIC stream slug, never "any bot"
+        # -- a dependabot-authored ticket stays BLOCKED with ME unresolvable.
+        self.assertNotEqual("app/dependabot", airuleset.STREAM_APP_BOT_LOGIN)
+        r = run("gh issue close 5562 --comment done",
+                self.fork, api_user_403=True, me="",
+                author="app/dependabot",
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fork-no-merge", r.stderr)
+
+    def test_bot_authored_fallback_is_strict_last_resort_when_me_resolves(self):
+        # The fallback is a STRICT ME-EMPTY last resort: a box whose self-login
+        # RESOLVES to a real (non-bot) login must NOT gain the ability to close a
+        # bot-authored ticket through it. Here `gh api user` succeeds (not a bot
+        # box) so ME resolves to a real user != the bot author -> BLOCK. This
+        # passes on both current and fixed code -- it locks the `[ -z "$ME" ]`
+        # guard so a future edit cannot widen the fallback to a resolved box.
+        r = run("gh issue close 5563 --comment done",
+                self.branch, me="some-real-user",
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_bot_authored_close_with_glued_repo_flag_when_selflogin_unresolvable(self):
+        # #773 review (MINOR): a glued `-Rowner/repo` (no separator) leaves
+        # REPO_ARG empty, so AUTHOR would be read from the CWD repo while the
+        # close targets the named one -- the fallback refuses via the same
+        # _repo_flag_unparseable fail-safe the #533/#756 carve-outs use, even
+        # though the ticket IS bot-authored.
+        r = run("gh issue close 5560 -Rzbynekdrlik/odoo-erp --comment done",
+                self.branch, api_user_403=True, me="",
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
                     "gh issue view 5 --json title", "gh pr list"):
@@ -869,6 +939,29 @@ class TestGkVerdictArtifactClose(TestCase):
                         "https://github.com/zbynekdrlik/odoo-erp.git"], cwd=self.branch)
         r = run("gh issue close 5345 --comment 'gk CLEAN'",
                 self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_reviewed_close_with_large_comment_payload(self):
+        # #772: a legit #756 verdict self-close must NOT be intermittently
+        # blocked by the SIGPIPE race in _has_gk_verdict_artifact (recurrence of
+        # #192). On a long-lived ticket V_COMMENTS is hundreds of KB; the
+        # `printf '%s\n' "$1" | grep -q` pipe under `set -o pipefail` collapses
+        # to printf's SIGPIPE-141 exit once grep -q short-circuits on the
+        # first-line match, so the artifact reads as ABSENT and the close is
+        # spuriously BLOCKED. A ~260KB payload with the verdict heading on line 1
+        # makes the race DETERMINISTIC: grep -q matches line 1 and exits while
+        # printf is still blocked writing past the full 64KB pipe -> SIGPIPE.
+        # The payload is ~97KB (2500 filler lines): >64KB (the pipe capacity, so
+        # printf always blocks) yet under the ~128KB single-env-var limit
+        # (MAX_ARG_STRLEN) the hermetic fake gh passes it through. RED on the pipe
+        # form (12/12 spurious NOT-FOUND measured at ~97KB), GREEN on the
+        # here-string.
+        big = self.HEADING + "\n" + ("filler line to pad the comment payload\n" * 2500)
+        self.assertGreater(len(big), 90000)
+        self.assertLess(len(big), 120000)
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp "
+                "--comment 'merged, gk verdict CLEAN'",
+                self.branch, me=self.M, author=self.M, labels="", comments=big)
         self.assertEqual(r.returncode, 0, r.stderr)
 
     # --- BLOCK: every failure fails toward hand-off ---

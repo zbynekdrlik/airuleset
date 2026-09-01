@@ -91,8 +91,18 @@ _is_patch_close_cmd() {
 # adversarial security — the whole system keys on the ARTIFACT, never on WHO closed,
 # per odoo-erp#5378).
 _has_gk_verdict_artifact() {
-    printf '%s\n' "$1" | grep -iqE '^#{1,3}[^[:alnum:]_#]*gatekeeper.*\b(review|verification|verdict)\b' && return 0
-    printf '%s\n' "$1" | grep -qE '^GATEKEEPER-CLOSE:' && return 0
+    # #772: here-string reads, NOT `printf … | grep -q`. On a long-lived ticket
+    # $1 (V_COMMENTS = all comment bodies) is hundreds of KB; under this hook's
+    # `set -o pipefail` a `printf '%s\n' "$1" | grep -q` collapses to printf's
+    # SIGPIPE-141 exit the moment grep -q short-circuits on the first-line match
+    # (printf still blocked writing past the 64KB pipe buffer), so the artifact
+    # read as ABSENT and a legitimate #756 self-close was spuriously BLOCKED
+    # (recurrence of the #192 SIGPIPE-under-pipefail class). A here-string feeds
+    # grep with NO producer process in a pipeline, so no SIGPIPE can arise and
+    # pipefail never applies — the command's status is grep's own regardless of
+    # input size. The ERE + per-line `^` anchoring are byte-for-byte preserved.
+    grep -iqE '^#{1,3}[^[:alnum:]_#]*gatekeeper.*\b(review|verification|verdict)\b' <<< "$1" && return 0
+    grep -qE '^GATEKEEPER-CLOSE:' <<< "$1" && return 0
     return 1
 }
 
@@ -455,6 +465,37 @@ if [ -n "$ISSUE_NUM" ]; then
     if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ] \
        && [ -n "$MAINTAINER_LOGIN" ] && [ "$ME" != "$MAINTAINER_LOGIN" ]; then
         exit 0   # self-authored sub-finding — the stream's own bookkeeping, allowed
+    fi
+    # #773: identity FALLBACK for a bot box whose own login could not be
+    # resolved. On a GitHub App-token box `authority --self-login` returns the
+    # fixed bot login ONLY when `_is_gh_app_token_box()` detects the box (a LOCAL
+    # ~/.config/gh-app-tokens/ check); when that detection does not fire it falls
+    # to `gh api user`, which 403s on an App token -> ME EMPTY -> the carve-out
+    # above is skipped and the stream's OWN bot-authored ticket is blocked (live:
+    # montalu2 on odoo-erp #5560). With a SHARED bot identity, "my box's own
+    # ticket" and "any stream's own ticket" are already identical (the accepted
+    # #463 residual), so when ME is unresolvable the ownership test degenerates
+    # to: is this ticket authored by the shared stream App bot? A ticket authored
+    # by it was FILED by a stream, NEVER maintainer-assigned (maintainer-assigned
+    # work is authored by MAINTAINER_LOGIN) — so a reduced-authority stream may
+    # self-close it as its own bookkeeping, exactly as the ME==bot==AUTHOR path
+    # above does, without needing the box's own login. The `[ -z "$ME" ]` guard
+    # keeps this a STRICT fallback: a resolved (non-bot) identity is unaffected.
+    # The #349 discriminator is preserved verbatim — AUTHOR must be the App bot
+    # (a maintainer-authored ticket is excluded), and the bot login is != the
+    # maintainer by construction (checked defensively). `_repo_flag_unparseable`
+    # is the SAME fail-safe the #533/#756 carve-outs use: a -R flag present but
+    # unparseable (a glued `-Rowner/repo`) would read AUTHOR from the CWD repo
+    # while the close targets the named one — refuse the exemption (fail SAFE).
+    # APP_BOT_LOGIN (a static constant, no network call, no App-token-box
+    # detection) is fetched lazily INSIDE this branch, so a resolved-identity
+    # close never spawns the extra python3.
+    if [ -z "$ME" ] && [ -n "$AUTHOR" ] && ! _repo_flag_unparseable "$REPO_ARG"; then
+        APP_BOT_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
+        if [ -n "$APP_BOT_LOGIN" ] && [ "$AUTHOR" = "$APP_BOT_LOGIN" ] \
+           && [ -n "$MAINTAINER_LOGIN" ] && [ "$APP_BOT_LOGIN" != "$MAINTAINER_LOGIN" ]; then
+            exit 0   # #773: stream-filed (bot-authored) ticket, self-login unresolvable — allowed
+        fi
     fi
 fi
 
