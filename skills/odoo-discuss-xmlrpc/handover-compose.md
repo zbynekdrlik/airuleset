@@ -181,9 +181,9 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   person; never address a formal-register contact informally (airuleset
   #625/#626, owner ruling 2026-08-22). The register is PER-PROJECT and grows by
   ONE line as new client people appear — add a contact to its project's row:
-  - **montalu** — VYKANIE: CEO Pavol Špetta (menovite). TYKANIE: Patrik Javorský,
-    Dominik Volek, Peter Hollý. DEFAULT for anyone NOT listed here: VYKANIE, until
-    the owner says otherwise.
+  - **montalu** — VYKANIE: CEO Pavol Špetta (menovite), Barbora Čuhaničová.
+    TYKANIE: Patrik Javorský, Dominik Volek, Peter Hollý. DEFAULT for anyone NOT
+    listed here: VYKANIE.
 
   A NEW client person you have not been told how to address is VYKANIE by default
   (#626) — never guess tykanie; ask the owner, then add the line.
