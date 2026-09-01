@@ -1499,5 +1499,107 @@ class TestCorpusReplay(TestCase):
         self.assertGreater(legit_rate, 0.6)
 
 
+class TestConcreteBlockReason(TestCase):
+    """#802 -- every BLOCK must emit a CONCRETE per-item reason; the opaque
+    `-> none` (an empty criterion string) is itself a defect.
+
+    Live incident (montalu1, 2026-09-01, odoo-erp title "Provizie cast 2"):
+    attempt 3 carried `Scope-gate: user-request` inside a `--body
+    "$(printf ...)"` command-substitution, so no real `Scope-gate:` LINE
+    existed for CRITERION_RE to match -> crit=None. The missing-Scope-gate
+    BLOCK branch then computed `_clean_field(crit)` == "" which the print
+    rendered as `-> none`, giving no actionable reason -- the block was
+    undiagnosable and the stream had to fall back to the
+    `# airuleset:scope-gate-ok` bypass. Root cause verified against the
+    shipped hook; the "retry-state" hypothesis was empirically DISPROVEN
+    (see test_compliant_retry_after_blocked_attempts_passes below)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-blockreason-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _block_line_from_log(self, home):
+        """The single BLOCK log line written to this run's scope-gate.log,
+        or "" if none -- used to assert the LOGGED criterion is concrete
+        too, not just the stderr per-item summary."""
+        log = Path(home) / ".claude" / "scope-gate.log"
+        if not log.exists():
+            return ""
+        for ln in log.read_text(encoding="utf-8").splitlines():
+            if "verdict=BLOCK" in ln:
+                return ln
+        return ""
+
+    def test_resolved_body_with_no_scope_gate_gives_concrete_reason(self):
+        # Body IS readable (inline --body) but carries no Scope-gate line;
+        # from a stream account whose OWN label is present (so the #390
+        # stream gate passes and we reach the missing-Scope-gate branch).
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run("gh issue create -t Provizie -l stream:david2 "
+                "--body 'plain finding, no criterion line here'",
+                home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("-> none", r.stderr)
+        self.assertIn("no-scope-gate", r.stderr)
+        self.assertNotIn("criterion=none", self._block_line_from_log(home))
+
+    def test_unresolvable_body_gives_concrete_reason_not_none(self):
+        # No -F / --body at all -> resolve_body returns (None, None): the
+        # exact (body is None AND body_err is None) hole that rendered the
+        # opaque `-> none`. Reason must name that the body was unresolvable.
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-home2-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run("gh issue create -t Provizie -l stream:david2",
+                home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("-> none", r.stderr)
+        self.assertIn("body-unresolved", r.stderr)
+        self.assertNotIn("criterion=none", self._block_line_from_log(home))
+
+    def test_command_substitution_body_is_the_montalu1_shape(self):
+        # The literal montalu1 attempt-3 shape: the Scope-gate line rides
+        # inside a `--body "$(printf ...)"` command-substitution token, so no
+        # newline-anchored `Scope-gate:` LINE exists for CRITERION_RE. It
+        # must still BLOCK (correct -- the gate cannot read a runtime
+        # substitution) but with a CONCRETE reason, never `-> none`.
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-home3-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run("gh issue create -t Provizie -l stream:david2 "
+                "--body \"$(printf 'Scope-gate: user-request')\"",
+                home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("-> none", r.stderr)
+        self.assertNotIn("criterion=none", self._block_line_from_log(home))
+
+    def test_compliant_retry_after_blocked_attempts_passes(self):
+        # #802 requirement 2 (validator "retry-state" hypothesis): a
+        # compliant filing must NOT be blocked by the SESSION's own earlier
+        # BLOCKED attempts. Three attempts share ONE home (== one
+        # scope-gate.log): (1) missing Scope-gate BLOCKS, (2) an unreadable
+        # -F BLOCKS, (3) a fully-compliant heredoc filing of the SAME title
+        # PASSES. Prior BLOCK/NOTFILED lines never charge the daily/width
+        # caps (they count verdict=PASS only) and never manufacture a
+        # near-duplicate (that check reads open issues, never the log).
+        home = tempfile.mkdtemp(prefix="airuleset-blockreason-retry-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        a1 = run("gh issue create -t 'Provizie cast 2' -l stream:david2 "
+                 "--body 'plain finding no criterion'",
+                 home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(a1.returncode, 2, a1.stderr)
+        a2 = run("gh issue create -t 'Provizie cast 2' -l stream:david2 -F body.md",
+                 home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(a2.returncode, 2, a2.stderr)
+        a3 = run(body_cmd("Provizie cast 2",
+                          "Stream-routing: belongs to us\nreal work",
+                          scope_gate="user-request", labels=["stream:david2"]),
+                 home=home, gh_bin=gh_bin, user="david2")
+        self.assertEqual(a3.returncode, 0, a3.stderr)
+
+
 if __name__ == "__main__":
     main()
