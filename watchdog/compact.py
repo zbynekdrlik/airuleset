@@ -101,13 +101,20 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             any origin or content, ever (#333/#228 — the session is
             mid-decision; the pending question + the in-flight ticket the
             user's answer needs would be lost). All pass → type
-            `/compact`, log `SEND`, clear the request. Any check fails →
-            log `SKIP reason=<x>`, and the request is LEFT PENDING for the
+            `/compact`; then a post-send re-capture (#822 (a)) classifies it
+            `sent` (executing) or `queued` (appended to CC's type-ahead queue
+            behind a running turn) — a `queued` `/compact` records its
+            queued-since (below) and does NOT write `compact-delivered`. Log
+            `SEND`/`QUEUED`, clear the request. Any check fails → log
+            `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
             except an EXPIRED request (condition e) or one that is already
-            otherwise handled (already-queued, or in cooldown for a
+            otherwise handled (`queued`, already-queued, or in cooldown for a
             non-drained-boundary origin — a `self-callback` drained boundary
-            supersedes the cooldown and delivers, #805), which is DISCARDED outright. "No infinite waiting" is the hard age cap's
+            supersedes the cooldown and delivers, #805), which is DISCARDED
+            outright. A `self-callback` request under an armed `/goal` with zero
+            live tasks is NOT typed (#822 (c), the pre-type `skip:goal-continuing`
+            gate). "No infinite waiting" is the hard age cap's
             job — EXCEPT while a hold-extend veto keeps refreshing the claim
             (#727 a mid-batch loop holds past 30 min by design; #741 an
             actively-held boundary — recent-human / busy / client-active — holds
@@ -154,9 +161,11 @@ _log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# State — two files. `compact-requests.json`: the pending request per
+# State — three files. `compact-requests.json`: the pending request per
 # session. `compact-delivered.json`: the last REAL send time per session
-# (condition (d)'s own store). Nothing else is needed.
+# (condition (d)'s own store). `compact-queued.json` (#822 (e), defined below):
+# the instant a typed `/compact` was classified QUEUED, so `--status` can report
+# `QUEUED since=…` while the row still sits in the pane.
 # --------------------------------------------------------------------------- #
 
 def compact_requests_path():
@@ -307,9 +316,11 @@ def compact_delivered_path():
     return Path.home() / ".claude" / "compact-delivered.json"
 
 
-def _load_compact_delivered(path=None):
-    """{session_id: last_real_send_ts}. {} on any error/missing file."""
-    path = path or compact_delivered_path()
+def _load_json_ts_map(path):
+    """{key: ts} JSON map load — the shared body behind the
+    `compact-delivered.json` (last-send, condition (d)) and the #822
+    `compact-queued.json` (queued-since) stores. {} on any error/missing
+    file; never raises."""
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
@@ -318,8 +329,8 @@ def _load_compact_delivered(path=None):
         return {}
 
 
-def _save_compact_delivered(d, path=None):
-    path = path or compact_delivered_path()
+def _save_json_ts_map(d, path):
+    """Atomic write of a `{key: ts}` map (shared by delivered + queued)."""
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         tmp = str(path) + ".tmp"
@@ -329,6 +340,15 @@ def _save_compact_delivered(d, path=None):
         return True
     except OSError:
         return False
+
+
+def _load_compact_delivered(path=None):
+    """{session_id: last_real_send_ts}. {} on any error/missing file."""
+    return _load_json_ts_map(path or compact_delivered_path())
+
+
+def _save_compact_delivered(d, path=None):
+    return _save_json_ts_map(d, path or compact_delivered_path())
 
 
 def mark_compact_delivery_ts(session, now=None, path=None):
@@ -384,6 +404,66 @@ def compact_delivery_in_cooldown(session, now, path=None, interval=None):
     if age is None:
         return False
     return age < _compact_min_delivery_interval(interval)
+
+
+# --------------------------------------------------------------------------- #
+# #822 (e) — the queued-since store. When `deliver_compact` classifies a typed
+# `/compact` as QUEUED (behind a running turn, never executed), it records the
+# instant here so `compact-request --status` reports `QUEUED sid=… since=…` for
+# as long as the `❯ /compact` row still sits unexecuted in the pane — the honest
+# signal the /goal HOLD doctrine (skills/autopilot Step 5) needs instead of a
+# false `NONE` (the request itself was cleared, `queued` being terminal). Same
+# `{sid: ts}` shape + shared load/save as `compact-delivered.json`; the LIVE
+# pane (`_pane_has_queued_compact`) gates the report, so a stale record is never
+# surfaced.
+# --------------------------------------------------------------------------- #
+
+def compact_queued_path():
+    """`~/.claude/compact-queued.json`, resolved at CALL time (same reasoning
+    as `compact_requests_path()` above)."""
+    return Path.home() / ".claude" / "compact-queued.json"
+
+
+def mark_compact_queued_ts(session, now=None, path=None):
+    """#822: record the instant `deliver_compact` classified a typed `/compact`
+    as QUEUED (behind a running turn) for `session` — the durable `since=`
+    anchor `--status` reports while the queued row is still in the pane. A blank
+    session is a no-op. Fail-safe; returns True on success."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    now = now if now is not None else time.time()
+    p = path or compact_queued_path()
+    d = _load_json_ts_map(p)
+    d[session] = float(now)
+    return _save_json_ts_map(d, p)
+
+
+def compact_queued_since(session, path=None):
+    """#822: the durable `since` ts for `session`'s last QUEUED classification,
+    or None (unrecorded / unreadable / non-numeric). Read by `--status` ONLY
+    once the LIVE pane confirms a queued `/compact` row still sits there, so a
+    stale record is never surfaced as QUEUED."""
+    session = str(session or "").strip()
+    if not session:
+        return None
+    ts = _load_json_ts_map(path or compact_queued_path()).get(session)
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return ts
+    return None
+
+
+def compact_queued_in_pane(pane_id, run=None):
+    """#822 (e): True iff pane `pane_id` currently shows a queued `❯ /compact`
+    row — the LIVE half of `--status`'s QUEUED report, reusing the (b) detector
+    `_pane_has_queued_compact` on a fresh capture. A blank pane_id or an
+    unreadable/empty capture reads False (fail-safe: report NONE, never a false
+    QUEUED)."""
+    pane_id = (pane_id or "").strip()
+    if not pane_id:
+        return False
+    cap = watchdog.capture_pane(pane_id, run, lines=40)
+    return bool(cap) and watchdog._pane_has_queued_compact(cap)
 
 
 # --------------------------------------------------------------------------- #
@@ -681,6 +761,27 @@ def _compact_live_bg_bash(cwd, sid, projects_dir=None):
 # --------------------------------------------------------------------------- #
 
 COMPACT_TEXT = "/compact"
+
+# #822 (d): the ONE short background command the session launches as a tracked
+# `run_in_background` Bash task at its drained batch boundary, so the pane gets an
+# ACCEPTED Stop that drains a queued/pending `/compact` under an armed `/goal` (the
+# goal Stop hook otherwise "continues" every `✅` boundary and CC never drains its
+# type-ahead queue). `compact-request --self` PRINTS it verbatim so the session
+# never guesses; `hooks/stop-check-working-liveness.sh` accepts this tracked task
+# (a `run_in_background` Bash job registers as type "shell", status "running").
+COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
+
+# The `--self` disposition words for which the boundary compact did NOT execute
+# and the session MUST do the boundary-hold to drain it: `skip:goal-continuing`
+# (the #822 (c) pre-type gate refused to type under the armed goal), `queued`
+# (typed, but appended to CC's type-ahead queue), and `already-queued` (a
+# `/compact` row from a prior delivery still sits unexecuted in the pane). All
+# three need an ACCEPTED Stop the hold turn provides — so print the hint at the
+# boundary itself rather than leaving the session to recover a turn later via
+# `--status`. A clean `sent` / any other skip does not print the hint.
+_COMPACT_HOLD_HINT_WORDS = frozenset(
+    ("skip:goal-continuing", "queued", "already-queued"))
+
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
 # first-seen" — #400's non-refreshable anchor is reversed). `ts` REFRESHES on
@@ -868,6 +969,42 @@ def _compact_still_in_box(pid, run, sleep_fn):
     return True                                # still there -> swallowed
 
 
+def _compact_post_send_classify(pid, run):
+    """#822 — after the input box went empty following a `/compact` submit, ONE
+    fresh re-capture distinguishes an EXECUTED compact (`"sent"`) from one that
+    merely QUEUED behind a running turn (`"queued"`).
+
+    An empty box is AMBIGUOUS: `/compact` leaves the box whether it executes OR
+    gets appended to CC's type-ahead queue because the pane went busy in the
+    microseconds after Enter (under an armed `/goal` the goal Stop hook blocks
+    every `✅` boundary, so a queued `/compact` never drains until the next
+    ACCEPTED Stop — the owner's 3x-queued incident). The tell is in the pane:
+
+      * CC's own "Compacting conversation" progress indicator -> `"sent"`: a
+        genuine compaction is IN FLIGHT, whatever put it there (#69);
+      * a queued `❯ /compact` row above the box -> `"queued"`;
+      * a running-turn spinner occupying the boundary -> `"queued"` (the submit
+        was appended behind a turn CC started right after the Enter).
+
+    Reuses the existing pane scanners (`_pane_compacting`,
+    `_pane_has_queued_compact`, `_classify_boundary`) — NO new detector family.
+    Classifying a never-executed compact `"queued"` is what keeps
+    `deliver_compact` from writing `compact-delivered` / starting the 30-min
+    cooldown for a compaction that did not happen (#135: delivery, not a claim).
+    An unreadable / idle-and-quiet re-capture reads `"sent"` (the pre-#822
+    behaviour): only a POSITIVE queued/spinner signal downgrades to `"queued"`,
+    so a genuinely-executed compact whose indicator has already cleared is never
+    mislabelled."""
+    recap = watchdog.capture_pane(pid, run, lines=40)
+    if watchdog._pane_compacting(recap):
+        return "sent"                          # genuinely executing right now
+    if watchdog._pane_has_queued_compact(recap):
+        return "queued"                        # queued behind a running turn
+    if watchdog._classify_boundary(recap)[0] == "busy":
+        return "queued"                        # a running-turn spinner ate it
+    return "sent"
+
+
 def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     """Type `/compact` and submit it, VERIFYING the submit actually landed —
     the piece `send_continue` (type + Enter, no post-send read) never had, so a
@@ -875,7 +1012,13 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     class) used to be reported "sent".
 
     Returns one of:
-      "sent"        — the box no longer shows `/compact` (submitted).
+      "sent"        — the box no longer shows `/compact` AND the post-send
+                       re-capture shows it executing / no queued row (#822).
+      "queued"      — the box cleared but a fresh re-capture shows a queued
+                       `❯ /compact` row or a running-turn spinner: the submit
+                       was appended to CC's type-ahead queue, NOT executed
+                       (`_compact_post_send_classify`, #822). The caller must
+                       NOT mark it delivered.
       "swallowed"   — the Enter was swallowed even after ONE corrective
                        Escape+Enter (never a second Escape #35, never a second
                        bare Enter — the SAME shape `_send_goal_verified` /
@@ -920,7 +1063,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
         return "raced-busy"
     watchdog.send_continue(pid, COMPACT_TEXT, run)
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return "sent"
+        return _compact_post_send_classify(pid, run)     # #822: sent vs queued
     # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective
     # Escape+Enter. The box holds ONLY our own `/compact` (verified bare above),
     # and a single Escape never deletes a CC draft (#35), so this only deselects
@@ -928,7 +1071,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return "sent"
+        return _compact_post_send_classify(pid, run)     # #822: sent vs queued
     # Still stuck. Backspace our own text off the bare-verified box so the next
     # sweep retries from a clean prompt; the janitor (job 20, provenance already
     # marked by the caller) is the backstop if this undo itself fails.
@@ -953,7 +1096,13 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     (a no-op at the sweep's ~60s cadence, since real elapsed time clears it).
 
     Returns:
-      "sent"            — `/compact` was typed.
+      "sent"            — `/compact` was typed AND observed executing / not
+                           queued (`_compact_post_send_classify`, #822).
+      "queued"          — `/compact` was typed but CC appended it to the
+                           type-ahead queue behind a running turn (#822); it did
+                           NOT execute, so `compact-delivered` is NOT written (no
+                           cooldown). TERMINAL — the queued row is now in the
+                           pane, so a re-type would only stack a duplicate.
       "expired"         — condition (e): the request is older than
                            `COMPACT_REQUEST_MAX_AGE_S`. Discard.
       "already-queued"  — the pane already holds an unexecuted `/compact`
@@ -967,7 +1116,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                            in-window cooldown (#805) and is delivered, never
                            returns "cooldown".
       "skip:<reason>"   — not safe right now; the caller LEAVES the
-                           request pending for the next periodic sweep.
+                           request pending for the next periodic sweep. One
+                           reason is `skip:goal-continuing` (#822): an armed
+                           `/goal` + zero live tasks means a typed `/compact`
+                           would only queue behind the goal continuation, so a
+                           `self-callback` boundary is NOT typed (the session's
+                           hold-turn delivers the boundary compact instead).
 
     Every decision is logged via `_log_compact_sync` from this ONE call
     site, immediately after any real send and BEFORE any other state
@@ -1108,6 +1262,31 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                           % (sid, cwd, bgjobs))
         return "skip:live-bg-bash-raced"
 
+    # #822 (c) — the goal-continuing pre-type gate. Everything above proved the
+    # pane is idle RIGHT NOW with ZERO live tasks (no worker lane, no bg-bash).
+    # If it ALSO shows an armed `/goal` (`◎ /goal active`) AND this is a
+    # DRAINED-boundary request (`self-callback`), a typed `/compact` CANNOT
+    # execute: with no live task to force an accepted Stop, the goal Stop hook
+    # blocks every boundary ("◯ Goal not yet met… continuing") and CC appends the
+    # `/compact` to its type-ahead queue, where it sits until the next accepted
+    # Stop (the owner's 3x-queued incident). So do NOT type — the boundary
+    # compact is delivered by the SESSION's own hold-turn (skills/autopilot
+    # Step 5: a `⏳ WORKING: boundary hold` turn with a live task provides the
+    # accepted Stop). Reuses the already-read pane state (`pane_goal_armed`, on
+    # the fresh capture) + the zero-live-tasks reads above — no new detector. A
+    # NON-drained-boundary origin, or an UNDETERMINABLE goal state
+    # (`pane_goal_armed` -> None / False), never trips this (fail-open, the
+    # pre-#822 path). NON-terminal: the request is LEFT PENDING so the sweep
+    # re-evaluates if the goal disarms; it is NOT hold-extended (a gone-quiet-
+    # under-goal boundary correctly ages out at the 30-min cap, like `skip:not-
+    # a-boundary`, #741).
+    if (origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS
+            and watchdog.pane_goal_armed(fresh) is True):
+        _log_compact_sync("SKIP goal-continuing sid=%s cwd=%s origin=%s "
+                          "(armed /goal + zero live tasks: a typed /compact "
+                          "would queue, not execute)" % (sid, cwd, origin or "-"))
+        return "skip:goal-continuing"
+
     # Mark provenance BEFORE typing so the shared janitor (#372) can
     # recover a stuck send for THIS pane — a delivering job's own
     # bookkeeping is the janitor's only proof it may act on this pane's
@@ -1116,6 +1295,24 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     outcome = _compact_submit_verified(
         pid, run, sleep_fn,
         lambda reason: _log_compact_sync("%s sid=%s cwd=%s" % (reason, sid, cwd)))
+    if outcome == "queued":
+        # #822: `/compact` was typed but CC APPENDED it to the type-ahead queue
+        # (the pane went busy in the microseconds after Enter -- under an armed
+        # /goal it never drains until the next ACCEPTED Stop). It did NOT
+        # execute, so do NOT mark it delivered / start the cooldown (the #135
+        # lesson: delivery, not a claim). TERMINAL: the queued row is now in the
+        # pane, so the next sweep reads `already-queued` and never re-types a
+        # duplicate -- the fix for the owner's 3x-queued accumulation.
+        _log_compact_sync("QUEUED sid=%s cwd=%s origin=%s "
+                          "(typed, queued behind a running turn, not executed)"
+                          % (sid, cwd, origin or "-"))
+        # #822 (e): record the queued-since instant so `compact-request
+        # --status` reports `QUEUED sid=… since=…` (not a false `NONE`) while the
+        # `❯ /compact` row still sits unexecuted in the pane — the request store
+        # is cleared here (`queued` is terminal), so this durable anchor is the
+        # only `since` the read-only /goal HOLD probe can report.
+        mark_compact_queued_ts(sid, now=now)
+        return "queued"
     if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed
         # the Enter, #36) or a draft raced into the box pre-send — either way the
@@ -1136,8 +1333,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 
 
 # The dispositions that fully HANDLE a request — the caller clears it
-# rather than leaving it pending for the next sweep.
-_COMPACT_TERMINAL_WORDS = frozenset(("sent", "expired", "already-queued", "cooldown"))
+# rather than leaving it pending for the next sweep. `queued` (#822) is terminal:
+# a `/compact` that CC appended to its type-ahead queue WILL execute at the next
+# accepted Stop, and the queued row is now in the pane — re-typing would only
+# stack a duplicate (the owner's 3x accumulation), so the request is done.
+_COMPACT_TERMINAL_WORDS = frozenset(
+    ("sent", "queued", "expired", "already-queued", "cooldown"))
 
 # #727/#741 hold-extend: the STRUCTURED live-own-task veto words PLUS the #741
 # ACTIVELY-HELD-BOUNDARY words. While one is the SWEEP's verdict, `compact_sweep`
@@ -1287,6 +1488,15 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
             clear_compact_request(sid, path=requests_path)
         if word == "sent":
             logs.append("OK (compact-sweep) sid=%s -> sent" % sid)
+            if handled is not None:
+                handled.add(sid)
+        elif word == "queued":
+            # #822: /compact was typed but queued behind a running turn — a real
+            # keystroke landed in the pane this sweep, so job 20 must still avoid
+            # typing a burst into it (handled), and the request is TERMINAL (the
+            # queued row is in the pane; the next sweep reads already-queued).
+            logs.append("OK (compact-sweep) sid=%s -> queued "
+                        "(typed, queued behind a running turn)" % sid)
             if handled is not None:
                 handled.add(sid)
         elif word == "expired":

@@ -5046,10 +5046,12 @@ def cmd_compact_request(args):
         # doctrine (skills/autopilot Step 5) runs this as a goal-fired turn's
         # FIRST action: PENDING -> end the turn immediately with one `⏳ WORKING`
         # line and ZERO dispatches; NONE -> the boundary compact is done, the next
-        # batch may be dispatched. Transcript-provable, no pane keystroke.
+        # batch may be dispatched. #822 (e) adds a third verdict, QUEUED, read from
+        # the LIVE pane. Transcript-provable, no pane keystroke.
         sid = (getattr(args, "session", "") or "").strip()
+        pane_id = ""
         if not sid:
-            _pane_id, _cwd, sid = compact.resolve_self_pane()
+            pane_id, _cwd, sid = compact.resolve_self_pane()
         entry = compact.load_compact_requests().get(sid) if sid else None
         if isinstance(entry, dict):
             import time as _time
@@ -5061,8 +5063,22 @@ def cmd_compact_request(args):
             # --status is read by the SESSION from its own transcript, so it
             # renders cleanly on its own line.
             sys.stdout.write("PENDING sid=%s age=%ss\n" % (sid, age))
-        else:
-            sys.stdout.write("NONE\n")
+            return
+        # #822 (e): no pending request, but a typed `/compact` may still sit
+        # unexecuted in the pane (`deliver_compact` returned the TERMINAL `queued`,
+        # clearing the request, yet the `❯ /compact` row has not drained under the
+        # armed /goal). Report QUEUED — not NONE — so the HOLD doctrine knows to end
+        # the boundary turn `⏳ WORKING` with a live task to drain it, never dispatch
+        # the next batch. Gated on the LIVE pane (self-resolved `pane_id` only, so an
+        # explicit `--session` that names a DIFFERENT pane never mis-reads this one).
+        if sid and pane_id and compact.compact_queued_in_pane(pane_id):
+            import time as _time
+            qts = compact.compact_queued_since(sid)
+            since = ("%d" % max(0, int(_time.time() - qts))
+                     if isinstance(qts, (int, float)) else "?")
+            sys.stdout.write("QUEUED sid=%s since=%ss\n" % (sid, since))
+            return
+        sys.stdout.write("NONE\n")
         return
     if getattr(args, "self", False):
         pane_id, cwd, sid = compact.resolve_self_pane()
@@ -5075,6 +5091,19 @@ def cmd_compact_request(args):
         word = compact._compact_sync_attempt(
             sid, cwd, compact._COMPACT_SELF_CALLBACK_ORIGIN)
         sys.stdout.write(word)
+        # #822 (d): when the boundary compact could NOT execute (queued behind a
+        # running turn, or the armed-/goal pre-type gate refused to type it), the
+        # session must give the pane an ACCEPTED Stop that drains it — launch the
+        # boundary-hold command as a tracked `run_in_background` Bash task, then
+        # end the turn `⏳ WORKING: boundary hold`. Print the EXACT command (zero
+        # guessing) — never on a clean `sent`. See skills/autopilot Step 5.
+        if word in compact._COMPACT_HOLD_HINT_WORDS:
+            sys.stdout.write(
+                "\nboundary-hold (#822): an armed /goal blocks this boundary's "
+                "/compact — launch this as a background Bash task "
+                "(run_in_background: true), then end the turn `⏳ WORKING: "
+                "boundary hold` so the accepted Stop drains the queued /compact:"
+                "\n  %s\n" % compact.COMPACT_BOUNDARY_HOLD_CMD)
         return
     if getattr(args, "record", False):
         session = (getattr(args, "session", "") or "").strip()
