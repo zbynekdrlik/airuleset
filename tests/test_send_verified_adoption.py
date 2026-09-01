@@ -43,18 +43,51 @@ class _SendVerifiedRecorder:
     tpath and returns a fixed result, so a site test asserts WHICH transcript
     the site verifies against and how it handles True vs False."""
 
-    def __init__(self, result=True):
+    def __init__(self, result=True, unconfirmed=False):
         self.result = result
+        # #594/#806: when `unconfirmed`, the primitive DELIVERED but the
+        # transcript confirmation RACED — it sets out["delivered_unconfirmed"]
+        # and returns False; a caller that must not re-deliver reads the flag
+        # as delivered. The #814 lane nudge + the job-7 typed answer pass `out=`.
+        self.unconfirmed = unconfirmed
         self.calls = []
 
-    def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
+                 out=None):
         self.calls.append({"pid": pid, "text": text, "tpath": tpath})
+        if self.unconfirmed and isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
         return self.result
 
     @property
     def tpaths(self):
         return [str(c["tpath"]) if c["tpath"] is not None else None
                 for c in self.calls]
+
+
+class _SubmitOwnDraftRecorder:
+    """Stand-in for `watchdog.submit_own_draft_verified`. Records every call
+    (pid/draft/tpath/caller_proven_own) and returns a fixed result, so the
+    job-7 own_stuck site test asserts it SUBMITS IN PLACE (never retypes) with
+    caller-proven ownership, and how it handles True vs False."""
+
+    def __init__(self, result=True, unconfirmed=False):
+        self.result = result
+        # #594/#806: the own_stuck lane carries the SAME delivered_unconfirmed
+        # channel as the fresh lane — a box that cleared but whose transcript
+        # confirm RACED sets out["delivered_unconfirmed"] and returns False; the
+        # site MUST read it as delivered so the reply is never re-typed next sweep
+        # (the double-delivery this recorder's `unconfirmed` mode locks against).
+        self.unconfirmed = unconfirmed
+        self.calls = []
+
+    def __call__(self, pid, draft, run=None, tpath=None, sleep_fn=None,
+                 logs=None, caller_proven_own=False, out=None):
+        self.calls.append({"pid": pid, "draft": draft, "tpath": tpath,
+                           "caller_proven_own": caller_proven_own})
+        if self.unconfirmed and isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
+        return self.result
 
 
 IDLE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
@@ -580,6 +613,161 @@ class ReplyPointerAdoption(unittest.TestCase):
         self._go(proj, state, now, result=False)
         self.assertIn(self.SID, state.get("dreply_pointer", {}),
                       "a swallowed pointer must be retried, not lost")
+
+
+class ReplyTypedAnswerAdoption(unittest.TestCase):
+    """#806 remaining scope — the job-7 TYPED-answer delivery (the reply
+    itself, not the pointer) moves off the render-only `send_continue` path
+    onto the transcript-proof delivery family. The fresh-type case goes
+    through `send_verified` (verified against the ASKING session's own
+    transcript); the own_stuck case (a prior swallowed delivery left OUR
+    exact reply in the box) is SUBMITTED IN PLACE via
+    `submit_own_draft_verified(caller_proven_own=True)` — never retyped
+    (doubled-text) nor stashed-around. On the pre-fix code line 746 calls the
+    raw `send_continue` + a render `t2==""` verify, so the recorders here are
+    never called and every assertion is RED."""
+
+    CWD = "/home/newlevel/devel/demo-typed"
+    SID = "typ1sess9"
+    REF = "888001"
+    CH = "777001"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        import notify
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": "773451844110385193",
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": self.CH}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+        # ✅ receipt reaction is a real Discord POST — stub it, no network.
+        rp = m.patch.object(wd, "_react_ok", return_value=True)
+        rp.start()
+        self.addCleanup(rp.stop)
+        self.proj = Path(self.tmp.name) / "projects"
+        self.tpath = _write_transcript(self.proj, self.CWD, sid=self.SID)
+        notify.record_question(self.REF, self.CH, self.SID, self.CWD,
+                               now=time.time(), path=self.qpath,
+                               question="Ticket #99 — pokracovat?")
+
+    def _reply(self):
+        return {"id": "repT", "author": {"id": "773451844110385193"},
+                "message_reference": {"message_id": self.REF}, "content": "1",
+                "_channel": self.CH}
+
+    def _run(self, argv, timeout=8):
+        return "0" if "display" in " ".join(argv) else ""
+
+    def _fetch(self, ch, token):
+        # a reply lives in exactly ONE channel — model it (else a swallowed
+        # reply that stays un-deduped is re-attempted once PER fetched channel).
+        return [self._reply()] if ch == self.CH else []
+
+    def _go(self, panes, *, sv=None, so=None, state=None):
+        state = state if state is not None else {}
+        sv = sv if sv is not None else _SendVerifiedRecorder(result=True)
+        so = so if so is not None else _SubmitOwnDraftRecorder(result=True)
+        with m.patch.object(wd, "send_verified", sv), \
+             m.patch.object(wd, "submit_own_draft_verified", so):
+            logs = wd.deliver_discord_replies(
+                time.time(), self._run, state, panes, dry_run=False,
+                discord_fetch=self._fetch,
+                gh_comment=lambda *a, **k: True, projects_dir=self.proj)
+        return state, sv, so, logs
+
+    def test_typed_answer_goes_through_send_verified_against_the_transcript(self):
+        import notify
+        sv = _SendVerifiedRecorder(result=True)
+        state, sv, so, _ = self._go({self.SID: ("%2", IDLE)}, sv=sv)
+        self.assertEqual(len(sv.calls), 1,
+                         "the typed answer must be delivered via send_verified")
+        self.assertIn("1", sv.calls[0]["text"])          # the reply text is carried
+        self.assertIn("pokracovat", sv.calls[0]["text"])  # the question context too
+        self.assertEqual(sv.tpaths[0], str(self.tpath),
+                         "must verify against _transcript_for_session(session)")
+        self.assertEqual(len(so.calls), 0,
+                         "a bare idle box is not own_stuck — no in-place submit")
+        # a verified submit consumes the question (delivered once)
+        self.assertNotIn(self.REF, notify.load_questions(self.qpath))
+
+    def test_swallowed_typed_answer_keeps_the_question_and_counts_inputdead(self):
+        import notify
+        sv = _SendVerifiedRecorder(result=False)   # transcript never confirmed
+        state, sv, so, logs = self._go({self.SID: ("%2", IDLE)}, sv=sv)
+        self.assertEqual(len(sv.calls), 1)
+        self.assertIn(self.REF, notify.load_questions(self.qpath),
+                      "a swallowed answer must NOT drop the question")
+        self.assertNotIn("repT", state.get("dreply_done", []))
+        self.assertIn("repT", state.get("dreply_blocked", {}))
+        self.assertEqual(state.get("inputdead", {}).get(self.SID), 1,
+                         "an unverified submit counts one inputdead failure")
+        self.assertTrue(any("wedge" in ln.lower() for ln in logs), logs)
+
+    def test_delivered_unconfirmed_typed_answer_is_treated_as_delivered(self):
+        import notify
+        # #594: box cleared (submit queued) but the transcript confirmation
+        # raced — send_verified returns False yet sets delivered_unconfirmed;
+        # NOT re-delivering is essential (else infinite re-type into a cycling
+        # armed /goal loop).
+        sv = _SendVerifiedRecorder(result=False, unconfirmed=True)
+        state, sv, so, _ = self._go({self.SID: ("%2", IDLE)}, sv=sv)
+        self.assertEqual(len(sv.calls), 1)
+        self.assertNotIn(self.REF, notify.load_questions(self.qpath),
+                         "delivered_unconfirmed consumes the question")
+        self.assertIn("repT", state.get("dreply_done", []))
+        self.assertNotIn(self.SID, state.get("inputdead", {}))
+
+    def test_own_stuck_reply_submits_in_place_never_send_verified(self):
+        import notify
+        # a PRIOR swallowed delivery left OUR exact composed reply in the box —
+        # the next cycle must SUBMIT IT IN PLACE (caller_proven_own), never
+        # retype it (send_verified TYPES) nor stash-around it.
+        prompt = wd.compose_reply_prompt({
+            "session": self.SID, "cwd": self.CWD, "referenced": self.REF,
+            "reply_id": "repT", "channel": self.CH, "text": "1",
+            "question": "Ticket #99 — pokracovat?", "asked_ts": time.time()})
+        stuck = "──── ultracode ─\n❯\xa0" + prompt + "\n────\n  ctx ██░░  caveman\n"
+        sv = _SendVerifiedRecorder(result=True)
+        so = _SubmitOwnDraftRecorder(result=True)
+        state, sv, so, _ = self._go({self.SID: ("%2", stuck)}, sv=sv, so=so)
+        self.assertEqual(len(so.calls), 1,
+                         "own stuck reply must be submitted in place")
+        self.assertTrue(so.calls[0]["caller_proven_own"],
+                        "the job-7 site proved ownership (head+tail) itself")
+        self.assertEqual(str(so.calls[0]["tpath"]), str(self.tpath),
+                         "in-place submit verifies against the session transcript")
+        self.assertEqual(so.calls[0]["draft"], prompt)
+        self.assertEqual(len(sv.calls), 0, "must NOT retype via send_verified")
+        self.assertNotIn(self.REF, notify.load_questions(self.qpath))
+
+    def test_own_stuck_delivered_unconfirmed_is_treated_as_delivered(self):
+        import notify
+        # #594/#806 — the own_stuck lane must carry the SAME delivered_unconfirmed
+        # channel as the fresh lane: the box cleared (Enter accepted) but the
+        # transcript confirm RACED (the cycling armed /goal loop own_stuck replies
+        # target). submit_own_draft_verified returns False yet sets the flag; the
+        # site MUST book it delivered — else the NEXT sweep finds a bare idle box
+        # and re-types the WHOLE reply via send_verified = DOUBLE delivery into the
+        # session (the exact accounting bug reviewer #2 found).
+        prompt = wd.compose_reply_prompt({
+            "session": self.SID, "cwd": self.CWD, "referenced": self.REF,
+            "reply_id": "repT", "channel": self.CH, "text": "1",
+            "question": "Ticket #99 — pokracovat?", "asked_ts": time.time()})
+        stuck = "──── ultracode ─\n❯\xa0" + prompt + "\n────\n  ctx ██░░  caveman\n"
+        so = _SubmitOwnDraftRecorder(result=False, unconfirmed=True)
+        state, sv, so, _ = self._go({self.SID: ("%2", stuck)}, so=so)
+        self.assertEqual(len(so.calls), 1)
+        self.assertEqual(len(sv.calls), 0, "must NOT fall back to send_verified")
+        self.assertNotIn(self.REF, notify.load_questions(self.qpath),
+                         "delivered_unconfirmed consumes the question")
+        self.assertIn("repT", state.get("dreply_done", []))
+        self.assertNotIn(self.SID, state.get("inputdead", {}),
+                         "a delivered_unconfirmed own_stuck is NOT an inputdead failure")
 
 
 # ------------------------------------------------------------------------- #

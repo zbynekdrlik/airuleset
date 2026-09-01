@@ -836,7 +836,8 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
 
 
 def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
-                              sleep_fn=None, logs=None):
+                              sleep_fn=None, logs=None, caller_proven_own=False,
+                              out=None):
     """#501 — SUBMIT an EXISTING recognized-own nudge draft already sitting in
     the input box, transcript-verified — WITHOUT typing anything. The missing
     "submit an already-composed OWN draft" member of the delivery family
@@ -856,6 +857,24 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     ownership for them — the #372 janitor recovers those only WITH provenance).
     Any unrecognized/foreign draft is refused with ZERO keystrokes: NEVER a
     blind Enter on a user's parked draft.
+
+    `caller_proven_own` (#806): a CALLER-PROVEN own PLAIN-TEXT draft. When True,
+    the caller has ALREADY established ownership against this exact expected
+    `draft` (job 7's `_box_holds_our_own_text` over a recorded `dreply_typed`
+    reply — a head+tail check for a WRAPPED box that DEGRADES to a tail/suffix
+    match on a NON-wrapped one), and THIS primitive COMPLETES the proof by
+    re-verifying the box HEAD row is a leading substring of `draft` on its OWN
+    fresh capture — together a STRONGER proof than the unambiguous-nudge prefix,
+    the caller-proven shape `submit_own_goal_verified` (#566) uses (head-only
+    here, the plain-text reply being transcript-confirmable). So the prefix gate
+    is SATISFIED by that combined proof: recognition + the transcript token key
+    on the box HEAD row being a leading substring of `draft` (wrap-safe) rather
+    than on a registered machine prefix. Default False -> byte-identical
+    prefix-gated behavior for every existing caller. The
+    two modes never mix: a caller-proven `draft` is PLAIN TEXT (transcript-
+    confirmable), never a slash command (`submit_own_goal_verified` owns the
+    pane-confirmed `/goal ` path — content proof there is a composite the
+    transcript can never match).
 
     Recognition + verification read the box HEAD row (`_input_box_head_text`),
     NEVER the tail (`_input_line_text`): every real own nudge is 289-720 chars
@@ -878,6 +897,16 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     nudge — and return False; the caller's give-up ping escalates (#193: never
     destroy an unproven buffer).
 
+    `out` (#594/#806, optional): the SAME `delivered_unconfirmed` channel
+    `send_verified` carries, so the own_stuck lane matches the fresh lane. When a
+    dict is passed, a box that went BARE after the Enter (submit not confirmed
+    inside the window but the box CLEARED — CC accepted/queued it, the transcript
+    merely raced, the normal case for an actively-cycling armed `/goal` loop) sets
+    `out["delivered_unconfirmed"] = True`. A caller reads `ok OR
+    out.get("delivered_unconfirmed")` as delivered so it NEVER re-types the reply
+    next sweep (a genuine swallow leaves the draft in place and sets NOTHING, so
+    it is still retried). Default None -> byte-identical for every existing caller.
+
     Returns True ONLY on a transcript-CONFIRMED submit; False = not delivered,
     retryable next sweep (the caller leaves its own budget unconsumed). A
     falsy/unreadable `tpath` refuses (the transcript is the whole proof)."""
@@ -888,10 +917,22 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
         if isinstance(logs, list):
             logs.append(reason)
 
-    prefix = watchdog._own_nudge_submit_prefix(draft)
-    if not prefix:
-        _log("submit-own abort: draft is not an unambiguous own nudge")
-        return False
+    if caller_proven_own:
+        # #806 — the CALLER proved head+tail ownership of this exact PLAIN-TEXT
+        # `draft`; the box HEAD row (a leading substring of `draft`, wrap-safe)
+        # is the fresh-race recognizer, mirroring `submit_own_goal_verified`'s
+        # `text.startswith(head)`. `startswith` is robust to the tail-whitespace
+        # strip that would break an `endswith` (#720/#763).
+        def _still_own(h):
+            return bool(h) and draft.startswith(h)
+    else:
+        prefix = watchdog._own_nudge_submit_prefix(draft)
+        if not prefix:
+            _log("submit-own abort: draft is not an unambiguous own nudge")
+            return False
+
+        def _still_own(h):
+            return bool(h) and h.startswith(prefix)
     if not tpath:
         _log("submit-own abort: no transcript path")
         return False
@@ -905,7 +946,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # FOREIGN draft that raced IN must NEVER be Entered.
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     head = watchdog._input_box_head_text(cap)
-    if not head or not head.startswith(prefix):
+    if not _still_own(head):
         _log("submit-own abort: box no longer holds the recognized own draft")
         return False
     if "esc to interrupt" in (cap or ""):
@@ -918,7 +959,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
         cap = watchdog.capture_pane(pane_id, run, lines=40)
         head = watchdog._input_box_head_text(cap)
-        if not head or not head.startswith(prefix):
+        if not _still_own(head):
             _log("submit-own abort: own draft gone after strip Escape")
             return False
     try:
@@ -942,7 +983,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # Escape (#35), never an Escape into a box that already went bare (a turn
     # may have started, #233).
     still = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
-    if still and still.startswith(prefix):
+    if _still_own(still):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
         run(["tmux", "send-keys", "-t", pane_id, "Enter"])
         if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
@@ -955,11 +996,19 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     final = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
     if final is None:
         _log("submit-own unconfirmed: box unreadable, submit not proven")
-    elif final.startswith(prefix):
+    elif _still_own(final):
         _log("submit-own unconfirmed: own draft still in box, left in place "
              "(retryable)")
     elif final == "":
         _log("submit-own unconfirmed: box bare, submit not proven")
+        # #594/#806: the Enter CLEARED the box (CC accepted/queued the submit) —
+        # a DELIVERY whose transcript confirm merely raced (a cycling armed /goal
+        # loop, exactly the population job-7 replies target). NOT a swallow (that
+        # path leaves the draft in place above). Surface it so the own_stuck
+        # caller reads it as delivered and never RE-TYPES the reply next sweep
+        # (the double-delivery the fresh lane already avoids via send_verified).
+        if isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
     else:
         _log("submit-own unconfirmed: box changed, left in place (retryable)")
     return False

@@ -209,9 +209,13 @@ class NoDoubleEscapeAnywhere(unittest.TestCase):
 
 
 class DeliverDiscordRepliesRetryEscapesFirst(unittest.TestCase):
-    """job 7's corrective-Enter retry loop (a swallowed submit) must Escape
-    first — the exact class of bug #36 fixes for every OTHER keystroke path
-    in this file."""
+    """#806 — job 7 no longer runs its OWN corrective-Enter retry loop: the
+    swallowed-submit self-heal (Escape-first #36 corrective Enter, the exact
+    class this file locks for every keystroke path) MOVED into `send_verified`
+    (locked in test_send_verified.py::test_corrective_escape_enter_recovers).
+    So the job-7-layer contract is now DELEGATION: the delivery goes through
+    `send_verified` — the #36-carrying primitive — not a raw type-and-render-
+    verify."""
 
     OWNER = "773451844110385193"
     IDLE = "● done\n❯\xa0\n  ctx ░░░  caveman\n"
@@ -246,35 +250,26 @@ class DeliverDiscordRepliesRetryEscapesFirst(unittest.TestCase):
     STUCK_WITH_SELECTED_STRIP = SELECTED_STRIP_PANE.replace(
         "❯ \n", "❯ auto-arm ho nalepí sám.\n")
 
-    def test_corrective_retry_escapes_before_the_retry_enter(self):
-        # send_continue's OWN pre-type capture sees an ordinary idle pane (no
-        # escape needed there); the VERIFY capture after typing shows our
-        # text stuck with the strip selected (swallowed submit) — the retry
-        # must Escape first. Third capture shows delivered.
-        captures = [self.IDLE, self.STUCK_WITH_SELECTED_STRIP, self.IDLE]
+    def test_delivery_goes_through_the_escape_first_send_verified(self):
+        # The fresh-type answer is delivered via `send_verified` (which owns the
+        # #36 Escape-first corrective retry, locked in test_send_verified.py) —
+        # never a raw type + a job-7-local render verify. Patch it to a recorder
+        # and assert the delegation.
         calls = []
 
+        def _sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None, out=None):
+            calls.append({"pid": pid, "text": text})
+            return True
+
         def run(argv, timeout=8):
-            calls.append(argv)
-            j = " ".join(argv)
-            if "pane_in_mode" in j:
-                return "0"
-            if "capture-pane" in j:
-                return captures.pop(0) if len(captures) > 1 else captures[0]
-            return ""
+            return "0" if "pane_in_mode" in " ".join(argv) else ""
         state = {}
-        wd.deliver_discord_replies(
-            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,
-            discord_fetch=lambda ch, t: [self._reply()])
-        tails = [a[-1] for a in calls]
-        enter_idxs = [i for i, t in enumerate(tails) if t == "Enter"]
-        self.assertGreaterEqual(len(enter_idxs), 2, calls)
-        # the RETRY Enter(s) — everything after send_continue's own first
-        # Enter — must each be directly preceded by an Escape send.
-        for i in enter_idxs[1:]:
-            self.assertEqual(tails[i - 1], "Escape",
-                             "corrective retry Enter must be preceded by "
-                             "Escape: %r" % calls)
+        with m.patch.object(wd, "send_verified", _sv):
+            wd.deliver_discord_replies(
+                time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
+                dry_run=False, discord_fetch=lambda ch, t: [self._reply()])
+        self.assertEqual(len(calls), 1,
+                         "the answer must be delivered via send_verified")
         self.assertIn("repE", state.get("dreply_done", []))
 
 

@@ -45,6 +45,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import notify
 import watchdog as wd
 
+
+# #806 — the job-7 typed answer routes through the transcript-proof
+# `send_verified`. These tests assert grace/supersede ROUTING, not the transcript
+# mechanics (locked in test_send_verified.py), so `send_verified` is replaced
+# module-wide by a happy-path fake byte-mirroring the old typing (`-l --` + Enter,
+# returns True).
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None,
+                          logs=None, out=None):
+    run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    return True
+
+
+_SV_PATCHER = None
+
+
+def setUpModule():
+    global _SV_PATCHER
+    _SV_PATCHER = m.patch.object(wd, "send_verified", _typing_send_verified)
+    _SV_PATCHER.start()
+
+
+def tearDownModule():
+    if _SV_PATCHER is not None:
+        _SV_PATCHER.stop()
+
+
 OWNER = "773451844110385193"
 SID = "aaaabbbb-cccc-4ddd-8eee-ffff00001111"
 CWD = "/home/x/devel/demo"

@@ -309,9 +309,11 @@ class DeliveredCaptureIntegration(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         # send_verified typing-fake so the delivery lands without real tmux.
+        # #806: the job-7 typed-answer site now passes out=send_out (the #594
+        # delivered_unconfirmed channel), so the fake MUST accept out= (#804).
         sv = m.patch.object(wd, "send_verified",
                             lambda pid, text, run=None, tpath=None,
-                            sleep_fn=None, logs=None: True)
+                            sleep_fn=None, logs=None, out=None: True)
         sv.start()
         self.addCleanup(sv.stop)
         self.sent = []
