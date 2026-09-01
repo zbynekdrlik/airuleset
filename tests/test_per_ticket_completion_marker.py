@@ -76,10 +76,12 @@ class TestMilestoneNotificationsRule(TestCase):
         for phrase in ["Mobile-App Model",
                        "do NOT call the discord `reply` tool or `PushNotification`",
                        "⏳", "FULL completion", "IMMEDIATELY",
-                       "ONLY while other answer-independent work exists",
-                       "even at night", "EXCEPTION", "notify --run-card",
+                       # #791: the sleep-window paragraph is gone — 24/7.
+                       "24/7", "EXCEPTION", "notify --run-card",
                        "notification-mechanics"]:
             self.assertIn(phrase, t, phrase)
+        self.assertNotIn("sleep window", t)
+        self.assertNotIn("even at night", t)
 
     def test_question_ping_unaffected_by_goal_armed_guard(self):
         t = read(self.MOD)

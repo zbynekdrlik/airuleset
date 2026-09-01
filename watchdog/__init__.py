@@ -594,7 +594,6 @@ from watchdog.questions import (  # noqa: E402
     _last_real_turn_ts as _last_real_turn_ts,
     _transcript_for_session as _transcript_for_session,
     prune_answered_questions as prune_answered_questions,
-    _in_sleep_window as _in_sleep_window,
     reping_stale_questions as reping_stale_questions,
     # reping_owner_decision_tickets is a PERMANENT NO-OP tombstone (#707 —
     # the daily owner-decision digest is retired; its _fetch/_digest_block
@@ -2092,8 +2091,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           once the terminal-answer prune above has run is a genuinely still-
           unanswered ❓, and `reping_stale_questions` re-asks it FRESH AND
           WHOLE once every `QUESTION_REPING_S` (24h) instead of the map's old
-          age-based TTL silently deleting it — deferred, never cancelled,
-          during the 00:00-05:59 Europe/Bratislava sleep window;
+          age-based TTL silently deleting it — 24/7, no night/day difference
+          (#791: the old 00:00-05:59 sleep-window deferral was removed);
 
       (8) (only when `bounce_fetch` is given) BOUNCE BACKSTOP — open `prio:bounce`
           (gatekeeper-returned) tickets for a repo this box touches → nudge the

@@ -390,7 +390,8 @@ def _ticket_is_stream_labeled(labels):
 # The labels that mark a ticket as WAITING ON THE OWNER — the consolidated
 # "on your court" family (#512, owner decision 2026-08-16 comment 5308903157):
 # `needs-answer` (the ask-and-continue durable marker, pinged), `needs-decision`
-# (the sleep-window deferral, queued for after 06:00), AND `needs-acceptance`
+# (a decision explicitly deferred TO the owner — a generic owner-decision label,
+# #791: no sleep-window semantics), AND `needs-acceptance`
 # (a hand-off the gatekeeper already processed — DONE, OPEN pending the owner's/
 # client's acceptance, "done = client saw it", odoo-erp #3145). Such a ticket is
 # genuine open work, but it is NOT this box's ACTIVE responsibility: the loop can

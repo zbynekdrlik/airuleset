@@ -234,10 +234,8 @@ class TestRepingHonorsSuppressedWithoutChurn(unittest.TestCase):
                 "ts": 1, "asked": 1, "suppressed": True,
                 "block": "**Otázka — projekt X:** …\n❓ NEEDS YOU: čo?",
                 "question": "…"}}))
-        # neutralise the sleep-window deferral so the re-ask actually runs.
-        self._sw = m.patch.object(wd, "_in_sleep_window", lambda *a, **k: False)
-        self._sw.start()
-        self.addCleanup(self._sw.stop)
+        # #791 deleted the sleep-window deferral — the re-ask runs at any
+        # wall clock, so no `_in_sleep_window` neutralisation is needed.
 
     def test_suppressed_reping_refreshes_ts_and_does_not_churn(self):
         calls = []

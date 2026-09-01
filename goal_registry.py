@@ -166,7 +166,7 @@ CLAUSES = [
     Clause("parked", ("full",),
         "A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence."),
     Clause("night", PROFILES,
-        "00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night."),
+        "No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral."),
     Clause("bounce", PROFILES, {
         "full": "Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds oldest-first (never preempting a running batch); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline.",
         "branch-merge": "Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline.",

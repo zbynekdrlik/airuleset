@@ -2,10 +2,10 @@
 (issue #433 item G, step 7).
 
 Extracted VERBATIM from ``watchdog/__init__.py``: the prune / re-ping jobs
-(``prune_answered_questions``, ``reping_stale_questions`` and their
-``_in_sleep_window`` helper — plus the ``reping_owner_decision_tickets``
-tombstone, a permanent no-op since ``#707`` retired the owner-decision
-digest), the ``#449`` never-silent owner-answer floor
+(``prune_answered_questions``, ``reping_stale_questions`` — plus the
+``reping_owner_decision_tickets`` tombstone, a permanent no-op since
+``#707`` retired the owner-decision digest), the ``#449`` never-silent
+owner-answer floor
 (``_orphan_answer_reason`` / ``_orphan_ping_text``), the FOREIGN-user hosted-map
 helpers (``_foreign_user`` / ``_foreign_session_info`` / ``_foreign_questions`` /
 ``_foreign_drop_question``), and the transcript-timestamp readers those jobs use
@@ -16,7 +16,7 @@ This is the question-lifecycle family, distinct from job 7's live DELIVERY flow
 
 Direction: BACK-REFERENCE (``import watchdog`` + call-time ``watchdog.<name>``).
 Every reference to a name that was a top-level ``watchdog`` name before the split
--- co-moved step-7 helpers (``_in_sleep_window``, ``_last_human_prompt_ts``,
+-- co-moved step-7 helpers (``_last_human_prompt_ts``,
 ``_transcript_for_session``), an
 ``__init__``-resident constant (``ORPHAN_ANSWER_WINDOW_S``, ``QUESTION_REPING_S``,
 ``OWNER_DECISION_LABELS``, ``AUTOPILOT_SKIP_EXCL``, ``_MACHINE_PROMPT_EXACT``,
@@ -514,32 +514,14 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
     return logs
 
 
-def _in_sleep_window(now, tz="Europe/Bratislava"):
-    """True during the 00:00-05:59 Europe/Bratislava sleep window a question
-    re-ask must defer past (message-status-marker.md's night-question
-    policy — applied here in code because nothing SESSION-side enforces it
-    for a question the session itself may never revisit, #368). Fail-safe:
-    an unresolvable clock/tz never blocks a re-ask forever, it just answers
-    "not asleep" — a question must still eventually be asked, never
-    silently parked on a tz error."""
-    try:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        hour = datetime.fromtimestamp(now, ZoneInfo(tz)).hour
-    except Exception:
-        return False
-    return 0 <= hour < 6
-
-
 def reping_stale_questions(now, send_fn, dry_run=False, path=None,
                            owner_by_sid=None, owner_by_cwd=None,
                            owners_seen=None, account_owner="",
                            reping=None):
     """#368 -- see the section comment above QUESTION_REPING_S. For every
-    question-map entry whose `ts` is >= `reping` old: skip it (leaving `ts`
-    untouched, so the SAME entry is re-evaluated -- and fires -- on the very
-    next sweep) while inside the 00:00-05:59 sleep window; otherwise repost
-    the WHOLE stored block VERBATIM (`rec["block"]`, falling back to the
+    question-map entry whose `ts` is >= `reping` old: repost
+    the WHOLE stored block VERBATIM 24/7 (#791: no night/day difference, no
+    sleep-window deferral) (`rec["block"]`, falling back to the
     collapsed `rec["question"]` for a pre-#368 legacy entry with no `block`
     field -- never a shortened/summarised form, the same "nanovo a cela"
     discipline a session's own re-ask already follows). Only on a CONFIRMED
@@ -563,7 +545,8 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
         qmap = load_questions(path)
     except Exception:
         return logs
-    night = watchdog._in_sleep_window(now)
+    # #791: no night/day difference — a due question re-asks 24/7, no
+    # sleep-window deferral (the `_in_sleep_window` gate was deleted).
     for qid, rec in sorted(qmap.items()):
         if not isinstance(rec, dict):
             continue
@@ -575,10 +558,6 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
             continue
         sid = str(rec.get("session") or "")
         cwd = str(rec.get("cwd") or "")
-        if night:
-            logs.append("question-reping deferred sleep-window %s"
-                        % str(qid)[-6:])
-            continue
         owner = (owner_by_sid.get(sid)
                 or (owner_by_cwd.get(cwd) if cwd else None)
                 or ("" if ambiguous else account_owner)

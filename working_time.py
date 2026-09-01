@@ -11,8 +11,7 @@ consumers so they can never drift (the #592 shared-helper rule): the CLI stale
 tag (`cli_quals._stale_ops_wait_flagged`, #570/#607 part 2) and the watchdog
 gk-lane freshness push (`watchdog.handoff_alarm`, #607 part 3).
 
-Pure + stdlib-only (`datetime` + `zoneinfo`, the `watchdog/questions.py
-_in_sleep_window` precedent) — NO `import airuleset`, so it stays cheap to import
+Pure + stdlib-only (`datetime` + `zoneinfo`) — NO `import airuleset`, so it stays cheap to import
 on the watchdog's 60s sweep path and trivially unit-testable with injected
 timestamps.
 """
@@ -37,7 +36,8 @@ def working_seconds_between(start_ts, end_ts, tz="Europe/Bratislava"):
       - on a tz-resolution failure, the FULL elapsed span (`end_ts - start_ts`) —
         the pre-#607 flat behavior, so a tz hiccup can never make the check MORE
         lenient than the shipped baseline and never suppresses detection outright
-        (the `_in_sleep_window` "must still eventually fire" fail-safe direction).
+        (the "must still eventually fire" fail-safe direction — a tz error never
+        silently swallows a reminder).
     """
     if end_ts <= start_ts:
         return 0.0
