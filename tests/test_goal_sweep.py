@@ -1191,6 +1191,33 @@ class TestGoalLaneSweep(unittest.TestCase):
                                   backlog_fetch=lambda cwd: 5, state={})
         self.assertTrue(any("-> dead-session" in ln for ln in l3), l3)
 
+    def test_804_dead_stream_resurrect_decision_line_mode5(self):
+        # #804 mode-5 -- for a DEAD rostered stream (no live candidate pane) that
+        # still has a bare-idle-SHELL pane in its cwd, the census evaluates a
+        # RESURRECT decision (item 3 recent-human HARD veto + cadence) and emits an
+        # explicit decision line. The live relaunch KEYSTROKE is opt-in
+        # (AIRULESET_RESURRECT_ACTION); with the flag OFF (default) the line says
+        # "would relaunch -- disabled" and NO send-keys fires. RED before the
+        # resurrect wiring exists.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        # a BARE-shell pane in the dead cwd -> not a claude candidate (so the cwd
+        # reads DEAD) but a valid relaunch target for find_pane.
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")], GOAL_IDLE_CAP)
+        logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                    backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") and "deadstream" in ln
+                            for ln in logs), logs)
+        self.assertTrue(any("would relaunch" in ln and "disabled" in ln
+                            for ln in logs), logs)
+        # flag OFF (default) -> NO relaunch send-keys keystroke into the pane
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "the live relaunch keystroke is opt-in (flag off)")
+
     def test_804_census_skipped_when_the_sweep_budget_broke(self):
         # #804-review 🟡: a sweep budget break leaves deferred panes' cwds OUT of
         # visited_cwds, so the DEAD-SESSION census must NOT run that sweep (it
