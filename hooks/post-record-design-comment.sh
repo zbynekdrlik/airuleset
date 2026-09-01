@@ -59,7 +59,17 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 # recipe `GH_TOKEN=$(...) gh issue comment ...` entirely -- no marker was
 # ever written for that shape, even for a fresh, valid, classifying
 # comment, because the hook exited here before touching python/gh at all.
-echo "$CMD" | grep -qE '\bgh[[:space:]]+issue[[:space:]]+comment\b' || exit 0
+#
+# #815: an OPTIONAL `-R <repo>`/`--repo <repo>` (space or `=` form) is now
+# also tolerated directly after `gh` and before `issue comment` -- the
+# natural `gh -R <owner>/<repo> issue comment <N> ...` shape a worker uses
+# when its cwd is not the target repo used to slip past this prefilter
+# entirely (the repo flag sits BETWEEN "gh" and "issue", breaking the old
+# contiguous match), silently losing the marker. `_REPO_FLAG_RE` below
+# needs no change -- it already scans the WHOLE matched segment for
+# `-R`/`--repo` in either position once this prefilter (and the two
+# downstream python regexes) actually recognize the invocation.
+echo "$CMD" | grep -qE '\bgh[[:space:]]+((-R|--repo)(=|[[:space:]]+)[^[:space:]]+[[:space:]]+)?issue[[:space:]]+comment\b' || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 REPO_ROOT="$(dirname "$HOOK_DIR")"
@@ -280,8 +290,14 @@ try:
     # `gh issue comment`, never `git commit`). Used for BOTH the repo_key
     # lookup below AND the `gh issue view` verification subprocess's own
     # cwd, so the two can never disagree about which repo this is.
+    # #815: tolerate an optional `-R <repo>`/`--repo <repo>` (space or `=`
+    # form) between `gh` and `issue comment` -- same shape as the bash
+    # prefilter above and the finditer capture below, so all three
+    # adjacency points agree on what counts as a `gh issue comment`
+    # invocation.
     work_cwd = notify.resolve_work_cwd(
-        cmd, cwd, trigger_re=re.compile(r"\bgh\s+issue\s+comment\b"))
+        cmd, cwd, trigger_re=re.compile(
+            r"\bgh\s+(?:(?:-R|--repo)[= ]+\S+\s+)?issue\s+comment\b"))
 
     scan_cmd = _control_flow_text(cmd, repo_root)
 
@@ -290,7 +306,16 @@ try:
     # validated/reviewed comments in ONE Bash call before a single bundled
     # commit, and `re.search` (a single, non-global match) used to extract
     # only the FIRST -- the rest silently never got checked or marked.
-    matches = list(re.finditer(r'gh\s+issue\s+comment\s+(\S+)', scan_cmd))
+    #
+    # #815 -- same optional `-R <repo>`/`--repo <repo>` tolerance as the
+    # bash prefilter and `trigger_re` above, between `gh` and `issue
+    # comment` (`gh -R <owner>/<repo> issue comment <N> ...`). The repo
+    # VALUE captured here is unused (`_REPO_FLAG_RE` below independently
+    # resolves it from the whole matched segment, in either position) --
+    # this only has to recognize the invocation and capture the target
+    # after "comment ".
+    matches = list(re.finditer(
+        r'gh\s+(?:(?:-R|--repo)[= ]+\S+\s+)?issue\s+comment\s+(\S+)', scan_cmd))
     if not matches:
         sys.exit(0)
 
