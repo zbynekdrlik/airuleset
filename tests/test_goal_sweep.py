@@ -1313,6 +1313,43 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # #475: the ❓ early return used to be silent -> now journals a decision.
         self.assertTrue(any("skip:awaiting-user" in ln for ln in logs), logs)
 
+    def test_814_delivered_unconfirmed_is_booked_not_retried(self):
+        # #814 RED -- send_verified returns False but sets
+        # out["delivered_unconfirmed"]=True (the Enter SUBMITTED and cleared the
+        # box; only the transcript `user`-turn confirm raced -- the normal case
+        # injecting into a cycling armed loop). The lane branch called
+        # send_verified WITHOUT `out=`, so this delivered-but-unconfirmed submit
+        # read as a FAILURE -> `submit-unverified (n/5)` backoff -> the retry
+        # re-typed the IDENTICAL nudge next sweep -> the duplicate `lane-check:`
+        # the owner saw (live gk 2026-09-01). GREEN: booked ONCE, not retried --
+        # the exact #594 sibling wiring u_freshness/release_gap/queue_arrival have.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        # transcript_path=None: Enter clears the box (delivered) but writes NO
+        # `user` turn -> send_verified False + out["delivered_unconfirmed"]=True.
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=None)
+        rec = {}
+        state = {}
+        with m.patch("airuleset.resolve_authority", return_value="full"):
+            logs, owns = goal.goal_lane_occupancy_nudge(
+                now, tmux, rec, self.SID, self.CWD, "111", GOAL_ARMED_CAP,
+                tpath, tmtime, "loc", None, False, None, proj,
+                backlog_fetch=lambda cwd: 5, state=state, sleep_fn=lambda s: None)
+        # booked as a DELIVERED nudge (delivered_unconfirmed -> _lane_record_nudge)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # NOT misread as a failure: no submit-unverified backoff, streak untouched
+        self.assertFalse(any("submit-unverified" in ln for ln in logs), logs)
+        self.assertNotIn("lna", rec)
+        # the shared cadence clock advanced (mark_sent) so a sibling defers
+        self.assertEqual(
+            state.get("nudge_cadence", {}).get(self.SID, {}).get("lane-occupancy"),
+            now, state)
+
     # #475 -- every previously-silent early-return path of the guard now logs a
     # `lane-occupancy <loc> -> skip:<reason>` decision (the #442c every-sweep
     # logging contract), or is a documented deliberately-silent structural N/A.
