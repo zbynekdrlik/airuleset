@@ -1460,9 +1460,19 @@ def cmd_authority(args):
     profile = resolve_authority()
     print(profile)
     if getattr(args, "explain", False):
+        # #486 / #821: make the resolution ORDER explicit (a decision log, not a
+        # silent `marker or map`) — the ONE command that diagnoses a stale-mapping
+        # bug (miva1 armed the wrong /goal template because odoo-erp's PROSE was not
+        # the HTML-comment marker, so the map value silently won). This lives ONLY
+        # in --explain (opt-in), never on the hot resolve_authority() path that the
+        # footer render and the close-guard hook call every cycle.
         user = airuleset._current_user()
-        print(f"user={user} (map: {airuleset.AUTHORITY_BY_USER.get(user, 'unmapped -> full')}); "
-              f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
+        marker = _authority_marker()
+        map_val = airuleset.AUTHORITY_BY_USER.get(user, "unmapped -> full")
+        source = ("project CLAUDE.md marker" if marker else "per-user map")
+        print(f"resolved={profile} via {source} "
+              f"(marker={marker or 'none'}; user={user} map={map_val}); "
+              f"an HTML-comment marker <!-- airuleset:authority=<profile> --> overrides the map.")
 
 
 def _label_exists_on_repo(label, cwd=None):

@@ -386,9 +386,20 @@ AUTHORITY_BY_USER = {
     "montalu2": "branch-merge",
     "montalu3": "branch-merge",
     "montalu4": "branch-merge",
-    # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
-    # as simap -- merges nowhere, fork-no-merge is already correct.
-    "miva1": "fork-no-merge",
+    # miva1 (airuleset#300, 2026-08-07): activated phase-1 isolated (fork-no-merge).
+    # PROMOTED to branch-merge (airuleset#821, 2026-09-01): odoo-erp CLAUDE.md
+    # phase-2 (#3244, 2026-08-14) made miva1 a full write stream "in the montalu
+    # mould" -- it pushes miva1/<topic> directly, opens+merges its own PR into
+    # develop, then the ready-for-review hand-off ("branch-merge authority (like
+    # montalu)", odoo-erp CLAUDE.md). odoo-erp states this in PROSE, not the
+    # <!-- airuleset:authority=... --> HTML-comment marker (and MUST stay
+    # marker-free: it is a MULTI-STREAM repo where a project marker would beat the
+    # table for EVERY user and DOWNGRADE the gatekeeper's `full`), so this per-user
+    # table row is the effective source. The stale fork-no-merge value armed the
+    # wrong (never-open/merge-a-PR) /goal template on 2026-09-01. miva1 is an
+    # odoo-erp-only single-client (MIVA) stream, so a per-USER branch-merge default
+    # is correct even though the table is per-user, not per-repo.
+    "miva1": "branch-merge",
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE clones of
     # the david external-developer fork stream (additional capacity for the
     # same slovnormal odoo developer) -- same authority as david1 (the renamed

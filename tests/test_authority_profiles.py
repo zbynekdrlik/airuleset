@@ -49,9 +49,10 @@ class TestAuthorityResolution(TestCase):
         # left the map with the OS account (runbook-537 step 8).
         self.assertEqual(airuleset.AUTHORITY_BY_USER["simap1"], "fork-no-merge")
         self.assertNotIn("simap", airuleset.AUTHORITY_BY_USER)
-        # miva1 (airuleset#300): phase-1 isolated stream, same shape as
-        # simap — merges nowhere, fork-no-merge already correct.
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "fork-no-merge")
+        # miva1 (airuleset#300): PROMOTED to branch-merge (airuleset#821):
+        # odoo-erp phase-2 (#3244, 2026-08-14) made it a full write stream "in
+        # the montalu mould" — own branch → own PR into develop → hand-off.
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "branch-merge")
 
     def test_montalu_family_streams_map_to_branch_merge(self):
         # airuleset#251: montalu2/3/4 are full parallel montalu streams
@@ -85,7 +86,24 @@ class TestAuthorityResolution(TestCase):
 
     def test_resolve_uses_the_map_for_miva1(self):
         with m.patch.object(airuleset, "_current_user", return_value="miva1"):
-            self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+            self.assertEqual(airuleset.resolve_authority(), "branch-merge")
+
+    def test_miva1_marker_still_overrides_the_table(self):
+        # airuleset#821: the table flip is the DEFAULT; an explicit HTML-comment
+        # marker must still win for miva1 in BOTH directions (single source of
+        # truth = marker over table). A fork-no-merge marker LOWERS it; a bogus
+        # marker is ignored and the branch-merge table value stands.
+        import tempfile
+        from pathlib import Path
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
+            lower = tempfile.mkdtemp()
+            (Path(lower) / "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            self.assertEqual(airuleset.resolve_authority(cwd=lower), "fork-no-merge")
+            bogus = tempfile.mkdtemp()
+            (Path(bogus) / "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=superuser -->\n")
+            self.assertEqual(airuleset.resolve_authority(cwd=bogus), "branch-merge")
 
     def test_resolve_miva1_no_marker_is_branch_merge(self):
         # airuleset#821 REGRESSION: miva1 was PROMOTED 2026-08-14 (#3244 phase 2)
@@ -125,6 +143,33 @@ class TestAuthorityResolution(TestCase):
                     m.Mock(explain=False, maintainer_login=False,
                            self_login=False, stream_label=False, app_bot_login=False))
         p.assert_any_call("branch-merge")
+
+    def test_cli_explain_logs_the_resolution_source(self):
+        # airuleset#821 / #486: --explain makes the resolution ORDER explicit
+        # (which source won: the project marker or the per-user map) — the one
+        # command that diagnoses a stale-mapping bug. Assert BOTH branches.
+        import cli_quals
+
+        def _explain_lines(user, marker):
+            with m.patch.object(airuleset, "_current_user", return_value=user):
+                with m.patch.object(cli_quals, "_authority_marker",
+                                    return_value=marker):
+                    with m.patch("builtins.print") as p:
+                        airuleset.cmd_authority(
+                            m.Mock(explain=True, maintainer_login=False,
+                                   self_login=False, stream_label=False,
+                                   app_bot_login=False))
+            return " ".join(str(c.args[0]) for c in p.call_args_list if c.args)
+
+        # miva1, no marker → the per-user map wins and reports branch-merge.
+        out = _explain_lines("miva1", None)
+        self.assertIn("branch-merge", out)
+        self.assertIn("per-user map", out)
+        self.assertNotIn("project CLAUDE.md marker", out)
+        # a marker present → the marker source wins and is named.
+        out = _explain_lines("miva1", "fork-no-merge")
+        self.assertIn("project CLAUDE.md marker", out)
+        self.assertIn("marker=fork-no-merge", out)
 
     def test_cli_prints_maintainer_login(self):
         # #349: the close-guard hook's shared-identity fix needs this to tell
