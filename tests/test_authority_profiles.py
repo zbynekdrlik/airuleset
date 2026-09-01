@@ -110,7 +110,7 @@ class TestAuthorityResolution(TestCase):
             with m.patch("builtins.print") as p:
                 airuleset.cmd_authority(
                     m.Mock(explain=False, maintainer_login=False,
-                           self_login=False, stream_label=False))
+                           self_login=False, stream_label=False, app_bot_login=False))
         p.assert_any_call("branch-merge")
 
     def test_cli_prints_maintainer_login(self):
@@ -120,8 +120,19 @@ class TestAuthorityResolution(TestCase):
         with m.patch("builtins.print") as p:
             airuleset.cmd_authority(
                 m.Mock(explain=False, maintainer_login=True,
-                       self_login=False, stream_label=False))
+                       self_login=False, stream_label=False, app_bot_login=False))
         p.assert_any_call(airuleset.MAINTAINER_GH_LOGIN)
+
+    def test_cli_prints_app_bot_login_unconditionally(self):
+        # #773: `authority --app-bot-login` prints the shared stream App bot
+        # login constant with no network call and no App-token-box detection --
+        # the close-guard hook's identity fallback compares a ticket's author
+        # against it when --self-login could not resolve the box's own login.
+        with m.patch("builtins.print") as p:
+            airuleset.cmd_authority(
+                m.Mock(explain=False, maintainer_login=False,
+                       self_login=False, stream_label=False, app_bot_login=True))
+        p.assert_any_call(airuleset.STREAM_APP_BOT_LOGIN)
 
     def test_cli_prints_stream_label_under_reduced_authority(self):
         # #533: `authority --stream-label` prints `stream:<unix-user>` on a
@@ -137,7 +148,7 @@ class TestAuthorityResolution(TestCase):
                 with m.patch("builtins.print") as p:
                     airuleset.cmd_authority(
                         m.Mock(explain=False, maintainer_login=False,
-                               self_login=False, stream_label=True))
+                               self_login=False, stream_label=True, app_bot_login=False))
         p.assert_any_call("stream:montalu3")
 
     def test_cli_stream_label_emits_rename_equivalents(self):
@@ -154,7 +165,7 @@ class TestAuthorityResolution(TestCase):
                 with m.patch("builtins.print") as p:
                     airuleset.cmd_authority(
                         m.Mock(explain=False, maintainer_login=False,
-                               self_login=False, stream_label=True))
+                               self_login=False, stream_label=True, app_bot_login=False))
         printed = [str(c.args[0]) for c in p.call_args_list if c.args]
         self.assertIn("stream:montalu1", printed, printed)
         self.assertIn("stream:montalu", printed, printed)
@@ -169,7 +180,7 @@ class TestAuthorityResolution(TestCase):
                 with m.patch("builtins.print") as p:
                     airuleset.cmd_authority(
                         m.Mock(explain=False, maintainer_login=False,
-                               self_login=False, stream_label=True))
+                               self_login=False, stream_label=True, app_bot_login=False))
         for call in p.call_args_list:
             args = call.args
             self.assertFalse(args and str(args[0]).startswith("stream:"),

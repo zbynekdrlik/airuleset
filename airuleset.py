@@ -6366,6 +6366,16 @@ def main():
                              "the real gh login. Prints nothing when the "
                              "identity cannot be resolved (the hook then refuses "
                              "the exemption / fails safe).")
+    p_auth.add_argument("--app-bot-login", action="store_true",
+                        help="Print the shared stream App bot login "
+                             "(STREAM_APP_BOT_LOGIN) unconditionally, for the "
+                             "#773 identity fallback in "
+                             "block-fork-no-merge-issue-close.sh: when "
+                             "--self-login is unresolvable (a bot box whose "
+                             "App-token dir is not detected, so `gh api user` "
+                             "403s), a ticket authored by this constant is "
+                             "stream-filed (never maintainer-assigned), so a "
+                             "reduced-authority stream may self-close it.")
     p_auth.add_argument("--stream-label", action="store_true",
                         help="Print THIS stream's ownership label "
                              "`stream:<unix-user>` for the acceptance-close "

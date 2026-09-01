@@ -1424,6 +1424,17 @@ def cmd_authority(args):
         if login:
             print(login)
         return
+    if getattr(args, "app_bot_login", False):
+        # #773: the shared stream App bot login (STREAM_APP_BOT_LOGIN), printed
+        # UNCONDITIONALLY -- it is a static constant, not a per-box identity, so
+        # no network call and no App-token-box detection is needed. The hook's
+        # #773 fallback compares a ticket's AUTHOR against it: a ticket authored
+        # by this bot was FILED by a stream (never maintainer-assigned, which is
+        # authored by MAINTAINER_GH_LOGIN), so a reduced-authority stream may
+        # self-close it even when --self-login could not resolve the box's own
+        # identity.
+        print(airuleset.STREAM_APP_BOT_LOGIN)
+        return
     if getattr(args, "stream_label", False):
         # #533: THIS stream's ownership label `stream:<unix-user>` for the
         # acceptance-close carve-out in block-fork-no-merge-issue-close.sh.
