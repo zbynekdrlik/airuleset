@@ -4225,9 +4225,18 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # a residual stuck send is reclaimable, cleared only on success -- the
         # bare branch never did this, a second reason the live incident sat.
         watchdog._janitor_mark_watch(state, pid, now)
-        if not watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                      logs=logs):
-            # Unverified submit -- transient, retried next sweep, and it must
+        # #814 -- #594 delivered_unconfirmed wiring (the last job-20 rider that
+        # lacked it): send_verified returns False on a transcript-confirm RACE
+        # but sets out["delivered_unconfirmed"]=True when Enter genuinely
+        # submitted and only the confirm read lost the race. Reading that (the
+        # exact sibling shape in u_freshness/release_gap/queue_arrival/ops_wait)
+        # stops a successful-but-unconfirmed submit being misread as failure ->
+        # backoff -> IDENTICAL re-type -> duplicate nudge (live gk 2026-09-01).
+        send_out = {}
+        ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
+                                    logs=logs, out=send_out)
+        if not (ok or bool(send_out.get("delivered_unconfirmed"))):
+            # GENUINE swallow -- transient, retried next sweep, and it must
             # NOT consume the ln/llast budget (a refused attempt is not a
             # nudge). It DOES advance the consecutive-abort streak, so a
             # permanently-unverified lane still reaches the give-up record above
