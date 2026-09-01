@@ -307,6 +307,27 @@ class TestForkNoMergeCloseGuard(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("fork-no-merge", r.stderr)
 
+    # --- #773: bot box whose App-token dir is NOT detected -> self-login empty ---
+    #
+    # `app_token_dir` points at a NON-EXISTENT path here, so
+    # `_is_gh_app_token_box()` is False and `authority --self-login` falls to
+    # `_gh_login()` -> `gh api user`, which 403s on an App token (`api_user_403`)
+    # -> ME EMPTY. That is the montalu2 #5560 failure: a bot-authored, own
+    # stream-labeled ticket the stream tries to self-close, blocked because the
+    # identity check could not resolve the box's own login.
+
+    def test_allows_self_close_when_bot_box_selflogin_unresolvable(self):
+        # RED (block) on current code; GREEN after the fallback: a ticket
+        # authored by the shared stream App bot (!= maintainer) is stream-filed,
+        # so a reduced-authority stream may self-close it without resolving ME.
+        self.assertNotEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                            airuleset.MAINTAINER_GH_LOGIN)
+        r = run("gh issue close 5560 --comment 'box recreated + verified'",
+                self.branch, api_user_403=True, me="",
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
                     "gh issue view 5 --json title", "gh pr list"):
