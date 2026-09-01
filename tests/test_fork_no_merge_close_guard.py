@@ -37,6 +37,7 @@ gh call fail (the global fail-safe path).
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -325,6 +326,42 @@ class TestForkNoMergeCloseGuard(TestCase):
                 app_token_dir=_app_token_dir())
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_blocks_self_authored_close_with_quoted_glued_repo_flag_on_app_token_box(self):
+        # #816 residual 1: a QUOTED glued `-R` — `'-Rowner/repo'` / `"-Rowner/repo"`
+        # — puts a quote IMMEDIATELY before `-R`, so the shared #760
+        # `_repo_flag_unparseable` boundary class `(^|[[:space:]])(-R|--repo)` (only
+        # start/whitespace) MISSES it → the fail-safe returns FALSE ("not
+        # unparseable") though REPO_ARG is empty (the `[[:space:]=]+` parser cannot
+        # read a glued form) → the author carve-out reads AUTHOR from the CWD repo
+        # while the close targets odoo-erp → wrong-ALLOW. RED on the pre-#816
+        # boundary class (rc 0); GREEN once the class is widened to include the
+        # quote/separator chars, mirroring `_CLOSE_OPEN` (#471/#540) → BLOCK. Both
+        # single- and double-quote must block (the class carries both `'` and `"`).
+        for cmd in ("gh issue close 4006 '-Rzbynekdrlik/odoo-erp' --comment done",
+                    'gh issue close 4006 "-Rzbynekdrlik/odoo-erp" --comment done'):
+            r = run(cmd, self.branch, api_user_403=True,
+                    author=airuleset.STREAM_APP_BOT_LOGIN,
+                    app_token_dir=_app_token_dir())
+            self.assertEqual(r.returncode, 2, "%s\n%s" % (cmd, r.stderr))
+
+    def test_blocks_self_authored_close_with_backslash_glued_repo_flag_on_app_token_box(self):
+        # #816 review M2: a BACKSLASH-escaped glued flag `\-Rowner/repo`. bash strips
+        # the `\`, so gh receives a valid glued `-Rowner/repo` and closes the NAMED
+        # repo, while `$CMD` (the raw command text the hook scans) carries a literal
+        # `\` immediately before `-R`. Neither the pre-#816 class nor the quote-ONLY
+        # widening carries `\`, so `_repo_flag_unparseable` returns FALSE though
+        # REPO_ARG is empty → the author carve-out reads AUTHOR from the CWD repo while
+        # the close targets odoo-erp → the SAME wrong-ALLOW class as the quoted-glued
+        # shape. RED (rc 0) on a class without `\`; GREEN (BLOCK) once the class carries
+        # `\` — a DELIBERATE superset of `_CLOSE_OPEN`, whose own `\gh issue close`
+        # blind spot is out of this helper's scope (follow-up #824). The Python `\\` is
+        # ONE literal backslash; json.dumps preserves it end-to-end into `$CMD`.
+        r = run("gh issue close 4006 \\-Rzbynekdrlik/odoo-erp --comment done",
+                self.branch, api_user_403=True,
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir=_app_token_dir())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     # --- #773: bot box whose App-token dir is NOT detected -> self-login empty ---
     #
     # `app_token_dir` points at a NON-EXISTENT path here, so
@@ -394,6 +431,21 @@ class TestForkNoMergeCloseGuard(TestCase):
                 author=airuleset.STREAM_APP_BOT_LOGIN,
                 app_token_dir="/nonexistent-773-app-token-dir")
         self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_bot_authored_close_with_quoted_glued_repo_flag_when_selflogin_unresolvable(self):
+        # #816 residual 1 on the #773 ME-empty fallback: a QUOTED glued
+        # `'-Rowner/repo'` / `"-Rowner/repo"` defeats the pre-#816 boundary class
+        # exactly as it does the author carve-out above — AUTHOR read from the CWD
+        # repo → wrong-ALLOW. #816-review m4: cover BOTH quotes on this carve-out too
+        # (the class carries both `'` and `"`), so all four carve-outs lock the single-
+        # AND double-quote shape. RED (rc 0) on the pre-#816 class; GREEN (BLOCK) once
+        # widened.
+        for cmd in ("gh issue close 5560 '-Rzbynekdrlik/odoo-erp' --comment done",
+                    'gh issue close 5560 "-Rzbynekdrlik/odoo-erp" --comment done'):
+            r = run(cmd, self.branch, api_user_403=True, me="",
+                    author=airuleset.STREAM_APP_BOT_LOGIN,
+                    app_token_dir="/nonexistent-773-app-token-dir")
+            self.assertEqual(r.returncode, 2, "%s\n%s" % (cmd, r.stderr))
 
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
@@ -673,6 +725,19 @@ class TestStreamLabelAcceptanceClose(TestCase):
                 self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
                 author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
         self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_quoted_glued_repo_flag_failsafe(self):
+        # #816 residual 1 on the #533 acceptance carve-out: a QUOTED glued `-R`
+        # (`'-Rowner/repo'` / `"-Rowner/repo"`) leaves REPO_ARG empty AND the
+        # pre-#816 boundary class misses it → the labels read falls back to the CWD
+        # repo (fake gh returns the acceptance labels regardless) → wrong-ALLOW.
+        # RED (rc 0) on the pre-#816 class; GREEN (BLOCK) once widened.
+        labels = "%s needs-acceptance" % self._self_stream()
+        for cmd in ("gh issue close 3313 '-Rzbynekdrlik/odoo-erp' --comment accepted",
+                    'gh issue close 3313 "-Rzbynekdrlik/odoo-erp" --comment accepted'):
+            r = run(cmd, self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                    author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+            self.assertEqual(r.returncode, 2, "%s\n%s" % (cmd, r.stderr))
 
     def test_allows_single_quoted_repo_flag(self):
         # A single-quoted `-R 'owner/repo'` now parses correctly → the labels read
@@ -959,6 +1024,26 @@ class TestGkVerdictArtifactClose(TestCase):
                 self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_blocks_quoted_glued_repo_flag_failsafe_verdict(self):
+        # #816 residual 1 on the #756 verdict carve-out. A QUOTED glued `-R`
+        # (`'-Rzbynekdrlik/odoo-erp'`) leaves REPO_ARG empty; with the pre-#816
+        # boundary class the fail-safe MISSES it, so VERDICT_REPO_UNPARSEABLE stays
+        # 0 and VERDICT_REPOFULL is resolved from the CWD git remote. Point the cwd
+        # origin at odoo-erp (as the cwd-remote test above does) so VERDICT_REPOFULL
+        # DOES match `zbynekdrlik/odoo-erp` — the carve-out then reads the artifact
+        # from the CWD repo and, with the verdict heading + --comment present,
+        # wrong-ALLOWs a close whose `-R` should have hit the present-but-unparseable
+        # fail-safe. RED (rc 0) on the pre-#816 class; GREEN once the class is widened
+        # → VERDICT_REPO_UNPARSEABLE=1 → the carve-out is skipped → BLOCK.
+        subprocess.run(["git", "init", "-q"], cwd=self.branch)
+        subprocess.run(["git", "remote", "add", "origin",
+                        "https://github.com/zbynekdrlik/odoo-erp.git"], cwd=self.branch)
+        for cmd in ("gh issue close 5345 '-Rzbynekdrlik/odoo-erp' --comment 'gk CLEAN'",
+                    'gh issue close 5345 "-Rzbynekdrlik/odoo-erp" --comment "gk CLEAN"'):
+            r = run(cmd, self.branch, me=self.M, author=self.M,
+                    labels="", comments=self.HEADING)
+            self.assertEqual(r.returncode, 2, "%s\n%s" % (cmd, r.stderr))
+
     def test_allows_reviewed_close_with_large_comment_payload(self):
         # #772: a legit #756 verdict self-close must NOT be intermittently
         # blocked by the SIGPIPE race in _has_gk_verdict_artifact (recurrence of
@@ -1114,6 +1199,63 @@ class TestGkVerdictArtifactClose(TestCase):
                 "--comment x`gh issue close 9999 -R zbynekdrlik/odoo-erp -c y`",
                 self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
         self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class TestRepoFlagUnparseableHereString(TestCase):
+    """#816 residual 2 — `_repo_flag_unparseable` must read `$CMD` via a
+    here-string (`grep -qE ... <<<"$CMD"`), NOT `printf '%s' "$CMD" | grep -q`.
+
+    Under the hook's `set -o pipefail`, on a MULTI-LINE command whose `-R` match
+    is on an early line with >64KB of trailing lines, `grep -q` short-circuits and
+    exits while `printf` is still blocked writing past the 64KB pipe buffer →
+    SIGPIPE → the pipeline returns 141 → the helper returns non-zero (FALSE, "not
+    unparseable") → the present-but-unparseable fail-safe is DEFEATED (a wrong-ALLOW,
+    the OPPOSITE fail direction from #772's `_has_gk_verdict_artifact`, which fails
+    toward block). Measured deterministic: pipe form 12/12 wrong-FALSE at 147KB /
+    3002 lines; here-string 0/12.
+
+    Tested at the HELPER level (not end-to-end through the hook) BY DESIGN: on the
+    SAME >64KB multi-line command the pre-existing `is_close` grep at ~L202 (a sibling
+    `printf | grep -qE`, OUT OF SCOPE for #816) SIGPIPEs FIRST and exits the hook 0
+    (allow) at ~L207 before any carve-out is reached, so an end-to-end test could
+    never isolate this helper's fix (see the #816 design comment + follow-up #824).
+    The function bytes are EXTRACTED from the live hook, so a regression that reverts
+    the here-string re-introduces the SIGPIPE and fails this test.
+    """
+
+    def _extract_helper(self):
+        src = HOOK.read_text()
+        m = re.search(r"(?ms)^_repo_flag_unparseable\(\) \{.*?^\}", src)
+        self.assertIsNotNone(
+            m, "could not locate _repo_flag_unparseable() in the hook")
+        return m.group(0)
+
+    def test_helper_blocks_a_multiline_over_64kb_command(self):
+        func = self._extract_helper()
+        # -R glued on line 1, then >64KB of trailing filler LINES → an early
+        # match with a large blocked-printf tail = the deterministic SIGPIPE case.
+        filler = "filler line to pad the command payload past 64KB\n" * 3000
+        cmd = "gh issue close 3313 -Rzbynekdrlik/odoo-erp --comment 'note\n%s'" % filler
+        self.assertGreater(len(cmd), 64 * 1024)
+        self.assertGreater(cmd.count("\n"), 100)
+        # Faithful reproduction of the real hook conditions: `set -euo pipefail`,
+        # $CMD read from stdin (avoids the ~128KB single-argv/env MAX_ARG_STRLEN
+        # limit), the helper called in an `if` (so `set -e` is suspended for its
+        # body, exactly as at the real call sites), REPO_ARG (`$1`) empty.
+        driver = (
+            "set -euo pipefail\n"
+            "CMD=$(cat)\n"
+            + func + "\n"
+            "if _repo_flag_unparseable \"\"; then echo TRUE; else echo FALSE; fi\n"
+        )
+        r = subprocess.run(["bash", "-c", driver], input=cmd,
+                           capture_output=True, text=True)
+        # RED on the `printf | grep` form (SIGPIPE → FALSE / wrong-allow);
+        # GREEN on the here-string form (TRUE → the fail-safe blocks).
+        self.assertEqual(r.stdout.strip(), "TRUE",
+                         "helper must detect the -R flag (fail-safe) on a >64KB "
+                         "multi-line command; stdout=%r stderr=%r"
+                         % (r.stdout, r.stderr))
 
 
 if __name__ == "__main__":
