@@ -243,7 +243,7 @@
     "tests/test_playbook_write_surface.py": 95,
     "tests/test_plugin_marketplace_payload_defer_419.py": 194,
     "tests/test_poll_payload_not_control_flow.py": 552,
-    "tests/test_post_record_design_comment.py": 1440,
+    "tests/test_post_record_design_comment.py": 1560,
     "tests/test_pre_push_lint_nested_repo.py": 94,
     "tests/test_probe_first_limit_recovery.py": 214,
     "tests/test_process_subdev_skill.py": 415,
