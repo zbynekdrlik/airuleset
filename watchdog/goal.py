@@ -4099,10 +4099,19 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, live_workers, waiters, backlog_n))
         return logs, False
     # live_workers == 0 -> the batch is CLOSED; the empty-lane "start a NEW batch"
-    # nudge. #530 empty-lane floor: a lone/tiny backlog is not batch-worthy.
-    if backlog_n < GOAL_LANE_MIN_BACKLOG:
+    # nudge. #530 empty-lane floor: a lone/tiny backlog is not batch-worthy for a
+    # FRESHLY-idle box (the anti-storm gate against nudge->"nič workable"->nudge).
+    # #804 mode-4: but a loop that has STOOD idle > 1h over just 1-2 workable
+    # tickets is NOT freshly-idle churn -- it is a stuck loop the batch-worthiness
+    # gate was parking FOREVER (#530's "1-2 held/foreign items read as workable"),
+    # in direct conflict with 24/7 (#791: "loop with 1-2 workable tickets stojí
+    # navždy by design"). Drop the floor to 1 once idle > GOAL_LANE_INTERVAL_S, so
+    # such a box is poked; if the ticket is genuinely non-dispatchable the nudge
+    # count still climbs to the give-up backoff (mode-1), never a storm.
+    min_backlog = 1 if idle > GOAL_LANE_INTERVAL_S else GOAL_LANE_MIN_BACKLOG
+    if backlog_n < min_backlog:
         _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
-                   % (backlog_n, GOAL_LANE_MIN_BACKLOG))
+                   % (backlog_n, min_backlog))
         return logs, False
     # #619 -- the empty-lane fill nudge is NO LONGER gated on the 15-min idle
     # floor. A continuously serially-working under-saturated session writes a
