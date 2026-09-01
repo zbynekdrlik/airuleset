@@ -197,11 +197,13 @@ def _secret_public_lane(args):
 
     Delegates the decision to `cli_drop_gateway.resolve_public_lane`: the lane is
     used only when this box has a LIVE drop marker AND (`--public` was passed OR
-    the box has no tailscale — the no-tailscale auto-fallback). "Has tailscale" is
-    the user-reachable encrypted transport; loopback/LAN do not count (loopback
-    is never reachable BY the user, LAN is unencrypted), so the check keys on a
-    real tailscale interface. A box with tailscale and no `--public` returns
-    (None, None) — today's behaviour untouched.
+    the invoking unix account has a no-tailscale CONSUMER — `consumer_forces_public`,
+    the #786 default for david1/david2 whose consumer is David's tailscale-less
+    laptop — OR the box has no tailscale, the no-tailscale auto-fallback). "Has
+    tailscale" is the user-reachable encrypted transport; loopback/LAN do not count
+    (loopback is never reachable BY the user, LAN is unencrypted), so the check
+    keys on a real tailscale interface. A box with tailscale, no `--public`, and a
+    non-consumer account returns (None, None) — today's behaviour untouched.
     """
     from filedrop import _is_tailscale
     from filedrop import bind_ips
