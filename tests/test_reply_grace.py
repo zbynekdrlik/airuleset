@@ -201,10 +201,12 @@ class SupersededAskStaysRoutable(_Base):
                         "wording: %r" % self.sent)
 
     def test_graced_entry_never_reinflates_badge_or_reping(self):
-        # Both the statusline Q badge (statusbar.py) and the daily re-ask
-        # (reping_stale_questions) read ONLY discord-questions.json — a
-        # graced entry must live in a SEPARATE file, or #407's ghost and
-        # the 2026-07-22 stale-badge problem both come back.
+        # The statusline footer `U N` badge (statusbar.py) reads ONLY
+        # discord-questions.json — a graced entry must live in a SEPARATE
+        # file, or #407's ghost and the 2026-07-22 stale-badge problem both
+        # come back. (Pre-#795 the daily re-ask, `reping_stale_questions`,
+        # shared this same read-only-the-main-map concern; it is now a
+        # permanent no-op tombstone and reads nothing at all.)
         self._record()
         self._transcript([_user(self.now - 3000, "ine veci")])
         self._prune()
@@ -600,48 +602,14 @@ class AuthorlessReferenceIsNeverSilent(_Base):
         self.assertTrue(self.pings)
 
 
-class RepingCrossChannelGrace(unittest.TestCase):
-    """#449-review F4: a daily re-track whose freshly-resolved questions
-    channel DIFFERS from the old entry's recorded channel misses
-    record_question's channel-scoped supersede — the old entry must be
-    GRACED (routable for the window), never hard-deleted."""
-
-    # fixed epoch, daytime Europe/Bratislava (never the sleep window)
-    NOW = 1750000000.0
-
-    def setUp(self):
-        self.tmp = TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.qpath = str(Path(self.tmp.name) / "q.json")
-        self.env = {"DISCORD_BOT_TOKEN": "tok",
-                    "DISCORD_MENTION_ZBYNEK": OWNER,
-                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
-        for tgt, val in [("_questions_path", lambda: self.qpath),
-                         ("_read_env", lambda: dict(self.env))]:
-            p = m.patch.object(notify, tgt, val)
-            p.start()
-            self.addCleanup(p.stop)
-
-    def test_cross_channel_retrack_graces_the_old_entry(self):
-        notify.record_question("666001", "666000", SID, CWD,
-                               now=self.NOW - 25 * 3600, path=self.qpath,
-                               question="stara otazka")
-
-        def send_fn(block, owner=None, kind=None, dedup_key=None,
-                    dry_run=False, return_message_id=False):
-            return ("sent", "999002")
-
-        wd.reping_stale_questions(self.NOW, send_fn, path=self.qpath,
-                                  owner_by_sid={SID: "zbynek"})
-        main = notify.load_questions(self.qpath)
-        self.assertNotIn("666001", main)          # old key re-tracked away
-        self.assertIn("999002", main)             # fresh id tracked
-        grace = json.loads(
-            (Path(self.tmp.name) / "discord-questions-grace.json")
-            .read_text())
-        self.assertIn("666001", grace,
-                      "the old still-visible card must stay routable via "
-                      "grace, never hard-deleted")
+# (#795: `RepingCrossChannelGrace` was REMOVED with the daily re-ask it
+# exercised — the #449-review F4 cross-channel grace scenario it locked was
+# specific to `reping_stale_questions`' own RETRACK path (a fresh id posted
+# + the old key superseded across channels), which no longer exists now
+# that `reping_stale_questions` is a permanent no-op tombstone. The grace
+# mechanism itself (`notify.grace_question`) stays fully live for
+# `prune_answered_questions`' own #407/#449 drop paths, locked elsewhere in
+# this file.)
 
 
 if __name__ == "__main__":

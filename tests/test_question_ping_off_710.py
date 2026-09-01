@@ -172,35 +172,44 @@ class TestSendSuppressesQuestionsForOffOwners(_HomeIsolated):
 
 
 class TestWatchdogRepingHonorsSuppression(_HomeIsolated):
-    """The watchdog daily re-ask (`reping_stale_questions`) calls
-    `send_fn(kind="questions")` == notify.send in production — so a zbynek/marek
-    re-ask is suppressed at the same chokepoint, and the entry is KEPT (never
-    dropped, so session-side tracking is unchanged)."""
+    """#795: the watchdog daily re-ask (`reping_stale_questions`) is a
+    PERMANENT NO-OP tombstone — the daily re-ask that used to call
+    `send_fn(kind="questions")` == notify.send in production is retired
+    outright, so the #710 owner-scoped suppression this class used to prove
+    at that chokepoint no longer has a live producer to prove it against.
+    What survives: the entry is NEVER touched (kept, not dropped — the same
+    outcome a suppressed re-ask used to leave, now reached because the
+    tombstone reaches no seam at all, not because it was suppressed), and
+    notify.send is never even called — for EITHER a suppressed (zbynek) or
+    an ON (david) owner, since the daily re-ask itself no longer exists.
+    `TestSendSuppressesQuestionsForOffOwners` above and
+    `InteractiveQuestionSuppression` below still lock the #710 suppression
+    at its LIVE chokepoints (job 7's orphan floor, the interactive shell
+    hook)."""
 
     def _qmap(self, owner):
         p = self.home / ".claude" / "discord-questions.json"
-        # ts far in the past so it is due for a re-ask.
+        # ts far in the past — this used to be "due for a re-ask" pre-#795.
         p.write_text(json.dumps({
             "111": {"block": "**Otázka — projekt X:** …\n❓ NEEDS YOU: čo?",
                     "session": "sid-1", "cwd": "/tmp/x", "ts": 1}}))
         return str(p)
 
-    def test_zbynek_reping_suppressed_and_entry_kept(self):
+    def test_reping_tombstone_never_posts_regardless_of_owner_suppression(self):
         import watchdog.questions as wq
         self._write_env()
-        path = self._qmap("zbynek")
-        # #791 deleted the sleep-window deferral — the re-ask now runs at any
-        # wall clock, so no `_in_sleep_window` patch is needed.
-        logs = wq.reping_stale_questions(
-            now=10 ** 9, send_fn=notify.send, path=path,
-            account_owner="zbynek")
-        self.assertEqual(self.posts, [], "a zbynek re-ask must POST nothing")
-        self.assertTrue(any("suppressed" in ln for ln in logs)
-                        or any("suppressed" in ln for ln in self.log_lines()),
-                        (logs, self.log_lines()))
-        # entry KEPT (not dropped) — session-side tracking unchanged
-        left = json.loads(Path(path).read_text())
-        self.assertIn("111", left, "the question entry must stay tracked")
+        for owner in ("zbynek", "david"):
+            with self.subTest(owner=owner):
+                path = self._qmap(owner)
+                logs = wq.reping_stale_questions(
+                    now=10 ** 9, send_fn=notify.send, path=path,
+                    account_owner=owner)
+                self.assertEqual(logs, [])
+                self.assertEqual(self.posts, [],
+                                 "the retired daily re-ask must POST nothing")
+                left = json.loads(Path(path).read_text())
+                self.assertIn("111", left,
+                              "the question entry must stay tracked")
 
 
 # --------------------------------------------------------------------------- #

@@ -1,11 +1,13 @@
 """Question-lifecycle JOB family + owner-answer/foreign-session helpers
 (issue #433 item G, step 7).
 
-Extracted VERBATIM from ``watchdog/__init__.py``: the prune / re-ping jobs
-(``prune_answered_questions``, ``reping_stale_questions`` — plus the
-``reping_owner_decision_tickets`` tombstone, a permanent no-op since
-``#707`` retired the owner-decision digest), the ``#449`` never-silent
-owner-answer floor
+Extracted VERBATIM from ``watchdog/__init__.py``: the prune job
+(``prune_answered_questions``, still LIVE) plus TWO permanent no-op
+tombstones — ``reping_owner_decision_tickets`` (``#707`` retired the daily
+owner-decision digest) and ``reping_stale_questions`` (``#795`` retired the
+daily question re-ask: a ❓ is asked ONCE, the footer ``U N`` holds it until
+the owner invokes step-by-step processing himself, #606 — the watchdog never
+automatically re-asks again) — the ``#449`` never-silent owner-answer floor
 (``_orphan_answer_reason`` / ``_orphan_ping_text``), the FOREIGN-user hosted-map
 helpers (``_foreign_user`` / ``_foreign_session_info`` / ``_foreign_questions`` /
 ``_foreign_drop_question``), and the transcript-timestamp readers those jobs use
@@ -18,7 +20,7 @@ Direction: BACK-REFERENCE (``import watchdog`` + call-time ``watchdog.<name>``).
 Every reference to a name that was a top-level ``watchdog`` name before the split
 -- co-moved step-7 helpers (``_last_human_prompt_ts``,
 ``_transcript_for_session``), an
-``__init__``-resident constant (``ORPHAN_ANSWER_WINDOW_S``, ``QUESTION_REPING_S``,
+``__init__``-resident constant (``ORPHAN_ANSWER_WINDOW_S``,
 ``OWNER_DECISION_LABELS``, ``AUTOPILOT_SKIP_EXCL``, ``_MACHINE_PROMPT_EXACT``,
 ``_MACHINE_PROMPT_PREFIXES``, ``_COMPACT_CONTINUATION_PREFIX``, ``_REAL_TURN_TYPES``),
 an ``__init__``-resident function (``_box_authority``), or a facade re-export from
@@ -514,111 +516,32 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
     return logs
 
 
-def reping_stale_questions(now, send_fn, dry_run=False, path=None,
-                           owner_by_sid=None, owner_by_cwd=None,
-                           owners_seen=None, account_owner="",
-                           reping=None):
-    """#368 -- see the section comment above QUESTION_REPING_S. For every
-    question-map entry whose `ts` is >= `reping` old: repost
-    the WHOLE stored block VERBATIM 24/7 (#791: no night/day difference, no
-    sleep-window deferral) (`rec["block"]`, falling back to the
-    collapsed `rec["question"]` for a pre-#368 legacy entry with no `block`
-    field -- never a shortened/summarised form, the same "nanovo a cela"
-    discipline a session's own re-ask already follows). Only on a CONFIRMED
-    `"sent"` status does the map get touched at all: the freshly-posted
-    message id is re-tracked (so a reply to the just-re-asked, phone-visible
-    message still routes to the session like job 7 already does for the
-    original) and the old map key is dropped. Any other status ("dedup",
-    "error", "no-config") leaves the entry exactly as it was, so the next
-    sweep retries -- a transient failure must never silently defer a whole
-    day's worth of "ask again"."""
-    from notify import (ask_generation, grace_question, load_questions,
-                        record_question, touch_question, notification_channel)
-    reping = watchdog.QUESTION_REPING_S if reping is None else reping
-    owner_by_sid = owner_by_sid or {}
-    owner_by_cwd = owner_by_cwd or {}
-    ambiguous = len(set(owners_seen or ())) > 1
-    logs = []
-    if send_fn is None:
-        return logs
-    try:
-        qmap = load_questions(path)
-    except Exception:
-        return logs
-    # #791: no night/day difference — a due question re-asks 24/7, no
-    # sleep-window deferral (the `_in_sleep_window` gate was deleted).
-    for qid, rec in sorted(qmap.items()):
-        if not isinstance(rec, dict):
-            continue
-        ts = rec.get("ts") or 0
-        if now - ts < reping:
-            continue                            # not due yet
-        block = str(rec.get("block") or rec.get("question") or "").strip()
-        if not block:
-            continue
-        sid = str(rec.get("session") or "")
-        cwd = str(rec.get("cwd") or "")
-        owner = (owner_by_sid.get(sid)
-                or (owner_by_cwd.get(cwd) if cwd else None)
-                or ("" if ambiguous else account_owner)
-                or None)
-        status, new_mid = send_fn(
-            block, owner=owner, kind="questions",
-            dedup_key="question-reping:%s:%d" % (qid, int(now // reping)),
-            dry_run=dry_run, return_message_id=True)
-        logs.append("question-reping %s -> %s [%s]"
-                    % (str(qid)[-6:], status, watchdog.project_label(cwd)))
-        if not dry_run and status == "suppressed":
-            # #716: a #710 OFF owner (zbynek/marek) takes questions in the
-            # footer `U N`, not a phone re-ping — send() POSTed nothing and
-            # returned "suppressed". Refresh the entry's ts so it is
-            # re-evaluated at most ONCE per re-ask interval, not every 60s
-            # sweep (which would emit one `suppressed` delivery-log + journal
-            # line per sweep, ~1440/day). The entry STAYS in the map (still
-            # folded into `U N`) until genuinely answered/pruned; it is never
-            # re-tracked with a new id (there is no Discord message) and never
-            # dropped. This is a re-ask CHOICE, not the transient failure the
-            # `status != "sent"` fall-through below treats every other
-            # non-"sent" status as.
-            touch_question(qid, now=now, path=path)
-            continue
-        if dry_run or status != "sent":
-            continue
-        # Adversarial review (#368): drop the OLD key ONLY once the fresh
-        # message id is genuinely re-tracked. "sent" with no usable id
-        # (Discord 2xx with an unparseable body -> _post_discord's bare
-        # True), or a record_question refusal / failed save (no resolvable
-        # questions channel on THIS box, a non-numeric id, a disk error)
-        # used to fall through to drop_question anyway -- re-asking ONCE
-        # and then silently UN-TRACKING the question forever, the exact
-        # silent-loss failure mode this function exists to kill. Keeping
-        # the entry is spam-safe: the day-bucketed dedup key above already
-        # caps this qid at one genuine send per bucket, so a kept entry
-        # only retries the re-tracking on a later sweep/bucket.
-        retracked = False
-        if new_mid:
-            ch = notification_channel(owner=owner, kind="questions") or ""
-            # asked_ts (#407 review MAJOR-1): a re-track is a REPOST of the
-            # SAME old ask, never a new one — carry the entry's own ask
-            # generation through, so the record-time supersede and the
-            # sweep collapse keep treating it as the OLD ask and can never
-            # displace a LIVE, newer question tracked on the current
-            # questions channel.
-            retracked = record_question(new_mid, ch, sid, cwd, now=now,
-                                        path=path, question=block,
-                                        asked_ts=ask_generation(rec))
-        if retracked:
-            # #449-review F4: GRACE the old entry, never hard-delete it.
-            # Same-channel re-tracks are usually already graced by
-            # record_question's own supersede (this is then a no-op), but
-            # a CROSS-channel re-track (a freshly provisioned -q thread,
-            # owner-resolution drift) misses the channel-scoped supersede
-            # — and the user's reply to YESTERDAY's still-visible card
-            # must keep routing for the grace window, not vanish.
-            grace_question(qid, path=path)
-    return logs
+def reping_stale_questions(*_args, **_kwargs):
+    """PERMANENT NO-OP -- the daily question re-ask (#368) is RETIRED (#795,
+    owner ruling 2026-09-01, verbatim: "aha mame aj reask ale ani ten uz nie
+    je potrebny dokial plati U v peticke tak ja nepotrebujem aby sa nieco
+    dokolecka pytalo, sam si vyvolam spracovanie U"). Do not resurrect.
 
+    This used to repost every question-map entry older than
+    `QUESTION_REPING_S` (24h) FRESH AND WHOLE, once a day, so an unanswered
+    ❓ was never silently dropped by the map's old age-based TTL. That
+    entire premise is gone: a question is asked ONCE, the moment it arises
+    (the ❓ marker + a `needs-answer`/`needs-decision` label + this map's own
+    entry) — the footer `U N` badge holds it VISIBLE for as long as it stays
+    open, and the owner invokes its processing himself via the "U N?"
+    step-by-step flow (#606), never via a repeated phone ping. Follows the
+    #707 retirement of the sibling `reping_owner_decision_tickets` digest
+    EXACTLY: the name stays importable for any stale caller, the body does
+    NOTHING -- no map read, no send_fn call, no state mutation, any call
+    shape accepted.
 
+    The question map ITSELF is untouched by this retirement -- it still
+    feeds the footer `U N` count and the #606 step-by-step delivery; only
+    the automatic RE-asking is gone. `prune_answered_questions` above (the
+    terminal-answer prune + the #407 ghost-pair collapse) stays fully live,
+    since it prunes/collapses the map for reasons that have nothing to do
+    with re-asking."""
+    return []
 
 
 def reping_owner_decision_tickets(*_args, **_kwargs):

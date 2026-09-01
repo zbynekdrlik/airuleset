@@ -193,10 +193,9 @@ class TranscriptFoundBySessionId(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# #368 -- an unanswered ❓ is re-asked FRESH AND WHOLE at least once a day,
-# never silently dropped. The map no longer age-prunes (see notify's own
-# QuestionMap tests); THIS is what turns an old, still-unanswered `ts` into
-# a fresh re-post instead of a no-op.
+# #368's daily re-ask is RETIRED (#795, owner ruling 2026-09-01): a ❓ is
+# asked ONCE, the footer `U N` holds it, the owner invokes processing
+# himself (#606) -- the watchdog never automatically re-asks again.
 # --------------------------------------------------------------------------- #
 class NoSleepWindowGate(unittest.TestCase):
     # #791: the 00:00-05:59 `_in_sleep_window` helper was DELETED — there is
@@ -207,7 +206,15 @@ class NoSleepWindowGate(unittest.TestCase):
                          "the night-hour gate must stay removed (#791)")
 
 
-class RepingStaleQuestions(unittest.TestCase):
+class RepingStaleQuestionsIsRetired(unittest.TestCase):
+    """#795: `reping_stale_questions` is a PERMANENT NO-OP tombstone — the
+    daily question re-ask (#368) is abolished. Every test that used to live
+    here (due-question repost, retrack/drop semantics, bucketed dedup,
+    owner_by_sid passthrough, dry-run) locked behavior of the RETIRED
+    mechanism and was removed with it (the #707 pattern applied to its
+    sibling `reping_owner_decision_tickets`). The tombstone must reach NO
+    seam at all, even against a map that would have been genuinely due."""
+
     BLOCK = ("**Otázka — projekt demo:** ktorú verziu nasadiť?\n"
             "1. najprv 0.28.0\n2. rovno 0.29.0\n\n❓ **rozhodnutie**")
 
@@ -215,163 +222,47 @@ class RepingStaleQuestions(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
-        # A deterministic pinned timestamp (local noon of the current day),
-        # kept for reproducibility. #791 removed the night-hour gate, so
-        # reping_stale_questions now re-asks 24/7 with no time-of-day
-        # dependence at all -- the pin is no longer load-bearing, just tidy.
-        _lt = time.localtime()
-        self.now = time.mktime(
-            (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
+        self.now = time.time()
 
     def _record(self, mid, ts, block=None, sid=SID, cwd=CWD, chan="777001"):
         notify.record_question(mid, chan, sid, cwd, now=ts, path=self.qpath,
                                question=block if block is not None else self.BLOCK)
 
-    def _fake_send(self, status="sent", mid="999001"):
+    def test_never_sends_touches_the_map_or_returns_anything_but_empty(self):
+        old_ts = self.now - 30 * 24 * 3600     # unambiguously "due" under #368
+        self._record("888001", old_ts)
         calls = []
 
-        def fn(body, owner=None, dedup_key=None, dry_run=False,
-               kind="default", return_message_id=False):
-            calls.append({"body": body, "owner": owner,
-                          "dedup_key": dedup_key, "kind": kind,
-                          "dry_run": dry_run})
-            return (status, mid) if return_message_id else status
-        return fn, calls
+        def send_fn(body, owner=None, dedup_key=None, dry_run=False,
+                    kind="default", return_message_id=False):
+            calls.append(1)
+            return ("sent", "mid")
 
-    def _due_ts(self):
-        return self.now - wd.QUESTION_REPING_S - 10
-
-    def test_due_question_is_reposted_verbatim_with_the_questions_kind(self):
-        self._record("888001", self._due_ts())
-        send_fn, calls = self._fake_send()
-        logs = wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["body"], self.BLOCK)      # verbatim, never shortened
-        self.assertEqual(calls[0]["kind"], "questions")
-        self.assertTrue(any("->" in ln for ln in logs), logs)
-
-    def test_not_yet_due_question_is_left_alone(self):
-        self._record("888001", self.now - 60)
-        send_fn, calls = self._fake_send()
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        self.assertEqual(calls, [])
-        self.assertIn("888001", notify.load_questions(self.qpath))
-
-    def test_due_question_is_reasked_at_night_too(self):
-        # #791: no sleep-window deferral — a due question re-asks regardless
-        # of the hour. A 03:00 timestamp must still POST.
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        night_now = datetime.now(ZoneInfo("Europe/Bratislava")).replace(
-            hour=3, minute=0, second=0, microsecond=0).timestamp()
-        old_ts = night_now - wd.QUESTION_REPING_S - 10
-        self._record("888001", old_ts)
-        send_fn, calls = self._fake_send()
-        self._patch_channel()
-        logs = wd.reping_stale_questions(night_now, send_fn, path=self.qpath)
-        self.assertEqual(len(calls), 1)                 # posted, not deferred
-        self.assertFalse(any("deferred sleep-window" in ln for ln in logs), logs)
-
-    def _patch_channel(self, value="777001"):
-        # reping re-resolves notification_channel(env=None) itself, which
-        # reads the LIVE ~/.claude/.env (and tmux, via resolve_owner) -- an
-        # unpatched test only passes on a box that HAS a configured Discord
-        # questions channel (adversarial review #368: the retrack assertion
-        # was green here purely because this dev box is provisioned; on a
-        # clean box record_question refuses the empty channel and the test
-        # fails). Patch it to a fixed snowflake so the test is hermetic.
-        p = m.patch.object(notify, "notification_channel",
-                           lambda env=None, owner=None, kind="default": value)
-        p.start()
-        self.addCleanup(p.stop)
-
-    def test_successful_send_retracks_the_new_message_id_and_drops_the_old(self):
-        self._patch_channel()
-        self._record("888001", self._due_ts(), sid="sid-x", cwd=CWD)
-        send_fn, calls = self._fake_send(status="sent", mid="999001")
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        q = notify.load_questions(self.qpath)
-        self.assertNotIn("888001", q)
-        self.assertIn("999001", q)
-        self.assertEqual(q["999001"]["session"], "sid-x")
-        self.assertEqual(q["999001"]["cwd"], CWD)
-        self.assertEqual(q["999001"]["ts"], int(self.now))
-
-    def test_sent_without_a_message_id_keeps_the_old_entry(self):
-        # Adversarial review (#368): a genuine POST whose response body did
-        # not parse to an id (_post_discord returns bare True -> send() says
-        # ("sent", None)) must NOT drop the old key -- that re-asked ONCE
-        # and then silently un-tracked the question forever, the exact
-        # silent-loss failure mode #368 exists to kill. The day-bucketed
-        # dedup key caps the same-day retry, so keeping it is spam-safe.
-        self._patch_channel()
-        old_ts = self._due_ts()
-        self._record("888001", old_ts)
-        send_fn, calls = self._fake_send(status="sent", mid=None)
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        out = wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        self.assertEqual(out, [])
+        self.assertEqual(calls, [], "the retired daily re-ask must NEVER send")
         q = notify.load_questions(self.qpath)
         self.assertIn("888001", q)
-        self.assertEqual(q["888001"]["ts"], int(old_ts))
+        self.assertEqual(q["888001"]["ts"], int(old_ts),
+                         "the retired daily re-ask must NEVER touch the map")
 
-    def test_unresolvable_questions_channel_keeps_the_old_entry(self):
-        # Same review finding, the other reachable leg: record_question
-        # REFUSES a non-numeric/empty channel, so on a box where the
-        # Python-side channel resolution comes up empty the retrack fails
-        # -- the old entry must survive for a later retry, never be
-        # dropped after a single re-ask.
-        self._patch_channel("")
-        old_ts = self._due_ts()
-        self._record("888001", old_ts)
-        send_fn, calls = self._fake_send(status="sent", mid="999001")
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        q = notify.load_questions(self.qpath)
-        self.assertIn("888001", q)
-        self.assertNotIn("999001", q)
-        self.assertEqual(q["888001"]["ts"], int(old_ts))
-
-    def test_failed_send_leaves_the_old_entry_untouched_for_a_retry(self):
-        old_ts = self._due_ts()
-        self._record("888001", old_ts)
-        send_fn, calls = self._fake_send(status="error", mid=None)
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        q = notify.load_questions(self.qpath)
-        self.assertIn("888001", q)
-        self.assertEqual(q["888001"]["ts"], int(old_ts))
-
-    def test_legacy_entry_without_block_falls_back_to_the_collapsed_question(self):
-        d = {"888001": {"session": SID, "cwd": CWD, "channel": "777001",
-                        "ts": self._due_ts(), "question": "legacy collapsed text"}}
-        Path(self.qpath).write_text(json.dumps(d))
-        send_fn, calls = self._fake_send()
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        self.assertEqual(calls[0]["body"], "legacy collapsed text")
-
-    def test_dedup_key_is_bucketed_by_day_not_by_instant(self):
-        self._record("888001", self._due_ts())
-        send_fn, calls = self._fake_send()
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+    def test_tolerates_any_stale_call_shape(self):
+        # A tombstone kept for stale callers must survive EVERY call shape a
+        # pre-#795 caller could use — including a `send_fn=None` (unwired)
+        # sweep and none at all.
+        self.assertEqual(wd.reping_stale_questions(), [])
+        self.assertEqual(wd.reping_stale_questions(0, None, path=None), [])
         self.assertEqual(
-            calls[0]["dedup_key"],
-            "question-reping:888001:%d" % int(self.now // wd.QUESTION_REPING_S))
+            wd.reping_stale_questions(
+                self.now, lambda *a, **k: "sent", dry_run=True,
+                path=self.qpath, owner_by_sid={}, owner_by_cwd={},
+                owners_seen=set(), account_owner="x", reping=1),
+            [])
 
-    def test_owner_by_sid_is_passed_through_to_the_send(self):
-        self._record("888001", self._due_ts(), sid="sid-marek")
-        send_fn, calls = self._fake_send()
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath,
-                                  owner_by_sid={"sid-marek": "marek"})
-        self.assertEqual(calls[0]["owner"], "marek")
-
-    def test_dry_run_never_touches_the_map(self):
-        old_ts = self._due_ts()
-        self._record("888001", old_ts)
-        send_fn, calls = self._fake_send()
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath,
-                                  dry_run=True)
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0]["dry_run"])
-        q = notify.load_questions(self.qpath)
-        self.assertIn("888001", q)
-        self.assertEqual(q["888001"]["ts"], int(old_ts))
+    def test_docstring_names_the_retirement(self):
+        doc = wd.reping_stale_questions.__doc__ or ""
+        self.assertIn("#795", doc)
+        self.assertIn("no-op", doc.lower())
 
 
 class RecordQuestionSupersede(unittest.TestCase):
@@ -519,57 +410,26 @@ class PruneCollapsesSupersededDuplicates(unittest.TestCase):
         self.assertNotIn("888001", q)
 
 
-class GhostPairRepingsOnceAfterCollapse(unittest.TestCase):
-    """Ghost questions (#407), integration — run_once orders prune BEFORE
-    reping, so a ghost pair produces exactly ONE daily re-ask (the newest
-    wording), not 2+ pings/day for one logical question forever."""
-
-    def setUp(self):
-        self.tmp = TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.qpath = str(Path(self.tmp.name) / "q.json")
-        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
-        p.start()
-        self.addCleanup(p.stop)
-        self.projects = Path(self.tmp.name) / "projects"
-        # Same deterministic local-noon pin as RepingStaleQuestions (#791
-        # removed the night-hour gate; the pin is just for reproducibility).
-        _lt = time.localtime()
-        self.now = time.mktime(
-            (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
-
-    def test_prune_then_reping_sends_only_the_newest_block(self):
-        due = self.now - wd.QUESTION_REPING_S - 10
-        ghost = {"session": SID, "cwd": CWD, "channel": "777001",
-                 "ts": due - 960, "question": "stara formulacia?",
-                 "block": "stara formulacia?"}
-        real = {"session": SID, "cwd": CWD, "channel": "777001",
-                "ts": due, "question": "nova formulacia?",
-                "block": "nova formulacia?"}
-        Path(self.qpath).write_text(json.dumps({"888001": ghost,
-                                                "888002": real}))
-        wd.prune_answered_questions(self.now,
-                                    projects_dir=str(self.projects))
-        sent = []
-
-        def send_fn(body, owner=None, dedup_key=None, dry_run=False,
-                    kind="default", return_message_id=False):
-            sent.append(body)
-            return ("dedup", None) if return_message_id else "dedup"
-
-        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        self.assertEqual(sent, ["nova formulacia?"])
+# (#795: `GhostPairRepingsOnceAfterCollapse` was REMOVED with the daily
+# re-ask it integration-tested — "run_once orders prune BEFORE reping, so a
+# ghost pair produces exactly ONE daily re-ask" has no meaning once
+# `reping_stale_questions` is a permanent no-op and run_once never calls it
+# at all. `PruneCollapsesSupersededDuplicates` above still locks the
+# collapse itself, which prune performs for its own #407 reasons.)
 
 
 class SupersedeIsAskGenerationGuarded(unittest.TestCase):
-    """Adversarial-review findings on the ghost fix (#407) — a re-tracked
-    DAILY RE-ASK of an old question is NOT a new ask: it must never
-    supersede (nor later out-collapse) a LIVE, newer question the same
-    session tracks on the target channel. "Newest ask wins" compares ASK
-    GENERATION (the `asked` field, preserved across re-tracks), never the
-    record time — a stale cross-channel sibling's re-post lands on the
-    CURRENT questions channel with a fresh record ts, and comparing record
-    times there inverts the ask order exactly where the loss is worst."""
+    """Adversarial-review findings on the ghost fix (#407) — "newest ask
+    wins" compares ASK GENERATION (the `asked` field, preserved across
+    `record_question`'s own retracks), never the record time — a re-tracked
+    entry's fresh record ts must never invert the ask order against a LIVE,
+    newer question the same session tracks on the target channel. (#795: the
+    ORIGINAL retrack producer of this scenario, the daily
+    `reping_stale_questions` re-ask, is retired — but `record_question`'s
+    `asked_ts` param and the generation-guarded collapse it feeds stay live,
+    since `record_question`/`prune_answered_questions` are general
+    map-writer/collapse primitives, not reping-specific; the two tests below
+    exercise them directly instead of via a retired retrack.)"""
 
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -583,44 +443,11 @@ class SupersedeIsAskGenerationGuarded(unittest.TestCase):
         self.now = time.mktime(
             (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
 
-    def _seed_live_and_cross_channel_stale(self):
-        live = {"session": SID, "cwd": CWD, "channel": "777001",
-                "ts": self.now - 3600, "question": "ziva otazka?",
-                "block": "ziva otazka?"}
-        stale = {"session": SID, "cwd": CWD, "channel": "999999",
-                 "ts": self.now - wd.QUESTION_REPING_S - 10,
-                 "question": "stara otazka?", "block": "stara otazka?"}
-        Path(self.qpath).write_text(json.dumps({"888100": live,
-                                                "888001": stale}))
-        return live, stale
-
-    def test_reping_retrack_never_eats_a_live_question_on_the_channel(self):
-        # MAJOR-1: the stale sibling lives on ANOTHER channel; its daily
-        # re-ask posts + re-tracks onto the CURRENT questions channel,
-        # where the session's live, newer, different question is tracked.
-        # The live entry must survive; the re-track must carry the OLD
-        # ask's generation so later passes keep treating it as older.
-        _live, stale = self._seed_live_and_cross_channel_stale()
-
-        def send_fn(body, owner=None, dedup_key=None, dry_run=False,
-                    kind="default", return_message_id=False):
-            return ("sent", "999001") if return_message_id else "sent"
-
-        with m.patch.object(notify, "notification_channel",
-                            lambda **kw: "777001"):
-            wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
-        q = notify.load_questions(self.qpath)
-        self.assertIn("888100", q)             # the live question survives
-        self.assertIn("999001", q)             # the re-post is tracked
-        self.assertNotIn("888001", q)          # the old key was dropped
-        self.assertEqual(q["999001"]["channel"], "777001")
-        self.assertEqual(q["999001"]["asked"], int(stale["ts"]))
-
     def test_collapse_prefers_the_newer_ask_generation_over_record_time(self):
-        # After the re-track above, the shared channel briefly holds the
-        # live ask (older record ts, newer GENERATION) and the re-posted
-        # old ask (fresh record ts, older generation). The collapse must
-        # keep the newer GENERATION — the live question.
+        # The shared channel holds the live ask (older record ts, newer
+        # GENERATION) and a re-posted old ask (fresh record ts, older
+        # generation — the shape a retrack used to produce). The collapse
+        # must keep the newer GENERATION — the live question.
         live = {"session": SID, "cwd": CWD, "channel": "777001",
                 "ts": self.now - 3600, "question": "ziva otazka?",
                 "block": "ziva otazka?"}
@@ -652,15 +479,24 @@ class SupersedeIsAskGenerationGuarded(unittest.TestCase):
                          ["999002"])
 
 
-class RunOnceOrdersPruneBeforeReping(unittest.TestCase):
-    """The ghost-collapse design (#407) leans on run_once running the prune
-    (which collapses superseded pairs) BEFORE the daily re-ask — lock the
-    real call ordering, not just a test-sequenced prune-then-reping."""
+class RunOnceNeverCallsTheRetiredReping(unittest.TestCase):
+    """#795: run_once's registry entry for the daily re-ask is GONE outright
+    (the #707 pattern — a retired job's `_add(...)` call is removed, not
+    left calling a now-inert tombstone). `prune_answered_questions` — the
+    #407 ghost-pair collapse this class used to test an ORDERING against —
+    stays registered and fully live; there is simply nothing after it to
+    order against any more."""
 
-    def test_prune_call_precedes_reping_call_in_run_once(self):
+    def test_run_once_source_never_invokes_reping_stale_questions(self):
         src = inspect.getsource(wd.run_once)
-        self.assertLess(src.index("prune_answered_questions("),
-                        src.index("reping_stale_questions("))
+        self.assertNotIn("reping_stale_questions(", src,
+                         "run_once must never call the retired daily re-ask")
+        self.assertIn("prune_answered_questions(", src)
+
+    def test_run_once_has_no_questions_path_param(self):
+        params = inspect.signature(wd.run_once).parameters
+        self.assertNotIn("questions_path", params,
+                         "the retired re-ask's sole consumer param must be gone")
 
 
 if __name__ == "__main__":

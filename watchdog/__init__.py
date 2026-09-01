@@ -594,6 +594,10 @@ from watchdog.questions import (  # noqa: E402
     _last_real_turn_ts as _last_real_turn_ts,
     _transcript_for_session as _transcript_for_session,
     prune_answered_questions as prune_answered_questions,
+    # reping_stale_questions is a PERMANENT NO-OP tombstone (#795 — the daily
+    # question re-ask is retired; a ❓ is asked once, the footer `U N` holds
+    # it, the owner invokes processing himself, #606). Kept re-exported for
+    # stale callers.
     reping_stale_questions as reping_stale_questions,
     # reping_owner_decision_tickets is a PERMANENT NO-OP tombstone (#707 —
     # the daily owner-decision digest is retired; its _fetch/_digest_block
@@ -683,21 +687,20 @@ _COMPACT_CONTINUATION_PREFIX = (
 _REAL_TURN_TYPES = ("user", "assistant")
 
 
-# #368 -- an unanswered ❓ is re-asked FRESH AND WHOLE at least once a day
-# instead of the map's old age-based TTL silently deleting it (see the
-# module comment above notify's own question-map constants for the user's
-# own directive this responds to). One question per QUESTION_REPING_S
-# window, via the SAME bucketed-dedup-key shape every other daily-reping
-# job in this file already uses (`delivery_stall_watch`/the net-drift
-# alarm/the gk-request backstop's own staged schedule):
-# `dedup_key="...:%d" % (now // reping)` — a retry within
-# the SAME day-bucket is deduped by notify.send()'s own marker (the "at
-# most ONE sanctioned daily re-ask" cap, with zero new bookkeeping needed),
-# while a genuinely NEW day always gets a fresh key. This is a completely
-# different, session-turn-scoped dedup layer than LASTQ (the "verbatim
-# repeat within one still-blocked turn" mechanism) — untouched by any of
-# this.
-QUESTION_REPING_S = 24 * 3600
+# #368 -- the daily question re-ask -- is RETIRED (#795, owner ruling
+# 2026-09-01, verbatim: "aha mame aj reask ale ani ten uz nie je potrebny
+# dokial plati U v peticke tak ja nepotrebujem aby sa nieco dokolecka
+# pytalo, sam si vyvolam spracovanie U"). #368 used to repost every
+# unanswered ❓ FRESH AND WHOLE at least once a day instead of the map's old
+# age-based TTL silently deleting it — that premise no longer holds: a
+# question is asked ONCE, the footer `U N` badge holds it visible for as
+# long as it stays open, and the owner invokes its processing himself via
+# the "U N?" step-by-step flow (#606). `reping_stale_questions` is a
+# permanent no-op tombstone in questions.py, its run_once registry entry +
+# `QUESTION_REPING_S` cadence constant are gone, and the question map itself
+# (`prune_answered_questions`, the terminal-answer prune + #407 ghost-pair
+# collapse) is untouched — see the #461/#707 retirement note immediately
+# below for the SAME pattern applied to the sibling owner-decision digest.
 
 
 # #461 -- the DURABLE owner-decision queue's daily re-ask -- is RETIRED
@@ -2003,7 +2006,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              vault_purge=None, vault_backstop=None, log_fn=None, reopen_fetch=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              ops_wait_fetch=None,
-             progress_dir=None, questions_path=None,
+             progress_dir=None,
              gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
@@ -2095,13 +2098,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (`dreact_done`/`dcard_done`, mirroring `dreply_done`) and never guess a
           delivery target — an untracked flagged message, or one with no live
           session/repo pane anywhere, is silently skipped and retried next sweep.
-          A THIRD extension, always-on (#368, no `discord_fetch` needed — it
-          only posts, it never reads Discord): any question left in the map
-          once the terminal-answer prune above has run is a genuinely still-
-          unanswered ❓, and `reping_stale_questions` re-asks it FRESH AND
-          WHOLE once every `QUESTION_REPING_S` (24h) instead of the map's old
-          age-based TTL silently deleting it — 24/7, no night/day difference
-          (#791: the old 00:00-05:59 sleep-window deferral was removed);
+          A THIRD extension, `prune_answered_questions` (#368/#449), collapses
+          the map (terminal-answer prune + #407 ghost-pair collapse) —
+          always-on, no `discord_fetch` needed. The daily RE-ASK that used to
+          follow it (#368, `reping_stale_questions` reposting an unanswered
+          ❓ FRESH AND WHOLE once a day) is RETIRED (#795): a question is
+          asked ONCE, the footer `U N` badge holds it visible for as long as
+          it stays open, and the owner invokes its processing himself via
+          the "U N?" step-by-step flow (#606) — the watchdog never
+          automatically re-asks a question again;
 
       (8) (only when `bounce_fetch` is given) BOUNCE BACKSTOP — open `prio:bounce`
           (gatekeeper-returned) tickets for a repo this box touches → nudge the
@@ -3904,23 +3909,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                           dry_run=dry_run),
          "question-prune error")
 
-    # #368 -- an unanswered ❓ that survives the pruning above (nobody
-    # answered it, at the terminal or on Discord) is now re-asked FRESH AND
-    # WHOLE once a day instead of quietly expiring — an extension of job 7's
-    # own question-tracking mechanism (never a new job, per the FREEZE).
-    # Needs only `send_fn` (always resolved by now), not `discord_fetch` —
-    # it posts, it never reads Discord.
-    # questions_path (None = live box map): same hermeticity reason as
-    # state_path/projects_dir — a run_once TEST otherwise inherits the
-    # box's REAL pending questions (observed flake, test_watchdog).
-    _add("reping_stale_questions", lambda: True,
-         lambda: reping_stale_questions(now, send_fn, dry_run=dry_run,
-                                        path=questions_path,
-                                        owner_by_sid=owner_by_sid,
-                                        owner_by_cwd=owner_by_cwd,
-                                        owners_seen=owners_seen,
-                                        account_owner=account_owner),
-         "question-reping error")
+    # #368 (the daily question re-ask) is RETIRED (#795, owner ruling
+    # 2026-09-01): its registry entry and the `questions_path` param that
+    # only ever fed IT are GONE — a question is asked ONCE, the footer `U N`
+    # badge holds it, and the owner invokes its processing himself (#606).
+    # `reping_stale_questions` survives only as a no-op tombstone
+    # (questions.py); `prune_answered_questions` above is UNCHANGED — it
+    # collapses the map for its own #368/#449/#407 reasons, unrelated to
+    # re-asking.
 
     # #461 (the daily owner-decision digest) is RETIRED (#707): its registry
     # entry, `owner_decision_fetch` param and fetch/digest helpers are GONE —

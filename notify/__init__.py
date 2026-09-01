@@ -358,10 +358,10 @@ def stream_redirect(raw_owner):
 # the aggregate (the record was coupled to a successful Discord POST via the
 # returned message-id, which `record_question` requires to be a real snowflake,
 # so a suppressed owner's POST-less ❓ was never recorded) — #716 CLOSED that:
-# the interactive send hook and `reping_stale_questions` now record a
-# Discord-LESS `record_question(..., suppressed=True)` entry (synthetic
-# non-digit key, channel-less), so a ticketless suppressed ❓ folds into the
-# `U N` ticketless surface too, not only webterm. Owner `david` (and david1-4
+# the interactive send hook now records a Discord-LESS
+# `record_question(..., suppressed=True)` entry (synthetic non-digit key,
+# channel-less), so a ticketless suppressed ❓ folds into the `U N`
+# ticketless surface too, not only webterm. Owner `david` (and david1-4
 # -> `david`) keeps FULL question delivery, so it is deliberately NOT in this set.
 QUESTION_PING_OWNERS_OFF = frozenset({"zbynek", "marek"})
 
@@ -2102,22 +2102,27 @@ def _prune_dedup(d):
 # accumulate without limit — but #368 (2026-08-12): an entry is NO LONGER
 # deleted merely for being OLD. A still-unanswered question must survive
 # until it is genuinely resolved (a routed Discord reply, or a HUMAN prompt
-# at the terminal — job 7 / prune_answered_questions) so that
-# watchdog.reping_stale_questions() has something to keep RE-ASKING daily —
-# the user's own directive (2026-08-11): "ak sa claude rozhodne ich skryt tak
-# ich aj tyzdne nepolozi. Chcem aby kazdy claude ak eviduje otazku minimalne
-# raz denne ju nanovo polozil." Silently DELETING an unanswered entry after
-# 24h was the exact inversion of that.
+# at the terminal — job 7 / prune_answered_questions). Originally (#368)
+# this kept the entry available for `watchdog.reping_stale_questions()` to
+# keep RE-ASKING daily — the user's own 2026-08-11 directive that an
+# unanswered question must not be silently dropped. #795 (2026-09-01,
+# owner ruling) retired the daily re-ask itself ("sam si vyvolam
+# spracovanie U" — the owner invokes processing himself via the footer
+# `U N` + the #606 step-by-step flow), but the SURVIVE-until-resolved
+# invariant this section implements is unchanged: the entry must stay
+# visible in `U N` until it is genuinely answered, never age out on its own.
 _QUESTIONS_REL = "discord-questions.json"
 _QUESTIONS_MAX = 200                  # hard cap on tracked questions (newest kept)
 _QUESTION_TEXT_MAX = 1200             # stored (collapsed, single-line) question
                                       # text cap (codepoints) — compose_reply_prompt
                                       # types this as ONE typed prompt line
 _QUESTION_BLOCK_MAX = 1800            # stored RAW block cap (codepoints, #368) — the
-                                      # newline-preserving posted content, resent
-                                      # VERBATIM by a daily re-ask; comfortably under
-                                      # `_MAX_CONTENT` (1900) so a fresh mention prefix
-                                      # still fits when send() re-composes it
+                                      # newline-preserving posted content, read by
+                                      # the footer `U N` fold + #606 step-by-step
+                                      # delivery (originally also resent VERBATIM by
+                                      # the daily re-ask; retired by #795); comfortably
+                                      # under `_MAX_CONTENT` (1900) so a fresh mention
+                                      # prefix still fits when send() re-composes it
 
 
 def _questions_path():
@@ -2191,11 +2196,13 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
         already reaches here via stdin (hooks/notify-discord-send.sh pipes
         the exact `$CONTENT` it POSTed), so this is genuinely the whole
         rendered block (bold headers, numbered options, blank-line
-        paragraphs), not a reconstruction. `watchdog.reping_stale_questions()`
-        reposts THIS verbatim for the daily re-ask, never the flattened
-        `question` — resending a wall of prose with no formatting would
-        reintroduce the exact "ziadne odrazky, ziadne zvyraznenia" complaint
-        `clean_q` was built to fix.
+        paragraphs), not a reconstruction. Originally (#368) the daily
+        `watchdog.reping_stale_questions()` reposted THIS verbatim, never
+        the flattened `question` — resending a wall of prose with no
+        formatting would reintroduce the exact "ziadne odrazky, ziadne
+        zvyraznenia" complaint `clean_q` was built to fix. #795 retired
+        that daily re-ask, but `block` stays live: it is what the footer
+        `U N` fold + the #606 step-by-step delivery read.
 
     `message_id` and `channel` must be NUMERIC Discord snowflakes — anything else
     (a Mock repr from a mis-wired test, a mangled shell var) is refused so garbage
@@ -2203,11 +2210,15 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     ~/.claude/discord-questions.json, 2026-07-04).
 
     `asked_ts` (#407 review): the ASK GENERATION this record belongs to.
-    Omitted (a genuinely NEW ask — the hook path) it defaults to `now`;
-    reping_stale_questions passes the OLD entry's own generation on a
-    daily re-track, so a re-posted old question keeps reading as the OLD
-    ask to the supersede below and to the sweep collapse — never as a
-    fresh one that could displace a live, newer question."""
+    Omitted (a genuinely NEW ask — the hook path) it defaults to `now`; a
+    re-track of an OLD entry passes that entry's own generation instead, so
+    a re-posted old question keeps reading as the OLD ask to the supersede
+    below and to the sweep collapse — never as a fresh one that could
+    displace a live, newer question. (The daily `reping_stale_questions`
+    was the production caller that exercised this path pre-#795; it is now
+    a permanent no-op tombstone, but `asked_ts` stays general infrastructure
+    for the map's own generation-guarded supersede/collapse — any future
+    caller that re-tracks an existing question under a new key needs it.)"""
     message_id = str(message_id or "").strip()
     channel = str(channel or "").strip()
     session = str(session or "").strip()
@@ -2329,30 +2340,13 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     return _save_questions(d, path)
 
 
-def touch_question(qid, now=None, path=None):
-    """#716: bump an EXISTING question-map entry's `ts` (never `asked` — the ask
-    GENERATION stays stable, this is the SAME question re-timestamped) to `now`
-    WITHOUT re-tracking it under a new message id. Used by
-    `reping_stale_questions` when a re-ask returns "suppressed" (a #710 OFF
-    owner takes the question in the footer `U N`, not a phone re-ping): the
-    entry STAYS folded into `U N`, but its due-clock is reset so the suppressed
-    re-attempt fires at most once per re-ask interval, never every 60s sweep.
-    Works for ANY key shape (a synthetic `suppressed:<session>` OR a real
-    snowflake whose owner became OFF after record time). Fail-safe; returns
-    True iff the entry existed and was bumped."""
-    qid = str(qid or "").strip()
-    if not qid:
-        return False
-    now = time.time() if now is None else now
-    d = load_questions(path)
-    rec = d.get(qid)
-    if not isinstance(rec, dict):
-        return False
-    # Only `ts` (the re-attempt clock reping's due-check reads) is bumped;
-    # `asked` (the ask GENERATION) stays stable — this is the SAME question
-    # re-timestamped, not a new ask.
-    rec["ts"] = int(now)
-    return _save_questions(d, path)
+# (#795: `touch_question` — #716's helper for bumping a suppressed entry's
+# `ts` without re-tracking it, so `reping_stale_questions`'s "suppressed"
+# re-attempt fired at most once per re-ask interval — was DELETED outright.
+# Its ONLY caller was `reping_stale_questions`, now a permanent no-op
+# tombstone in questions.py that reaches no seam at all; a suppressed
+# entry's `ts` is simply never touched any more. mvp-philosophy: dead code,
+# zero remaining callers anywhere including tests.)
 
 
 def drop_question(message_id, path=None):
@@ -2377,15 +2371,17 @@ def drop_question(message_id, path=None):
 # watchdog job 7 merges this store for reply matching, so a reply within
 # QUESTION_GRACE_S still routes NORMALLY (typed into the asking session,
 # with the original question wording). The MAIN map stays the single source
-# for the statusline Q badge (statusbar.py reads discord-questions.json
-# directly) and for the daily re-ask (reping_stale_questions reads
-# load_questions only) — a grace entry is never counted and never re-pinged,
-# so #407's ghost problem and the 2026-07-22 stale-badge problem both stay
-# fixed. Same file shape, same hard cap, same fail-safe discipline as the
-# main map; `pruned` stamps when the entry left the main map. Expiry is
-# enforced by job 7 at load time (deliver_discord_replies), NOT by the
-# prune: bare run_once tests without a Discord fetcher must never touch
-# this store, and job 7 is the store's only consumer anyway.
+# for the footer `U N` fold (statusbar.py reads discord-questions.json
+# directly) — a grace entry is never counted, so #407's ghost problem and
+# the 2026-07-22 stale-badge problem both stay fixed. (Pre-#795 the daily
+# `reping_stale_questions` re-ask ALSO read `load_questions` only, so a
+# grace entry was never re-pinged either; that re-ask is now a permanent
+# no-op tombstone and reads nothing at all.) Same file shape, same hard
+# cap, same fail-safe discipline as the main map; `pruned` stamps when the
+# entry left the main map. Expiry is enforced by job 7 at load time
+# (deliver_discord_replies), NOT by the prune: bare run_once tests without
+# a Discord fetcher must never touch this store, and job 7 is the store's
+# only consumer.
 _GRACE_REL = "discord-questions-grace.json"
 QUESTION_GRACE_S = 24 * 3600
 
@@ -3179,8 +3175,10 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     if owner is None:
         owner = resolve_owner()
 
-    # #710: owner-scoped QUESTION-ping suppression (the watchdog re-ask / digest
-    # transport — every `send(kind="questions")` caller). Gated AFTER owner
+    # #710: owner-scoped QUESTION-ping suppression (every `send(kind="questions")`
+    # caller — e.g. job 7's orphan floor; the daily re-ask/digest transports
+    # that used to share this chokepoint are both retired, #707/#795). Gated
+    # AFTER owner
     # resolution but BEFORE the keyless-key derivation / dedup claim / channel
     # resolution / network, mirroring the #546 alert-class gate: a suppressed
     # question POSTs NOTHING, returns "suppressed", and logs one explicit

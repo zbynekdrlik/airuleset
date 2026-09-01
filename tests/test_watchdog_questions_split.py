@@ -170,22 +170,38 @@ class CoMovedCrossCallsGoThroughPackageSeam(unittest.TestCase):
             any("answered in-session" in ln and "SENTLBL" in ln for ln in logs),
             logs)
 
-    def test_reping_stale_reasks_24_7_no_night_gate(self):
-        # #791: the sleep-window gate was DELETED — a due question re-asks
-        # regardless of the hour. A `now` that used to fall inside the old
-        # 00:00-05:59 window (10**9 == 03:46 CEST) must POST, not defer.
+    def test_reping_stale_tombstone_touches_no_seams(self):
+        # #795: reping_stale_questions is a PERMANENT NO-OP tombstone — the
+        # daily question re-ask (#368) is retired (a question is asked
+        # ONCE, the footer `U N` holds it, the owner invokes processing
+        # himself, #606). The seam tests that used to live here (a real
+        # `notify.load_questions` read + a patched `project_label` observed
+        # on a genuine send) locked behavior of the RETIRED re-ask and were
+        # removed with it. The tombstone must reach NO seam at all: not
+        # `notify.load_questions`, not `project_label`, not send_fn — even
+        # fully wired with a due-looking question map.
         qmap = {"qdue01": {"session": "s", "cwd": "/c", "ts": 0, "block": "BLK"}}
-        sends = []
+        loads, labels, sends = [], [], []
+
+        def fake_load(*a, **k):
+            loads.append(1)
+            return dict(qmap)
+
+        def fake_label(*a, **k):
+            labels.append(1)
+            return "L"
 
         def send_fn(*a, **k):
             sends.append((a, k))
             return ("sent", "mid")
 
-        with mock.patch("notify.load_questions", return_value=dict(qmap)), \
-             mock.patch.object(wd, "project_label", return_value="L"):
-            logs = wd.reping_stale_questions(10 ** 9, send_fn, path=None)
-        self.assertEqual(len(sends), 1)   # posted even at a former-night hour
-        self.assertFalse(any("deferred sleep-window" in ln for ln in logs), logs)
+        with mock.patch("notify.load_questions", side_effect=fake_load), \
+             mock.patch.object(wd, "project_label", side_effect=fake_label):
+            out = wd.reping_stale_questions(10 ** 9, send_fn, path=None)
+        self.assertEqual(out, [])
+        self.assertEqual(loads, [])
+        self.assertEqual(labels, [])
+        self.assertEqual(sends, [])
 
     def test_reping_owner_tombstone_touches_no_seams(self):
         # #707: reping_owner_decision_tickets is a PERMANENT NO-OP tombstone —

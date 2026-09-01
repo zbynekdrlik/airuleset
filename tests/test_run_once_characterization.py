@@ -118,10 +118,10 @@ CANONICAL_SWEEP = [
             "discord_fetch", _stub_fetch, "list", "discord-reply error"),
     JobSpec("prune_answered_questions", "wd", "prune_answered_questions",
             None, None, "list", "question-prune error"),
-    JobSpec("reping_stale_questions", "wd", "reping_stale_questions",
-            None, None, "list", "question-reping error"),
-    # (#461's reping_owner_decision_tickets JobSpec was RETIRED by #707 —
-    # the digest job, its gate param and registry entry no longer exist.)
+    # (#461's reping_owner_decision_tickets JobSpec was RETIRED by #707, and
+    # #368's reping_stale_questions JobSpec was RETIRED by #795 — both
+    # digest/re-ask jobs, their gate params and registry entries no longer
+    # exist.)
 
     # jobs 8 → 30 (standalone registry)
     JobSpec("bounce_backstop", "wd", "bounce_backstop",
