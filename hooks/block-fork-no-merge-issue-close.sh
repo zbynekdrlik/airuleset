@@ -149,7 +149,8 @@ _cmd_has_comment_flag() {
 #   immediately before `-R`, which `_CLOSE_OPEN`'s class also missed → the SAME
 #   wrong-allow class across all four carve-outs. This is a DELIBERATE superset of
 #   `_CLOSE_OPEN` (whose is_close/N_CLOSE gate is out of scope here — widening it
-#   needs its own RED matrix); the two classes are intentionally NOT identical.
+#   needs its own RED matrix, follow-up #824); the two classes are intentionally
+#   NOT identical.
 #   ACCEPTED over-block residual: a legit self-close carrying NO parseable `-R` flag
 #   whose command text contains a quote/separator/backslash immediately before the
 #   literal `-R`/`--repo` (most plausibly a `--comment` VALUE — but the grep scans
@@ -165,7 +166,7 @@ _cmd_has_comment_flag() {
 #   itself text-scans the whole command, so a separator-parseable `-R x/y`-looking
 #   string inside a `--comment` VALUE yields a NON-empty REPO_ARG that defeats the
 #   `[ -z "$1" ]` leg (pre-existing, not fixable inside this helper) — both tracked
-#   in the #816-review follow-up.
+#   in follow-up #824 (front-gate SIGPIPE + comment-value REPO_ARG poisoning).
 #
 # #816: reads $CMD via a HERE-STRING, NOT `printf '%s' "$CMD" | grep -q` (the #772
 # fix for `_has_gk_verdict_artifact`). Under `set -o pipefail`, on a multi-line

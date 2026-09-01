@@ -344,6 +344,24 @@ class TestForkNoMergeCloseGuard(TestCase):
                     app_token_dir=_app_token_dir())
             self.assertEqual(r.returncode, 2, "%s\n%s" % (cmd, r.stderr))
 
+    def test_blocks_self_authored_close_with_backslash_glued_repo_flag_on_app_token_box(self):
+        # #816 review M2: a BACKSLASH-escaped glued flag `\-Rowner/repo`. bash strips
+        # the `\`, so gh receives a valid glued `-Rowner/repo` and closes the NAMED
+        # repo, while `$CMD` (the raw command text the hook scans) carries a literal
+        # `\` immediately before `-R`. Neither the pre-#816 class nor the quote-ONLY
+        # widening carries `\`, so `_repo_flag_unparseable` returns FALSE though
+        # REPO_ARG is empty → the author carve-out reads AUTHOR from the CWD repo while
+        # the close targets odoo-erp → the SAME wrong-ALLOW class as the quoted-glued
+        # shape. RED (rc 0) on a class without `\`; GREEN (BLOCK) once the class carries
+        # `\` — a DELIBERATE superset of `_CLOSE_OPEN`, whose own `\gh issue close`
+        # blind spot is out of this helper's scope (follow-up #824). The Python `\\` is
+        # ONE literal backslash; json.dumps preserves it end-to-end into `$CMD`.
+        r = run("gh issue close 4006 \\-Rzbynekdrlik/odoo-erp --comment done",
+                self.branch, api_user_403=True,
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir=_app_token_dir())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     # --- #773: bot box whose App-token dir is NOT detected -> self-login empty ---
     #
     # `app_token_dir` points at a NON-EXISTENT path here, so
@@ -416,14 +434,18 @@ class TestForkNoMergeCloseGuard(TestCase):
 
     def test_blocks_bot_authored_close_with_quoted_glued_repo_flag_when_selflogin_unresolvable(self):
         # #816 residual 1 on the #773 ME-empty fallback: a QUOTED glued
-        # `'-Rowner/repo'` defeats the pre-#816 boundary class exactly as it does
-        # the author carve-out above — AUTHOR read from the CWD repo → wrong-ALLOW.
-        # RED (rc 0) on the pre-#816 class; GREEN (BLOCK) once widened.
-        r = run("gh issue close 5560 '-Rzbynekdrlik/odoo-erp' --comment done",
-                self.branch, api_user_403=True, me="",
-                author=airuleset.STREAM_APP_BOT_LOGIN,
-                app_token_dir="/nonexistent-773-app-token-dir")
-        self.assertEqual(r.returncode, 2, r.stderr)
+        # `'-Rowner/repo'` / `"-Rowner/repo"` defeats the pre-#816 boundary class
+        # exactly as it does the author carve-out above — AUTHOR read from the CWD
+        # repo → wrong-ALLOW. #816-review m4: cover BOTH quotes on this carve-out too
+        # (the class carries both `'` and `"`), so all four carve-outs lock the single-
+        # AND double-quote shape. RED (rc 0) on the pre-#816 class; GREEN (BLOCK) once
+        # widened.
+        for cmd in ("gh issue close 5560 '-Rzbynekdrlik/odoo-erp' --comment done",
+                    'gh issue close 5560 "-Rzbynekdrlik/odoo-erp" --comment done'):
+            r = run(cmd, self.branch, api_user_403=True, me="",
+                    author=airuleset.STREAM_APP_BOT_LOGIN,
+                    app_token_dir="/nonexistent-773-app-token-dir")
+            self.assertEqual(r.returncode, 2, "%s\n%s" % (cmd, r.stderr))
 
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
@@ -1196,7 +1218,7 @@ class TestRepoFlagUnparseableHereString(TestCase):
     SAME >64KB multi-line command the pre-existing `is_close` grep at ~L202 (a sibling
     `printf | grep -qE`, OUT OF SCOPE for #816) SIGPIPEs FIRST and exits the hook 0
     (allow) at ~L207 before any carve-out is reached, so an end-to-end test could
-    never isolate this helper's fix (see the #816 design comment + follow-up ticket).
+    never isolate this helper's fix (see the #816 design comment + follow-up #824).
     The function bytes are EXTRACTED from the live hook, so a regression that reverts
     the here-string re-introduces the SIGPIPE and fails this test.
     """
