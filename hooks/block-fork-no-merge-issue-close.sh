@@ -454,6 +454,9 @@ if [ -n "$ISSUE_NUM" ]; then
     # self-vs-assigned distinguishability the pre-App shared-PAT setup destroyed.
     ME=$(python3 "$REPO_DIR/airuleset.py" authority --self-login 2>/dev/null || echo "")
     MAINTAINER_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --maintainer-login 2>/dev/null || echo "")
+    # #773: the shared stream App bot login (a static constant, no network call,
+    # no App-token-box detection) — used ONLY by the fallback below.
+    APP_BOT_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
     if [ -n "$REPO_ARG" ]; then
         AUTHOR=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json author -q .author.login 2>/dev/null || echo "")
     else
@@ -465,6 +468,29 @@ if [ -n "$ISSUE_NUM" ]; then
     if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ] \
        && [ -n "$MAINTAINER_LOGIN" ] && [ "$ME" != "$MAINTAINER_LOGIN" ]; then
         exit 0   # self-authored sub-finding — the stream's own bookkeeping, allowed
+    fi
+    # #773: identity FALLBACK for a bot box whose own login could not be
+    # resolved. On a GitHub App-token box `authority --self-login` returns the
+    # fixed bot login ONLY when `_is_gh_app_token_box()` detects the box (a LOCAL
+    # ~/.config/gh-app-tokens/ check); when that detection does not fire it falls
+    # to `gh api user`, which 403s on an App token -> ME EMPTY -> the carve-out
+    # above is skipped and the stream's OWN bot-authored ticket is blocked (live:
+    # montalu2 on odoo-erp #5560). With a SHARED bot identity, "my box's own
+    # ticket" and "any stream's own ticket" are already identical (the accepted
+    # #463 residual), so when ME is unresolvable the ownership test degenerates
+    # to: is this ticket authored by the shared stream App bot? A ticket authored
+    # by it was FILED by a stream, NEVER maintainer-assigned (maintainer-assigned
+    # work is authored by MAINTAINER_LOGIN) — so a reduced-authority stream may
+    # self-close it as its own bookkeeping, exactly as the ME==bot==AUTHOR path
+    # above does, without needing the box's own login. The `[ -z "$ME" ]` guard
+    # keeps this a STRICT fallback: a resolved (non-bot) identity is unaffected.
+    # The #349 discriminator is preserved verbatim — AUTHOR must be the App bot
+    # (a maintainer-authored ticket is excluded), and the bot login is != the
+    # maintainer by construction (checked defensively).
+    if [ -z "$ME" ] && [ -n "$AUTHOR" ] && [ -n "$APP_BOT_LOGIN" ] \
+       && [ "$AUTHOR" = "$APP_BOT_LOGIN" ] \
+       && [ -n "$MAINTAINER_LOGIN" ] && [ "$APP_BOT_LOGIN" != "$MAINTAINER_LOGIN" ]; then
+        exit 0   # #773: stream-filed (bot-authored) ticket, self-login unresolvable — allowed
     fi
 fi
 

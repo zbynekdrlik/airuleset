@@ -328,6 +328,43 @@ class TestForkNoMergeCloseGuard(TestCase):
                 app_token_dir="/nonexistent-773-app-token-dir")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_blocks_maintainer_authored_close_when_selflogin_unresolvable(self):
+        # The #349 discriminator survives the fallback: a maintainer-ASSIGNED
+        # ticket is authored by the human maintainer, NEVER the App bot, so the
+        # fallback (AUTHOR == the App bot) never fires and it stays BLOCKED even
+        # when ME is unresolvable. The exact review-requiring work the guard
+        # exists to protect.
+        r = run("gh issue close 5561 --comment done",
+                self.branch, api_user_403=True, me="",
+                author=airuleset.MAINTAINER_GH_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_foreign_bot_authored_close_when_selflogin_unresolvable(self):
+        # The fallback compares against the SPECIFIC stream slug, never "any bot"
+        # -- a dependabot-authored ticket stays BLOCKED with ME unresolvable.
+        self.assertNotEqual("app/dependabot", airuleset.STREAM_APP_BOT_LOGIN)
+        r = run("gh issue close 5562 --comment done",
+                self.fork, api_user_403=True, me="",
+                author="app/dependabot",
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fork-no-merge", r.stderr)
+
+    def test_bot_authored_fallback_is_strict_last_resort_when_me_resolves(self):
+        # The fallback is a STRICT ME-EMPTY last resort: a box whose self-login
+        # RESOLVES to a real (non-bot) login must NOT gain the ability to close a
+        # bot-authored ticket through it. Here `gh api user` succeeds (not a bot
+        # box) so ME resolves to a real user != the bot author -> BLOCK. This
+        # passes on both current and fixed code -- it locks the `[ -z "$ME" ]`
+        # guard so a future edit cannot widen the fallback to a resolved box.
+        r = run("gh issue close 5563 --comment done",
+                self.branch, me="some-real-user",
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
                     "gh issue view 5 --json title", "gh pr list"):
