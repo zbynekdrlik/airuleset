@@ -3106,7 +3106,7 @@ class TestPostSendQueued822(unittest.TestCase):
         def run(argv, timeout=8):
             j = " ".join(argv)
             if "list-panes" in j:
-                return "%9\tclaude\t%s\t111" % self.CWD
+                return "%9\tclaude\t" + self.CWD + "\t111"
             if "display-message" in j:
                 return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
             if "send-keys" in j:

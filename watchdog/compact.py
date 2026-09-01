@@ -868,6 +868,42 @@ def _compact_still_in_box(pid, run, sleep_fn):
     return True                                # still there -> swallowed
 
 
+def _compact_post_send_classify(pid, run):
+    """#822 — after the input box went empty following a `/compact` submit, ONE
+    fresh re-capture distinguishes an EXECUTED compact (`"sent"`) from one that
+    merely QUEUED behind a running turn (`"queued"`).
+
+    An empty box is AMBIGUOUS: `/compact` leaves the box whether it executes OR
+    gets appended to CC's type-ahead queue because the pane went busy in the
+    microseconds after Enter (under an armed `/goal` the goal Stop hook blocks
+    every `✅` boundary, so a queued `/compact` never drains until the next
+    ACCEPTED Stop — the owner's 3x-queued incident). The tell is in the pane:
+
+      * CC's own "Compacting conversation" progress indicator -> `"sent"`: a
+        genuine compaction is IN FLIGHT, whatever put it there (#69);
+      * a queued `❯ /compact` row above the box -> `"queued"`;
+      * a running-turn spinner occupying the boundary -> `"queued"` (the submit
+        was appended behind a turn CC started right after the Enter).
+
+    Reuses the existing pane scanners (`_pane_compacting`,
+    `_pane_has_queued_compact`, `_classify_boundary`) — NO new detector family.
+    Classifying a never-executed compact `"queued"` is what keeps
+    `deliver_compact` from writing `compact-delivered` / starting the 30-min
+    cooldown for a compaction that did not happen (#135: delivery, not a claim).
+    An unreadable / idle-and-quiet re-capture reads `"sent"` (the pre-#822
+    behaviour): only a POSITIVE queued/spinner signal downgrades to `"queued"`,
+    so a genuinely-executed compact whose indicator has already cleared is never
+    mislabelled."""
+    recap = watchdog.capture_pane(pid, run, lines=40)
+    if watchdog._pane_compacting(recap):
+        return "sent"                          # genuinely executing right now
+    if watchdog._pane_has_queued_compact(recap):
+        return "queued"                        # queued behind a running turn
+    if watchdog._classify_boundary(recap)[0] == "busy":
+        return "queued"                        # a running-turn spinner ate it
+    return "sent"
+
+
 def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     """Type `/compact` and submit it, VERIFYING the submit actually landed —
     the piece `send_continue` (type + Enter, no post-send read) never had, so a
@@ -875,7 +911,13 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     class) used to be reported "sent".
 
     Returns one of:
-      "sent"        — the box no longer shows `/compact` (submitted).
+      "sent"        — the box no longer shows `/compact` AND the post-send
+                       re-capture shows it executing / no queued row (#822).
+      "queued"      — the box cleared but a fresh re-capture shows a queued
+                       `❯ /compact` row or a running-turn spinner: the submit
+                       was appended to CC's type-ahead queue, NOT executed
+                       (`_compact_post_send_classify`, #822). The caller must
+                       NOT mark it delivered.
       "swallowed"   — the Enter was swallowed even after ONE corrective
                        Escape+Enter (never a second Escape #35, never a second
                        bare Enter — the SAME shape `_send_goal_verified` /
@@ -920,7 +962,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
         return "raced-busy"
     watchdog.send_continue(pid, COMPACT_TEXT, run)
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return "sent"
+        return _compact_post_send_classify(pid, run)     # #822: sent vs queued
     # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective
     # Escape+Enter. The box holds ONLY our own `/compact` (verified bare above),
     # and a single Escape never deletes a CC draft (#35), so this only deselects
@@ -928,7 +970,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return "sent"
+        return _compact_post_send_classify(pid, run)     # #822: sent vs queued
     # Still stuck. Backspace our own text off the bare-verified box so the next
     # sweep retries from a clean prompt; the janitor (job 20, provenance already
     # marked by the caller) is the backstop if this undo itself fails.
@@ -953,7 +995,13 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     (a no-op at the sweep's ~60s cadence, since real elapsed time clears it).
 
     Returns:
-      "sent"            — `/compact` was typed.
+      "sent"            — `/compact` was typed AND observed executing / not
+                           queued (`_compact_post_send_classify`, #822).
+      "queued"          — `/compact` was typed but CC appended it to the
+                           type-ahead queue behind a running turn (#822); it did
+                           NOT execute, so `compact-delivered` is NOT written (no
+                           cooldown). TERMINAL — the queued row is now in the
+                           pane, so a re-type would only stack a duplicate.
       "expired"         — condition (e): the request is older than
                            `COMPACT_REQUEST_MAX_AGE_S`. Discard.
       "already-queued"  — the pane already holds an unexecuted `/compact`
@@ -1116,6 +1164,18 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     outcome = _compact_submit_verified(
         pid, run, sleep_fn,
         lambda reason: _log_compact_sync("%s sid=%s cwd=%s" % (reason, sid, cwd)))
+    if outcome == "queued":
+        # #822: `/compact` was typed but CC APPENDED it to the type-ahead queue
+        # (the pane went busy in the microseconds after Enter -- under an armed
+        # /goal it never drains until the next ACCEPTED Stop). It did NOT
+        # execute, so do NOT mark it delivered / start the cooldown (the #135
+        # lesson: delivery, not a claim). TERMINAL: the queued row is now in the
+        # pane, so the next sweep reads `already-queued` and never re-types a
+        # duplicate -- the fix for the owner's 3x-queued accumulation.
+        _log_compact_sync("QUEUED sid=%s cwd=%s origin=%s "
+                          "(typed, queued behind a running turn, not executed)"
+                          % (sid, cwd, origin or "-"))
+        return "queued"
     if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed
         # the Enter, #36) or a draft raced into the box pre-send — either way the
@@ -1136,8 +1196,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 
 
 # The dispositions that fully HANDLE a request — the caller clears it
-# rather than leaving it pending for the next sweep.
-_COMPACT_TERMINAL_WORDS = frozenset(("sent", "expired", "already-queued", "cooldown"))
+# rather than leaving it pending for the next sweep. `queued` (#822) is terminal:
+# a `/compact` that CC appended to its type-ahead queue WILL execute at the next
+# accepted Stop, and the queued row is now in the pane — re-typing would only
+# stack a duplicate (the owner's 3x accumulation), so the request is done.
+_COMPACT_TERMINAL_WORDS = frozenset(
+    ("sent", "queued", "expired", "already-queued", "cooldown"))
 
 # #727/#741 hold-extend: the STRUCTURED live-own-task veto words PLUS the #741
 # ACTIVELY-HELD-BOUNDARY words. While one is the SWEEP's verdict, `compact_sweep`
@@ -1287,6 +1351,15 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
             clear_compact_request(sid, path=requests_path)
         if word == "sent":
             logs.append("OK (compact-sweep) sid=%s -> sent" % sid)
+            if handled is not None:
+                handled.add(sid)
+        elif word == "queued":
+            # #822: /compact was typed but queued behind a running turn — a real
+            # keystroke landed in the pane this sweep, so job 20 must still avoid
+            # typing a burst into it (handled), and the request is TERMINAL (the
+            # queued row is in the pane; the next sweep reads already-queued).
+            logs.append("OK (compact-sweep) sid=%s -> queued "
+                        "(typed, queued behind a running turn)" % sid)
             if handled is not None:
                 handled.add(sid)
         elif word == "expired":
