@@ -214,6 +214,19 @@ dispatched alongside you in the SAME round. You can tell from your own `cwd` (so
 `<repo>/.claude/worktrees/agent-<id>`, distinct from the repo's main checkout path) and from the
 dispatch prompt naming it explicitly. This changes what "done" looks like for you:
 
+- **FIRST STEP, UNCONDITIONAL — assert your isolation actually applied, before ANY git write (#817).**
+  Your very first command is the isolation self-check: `git rev-parse --show-toplevel` MUST print a
+  `.claude/worktrees/agent-*` path AND `git symbolic-ref --short HEAD` MUST print a `worktree-agent-*`
+  branch. If instead the toplevel is the repo's bare main checkout and the branch is `main`/`dev`,
+  your `isolation: "worktree"` SILENTLY DID NOT APPLY (a Claude Code harness fallback) — STOP
+  immediately, do NO git write of any kind, and RETURN `ISOLATION FAILED: <toplevel> <branch>` so the
+  supervisor re-dispatches you into a fresh worktree. **NEVER work in the shared main checkout**: a
+  worker that created/switched branches there hijacked the shared HEAD during the supervisor's `git
+  merge --no-ff` integration and a merge commit was LOST (#817, the incident this self-check
+  prevents). In airuleset this is ALSO mechanically backstopped — `block-foreign-airuleset-write.sh`
+  RULE B2 (#817) hard-blocks a dispatched worker's branch-state git op / write against the shared
+  checkout when its cwd is not a worktree — but the self-check + abort is YOUR obligation; the hook is
+  only the last-resort net (fail-safe: a refused worker is recoverable, a hijacked HEAD is not).
 - **NEVER touch the shared main tree.** Work entirely inside your OWN worktree path — always your
   own `cwd` (`<repo>/.claude/worktrees/agent-<id>`), NEVER the bare main checkout path even if the
   dispatch prompt happens to name it as context. If any tool call refuses with "this command

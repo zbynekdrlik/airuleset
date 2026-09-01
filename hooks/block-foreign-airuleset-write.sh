@@ -146,6 +146,92 @@ EOF
         fi
       fi
       ;;
+    *)
+      # RULE B2 (#817) — an isolation-FAILED worker: agent_id present, but cwd
+      # is NOT a worktree, so its `isolation:"worktree"` did not apply and it is
+      # running in the SHARED airuleset checkout. RULE B above is BLIND to this
+      # (it only engages on a `*/.claude/worktrees/*` cwd), which is exactly how
+      # a worker hijacked the shared HEAD during the supervisor's `git merge
+      # --no-ff` integration and a merge commit was LOST. Block any git
+      # branch-state write / file-write whose RESOLVED target is this shared
+      # checkout. CHECKOUT = the installed hook's OWN checkout (REPO_ROOT,
+      # dirname-dirname of this script) — inherently airuleset-scoped (a worker
+      # on another repo targets a different tree → not under CHECKOUT → allowed;
+      # a fleet-wide guard would false-block legit serial-fallback elsewhere).
+      # Keying on the analyzer's target RESOLUTION (worktree_guard.py: cwd +
+      # `cd`-tracking + `-C`) rather than a cwd string catches a subdir cwd AND
+      # a `git -C <checkout> …` from any cwd. The MAIN session (no agent_id) is
+      # exempt by the enclosing `if`.
+      CHECKOUT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || CHECKOUT=""
+      if [ -n "$CHECKOUT" ] && [ -n "$CWD" ]; then
+        CO=$(realpath -m -- "$CHECKOUT" 2>/dev/null) || CO="$CHECKOUT"
+        WTP="$CO/.claude/worktrees"
+
+        b2_is_under() {  # is $1 under (or equal to) $2 ?
+          local p="${1%/}/" base="${2%/}/"
+          case "$p" in "$base"*) return 0 ;; *) return 1 ;; esac
+        }
+        b2_deny() {  # $1 = human description of the offending target
+          cat >&2 <<EOF
+🚫 BLOCKED: your isolation:"worktree" did NOT apply — you (agent $AGENT_ID) are
+running in the SHARED airuleset checkout, not an isolated worktree. A dispatched
+worker must NEVER mutate the shared checkout's HEAD / branches / tree: it hijacks
+the supervisor's serial-integration merge and can LOSE a merge commit (#817).
+
+  shared checkout : $CO
+  refused         : $1
+
+STOP now. Your FIRST step is the isolation self-check: 'git rev-parse
+--show-toplevel' must be a .claude/worktrees/agent-* path AND the branch a
+worktree-agent-* branch. If it is not, return "ISOLATION FAILED" so the
+supervisor re-dispatches — never work in the shared checkout.
+Deliberate serial-fallback override (logged): prefix env AIRULESET_ALLOW_WORKTREE_ESCAPE=1
+EOF
+          echo "[block-foreign-airuleset-write:ruleB2] $AGENT_ID -> $1" \
+            >> /tmp/airuleset-worktree-escape-block.log 2>/dev/null || true
+          exit 2
+        }
+
+        # --- Write / Edit / NotebookEdit : a target under the shared checkout
+        # (but not inside one of its own worktrees). Relative paths resolve
+        # against the worker's session cwd.
+        RAW=""
+        case "$TOOL" in
+          Write|Edit)   RAW=$(jqr '.tool_input.file_path // empty') ;;
+          NotebookEdit) RAW=$(jqr '.tool_input.notebook_path // .tool_input.file_path // empty') ;;
+        esac
+        if [ -n "$RAW" ]; then
+          case "$RAW" in /*) _t="$RAW" ;; *) _t="$CWD/$RAW" ;; esac
+          ABS=$(realpath -m -- "$_t" 2>/dev/null) || ABS="$_t"
+          if b2_is_under "$ABS" "$CO" && ! b2_is_under "$ABS" "$WTP"; then
+            b2_deny "$ABS"
+          fi
+        fi
+
+        # --- Bash : a git branch-state op / file-write targeting the shared
+        # checkout. worktree_guard.py --shared resolves the effective target
+        # (cd-tracking + -C) and also covers cp/mv/sed -i/tee/redirect writes.
+        if [ "$TOOL" = "Bash" ] && [ -n "$CMD" ]; then
+          STRIPPED=$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g') || STRIPPED="$CMD"
+          case "$STRIPPED" in
+            *"airuleset:worktree-ok"*)
+              echo "[block-foreign-airuleset-write:ruleB2] bypass marker: $CMD" \
+                >> /tmp/airuleset-worktree-escape-block.log 2>/dev/null || true
+              ;;
+            *)
+              WG="$(dirname "${BASH_SOURCE[0]}")/worktree_guard.py"
+              if command -v python3 >/dev/null 2>&1 && [ -r "$WG" ]; then
+                rc=0
+                printf '%s' "$CMD" | python3 "$WG" --shared - "$CO" "$CWD" >/dev/null 2>&1 || rc=$?
+                if [ "$rc" = "2" ]; then
+                  b2_deny "Bash git/file op mutating the shared checkout: $CMD"
+                fi
+              fi
+              ;;
+          esac
+        fi
+      fi
+      ;;
   esac
 fi
 

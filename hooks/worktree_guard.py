@@ -27,11 +27,16 @@ import os
 import shlex
 import sys
 
-# git subcommands that WRITE the repository.
+# git subcommands that WRITE the repository (mutate HEAD / branch pointers /
+# index / working tree). `switch`, `branch` and `worktree` were added by #817 —
+# RULE B's own enumeration missed `git switch <b>` / `git branch -D <b>` in the
+# shared tree (the branch-pointer moves the incident hijacked HEAD with), and a
+# confused worker could `git worktree remove` a sibling's checkout. `branch`,
+# `tag`, `stash` and `worktree` have READ subforms exempted in `_git_writes_main`.
 _GIT_WRITE = {
-    "commit", "apply", "checkout", "restore", "add", "rm", "mv", "stash",
-    "reset", "merge", "rebase", "cherry-pick", "revert", "clean", "am", "tag",
-    "push", "pull",
+    "commit", "apply", "checkout", "switch", "restore", "add", "rm", "mv",
+    "stash", "reset", "merge", "rebase", "cherry-pick", "revert", "clean",
+    "am", "tag", "branch", "worktree", "push", "pull",
 }
 # top-level command separators shlex(punctuation_chars) emits as their own tokens
 _SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
@@ -45,10 +50,12 @@ def _norm(path):
 
 
 class _Analyzer:
-    def __init__(self, main, wt):
+    def __init__(self, main, wt, start_cwd=None):
         self.main = _norm(main)
         self.wt = _norm(wt)
-        self.cwd = self.wt  # a worker's shell starts in its worktree
+        # RULE B starts the worker's shell in its worktree; RULE B2 (#817) has
+        # no worktree (isolation failed) and passes the worker's OWN session cwd.
+        self.cwd = _norm(start_cwd) if start_cwd else self.wt
 
     def _resolve(self, target):
         if not target:
@@ -104,6 +111,29 @@ class _Analyzer:
                                       "--points-at", "--merged", "--no-merged")
                                 for x in subargs):
             return False
+        # `git worktree list` (and a bare `git worktree`) is a read; add/remove/
+        # prune/move/repair/lock/unlock write. (#817)
+        if sub == "worktree" and (not subargs or subargs[0] == "list"):
+            return False
+        # `git branch` reads (list/--contains/--merged/...) vs writes (create a
+        # positional name, or -d/-D/-m/-M/-c/-C/--force/-u/...). Over-block a
+        # read flag's value that looks positional is fine (fail-safe). `git
+        # switch` has no read form, so it never reaches here — always a write.
+        if sub == "branch":
+            _READ = {"-l", "--list", "-a", "--all", "-r", "--remotes",
+                     "-v", "-vv", "--verbose", "--contains", "--no-contains",
+                     "--merged", "--no-merged", "--points-at",
+                     "--show-current", "--format", "--sort", "--color",
+                     "--no-color", "-i", "--ignore-case"}
+            _WRITE = {"-d", "-D", "--delete", "-m", "-M", "--move",
+                      "-c", "-C", "--copy", "-f", "--force",
+                      "-u", "--set-upstream-to", "--unset-upstream",
+                      "--edit-description"}
+            positional = [x for x in subargs if not x.startswith("-")]
+            has_w = any(x in _WRITE for x in subargs)
+            has_r = any(x in _READ for x in subargs)
+            if not has_w and not (positional and not has_r):
+                return False
         if loc is not None:
             return self._mutates_main(self._resolve(loc))
         return self._mutates_main(self.cwd)   # bare git → runs in the shell cwd
@@ -208,10 +238,33 @@ def mutates_main_checkout(cmd, main, wt):
         return False
 
 
+def mutates_shared_checkout(cmd, checkout, worker_cwd):
+    """RULE B2 (#817): True iff `cmd` runs a git write / file-write op whose
+    resolved TARGET is the SHARED main `checkout` (but NOT one of its own
+    `.claude/worktrees/*` sub-worktrees), from a dispatched worker whose
+    isolation did NOT apply — so its session cwd is `worker_cwd` (the shared
+    checkout, a subdir of it, or elsewhere) rather than a worktree. Keying on
+    the analyzer's target RESOLUTION (cwd + `cd`-tracking + `-C`) rather than a
+    cwd string catches a subdir cwd AND a `git -C <checkout> …` from any cwd.
+    Fail-safe: any parse error returns False."""
+    try:
+        wt_parent = os.path.join(checkout, ".claude", "worktrees")
+        return _Analyzer(checkout, wt_parent, start_cwd=worker_cwd).analyze(cmd)
+    except Exception:
+        return False
+
+
 def main(argv):
-    if len(argv) < 4:
+    # `--shared <cmd-source> <checkout> <worker-cwd>`  -> RULE B2 (#817).
+    # `<cmd-source> <main> <wt>`                       -> RULE B (#496).
+    args = argv[1:]
+    shared = False
+    if args and args[0] == "--shared":
+        shared = True
+        args = args[1:]
+    if len(args) < 3:
         return 0
-    cmd_source, main_path, wt_path = argv[1], argv[2], argv[3]
+    cmd_source, p1, p2 = args[0], args[1], args[2]
     try:
         if cmd_source == "-":
             cmd = sys.stdin.read()
@@ -220,7 +273,12 @@ def main(argv):
                 cmd = fh.read()
     except OSError:
         return 0
-    if mutates_main_checkout(cmd, main_path, wt_path):
+    if shared:
+        if mutates_shared_checkout(cmd, p1, p2):
+            print("Bash command mutating the shared main checkout")
+            return 2
+        return 0
+    if mutates_main_checkout(cmd, p1, p2):
         print("Bash command mutating the main checkout")
         return 2
     return 0

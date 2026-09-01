@@ -929,7 +929,14 @@ gap in either.
    >    <worktree-path> log --oneline` / `git -C <worktree-path> diff <base>` — confirm the
    >    claimed commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review`
    >    results genuinely exist on that branch before trusting it enough to merge.
-   > 2. Merge each READY worker's branch **`--no-ff`** into the cycle's target — local `main` for a
+   > 2. **BEFORE each `--no-ff` merge, ASSERT the shared checkout's HEAD is still the integration
+   >    target** — `git symbolic-ref --short HEAD` MUST print exactly `main` (local-merge repo) or
+   >    `dev` (`dev`→`main` PR repo). If it names a `worktree-agent-*`/`worktree-issue-*` branch
+   >    instead, a worker whose `isolation:"worktree"` failed HIJACKED the shared HEAD (#817): do NOT
+   >    merge onto it — a merge onto a hijacked HEAD lands on the worker's branch and its later
+   >    deletion LOSES the merge commit. `git checkout main` (or `dev`) to restore HEAD and
+   >    investigate the isolation-failed lane FIRST. Then merge each READY worker's branch
+   >    **`--no-ff`** into the cycle's target — local `main` for a
    >    local-merge repo, local `dev` for a `dev`→`main` PR repo (repo-flow policy above) — ONE AT
    >    A TIME, in a fixed order (e.g. lowest issue number first). Resolve any conflict yourself; a
    >    worktree's branch is a normal ref shared via the ONE `.git`, so it merges cleanly even after
