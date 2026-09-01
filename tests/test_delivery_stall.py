@@ -378,6 +378,19 @@ class TestAuthorityRouting(_Base):
         # the detection state is NOT seeded on a suppressed box
         self.assertFalse(self.state.get("delivery_stall"))
 
+    def test_804_reduced_authority_skip_is_cadenced_1x_per_day(self):
+        # #804 mode-3: the reduced-authority skip is a legit explicit decision,
+        # but was logged 1440x/day (every 60s sweep), masking the diagnosis.
+        # RED (before the demotion): every call re-logged it. GREEN: at most
+        # 1x/day per box; a second sweep same-day is silent, past 24h re-logs.
+        r = self.stalled()
+        l1 = self.watch([r], authority="fork-no-merge")
+        self.assertTrue(any("skip:reduced-authority" in ln for ln in l1), l1)
+        l2 = self.watch([r], authority="fork-no-merge")
+        self.assertFalse(any("skip:reduced-authority" in ln for ln in l2), l2)
+        l3 = self.watch([r], now=NOW + 86401, authority="fork-no-merge")
+        self.assertTrue(any("skip:reduced-authority" in ln for ln in l3), l3)
+
     def test_a_branch_merge_box_is_also_suppressed(self):
         r = self.stalled()
         self.watch([r], authority="branch-merge")
