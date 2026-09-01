@@ -1882,17 +1882,17 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 # backstop healed ~93% (14/15 measured) of these within ~2 min; #403 deleted
 # it, so a compact-stalled loop now gets exactly ONE ping and, if the away
 # user misses it (the 02:59-into-a-sleeping-user incident), no follow-up.
-# The FIRST ping stays byte-for-byte as #403 shipped it; a persistently-dark
-# goal is then RE-pinged on a widening schedule, but ONLY while the per-cwd
-# tickets-status obligation cache proves work still remains (open > 0) -- an
-# ACHIEVED loop is transcript-indistinguishable from a stalled one (both
-# mark=set / footer dark; achievement persists NO marker, measured over 8329
-# transcripts), so an ungated re-ping would nag every completed backlog, the
-# exact noise class the user purged. No positive confirmation -> stay silent
-# (the first ping already went out). Zero keystrokes, ever. Tunable; mirrors
-# the #399/#353 staged-alarm constant style.
-GOAL_DARK_REPING_SCHEDULE_S = (3600, 3 * 3600, 6 * 3600, 24 * 3600)
-GOAL_DARK_REPING_MAX = 10               # hard cap on total pings per dark episode
+# The FIRST ping stays byte-for-byte as #403 shipped it. #804 item 4 DELETED
+# the staged RE-ping (the old `GOAL_DARK_REPING_SCHEDULE_S` widening schedule +
+# `GOAL_DARK_REPING_MAX` cap + `_goal_dark_reping_due`): every dark ping is
+# notify-SUPPRESSED (goal-dark in SUPPRESSED_ALERT_PREFIXES, #704) AND the #795
+# daily re-ask is retired, so a staged re-ping only composed a message notify
+# drops -- dead code (removing it is net-LOC-down, the owner's #804 constraint).
+# A dark episode now pings AT MOST ONCE; `pinged_state` is a per-episode
+# already-pinged LATCH (mark_ts-keyed), still popped by the confirmed re-arm /
+# FULFILLED-SILENT paths above so a genuine re-arm / fresh episode re-pings once.
+# GOAL_DARK_CACHE_MAX_AGE_S stays the freshness bound the #459 first-ping gate +
+# every re-arm path read against the per-cwd tickets-status obligation cache.
 GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older than this
 
 # #524 (owner decision B, 2026-08-17) -- HARDENED death-confirmation for the
@@ -1911,7 +1911,18 @@ GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older t
 # even read goal_armed=no for a session whose transcript mark was `set`).
 GOAL_DARK_CONFIRM_MIN_READS = 8         # K consecutive clean-dark reads to TYPE
 GOAL_DARK_CONFIRM_MIN_SPAN_S = 600      # AND the run must span >= 10 min
-GOAL_DARK_REARM_MAX_PER_DAY = 2         # attempt cap: max auto-types per sid / 24h
+GOAL_DARK_REARM_MAX_PER_DAY = 2         # base cap: fast auto-types per sid / 24h
+# #804 mode-2 -- past the base cap the dark/stale/auth re-arm is NEVER
+# silent-until-midnight (montalu2 "sam sa vypne a uz nezapne"). It keeps
+# re-arming on an ESCALATING backoff from the last attempt (30m -> 1h -> 3h ->
+# 6h, holding at 6h), bounded by a hard daily STROP (anti-keystorm). This
+# mirrors mode-1's shipped inline `_lane_giveup_backoff` (NOT the settled
+# design's nudge_gate resurrect-family) for consistency with shipped reality + a
+# lower blast radius. At 6h spacing only ~4 attempts fit a rolling 24h, so the
+# strop is a safety ceiling the backoff practically never reaches -- the loop
+# gets a bounded resurrection attempt every ~6h forever instead of dying at 2.
+GOAL_DARK_REARM_BACKOFF_S = (30 * 60, 60 * 60, 3 * 3600, 6 * 3600)
+GOAL_DARK_REARM_HARD_CAP_PER_DAY = 12   # anti-keystorm daily strop past the backoff
 # #764 -- the FULFILLED-REARM rate limits (evaluated every sweep; the 🏁 proof
 # replaces the dark-duration confirmation, so there is NO 8-read/600s ramp).
 # MIN_GAP: >= this many seconds between fulfilled-rearms for one sid, so a
@@ -2083,22 +2094,48 @@ def _dark_confirm_advance(win, mark_ts, now):
     return confirmed, new_win
 
 
+def _dark_rearm_backoff(i):
+    """#804 mode-2 -- the ith re-arm-backoff window past the base cap
+    (`GOAL_DARK_REARM_BACKOFF_S`, clamped to the last value so it holds at 6h
+    forever, mirroring `_lane_giveup_backoff`). `i` is the 0-based stage (attempts
+    already recorded PAST `GOAL_DARK_REARM_MAX_PER_DAY`)."""
+    sched = GOAL_DARK_REARM_BACKOFF_S
+    j = i if i < len(sched) else len(sched) - 1
+    return sched[max(0, j)]
+
+
 def _dark_rearm_attempt_ok(attempts, now):
-    """Pure per-sid attempt cap (#524): at most GOAL_DARK_REARM_MAX_PER_DAY
-    auto-types per session per rolling 24 h, so a typed `/goal` that does not
-    stick can never become a keystorm. `attempts` is the prior list of type
-    timestamps (a JSON list; any non-number entry is dropped). Returns
-    `(ok, pruned)` -- `ok` False once the cap is hit; `pruned` is the list with
-    entries older than 24 h removed (the caller appends `now` only on a real
+    """Pure per-sid re-arm gate (#524 base cap, #804 mode-2 escalating backoff).
+    `attempts` is the prior list of type timestamps (a JSON list; any non-number
+    entry is dropped). Returns `(ok, pruned, wait_s)`:
+      * `(True, pruned, None)`  -- allowed: either under the fast base cap
+        (`GOAL_DARK_REARM_MAX_PER_DAY`), OR past it with the escalating backoff
+        window (`_dark_rearm_backoff`) since the last attempt ELAPSED;
+      * `(False, pruned, wait_s>0)` -- #804 mode-2 BACKOFF not yet elapsed: retry
+        in `wait_s` seconds. The loop is being actively resurrected, NOT abandoned
+        (the pre-#804 flat cap went silent-until-midnight here -- montalu2);
+      * `(False, pruned, None)` -- the hard daily STROP
+        (`GOAL_DARK_REARM_HARD_CAP_PER_DAY`) is reached (anti-keystorm; at 6h
+        backoff spacing this is practically unreachable within a rolling 24h).
+    `pruned` is the 24h-pruned list (the caller appends `now` only on a real
     type). The cap counts CONFIRMED RECORDS, not landed keystrokes: a record
-    that `deliver_goal` later drops as `drop:stale-rearm` still consumed a slot
-    without any `/goal` typed -- this fails SAFE (fewer real re-arms than the
-    cap allows, so the ping escalates sooner) and correlates with a present
-    human, so it is deliberate, not a defect."""
+    `deliver_goal` later drops as `drop:stale-rearm` still consumed a slot
+    without any `/goal` typed -- this fails SAFE (fewer real re-arms than allowed,
+    so the next attempt is eligible sooner) and correlates with a present human,
+    so it is deliberate, not a defect."""
     day = 24 * 3600
     pruned = [t for t in (attempts or [])
               if isinstance(t, (int, float)) and 0 <= (now - t) <= day]
-    return (len(pruned) < GOAL_DARK_REARM_MAX_PER_DAY), pruned
+    n = len(pruned)
+    if n < GOAL_DARK_REARM_MAX_PER_DAY:
+        return True, pruned, None                # fast base-cap slot
+    if n >= GOAL_DARK_REARM_HARD_CAP_PER_DAY:
+        return False, pruned, None               # daily strop (anti-keystorm)
+    back = _dark_rearm_backoff(n - GOAL_DARK_REARM_MAX_PER_DAY)
+    elapsed = now - max(pruned)                   # >=0 (pruned filters future ts)
+    if elapsed >= back:
+        return True, pruned, None                # backoff window elapsed -> re-arm
+    return False, pruned, int(back - elapsed)     # backoff not elapsed -> retry later
 
 
 def _fulfilled_rearm_ok(recs, now):
@@ -2357,26 +2394,6 @@ def _dark_record_rearm(sid, cwd, text, auth, now, loc, open_n, dry_run,
             % (loc, sid, open_n, auth, reads, span, len(attempts_state[sid])))
 
 
-def _goal_dark_reping_due(prev, now, schedule):
-    """Pure staged-schedule check for a dark-goal RE-ping (#459), mirroring
-    the `_gkreq_reping_due` SHAPE (#353/#352) as an INDEPENDENT function
-    reusing that proven pattern per this repo's own 'same shape, own
-    vocabulary' precedent, never a cross-job call. `prev` is a prior ping
-    record with `count`>=1 and `last`. Returns `(due, next_count)`: too soon
-    -> `(False, count)`; the schedule interval for this stage cleared ->
-    `(True, count + 1)`. Holds at the final stage forever. A record with no
-    readable `last` re-pings once (fail toward reminding), never silently
-    sticks."""
-    count = int(prev.get("count") or 1)
-    last = prev.get("last")
-    if last is None:
-        return True, count + 1
-    step = min(count - 1, len(schedule) - 1)
-    if (now - last) < schedule[step]:
-        return False, count
-    return True, count + 1
-
-
 def _default_obligation_fn(cwd):
     """Real obligation source for `goal_dark_watch`'s re-ping gate: the
     per-cwd tickets-status cache via `statusbar.obligation_count`. Lazily
@@ -2460,10 +2477,13 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
         return ("stale-rearm %s sid=%s -> STALE (armed condition predates the "
                 "shipped template) but backlog not workable (open=%s) -- skip"
                 % (loc, sid, open_n))
-    ok, pruned = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
+    ok, pruned, wait_s = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
     if not ok:
+        if wait_s is not None:   # #804 mode-2 -- backoff, never silent-until-midnight
+            return ("stale-rearm %s sid=%s -> STALE but re-arm BACKOFF (next in "
+                    "%ss) -- skip" % (loc, sid, wait_s))
         return ("stale-rearm %s sid=%s -> STALE but ATTEMPT-CAP (%d/24h) -- skip"
-                % (loc, sid, GOAL_DARK_REARM_MAX_PER_DAY))
+                % (loc, sid, GOAL_DARK_REARM_HARD_CAP_PER_DAY))
     if dry_run:
         return ("stale-rearm %s sid=%s -> STALE would record re-arm (dry-run, "
                 "open=%s authority=%s)" % (loc, sid, open_n, authority))
@@ -2525,10 +2545,13 @@ def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
     if not (isinstance(open_n, int) and open_n > 0 and fresh):
         return ("auth-rearm %s sid=%s -> cleared-by-auth but backlog not "
                 "workable (open=%s) -- skip" % (loc, sid, open_n))
-    ok, pruned = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
+    ok, pruned, wait_s = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
     if not ok:
+        if wait_s is not None:   # #804 mode-2 -- backoff, never silent-until-midnight
+            return ("auth-rearm %s sid=%s -> cleared-by-auth but re-arm BACKOFF "
+                    "(next in %ss) -- skip" % (loc, sid, wait_s))
         return ("auth-rearm %s sid=%s -> cleared-by-auth but ATTEMPT-CAP "
-                "(%d/24h) -- skip" % (loc, sid, GOAL_DARK_REARM_MAX_PER_DAY))
+                "(%d/24h) -- skip" % (loc, sid, GOAL_DARK_REARM_HARD_CAP_PER_DAY))
     if dry_run:
         return ("auth-rearm %s sid=%s -> cleared-by-auth would record re-arm "
                 "(dry-run, open=%s authority=%s)" % (loc, sid, open_n, authority))
@@ -2922,9 +2945,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # ping so the human is told.
         rearm_text = rearm_auth = None
         attempt_ok = False
+        attempt_wait = None
         if workable:
             rearm_text, rearm_auth = (rearm_fn or _default_rearm_fn)(cwd)
-            attempt_ok, attempts_state[sid] = _dark_rearm_attempt_ok(
+            attempt_ok, attempts_state[sid], attempt_wait = _dark_rearm_attempt_ok(
                 attempts_state.get(sid), now)
         can_self_heal = bool(workable and rearm_text and attempt_ok)
 
@@ -2951,9 +2975,21 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             continue
 
         if workable and rearm_text and not attempt_ok:
+            if attempt_wait is not None:
+                # #804 mode-2 -- past the base cap but within the daily strop: the
+                # loop keeps re-arming on an ESCALATING backoff, so it is NEVER
+                # silent-until-midnight (montalu2). This is an ACTIVE retry, not an
+                # abandonment -- log the DECISION + next-eligible and `continue`,
+                # NOT a premature #459 ping (the ping fallback below is for a loop
+                # the watchdog cannot self-heal, which is not the case here).
+                logs.append(
+                    "dark-watch %s sid=%s -> re-arm BACKOFF (next in %ss, %d "
+                    "attempts/24h — never silent)"
+                    % (loc, sid, attempt_wait, len(attempts_state.get(sid) or [])))
+                continue
             logs.append(
                 "dark-watch %s sid=%s -> ATTEMPT-CAP: %d auto-types in 24h, "
-                "ping only" % (loc, sid, GOAL_DARK_REARM_MAX_PER_DAY))
+                "ping only" % (loc, sid, GOAL_DARK_REARM_HARD_CAP_PER_DAY))
 
         # #459 ping FALLBACK (staged schedule): reached for a NON-workable dark
         # backlog, an unresolvable template, OR an exhausted attempt cap -- the
@@ -2963,48 +2999,31 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # #766: a 🏁-PROVEN achieved loop (fresh open==0) is DISTINGUISHABLE and
         # never reaches here -- it is vetoed FULFILLED-SILENT above; only a dark
         # loop WITHOUT a proven drained backlog falls through to this ping.
+        # #804 item 4 -- a dark episode pings AT MOST ONCE. The staged re-ping
+        # (count>1, GOAL_DARK_REPING_SCHEDULE_S) is DELETED: the ping is
+        # notify-SUPPRESSED (goal-dark, #704) and the #795 re-ask is retired, so
+        # a re-ping only composed a dropped message. `pinged_state` is now a
+        # per-episode already-pinged LATCH (mark_ts-keyed) -- popped by the
+        # confirmed re-arm / FULFILLED-SILENT paths above, so a genuine re-arm or
+        # a fresh episode (new mark_ts) still pings once.
         prec = pinged_state.get(sid)
-        is_first = not (isinstance(prec, dict) and prec.get("mark_ts") == mark_ts)
-        if is_first:
-            count = 1
-        else:
-            count = int(prec.get("count") or 1)
-            if count >= GOAL_DARK_REPING_MAX:
-                continue                          # hard cap -- stop for this episode
-            due, count = _goal_dark_reping_due(prec, now,
-                                               GOAL_DARK_REPING_SCHEDULE_S)
-            if not due:
-                continue                          # too soon this stage
-
-        if not is_first and not workable:
-            continue                              # can't confirm work -- no nag
-        pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}
-        logs.append(
-            "dark-watch %s sid=%s -> %s" % (
-                loc, sid,
-                "goal died silently, pinging" if count == 1
-                else "goal still dark, re-pinging #%d" % count))
+        if isinstance(prec, dict) and prec.get("mark_ts") == mark_ts:
+            continue                              # already pinged this episode
+        pinged_state[sid] = {"mark_ts": mark_ts, "last": now}
+        logs.append("dark-watch %s sid=%s -> goal died silently, pinging"
+                    % (loc, sid))
         if send_fn is not None and not dry_run:
             from notify import stream_redirect
             proj = watchdog.project_label(cwd)
-            if count == 1:
-                msg = ("\U0001f480 **%s** — /goal loop zomrelo potichu "
-                       "(transkript hovorí armovaný, footer nie). "
-                       "Spústi prosím `/autopilot` znova." % proj)
-            else:
-                msg = ("\U0001f480 **%s** — /goal loop je STÁLE mŕtvy "
-                       "(pripomienka #%d; transkript hovorí armovaný, footer "
-                       "nie). Spústi prosím `/autopilot` znova." % (proj, count))
-            # The FIRST ping keeps #403's exact dedup_key (goal-dark:sid:mark) so
-            # a legacy disk marker written by pre-#459 code never yields a
-            # duplicate first ping across the deploy boundary; re-pings append
-            # :count so each staged reminder delivers on its own.
-            dkey = ("goal-dark:%s:%d" % (sid, int(mark_ts or 0)) if count == 1
-                    else "goal-dark:%s:%d:%d" % (sid, int(mark_ts or 0), count))
+            # #403's exact dedup_key (goal-dark:sid:mark) so a legacy on-disk
+            # marker from pre-#459 code never yields a duplicate first ping
+            # across the deploy boundary.
             send_fn(
-                msg,
+                "\U0001f480 **%s** — /goal loop zomrelo potichu "
+                "(transkript hovorí armovaný, footer nie). "
+                "Spústi prosím `/autopilot` znova." % proj,
                 owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                dedup_key=dkey,
+                dedup_key="goal-dark:%s:%d" % (sid, int(mark_ts or 0)),
                 dry_run=dry_run)
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)

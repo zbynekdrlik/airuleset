@@ -598,7 +598,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         # still locks the #403/#459 ping TEXT + dedup-key, reached via the
         # #478 ping FALLBACK: workable but the /goal template cannot be
         # resolved (rearm_fn -> None) -> can't auto-fix -> ping the user
-        # exactly as #459 did (first "zomrelo", then "STÁLE" re-ping).
+        # exactly as #459 did (the single "zomrelo potichu" ping; #804 item 4
+        # DELETED the "STÁLE" staged re-ping -- a dark episode pings AT MOST
+        # ONCE now, so no second ping fires however long it stays dark).
         reqs = self._dir() / "goal-requests.json"
 
         def send_fn(m, **k):
@@ -619,11 +621,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertNotIn("STÁLE", first_msg)
         # legacy shape: exactly "goal-dark:<sid>:<mark>" (two colons after label)
         self.assertEqual(first_key.count(":"), 2, first_key)
-        sweep(2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10)  # re-ping #2
-        self.assertEqual(len(rec), 2)
-        reping_msg, reping_key = rec[1]
-        self.assertIn("STÁLE", reping_msg)
-        self.assertEqual(reping_key, first_key + ":2", reping_key)
+        # #804 item 4 -- no staged re-ping: a far-later sweep pings NO second time.
+        sweep(2000 + 100 * 3600)
+        self.assertEqual(len(rec), 1, "a dark episode pings AT MOST once (#804)")
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "the template-unresolved ping fallback records no re-arm")
 
@@ -638,8 +638,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, 1000, obl)
         self._sweep(tmux, proj, state, sent, 2000, obl)
         self.assertEqual(len(sent), 1)
-        self._sweep(tmux, proj, state, sent,
-                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self._sweep(tmux, proj, state, sent, 2000 + 100 * 3600, obl)
         self.assertEqual(len(sent), 1, "an achieved backlog (open==0) must never nag")
 
     def test_766_achieved_with_backlog_flag_is_never_pinged(self):
@@ -698,8 +697,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, 1000, obl)
         self._sweep(tmux, proj, state, sent, 2000, obl)
         self.assertEqual(len(sent), 1)
-        self._sweep(tmux, proj, state, sent,
-                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self._sweep(tmux, proj, state, sent, 2000 + 100 * 3600, obl)
         self.assertEqual(len(sent), 1, "an unavailable cache must not re-ping")
 
     def test_stale_obligation_cache_does_not_re_ping(self):
@@ -721,7 +719,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, base + 1000, lambda c: (5, base - 10),
                     rearm, reqs)
         self.assertEqual(len(sent), 1)
-        t = base + 1000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
+        t = base + 1000 + 100 * 3600
         stale_ts = t - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
         self._sweep(tmux, proj, state, sent, t, lambda c: (5, stale_ts),
                     rearm, reqs)
@@ -729,31 +727,40 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "a stale/unresolved-template path records no re-arm")
 
-    def test_re_pinging_is_hard_capped_per_episode(self):
-        # #459 — with a cache that stays FRESH and non-empty forever (a
-        # stalled session that keeps re-rendering its statusline), the ONLY
-        # thing that can bound the ping count is the hard cap. (A FROZEN
-        # cache instead ages out at GOAL_DARK_CACHE_MAX_AGE_S — the stale
-        # test above — so the freshness gate is the practical bound for a
-        # genuinely dead loop; the cap backstops the fresh-cache case.)
-        proj, tmux = self._dark("sess-dark-cap")
+    # #804 item 4 -- `test_re_pinging_is_hard_capped_per_episode` (the #459
+    # GOAL_DARK_REPING_MAX cap) is DELETED with the staged re-ping it bounded;
+    # `test_dark_episode_pings_at_most_once_804` below is the replacement
+    # invariant (one ping per episode, no cap to bound because there is no
+    # second ping).
+
+    def test_dark_episode_pings_at_most_once_804(self):
+        # #804 item 4 -- the STAGED re-ping (GOAL_DARK_REPING_SCHEDULE_S,
+        # count>1) is DELETED: every dark ping is notify-SUPPRESSED (goal-dark
+        # in SUPPRESSED_ALERT_PREFIXES, #704) and the #795 daily re-ask is
+        # retired, so a staged re-ping composed a message notify drops -- dead
+        # code. The FIRST ping stays; a dark episode now pings AT MOST ONCE, no
+        # matter how long it stays dark with a fresh workable cache. RED on the
+        # pre-#804 staged schedule (which re-pinged at every elapsed stage);
+        # GREEN once the reping path is removed. No reference to the deleted
+        # constant -- a 100h/sweep jump is past any conceivable schedule.
+        proj, tmux = self._dark("sess-dark-once-804")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
-        # #478: stay in the ping FALLBACK (workable but template unresolved),
-        # the only path that still re-pings a workable backlog -- so the cap
-        # is exercised exactly as #459 intended.
-        rearm = _rearm_none
+        rearm = _rearm_none                       # template unresolved -> ping fallback
         now = [1_700_000_000]
 
         def obl(cwd):
-            return (5, now[0] - 60)          # always fresh (60s before now)
+            return (5, now[0] - 60)               # always fresh + workable
 
-        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)  # first obs
-        for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
-            now[0] += 30 * 3600                              # > final stage (24h)
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)   # first obs
+        now[0] += 100
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)   # FIRST ping
+        self.assertEqual(len(sent), 1, "the first ping fires")
+        for _ in range(12):
+            now[0] += 100 * 3600                  # far past any staged schedule
             self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
-        self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
-                         "re-pings must be hard-capped per episode")
+        self.assertEqual(len(sent), 1,
+                         "a dark episode pings AT MOST ONCE, never re-pings (#804)")
 
     # ----------------------------------------------------------------- #
     # #478 — AUTO-RE-ARM the dark-DIED branch (reverses #403), gated on a
@@ -779,7 +786,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(5, 1500)                        # workable
         rearm = _rearm_ok                               # template resolves
-        for now in (1000, 2000, 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10):
+        for now in (1000, 2000, 2000 + 100 * 3600):
             self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
         self.assertEqual(sent, [])
         self.assertEqual(goal.load_goal_requests(reqs), {},
@@ -878,16 +885,14 @@ class TestGoalDarkWatch(unittest.TestCase):
                 self.assertEqual(goal.load_goal_requests(reqs), {},
                                  "%s cache must never re-arm" % label)
 
-    def test_re_arm_is_hard_capped_per_day_then_pings(self):
-        # #524 UPDATE: the OLD model (re-arm ATTEMPTS back off on the #459 ping
-        # schedule, hard-capped at GOAL_DARK_REPING_MAX per episode) is replaced
-        # by a per-sid 24h ATTEMPT CAP. A session that keeps confirming dead
-        # (delivery, not modelled here, never sticks) is auto-typed at most
-        # GOAL_DARK_REARM_MAX_PER_DAY times per rolling 24h; a further CONFIRMED
-        # cycle PINGS instead (fail toward the human). Each confirmed run resets
-        # the confirmation window, so the cap -- not a ping schedule -- bounds
-        # the total. Counted via a record_goal_request spy (it overwrites the
-        # SAME sid each time). mtime stays frozen -> no liveness veto.
+    def test_re_arm_base_cap_paces_the_first_burst_804(self):
+        # #524 base cap + #804 mode-2 backoff. Within ~1.7h (one 24h window) the
+        # loop auto-types the fast base cap (GOAL_DARK_REARM_MAX_PER_DAY) BEFORE
+        # the first 30m backoff window elapses -- the base cap still paces the
+        # first burst. (The pre-#804 flat cap then went SILENT until midnight;
+        # #804 mode-2 keeps re-arming on backoff past this point, proven by
+        # `test_re_arm_past_cap_backs_off_never_silent_804`.) Counted via a
+        # record_goal_request spy; mtime frozen -> no liveness veto.
         proj, tmux = self._dark("sess-dark-rearm-cap")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
@@ -905,16 +910,51 @@ class TestGoalDarkWatch(unittest.TestCase):
             return (5, now[0] - 60)                     # always workable + fresh
 
         with m.patch.object(goal, "record_goal_request", side_effect=spy):
-            # Many clean-dark sweeps within ONE 24h window (100s apart, ~1.7h
-            # total): several confirmed cycles, but only the first
-            # GOAL_DARK_REARM_MAX_PER_DAY of them TYPE; the rest ping.
-            for _ in range(80):
+            # ~50min of clean-dark sweeps (100s apart) -- BEFORE the first 30m
+            # backoff window (measured from the 2nd type) elapses, so only the
+            # fast base-cap types fire.
+            for _ in range(30):
                 now[0] += 100
                 self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
         self.assertEqual(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
-                         "auto-types are hard-capped per sid per rolling 24h")
-        self.assertTrue(sent,
-                        "a CONFIRMED dark loop past the attempt cap PINGS the human")
+                         "the fast base cap paces the first burst (backoff not yet due)")
+
+    def test_re_arm_past_cap_backs_off_never_silent_804(self):
+        # #804 mode-2 -- past the base 24h cap the dark-rearm is NOT silent until
+        # midnight (montalu2 "sam sa vypne a uz nezapne"): it re-arms on an
+        # ESCALATING backoff from the last attempt (30m -> 1h -> 3h -> 6h), so a
+        # persistently dead-stuck loop keeps getting bounded resurrection
+        # attempts. RED on the pre-#804 flat cap (EXACTLY 2 types then silent
+        # within 24h); GREEN once the backoff allows a 3rd type after its 30m
+        # window elapses, AND the 3rd type is spaced >= 30m from the 2nd (the
+        # backoff floor, distinct from the ~confirm-ramp spacing of the 2nd).
+        proj, tmux = self._dark("sess-dark-rearm-backoff-804")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        rearm = _rearm_ok
+        writes = []                                   # capture the record TIMES
+        real_record = goal.record_goal_request
+
+        def spy(*a, **k):
+            writes.append(now[0])
+            return real_record(*a, **k)
+
+        now = [1_700_000_000]
+
+        def obl(cwd):
+            return (5, now[0] - 60)                    # always workable + fresh
+
+        with m.patch.object(goal, "record_goal_request", side_effect=spy):
+            # ~4h of clean-dark sweeps (100s apart) -- long past the first (30m)
+            # backoff window, all within ONE 24h prune window.
+            for _ in range(150):
+                now[0] += 100
+                self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
+        self.assertGreater(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
+                           "past the base cap the loop re-arms on backoff, never silent")
+        self.assertGreaterEqual(
+            writes[2] - writes[1], goal.GOAL_DARK_REARM_BACKOFF_S[0],
+            "the 3rd re-arm is spaced >= the first (30m) backoff window from the 2nd")
 
     def test_dry_run_re_arm_records_nothing_and_consumes_no_slot(self):
         # #478/#524 review MINOR — a dry-run sweep must never WRITE the request
@@ -1150,6 +1190,33 @@ class TestGoalLaneSweep(unittest.TestCase):
                                   projects_dir=self._dir(),
                                   backlog_fetch=lambda cwd: 5, state={})
         self.assertTrue(any("-> dead-session" in ln for ln in l3), l3)
+
+    def test_804_dead_stream_resurrect_decision_line_mode5(self):
+        # #804 mode-5 -- for a DEAD rostered stream (no live candidate pane) that
+        # still has a bare-idle-SHELL pane in its cwd, the census evaluates a
+        # RESURRECT decision (item 3 recent-human HARD veto + cadence) and emits an
+        # explicit decision line. The live relaunch KEYSTROKE is opt-in
+        # (AIRULESET_RESURRECT_ACTION); with the flag OFF (default) the line says
+        # "would relaunch -- disabled" and NO send-keys fires. RED before the
+        # resurrect wiring exists.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        # a BARE-shell pane in the dead cwd -> not a claude candidate (so the cwd
+        # reads DEAD) but a valid relaunch target for find_pane.
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")], GOAL_IDLE_CAP)
+        logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                    backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") and "deadstream" in ln
+                            for ln in logs), logs)
+        self.assertTrue(any("would relaunch" in ln and "disabled" in ln
+                            for ln in logs), logs)
+        # flag OFF (default) -> NO relaunch send-keys keystroke into the pane
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "the live relaunch keystroke is opt-in (flag off)")
 
     def test_804_census_skipped_when_the_sweep_budget_broke(self):
         # #804-review 🟡: a sweep budget break leaves deferred panes' cwds OUT of
