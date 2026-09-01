@@ -3137,5 +3137,70 @@ class TestPostSendQueued822(unittest.TestCase):
             self.SID, time.time() + 1, path=self.delp))
 
 
+class TestGoalContinuingGate822(unittest.TestCase):
+    """#822 (c): a deterministic PRE-TYPE gate. Under an armed `/goal`
+    (`◎ /goal active`) with ZERO live tasks, a DRAINED-boundary (`self-callback`)
+    `/compact` cannot execute — the goal Stop hook blocks every boundary, so CC
+    would only append the `/compact` to its type-ahead queue (the owner's 3x
+    accumulation). So it is NOT typed; the boundary compact is delivered by the
+    session's own hold-turn instead (skills/autopilot Step 5)."""
+
+    SID = "sess-goalcont-822"
+    CWD = "/home/newlevel/devel/goalconttest"
+
+    _ARMED_IDLE = (
+        "● Predošlá várka integrovaná.\n"
+        "\n"
+        "                                                          ◎ /goal active (12m)\n"
+        "──────────────────────────────────────────────────────── ultracode ─\n"
+        "❯ \n"
+        "────────────────────────────────────────────────────────────────────\n"
+        "  5h 7%(4h)  wk 1%(4d)  fable  I 3  ctx 210K ~$0.30  caveman\n"
+    )
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _run(self, render):
+        typed = []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%9\tclaude\t" + self.CWD + "\t111"
+            if "display-message" in j:
+                return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
+            if "send-keys" in j:
+                if "-l" in argv:
+                    typed.append(argv[-1])
+                return ""
+            if "capture-pane" in j:
+                return render
+            return ""
+        return run, typed
+
+    def _deliver(self, origin, render=None):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run, typed = self._run(render if render is not None else self._ARMED_IDLE)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin=origin, run=run, projects_dir=proj,
+            delivered_path=self.delp, now=time.time())
+        return word, typed
+
+    def test_self_callback_under_armed_goal_skips_without_typing(self):
+        word, typed = self._deliver(compact._COMPACT_SELF_CALLBACK_ORIGIN)
+        self.assertEqual(word, "skip:goal-continuing")
+        self.assertEqual(typed, [])            # NEVER typed /compact
+
+
 if __name__ == "__main__":
     unittest.main()
