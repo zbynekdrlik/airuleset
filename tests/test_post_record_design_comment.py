@@ -294,6 +294,68 @@ class TestRepoFlagBeforeIssueCommentIsRecognized(_Base):
         self.assertIsNone(dg.read_marker("parovanie-produktov", 11))
         self.assertIsNone(dg.read_marker("airuleset", 11))
 
+    def test_glued_dash_R_before_issue_comment_resolves_the_right_repo(self):
+        # Adversarial-review finding (post-#815 fix): `-Rowner/repo` (no
+        # separator at all) is a real gh-CLI-accepted short-flag form
+        # (confirmed live against gh 2.45.0), not just a hypothetical.
+        # Recognizing the INVOCATION without also widening the repo-VALUE
+        # extraction (`_REPO_FLAG_RE`) would silently fall back to the
+        # cwd-derived repo -- writing a marker under the WRONG repo,
+        # worse than writing none at all. Assert it resolves to the repo
+        # actually named, never to "airuleset" (this test's own cwd repo).
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/other/parovanie-produktov/issues/12#issuecomment-815d",
+        }])
+        cmd = 'gh -Rother/parovanie-produktov issue comment 12 --body "x"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNotNone(
+            dg.read_marker("parovanie-produktov", 12),
+            "glued -Rowner/repo (no separator) must still be recognized")
+        self.assertIsNone(
+            dg.read_marker("airuleset", 12),
+            "glued -R's value must resolve to ITS OWN repo, never fall "
+            "back to the cwd-derived repo")
+
+    def test_tab_separated_dash_R_before_issue_comment_writes_marker(self):
+        # Adversarial-review finding (post-#815 fix): the bash prefilter
+        # used `[[:space:]]` (tab-inclusive) around -R/--repo while both
+        # python regexes used a literal `[= ]`/`[=\s]` -- verify all
+        # three genuinely agree by using a TAB as the separator, not just
+        # a plain space.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/other/parovanie-produktov/issues/13#issuecomment-815e",
+        }])
+        cmd = 'gh\t-R\tother/parovanie-produktov\tissue\tcomment 13 --body "x"'
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNotNone(
+            dg.read_marker("parovanie-produktov", 13),
+            "a tab-separated -R must be recognized identically to a "
+            "space-separated one")
+
+    def test_dash_R_before_issue_comment_in_a_compound_two_issue_command(self):
+        # Mirrors TestAmbiguousRepoIsRefused's own "single repeated repo"
+        # positive control, but with -R placed BEFORE 'issue comment' on
+        # BOTH calls (the new #815 shape) instead of after -- proves the
+        # multi-issue loop (#208) and the -R-before recognition compose
+        # correctly, not just each in isolation.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/owner/aaa/issues/14#issuecomment-815f",
+        }])
+        cmd = ('gh -R owner/aaa issue comment 14 -F a.md && '
+               'gh -R owner/aaa issue comment 15 -F b.md')
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        os.environ["HOME"] = str(self.home)
+        self.assertIsNotNone(dg.read_marker("aaa", 14))
+        self.assertIsNotNone(dg.read_marker("aaa", 15))
+
 
 class TestNeverWritesOnNonEvidence(_Base):
 

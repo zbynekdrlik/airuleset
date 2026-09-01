@@ -60,16 +60,25 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 # ever written for that shape, even for a fresh, valid, classifying
 # comment, because the hook exited here before touching python/gh at all.
 #
-# #815: an OPTIONAL `-R <repo>`/`--repo <repo>` (space or `=` form) is now
-# also tolerated directly after `gh` and before `issue comment` -- the
-# natural `gh -R <owner>/<repo> issue comment <N> ...` shape a worker uses
-# when its cwd is not the target repo used to slip past this prefilter
-# entirely (the repo flag sits BETWEEN "gh" and "issue", breaking the old
-# contiguous match), silently losing the marker. `_REPO_FLAG_RE` below
-# needs no change -- it already scans the WHOLE matched segment for
-# `-R`/`--repo` in either position once this prefilter (and the two
-# downstream python regexes) actually recognize the invocation.
-echo "$CMD" | grep -qE '\bgh[[:space:]]+((-R|--repo)(=|[[:space:]]+)[^[:space:]]+[[:space:]]+)?issue[[:space:]]+comment\b' || exit 0
+# #815: an OPTIONAL `-R <repo>`/`--repo <repo>` is now also tolerated
+# directly after `gh` and before `issue comment` -- the natural
+# `gh -R <owner>/<repo> issue comment <N> ...` shape a worker uses when its
+# cwd is not the target repo used to insert the repo flag BETWEEN "gh" and
+# "issue", breaking the old contiguous match and silently losing the
+# marker. `[[:space:]]` (not a literal space) so a tab-separated
+# invocation matches identically to a space-separated one, matching the
+# two python regexes below byte-for-byte (adversarial-review finding,
+# post-#815 fix). `-R` additionally tolerates a GLUED value with NO
+# separator at all (`-Rowner/repo`, real `gh`-CLI-accepted short-flag
+# syntax, confirmed live against gh 2.45.0) via `[=[:space:]]*` (zero or
+# more); `--repo` keeps requiring at least one separator
+# (`[=[:space:]]+`) since gh's long-flag parser does NOT accept a glued
+# `--repoowner/repo` -- `_REPO_FLAG_RE` below is widened the SAME way
+# (adversarial-review finding: recognizing the glued invocation here
+# without ALSO widening the repo-VALUE extraction there would write a
+# marker under the WRONG repo -- the cwd-derived fallback -- instead of
+# no marker at all, which is worse).
+echo "$CMD" | grep -qE '\bgh[[:space:]]+((-R[=[:space:]]*|--repo[=[:space:]]+)[^[:space:]]+[[:space:]]+)?issue[[:space:]]+comment\b' || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 REPO_ROOT="$(dirname "$HOOK_DIR")"
@@ -196,7 +205,17 @@ def _blank_gh_text_flag_values(text, lib_poll_payload):
 # this scoping must keep working even when that module failed to import
 # above (see `_control_flow_text`'s own fallback comment), and it is a
 # small, stable literal not worth a second import for.
-_REPO_FLAG_RE = re.compile(r'(?:-R|--repo)[= ]+([^\s\'"]+)')
+#
+# #815 (adversarial-review finding): `-R` also tolerates a GLUED value
+# with no separator (`-Rowner/repo`, real gh-CLI-accepted short-flag
+# syntax) via `[=\s]*` -- matching the SAME widening the bash prefilter/
+# `trigger_re`/`finditer` detectors above got, so a glued `-R` is not
+# only *recognized* as a `gh issue comment` invocation but also correctly
+# resolved to ITS OWN repo, never silently falling back to the (possibly
+# different) cwd-derived repo. `--repo` keeps requiring at least one
+# separator (`[=\s]+`) since gh's long-flag parser rejects a glued
+# `--repoowner/repo` outright.
+_REPO_FLAG_RE = re.compile(r'(?:-R[=\s]*|--repo[=\s]+)([^\s\'"]+)')
 _SEG_SEP = (";", "&&", "||", "|", "\n")
 
 
@@ -290,14 +309,15 @@ try:
     # `gh issue comment`, never `git commit`). Used for BOTH the repo_key
     # lookup below AND the `gh issue view` verification subprocess's own
     # cwd, so the two can never disagree about which repo this is.
-    # #815: tolerate an optional `-R <repo>`/`--repo <repo>` (space or `=`
-    # form) between `gh` and `issue comment` -- same shape as the bash
+    # #815: tolerate an optional `-R <repo>`/`--repo <repo>` between `gh`
+    # and `issue comment` -- same shape (incl. `-R`'s glued-value and
+    # `\s` tab tolerance, adversarial-review finding) as the bash
     # prefilter above and the finditer capture below, so all three
     # adjacency points agree on what counts as a `gh issue comment`
     # invocation.
     work_cwd = notify.resolve_work_cwd(
         cmd, cwd, trigger_re=re.compile(
-            r"\bgh\s+(?:(?:-R|--repo)[= ]+\S+\s+)?issue\s+comment\b"))
+            r"\bgh\s+(?:(?:-R[=\s]*|--repo[=\s]+)\S+\s+)?issue\s+comment\b"))
 
     scan_cmd = _control_flow_text(cmd, repo_root)
 
@@ -307,15 +327,17 @@ try:
     # commit, and `re.search` (a single, non-global match) used to extract
     # only the FIRST -- the rest silently never got checked or marked.
     #
-    # #815 -- same optional `-R <repo>`/`--repo <repo>` tolerance as the
-    # bash prefilter and `trigger_re` above, between `gh` and `issue
-    # comment` (`gh -R <owner>/<repo> issue comment <N> ...`). The repo
-    # VALUE captured here is unused (`_REPO_FLAG_RE` below independently
-    # resolves it from the whole matched segment, in either position) --
-    # this only has to recognize the invocation and capture the target
-    # after "comment ".
+    # #815 -- same optional `-R <repo>`/`--repo <repo>` tolerance (incl.
+    # `-R`'s glued-value/tab handling) as the bash prefilter and
+    # `trigger_re` above, between `gh` and `issue comment` (`gh -R
+    # <owner>/<repo> issue comment <N> ...`). The repo VALUE captured
+    # here is unused (`_REPO_FLAG_RE` below independently resolves it
+    # from the whole matched segment, in either position) -- this only
+    # has to recognize the invocation and capture the target after
+    # "comment ".
     matches = list(re.finditer(
-        r'gh\s+(?:(?:-R|--repo)[= ]+\S+\s+)?issue\s+comment\s+(\S+)', scan_cmd))
+        r'gh\s+(?:(?:-R[=\s]*|--repo[=\s]+)\S+\s+)?issue\s+comment\s+(\S+)',
+        scan_cmd))
     if not matches:
         sys.exit(0)
 
