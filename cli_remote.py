@@ -1180,6 +1180,10 @@ def cmd_push(args):
         # same single-place-that-knows rule as the overrides above.
         test_env["AIRULESET_GOAL_ROSTER_PATH"] = str(
             Path(_lock_tmp) / "goal-roster.json")
+        # #804 mode-5: the resurrect ACTION opt-in flag OFF for the push-gate
+        # suite (conftest is pytest-only), so the mode-5 test stays deterministic
+        # even if the LIVE box running the gate has enabled it fleet-wide.
+        test_env["AIRULESET_RESURRECT_ACTION"] = ""
         # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
         # redirect is pytest-only and is NEVER read by `unittest discover`, so
         # this is the single place the push gate's own ~459 raw

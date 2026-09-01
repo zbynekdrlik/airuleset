@@ -206,24 +206,37 @@ class TestStaleArmedRearmRecorded(unittest.TestCase):
                          "a pending self-callback is never clobbered")
         self.assertFalse(any("recording re-arm" in ln for ln in logs), logs)
 
-    def test_attempt_cap_bounds_the_rearm(self):
-        # SHARES the dark-rearm 24h/2 cap: after 2 records the sweep skips.
+    def test_attempt_backoff_bounds_then_rearms_804(self):
+        # #804 mode-2 -- SHARES the dark-rearm gate. Past the fast base cap
+        # (2/24h) the stale-rearm is NOT silent-until-midnight: it re-arms on an
+        # ESCALATING backoff. A 3rd attempt INSIDE the first (30m) backoff window
+        # is DEFERRED (BACKOFF log, no record); once the window elapses it
+        # re-arms again. (The pre-#804 flat cap skipped forever with ATTEMPT-CAP.)
         state = {}
         reqs_path = self._dir() / "goal-requests.json"
-        # record #1
+        # record #1 (now=100000)
         self._sweep("sess-cap", _OLD_COND, reqs=reqs_path, state=state)
         self.assertEqual(goal.load_goal_requests(reqs_path)["sess-cap"]["origin"],
                          "stale-rearm")
         # clear the pending request so the next sweep is not blocked by the
-        # already-pending guard, exercising the ATTEMPT cap specifically.
+        # already-pending guard, exercising the ATTEMPT gate specifically.
         goal.clear_goal_request("sess-cap", path=reqs_path)
+        # record #2 (now=100100) -- the fast base cap is now full
         self._sweep("sess-cap", _OLD_COND, reqs=reqs_path, state=state, now=100100)
         goal.clear_goal_request("sess-cap", path=reqs_path)
-        # 3rd within 24h -> cap hit, no record
+        # 3rd INSIDE the first 30m backoff window -> deferred, no record
         reqs, _, logs, _ = self._sweep("sess-cap", _OLD_COND, reqs=reqs_path,
                                        state=state, now=100200)
-        self.assertEqual(reqs, {}, "the 3rd re-arm in 24h is capped")
-        self.assertTrue(any("ATTEMPT-CAP" in ln for ln in logs), logs)
+        self.assertEqual(reqs, {}, "a 3rd re-arm inside the backoff window is deferred")
+        self.assertTrue(any("BACKOFF" in ln for ln in logs), logs)
+        self.assertFalse(any("ATTEMPT-CAP" in ln for ln in logs),
+                         "inside the backoff window is NOT the hard strop")
+        # 3rd AFTER the 30m backoff window elapses -> re-arm (never silent)
+        reqs, _, logs, _ = self._sweep(
+            "sess-cap", _OLD_COND, reqs=reqs_path, state=state,
+            now=100100 + goal.GOAL_DARK_REARM_BACKOFF_S[0] + 10)
+        self.assertEqual(reqs["sess-cap"]["origin"], "stale-rearm",
+                         "past the backoff window the loop re-arms -- never silent")
 
 
 class TestDeliverStaleRearmReplaces(unittest.TestCase):

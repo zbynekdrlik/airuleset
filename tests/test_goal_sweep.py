@@ -598,7 +598,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         # still locks the #403/#459 ping TEXT + dedup-key, reached via the
         # #478 ping FALLBACK: workable but the /goal template cannot be
         # resolved (rearm_fn -> None) -> can't auto-fix -> ping the user
-        # exactly as #459 did (first "zomrelo", then "STÁLE" re-ping).
+        # exactly as #459 did (the single "zomrelo potichu" ping; #804 item 4
+        # DELETED the "STÁLE" staged re-ping -- a dark episode pings AT MOST
+        # ONCE now, so no second ping fires however long it stays dark).
         reqs = self._dir() / "goal-requests.json"
 
         def send_fn(m, **k):
@@ -619,11 +621,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertNotIn("STÁLE", first_msg)
         # legacy shape: exactly "goal-dark:<sid>:<mark>" (two colons after label)
         self.assertEqual(first_key.count(":"), 2, first_key)
-        sweep(2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10)  # re-ping #2
-        self.assertEqual(len(rec), 2)
-        reping_msg, reping_key = rec[1]
-        self.assertIn("STÁLE", reping_msg)
-        self.assertEqual(reping_key, first_key + ":2", reping_key)
+        # #804 item 4 -- no staged re-ping: a far-later sweep pings NO second time.
+        sweep(2000 + 100 * 3600)
+        self.assertEqual(len(rec), 1, "a dark episode pings AT MOST once (#804)")
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "the template-unresolved ping fallback records no re-arm")
 
@@ -638,8 +638,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, 1000, obl)
         self._sweep(tmux, proj, state, sent, 2000, obl)
         self.assertEqual(len(sent), 1)
-        self._sweep(tmux, proj, state, sent,
-                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self._sweep(tmux, proj, state, sent, 2000 + 100 * 3600, obl)
         self.assertEqual(len(sent), 1, "an achieved backlog (open==0) must never nag")
 
     def test_766_achieved_with_backlog_flag_is_never_pinged(self):
@@ -698,8 +697,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, 1000, obl)
         self._sweep(tmux, proj, state, sent, 2000, obl)
         self.assertEqual(len(sent), 1)
-        self._sweep(tmux, proj, state, sent,
-                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self._sweep(tmux, proj, state, sent, 2000 + 100 * 3600, obl)
         self.assertEqual(len(sent), 1, "an unavailable cache must not re-ping")
 
     def test_stale_obligation_cache_does_not_re_ping(self):
@@ -721,7 +719,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, base + 1000, lambda c: (5, base - 10),
                     rearm, reqs)
         self.assertEqual(len(sent), 1)
-        t = base + 1000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
+        t = base + 1000 + 100 * 3600
         stale_ts = t - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
         self._sweep(tmux, proj, state, sent, t, lambda c: (5, stale_ts),
                     rearm, reqs)
@@ -729,31 +727,40 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "a stale/unresolved-template path records no re-arm")
 
-    def test_re_pinging_is_hard_capped_per_episode(self):
-        # #459 — with a cache that stays FRESH and non-empty forever (a
-        # stalled session that keeps re-rendering its statusline), the ONLY
-        # thing that can bound the ping count is the hard cap. (A FROZEN
-        # cache instead ages out at GOAL_DARK_CACHE_MAX_AGE_S — the stale
-        # test above — so the freshness gate is the practical bound for a
-        # genuinely dead loop; the cap backstops the fresh-cache case.)
-        proj, tmux = self._dark("sess-dark-cap")
+    # #804 item 4 -- `test_re_pinging_is_hard_capped_per_episode` (the #459
+    # GOAL_DARK_REPING_MAX cap) is DELETED with the staged re-ping it bounded;
+    # `test_dark_episode_pings_at_most_once_804` below is the replacement
+    # invariant (one ping per episode, no cap to bound because there is no
+    # second ping).
+
+    def test_dark_episode_pings_at_most_once_804(self):
+        # #804 item 4 -- the STAGED re-ping (GOAL_DARK_REPING_SCHEDULE_S,
+        # count>1) is DELETED: every dark ping is notify-SUPPRESSED (goal-dark
+        # in SUPPRESSED_ALERT_PREFIXES, #704) and the #795 daily re-ask is
+        # retired, so a staged re-ping composed a message notify drops -- dead
+        # code. The FIRST ping stays; a dark episode now pings AT MOST ONCE, no
+        # matter how long it stays dark with a fresh workable cache. RED on the
+        # pre-#804 staged schedule (which re-pinged at every elapsed stage);
+        # GREEN once the reping path is removed. No reference to the deleted
+        # constant -- a 100h/sweep jump is past any conceivable schedule.
+        proj, tmux = self._dark("sess-dark-once-804")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
-        # #478: stay in the ping FALLBACK (workable but template unresolved),
-        # the only path that still re-pings a workable backlog -- so the cap
-        # is exercised exactly as #459 intended.
-        rearm = _rearm_none
+        rearm = _rearm_none                       # template unresolved -> ping fallback
         now = [1_700_000_000]
 
         def obl(cwd):
-            return (5, now[0] - 60)          # always fresh (60s before now)
+            return (5, now[0] - 60)               # always fresh + workable
 
-        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)  # first obs
-        for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
-            now[0] += 30 * 3600                              # > final stage (24h)
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)   # first obs
+        now[0] += 100
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)   # FIRST ping
+        self.assertEqual(len(sent), 1, "the first ping fires")
+        for _ in range(12):
+            now[0] += 100 * 3600                  # far past any staged schedule
             self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
-        self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
-                         "re-pings must be hard-capped per episode")
+        self.assertEqual(len(sent), 1,
+                         "a dark episode pings AT MOST ONCE, never re-pings (#804)")
 
     # ----------------------------------------------------------------- #
     # #478 — AUTO-RE-ARM the dark-DIED branch (reverses #403), gated on a
@@ -779,7 +786,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(5, 1500)                        # workable
         rearm = _rearm_ok                               # template resolves
-        for now in (1000, 2000, 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10):
+        for now in (1000, 2000, 2000 + 100 * 3600):
             self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
         self.assertEqual(sent, [])
         self.assertEqual(goal.load_goal_requests(reqs), {},
@@ -878,16 +885,14 @@ class TestGoalDarkWatch(unittest.TestCase):
                 self.assertEqual(goal.load_goal_requests(reqs), {},
                                  "%s cache must never re-arm" % label)
 
-    def test_re_arm_is_hard_capped_per_day_then_pings(self):
-        # #524 UPDATE: the OLD model (re-arm ATTEMPTS back off on the #459 ping
-        # schedule, hard-capped at GOAL_DARK_REPING_MAX per episode) is replaced
-        # by a per-sid 24h ATTEMPT CAP. A session that keeps confirming dead
-        # (delivery, not modelled here, never sticks) is auto-typed at most
-        # GOAL_DARK_REARM_MAX_PER_DAY times per rolling 24h; a further CONFIRMED
-        # cycle PINGS instead (fail toward the human). Each confirmed run resets
-        # the confirmation window, so the cap -- not a ping schedule -- bounds
-        # the total. Counted via a record_goal_request spy (it overwrites the
-        # SAME sid each time). mtime stays frozen -> no liveness veto.
+    def test_re_arm_base_cap_paces_the_first_burst_804(self):
+        # #524 base cap + #804 mode-2 backoff. Within ~1.7h (one 24h window) the
+        # loop auto-types the fast base cap (GOAL_DARK_REARM_MAX_PER_DAY) BEFORE
+        # the first 30m backoff window elapses -- the base cap still paces the
+        # first burst. (The pre-#804 flat cap then went SILENT until midnight;
+        # #804 mode-2 keeps re-arming on backoff past this point, proven by
+        # `test_re_arm_past_cap_backs_off_never_silent_804`.) Counted via a
+        # record_goal_request spy; mtime frozen -> no liveness veto.
         proj, tmux = self._dark("sess-dark-rearm-cap")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
@@ -905,16 +910,51 @@ class TestGoalDarkWatch(unittest.TestCase):
             return (5, now[0] - 60)                     # always workable + fresh
 
         with m.patch.object(goal, "record_goal_request", side_effect=spy):
-            # Many clean-dark sweeps within ONE 24h window (100s apart, ~1.7h
-            # total): several confirmed cycles, but only the first
-            # GOAL_DARK_REARM_MAX_PER_DAY of them TYPE; the rest ping.
-            for _ in range(80):
+            # ~50min of clean-dark sweeps (100s apart) -- BEFORE the first 30m
+            # backoff window (measured from the 2nd type) elapses, so only the
+            # fast base-cap types fire.
+            for _ in range(30):
                 now[0] += 100
                 self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
         self.assertEqual(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
-                         "auto-types are hard-capped per sid per rolling 24h")
-        self.assertTrue(sent,
-                        "a CONFIRMED dark loop past the attempt cap PINGS the human")
+                         "the fast base cap paces the first burst (backoff not yet due)")
+
+    def test_re_arm_past_cap_backs_off_never_silent_804(self):
+        # #804 mode-2 -- past the base 24h cap the dark-rearm is NOT silent until
+        # midnight (montalu2 "sam sa vypne a uz nezapne"): it re-arms on an
+        # ESCALATING backoff from the last attempt (30m -> 1h -> 3h -> 6h), so a
+        # persistently dead-stuck loop keeps getting bounded resurrection
+        # attempts. RED on the pre-#804 flat cap (EXACTLY 2 types then silent
+        # within 24h); GREEN once the backoff allows a 3rd type after its 30m
+        # window elapses, AND the 3rd type is spaced >= 30m from the 2nd (the
+        # backoff floor, distinct from the ~confirm-ramp spacing of the 2nd).
+        proj, tmux = self._dark("sess-dark-rearm-backoff-804")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        rearm = _rearm_ok
+        writes = []                                   # capture the record TIMES
+        real_record = goal.record_goal_request
+
+        def spy(*a, **k):
+            writes.append(now[0])
+            return real_record(*a, **k)
+
+        now = [1_700_000_000]
+
+        def obl(cwd):
+            return (5, now[0] - 60)                    # always workable + fresh
+
+        with m.patch.object(goal, "record_goal_request", side_effect=spy):
+            # ~4h of clean-dark sweeps (100s apart) -- long past the first (30m)
+            # backoff window, all within ONE 24h prune window.
+            for _ in range(150):
+                now[0] += 100
+                self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
+        self.assertGreater(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
+                           "past the base cap the loop re-arms on backoff, never silent")
+        self.assertGreaterEqual(
+            writes[2] - writes[1], goal.GOAL_DARK_REARM_BACKOFF_S[0],
+            "the 3rd re-arm is spaced >= the first (30m) backoff window from the 2nd")
 
     def test_dry_run_re_arm_records_nothing_and_consumes_no_slot(self):
         # #478/#524 review MINOR — a dry-run sweep must never WRITE the request
@@ -1102,8 +1142,30 @@ class TestGoalDarkWatch(unittest.TestCase):
 #    apply here (unlike arm delivery).
 # --------------------------------------------------------------------------- #
 
+# #804 mode-5 -- a REALISTIC capture for a DEAD stream's bare BASH pane (a login
+# shell at an idle prompt), not the CC `❯`+statusline GOAL_IDLE_CAP. resurrect's
+# `pane_is_bare_idle` reads the LAST non-blank line, which for a bash pane IS the
+# prompt (bash has no statusline below it).
+_BASH_IDLE_CAP = "newlevel@dev1:~/devel/deadstream$ "
+# a bash pane with a human's STALE half-typed command still on the prompt.
+_BASH_TYPED_CAP = "newlevel@dev1:~/devel/deadstream$ rm -rf /tmp/junk "
+
+
 class TestGoalLaneSweep(unittest.TestCase):
     CWD = "/home/newlevel/devel/lanesweep"
+
+    def setUp(self):
+        # #804(4)/review -- isolate the roster path for a DIRECT
+        # `python3 tests/test_goal_sweep.py` run too (conftest is pytest-only;
+        # cmd_push's test_env covers only `unittest discover`), so a resurrect/
+        # census test's roster.save_roster never writes the developer's real
+        # ~/.claude/goal-roster.json.
+        p = m.patch.dict(os.environ,
+                         {"AIRULESET_GOAL_ROSTER_PATH":
+                          str(Path(self._dir()) / "goal-roster.json"),
+                          "AIRULESET_RESURRECT_ACTION": ""})
+        p.start()
+        self.addCleanup(p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -1150,6 +1212,160 @@ class TestGoalLaneSweep(unittest.TestCase):
                                   projects_dir=self._dir(),
                                   backlog_fetch=lambda cwd: 5, state={})
         self.assertTrue(any("-> dead-session" in ln for ln in l3), l3)
+
+    def test_804_dead_stream_resurrect_decision_line_mode5(self):
+        # #804 mode-5 -- for a DEAD rostered stream (no live candidate pane) that
+        # still has a bare-idle-SHELL pane in its cwd, the census evaluates a
+        # RESURRECT decision (item 3 recent-human HARD veto + cadence) and emits an
+        # explicit decision line. The live relaunch KEYSTROKE is opt-in
+        # (AIRULESET_RESURRECT_ACTION); with the flag OFF (default) the line says
+        # "would relaunch -- disabled" and NO send-keys fires. RED before the
+        # resurrect wiring exists.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        # a BARE-idle shell pane in the dead cwd -> not a claude candidate (so the
+        # cwd reads DEAD) but a valid, safe-to-type relaunch target.
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)
+        logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                    backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") and "deadstream" in ln
+                            for ln in logs), logs)
+        self.assertTrue(any("would relaunch" in ln and "disabled" in ln
+                            for ln in logs), logs)
+        # flag OFF (default) -> NO relaunch send-keys keystroke into the pane
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "the live relaunch keystroke is opt-in (flag off)")
+
+    def test_804_resurrect_hard_veto_on_human_active_pane_mode4(self):
+        # #804 mode-4 -- the resurrect relaunch keystroke into a dead stream's
+        # bare-shell pane is HARD-VETOED when a human is active on that pane
+        # (signal 3: an attached tmux client's recent input), EVEN with the
+        # opt-in flag ON. "Never keystroke a human-active pane" is the owner's
+        # hardest rule; the veto is logged with its signal and NO send-keys
+        # fires. RED before the recent-human veto is wired into the resurrect
+        # decision -- with the flag ON + no veto, decide() would relaunch and
+        # send-keys into the human's pane.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        # a BARE-idle shell pane in the dead cwd WITH an attached client whose
+        # input activity is NOW (signal 3 -> a human is at this pane right now).
+        tmux = _ClientActiveFake([("%bash", "bash", cwd, "222")], _BASH_IDLE_CAP,
+                                 client_epochs=[now])
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") and "recent-human" in ln
+                            for ln in logs), logs)
+        # a human-active pane is NEVER keystroked, flag ON notwithstanding.
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "resurrect must HARD-veto a human-active pane")
+
+    def test_804_resurrect_relaunches_when_enabled_no_human_bare_pane_mode5(self):
+        # #804 mode-5 ACT path -- flag ON + a bare-idle shell pane + no recent
+        # human -> the relaunch keystroke fires (`claude --continue` + Enter) and
+        # the line says 'relaunching'. This is the ACTION half the disabled/veto
+        # tests never exercise (both assert NO keystroke), so without this the
+        # whole relaunch call is mutant-survivable (#749).
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)   # no clients -> no signal-3
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any("resurrect deadstream -> relaunching" in ln
+                            for ln in logs), logs)
+        self.assertIn(
+            ["tmux", "send-keys", "-t", "%bash", "claude --continue", "Enter"],
+            [list(a) for a in tmux.sent])
+
+    def test_804_resurrect_refuses_a_pane_with_typed_text_mode4(self):
+        # #804 mode-4 review -- a shell pane holding a human's stale half-typed
+        # command is NOT bare: `claude --continue`+Enter would be APPENDED and
+        # executed. Even with the flag ON, resurrect refuses (skip:pane-not-bare)
+        # and NEVER keystrokes.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_TYPED_CAP)   # typed text on the prompt
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any("skip:pane-not-bare" in ln for ln in logs), logs)
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "a pane with typed text is NEVER keystroked")
+
+    def test_804_resurrect_decision_is_cadenced_not_every_sweep(self):
+        # #804 -- the resurrect ATTEMPT (and its keystroke, when enabled) is
+        # bounded to once per RESURRECT_CADENCE_S by the `rgts` anchor, NOT every
+        # 60-s sweep (else a dead-stuck box would be re-typed every sweep -- the
+        # #749 'dokolecka promptuje' keystorm). Line cadence proven flag-OFF.
+        from watchdog import roster, resurrect
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)
+
+        def _sweep(t):
+            return goal.goal_lane_sweep(t, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") for ln in _sweep(now)))
+        # a second sweep 5 min later is WITHIN the cadence window -> no attempt.
+        self.assertFalse(any(ln.startswith("resurrect ")
+                             for ln in _sweep(now + 300)))
+        # past the window -> a fresh attempt line.
+        self.assertTrue(any(ln.startswith("resurrect ")
+                            for ln in _sweep(now + resurrect.RESURRECT_CADENCE_S
+                                             + 10)))
+
+    def test_804_resurrect_escalates_continue_to_fresh_after_failed_attempts(self):
+        # #804 #805-interface -- a relaunch that fires but leaves the stream STILL
+        # dead is a FAILED attempt; after RESURRECT_MAX_FAILS the launch escalates
+        # `claude --continue` -> a fresh `claude` (a ballooned session that dies
+        # straight after --continue never livelocks). Locks the `rfails` census
+        # incrementer the reviewers flagged as never-written.
+        from watchdog import roster, resurrect
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)
+        step = resurrect.RESURRECT_CADENCE_S + 1
+
+        def _sweep(t):
+            return goal.goal_lane_sweep(t, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            l0 = _sweep(now)                 # attempt 1 -> --continue, rfails 0
+            l1 = _sweep(now + step)          # still dead -> rfails 1, --continue
+            l2 = _sweep(now + 2 * step)      # still dead -> rfails 2 -> fresh
+        self.assertTrue(any("relaunching (claude --continue;" in ln
+                            for ln in l0), l0)
+        self.assertTrue(any("relaunching (claude --continue;" in ln
+                            for ln in l1), l1)
+        self.assertTrue(any("relaunching (claude;" in ln for ln in l2), l2)
 
     def test_804_census_skipped_when_the_sweep_budget_broke(self):
         # #804-review 🟡: a sweep budget break leaves deferred panes' cwds OUT of

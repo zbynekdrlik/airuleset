@@ -8,6 +8,14 @@ session-id change AND a reboot):
 
     {cwd: {"sid": str, "authority": str, "armed_ts": float, "last_seen_ts": float}}
 
+`upsert`/`drop` write only the four fields above. `goal_lane_sweep` ADDS,
+per entry, its own census/resurrect bookkeeping on the SAME dict — `census_ts`
+(the DEAD-SESSION line's flood-latch) and the mode-5 resurrect anchors `rgts`
+(last relaunch-attempt time), `rfails` (consecutive failed attempts, the #805
+--continue->fresh escalation) and `ratt` (did the last due-cycle fire a
+relaunch) — all cleared when the cwd is live again (a successful resurrect
+resets). This module stores/loads them transparently; it never authors them.
+
 LIFECYCLE (as SHIPPED — all driven from `goal_lane_sweep`, no cross-job hooks):
   * WRITE (upsert): a candidate pane whose STRUCTURED one-glance verdict is
     genuinely ARMED this sweep upserts its `{cwd, sid, authority, armed_ts,
@@ -31,10 +39,12 @@ DEAD-SESSION -- one `one_glance` verdict line per entry (cadenced), so a stream
 that is EXPECTED to be armed can never drop off the radar silently again.
 
 This module is PURE data (load/save/upsert/drop/dead_entries) -- the drop
-DECISIONS live in `goal_lane_sweep`, not here. It never types a keystroke, never
-relaunches anything (that is a future `resurrect.py`), never raises. Module-import
-safety mirrors `compact.py`/`nudge_gate.py`: `watchdog/__init__.py` never imports
-it at module level (callers reach it lazily), and it needs no `import watchdog`.
+DECISIONS live in `goal_lane_sweep`, not here. It never types a keystroke and
+never relaunches anything ITSELF; the mode-5 relaunch ACTION lives in the sibling
+`resurrect.py`, driven from the census (it is no longer "a future module"). It
+never raises. Module-import safety mirrors `compact.py`/`nudge_gate.py`:
+`watchdog/__init__.py` never imports it at module level (callers reach it lazily),
+and it needs no `import watchdog`.
 """
 import json
 import os
