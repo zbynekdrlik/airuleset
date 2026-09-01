@@ -112,9 +112,12 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             otherwise handled (`queued`, already-queued, or in cooldown for a
             non-drained-boundary origin — a `self-callback` drained boundary
             supersedes the cooldown and delivers, #805), which is DISCARDED
-            outright. A `self-callback` request under an armed `/goal` with zero
-            live tasks is NOT typed (#822 (c), the pre-type `skip:goal-continuing`
-            gate). "No infinite waiting" is the hard age cap's
+            outright. #822: under an armed `/goal` a typed `/compact` QUEUES
+            behind the goal continuation rather than executing — it is still
+            TYPED (there is deliberately no refuse-to-type gate; refusing left the
+            queue empty and the boundary compact never ran), recorded `queued`,
+            and drained by the session's boundary-hold turn (item d).
+            "No infinite waiting" is the hard age cap's
             job — EXCEPT while a hold-extend veto keeps refreshing the claim
             (#727 a mid-batch loop holds past 30 min by design; #741 an
             actively-held boundary — recent-human / busy / client-active — holds
@@ -772,15 +775,16 @@ COMPACT_TEXT = "/compact"
 COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
 
 # The `--self` disposition words for which the boundary compact did NOT execute
-# and the session MUST do the boundary-hold to drain it: `skip:goal-continuing`
-# (the #822 (c) pre-type gate refused to type under the armed goal), `queued`
-# (typed, but appended to CC's type-ahead queue), and `already-queued` (a
-# `/compact` row from a prior delivery still sits unexecuted in the pane). All
-# three need an ACCEPTED Stop the hold turn provides — so print the hint at the
-# boundary itself rather than leaving the session to recover a turn later via
-# `--status`. A clean `sent` / any other skip does not print the hint.
-_COMPACT_HOLD_HINT_WORDS = frozenset(
-    ("skip:goal-continuing", "queued", "already-queued"))
+# and the session MUST do the boundary-hold to drain it: `queued` (typed, but
+# appended to CC's type-ahead queue behind the armed-goal continuation) and
+# `already-queued` (a `/compact` row from a prior delivery still sits unexecuted
+# in the pane). BOTH need an ACCEPTED Stop the hold turn provides — so print the
+# hint at the boundary itself rather than leaving the session to recover a turn
+# later via `--status`. A clean `sent` / any other skip does not print the hint.
+# (#822: there is deliberately NO `skip:goal-continuing` pre-type gate — see
+# `deliver_compact`; a `/compact` under an armed goal is typed and QUEUES, so
+# `queued` is the word that fires the hint, never a refuse-to-type skip.)
+_COMPACT_HOLD_HINT_WORDS = frozenset(("queued", "already-queued"))
 
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
@@ -1115,13 +1119,15 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                            `self-callback` drained-boundary request SUPERSEDES an
                            in-window cooldown (#805) and is delivered, never
                            returns "cooldown".
-      "skip:<reason>"   — not safe right now; the caller LEAVES the
-                           request pending for the next periodic sweep. One
-                           reason is `skip:goal-continuing` (#822): an armed
-                           `/goal` + zero live tasks means a typed `/compact`
-                           would only queue behind the goal continuation, so a
-                           `self-callback` boundary is NOT typed (the session's
-                           hold-turn delivers the boundary compact instead).
+      "skip:<reason>"   — not safe right now (busy pane, live sibling task,
+                           raced boundary, ...); the caller LEAVES the request
+                           pending for the next periodic sweep. #822: there is
+                           deliberately NO armed-`/goal` refuse-to-type skip — a
+                           `/compact` under an armed goal IS typed and QUEUES
+                           (returns "queued"), which the session's boundary-hold
+                           turn drains; a pre-type refusal left the queue empty
+                           and the compact never ran (the owner's ctx-448K
+                           incident — see the code comment before the type).
 
     Every decision is logged via `_log_compact_sync` from this ONE call
     site, immediately after any real send and BEFORE any other state
@@ -1262,30 +1268,22 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                           % (sid, cwd, bgjobs))
         return "skip:live-bg-bash-raced"
 
-    # #822 (c) — the goal-continuing pre-type gate. Everything above proved the
-    # pane is idle RIGHT NOW with ZERO live tasks (no worker lane, no bg-bash).
-    # If it ALSO shows an armed `/goal` (`◎ /goal active`) AND this is a
-    # DRAINED-boundary request (`self-callback`), a typed `/compact` CANNOT
-    # execute: with no live task to force an accepted Stop, the goal Stop hook
-    # blocks every boundary ("◯ Goal not yet met… continuing") and CC appends the
-    # `/compact` to its type-ahead queue, where it sits until the next accepted
-    # Stop (the owner's 3x-queued incident). So do NOT type — the boundary
-    # compact is delivered by the SESSION's own hold-turn (skills/autopilot
-    # Step 5: a `⏳ WORKING: boundary hold` turn with a live task provides the
-    # accepted Stop). Reuses the already-read pane state (`pane_goal_armed`, on
-    # the fresh capture) + the zero-live-tasks reads above — no new detector. A
-    # NON-drained-boundary origin, or an UNDETERMINABLE goal state
-    # (`pane_goal_armed` -> None / False), never trips this (fail-open, the
-    # pre-#822 path). NON-terminal: the request is LEFT PENDING so the sweep
-    # re-evaluates if the goal disarms; it is NOT hold-extended (a gone-quiet-
-    # under-goal boundary correctly ages out at the 30-min cap, like `skip:not-
-    # a-boundary`, #741).
-    if (origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS
-            and watchdog.pane_goal_armed(fresh) is True):
-        _log_compact_sync("SKIP goal-continuing sid=%s cwd=%s origin=%s "
-                          "(armed /goal + zero live tasks: a typed /compact "
-                          "would queue, not execute)" % (sid, cwd, origin or "-"))
-        return "skip:goal-continuing"
+    # #822 — NO pre-type gate under an armed `/goal`, DELIBERATELY. An earlier
+    # cut added a `skip:goal-continuing` gate here (refuse to type when armed goal
+    # + zero live tasks, on the theory that a typed `/compact` would only queue).
+    # Two fresh-context adversarial reviews proved it FORECLOSED the boundary-hold
+    # mechanism (item d) it was meant to complement: under an armed goal neither
+    # `--self` nor the sweep would ever type, so CC's type-ahead queue stayed
+    # EMPTY and the hold turn's accepted Stop drained nothing — the compact never
+    # ran (the owner's ctx-448K incident, still unfixed). The gate was ALSO
+    # redundant: the 3x-pile it targeted is prevented by the (b)
+    # `_pane_has_queued_compact` detector fix ALONE (the next sweep reads
+    # `already-queued` and never re-types a duplicate). So a `/compact` IS typed
+    # under an armed goal — it queues a SINGLE row, classified `queued` by
+    # `_compact_post_send_classify` below (which writes NO false
+    # `compact-delivered`), and the session's boundary-hold turn (skills/autopilot
+    # Step 5) provides the accepted Stop that drains it. See the #822 review
+    # verdicts on the ticket for the full trace.
 
     # Mark provenance BEFORE typing so the shared janitor (#372) can
     # recover a stuck send for THIS pane — a delivering job's own

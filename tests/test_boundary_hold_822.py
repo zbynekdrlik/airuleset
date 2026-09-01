@@ -20,6 +20,7 @@ import types
 import unittest
 import unittest.mock as m
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -46,6 +47,23 @@ def _args(**kw):
 
 
 class TestBoundaryHoldCommand(unittest.TestCase):
+    def setUp(self):
+        # Isolate the compact stores: `--self` runs the REAL
+        # `_compact_sync_attempt`, whose `record_compact_request(path=None)`
+        # would otherwise write the developer's real `~/.claude/compact-*.json`
+        # (and leave a `sess-bh` entry the live watchdog churns) — the store the
+        # 60s systemd watchdog reads. Patch the four path functions to a temp dir.
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        for name, fn in (("compact_requests_path", "compact-requests-test.json"),
+                         ("compact_delivered_path", "compact-delivered-test.json"),
+                         ("compact_sync_log_path", "compact-sync-test.log"),
+                         ("compact_queued_path", "compact-queued-test.json")):
+            p = m.patch.object(compact, name,
+                               return_value=Path(d.name) / fn)
+            p.start()
+            self.addCleanup(p.stop)
+
     def test_constant_is_the_boundary_hold_command(self):
         # The one command the session runs as a tracked background task so the
         # pane gets an accepted Stop that drains the queued /compact.
@@ -64,11 +82,13 @@ class TestBoundaryHoldCommand(unittest.TestCase):
                         airuleset.cmd_compact_request(_args(self=True))
         return "".join(buf)
 
-    def test_self_prints_the_command_when_goal_continuing(self):
-        # skip:goal-continuing means the armed /goal blocked the type -> the
-        # boundary needs the hold to drain, so --self prints the exact command.
-        out = self._self_output("skip:goal-continuing")
-        self.assertTrue(out.startswith("skip:goal-continuing"), out)
+    def test_self_prints_the_command_when_already_queued(self):
+        # `already-queued` means a `/compact` row from a PRIOR delivery still sits
+        # unexecuted in the pane — it equally needs the hold's accepted Stop to
+        # drain, so --self prints the exact command at the boundary rather than
+        # leaving the session to recover a turn later via --status (#822).
+        out = self._self_output("already-queued")
+        self.assertTrue(out.startswith("already-queued"), out)
         self.assertIn("sleep 45 && echo boundary-hold", out)
         self.assertIn("run_in_background", out)
 
@@ -76,6 +96,13 @@ class TestBoundaryHoldCommand(unittest.TestCase):
         out = self._self_output("queued")
         self.assertTrue(out.startswith("queued"), out)
         self.assertIn("sleep 45 && echo boundary-hold", out)
+
+    def test_self_does_not_print_the_command_on_a_refuse_to_type_skip(self):
+        # #822: there is NO `skip:goal-continuing` refuse-to-type word any more,
+        # and an ordinary skip (busy pane, live task) is NOT a queued boundary —
+        # it does not print the hold hint (the session retries via the sweep).
+        out = self._self_output("skip:busy")
+        self.assertEqual(out, "skip:busy")
 
     def test_self_does_not_print_the_command_on_a_clean_sent(self):
         # A compact that executed immediately needs no hold -> only the word.

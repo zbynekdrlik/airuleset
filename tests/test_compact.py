@@ -3183,6 +3183,17 @@ class TestPostSendQueued822(unittest.TestCase):
             lambda *a, **k: None, lambda r: None)
         self.assertEqual(outcome, "queued")
 
+    def test_submit_verified_reports_queued_on_a_busy_spinner_no_row(self):
+        # #822 (a): a running-turn spinner occupying the boundary AFTER the Enter
+        # (CC started a turn in the microseconds after the submit, BEFORE any
+        # `❯ /compact` row rendered) is ALSO `queued` — the submit was appended
+        # behind that turn. This exercises `_compact_post_send_classify`'s
+        # `_classify_boundary(...)=="busy"` arm, which no queued-row fixture hits.
+        outcome = compact._compact_submit_verified(
+            "%9", self._submit_run(CB_BUSY_CAP),
+            lambda *a, **k: None, lambda r: None)
+        self.assertEqual(outcome, "queued")
+
     def test_deliver_compact_returns_queued_and_starts_no_cooldown(self):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
@@ -3194,19 +3205,32 @@ class TestPostSendQueued822(unittest.TestCase):
         # A queued (never-executed) /compact must NOT start the 30-min cooldown.
         self.assertFalse(compact.compact_delivery_in_cooldown(
             self.SID, time.time() + 1, path=self.delp))
+        # #822 (e): the queued branch MUST record the queued-since instant through
+        # the PRODUCTION write path (mark_compact_queued_ts), or `--status` would
+        # print `since=?s` forever. Assert it landed as a real number (this kills
+        # the mutant where the `mark_compact_queued_ts` call is deleted).
+        self.assertIsInstance(
+            compact.compact_queued_since(self.SID), (int, float))
 
 
-class TestGoalContinuingGate822(unittest.TestCase):
-    """#822 (c): a deterministic PRE-TYPE gate. Under an armed `/goal`
-    (`◎ /goal active`) with ZERO live tasks, a DRAINED-boundary (`self-callback`)
-    `/compact` cannot execute — the goal Stop hook blocks every boundary, so CC
-    would only append the `/compact` to its type-ahead queue (the owner's 3x
-    accumulation). So it is NOT typed; the boundary compact is delivered by the
-    session's own hold-turn instead (skills/autopilot Step 5)."""
+class TestArmedGoalTypesNotRefuses822(unittest.TestCase):
+    """#822 — under an armed `/goal` (`◎ /goal active`) with ZERO live tasks a
+    `self-callback` boundary `/compact` IS typed (there is deliberately NO
+    `skip:goal-continuing` pre-type gate). Two adversarial reviews proved an
+    earlier refuse-to-type gate FORECLOSED the boundary-hold mechanism it was
+    meant to complement: a refused `/compact` never queues, so the hold turn's
+    accepted Stop drains nothing and the compact never runs (the owner's ctx-448K
+    incident). The 3x pile-up the gate targeted is prevented by the (b)
+    `_pane_has_queued_compact` detector fix ALONE. So the correct behaviour is:
+    type it, let it QUEUE a single row, and the session's boundary-hold turn
+    drains it. THIS class is the regression lock — re-adding a refuse-to-type
+    gate turns the first test RED."""
 
-    SID = "sess-goalcont-822"
-    CWD = "/home/newlevel/devel/goalconttest"
+    SID = "sess-armedtype-822"
+    CWD = "/home/newlevel/devel/armedtypetest"
 
+    # The pre-send pane: armed `/goal`, idle bare `❯ ` box, zero live tasks —
+    # exactly the state an earlier cut refused to type into.
     _ARMED_IDLE = (
         "● Predošlá várka integrovaná.\n"
         "\n"
@@ -3228,7 +3252,12 @@ class TestGoalContinuingGate822(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _run(self, render):
+    def _submit_run(self, post_send_render):
+        """A run() whose captures show the ARMED idle box until the `/compact`
+        Enter lands, then render `post_send_render` (the queued / compacting
+        state) — records every `-l` literal typed so a refuse-to-type regression
+        is caught by an empty `typed` list."""
+        state = {"submitted": False}
         typed = []
 
         def run(argv, timeout=8):
@@ -3240,43 +3269,43 @@ class TestGoalContinuingGate822(unittest.TestCase):
             if "send-keys" in j:
                 if "-l" in argv:
                     typed.append(argv[-1])
+                if argv[-1] == "Enter":
+                    state["submitted"] = True
                 return ""
             if "capture-pane" in j:
-                return render
+                return post_send_render if state["submitted"] else self._ARMED_IDLE
             return ""
         return run, typed
 
-    def _deliver(self, origin, render=None):
+    def _deliver(self, post_send_render):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
-        run, typed = self._run(render if render is not None else self._ARMED_IDLE)
+        run, typed = self._submit_run(post_send_render)
         word = compact.deliver_compact(
-            self.SID, self.CWD, origin=origin, run=run, projects_dir=proj,
-            delivered_path=self.delp, now=time.time())
+            self.SID, self.CWD, origin=compact._COMPACT_SELF_CALLBACK_ORIGIN,
+            run=run, projects_dir=proj, delivered_path=self.delp,
+            now=time.time())
         return word, typed
 
-    def test_self_callback_under_armed_goal_skips_without_typing(self):
-        word, typed = self._deliver(compact._COMPACT_SELF_CALLBACK_ORIGIN)
-        self.assertEqual(word, "skip:goal-continuing")
-        self.assertEqual(typed, [])            # NEVER typed /compact
+    def test_self_callback_under_armed_goal_types_and_queues(self):
+        # The regression lock: an armed goal + self-callback + zero live tasks
+        # TYPES `/compact` (never `skip:goal-continuing`), and a queued post-send
+        # render classifies it `queued` — the row the hold turn later drains.
+        word, typed = self._deliver(_FIXTURE_822_TRIPLE_QUEUED)
+        self.assertEqual(typed, [compact.COMPACT_TEXT])   # typed, NOT refused
+        self.assertEqual(word, "queued")
+        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
+        self.assertFalse(compact.compact_delivery_in_cooldown(
+            self.SID, time.time() + 1, path=self.delp))
 
-    def test_gate_is_origin_scoped_subagent_stop_still_delivers(self):
-        # A NON-drained-boundary origin is NOT gated — it types and sends, proving
-        # the gate is scoped to the self-callback drained-boundary origin only.
-        word, typed = self._deliver("subagent-stop")
-        self.assertEqual(word, "sent")
+    def test_self_callback_under_armed_goal_executing_reports_sent(self):
+        # If the post-send capture shows CC's "Compacting conversation" indicator,
+        # the compact genuinely executed even under the armed goal -> `sent`.
+        compacting = ("Compacting conversation…\n❯ \n"
+                      "  5h 7%(4h)  fable  ctx 210K  caveman\n")
+        word, typed = self._deliver(compacting)
         self.assertEqual(typed, [compact.COMPACT_TEXT])
-
-    def test_gate_does_not_fire_on_an_unarmed_pane(self):
-        # Same self-callback origin, but the pane shows NO `◎ /goal` — the compact
-        # delivers normally (the gate is armed-goal-scoped, fail-open otherwise).
-        unarmed = ("● Predošlá várka integrovaná.\n❯ \n"
-                   "────────────────────────────────────────────\n"
-                   "  5h 7%(4h)  wk 1%(4d)  fable  ctx 210K  caveman\n")
-        word, typed = self._deliver(
-            compact._COMPACT_SELF_CALLBACK_ORIGIN, render=unarmed)
         self.assertEqual(word, "sent")
-        self.assertEqual(typed, [compact.COMPACT_TEXT])
 
 
 if __name__ == "__main__":
