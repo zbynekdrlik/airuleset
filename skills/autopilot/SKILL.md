@@ -1035,14 +1035,17 @@ gap in either.
    dispatch the next batch yet.** Do NOT chain into Step 1 within this same turn, and do NOT re-run
    `/issue-planner`. After `compact-request --self` at a drained boundary, EVERY subsequent goal-fired
    turn WHILE the request is still pending is a HOLD turn: its FIRST action is
-   `python3 ~/devel/airuleset/airuleset.py compact-request --status`; if it prints `PENDING`, the turn
-   ENDS IMMEDIATELY with the single line `⏳ WORKING: čakám na compact hranice várky` and ZERO
-   dispatches (a cheap one-command turn that returns the pane to the idle window job 14 delivers
-   `/compact` in). Re-enter Step 1 for the NEXT batch ONLY once `--status` prints `NONE` after delivery
-   / the transcript shows the compact happened — NEVER before, so a next batch can never be loaded into
-   the prompt before the compact executes (the owner's binding model: "callback v pokojovom stave,
-   pokračovanie až po compacte"). Do NOT hand-type `/compact` yourself (job 14 types it once the pane
-   goes idle). While the request is pending, the watchdog's OWN work-pushing writers also HOLD (the
+   `python3 ~/devel/airuleset/airuleset.py compact-request --status`; if it prints `PENDING` or
+   `QUEUED`, the turn LAUNCHES the boundary-hold task (the #822 mechanism below) and ENDS with
+   `⏳ WORKING: boundary hold — čakám na compact hranice várky` and ZERO dispatches. A BARE `⏳` turn
+   does NOT drain the compact under an armed goal (no accepted Stop, so CC's `/goal` continuation just
+   keeps the queued `/compact` waiting); the live `run_in_background` hold task is what makes the pane
+   genuinely idle so the sweep-typed `/compact` drains. Re-enter Step 1 for the NEXT batch ONLY once
+   `--status` prints `NONE` after delivery / the transcript shows the compact happened — NEVER before,
+   so a next batch can never be loaded into the prompt before the compact executes (the owner's binding
+   model: "callback v pokojovom stave, pokračovanie až po compacte"). Do NOT hand-type `/compact`
+   yourself (job 14 / `compact-request --self` types it — under an armed goal it QUEUES a single row,
+   which the boundary-hold turn drains). While the request is pending, the watchdog's OWN work-pushing writers also HOLD (the
    #741 writer-side latch: goal-arm delivery, the job-20 lane nudge, dark re-arm, and ❓-repoke disarm
    all skip with `hold:compact-pending`; ONLY a human's Discord answer — job 7 — still lands), so
    nothing races work into the prompt ahead of the compact. **Compact delivery is NOT
@@ -1051,6 +1054,34 @@ gap in either.
    on a long (>30 min) batch lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
    every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT drained
    boundary — never lost, just not strictly deterministic per boundary.
+   **THE BOUNDARY-HOLD TURN — how the drained-boundary `/compact` ACTUALLY drains under an armed
+   `/goal` (#822).** Under an armed `/goal` the goal Stop hook blocks EVERY `✅` boundary
+   ("◯ Goal not yet met… continuing"), so a queued `❯ /compact` never drains on its own — CC drains
+   its type-ahead queue ONLY at an ACCEPTED Stop. The ~60s sweep (and `compact-request --self`) DOES
+   type a `/compact` under an armed goal — but it only QUEUES behind the goal continuation, a SINGLE
+   `❯ /compact` row (the #822 (b) `_pane_has_queued_compact` detector fix stops the owner's old 3×
+   pile-up: the next sweep reads `already-queued` and never re-types a duplicate). There is
+   deliberately NO refuse-to-type gate — an earlier `skip:goal-continuing` cut left the queue EMPTY so
+   the hold turn drained nothing and the compact never ran (two reviews caught it). So do NOT trust a
+   bare `⏳ WORKING` turn to drain the queued row. Instead, give the
+   pane an ACCEPTED Stop: after `compact-request --self`, launch ONE short tracked background task —
+   exactly the command `compact-request --self` PRINTS, `sleep 45 && echo boundary-hold` via
+   `run_in_background: true` — and end the turn `⏳ WORKING: boundary hold`. With a live background
+   task CC does not re-fire the goal, the pane is genuinely idle, the queued/pending `/compact`
+   drains, and the task's completion notification wakes the now-compacted session
+   (`hooks/stop-check-working-liveness.sh` accepts this tracked task — a `run_in_background` Bash job
+   registers as type "shell", status "running", so the `⏳ WORKING` turn passes). The HOLD probe now
+   has THREE verdicts: `--status` prints `PENDING` (recorded, not yet delivered → hold),
+   `QUEUED sid=… since=…` (typed but still sitting unexecuted in the pane → the boundary-hold turn
+   must drain it, do NOT dispatch), or `NONE` (drained AFTER delivery / the transcript shows the
+   compact happened → re-enter Step 1 for the next batch — but a `NONE` on a request that simply
+   LAPSED at the 30-min cap without ever delivering is NOT a real drain: #411 re-records a fresh one at
+   the next `## ✅ Work Complete`, so keep holding, never read a lapsed `NONE` as done). This is
+   the one lever we have while CC's `/goal` continuation does not itself drain queued messages — the
+   UPSTREAM defect (item (f); a SendFeedback draft was filed from the dev1 session, sid 2d02a127).
+   **LIVE-VERIFY it on a real armed-goal pane after deploy: if the goal re-fires even with a live
+   task and the `/compact` still does NOT drain, record the evidence and ESCALATE to the owner —
+   never stack a further workaround** (the design's own hedge, #822).
    **WAIVER — a RE-DERIVABLE waiter never holds a drained boundary open forever (#730, owner
    incident 2026-08-26): gk `/autopilot-master` crossed batch 1 → drain → batch 2 → drain →
    batch 3 with ZERO compacts, because a release-lane waiter — shadow rerun → deploy →

@@ -101,9 +101,14 @@ def _isolate_compact_state(testcase):
     reqp = Path(d.name) / "compact-requests-test.json"
     delp = Path(d.name) / "compact-delivered-test.json"
     syncp = Path(d.name) / "compact-sync-test.log"
+    # #822 (e): the queued-since store is isolated too (read `compact_queued_path()`
+    # to get the temp path); the return tuple stays 3 so every existing caller is
+    # unaffected.
+    queuedp = Path(d.name) / "compact-queued-test.json"
     for name, path in (("compact_requests_path", reqp),
                        ("compact_delivered_path", delp),
-                       ("compact_sync_log_path", syncp)):
+                       ("compact_sync_log_path", syncp),
+                       ("compact_queued_path", queuedp)):
         patcher = m.patch.object(compact, name, return_value=path)
         patcher.start()
         testcase.addCleanup(patcher.stop)
@@ -2446,6 +2451,76 @@ class TestCompactRequestCli(unittest.TestCase):
         rec.assert_not_called()
         self.assertEqual(compact.load_compact_requests(self.reqp), {})
 
+    # -- #822 (e): --status reports QUEUED while a queued /compact sits in the
+    #    pane (deliver_compact returned the TERMINAL `queued`, clearing the
+    #    request, yet the typed /compact has not drained under the armed /goal).
+    def test_status_reports_queued_when_pane_shows_queued_compact(self):
+        # No pending request in the store, but a queued `❯ /compact` row still
+        # sits unexecuted in the pane (the (b) detector fixture) -> --status must
+        # report QUEUED (not NONE) so the /goal HOLD doctrine drains it via a
+        # boundary-hold turn instead of dispatching the next batch.
+        compact.mark_compact_queued_ts("sess-q", now=time.time() - 20)
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-q")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        line = "".join(buf).strip()
+        mobj = re.fullmatch(r"QUEUED sid=sess-q since=(\d+)s", line)
+        self.assertIsNotNone(mobj, line)
+        self.assertGreaterEqual(int(mobj.group(1)), 10)
+
+    def test_status_reports_queued_since_question_when_store_is_empty(self):
+        # #822 (e) fail-safe: a queued `❯ /compact` row is LIVE in the pane but the
+        # queued-since store has NO entry (never marked, or a corrupt/non-numeric
+        # value) -> --status still reports QUEUED (the pane is the source of truth
+        # for the HOLD decision) with `since=?s`, never a false NONE that would
+        # dispatch the next batch over the undrained compact.
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-noqts")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        self.assertEqual("".join(buf).strip(), "QUEUED sid=sess-noqts since=?s")
+
+    def test_status_reports_none_when_pane_has_no_queued_row(self):
+        # A stale queued record must NOT be reported once the pane no longer
+        # shows a queued /compact (it drained): the LIVE pane gates the report,
+        # so QUEUED vs NONE turns ONLY on the pane, never on the stale record.
+        compact.mark_compact_queued_ts("sess-drained", now=time.time() - 5)
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-drained")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value="● práca hotová.\n❯ \n  ctx caveman\n"):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        self.assertEqual("".join(buf).strip(), "NONE")
+
+    def test_status_pending_wins_over_a_queued_row_in_the_pane(self):
+        # A genuinely PENDING request (not yet delivered) is reported PENDING even
+        # if an older queued row lingers in the pane -- PENDING precedes the
+        # #822 QUEUED check.
+        compact.record_compact_request("sess-pw", "/cwd", now=time.time() - 3,
+                                       path=self.reqp, origin="self-callback")
+        compact.mark_compact_queued_ts("sess-pw", now=time.time() - 3)
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-pw")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        self.assertTrue("".join(buf).startswith("PENDING sid=sess-pw"), buf)
+
 
 # --------------------------------------------------------------------------- #
 # 7b. `_compact_sync_attempt` — #402-review MAJOR-1's own fix: the ONE
@@ -3014,6 +3089,247 @@ class TestCompactBgBashVeto599(unittest.TestCase):
             tb, me2 = compact._compact_bg_bash_window()
         self.assertEqual(tb, compact.COMPACT_BG_BASH_TAIL_BYTES)
         self.assertEqual(me2, compact.COMPACT_BG_BASH_MAX_ENTRIES)
+
+
+# --------------------------------------------------------------------------- #
+# #822 — the OWNER-ESCALATION fixture: 3x queued `❯ /compact` accumulated in a
+# stream pane under an armed /goal (ctx 448K, ZERO compaction). The pane-render
+# `_pane_has_queued_compact` detector MUST catch this exact render, or the
+# `already-queued` gate never fires and every boundary types another `/compact`.
+# Verbatim from issue #822 comment 5499555722.
+# --------------------------------------------------------------------------- #
+
+_FIXTURE_822_TRIPLE_QUEUED = (
+    "✅ DONE: bounce #5723/#5724 re-hand-off hotový (PR #5786 merged, gate PASS),"
+    " compact-request odoslaný — ďalšia várka: W-drain + bounce #5438\n"
+    "\n"
+    "◯ Goal not yet met… continuing\n"
+    "\n"
+    "✢ Recombobulating… (3m 5s · ↓ 7.3k tokens)\n"
+    "Tip: See an artifact you'd like to build on? Duplicate, in its title menu,"
+    " gives you your own editable copy.\n"
+    "\n"
+    "  ❯ /compact\n"
+    "  ❯ /compact\n"
+    "  ❯ /compact\n"
+    "                                                                          "
+    "                        ◎ /goal active (14m)\n"
+    "─────────────────────────────────────────────────────────────────────────"
+    "─────────────────────────── ultracode ─\n"
+    "❯ Press up to edit queued messages\n"
+    "─────────────────────────────────────────────────────────────────────────"
+    "───────────────────────────────────────\n"
+    "  5h 7%(4h)  wk 1%(4d)  F 3%(4d)  fable  I 1 · W 10 · gk 2  ctx 448K ~$0.45"
+    "  cloude-15@newlevel.media sub 13.9.(12d)  caveman\n"
+)
+
+
+class TestQueuedCompactDetector822(unittest.TestCase):
+    """The queued-`/compact` pane detector must see the #822 render.
+
+    The walk up from the input box (`_above_box_scan`) skips blanks and pure
+    separator rows, but CC renders TWO structural-chrome rows between the box
+    and the queued messages the old walk did NOT recognise: the box's LABELLED
+    top border (`──… ultracode ─`, which `_is_separator_line` rejects for the
+    `ultracode` text) and the armed-goal indicator (`◎ /goal active (Nm)`). So
+    the walk stopped BEFORE the `❯ /compact` rows and `_pane_has_queued_compact`
+    returned False, letting each boundary type another `/compact` (owner: 3x)."""
+
+    def test_detector_sees_the_three_queued_compacts(self):
+        self.assertTrue(
+            wd._pane_has_queued_compact(_FIXTURE_822_TRIPLE_QUEUED),
+            "the 3 queued `❯ /compact` rows must be detected under the armed-goal"
+            " glyph + the labelled top border")
+
+    def test_box_still_classifies_as_a_bare_input_pane(self):
+        # The whole trap: the box shows the `Press up to edit queued messages`
+        # placeholder, which normalises to a BARE input box — so the delivery
+        # thinks the pane is idle. The detector is the only guard here.
+        kind, draft = wd._classify_boundary(_FIXTURE_822_TRIPLE_QUEUED)
+        self.assertEqual((kind, draft), ("input", ""))
+
+
+class TestPostSendQueued822(unittest.TestCase):
+    """#822 (a): an empty input box after a `/compact` submit is AMBIGUOUS — the
+    command left the box whether it EXECUTED or merely QUEUED behind a running
+    turn. A queued `❯ /compact` row (or a running-turn spinner) after the submit
+    means QUEUED, not sent; a delivery must then NOT write `compact-delivered`
+    (the #135 lesson: delivery, not a claim), so a boundary compact that never
+    ran does not start a false cooldown."""
+
+    SID = "sess-queued-822"
+    CWD = "/home/newlevel/devel/queuedtest"
+
+    _BARE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _submit_run(self, post_send_render):
+        """A run() whose captures are BARE until the `/compact` Enter lands,
+        then render `post_send_render` (the queued/spinner/compacting state)."""
+        state = {"submitted": False}
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%9\tclaude\t" + self.CWD + "\t111"
+            if "display-message" in j:
+                return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
+            if "send-keys" in j:
+                if argv[-1] == "Enter":
+                    state["submitted"] = True
+                return ""
+            if "capture-pane" in j:
+                return post_send_render if state["submitted"] else self._BARE
+            return ""
+        return run
+
+    def test_submit_verified_reports_queued_when_a_compact_row_is_queued(self):
+        outcome = compact._compact_submit_verified(
+            "%9", self._submit_run(_FIXTURE_822_TRIPLE_QUEUED),
+            lambda *a, **k: None, lambda r: None)
+        self.assertEqual(outcome, "queued")
+
+    def test_queued_is_a_terminal_disposition_word(self):
+        # `queued` MUST be terminal so `_compact_sync_attempt`/`compact_sweep`
+        # CLEAR the request after a queued delivery -- the queued row is now in
+        # the pane, and leaving the request pending would let the next sweep
+        # re-type a duplicate (the owner's 3x pile). Mutant lock: dropping
+        # `queued` from `_COMPACT_TERMINAL_WORDS` reopens the re-type.
+        self.assertIn("queued", compact._COMPACT_TERMINAL_WORDS)
+
+    def test_submit_verified_reports_queued_on_a_busy_spinner_no_row(self):
+        # #822 (a): a running-turn spinner occupying the boundary AFTER the Enter
+        # (CC started a turn in the microseconds after the submit, BEFORE any
+        # `❯ /compact` row rendered) is ALSO `queued` — the submit was appended
+        # behind that turn. This exercises `_compact_post_send_classify`'s
+        # `_classify_boundary(...)=="busy"` arm, which no queued-row fixture hits.
+        outcome = compact._compact_submit_verified(
+            "%9", self._submit_run(CB_BUSY_CAP),
+            lambda *a, **k: None, lambda r: None)
+        self.assertEqual(outcome, "queued")
+
+    def test_deliver_compact_returns_queued_and_starts_no_cooldown(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run = self._submit_run(_FIXTURE_822_TRIPLE_QUEUED)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin="subagent-stop", run=run,
+            projects_dir=proj, delivered_path=self.delp, now=time.time())
+        self.assertEqual(word, "queued")
+        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
+        self.assertFalse(compact.compact_delivery_in_cooldown(
+            self.SID, time.time() + 1, path=self.delp))
+        # #822 (e): the queued branch MUST record the queued-since instant through
+        # the PRODUCTION write path (mark_compact_queued_ts), or `--status` would
+        # print `since=?s` forever. Assert it landed as a real number (this kills
+        # the mutant where the `mark_compact_queued_ts` call is deleted).
+        self.assertIsInstance(
+            compact.compact_queued_since(self.SID), (int, float))
+
+
+class TestArmedGoalTypesNotRefuses822(unittest.TestCase):
+    """#822 — under an armed `/goal` (`◎ /goal active`) with ZERO live tasks a
+    `self-callback` boundary `/compact` IS typed (there is deliberately NO
+    `skip:goal-continuing` pre-type gate). Two adversarial reviews proved an
+    earlier refuse-to-type gate FORECLOSED the boundary-hold mechanism it was
+    meant to complement: a refused `/compact` never queues, so the hold turn's
+    accepted Stop drains nothing and the compact never runs (the owner's ctx-448K
+    incident). The 3x pile-up the gate targeted is prevented by the (b)
+    `_pane_has_queued_compact` detector fix ALONE. So the correct behaviour is:
+    type it, let it QUEUE a single row, and the session's boundary-hold turn
+    drains it. THIS class is the regression lock — re-adding a refuse-to-type
+    gate turns the first test RED."""
+
+    SID = "sess-armedtype-822"
+    CWD = "/home/newlevel/devel/armedtypetest"
+
+    # The pre-send pane: armed `/goal`, idle bare `❯ ` box, zero live tasks —
+    # exactly the state an earlier cut refused to type into.
+    _ARMED_IDLE = (
+        "● Predošlá várka integrovaná.\n"
+        "\n"
+        "                                                          ◎ /goal active (12m)\n"
+        "──────────────────────────────────────────────────────── ultracode ─\n"
+        "❯ \n"
+        "────────────────────────────────────────────────────────────────────\n"
+        "  5h 7%(4h)  wk 1%(4d)  fable  I 3  ctx 210K ~$0.30  caveman\n"
+    )
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _submit_run(self, post_send_render):
+        """A run() whose captures show the ARMED idle box until the `/compact`
+        Enter lands, then render `post_send_render` (the queued / compacting
+        state) — records every `-l` literal typed so a refuse-to-type regression
+        is caught by an empty `typed` list."""
+        state = {"submitted": False}
+        typed = []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%9\tclaude\t" + self.CWD + "\t111"
+            if "display-message" in j:
+                return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
+            if "send-keys" in j:
+                if "-l" in argv:
+                    typed.append(argv[-1])
+                if argv[-1] == "Enter":
+                    state["submitted"] = True
+                return ""
+            if "capture-pane" in j:
+                return post_send_render if state["submitted"] else self._ARMED_IDLE
+            return ""
+        return run, typed
+
+    def _deliver(self, post_send_render):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run, typed = self._submit_run(post_send_render)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin=compact._COMPACT_SELF_CALLBACK_ORIGIN,
+            run=run, projects_dir=proj, delivered_path=self.delp,
+            now=time.time())
+        return word, typed
+
+    def test_self_callback_under_armed_goal_types_and_queues(self):
+        # The regression lock: an armed goal + self-callback + zero live tasks
+        # TYPES `/compact` (never `skip:goal-continuing`), and a queued post-send
+        # render classifies it `queued` — the row the hold turn later drains.
+        word, typed = self._deliver(_FIXTURE_822_TRIPLE_QUEUED)
+        self.assertEqual(typed, [compact.COMPACT_TEXT])   # typed, NOT refused
+        self.assertEqual(word, "queued")
+        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
+        self.assertFalse(compact.compact_delivery_in_cooldown(
+            self.SID, time.time() + 1, path=self.delp))
+
+    def test_self_callback_under_armed_goal_executing_reports_sent(self):
+        # If the post-send capture shows CC's "Compacting conversation" indicator,
+        # the compact genuinely executed even under the armed goal -> `sent`.
+        compacting = ("Compacting conversation…\n❯ \n"
+                      "  5h 7%(4h)  fable  ctx 210K  caveman\n")
+        word, typed = self._deliver(compacting)
+        self.assertEqual(typed, [compact.COMPACT_TEXT])
+        self.assertEqual(word, "sent")
 
 
 if __name__ == "__main__":
