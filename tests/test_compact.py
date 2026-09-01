@@ -3016,5 +3016,63 @@ class TestCompactBgBashVeto599(unittest.TestCase):
         self.assertEqual(me2, compact.COMPACT_BG_BASH_MAX_ENTRIES)
 
 
+# --------------------------------------------------------------------------- #
+# #822 — the OWNER-ESCALATION fixture: 3x queued `❯ /compact` accumulated in a
+# stream pane under an armed /goal (ctx 448K, ZERO compaction). The pane-render
+# `_pane_has_queued_compact` detector MUST catch this exact render, or the
+# `already-queued` gate never fires and every boundary types another `/compact`.
+# Verbatim from issue #822 comment 5499555722.
+# --------------------------------------------------------------------------- #
+
+_FIXTURE_822_TRIPLE_QUEUED = (
+    "✅ DONE: bounce #5723/#5724 re-hand-off hotový (PR #5786 merged, gate PASS),"
+    " compact-request odoslaný — ďalšia várka: W-drain + bounce #5438\n"
+    "\n"
+    "◯ Goal not yet met… continuing\n"
+    "\n"
+    "✢ Recombobulating… (3m 5s · ↓ 7.3k tokens)\n"
+    "Tip: See an artifact you'd like to build on? Duplicate, in its title menu,"
+    " gives you your own editable copy.\n"
+    "\n"
+    "  ❯ /compact\n"
+    "  ❯ /compact\n"
+    "  ❯ /compact\n"
+    "                                                                          "
+    "                        ◎ /goal active (14m)\n"
+    "─────────────────────────────────────────────────────────────────────────"
+    "─────────────────────────── ultracode ─\n"
+    "❯ Press up to edit queued messages\n"
+    "─────────────────────────────────────────────────────────────────────────"
+    "───────────────────────────────────────\n"
+    "  5h 7%(4h)  wk 1%(4d)  F 3%(4d)  fable  I 1 · W 10 · gk 2  ctx 448K ~$0.45"
+    "  cloude-15@newlevel.media sub 13.9.(12d)  caveman\n"
+)
+
+
+class TestQueuedCompactDetector822(unittest.TestCase):
+    """The queued-`/compact` pane detector must see the #822 render.
+
+    The walk up from the input box (`_above_box_scan`) skips blanks and pure
+    separator rows, but CC renders TWO structural-chrome rows between the box
+    and the queued messages the old walk did NOT recognise: the box's LABELLED
+    top border (`──… ultracode ─`, which `_is_separator_line` rejects for the
+    `ultracode` text) and the armed-goal indicator (`◎ /goal active (Nm)`). So
+    the walk stopped BEFORE the `❯ /compact` rows and `_pane_has_queued_compact`
+    returned False, letting each boundary type another `/compact` (owner: 3x)."""
+
+    def test_detector_sees_the_three_queued_compacts(self):
+        self.assertTrue(
+            wd._pane_has_queued_compact(_FIXTURE_822_TRIPLE_QUEUED),
+            "the 3 queued `❯ /compact` rows must be detected under the armed-goal"
+            " glyph + the labelled top border")
+
+    def test_box_still_classifies_as_a_bare_input_pane(self):
+        # The whole trap: the box shows the `Press up to edit queued messages`
+        # placeholder, which normalises to a BARE input box — so the delivery
+        # thinks the pane is idle. The detector is the only guard here.
+        kind, draft = wd._classify_boundary(_FIXTURE_822_TRIPLE_QUEUED)
+        self.assertEqual((kind, draft), ("input", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
