@@ -12,30 +12,31 @@ Incident: a client 👍'd our acceptance question (montalu PROD, discuss.channel
 
 ## The real-time read recipe — GUARDED METHOD (odoo-erp #5577, `company_base`), never a raw `mail.message.reaction` search_read (#784)
 
-The handover **base.group_user** account gets a **403 on the raw model** (`mail.message.reaction` `search_read`) — BY DESIGN, permanently. odoo-erp **#5577** shipped a **guarded method** instead of widening that ACL — widening was REJECTED upstream (leaks every message's reactor+emoji to every internal user). Call the guarded method, never the raw model:
+The handover **base.group_user** account gets a **403 on the raw model** (`mail.message.reaction` `search_read`) — BY DESIGN, permanently. odoo-erp **#5577** shipped a **guarded method** instead — widening the ACL was REJECTED (leaks every reactor+emoji to every internal user). Call the guarded method:
 
 ```python
 rx = models.execute_kw(db, uid, api_key, "mail.message", "message_reactions_guarded", [message_id])
-# Guarded method on mail.message (company_base, FLEET-WIDE, not montalu-only).
-# `content`=emoji, reactor is `partner_id` OR `guest_id` — a Discuss GUEST
-# reacts with partner_id=False + guest_id set, so a guest reaction STILL
-# counts. A CLIENT partner OR guest row = an answer.
+# Guarded method on mail.message (company_base, fleet-wide). Returns a list
+# of dicts: `content`=emoji, reactor is `partner_id` OR `guest_id` — a
+# Discuss GUEST reacts with partner_id=False + guest_id set, so a guest
+# reaction STILL counts (shape confirmed via odoo-erp #5577's own live
+# JSON-2 verify). A CLIENT partner OR guest row = an answer.
 ```
 
-Montalu instances also keep the pre-#5577 `montalu_message_reactions(message_id)` alias (thin delegation, back-compat) — prefer the neutral name for any NEW recipe.
+Montalu keeps the pre-#5577 `montalu_message_reactions(message_id)` alias (thin delegation) — prefer the neutral name for NEW recipes.
 
 ## Availability — check per instance, fall back below
 
-Reaches a client's PROD only once that instance's `company_base` has RELEASED #5577 — not the instant it merged upstream.
+Reaches a client's PROD only once its `company_base` has RELEASED #5577 — not the instant it merged upstream.
 
-- **`200`** (a list, possibly empty) → live here, use it.
-- **`404`** on `message_reactions_guarded` → not released here yet — fall back below, re-check after the next release.
-- The raw model staying **403** is never a sign of breakage.
+- A successful call returns a list (possibly empty) → live here, use it.
+- A `Fault` naming `message_reactions_guarded` as unknown (XML-RPC), or a **404** "method does not exist" via JSON-2 (verified live, odoo-erp #5577) → not released here yet — fall back below, re-check after the next release.
+- The raw model staying **403**/AccessError is never a sign of breakage.
 
 ## Fallback — fresh prod copy (while the guarded method isn't live yet on THIS instance)
 
-Prod-STATE read, self-service path (`autonomous-verification.md` #500/#608), NEVER an honest „nedá sa overiť": `REFRESH-DEV-BOX-FROM-PROD: <stream>`, then `psql` the `mail_message_reaction` table (`SELECT content, partner_id, guest_id FROM mail_message_reaction WHERE message_id = <id>;` — read `guest_id` too, a guest reaction is also the client). Stale by minutes, AUTHORITATIVE for a state read.
+Prod-STATE read, self-service path (`autonomous-verification.md` #500/#608), NEVER an honest „nedá sa overiť": `REFRESH-DEV-BOX-FROM-PROD: <stream>`, then `psql` the `mail_message_reaction` table (`SELECT content, partner_id, guest_id FROM mail_message_reaction WHERE message_id = <id>;`). Stale by minutes, AUTHORITATIVE for a state read.
 
 ## Anti-pattern (all rewordings apply)
 
-"Klient neodpovedal" / "bez odpovede" / a `stale!` reminder on a client-QUESTION `W` thread WITHOUT checking `mail.message.reaction` (via `message_reactions_guarded`, or the fallback above) is banned. Reaching for the raw `search_read` instead of the guarded method is also banned — it 403s by design.
+"Klient neodpovedal" / "bez odpovede" / a `stale!` reminder on a client-QUESTION `W` thread WITHOUT checking `mail.message.reaction` (via the guarded method or the fallback above) is banned. Reaching for the raw `search_read` instead of the guarded method is ALSO BANNED — it 403s by design.

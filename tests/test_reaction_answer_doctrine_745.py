@@ -160,9 +160,12 @@ class TestReadReactionsCompanion(_Teeth, TestCase):
 
     def test_raw_search_read_is_banned_not_recommended(self):
         # #784: the raw `mail.message.reaction` search_read may still be
-        # NAMED (as the thing to avoid / the permanent 403), but must never
-        # again be documented as the real-time path to call.
-        self._teeth("search_read", "mail.message.reaction", "403")
+        # NAMED (as the thing to avoid / the permanent 403), but must
+        # explicitly say it is BANNED -- co-occurrence with "403" alone is
+        # not enough teeth (a 403 could just as easily describe a working
+        # call that occasionally errors). Anchor on the anti-pattern's own
+        # explicit ban sentence.
+        self._teeth("search_read", "BANNED", "guarded method")
 
     def test_403_obstacle_documented(self):
         self._teeth("403", "base.group_user", "handover")
@@ -185,9 +188,13 @@ class TestReadReactionsCompanion(_Teeth, TestCase):
     def test_availability_check_documented(self):
         # #784 review consideration: #5577 lives on develop and reaches a
         # given client's PROD only via that client's own release train, so
-        # the recipe must tell the reader to CHECK per instance (404 = not
-        # yet released here) rather than assume it always works.
-        self._teeth("404", "message_reactions_guarded")
+        # the recipe must tell the reader to CHECK per instance. Review
+        # finding (fable, 2026-09-01): the recipe's own call is XML-RPC
+        # `execute_kw`, which surfaces a `Fault`, not a literal HTTP 404 --
+        # the doc must hedge BOTH shapes (a Fault for XML-RPC, a 404 only
+        # over the JSON-2 endpoint that was actually live-verified),
+        # never claim an XML-RPC call returns a raw HTTP status.
+        self._teeth("Fault", "message_reactions_guarded", "404")
 
     def test_doctrine_pointer(self):
         self._teeth("statusline-vocabulary", "#745", "plnohodnotná")
