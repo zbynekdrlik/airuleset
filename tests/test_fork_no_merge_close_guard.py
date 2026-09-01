@@ -871,6 +871,27 @@ class TestGkVerdictArtifactClose(TestCase):
                 self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_allows_reviewed_close_with_large_comment_payload(self):
+        # #772: a legit #756 verdict self-close must NOT be intermittently
+        # blocked by the SIGPIPE race in _has_gk_verdict_artifact (recurrence of
+        # #192). On a long-lived ticket V_COMMENTS is hundreds of KB; the
+        # `printf '%s\n' "$1" | grep -q` pipe under `set -o pipefail` collapses
+        # to printf's SIGPIPE-141 exit once grep -q short-circuits on the
+        # first-line match, so the artifact reads as ABSENT and the close is
+        # spuriously BLOCKED. A ~260KB payload with the verdict heading on line 1
+        # makes the race DETERMINISTIC: grep -q matches line 1 and exits while
+        # printf is still blocked writing past the full 64KB pipe -> SIGPIPE.
+        # Kept under the ~128KB single-env-var limit (MAX_ARG_STRLEN) that the
+        # hermetic fake gh passes it through. RED on the pipe form (12/12 spurious
+        # NOT-FOUND measured at this size), GREEN on the here-string.
+        big = self.HEADING + "\n" + ("filler line to pad the comment payload\n" * 2500)
+        self.assertGreater(len(big), 90000)
+        self.assertLess(len(big), 120000)
+        r = run("gh issue close 5345 -R zbynekdrlik/odoo-erp "
+                "--comment 'merged, gk verdict CLEAN'",
+                self.branch, me=self.M, author=self.M, labels="", comments=big)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     # --- BLOCK: every failure fails toward hand-off ---
 
     def test_blocks_close_without_verdict_artifact(self):
