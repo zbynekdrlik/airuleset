@@ -598,7 +598,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         # still locks the #403/#459 ping TEXT + dedup-key, reached via the
         # #478 ping FALLBACK: workable but the /goal template cannot be
         # resolved (rearm_fn -> None) -> can't auto-fix -> ping the user
-        # exactly as #459 did (first "zomrelo", then "STÁLE" re-ping).
+        # exactly as #459 did (the single "zomrelo potichu" ping; #804 item 4
+        # DELETED the "STÁLE" staged re-ping -- a dark episode pings AT MOST
+        # ONCE now, so no second ping fires however long it stays dark).
         reqs = self._dir() / "goal-requests.json"
 
         def send_fn(m, **k):
@@ -619,11 +621,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertNotIn("STÁLE", first_msg)
         # legacy shape: exactly "goal-dark:<sid>:<mark>" (two colons after label)
         self.assertEqual(first_key.count(":"), 2, first_key)
-        sweep(2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10)  # re-ping #2
-        self.assertEqual(len(rec), 2)
-        reping_msg, reping_key = rec[1]
-        self.assertIn("STÁLE", reping_msg)
-        self.assertEqual(reping_key, first_key + ":2", reping_key)
+        # #804 item 4 -- no staged re-ping: a far-later sweep pings NO second time.
+        sweep(2000 + 100 * 3600)
+        self.assertEqual(len(rec), 1, "a dark episode pings AT MOST once (#804)")
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "the template-unresolved ping fallback records no re-arm")
 
@@ -638,8 +638,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, 1000, obl)
         self._sweep(tmux, proj, state, sent, 2000, obl)
         self.assertEqual(len(sent), 1)
-        self._sweep(tmux, proj, state, sent,
-                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self._sweep(tmux, proj, state, sent, 2000 + 100 * 3600, obl)
         self.assertEqual(len(sent), 1, "an achieved backlog (open==0) must never nag")
 
     def test_766_achieved_with_backlog_flag_is_never_pinged(self):
@@ -698,8 +697,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, 1000, obl)
         self._sweep(tmux, proj, state, sent, 2000, obl)
         self.assertEqual(len(sent), 1)
-        self._sweep(tmux, proj, state, sent,
-                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self._sweep(tmux, proj, state, sent, 2000 + 100 * 3600, obl)
         self.assertEqual(len(sent), 1, "an unavailable cache must not re-ping")
 
     def test_stale_obligation_cache_does_not_re_ping(self):
@@ -721,7 +719,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         self._sweep(tmux, proj, state, sent, base + 1000, lambda c: (5, base - 10),
                     rearm, reqs)
         self.assertEqual(len(sent), 1)
-        t = base + 1000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
+        t = base + 1000 + 100 * 3600
         stale_ts = t - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
         self._sweep(tmux, proj, state, sent, t, lambda c: (5, stale_ts),
                     rearm, reqs)
@@ -729,31 +727,11 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "a stale/unresolved-template path records no re-arm")
 
-    def test_re_pinging_is_hard_capped_per_episode(self):
-        # #459 — with a cache that stays FRESH and non-empty forever (a
-        # stalled session that keeps re-rendering its statusline), the ONLY
-        # thing that can bound the ping count is the hard cap. (A FROZEN
-        # cache instead ages out at GOAL_DARK_CACHE_MAX_AGE_S — the stale
-        # test above — so the freshness gate is the practical bound for a
-        # genuinely dead loop; the cap backstops the fresh-cache case.)
-        proj, tmux = self._dark("sess-dark-cap")
-        sent, state = [], {}
-        reqs = self._dir() / "goal-requests.json"
-        # #478: stay in the ping FALLBACK (workable but template unresolved),
-        # the only path that still re-pings a workable backlog -- so the cap
-        # is exercised exactly as #459 intended.
-        rearm = _rearm_none
-        now = [1_700_000_000]
-
-        def obl(cwd):
-            return (5, now[0] - 60)          # always fresh (60s before now)
-
-        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)  # first obs
-        for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
-            now[0] += 30 * 3600                              # > final stage (24h)
-            self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
-        self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
-                         "re-pings must be hard-capped per episode")
+    # #804 item 4 -- `test_re_pinging_is_hard_capped_per_episode` (the #459
+    # GOAL_DARK_REPING_MAX cap) is DELETED with the staged re-ping it bounded;
+    # `test_dark_episode_pings_at_most_once_804` below is the replacement
+    # invariant (one ping per episode, no cap to bound because there is no
+    # second ping).
 
     def test_dark_episode_pings_at_most_once_804(self):
         # #804 item 4 -- the STAGED re-ping (GOAL_DARK_REPING_SCHEDULE_S,
@@ -808,7 +786,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(5, 1500)                        # workable
         rearm = _rearm_ok                               # template resolves
-        for now in (1000, 2000, 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10):
+        for now in (1000, 2000, 2000 + 100 * 3600):
             self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
         self.assertEqual(sent, [])
         self.assertEqual(goal.load_goal_requests(reqs), {},
@@ -909,7 +887,7 @@ class TestGoalDarkWatch(unittest.TestCase):
 
     def test_re_arm_is_hard_capped_per_day_then_pings(self):
         # #524 UPDATE: the OLD model (re-arm ATTEMPTS back off on the #459 ping
-        # schedule, hard-capped at GOAL_DARK_REPING_MAX per episode) is replaced
+        # schedule) is replaced
         # by a per-sid 24h ATTEMPT CAP. A session that keeps confirming dead
         # (delivery, not modelled here, never sticks) is auto-typed at most
         # GOAL_DARK_REARM_MAX_PER_DAY times per rolling 24h; a further CONFIRMED

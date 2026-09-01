@@ -1882,17 +1882,17 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 # backstop healed ~93% (14/15 measured) of these within ~2 min; #403 deleted
 # it, so a compact-stalled loop now gets exactly ONE ping and, if the away
 # user misses it (the 02:59-into-a-sleeping-user incident), no follow-up.
-# The FIRST ping stays byte-for-byte as #403 shipped it; a persistently-dark
-# goal is then RE-pinged on a widening schedule, but ONLY while the per-cwd
-# tickets-status obligation cache proves work still remains (open > 0) -- an
-# ACHIEVED loop is transcript-indistinguishable from a stalled one (both
-# mark=set / footer dark; achievement persists NO marker, measured over 8329
-# transcripts), so an ungated re-ping would nag every completed backlog, the
-# exact noise class the user purged. No positive confirmation -> stay silent
-# (the first ping already went out). Zero keystrokes, ever. Tunable; mirrors
-# the #399/#353 staged-alarm constant style.
-GOAL_DARK_REPING_SCHEDULE_S = (3600, 3 * 3600, 6 * 3600, 24 * 3600)
-GOAL_DARK_REPING_MAX = 10               # hard cap on total pings per dark episode
+# The FIRST ping stays byte-for-byte as #403 shipped it. #804 item 4 DELETED
+# the staged RE-ping (the old `GOAL_DARK_REPING_SCHEDULE_S` widening schedule +
+# `GOAL_DARK_REPING_MAX` cap + `_goal_dark_reping_due`): every dark ping is
+# notify-SUPPRESSED (goal-dark in SUPPRESSED_ALERT_PREFIXES, #704) AND the #795
+# daily re-ask is retired, so a staged re-ping only composed a message notify
+# drops -- dead code (removing it is net-LOC-down, the owner's #804 constraint).
+# A dark episode now pings AT MOST ONCE; `pinged_state` is a per-episode
+# already-pinged LATCH (mark_ts-keyed), still popped by the confirmed re-arm /
+# FULFILLED-SILENT paths above so a genuine re-arm / fresh episode re-pings once.
+# GOAL_DARK_CACHE_MAX_AGE_S stays the freshness bound the #459 first-ping gate +
+# every re-arm path read against the per-cwd tickets-status obligation cache.
 GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older than this
 
 # #524 (owner decision B, 2026-08-17) -- HARDENED death-confirmation for the
@@ -2355,26 +2355,6 @@ def _dark_record_rearm(sid, cwd, text, auth, now, loc, open_n, dry_run,
     return ("dark-watch %s sid=%s -> CONFIRMED-DEAD: recording re-arm "
             "(open=%s authority=%s reads=%s span=%ss attempt=%d)"
             % (loc, sid, open_n, auth, reads, span, len(attempts_state[sid])))
-
-
-def _goal_dark_reping_due(prev, now, schedule):
-    """Pure staged-schedule check for a dark-goal RE-ping (#459), mirroring
-    the `_gkreq_reping_due` SHAPE (#353/#352) as an INDEPENDENT function
-    reusing that proven pattern per this repo's own 'same shape, own
-    vocabulary' precedent, never a cross-job call. `prev` is a prior ping
-    record with `count`>=1 and `last`. Returns `(due, next_count)`: too soon
-    -> `(False, count)`; the schedule interval for this stage cleared ->
-    `(True, count + 1)`. Holds at the final stage forever. A record with no
-    readable `last` re-pings once (fail toward reminding), never silently
-    sticks."""
-    count = int(prev.get("count") or 1)
-    last = prev.get("last")
-    if last is None:
-        return True, count + 1
-    step = min(count - 1, len(schedule) - 1)
-    if (now - last) < schedule[step]:
-        return False, count
-    return True, count + 1
 
 
 def _default_obligation_fn(cwd):
@@ -2963,48 +2943,31 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # #766: a 🏁-PROVEN achieved loop (fresh open==0) is DISTINGUISHABLE and
         # never reaches here -- it is vetoed FULFILLED-SILENT above; only a dark
         # loop WITHOUT a proven drained backlog falls through to this ping.
+        # #804 item 4 -- a dark episode pings AT MOST ONCE. The staged re-ping
+        # (count>1, GOAL_DARK_REPING_SCHEDULE_S) is DELETED: the ping is
+        # notify-SUPPRESSED (goal-dark, #704) and the #795 re-ask is retired, so
+        # a re-ping only composed a dropped message. `pinged_state` is now a
+        # per-episode already-pinged LATCH (mark_ts-keyed) -- popped by the
+        # confirmed re-arm / FULFILLED-SILENT paths above, so a genuine re-arm or
+        # a fresh episode (new mark_ts) still pings once.
         prec = pinged_state.get(sid)
-        is_first = not (isinstance(prec, dict) and prec.get("mark_ts") == mark_ts)
-        if is_first:
-            count = 1
-        else:
-            count = int(prec.get("count") or 1)
-            if count >= GOAL_DARK_REPING_MAX:
-                continue                          # hard cap -- stop for this episode
-            due, count = _goal_dark_reping_due(prec, now,
-                                               GOAL_DARK_REPING_SCHEDULE_S)
-            if not due:
-                continue                          # too soon this stage
-
-        if not is_first and not workable:
-            continue                              # can't confirm work -- no nag
-        pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}
-        logs.append(
-            "dark-watch %s sid=%s -> %s" % (
-                loc, sid,
-                "goal died silently, pinging" if count == 1
-                else "goal still dark, re-pinging #%d" % count))
+        if isinstance(prec, dict) and prec.get("mark_ts") == mark_ts:
+            continue                              # already pinged this episode
+        pinged_state[sid] = {"mark_ts": mark_ts, "last": now}
+        logs.append("dark-watch %s sid=%s -> goal died silently, pinging"
+                    % (loc, sid))
         if send_fn is not None and not dry_run:
             from notify import stream_redirect
             proj = watchdog.project_label(cwd)
-            if count == 1:
-                msg = ("\U0001f480 **%s** — /goal loop zomrelo potichu "
-                       "(transkript hovorí armovaný, footer nie). "
-                       "Spústi prosím `/autopilot` znova." % proj)
-            else:
-                msg = ("\U0001f480 **%s** — /goal loop je STÁLE mŕtvy "
-                       "(pripomienka #%d; transkript hovorí armovaný, footer "
-                       "nie). Spústi prosím `/autopilot` znova." % (proj, count))
-            # The FIRST ping keeps #403's exact dedup_key (goal-dark:sid:mark) so
-            # a legacy disk marker written by pre-#459 code never yields a
-            # duplicate first ping across the deploy boundary; re-pings append
-            # :count so each staged reminder delivers on its own.
-            dkey = ("goal-dark:%s:%d" % (sid, int(mark_ts or 0)) if count == 1
-                    else "goal-dark:%s:%d:%d" % (sid, int(mark_ts or 0), count))
+            # #403's exact dedup_key (goal-dark:sid:mark) so a legacy on-disk
+            # marker from pre-#459 code never yields a duplicate first ping
+            # across the deploy boundary.
             send_fn(
-                msg,
+                "\U0001f480 **%s** — /goal loop zomrelo potichu "
+                "(transkript hovorí armovaný, footer nie). "
+                "Spústi prosím `/autopilot` znova." % proj,
                 owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                dedup_key=dkey,
+                dedup_key="goal-dark:%s:%d" % (sid, int(mark_ts or 0)),
                 dry_run=dry_run)
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
