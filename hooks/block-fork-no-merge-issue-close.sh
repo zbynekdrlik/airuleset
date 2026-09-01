@@ -123,14 +123,63 @@ _cmd_has_comment_flag() {
       || printf '%s' "$CMD" | grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)'
 }
 
-# The `-R`/`--repo`-present-but-unparseable fail-safe shared by the #533/#756
-# carve-outs ($1 = the extracted REPO_ARG). True (0) iff a -R/--repo FLAG is
-# present in $CMD but the arg came back EMPTY (a glued `-Rowner/repo`, or a form
-# the REPO_ARG parser cannot read) — the label/comment reads would then fall
+# The `-R`/`--repo`-present-but-unparseable fail-safe shared by ALL FOUR carve-outs
+# (author / #773 fallback / #533 acceptance / #756 verdict) ($1 = the extracted
+# REPO_ARG). True (0) iff a -R/--repo FLAG is present in $CMD but the arg came back
+# EMPTY (a glued `-Rowner/repo`, a QUOTED glued `'-Rowner/repo'`, or a form the
+# REPO_ARG parser cannot read) — the label/comment/author reads would then fall
 # back to the CWD repo, so the carve-out must refuse (fail SAFE). A parseable -R
 # yields a non-empty arg, so a legit close is unaffected.
+#
+# #816: the boundary class is the WIDENED `_CLOSE_OPEN` class (#471/#540) PLUS a
+# backslash — quote / shell-separator / backslash chars (`'`, `"`, `;`, `&`, `|`,
+# `(`, `\`) as well as start/whitespace — NOT the narrow `(^|[[:space:]])`. The old
+# class matched a flag ONLY after start-of-string or whitespace, so a QUOTED glued
+# flag — `'-Rowner/repo'` / `"-Rowner/repo"` (a quote sits immediately before `-R`)
+# — was MISSED: the helper returned FALSE ("not unparseable") though REPO_ARG was
+# empty (the `[[:space:]=]+` REPO_ARG parser cannot read a glued form), and all four
+# carve-outs then read from the CWD repo → wrong-ALLOW. Widening the OPENING class
+# is a monotonic over-block (fail-SAFE): it only ADDS matches, and combined with
+# `[ -z "$1" ]` the only new positives are a quote/separator/backslash-preceded flag
+# WITH an empty REPO_ARG — exactly the glued wrong-allow. No end-anchor is added: a
+# glued `-Rvalue` must still match on the `-R` prefix.
+#   The extra `\` beyond `_CLOSE_OPEN`'s class closes the #816-review M2 sibling: a
+#   BACKSLASH-escaped glued flag `\-Rowner/repo` — bash strips the `\` so gh receives
+#   a valid glued `-R` and closes the named repo, while `$CMD` (the raw text) has `\`
+#   immediately before `-R`, which `_CLOSE_OPEN`'s class also missed → the SAME
+#   wrong-allow class across all four carve-outs. This is a DELIBERATE superset of
+#   `_CLOSE_OPEN` (whose is_close/N_CLOSE gate is out of scope here — widening it
+#   needs its own RED matrix); the two classes are intentionally NOT identical.
+#   ACCEPTED over-block residual: a legit self-close carrying NO parseable `-R` flag
+#   whose command text contains a quote/separator/backslash immediately before the
+#   literal `-R`/`--repo` (most plausibly a `--comment` VALUE — but the grep scans
+#   the WHOLE $CMD, so ANY quoted string in a compound command carries it, e.g.
+#   `git commit -m "quote the '-Rfoo' example" && gh issue close N --comment ok`)
+#   now over-blocks. It fails toward hand-off (the SAME residual `_CLOSE_OPEN`
+#   already documents); the worker rephrases or adds an explicit `-R owner/repo`
+#   (which makes `[ -z "$1" ]` false, so the text is irrelevant).
+#   REMAINING residuals (undetectable by any text scan / out of this helper's scope,
+#   all fail-SAFE or pre-existing): a fully `$VAR`-hidden flag (`R=-Rx/y; gh … $R`)
+#   carries no literal `-R` in $CMD — a truly separate structural residual, and a
+#   confusion-guard (not adversarial-security) accepts it; and the REPO_ARG parser
+#   itself text-scans the whole command, so a separator-parseable `-R x/y`-looking
+#   string inside a `--comment` VALUE yields a NON-empty REPO_ARG that defeats the
+#   `[ -z "$1" ]` leg (pre-existing, not fixable inside this helper) — both tracked
+#   in the #816-review follow-up.
+#
+# #816: reads $CMD via a HERE-STRING, NOT `printf '%s' "$CMD" | grep -q` (the #772
+# fix for `_has_gk_verdict_artifact`). Under `set -o pipefail`, on a multi-line
+# >64KB command whose `-R` match is on an early line with a large trailing tail,
+# `grep -q` short-circuits and exits while printf is still blocked writing past the
+# 64KB pipe buffer → SIGPIPE → the pipeline returns 141 → the helper returns
+# non-zero (FALSE) → the fail-safe is DEFEATED (a wrong-ALLOW — the OPPOSITE fail
+# direction from #772, which failed toward block). A here-string feeds grep with no
+# producer process, so no SIGPIPE can arise and pipefail never applies. (Extreme
+# environmental residual, same trade as the #772 sibling: bash materialises a >64KB
+# here-string as a temp file, so an UNWRITABLE TMPDIR would fail the grep → FALSE →
+# allow direction; a broken-TMPDIR box is out of this helper's scope.)
 _repo_flag_unparseable() {
-    printf '%s' "$CMD" | grep -qE '(^|[[:space:]])(-R|--repo)' && [ -z "$1" ]
+    grep -qE '(^|[\;&|[:space:]('\''"])(-R|--repo)' <<< "$CMD" && [ -z "$1" ]
 }
 
 # Whole-line fixed-string label membership ($1 = newline-separated label list,
