@@ -26,7 +26,6 @@ from watchdog import goal
 from watchdog import ops_wait_recheck as owr
 from watchdog import release_gap as rg
 from watchdog import queue_arrival_recheck as qa
-from watchdog import nudge_gate as ng
 
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
@@ -94,7 +93,7 @@ class TestOpsWaitGate(_Base):
         # the family gap ignores the SAME category — a partition-audit clock does
         # not block a partition-audit nudge (its own cadence governs that).
         tmux = self._tmux()
-        logs = self._run(tmux, _closed_gate(self.sid, "partition-audit"))
+        self._run(tmux, _closed_gate(self.sid, "partition-audit"))
         self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
 
 

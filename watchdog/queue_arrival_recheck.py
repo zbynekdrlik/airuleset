@@ -83,6 +83,7 @@ import os
 
 import watchdog
 from watchdog import ops_wait_recheck as _ops_wait_recheck
+from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
 # env AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S — how long a queue-union snapshot is
 # CACHED per repo (`state["queue_arrival_cache"]`, keyed by cwd). ~5 min: the
@@ -470,6 +471,15 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                     "background agent — deferred, retry next sweep, %d new)"
                     % (loc, len(arrivals)))
         return logs
+    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
+    # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke, base &
+    # last_nudge unadvanced so the arrival re-detects, `handled` unclaimed) so it
+    # retries a later sweep. queue-arrival carries NO per-category floor (its own
+    # #780 nudge floor governs), so the gate only spaces DISTINCT categories.
+    if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):
+        logs.append("queue-arrival %s -> hold:cadence-gate (shared family gap; "
+                    "retry next sweep, %d new)" % (loc, len(arrivals)))
+        return logs
     if dry_run:
         logs.append("queue-arrival %s -> WOULD-NUDGE (%d new: %s)"
                     % (loc, len(arrivals), _fmt_arrivals(arrivals)))
@@ -498,6 +508,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     new_rec["last_nudge"] = now   # #780 — start the floor window on a delivered nudge
     new_rec["send_fails"] = 0
     qrecs[sid] = new_rec
+    _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #797
     if handled is not None:
         handled.add(sid)
     note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"

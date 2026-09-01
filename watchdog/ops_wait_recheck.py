@@ -177,6 +177,7 @@ import os
 import re
 
 import watchdog
+from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
 # #695 -- the DISCUSS-AUDIT clause is odoo-erp-scoped (client Odoo Discuss
 # threads are an odoo-erp thing, the same repo scope the #627 close gate holds
@@ -942,6 +943,16 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
         logs.append("ops-wait-recheck %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep)" % loc)
         return logs
+    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
+    # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke,
+    # last_nudge unadvanced, `handled` unclaimed) so it retries a later sweep,
+    # killing cross-sweep bursts. partition-audit carries NO per-category floor
+    # (its own ~22h cadence governs), so the gate is a pure family-spacing no-op
+    # here except when a sibling category fired recently — semantics unchanged.
+    if not _nudge_gate.gate_ok(state, sid, "partition-audit", now):
+        logs.append("ops-wait-recheck %s -> hold:cadence-gate (shared family gap; "
+                    "retry next sweep, partition %s)" % (loc, sig))
+        return logs
     if dry_run:
         logs.append("ops-wait-recheck %s -> WOULD-NUDGE partition %s" % (loc, sig))
         return logs
@@ -1018,6 +1029,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     new_rec["last_nudge"] = now
     new_rec["send_fails"] = 0
     wrecs[sid] = new_rec
+    _nudge_gate.mark_sent(state, sid, "partition-audit", now)   # #797
     if handled is not None:
         handled.add(sid)
     note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"

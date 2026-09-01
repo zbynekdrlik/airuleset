@@ -2013,7 +2013,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
              release_state_fetch=None, queue_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
-             resource_guard_gk_request=None):
+             resource_guard_gk_request=None,
+             u_fetch=None):
     """Scan every `claude` pane once. 39 numbered jobs per poll — 33 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2268,7 +2269,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           needs-gatekeeper ∪ prio:bounce` per repo and, on a SET DELTA (a NEW
           member vs the baseline), keystrokes the armed-but-WAITING loop to
           re-derive + process its gk backlog (the "parked on a waiter, blind to
-          new hand-offs" incident).
+          new hand-offs" incident). And, when `u_fetch` is wired, the
+          U-FRESHNESS reconcile rider (#797,
+          `u_freshness.goal_u_freshness_recheck`) — for an armed pane whose
+          footer `user_waiting` count (read from the SAME tickets-status cache
+          the footer renders, ZERO gh) is > 0, it keystrokes the session to
+          re-audit each U member and drop a `needs-answer`/`needs-decision`
+          label + question-map entry that is no longer a live owner question
+          (so the footer `U`, the owner's ONLY question surface since #795,
+          stays truthful) — NEVER an owner ping, and hard-floored at 1×/hour
+          per session by the shared cadence gate. All five riders (lane /
+          ops-wait / release-gap / queue-arrival / u-freshness) now consult that
+          SHARED `nudge_gate` (`state["nudge_cadence"]`, #797): a per-category
+          floor (only u-freshness's 1×/hour strop is non-zero) plus a
+          cross-category family-spacing floor that DEFERS a second category's
+          keystroke to a later sweep, killing the "nudges chodia jak besne po
+          sebe" cross-sweep bursts without changing any rider's own cadence.
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
@@ -4162,7 +4178,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             sleep_fn=sleep_fn, time_fn=time_fn,
             sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
             release_state_fetch=release_state_fetch,     # #616
-            queue_fetch=queue_fetch)                     # #733
+            queue_fetch=queue_fetch,                     # #733
+            u_fetch=u_fetch)                             # #797
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 

@@ -4426,6 +4426,24 @@ def _watchdog_queue_fetch(cwd):
     return sorted(nums)
 
 
+def _watchdog_u_fetch(cwd):
+    """#797 — the footer `U` (user-waiting) count + cache write time for the repo
+    at `cwd`, read from the SAME machine-local tickets-status cache the footer
+    renders (`statusbar.obligation_partition`), for the job-20 U-freshness
+    reconcile rider. Returns `(user_waiting, ts)` — both int/float or None. This
+    is a LOCAL cache FILE read (NO gh, NO network), unlike the sibling
+    `_watchdog_*_fetch` helpers, so it costs one small read per armed pane per
+    sweep; the rider's own #618 self-heal + the 15-min freshness gate handle a
+    stale/absent cache. Wired HERE like every other run_once seam so the rider is
+    disabled (u_fetch None) in run_once's network-free unit tests."""
+    import statusbar
+    try:
+        _open, user_waiting, _ops, _gk, ts = statusbar.obligation_partition(cwd)
+    except Exception:
+        return None, None
+    return user_waiting, ts
+
+
 def _parse_origin_slug(url):
     """owner/name from a git remote URL, or None. Pure + testable (#616). Handles
     the https form (`https://github.com/owner/name[.git]`), the scp form
@@ -4922,6 +4940,14 @@ def cmd_watchdog(args):
                     # repo per TTL (~5 min) inside the module, FULL-authority
                     # only. Wired on EVERY box; the rider self-gates authority.
                     queue_fetch=_watchdog_queue_fetch,
+                    # #797 — job 20's U-freshness reconcile rider reads the
+                    # footer `user_waiting` count from the SAME machine-local
+                    # tickets-status cache the footer renders (a LOCAL file read,
+                    # NO gh), and keystrokes an armed pane whose footer claims U>0
+                    # to re-audit + make it truthful. Wired on EVERY box; the
+                    # rider self-heals a stale cache and is per-session floored at
+                    # 1x/hour by the shared nudge_gate.
+                    u_fetch=_watchdog_u_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.

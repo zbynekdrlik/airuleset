@@ -172,8 +172,8 @@ class TestOrchestrator(_OrchBase):
     def test_absent_cache_spawns_refresh_no_nudge(self):
         spawned = []
         urecs = {}
-        logs = self._run(urecs, lambda cwd: (None, None), self._tmux(),
-                         refresh_fn=lambda cwd: spawned.append(cwd))
+        self._run(urecs, lambda cwd: (None, None), self._tmux(),
+                  refresh_fn=lambda cwd: spawned.append(cwd))
         self.assertEqual(spawned, [self.CWD])
         self.assertEqual(self._tmux().typed_texts(), [])
 
@@ -186,7 +186,7 @@ class TestOrchestrator(_OrchBase):
     def test_fresh_u_is_seeded_not_nudged(self):
         urecs = {}
         tmux = self._tmux()
-        logs = self._run(urecs, lambda cwd: (3, FRESH_TS), tmux)
+        self._run(urecs, lambda cwd: (3, FRESH_TS), tmux)
         self.assertEqual(tmux.typed_texts(), [])
         self.assertIn(self.sid, urecs)
 
@@ -194,8 +194,8 @@ class TestOrchestrator(_OrchBase):
         urecs = {self.sid: {"first_seen": NOW - 2 * HOUR, "last_nudge": None}}
         tmux = self._tmux()
         state = {}
-        logs = self._run(urecs, lambda cwd: (5, FRESH_TS), tmux, handled=set(),
-                         state=state)
+        self._run(urecs, lambda cwd: (5, FRESH_TS), tmux, handled=set(),
+                  state=state)
         typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed)
         self.assertIn("U=5", typed)
