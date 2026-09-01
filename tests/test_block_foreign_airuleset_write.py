@@ -168,6 +168,113 @@ class ForeignBypassLogPerUser492(TestCase):
         self.assertIn(tag, self.PER_USER.read_text())
 
 
+class AutopilotLockComposite790(TestCase):
+    """#790: a composite Bash command that combines a legitimate
+    `airuleset.py autopilot-lock acquire/release --repo <foreign-repo>` call
+    with git write ops targeting that SAME foreign repo (never airuleset)
+    false-blocked, because the old RULE A logic set TARGETS=1 from the
+    substring "devel/airuleset" appearing in the PATH to airuleset.py itself,
+    then matched a git write verb ANYWHERE in the whole composite string with
+    no check that THAT git invocation's own target was airuleset. autopilot-
+    lock is called routinely right alongside the integration git steps of a
+    foreign-repo release cycle, so this pattern recurs every cycle.
+
+    These reproduce the exact incident shapes from a foreign (non-airuleset)
+    session and must be ALLOWED — no segment in them writes */devel/airuleset.
+    """
+
+    FOREIGN_CWD = "/home/montalu1/devel/odoo/odoo-slovnormal"
+    GK_CWD = "/home/gatekeeper/devel/odoo/odoo-erp"
+
+    def assertAllowed(self, cmd, **kw):
+        r = run(cmd, **kw)
+        self.assertEqual(r.returncode, 0,
+                         f"expected ALLOW for: {cmd}\nstderr={r.stderr}")
+
+    def test_lock_acquire_then_cd_then_fetch_merge_foreign_repo(self):
+        # montalu1 incident 1 (2026-08-31)
+        self.assertAllowed(
+            "python3 ~/devel/airuleset/airuleset.py autopilot-lock acquire "
+            "--repo /home/montalu1/devel/odoo/odoo-slovnormal && "
+            "cd /tmp/wt-5646 && "
+            "git fetch origin develop && "
+            "git merge origin/develop",
+            cwd=self.FOREIGN_CWD)
+
+    def test_lock_release_then_dash_c_worktree_remove_then_push_foreign_repo(self):
+        # montalu1 incident 2 (2026-08-31)
+        self.assertAllowed(
+            "python3 ~/devel/airuleset/airuleset.py autopilot-lock release "
+            "--repo /home/montalu1/devel/odoo/odoo-slovnormal ; "
+            "git -C /home/montalu1/devel/odoo/odoo-slovnormal worktree remove "
+            "/tmp/wt-5646 ; "
+            "git push origin :refs/autopilot-wip/worktree-foo",
+            cwd=self.FOREIGN_CWD)
+
+    def test_lock_acquire_then_push_foreign_repo(self):
+        # gk odoo-erp incident (2026-09-01, integration cycle #5687 -> PR #5699)
+        self.assertAllowed(
+            "python3 ~/devel/airuleset/airuleset.py autopilot-lock acquire "
+            "--repo /home/gatekeeper/devel/odoo/odoo-erp && "
+            "git push -u origin gatekeeper/5687-something",
+            cwd=self.GK_CWD)
+
+    def test_push_delete_autopilot_wip_ref_then_lock_release_foreign_repo(self):
+        # gk odoo-erp incident, second shape from the same integration cycle
+        self.assertAllowed(
+            "git push origin --delete refs/autopilot-wip/worktree-foo ; "
+            "python3 ~/devel/airuleset/airuleset.py autopilot-lock release "
+            "--repo /home/gatekeeper/devel/odoo/odoo-erp",
+            cwd=self.GK_CWD)
+
+    # --- protection must STILL hold: a REAL airuleset write in the same
+    # composite as an autopilot-lock call is STILL blocked -----------------
+    def test_lock_call_plus_genuine_airuleset_write_still_blocked(self):
+        r = run(
+            "python3 ~/devel/airuleset/airuleset.py autopilot-lock acquire "
+            "--repo /home/montalu1/devel/odoo/odoo-slovnormal && "
+            "cd ~/devel/airuleset && git commit -am 'sneaky'",
+            cwd=self.FOREIGN_CWD)
+        self.assertEqual(r.returncode, 2,
+                         f"expected BLOCK for genuine airuleset write: {r.stderr}")
+
+    def test_lock_call_plus_dash_c_airuleset_push_still_blocked(self):
+        r = run(
+            "python3 ~/devel/airuleset/airuleset.py autopilot-lock release "
+            "--repo /home/montalu1/devel/odoo/odoo-slovnormal ; "
+            "git -C /home/newlevel/devel/airuleset push",
+            cwd=self.FOREIGN_CWD)
+        self.assertEqual(r.returncode, 2,
+                         f"expected BLOCK for genuine airuleset write: {r.stderr}")
+
+    def test_newline_separated_genuine_write_still_blocked(self):
+        # review finding on #790: shlex(posix=True) treats a literal newline
+        # as plain whitespace, so a multi-line composite silently merged into
+        # ONE token stream and a newline-separated airuleset write went
+        # UNDETECTED. Multi-line Bash commands are a common shape, so this
+        # was a genuine protection regression, not an exotic residual.
+        r = run("cd ~/devel/airuleset\ngit add -A\ngit commit -m fix",
+                cwd=self.FOREIGN_CWD)
+        self.assertEqual(r.returncode, 2,
+                         f"expected BLOCK for newline-separated write: {r.stderr}")
+
+    def test_newline_separated_dash_c_push_still_blocked(self):
+        r = run("echo syncing\ngit -C /home/newlevel/devel/airuleset push",
+                cwd=self.FOREIGN_CWD)
+        self.assertEqual(r.returncode, 2,
+                         f"expected BLOCK for newline-separated write: {r.stderr}")
+
+    # --- new over-block class the fix must NOT introduce --------------------
+    def test_airuleset_py_push_mentioned_as_plain_argument_not_blocked(self):
+        # review finding on #790: `airuleset.py push` appearing merely as an
+        # unquoted ARGUMENT of some other command (not as the invoked
+        # program) must NOT block — the cousin of the original whole-string
+        # TARGETS bug this fix set out to remove.
+        self.assertAllowed("echo airuleset.py push", cwd=self.FOREIGN_CWD)
+        self.assertAllowed("echo Run airuleset.py push on dev1",
+                           cwd=self.FOREIGN_CWD)
+
+
 class HookWired(TestCase):
     def test_registered_in_settings_fragment(self):
         cfg = json.loads((Path(__file__).resolve().parent.parent / "settings"
