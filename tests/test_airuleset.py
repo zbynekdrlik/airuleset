@@ -3987,6 +3987,28 @@ class TestUltracodeLauncher(TestCase):
         plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
         self.assertNotIn("PRESSURE_REAP", plain_branch)
 
+    def test_allowed_tools_flag_present_in_every_mode_except_plain(self):
+        # #779 (owner ROZHODNUTÉ, comment 5479254695, 2026-08-31): the
+        # managed launcher passes `--allowedTools Grep,Glob` fleet-wide so
+        # Claude Code's undocumented shadow-shell-snapshot substitution
+        # (grep -> bundled ugrep, find -> bfs) is neutralized AT THE SOURCE
+        # in every managed session's Bash tool -- an Anthropic-collaborator-
+        # confirmed side effect of reinstating the built-in Grep/Glob tools
+        # (anthropics/claude-code#69736, no dedicated opt-out exists yet).
+        # The #776 hook (block-root-recursive-grep.sh) + watchdog Job 37
+        # reaper stay as a backstop. Placement mirrors the EXACT "every mode
+        # except plain" convention already established for --model and
+        # CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP above -- plain stays
+        # the deliberate vanilla/no-managed-flags stock-claude escape hatch.
+        content = airuleset.render_claude_launch_script()
+        expected = "--allowedTools Grep,Glob"
+        # new(x1) + ultracode(if/else x2) + default(if/else x2)
+        # + fullscreen(if/else x2) = 7 -- same count/shape as --model.
+        self.assertEqual(content.count(expected), 7, content)
+        plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
+        self.assertNotIn("--allowedTools", plain_branch)
+        self.assertNotIn("Grep,Glob", plain_branch)
+
 
 class TestStreamNotifyOwnerRouting(TestCase):
     """notify.STREAM_NOTIFY_OWNER + resolve_owner() (airuleset#151/#259):
