@@ -132,6 +132,16 @@ const WT_FILL_MAX_LINE_STRETCH = 1.8;   // cell HEIGHT (lineHeight) may grow up 
 // parent-side iframe stretch that removes the integer-cell letterbox the native
 // fill cannot (its quantum is cols/rows x 1px per axis, ~176px horizontally).
 const WT_FRAME_FILL_MAX_STRETCH = 1.25; // parent-frame residual scale, per axis
+// #798: floor for the parent DOWN-scale in reconcileFrameFit (below). When the fixed
+// 176x51 grid OVERFLOWS a viewport too SHORT to fit it even at fitFixedGrid's 6px font
+// floor (owner's compact window: natural grid ~357px vs a ~312px slot), the iframe is
+// grown to the grid's own size -- so the child paints ALL 51 rows unclipped -- then
+// scaled DOWN into the slot. The floor bounds that shrink for readability: within the
+// floor the WHOLE grid fits; only for a PATHOLOGICALLY short viewport (needing a scale
+// below the floor) does the scaled box still exceed the slot -- and because the top is
+// pinned (origin y=0), what #frames then clips is the BOTTOM, so row 0 (the ticket's
+// casualty) always survives. A deliberate wholeness-vs-readability trade at the extreme.
+const WT_FRAME_FILL_MIN_SHRINK = 0.5;   // parent-frame down-scale floor (over-fit only)
 function themeTerminal(term) {           // idempotent: applied once per terminal
   if (!term || term.__wtThemed) return;
   term.options.theme = CAMPBELL_THEME;
@@ -314,6 +324,19 @@ function reviveTerminal(f, idx) {
 // scale term.options.fontSize (crisp re-render, unlike a blurry CSS transform).
 // Verified live against real ttyd + headless Chrome: grid forced 176x51, no
 // dead dotted region, status bar full width.
+// #798: the TRUE available slot = the parent #frames content box, read from the PARENT
+// document -- transform- AND box-independent (the iframe's own scale/explicit size never
+// change #frames). fitFixedGrid fits the font to THIS (never the possibly-grown box), so
+// a reconcileFrameFit box-grow can never inflate the font -> the feedback loop's runaway
+// direction is closed at the source. Fallback to the iframe's own innerWidth/innerHeight
+// where there is no frameElement/parentElement (the node fit-harness), so that path is
+// behaviourally unchanged.
+function slotOf(win) {
+  const fr = win && win.frameElement;
+  const p = fr && fr.parentElement;              // #frames -- the real slot
+  if (p && p.clientWidth && p.clientHeight) return { w: p.clientWidth, h: p.clientHeight };
+  return { w: win.innerWidth, h: win.innerHeight };
+}
 function fitFixedGrid(win) {
   const term = win && win.term, cols = CFG.term_cols, rows = CFG.term_rows;
   if (!term || !cols || !rows) return false;   // ttyd not connected yet -> retry
@@ -354,7 +377,8 @@ function fitFixedGrid(win) {
   // the DOM synchronously (verified live: real ttyd + headless Chrome); the
   // bounded shrink loop below is the safety net if it ever lags by a frame.
   const r = el.getBoundingClientRect();
-  const availW = win.innerWidth, availH = win.innerHeight;
+  const _slot = slotOf(win);                     // #798: fit to the SLOT, not a grown box
+  const availW = _slot.w, availH = _slot.h;
   if (!r.width || !r.height || !availW || !availH) return false;  // hidden/0 -> retry
   const F0 = term.options.fontSize || 13;
   let F = Math.max(6, Math.min(40, Math.floor(F0 * Math.min(availW / r.width, availH / r.height))));
@@ -409,7 +433,7 @@ function fillFixedGrid(win) {
   term.options.lineHeight = 1;
   term.options.letterSpacing = 0;
   const g = el.getBoundingClientRect();            // NATURAL grid (fill just reset)
-  const availW = win.innerWidth, availH = win.innerHeight;
+  const _slot = slotOf(win), availW = _slot.w, availH = _slot.h;  // #798: the SLOT, not a grown box
   if (!g.width || !g.height || !availW || !availH) return false;
   // vertical: taller cells via lineHeight. Target an INTEGER cell height that never
   // overflows -- xterm rounds cell HEIGHT to integer px (same as letterSpacing), so a
@@ -475,13 +499,82 @@ function stretchFrameToFill(win) {
   const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
   if (!el) return false;
   const g = el.getBoundingClientRect();     // CHILD layout coords (settled fill)
-  const availW = win.innerWidth, availH = win.innerHeight;
+  const _slot = slotOf(win), availW = _slot.w, availH = _slot.h;  // #798: the SLOT, not a grown box
   if (!g.width || !g.height || !availW || !availH) return false;
   const sx = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availW / g.width));
   const sy = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availH / g.height));
   fr.style.transformOrigin = '50% 50%';
   fr.style.transform = (sx <= 1.0005 && sy <= 1.0005)
     ? 'none' : 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  return true;
+}
+// #798 OVER-FIT (fourth layer): fitFixedGrid floors the font at 6px, so on a viewport
+// too SHORT to fit the fixed 176x51 grid even at that floor (owner's compact window:
+// natural grid ~357px tall vs a ~312px slot) the grid OVERFLOWS and the child's own
+// html,body{overflow:hidden} CLIPS it -- the owner's row-0 shell prompt (or, per the
+// flex resolution, the tmux status bar) vanishes. stretchFrameToFill CANNOT fix this:
+// a PARENT transform rescales the child's ALREADY-COMPOSITED bitmap, so it cannot
+// reveal a row the child never painted (the #798 review 🔴, proven live: 0 marker
+// pixels before AND after a shrink transform on the clipped child). This layer instead
+// GROWS the iframe's real CSS layout box (which the child sees as win.innerHeight) to
+// COVER the grid's own extent -- so the child paints ALL 51 rows with NO internal clip
+// -- then applies a parent UNIFORM down-scale (origin '50% 0', top-centre) to fit that
+// fully-painted box back into the slot: row 0 pinned at the slot top, the whole grid
+// visible. Proven live (real ttyd 1.7.4 + tmux + headless Chromium at 723x312): box
+// grown 312->366, scale 0.8525, the whole grid maps to parent y 41.3..345.6 inside the
+// 37..349 slot (RED: grid clipped past 349). Runs LAST in scheduleFill's pass, so it
+// OVERRIDES stretchFrameToFill's grow-only transform in the over-fit case and clears
+// its own box + defers to #700 in the under-fit case. Feedback-loop guard (a naive box
+// grow re-fires the child 'resize' -> fitFixedGrid -> bigger font -> bigger grid ->
+// runaway): (1) fitFixedGrid fits the font to slotOf (the slot), NEVER the grown box,
+// so a grow can't inflate the font; (2) the box is grown only to cover the (font-fixed)
+// grid, so it never runs away; (3) the box is mutated only when it DIFFERS from the
+// target -> idempotent, so a settled pass makes no change and the resize stops firing;
+// (4) the child 'resize' our own grow fires is IGNORED via win.__wtSetBox (see
+// applyFixedGrid), while a GENUINE slot change is driven by the parent #frames
+// ResizeObserver (our box mutations never resize #frames, so it never self-triggers).
+function reconcileFrameFit(win) {
+  const fr = win && win.frameElement;       // same-origin under the gateway
+  if (!fr || !win.term) return false;
+  const doc = win.document;
+  const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+  if (!el) return false;
+  const slot = slotOf(win);                 // the real #frames slot (parent-read)
+  const g = el.getBoundingClientRect();      // CHILD coords
+  if (!slot.w || !slot.h || !g.width || !g.height) return false;
+  // The over-fit check + box size use the grid's OWN dimensions (g.width/g.height),
+  // which are font-determined and PLACEMENT-independent -- so the box target is a fixed
+  // function of the (stable) font, never of the child's centring offset. (Using the
+  // extent g.right/g.bottom instead would count the post-grow centring offset and make
+  // the box creep a few px per pass before settling.) The +16 slack absorbs the child's
+  // own top/left padding (ttyd's ~5px), so the grid fits inside the grown box wherever
+  // the child places it (top-aligned OR centred), regardless of clip direction.
+  const natW = g.width, natH = g.height;
+  const over = (natW > slot.w + 1) || (natH > slot.h + 1);
+  if (!over) {                               // fits crisply -> box = slot, leave #700's transform
+    if (fr.style.width || fr.style.height) { fr.style.width = ''; fr.style.height = ''; }
+    win.__wtSetBox = null;                   // slot-sized: no self-induced-resize marker
+    return true;
+  }
+  // OVER-FIT: grow the box to cover the grid (+ slack for the child offset), uniform down-scale.
+  const boxW = Math.max(slot.w, Math.ceil(natW) + 16);
+  const boxH = Math.max(slot.h, Math.ceil(natH) + 16);
+  const wpx = boxW + 'px', hpx = boxH + 'px';
+  if (fr.style.width !== wpx) fr.style.width = wpx;     // mutate only on change -> idempotent
+  if (fr.style.height !== hpx) fr.style.height = hpx;
+  win.__wtSetBox = { w: boxW, h: boxH };     // the resize this fires is OUR OWN -> guarded
+  const s = Math.max(WT_FRAME_FILL_MIN_SHRINK, Math.min(slot.w / boxW, slot.h / boxH));
+  // Pin the TOP at the slot top (row 0 always survives) and CENTRE horizontally in the
+  // SLOT. transformOrigin '0 0' + an explicit translateX is exact for BOTH axes: a plain
+  // 'scale() origin 50% 0' would centre about the GROWN BOX's centre, which only equals
+  // the slot centre when boxW == slot.w -- so a WIDTH over-fit (a viewport narrower than
+  // the 704px grid) would shift the grid right and clip it. translateX = half the slack
+  // between the scaled box and the slot (0 when the width axis is the limiting one -> the
+  // grid fills the width; positive when height-limited -> centred letterbox).
+  const tx = (slot.w - s * boxW) / 2;
+  fr.style.transformOrigin = '0 0';
+  const t = 'translate(' + tx.toFixed(1) + 'px, 0px) scale(' + s.toFixed(4) + ')';
+  if (fr.style.transform !== t) fr.style.transform = t;
   return true;
 }
 // #655/#678: the FILL must re-run whenever the NATURAL grid size settles/changes.
@@ -500,7 +593,9 @@ function stretchFrameToFill(win) {
 // persistent clip.
 function scheduleFill(win) {
   // #700: every fill pass ends with the residual frame stretch (third layer).
-  const pass = () => { try { fillFixedGrid(win); stretchFrameToFill(win); } catch (e) {} };
+  // #798: reconcileFrameFit runs LAST so it OVERRIDES stretchFrameToFill's grow-only
+  // transform in the over-fit case (and clears its box + defers to #700 when it fits).
+  const pass = () => { try { fillFixedGrid(win); stretchFrameToFill(win); reconcileFrameFit(win); } catch (e) {} };
   pass();
   try {
     const doc = win.document;
@@ -566,7 +661,16 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
       if (!win.__wtResize) {                       // re-fit + re-fill on window resize
         win.__wtResize = true;
         try {
-          win.addEventListener('resize', () => { fitFixedGrid(win); scheduleFill(win); });
+          win.addEventListener('resize', () => {
+            // #798 feedback-loop guard: IGNORE the resize our own reconcileFrameFit
+            // box-grow fired (its new inner size == the box we deliberately set) so it
+            // can never re-enter the fit loop; a GENUINE viewport change never matches
+            // __wtSetBox and still re-fits (a slot change while the box is explicitly
+            // grown is driven by the parent #frames ResizeObserver instead).
+            const b = win.__wtSetBox;
+            if (b && Math.abs(win.innerWidth - b.w) <= 1 && Math.abs(win.innerHeight - b.h) <= 1) return;
+            fitFixedGrid(win); scheduleFill(win);
+          });
         } catch (e) {}
       }
       return;
@@ -629,6 +733,20 @@ if (fsBtn) {
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
 preloadAll();                           // #586: connect every tab up front (instant switching)
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
+// #798: drive a re-fit of the ACTIVE tab from a PARENT-side ResizeObserver on #frames
+// (the real slot). An over-fit tab grows its iframe to an EXPLICIT box, which then goes
+// deaf to a genuine viewport change via the child's own 'resize' (the box no longer
+// tracks #frames); this observer catches the slot change regardless. Our own iframe box
+// mutations never resize #frames, so it never self-triggers -- only a genuine viewport /
+// tab-bar height change fires it.
+try {
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      const f = made[current], win = f && f.contentWindow;
+      if (win && win.term) { fitFixedGrid(win); scheduleFill(win); }
+    }).observe(frames);
+  }
+} catch (e) {}
 // #644: register the minimal NETWORK-ONLY service worker (Chromium
 // installability). Best-effort — a registration failure never breaks the page.
 if ('serviceWorker' in navigator) {
