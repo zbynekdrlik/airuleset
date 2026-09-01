@@ -178,6 +178,22 @@ def _isolate_content_dedup_store():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_goal_roster():
+    """#804: `watchdog.roster` (the durable expected-armed register) writes to
+    `~/.claude/goal-roster.json` by default. A goal_lane_sweep integration test
+    that upserts an armed pane / logs a DEAD-SESSION would otherwise write the
+    developer's REAL home. Point it at a fresh per-test file via the same
+    `AIRULESET_GOAL_ROSTER_PATH` env seam the module reads; `mock.patch.dict` (a
+    real os.environ entry) so any subprocess inherits it. The push-gate
+    `unittest discover` gets its own floor in `cmd_push`."""
+    with TemporaryDirectory() as d:
+        with mock.patch.dict(os.environ,
+                             {"AIRULESET_GOAL_ROSTER_PATH":
+                              str(Path(d) / "goal-roster.json")}):
+            yield
+
+
+@pytest.fixture(autouse=True)
 def _ignore_owner_kill_switch(monkeypatch):
     """#400: the owner kill-switch flag files under the REAL ~/.claude are
     production state; a direct pytest run on a box with them set must not
