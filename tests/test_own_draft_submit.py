@@ -182,6 +182,106 @@ class SubmitOwnDraftVerified(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 2b. #806 caller-proven mode — a PLAIN-TEXT own draft (e.g. job 7's stranded
+#     Discord reply) whose ownership the CALLER already proved (head+tail exact
+#     match via `_box_holds_our_own_text`), so the machine-prefix gate is
+#     satisfied by that proof. The default (caller_proven_own=False) stays
+#     prefix-gated, byte-for-byte. Same caller-proven shape `submit_own_goal_
+#     verified` (#566) uses, but plain text -> transcript-confirmed here.
+# --------------------------------------------------------------------------- #
+
+# A realistic stranded own Discord-reply prompt (NO machine prefix — a human-
+# adjacent Slovak sentence the prefix gate deliberately refuses on content).
+OWN_REPLY = ("Odpoveď z Discordu: 2026-09-01 12:00 ti bola cez Discord položená "
+             "táto otázka: «Ticket #99 — pokračovať?» Užívateľ na ňu teraz "
+             "odpovedal: «1» — zariaď sa podľa tejto odpovede.")
+
+
+class CallerProvenOwnDraft806(unittest.TestCase):
+    def _tpath(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "sess.jsonl"
+        p.write_text(json.dumps(
+            {"type": "assistant", "message": {"content": "predošlá práca"}}) + "\n")
+        return p
+
+    def _fake(self, initial_box, tpath, enters_swallowed=0):
+        return DeliverGoalFakeTmux([(PID, "claude", "/x", "111")], GOAL_ARMED_CAP,
+                                   model_type=True, transcript_path=tpath,
+                                   enters_swallowed=enters_swallowed,
+                                   initial_box=initial_box)
+
+    def test_caller_proven_plain_text_draft_is_submitted_and_confirmed(self):
+        # RED on the pre-#806 signature (no caller_proven_own kwarg -> TypeError),
+        # AND semantically: a non-prefix reply is refused without the proof.
+        p = self._tpath()
+        tmux = self._fake(OWN_REPLY, p)
+        logs = []
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=logs,
+                                          caller_proven_own=True)
+        self.assertTrue(ok, logs)
+        self.assertEqual(tmux.box, "")                     # submitted (cleared)
+        self.assertFalse(any("-l" in a for a in tmux.sent), tmux.sent)  # never retyped
+        self.assertIn("Odpoveď z Discordu:", p.read_text())  # real user turn landed
+
+    def test_default_mode_refuses_the_same_plain_text_draft(self):
+        # The prefix gate is UNCHANGED by default: a plain-text reply has no
+        # unambiguous machine prefix, so without the caller's proof it is
+        # refused with ZERO keystrokes (never a blind Enter on a user's draft).
+        p = self._tpath()
+        tmux = self._fake(OWN_REPLY, p)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=[])
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_caller_proven_swallow_leaves_the_draft_untouched(self):
+        p = self._tpath()
+        tmux = self._fake(OWN_REPLY, p, enters_swallowed=99)
+        logs = []
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=logs,
+                                          caller_proven_own=True)
+        self.assertFalse(ok, logs)
+        self.assertEqual(tmux.box, OWN_REPLY)             # left exactly as-is
+        self.assertFalse(any("BSpace" in " ".join(a) for a in tmux.sent), tmux.sent)
+        self.assertFalse(any("-l" in a for a in tmux.sent), tmux.sent)
+        _no_double_escape(tmux.sent)
+
+    def test_caller_proven_corrective_escape_enter_recovers_a_single_swallow(self):
+        p = self._tpath()
+        tmux = self._fake(OWN_REPLY, p, enters_swallowed=1)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=[],
+                                          caller_proven_own=True)
+        self.assertTrue(ok)
+        self.assertEqual(tmux.box, "")
+        _no_double_escape(tmux.sent)
+        self.assertEqual(_tails(tmux.sent).count("Escape"), 1, tmux.sent)
+
+    def test_caller_proven_missing_tpath_refuses(self):
+        tmux = self._fake(OWN_REPLY, None)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, None,
+                                          sleep_fn=lambda s: None, logs=[],
+                                          caller_proven_own=True)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+    def test_caller_proven_box_no_longer_holds_the_draft_is_refused(self):
+        # The box raced empty since the caller's own head+tail check — never a
+        # blind Enter (the same fresh-capture race guard the prefix mode uses).
+        p = self._tpath()
+        tmux = self._fake("", p)
+        ok = wd.submit_own_draft_verified(PID, OWN_REPLY, tmux, p,
+                                          sleep_fn=lambda s: None, logs=[],
+                                          caller_proven_own=True)
+        self.assertFalse(ok)
+        self.assertEqual(tmux.sent, [])
+
+
+# --------------------------------------------------------------------------- #
 # 3. lane-guard branching — own-prefix draft submitted in place; a foreign
 #    draft keeps today's deliver_with_stash behavior byte-for-byte.
 # --------------------------------------------------------------------------- #
