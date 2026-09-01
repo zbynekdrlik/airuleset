@@ -4354,7 +4354,8 @@ def _watchdog_ops_wait_fetch(cwd):
         # `--ops-wait` always prints the FULL 5-field form (reason_fn is always
         # given), so field 3 IS the reason column (`ops-wait`/`acceptance` +
         # optional ` gk-handoff!` (#636) + optional ` stale!` + optional
-        # ` recheck!` (#699) + optional ` unpark?` (#753)). Require >=5 fields so
+        # ` recheck!` (#699) + optional ` unpark?` (#753) + optional
+        # ` tacit-wait`/` tacit-close?` (#818)). Require >=5 fields so
         # a hypothetical degraded
         # 4-field line (title at index 3) can never be misread as a flag (#570
         # review nit); anything shorter -> no flag.
@@ -4373,6 +4374,17 @@ def _watchdog_ops_wait_fetch(cwd):
                         "gk_handoff": "gk-handoff!" in reason,
                         "release_recheck": "recheck!" in reason,
                         "acceptance": "acceptance" in reason,
+                        # #818: only `tacit-close?` is consumed by the job-20
+                        # nudge (the actionable "close, don't remind" clause). A
+                        # tacit member keeps its base `acceptance` reason in the
+                        # string, so `acceptance` above stays True and the #753
+                        # UNPARK-AUDIT count still includes it — the client can
+                        # still reply mid-window, so tacit is NEVER excluded from
+                        # UNPARK-AUDIT. `tacit-wait` is a CLI display tag with no
+                        # watchdog consumer (its stale! suppression already
+                        # dropped the false "remind DNES" nudge), so it is
+                        # deliberately NOT parsed here (the #753 no-dead-parse rule).
+                        "tacit_close": "tacit-close?" in reason,
                         "title": title})
     return members
 
@@ -5614,10 +5626,13 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     OPS_WAIT_EVIDENCE_MAX_S as OPS_WAIT_EVIDENCE_MAX_S,
     OPS_WAIT_STALE_MAX_FETCHES as OPS_WAIT_STALE_MAX_FETCHES,
     OPS_WAIT_WDRAIN_THRESHOLD as OPS_WAIT_WDRAIN_THRESHOLD,
+    TACIT_WINDOW_WORKING_S as TACIT_WINDOW_WORKING_S,
     _stream_self_login as _stream_self_login,
     _comment_has_citation as _comment_has_citation,
+    _comment_is_final_reminder as _comment_is_final_reminder,
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
+    _tacit_window_flagged as _tacit_window_flagged,
     _release_recheck_flagged as _release_recheck_flagged,
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,

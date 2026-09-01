@@ -409,6 +409,20 @@ def _acceptance_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _tacit_close_numbers(members):
+    """The subset of `_member_numbers` flagged `tacit-close?` (#818) — a
+    delivered + reminded client-acceptance W member whose #799 N=3 tacit window
+    has ELAPSED: a tacit-close CANDIDATE. Only the structured shape carries the
+    flag, so a legacy int list yields an EMPTY list (no TACIT-CLOSE sub-clause —
+    the safe/unchanged direction, exactly like `_stale_numbers`). `tacit-wait`
+    (still in the window) is deliberately NOT surfaced here — its only effect is
+    the CLI's stale! suppression (which already dropped the false 'remind DNES'
+    nudge); it needs no session action, so it carries no clause."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("tacit_close")
+            and isinstance(m.get("number"), int)]
+
+
 # #698 — above this many release-landed-flagged W members on one box, the
 # escalated sub-clause additionally instructs the session to summarise the
 # state to the owner via the standard ❓ channel (the ticket's own >N=5; never
@@ -639,6 +653,19 @@ def _flag_items(w_members, release_landed):
             "W-OVERFLOW %d>%d (#754 -- W-drain PRED I: "
             "zavri/odparkuj/cituj; nedá sa → zhrň ownerovi ❓)."
             % (w_total, WDRAIN_ESCALATE_N))
+    # #818 — TACIT-CLOSE: a delivered+reminded acceptance member past its #799
+    # N=3 silence window is a cheap W-drain CANDIDATE (close, never remind). High
+    # priority (right after W-OVERFLOW) — closing it directly pays down the #754
+    # W-debt. The action is a tacit close, NOT a second reminder: verify the
+    # reminder was genuinely SENT (re-read the cited msg-id) + check #745
+    # reactions + the Discuss thread, then closing note + `Acceptance-tacit:`.
+    tacit_close = len(_tacit_close_numbers(w_members))
+    if tacit_close:
+        items.append(
+            "TACIT-CLOSE %d (#799 -- ticho N=3 po pripomienke: over ze "
+            "pripomienka ODOSLANÁ (re-read msg-id) + #745 reakcie, POSTni "
+            "closing nótu, close s Acceptance-tacit; NEpripomínaj)."
+            % tacit_close)
     stale = len(_stale_numbers(w_members))
     if stale:
         items.append("STALE %d (#607 -- pošli vecnú pripomienku "

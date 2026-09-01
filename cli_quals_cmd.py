@@ -55,7 +55,8 @@ def _row_action(row, own_stream=None):
 def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       stale_numbers=None, queued_numbers=None,
                       gk_handoff_numbers=None, recheck_numbers=None,
-                      unpark_numbers=None):
+                      unpark_numbers=None, tacit_wait_numbers=None,
+                      tacit_close_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -116,13 +117,23 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     (vs the `!` warning family) marks a session-verify CANDIDATE: verify per the
     #588 deployed-state doctrine and clear `ops-wait` WITH evidence. Only
     meaningful alongside `reason_fn`; a member can carry several warnings + this
-    (order: gk-handoff! then stale! then recheck! then unpark?)."""
+    (order: gk-handoff! then stale! then recheck! then unpark?).
+
+    `tacit_wait_numbers` / `tacit_close_numbers` (#818, `--ops-wait` only): the
+    acceptance-reason W members inside / past their #799 N=3 tacit-acceptance
+    window — ` tacit-wait` (in window: NEpripomínaj druhýkrát, wait) or
+    ` tacit-close?` (window elapsed: a session-verify CANDIDATE, the `?` like
+    `unpark?`) is APPENDED LAST. The caller already SUBTRACTED these from
+    stale!/recheck! (a tacit member is never nudged for a second reminder), so
+    the two are mutually exclusive per member and never co-render with stale!."""
     flag_numbers = flag_numbers or set()
     stale_numbers = stale_numbers or set()
     queued_numbers = queued_numbers or set()
     gk_handoff_numbers = gk_handoff_numbers or set()
     recheck_numbers = recheck_numbers or set()
     unpark_numbers = unpark_numbers or set()
+    tacit_wait_numbers = tacit_wait_numbers or set()
+    tacit_close_numbers = tacit_close_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -150,17 +161,29 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
             # distinct from the `!` accusation family before it.
             if n in unpark_numbers:
                 reason = (reason + " unpark?").strip()
+            # #818: the tacit-window tags. A tacit member was already SUBTRACTED
+            # from stale!/recheck! by the caller (no 2nd-reminder nudge), so it
+            # carries neither of those; `tacit-wait` (in the #799 N=3 silence
+            # window — do nothing, wait) or `tacit-close?` (window elapsed — a
+            # session-verify CANDIDATE like `unpark?`: verify the reminder was
+            # sent + #745 reactions, then tacit-close).
+            if n in tacit_wait_numbers:
+                reason = (reason + " tacit-wait").strip()
+            if n in tacit_close_numbers:
+                reason = (reason + " tacit-close?").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                           action, reason,
                                           row.get("title") or ""))
 
 
 def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
-                           gk_handoff_numbers, unpark_numbers=None):
+                           gk_handoff_numbers, unpark_numbers=None,
+                           tacit_wait_numbers=None, tacit_close_numbers=None):
     """#754 — a single `#`-prefixed AGGREGATE summary of the parked-W bucket,
     appended after the `--ops-wait` member rows: total count, the OLDEST member
-    (by createdAt), and the stale!/recheck!/gk-handoff!/unpark? flag counts, plus
-    an ` OVER-THRESHOLD >N` marker when |W| exceeds `OPS_WAIT_WDRAIN_THRESHOLD`.
+    (by createdAt), the stale!/recheck!/gk-handoff!/unpark? flag counts and the
+    #818 tacit-wait/tacit-close counts, plus an ` OVER-THRESHOLD >N` marker when
+    |W| exceeds `OPS_WAIT_WDRAIN_THRESHOLD`.
     The goal state of the loop is I0 ∧ U0 ∧ W0 — W is a DEBT bucket with a strop,
     not a terminal ticket state — so the session/owner needs the bucket-level
     picture (not just per-member rows) to decide a W-drain pass.
@@ -181,11 +204,14 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
     marker = (" OVER-THRESHOLD >%d" % airuleset.OPS_WAIT_WDRAIN_THRESHOLD
               if over else "")
     return ("# W-summary: total=%d oldest=#%s (%s) stale=%d recheck=%d "
-            "gk-handoff=%d unpark=%d%s" % (total, oldest, created,
-                                           len(stale_numbers or set()),
-                                           len(recheck_numbers or set()),
-                                           len(gk_handoff_numbers or set()),
-                                           len(unpark_numbers or set()), marker))
+            "gk-handoff=%d unpark=%d tacit-wait=%d tacit-close=%d%s" % (
+                total, oldest, created,
+                len(stale_numbers or set()),
+                len(recheck_numbers or set()),
+                len(gk_handoff_numbers or set()),
+                len(unpark_numbers or set()),
+                len(tacit_wait_numbers or set()),
+                len(tacit_close_numbers or set()), marker))
 
 
 def _print_audit_rows(rows, own_stream=None):
@@ -438,18 +464,26 @@ def _handoff_label_mechanism_health(cwd=None):
 
 
 def _ops_wait_flag_sets(ops_wait, root):
-    """#699 — the (stale, recheck, gk_handoff, unpark) flag sets for the
-    `--ops-wait` reason column, SHARING ONE per-member comment-age fetch between
-    the #570 `stale!` (24h) and #699 `recheck!` (1h release cadence) tags so the
-    reason column never DOUBLES the gh reads (margin for the 35s
-    `_watchdog_ops_wait_fetch` timeout). `gk-handoff!` is pure-label (no gh).
+    """#699 — the (stale, recheck, gk_handoff, unpark, tacit_wait, tacit_close)
+    flag sets for the `--ops-wait` reason column, SHARING ONE per-member
+    comment-age fetch between the #570 `stale!` (24h), #699 `recheck!` (1h
+    release cadence) and #818 tacit-window tags so the reason column never
+    DOUBLES the gh reads (margin for the 35s `_watchdog_ops_wait_fetch`
+    timeout). `gk-handoff!` is pure-label (no gh).
 
     #753 part 1a — `unpark?`: ONE per-repo ORIGIN release-train read (via
     `_watchdog_release_state_fetch`), fired lazily by `_unpark_release_flagged`
     ONLY when a release-shaped member exists AND `resolve_authority(root)` ∈
     {full, branch-merge}; a repo with no release-parked member does ZERO extra
     work, so the #570 per-member budget is untouched. Any failure (authority
-    unresolvable / fetch error / not-drained) → the empty set (fail-safe)."""
+    unresolvable / fetch error / not-drained) → the empty set (fail-safe).
+
+    #818 — `tacit_wait`/`tacit_close`: a delivered + reminded client-acceptance
+    W member inside / past its #799 N=3 tacit window, computed from the SAME
+    shared `_ages` fetch (`own_final_reminder` was read in the same pass). A
+    tacit member is SUBTRACTED from `stale!` AND `recheck!` — it is in the tacit
+    silence window (or past it), so it must NOT be nudged for a second reminder;
+    the doctrine's terminal action is a tacit close, not a push."""
     import airuleset
     self_login = airuleset._stream_self_login()
     ages_cache = {}
@@ -463,6 +497,11 @@ def _ops_wait_flag_sets(ops_wait, root):
     stale = airuleset._stale_ops_wait_flagged(ops_wait, ages_fn=_ages)
     recheck = airuleset._release_recheck_flagged(ops_wait, ages_fn=_ages)
     gk_handoff = airuleset._gk_handoff_ops_wait_flagged(ops_wait)
+    tacit_wait, tacit_close = airuleset._tacit_window_flagged(
+        ops_wait, ages_fn=_ages)
+    tacit = tacit_wait | tacit_close
+    stale = stale - tacit                        # #818: no 2nd-reminder nudge
+    recheck = recheck - tacit
     try:
         authority = airuleset.resolve_authority(root)
     except Exception:
@@ -470,7 +509,7 @@ def _ops_wait_flag_sets(ops_wait, root):
     unpark = airuleset._unpark_release_flagged(
         ops_wait, authority=authority,
         release_fetch=lambda: airuleset._watchdog_release_state_fetch(root))
-    return stale, recheck, gk_handoff, unpark
+    return stale, recheck, gk_handoff, unpark, tacit_wait, tacit_close
 
 
 def cmd_slice_quals(args):
@@ -642,14 +681,21 @@ def cmd_slice_quals(args):
         # #753: also tag `unpark?` a release-parked member whose release has
         # PROVABLY landed (origin train drained, full/branch-merge authority) —
         # ONE per-repo origin read, only when a release-shaped member exists.
-        _stale, _recheck, _gkh, _unpark = _ops_wait_flag_sets(ops_wait, root)
+        # #818: also tag `tacit-wait`/`tacit-close?` a delivered+reminded
+        # acceptance member inside/past its #799 N=3 window (subtracted from
+        # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
+        _stale, _recheck, _gkh, _unpark, _tw, _tc = _ops_wait_flag_sets(
+            ops_wait, root)
         _print_issue_rows(ops_wait, own_stream=user,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
-                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark)
+                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
+                          tacit_wait_numbers=_tw, tacit_close_numbers=_tc)
         # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
         _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
-                                          unpark_numbers=_unpark)
+                                          unpark_numbers=_unpark,
+                                          tacit_wait_numbers=_tw,
+                                          tacit_close_numbers=_tc)
         if _summary:
             print(_summary)
         return
@@ -852,14 +898,21 @@ def cmd_core_quals(args):
         # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
         # #753: also tag `unpark?` a release-parked member whose release has
         # PROVABLY landed (origin train drained, full/branch-merge authority).
-        _stale, _recheck, _gkh, _unpark = _ops_wait_flag_sets(ops_wait, root)
+        # #818: also tag `tacit-wait`/`tacit-close?` a delivered+reminded
+        # acceptance member inside/past its #799 N=3 window (subtracted from
+        # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
+        _stale, _recheck, _gkh, _unpark, _tw, _tc = _ops_wait_flag_sets(
+            ops_wait, root)
         _print_issue_rows(ops_wait, own_stream=None,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
-                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark)
+                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
+                          tacit_wait_numbers=_tw, tacit_close_numbers=_tc)
         # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
         _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
-                                          unpark_numbers=_unpark)
+                                          unpark_numbers=_unpark,
+                                          tacit_wait_numbers=_tw,
+                                          tacit_close_numbers=_tc)
         if _summary:
             print(_summary)
         return
