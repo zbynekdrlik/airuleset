@@ -779,6 +779,27 @@ class SubagentNudgeAdoption(unittest.TestCase):
         self.assertNotIn(self.PANE, state.get("janitor_watch", {}))
 
 
+class SubagentNudgeTpathlessRefuse806(unittest.TestCase):
+    def test_no_tpath_refuses_and_never_types(self):
+        # #806 RED -- without a supervisor transcript the submit is UNVERIFIABLE.
+        # The old tpath-less fallback ran a raw `send_continue` (type + Enter) and
+        # returned True unconditionally, so a swallowed Enter stranded the nudge in
+        # the composer while the caller believed it delivered (mode-6). GREEN: it
+        # REFUSES -- no keystroke, returns False, logs the reason, retries later.
+        keys = []
+
+        def run(argv, timeout=8):
+            keys.append(argv)
+            return ""
+
+        logs = []
+        ok = wd.send_subagent_nudge("%1", "worker-x", "api-error", run,
+                                    tpath=None, sleep_fn=lambda s: None, logs=logs)
+        self.assertFalse(ok)
+        self.assertFalse(any("send-keys" in " ".join(a) for a in keys), keys)
+        self.assertTrue(any("refuse: no transcript path" in ln for ln in logs), logs)
+
+
 # #505 — the two card_flags.py flag-cluster bare-box sites (_nudge_repo_pane /
 # _deliver_flag_prompt_to_exact_session) adopt send_verified. The end-to-end
 # caller-threading + janitor-mark tests (WHICH transcript, True vs False ->

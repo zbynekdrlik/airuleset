@@ -138,6 +138,31 @@ class TestMachineNudgeAutoSubmit(unittest.TestCase):
         self.assertTrue(any("machine-nudge" in ln for ln in logs), logs)
         self.assertFalse(s.calls, "machine nudge submits, never pings")
 
+    def test_806_stranded_lane_check_is_recognized_and_submitted(self):
+        # #806 RED -- a stranded `lane-check:` empty-lane nudge carries a
+        # REGISTERED own-nudge prefix (`_OWN_NUDGE_SUBMIT_PREFIXES`) but was NOT
+        # in `MACHINE_NUDGE_PREFIX` (bounce/gk-request only), so it fell through
+        # to the FOREIGN ping path and sat in the composer forever while the
+        # watchdog only pinged (mode-6). GREEN: recognized as machine -> SUBMITTED
+        # in place (Escape+Enter), never pinged.
+        lane_pane = ("✻ Waiting for 1 background agent to finish\n"
+                     "──── ultracode ─\n"
+                     "❯\xa0lane-check: backlog=4 workers=0 — várka je ZAVRETÁ, "
+                     "spusti ďalšiu\n"
+                     "────\n"
+                     "  ctx ██░░  caveman\n")
+        st, s = {}, FakeSend()
+        now = time.time()
+        run = self._run_recorder()
+        wd.prompt_wedge_check(now, st, "%2", lane_pane, now, "zbynek",
+                              "gk", s, run=run)
+        logs = wd.prompt_wedge_check(now + 70, st, "%2", lane_pane, now,
+                                     "zbynek", "gk", s, run=run)
+        enters = [a for a in run.calls if a[-1] == "Enter"]
+        self.assertEqual(len(enters), 1, run.calls)
+        self.assertTrue(any("machine-nudge" in ln for ln in logs), logs)
+        self.assertFalse(s.calls, "a stranded own lane-check submits, never pings")
+
     def test_single_sweep_machine_nudge_waits(self):
         st, s = {}, FakeSend()
         run = self._run_recorder()
