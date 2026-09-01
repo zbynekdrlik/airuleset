@@ -101,13 +101,20 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             any origin or content, ever (#333/#228 — the session is
             mid-decision; the pending question + the in-flight ticket the
             user's answer needs would be lost). All pass → type
-            `/compact`, log `SEND`, clear the request. Any check fails →
-            log `SKIP reason=<x>`, and the request is LEFT PENDING for the
+            `/compact`; then a post-send re-capture (#822 (a)) classifies it
+            `sent` (executing) or `queued` (appended to CC's type-ahead queue
+            behind a running turn) — a `queued` `/compact` records its
+            queued-since (below) and does NOT write `compact-delivered`. Log
+            `SEND`/`QUEUED`, clear the request. Any check fails → log
+            `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
             except an EXPIRED request (condition e) or one that is already
-            otherwise handled (already-queued, or in cooldown for a
+            otherwise handled (`queued`, already-queued, or in cooldown for a
             non-drained-boundary origin — a `self-callback` drained boundary
-            supersedes the cooldown and delivers, #805), which is DISCARDED outright. "No infinite waiting" is the hard age cap's
+            supersedes the cooldown and delivers, #805), which is DISCARDED
+            outright. A `self-callback` request under an armed `/goal` with zero
+            live tasks is NOT typed (#822 (c), the pre-type `skip:goal-continuing`
+            gate). "No infinite waiting" is the hard age cap's
             job — EXCEPT while a hold-extend veto keeps refreshing the claim
             (#727 a mid-batch loop holds past 30 min by design; #741 an
             actively-held boundary — recent-human / busy / client-active — holds
@@ -154,9 +161,11 @@ _log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# State — two files. `compact-requests.json`: the pending request per
+# State — three files. `compact-requests.json`: the pending request per
 # session. `compact-delivered.json`: the last REAL send time per session
-# (condition (d)'s own store). Nothing else is needed.
+# (condition (d)'s own store). `compact-queued.json` (#822 (e), defined below):
+# the instant a typed `/compact` was classified QUEUED, so `--status` can report
+# `QUEUED since=…` while the row still sits in the pane.
 # --------------------------------------------------------------------------- #
 
 def compact_requests_path():
@@ -764,10 +773,14 @@ COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
 
 # The `--self` disposition words for which the boundary compact did NOT execute
 # and the session MUST do the boundary-hold to drain it: `skip:goal-continuing`
-# (the #822 (c) pre-type gate refused to type under the armed goal) and `queued`
-# (typed, but appended to CC's type-ahead queue). A clean `sent` / any other skip
-# does not print the hold hint.
-_COMPACT_HOLD_HINT_WORDS = frozenset(("skip:goal-continuing", "queued"))
+# (the #822 (c) pre-type gate refused to type under the armed goal), `queued`
+# (typed, but appended to CC's type-ahead queue), and `already-queued` (a
+# `/compact` row from a prior delivery still sits unexecuted in the pane). All
+# three need an ACCEPTED Stop the hold turn provides — so print the hint at the
+# boundary itself rather than leaving the session to recover a turn later via
+# `--status`. A clean `sent` / any other skip does not print the hint.
+_COMPACT_HOLD_HINT_WORDS = frozenset(
+    ("skip:goal-continuing", "queued", "already-queued"))
 
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
