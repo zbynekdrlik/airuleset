@@ -755,6 +755,35 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
                          "re-pings must be hard-capped per episode")
 
+    def test_dark_episode_pings_at_most_once_804(self):
+        # #804 item 4 -- the STAGED re-ping (GOAL_DARK_REPING_SCHEDULE_S,
+        # count>1) is DELETED: every dark ping is notify-SUPPRESSED (goal-dark
+        # in SUPPRESSED_ALERT_PREFIXES, #704) and the #795 daily re-ask is
+        # retired, so a staged re-ping composed a message notify drops -- dead
+        # code. The FIRST ping stays; a dark episode now pings AT MOST ONCE, no
+        # matter how long it stays dark with a fresh workable cache. RED on the
+        # pre-#804 staged schedule (which re-pinged at every elapsed stage);
+        # GREEN once the reping path is removed. No reference to the deleted
+        # constant -- a 100h/sweep jump is past any conceivable schedule.
+        proj, tmux = self._dark("sess-dark-once-804")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        rearm = _rearm_none                       # template unresolved -> ping fallback
+        now = [1_700_000_000]
+
+        def obl(cwd):
+            return (5, now[0] - 60)               # always fresh + workable
+
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)   # first obs
+        now[0] += 100
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)   # FIRST ping
+        self.assertEqual(len(sent), 1, "the first ping fires")
+        for _ in range(12):
+            now[0] += 100 * 3600                  # far past any staged schedule
+            self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
+        self.assertEqual(len(sent), 1,
+                         "a dark episode pings AT MOST ONCE, never re-pings (#804)")
+
     # ----------------------------------------------------------------- #
     # #478 — AUTO-RE-ARM the dark-DIED branch (reverses #403), gated on a
     # genuinely WORKABLE obligation cache. The safeguard is the SAME #459
