@@ -65,7 +65,11 @@ AGENT_DEATH = ('Agent "Implement #41" failed: Agent terminated early due to an '
 _SV_PATCHER = None
 
 
-def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None,
+                          logs=None, out=None):
+    # `out=` mirrors the real send_verified signature (#594/#814) so the
+    # lane-occupancy nudge's `out=send_out` call resolves; a confirmed True
+    # submit leaves the dict untouched.
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True

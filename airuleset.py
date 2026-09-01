@@ -5138,6 +5138,40 @@ def cmd_goal_arm(args):
     sys.stdout.write(word)
 
 
+def cmd_goal_roster(args):
+    """#804 -- inspect / edit the durable expected-armed roster. Default: list
+    every rostered stream (cwd, sid, authority, armed_ts). `--drop <cwd>`
+    explicitly deprovisions a stream (the sanctioned EXPLICIT removal event: a
+    user retired that stream on purpose), so the DEAD-SESSION census stops
+    surfacing it. A read-only helper otherwise -- the census/upsert own the
+    roster's normal lifecycle."""
+    from watchdog import roster as _roster_mod
+    reg = _roster_mod.load_roster()
+    drop = (getattr(args, "drop", "") or "").strip()
+    if drop:
+        if _roster_mod.drop(reg, drop):
+            if _roster_mod.save_roster(reg):
+                print("goal-roster: dropped %s" % drop)
+            else:
+                print("goal-roster: dropped %s in memory but the roster file "
+                      "could not be written (unwritable ~/.claude?)" % drop,
+                      file=sys.stderr)
+                sys.exit(1)
+        else:
+            print("goal-roster: %s not in roster" % drop, file=sys.stderr)
+            sys.exit(1)
+        return
+    if not reg:
+        print("goal-roster: empty (no expected-armed streams recorded)")
+        return
+    for cwd, e in reg.items():
+        if not isinstance(e, dict):
+            continue
+        print("%s\tsid=%s\tauthority=%s\tarmed_ts=%s\tlast_seen_ts=%s"
+              % (cwd, e.get("sid", "?"), e.get("authority", "?"),
+                 e.get("armed_ts", "?"), e.get("last_seen_ts", "?")))
+
+
 # --- #433 cluster L-E: the autopilot authority profiles (AUTHORITY_PROFILES +
 # AUTHORITY_BY_USER) promoted to the constants-only leaf cli_fleet.py —
 # re-exported here so every resident reader + every shipped leaf that reads
@@ -6191,6 +6225,15 @@ def main():
                              "printed line already used, so they can "
                              "never disagree.")
 
+    p_roster = sub.add_parser(
+        "goal-roster",
+        help="Inspect / edit the #804 durable expected-armed roster "
+             "(~/.claude/goal-roster.json). Default: list. `--drop <cwd>` "
+             "explicitly deprovisions a stream (a user retired it) so the "
+             "DEAD-SESSION census stops surfacing it.")
+    p_roster.add_argument("--drop", metavar="CWD", default="",
+                          help="Remove this stream (cwd) from the roster.")
+
     p_tickets = sub.add_parser(
         "tickets-status",
         help="Statusline github-tickets segment — autopilot done/total or open issues")
@@ -6639,6 +6682,7 @@ SUBCOMMANDS = {
     "watchdog": cmd_watchdog,
     "compact-request": cmd_compact_request,
     "goal-arm": cmd_goal_arm,
+    "goal-roster": cmd_goal_roster,
     "fable-gate": cmd_fable_gate,
     "webterm-access": cmd_webterm_access,
     "drop-gateway": cmd_drop_gateway,

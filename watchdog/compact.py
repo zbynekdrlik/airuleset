@@ -54,7 +54,15 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
                 demonstrably not consumed yet);
             (d) at least `COMPACT_MIN_DELIVERY_INTERVAL_S` (30 min) has
                 passed since the last REAL `/compact` delivered to this
-                session;
+                session — EXCEPT a DRAINED-boundary request (`self-callback`, the sole
+                production origin), which SUPERSEDES an in-window cooldown (#805):
+                a genuine drained boundary that cleared every gate above is the
+                authoritative "compact NOW" signal, so two batch boundaries
+                within 30 min BOTH compact (the owner's report — the cooldown,
+                keyed only on watchdog-delivered sends, was swallowing the
+                second boundary and starting the next batch on a grown context).
+                The cooldown stays an unconditional skip for any NON-boundary
+                origin;
             (e) the request itself is not older than
                 `COMPACT_REQUEST_MAX_AGE_S`, whose `ts` REFRESHES both on every
                 re-record (#599 supersede, REVERSING #400's non-refreshable
@@ -76,8 +84,12 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             a loop) against the same-turn-dispatch race (#238): a sibling
             worker dispatched in the very same turn can be briefly
             invisible to the live-tasks signals.
-            Every condition above is an UNCONDITIONAL hard skip — none has a
-            TIME-BOXED override. #599 removed condition (c)'s `⏳` veto
+            Every condition above is an UNCONDITIONAL hard skip with ONE
+            origin-scoped supersede — none has a TIME-BOXED override. The one
+            supersede is condition (d)'s #805 drained-boundary priority above:
+            the drained-boundary origin (`self-callback`) overrides an in-window
+            cooldown (never the 30-min clock for a non-boundary origin, never any of (a)/(b)/(c)/(e),
+            never `❓`). #599 removed condition (c)'s `⏳` veto
             ENTIRELY (and with it the self-callback-only #425 exemption and its
             `_compact_self_reported_*` machinery): a recorded boundary request
             already PROVES a boundary occurred, and a 24/7 loop moves on to `⏳`
@@ -93,8 +105,9 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             log `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
             except an EXPIRED request (condition e) or one that is already
-            otherwise handled (already-queued, in cooldown), which is
-            DISCARDED outright. "No infinite waiting" is the hard age cap's
+            otherwise handled (already-queued, or in cooldown for a
+            non-drained-boundary origin — a `self-callback` drained boundary
+            supersedes the cooldown and delivers, #805), which is DISCARDED outright. "No infinite waiting" is the hard age cap's
             job — EXCEPT while a hold-extend veto keeps refreshing the claim
             (#727 a mid-batch loop holds past 30 min by design; #741 an
             actively-held boundary — recent-human / busy / client-active — holds
@@ -427,6 +440,18 @@ _COMPACT_PROVEN_BOUNDARY_ORIGIN = "subagent-stop"
 _COMPACT_SELF_CALLBACK_ORIGIN = "self-callback"
 _COMPACT_PROVEN_BOUNDARY_ORIGINS = frozenset(
     (_COMPACT_PROVEN_BOUNDARY_ORIGIN, _COMPACT_SELF_CALLBACK_ORIGIN))
+
+# #805 -- the drained-BATCH-boundary origins that SUPERSEDE an in-window cooldown
+# on condition (d) (see `deliver_compact`). A narrow ALLOWLIST, not the full
+# proven-boundary set (the #757 fail-safe: only a named production origin gains a
+# superseding power). `self-callback` is the SOLE production producer of a pending
+# request (the module-header INPUT note; `subagent-stop`'s RECORD channel is
+# retired, #610) — so this is exactly the origin that must never be swallowed by
+# the cooldown, and it deliberately EXCLUDES `subagent-stop` (kept subject to the
+# ordinary cooldown, the pre-#805 behaviour its own test locks). Any future
+# automatic origin must be added here EXPLICITLY to gain the supersede — never
+# inherited from `_COMPACT_PROVEN_BOUNDARY_ORIGINS`.
+_COMPACT_DRAINED_BOUNDARY_ORIGINS = frozenset((_COMPACT_SELF_CALLBACK_ORIGIN,))
 
 # The ONLY marker that still vetoes condition (c) after #599: `❓` (blocked on
 # the user) is genuinely undurable state — the session is mid-decision, and the
@@ -936,7 +961,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                            but the request is fully handled. Discard.
       "cooldown"        — condition (d): a real send already happened for
                            this session too recently. A delayed send would
-                           only ever fire STALE — discard, never hold.
+                           only ever fire STALE — discard, never hold. Returned
+                           for a NON-drained-boundary origin only: a
+                           `self-callback` drained-boundary request SUPERSEDES an
+                           in-window cooldown (#805) and is delivered, never
+                           returns "cooldown".
       "skip:<reason>"   — not safe right now; the caller LEAVES the
                            request pending for the next periodic sweep.
 
@@ -1031,10 +1060,32 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return "skip:too-young"
 
-    # Condition (d) — the 30-min per-session cooldown.
+    # Condition (d) — the 30-min per-session cooldown, with the #805
+    # DRAINED-BOUNDARY PRIORITY exemption. A drained-boundary request
+    # (`self-callback` — the SOLE production origin) that
+    # reached here has already cleared EVERY gate above: at-boundary (c), no
+    # recent human, no draft, not busy, zero live worker lanes / bg-bash (b),
+    # aged past too-young. That is a genuine DRAINED boundary, and the boundary
+    # is the authoritative "compact NOW" signal — it SUPERSEDES an in-window
+    # cooldown left by a PRIOR delivery, so the next batch never starts on an
+    # uncompacted, growing context (the owner's report). ROOT (why the direct-
+    # condition model, #599, still swallowed it): the cooldown store
+    # `compact-delivered.json` is written ONLY by watchdog delivery
+    # (`mark_compact_delivery_ts`) — a manual owner `/compact` never writes it —
+    # so a second batch boundary within 30 min of the PREVIOUS delivered
+    # boundary hit "cooldown" (a TERMINAL word → the request was CLEARED), and
+    # the boundary compact silently never ran. The fix is NOT re-keying the
+    # cooldown nor tuning the 30-min constant (both stay for any non-boundary
+    # origin — the anti-storm floor); it is a boundary-priority path that
+    # supersedes the in-window cooldown, logged as an explicit #486 decision.
     if compact_delivery_in_cooldown(sid, now, path=delivered_path):
-        _log_compact_sync("SKIP cooldown sid=%s cwd=%s" % (sid, cwd))
-        return "cooldown"
+        if origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS:
+            _log_compact_sync(
+                "BOUNDARY-PRIORITY cooldown-superseded sid=%s cwd=%s origin=%s"
+                % (sid, cwd, origin or "-"))
+        else:
+            _log_compact_sync("SKIP cooldown sid=%s cwd=%s" % (sid, cwd))
+            return "cooldown"
 
     # Re-verify against a FRESH capture immediately before typing (#333) —
     # everything above spent real wall-clock time (a marker re-read, the

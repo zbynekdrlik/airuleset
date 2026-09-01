@@ -214,7 +214,29 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
     # uses — so every existing caller stays byte-identical (#134: log, never
     # silence).
     if authority not in (None, "full"):
-        return ["delivery-stall skip:reduced-authority (%s)" % authority]
+        # #804 mode-3 -- this line is the #667 develop->main GIT-DELIVERY metric
+        # (a full-authority / gatekeeper concern), NOT a goal-resume path: a
+        # reduced-authority box's work reaching its integration branch is
+        # review-pending, never a loop death. The skip stays an explicit decision,
+        # but logging it 1440x/day (every 60s sweep) MASKED the diagnosis (it read
+        # in the journal like "resume is off for this box" -- the exact mode-3 red
+        # herring the evidence pass followed). Demote to at most 1x/day per box.
+        if isinstance(state, dict):
+            _rlast = state.get("delivery_stall_reduced_authority_ts")
+            # #804-review 🟡: treat a FUTURE-skewed / corrupt-huge ts as unset
+            # (the #797 self-healing guard) -- a `_rlast > now` must never mute
+            # the line forever nor block the refreshing write below.
+            if isinstance(_rlast, (int, float)) and _rlast <= now \
+                    and (now - _rlast) < 86400:
+                return []
+            # #804-review 🟡: dry_run-safe (the #516 convention) -- a
+            # `watchdog --once --dry-run` acceptance probe must not consume the
+            # 1x/day log slot for 24h of real sweeps (run_once persists state
+            # unconditionally).
+            if not dry_run:
+                state["delivery_stall_reduced_authority_ts"] = now
+        return ["delivery-stall skip:reduced-authority (%s) -- #667 git-delivery "
+                "metric, NOT a goal-resume path" % authority]
     if stall is None:
         try:
             stall = int(os.environ.get("AIRULESET_DELIVERY_STALL_S",

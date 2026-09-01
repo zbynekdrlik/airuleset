@@ -1114,6 +1114,108 @@ class TestGoalLaneSweep(unittest.TestCase):
         logs = goal.goal_lane_sweep(1000, run=lambda *a, **k: "")
         self.assertEqual(logs, [])
 
+    def test_804_dead_rostered_stream_produces_a_dead_session_census_line(self):
+        # #804 -- a stream EXPECTED to be armed (in the roster) but with NO live
+        # candidate pane this sweep is a mode-5 death: the census surfaces it so
+        # it can never go dark silently ("sam sa vypne a nikto to nevidí").
+        from watchdog import roster
+        now = 100000
+        r = {}
+        roster.upsert(r, "/home/newlevel/devel/deadstream", "old-sid", "full",
+                      now - 7200)
+        roster.save_roster(r)
+        # NO panes at all -> visited_cwds empty -> the rostered cwd is dead.
+        tmux = DeliverGoalFakeTmux([], GOAL_IDLE_CAP)
+        logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                    backlog_fetch=lambda cwd: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln and "deadstream" in ln
+                            for ln in logs), logs)
+
+    def test_804_dead_session_line_is_cadenced_not_every_sweep(self):
+        from watchdog import roster
+        now = 100000
+        r = {}
+        roster.upsert(r, "/home/newlevel/devel/deadstream", "s", "full", now)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([], GOAL_IDLE_CAP)
+        l1 = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                  backlog_fetch=lambda cwd: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln for ln in l1), l1)
+        # a second sweep 5 min later must NOT re-log (< GOAL_ROSTER_CENSUS_S)
+        l2 = goal.goal_lane_sweep(now + 300, run=tmux, projects_dir=self._dir(),
+                                  backlog_fetch=lambda cwd: 5, state={})
+        self.assertFalse(any("-> dead-session" in ln for ln in l2), l2)
+        # a sweep past the cadence window re-surfaces it.
+        l3 = goal.goal_lane_sweep(now + goal.GOAL_ROSTER_CENSUS_S + 10, run=tmux,
+                                  projects_dir=self._dir(),
+                                  backlog_fetch=lambda cwd: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln for ln in l3), l3)
+
+    def test_804_census_skipped_when_the_sweep_budget_broke(self):
+        # #804-review 🟡: a sweep budget break leaves deferred panes' cwds OUT of
+        # visited_cwds, so the DEAD-SESSION census must NOT run that sweep (it
+        # would falsely flag every deferred LIVE stream). Force the break on the
+        # first pane and assert no dead-session line for the rostered cwd.
+        from watchdog import roster
+        now = 100000
+        r = {}
+        roster.upsert(r, self.CWD, "s", "full", now)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                    backlog_fetch=lambda cwd: 5, state={},
+                                    sweep_deadline=0, time_fn=lambda: 1)
+        self.assertTrue(any("budget-exceeded" in ln for ln in logs), logs)
+        self.assertFalse(any("-> dead-session" in ln for ln in logs), logs)
+
+    def test_804_definite_goal_clear_drops_the_roster_entry(self):
+        # #804-review 🔴: a DEFINITE goal-clear (armed is False) means the stream
+        # is no longer expected-armed -> drop it, so a deliberately retired stream
+        # is never later falsely flagged dead (nor mis-drives a future resurrect).
+        from watchdog import roster
+        now = 1_000_000
+        proj = self._dir()
+        tpath = _write_marker_transcript(proj, self.CWD, "sess-cleared")
+        sid = tpath.stem
+        r = {}
+        roster.upsert(r, self.CWD, sid, "full", now - 500)
+        roster.save_roster(r)
+        # A CLEARED goal_mark -> a DEFINITE not-armed verdict (glance.goal_armed
+        # is False), not the transient armed-unknown None.
+        state = {"goal_mark": {sid: {"off": 0,
+                                     "mark": {"state": "cleared", "ts": now}}}}
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+                m.patch.object(wd, "_owner_disabled", return_value=False):
+            goal.goal_lane_sweep(now, run=tmux, projects_dir=proj, state=state,
+                                 backlog_fetch=lambda cwd: 5)
+        self.assertNotIn(self.CWD, roster.load_roster())
+
+    def test_804_armed_pane_is_upserted_into_the_roster(self):
+        # A CONFIRMED-armed candidate pane refreshes its durable roster entry, so
+        # the census has an accurate expected-armed fact if the session later dies.
+        from watchdog import roster
+        now = 1_000_000
+        proj = self._dir()
+        tpath = _write_marker_transcript(proj, self.CWD, "sess-armed-roster")
+        sid = tpath.stem
+        old = now - goal.GOAL_LANE_IDLE_S - 500
+        os.utime(tpath, (old, old))
+        # dark_watch's tail-proof goal_mark says the /goal IS armed (#486 G6).
+        state = {"goal_mark": {sid: {"off": 0, "mark": {"state": "set", "ts": now}}}}
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath)
+        with m.patch("airuleset.resolve_authority", return_value="branch-merge"), \
+                m.patch.object(wd, "_owner_disabled", return_value=False):
+            goal.goal_lane_sweep(now, run=tmux, projects_dir=proj, state=state,
+                                 backlog_fetch=lambda cwd: 5)
+        reg = roster.load_roster()
+        self.assertIn(self.CWD, reg)
+        self.assertEqual(reg[self.CWD]["sid"], sid)
+        self.assertEqual(reg[self.CWD]["authority"], "branch-merge")
+        self.assertEqual(reg[self.CWD]["armed_ts"], now)
+
     def test_kill_switch_disables_lane_sweep(self):
         with m.patch.object(wd, "_owner_disabled", return_value=True):
             logs = goal.goal_lane_sweep(1000, run=lambda *a, **k: "",
@@ -1313,6 +1415,43 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # #475: the ❓ early return used to be silent -> now journals a decision.
         self.assertTrue(any("skip:awaiting-user" in ln for ln in logs), logs)
 
+    def test_814_delivered_unconfirmed_is_booked_not_retried(self):
+        # #814 RED -- send_verified returns False but sets
+        # out["delivered_unconfirmed"]=True (the Enter SUBMITTED and cleared the
+        # box; only the transcript `user`-turn confirm raced -- the normal case
+        # injecting into a cycling armed loop). The lane branch called
+        # send_verified WITHOUT `out=`, so this delivered-but-unconfirmed submit
+        # read as a FAILURE -> `submit-unverified (n/5)` backoff -> the retry
+        # re-typed the IDENTICAL nudge next sweep -> the duplicate `lane-check:`
+        # the owner saw (live gk 2026-09-01). GREEN: booked ONCE, not retried --
+        # the exact #594 sibling wiring u_freshness/release_gap/queue_arrival have.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        # transcript_path=None: Enter clears the box (delivered) but writes NO
+        # `user` turn -> send_verified False + out["delivered_unconfirmed"]=True.
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=None)
+        rec = {}
+        state = {}
+        with m.patch("airuleset.resolve_authority", return_value="full"):
+            logs, owns = goal.goal_lane_occupancy_nudge(
+                now, tmux, rec, self.SID, self.CWD, "111", GOAL_ARMED_CAP,
+                tpath, tmtime, "loc", None, False, None, proj,
+                backlog_fetch=lambda cwd: 5, state=state, sleep_fn=lambda s: None)
+        # booked as a DELIVERED nudge (delivered_unconfirmed -> _lane_record_nudge)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # NOT misread as a failure: no submit-unverified backoff, streak untouched
+        self.assertFalse(any("submit-unverified" in ln for ln in logs), logs)
+        self.assertNotIn("lna", rec)
+        # the shared cadence clock advanced (mark_sent) so a sibling defers
+        self.assertEqual(
+            state.get("nudge_cadence", {}).get(self.SID, {}).get("lane-occupancy"),
+            now, state)
+
     # #475 -- every previously-silent early-return path of the guard now logs a
     # `lane-occupancy <loc> -> skip:<reason>` decision (the #442c every-sweep
     # logging contract), or is a documented deliberately-silent structural N/A.
@@ -1411,6 +1550,60 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(owns)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:gave-up" in ln for ln in logs), logs)
+
+    def test_804_giveup_holds_during_backoff_window(self):
+        # #804 mode-1: within the give-up backoff window the box still holds
+        # (skip:gave-up) -- no nudge -- but the log now says it will RE-ARM.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True, "lna": 0,
+               "lgts": now - 100}   # gave up 100s ago, backoff[0]=1h not elapsed
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:gave-up (backoff" in ln for ln in logs), logs)
+
+    def test_804_giveup_re_arms_a_nudge_after_the_backoff_elapses(self):
+        # #804 mode-1 RED (pre-#804 this held `skip:gave-up` FOREVER): once the
+        # backoff window elapses the give-up RE-ARMS one bounded nudge attempt --
+        # a dead-stuck armed loop is never permanently silent again.
+        #
+        # #804-review 🔴: the rec carries the FROZEN landed-nudge signature every
+        # real gave-up box has (`llast` >1h old, `lsw`=0, `lsb`=backlog) -- so the
+        # re-arm MUST also pop `lsw`/`lsb`, else the #670 dedup swallows the nudge
+        # at `skip:dedup-unchanged` and the "retry chain" is inert (the exact bug
+        # the reviewer caught). This test now goes RED if the dedup-pop is dropped.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True, "lna": 0,
+               "lgts": now - (goal.GOAL_LANE_GIVEUP_BACKOFF_S[0] + 100),
+               "llast": now - goal.GOAL_LANE_INTERVAL_S - 100,  # past the hourly cap
+               "lsw": 0, "lsb": 5}                              # frozen dedup sig
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(owns)
+        self.assertTrue(any("giveup-backoff elapsed" in ln for ln in logs), logs)
+        # the re-arm falls through to a fresh nudge that actually LANDS (not
+        # swallowed by skip:dedup-unchanged)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:dedup-unchanged" in ln for ln in logs), logs)
+        # the backoff schedule widened for the NEXT give-up cycle
+        self.assertEqual(rec.get("lgn"), 1, rec)
+
+    def test_804_pre_804_latched_rec_without_lgts_starts_a_window(self):
+        # #804-review 🟡: a rec latched BEFORE #804 shipped (lpinged, no lgts) --
+        # every box already stuck at deploy -- must not hold forever with a lying
+        # countdown; it starts the first backoff window instead of never re-arming.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True, "lna": 0}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(owns)
+        self.assertTrue(any("backoff window started" in ln for ln in logs), logs)
+        self.assertEqual(rec.get("lgts"), now, rec)   # window anchored now
+        self.assertEqual(tmux.sent, [])               # still held this sweep
 
     def test_branch_merge_box_also_nudges(self):
         # #618: a reduced-authority STREAM box (branch-merge — montalu/marek)
@@ -2274,12 +2467,35 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
 
     def test_530_min_backlog_floor_skips_two_workable(self):
-        # backlog 2 is still below the floor of 3 -> skip:min-backlog.
+        # backlog 2 is below the floor of 3 for a FRESHLY-idle box (idle ~15min,
+        # < GOAL_LANE_INTERVAL_S) -> skip:min-backlog. #804 mode-4 lowers the
+        # floor to 1 only once idle > 1h (see test_804_min_backlog_floor... below).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 2, now, tmtime)
         self.assertTrue(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    def test_804_min_backlog_floor_drops_to_1_after_an_hour_idle(self):
+        # #804 mode-4 RED: a loop that has stood idle > 1h over just 1 workable
+        # ticket is a stuck loop, not freshly-idle churn -- the #530 floor of 3 was
+        # parking it FOREVER (#791 "stojí navždy by design"). Once idle > 1h the
+        # floor drops to 1, so the box IS poked.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_INTERVAL_S - 100   # idle > 1h
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 1, now, tmtime)
+        self.assertTrue(owns)
+        self.assertFalse(any("skip:min-backlog" in ln for ln in logs), logs)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_804_freshly_idle_lone_ticket_still_skips(self):
+        # The anti-storm floor is UNCHANGED for a freshly-idle box (idle ~15min):
+        # a lone ticket there is still not batch-worthy (#530 preserved).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100   # idle ~15min, < 1h
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 1, now, tmtime)
+        self.assertTrue(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_530_min_backlog_floor_fires_at_threshold(self):

@@ -32,7 +32,10 @@ reached call-time through the package namespace (``watchdog.<name>``), so any
     ``watchdog._iter_jsonl_tail`` / ``watchdog._entry_text``
   * pane/box helpers: ``watchdog._find_input_box`` (pane_classify.py),
     ``watchdog.pane_in_mode`` (tmux_io.py), ``watchdog._pane_location``
-    (janitor.py), ``watchdog._cached_backlog_open`` (cross_stream.py)
+    (janitor.py), ``watchdog._cached_backlog_open`` (cross_stream.py),
+    ``watchdog._own_nudge_submit_prefix`` (stash.py, #806 -- the registered
+    own-nudge prefix recognizer, so a stranded ``lane-check:`` nudge is
+    submitted here rather than pinged as a foreign draft)
   * still ``__init__``-resident: ``watchdog._is_dreply_machine_text`` and the
     six job-10 constants ``watchdog.MACHINE_NUDGE_PREFIX`` /
     ``watchdog.PWEDGE_MIN_IDLE_S`` / ``watchdog.PWEDGE_SWEEPS`` /
@@ -74,11 +77,13 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
 
     Three refinements from issue #35 on top of the original ping-first
     design:
-      - MACHINE recognition now covers BOTH the static cross-stream prefixes
-        AND job 7's own compose-reply text (`state['dreply_typed']`, set by
-        `_record_dreply_typed`) — a swallowed delivery of OUR OWN text is
-        auto-submitted (Escape+Enter — #36), never pinged as if it were a
-        foreign draft.
+      - MACHINE recognition covers THREE things: the static cross-stream
+        prefixes (`MACHINE_NUDGE_PREFIX`), the #806 registered own-nudge prefixes
+        (`_own_nudge_submit_prefix` = lane-check/bounce/gk-request, so a stranded
+        `lane-check:` nudge is submitted, not pinged as foreign), AND job 7's own
+        compose-reply text (`state['dreply_typed']`, set by `_record_dreply_typed`)
+        — a swallowed delivery of OUR OWN text is auto-submitted (Escape+Enter —
+        #36), never pinged as if it were a foreign draft.
       - `waiting` (default True — callers that can't cheaply determine it,
         e.g. a sudo-hosted foreign transcript, keep the old always-eligible
         behavior): a genuine USER draft pings NOTHING while the session is
@@ -131,7 +136,20 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     # mislabels our own stranded nudge a foreign draft and pings instead of
     # submitting it.
     head_txt = head[1:].strip()
+    # #806 -- recognize EVERY registered own-nudge prefix, not only the
+    # cross-stream `MACHINE_NUDGE_PREFIX` subset. `MACHINE_NUDGE_PREFIX` covers
+    # bounce/gk-request but NOT `lane-check: ` (the empty-lane nudge) -- so a
+    # genuinely-stranded lane-check nudge (a real swallow #814's delivered_
+    # unconfirmed can't catch) fell through to the FOREIGN ping path and sat in
+    # the composer forever while the watchdog only pinged (the mode-6 class:
+    # detection ending in a suppressed ping instead of an action). The #501
+    # `_own_nudge_submit_prefix` register (lane-check/bounce/gk-request) is the
+    # single source of truth for "this HEAD is our own recognized machine nudge",
+    # so a stranded own nudge is SUBMITTED in place here, never pinged. A FOREIGN
+    # / human draft (no registered prefix -- e.g. a session's own `gk: ...` bounce
+    # note) still takes the ping-only path below, untouched.
     machine = (head_txt.startswith(watchdog.MACHINE_NUDGE_PREFIX)
+               or watchdog._own_nudge_submit_prefix(head_txt) is not None
                or watchdog._is_dreply_machine_text(state, pid, head_txt, txt))
     if not machine and ("esc to interrupt" in (captured or "")
                         or "Waiting for" in (captured or "")

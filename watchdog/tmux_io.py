@@ -452,16 +452,30 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
     the submit landed. The `_nudge_dying_subagent` caller marks/clears the #372
     janitor provenance around this call, so a swallowed chunk-typed residue is
     reclaimable via the shared `"stuck-check: "` own-payload prefix. Without a
-    tpath, fall back to the raw `send_continue` (backward-compatible; a caller
-    that cannot resolve the supervisor transcript still delivers, unverified)."""
+    tpath there is NO transcript to prove the submit landed, so #806 REFUSES
+    (returns False) rather than the old raw-`send_continue` book-as-delivered:
+    an unverifiable send left a swallowed stuck-check stranded in the composer.
+    A refused send is retried next sweep once a transcript is resolvable."""
     text = ("stuck-check: %s (%s v subagents/%s.jsonl) "
             "— over jeho transcript a zasiahni (dispatchni znova alebo naň nadviaž), "
             "nič nerob naslepo." % (_subagent_nudge_signature(worker_id), kind, worker_id))
     if tpath is not None:
         return watchdog.send_verified(pane_id, text, run, tpath,
                                       sleep_fn=sleep_fn, logs=logs)
-    watchdog.send_continue(pane_id, text, run)
-    return True
+    # #806 -- no transcript = unverifiable delivery; never a raw unverified type.
+    # The old tpath-less `send_continue` fallback returned True unconditionally,
+    # so a swallowed Enter left the stuck-check stranded in the composer while
+    # the caller believed it delivered (the mode-6 class). Refuse instead (return
+    # False, exactly like a genuine swallow). BOTH production call sites derive
+    # the supervisor tpath before calling and so never reach this branch (it is a
+    # defensive floor, not a live path); the sole caller (`_nudge_dying_subagent`)
+    # treats a False like a swallowed nudge -- it logs "(submit-unverified)" and
+    # decide_working re-tries on its own cadence -- so no nudge is ever booked as
+    # delivered. (A persistently tpath-less pane, which cannot arise today, would
+    # escalate through decide_working's normal give-up like any un-landed nudge.)
+    if isinstance(logs, list):
+        logs.append("send-subagent-nudge refuse: no transcript path (unverifiable)")
+    return False
 
 
 def _subagent_transcript_unsalvageable(sub_path):

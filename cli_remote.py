@@ -1173,6 +1173,13 @@ def cmd_push(args):
         # per-test in their own setUp (conftest.py covers the pytest path).
         test_env["AIRULESET_CONTENT_DEDUP_DIR"] = str(
             Path(_lock_tmp) / "content-dedup")
+        # #804 (dual-coverage): watchdog.roster writes ~/.claude/goal-roster.json
+        # by default; a goal_lane_sweep integration test that upserts an armed
+        # pane / logs a DEAD-SESSION would litter the REAL home under `unittest
+        # discover` (which never reads conftest.py's own isolation fixture) —
+        # same single-place-that-knows rule as the overrides above.
+        test_env["AIRULESET_GOAL_ROSTER_PATH"] = str(
+            Path(_lock_tmp) / "goal-roster.json")
         # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
         # redirect is pytest-only and is NEVER read by `unittest discover`, so
         # this is the single place the push gate's own ~459 raw
