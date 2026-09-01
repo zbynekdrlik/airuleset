@@ -556,9 +556,11 @@ def _alert_recipient(derived, ambiguous, account_owner):
       would be the first-owner-seen COIN FLIP (#707), so DO NOT deliver:
       `(False, None)`, and the caller logs the skip (machine channel, never a
       wrong-owner @mention). This mirrors the `("" if ambiguous else
-      account_owner)` guard `deliver_pending_done`/`reping_stale_questions`
-      already carry, made strict: a genuinely-ambiguous alert is skipped +
-      logged, not routed to a guessed owner.
+      account_owner)` guard `deliver_pending_done` already carries, made
+      strict: a genuinely-ambiguous alert is skipped + logged, not routed to
+      a guessed owner. (`reping_stale_questions` used to carry the SAME
+      guard; #795 retired the whole daily re-ask, so it is now a no-op that
+      carries no owner-resolution logic at all.)
 
     RESIDUAL (#717 review F1, inherent to the reused #707 proxy): `ambiguous`
     is derived from ONE sweep's live-pane scan (`len(set(owners_seen)) > 1`).
@@ -566,10 +568,11 @@ def _alert_recipient(derived, ambiguous, account_owner):
     panes (the others' sessions closed, or the pane loop cut short by the
     sweep-deadline budget so `owners_seen` is partial), `ambiguous` is False
     and a pane-less foreign repo's alert can still deliver to the only-seen
-    owner. This is the SAME accepted proxy `deliver_pending_done`/
-    `reping_stale_questions` carry; a TTL'd owners-seen high-water mark would
-    close it but is deliberately out of scope here (it would diverge from the
-    sibling guard the #707 doctrine reuses). Named, not silently accepted."""
+    owner. This is the SAME accepted proxy `deliver_pending_done` carries
+    (`reping_stale_questions` used to carry it too; #795 retired that job
+    outright); a TTL'd owners-seen high-water mark would close it but is
+    deliberately out of scope here (it would diverge from the sibling guard
+    the #707 doctrine reuses). Named, not silently accepted."""
     if derived:
         return True, derived
     if not ambiguous:

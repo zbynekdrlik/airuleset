@@ -2257,13 +2257,14 @@ class RunOnceSubagentVisibility(unittest.TestCase):
 
     def setUp(self):
         # (#449 gate-run live catch — pre-existing, reproduced against the
-        # pre-#449 code too) run_once with dry_run=False wires
-        # reping_stale_questions against notify's REAL question map: a
-        # GENUINE production ❓ on this box crossing its 24h re-ask
-        # boundary mid-test injected an unexpected re-ask ping into this
-        # class's fake send_fn, failing the pings3==[] lock. Sandbox the
-        # map (the grace store derives from the same dirname) so the class
-        # only ever sees its own state.
+        # pre-#449 code too) `prune_answered_questions` takes no `path`
+        # param — it reads notify's REAL global question map
+        # (`notify._questions_path()`) whenever run_once wires it with
+        # dry_run=False. (#795 retired the daily `reping_stale_questions`
+        # re-ask that used to share this concern via an injected
+        # `questions_path`; the prune job's own hermeticity need survives
+        # it untouched.) Sandbox the map (the grace store derives from the
+        # same dirname) so the class only ever sees its own state.
         import notify
         tmpq = TemporaryDirectory()
         self.addCleanup(tmpq.cleanup)
@@ -2323,57 +2324,15 @@ class RunOnceSubagentVisibility(unittest.TestCase):
 
         logs = wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
                            projects_dir=proj, state_path=state_path,
-                           pending_prefix=str(Path(proj).parent / "pending-"),
-                           # hermetic: without this, the daily question-reping
-                           # sweep reads the LIVE ~/.claude/discord-questions.json
-                           # and a real pending question on the box leaks an
-                           # extra ping into these assertions (observed live:
-                           # the ping-count check below flaked from 1 to 2 the
-                           # moment a real question crossed its reping bucket).
-                           questions_path=str(Path(proj).parent
-                                              / "questions.json"))
+                           pending_prefix=str(Path(proj).parent / "pending-"))
         return logs, sent, pings
 
-    def test_question_reping_reads_only_the_injected_questions_path(self):
-        # The passthrough itself must be real: a stale entry in the INJECTED
-        # map fires a reping ping through run_once; the live box map is never
-        # consulted. (Pre-fix this failed with TypeError: unexpected keyword
-        # 'questions_path' — run_once parameterized every other state source
-        # but read the questions map from the live default.)
-        tmp = tempfile_mkdtemp_cleanup(self)
-        proj, now = self._build(
-            tmp, [_assistant("Bežím ďalej.")], [_assistant("ok")],
-            sup_age=10, sub_age=10)
-        qpath = Path(tmp) / "questions.json"
-        qpath.write_text(json.dumps({
-            "123456": {"session": "s-x", "cwd": "/tmp/qproj",
-                       "ts": now - 2 * 24 * 3600,
-                       "block": "**Otázka — projekt qproj:**\ntest?\n❓ NEEDS YOU: test?"},
-        }))
-        pings = []
-
-        def fake_run(argv, timeout=8):
-            return ""
-
-        def fake_send(body, **k):
-            pings.append((body, k))
-            return ("sent", "m-1")
-
-        # This test exercises the injected-questions-path PASSTHROUGH. #791
-        # deleted the 00:00-05:59 sleep-window gate, so the reping-due path
-        # now fires at ANY wall-clock time with no time-of-day dependence —
-        # the old `_in_sleep_window` patch that made this deterministic is no
-        # longer needed (and the helper no longer exists).
-        wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
-                    projects_dir=proj, state_path=Path(tmp) / "state.json",
-                    pending_prefix=str(Path(tmp) / "pending-"),
-                    questions_path=str(qpath))
-        reping = [p for p in pings
-                  if (p[1] or {}).get("dedup_key", "").startswith("question-reping:")]
-        self.assertEqual(len(reping), 1,
-                         "the injected stale entry must fire exactly one "
-                         "reping ping: %r" % pings)
-        self.assertIn("projekt qproj", reping[0][0])
+    # (#795: `test_question_reping_reads_only_the_injected_questions_path`
+    # was removed WITH the run_once `questions_path` param it exercised —
+    # `reping_stale_questions` is a permanent no-op tombstone and run_once no
+    # longer calls it at all, so there is nothing left for an injected path
+    # to pass through to. `tests/test_question_prune.py`'s
+    # `RepingStaleQuestionsIsRetired` class locks the tombstone itself.)
 
     # --- (1b) subagent api-error ------------------------------------------------
 

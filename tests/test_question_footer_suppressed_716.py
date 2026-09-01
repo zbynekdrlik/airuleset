@@ -14,8 +14,11 @@ watchdog consumers (re-ask churn, orphan re-fire).
 Three coupled locks, one per scope item:
   1. the writer + the footer fold (record_question suppressed=True, the CLI, the
      interactive hook) — the suppressed ❓ folds into `U N`;
-  2. `reping_stale_questions` treats send()'s "suppressed" as a re-ask CHOICE
-     (refresh ts, keep the entry) not a transient failure (retry every sweep);
+  2. `reping_stale_questions` used to treat send()'s "suppressed" as a
+     re-ask CHOICE (refresh ts, keep the entry) not a transient failure
+     (retry every sweep) — #795 retired the daily re-ask outright, so the
+     tombstone now never touches a suppressed entry at all (a strictly
+     stronger no-churn guarantee, locked in `TestRepingHonorsSuppressedWithoutChurn`);
   3. `discord_replies._orphan_floor` marks `dorphan_done` on "suppressed" so an
      orphaned reply to an OFF owner's old card does not re-fire every sweep.
 """
@@ -222,22 +225,30 @@ class InteractiveSuppressedFold(unittest.TestCase):
 # 3. reping treats "suppressed" as a re-ask CHOICE — no per-sweep churn
 # --------------------------------------------------------------------------- #
 class TestRepingHonorsSuppressedWithoutChurn(unittest.TestCase):
+    """#795: `reping_stale_questions` is a PERMANENT NO-OP tombstone — the
+    daily re-ask's "suppressed" churn-avoidance (refresh ts, keep the entry,
+    fire at most once per interval) is retired along with the re-ask
+    itself. What survives, for a suppressed OR a normal entry alike: the
+    entry is never touched at all (not even its `ts`), and send_fn is never
+    called — a strictly STRONGER no-churn guarantee than before, reached
+    because the tombstone reaches no seam, not because it decided to hold
+    off."""
+
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-716-reping-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".claude").mkdir(parents=True, exist_ok=True)
         self.path = str(self.home / ".claude" / "discord-questions.json")
-        # a due suppressed entry (non-digit key, empty channel, old ts).
+        # a "due"-looking suppressed entry (non-digit key, empty channel,
+        # old ts) — this used to be the shape reping refreshed pre-#795.
         Path(self.path).write_text(json.dumps({
             "suppressed:sid-1": {
                 "session": "sid-1", "cwd": "/tmp/x", "channel": "",
                 "ts": 1, "asked": 1, "suppressed": True,
                 "block": "**Otázka — projekt X:** …\n❓ NEEDS YOU: čo?",
                 "question": "…"}}))
-        # #791 deleted the sleep-window deferral — the re-ask runs at any
-        # wall clock, so no `_in_sleep_window` neutralisation is needed.
 
-    def test_suppressed_reping_refreshes_ts_and_does_not_churn(self):
+    def test_reping_tombstone_never_touches_a_suppressed_entry(self):
         calls = []
 
         def spy(block, **k):
@@ -245,18 +256,14 @@ class TestRepingHonorsSuppressedWithoutChurn(unittest.TestCase):
             return ("suppressed", None)
 
         now1 = 10 ** 9
-        wq.reping_stale_questions(now=now1, send_fn=spy, path=self.path,
-                                  account_owner="zbynek")
+        out = wq.reping_stale_questions(now=now1, send_fn=spy, path=self.path,
+                                        account_owner="zbynek")
+        self.assertEqual(out, [])
+        self.assertEqual(calls, [], "the retired daily re-ask must never call send_fn")
         d = json.loads(Path(self.path).read_text())
         self.assertIn("suppressed:sid-1", d, "the suppressed entry must be KEPT")
-        self.assertEqual(d["suppressed:sid-1"]["ts"], now1,
-                         "the entry's ts must be refreshed to the current re-ask bucket")
-        # a SECOND sweep within the re-ask interval must NOT re-attempt.
-        wq.reping_stale_questions(now=now1, send_fn=spy, path=self.path,
-                                  account_owner="zbynek")
-        self.assertEqual(len(calls), 1,
-                         "a suppressed re-ask must fire at most once per interval, "
-                         "not every 60s sweep: %r" % calls)
+        self.assertEqual(d["suppressed:sid-1"]["ts"], 1,
+                         "the tombstone must never mutate the entry's ts")
 
 
 # --------------------------------------------------------------------------- #

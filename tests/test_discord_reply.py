@@ -87,12 +87,16 @@ class QuestionMap(unittest.TestCase):
         self.assertFalse(notify.drop_question("nope", path=p))     # absent → False
 
     def test_stale_entries_are_never_pruned_by_age_on_write(self):
-        # #368: an unanswered entry must survive past 24h+ so
-        # watchdog.reping_stale_questions() has something to keep re-asking
-        # daily — the old age-based prune (deleting it outright the moment
-        # ANY later write swept the map) was the exact inversion of "ask at
-        # least once a day, never silently drop" (the user's own directive,
-        # 2026-08-11). Only a MALFORMED entry (not a dict) is still pruned.
+        # #368: an unanswered entry must survive past 24h+ — the old
+        # age-based prune (deleting it outright the moment ANY later write
+        # swept the map) was the exact inversion of "never silently drop"
+        # (the user's own directive, 2026-08-11). Originally this kept the
+        # entry available for the now-retired daily re-ask
+        # (`reping_stale_questions`, #795); the invariant survives its
+        # retirement unchanged — the footer `U N` badge + the #606
+        # step-by-step flow both still need the entry to stay visible until
+        # the owner genuinely answers it. Only a MALFORMED entry (not a
+        # dict) is still pruned.
         # Fixture re-pinned for the ghost-supersede work: the two entries
         # belong to DISTINCT sessions, because this lock's claim is about
         # AGE (a later write must not sweep an old entry) — a same-session

@@ -226,12 +226,18 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # registry entry are gone), so `gk_selfservice_fetch=None` now sits
         # alone on that line; the anchor shrank a middle line, the mutation
         # target `vault_purge=None` is untouched.
+        # #795 re-pin: `questions_path=None` was REMOVED (the #368 daily
+        # question re-ask class is retired — `reping_stale_questions` is
+        # now a permanent no-op tombstone, and it was the ONLY consumer of
+        # this param), so `progress_dir=None,` now sits alone on that line;
+        # the anchor shrank a middle line, the mutation target
+        # `vault_purge=None` is untouched.
         old = ("             vault_purge=None, vault_backstop=None, "
                "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
                "             ops_wait_fetch=None,\n"
-               "             progress_dir=None, questions_path=None,\n"
+               "             progress_dir=None,\n"
                "             gk_selfservice_fetch=None,\n"
                "             u_reconcile_clear=None, conformance_root=None,\n"
                "             conformance_is_target=None, "
