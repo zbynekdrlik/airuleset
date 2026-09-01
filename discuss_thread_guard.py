@@ -456,18 +456,56 @@ APPROVAL_BYPASS_MARKER = "airuleset:discuss-approval-ok"
 # `[ \t]` (not the earlier `[^\S\r\n]`): an exotic Unicode line separator
 # (U+2028, NEL, VT) must not satisfy the same-line claim -- tightened in one
 # sweep with the #696 `_ARTIFACT_RE` sibling (over-block direction).
-_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[ \t]+\S")
+#
+# #799: the first non-whitespace TOKEN after the marker is captured so the
+# template-grant branch below can inspect it. The trigger condition is
+# UNCHANGED from the old `[ \t]+\S` (>= 1 non-whitespace char on the marker's
+# own line), so every free-form per-message approval keeps its exact prior
+# verdict; only a `template:<type>` colon-form token is additionally narrowed.
+_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[ \t]+(\S+)")
+
+# #799 STANDING TEMPLATE GRANT. The two MECHANICAL client-message types (the
+# final reminder + the closing note) do not queue for per-message owner
+# approval: the owner approves each stream's TEMPLATE once, and those messages
+# cite `airuleset:owner-approved template:<TYPE> <ref>` with TYPE one of these
+# two sanctioned tokens. An UNsanctioned `template:<other>` does NOT grant
+# approval -- it still BLOCKS (fail-safe over-block) -- so the standing grant
+# can never be widened to an arbitrary client message. Owner directive
+# 2026-09-01 (montalu1); doctrine in handover-compose.md (#799 closure bullet).
+_TEMPLATE_PREFIX = "template:"
+SANCTIONED_TEMPLATE_TYPES = ("final-reminder", "closing-note")
 
 ApprovalViolation = namedtuple("ApprovalViolation", "number")
 
 
 def approval_present(content):
-    """True iff `content` carries the `airuleset:owner-approved <ref>` evidence
-    marker WITH a non-empty reference after it. A bare `airuleset:owner-approved`
-    (no reference) is NOT accepted -- the falsifiable-claim requirement."""
+    """True iff `content` carries a valid owner-approval marker.
+
+    TWO accepted forms of `airuleset:owner-approved <first-token> ...`:
+      * a free-form per-message reference (any non-empty first token that is
+        NOT a `template:` colon form) -- unchanged #628 behaviour; a bare
+        `airuleset:owner-approved` with no reference is still NOT accepted.
+      * a STANDING template grant `template:<TYPE>` where <TYPE> is one of
+        `SANCTIONED_TEMPLATE_TYPES` (#799) -- the two mechanical message types.
+
+    A `template:<UNsanctioned-type>` token does NOT grant (fail-safe over-block);
+    if it is the only marker present the post BLOCKS. Any single valid marker
+    anywhere in `content` grants (multiple markers are OR-ed)."""
     if not content:
         return False
-    return bool(_APPROVAL_RE.search(content))
+    for m in _APPROVAL_RE.finditer(content):
+        token = m.group(1)
+        if token.startswith(_TEMPLATE_PREFIX):
+            # a template-grant colon form: valid ONLY for a sanctioned type.
+            ttype = token[len(_TEMPLATE_PREFIX):]
+            if ttype in SANCTIONED_TEMPLATE_TYPES:
+                return True
+            # unsanctioned type -> this occurrence grants nothing; keep scanning
+            # for another (free-form or sanctioned) marker.
+            continue
+        # a free-form per-message reference (the #628 shape) -- grants.
+        return True
+    return False
 
 
 def has_approval_bypass_marker(content):
