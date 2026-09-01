@@ -3891,11 +3891,17 @@ def _watchdog_resource_guard_gk_request(uid):
         "(guard krok ich aplikuje). Self-service-checked: watchdog číta VLASTNÝ "
         "cgroup memory.max bez rootu; aplikácia guardov vyžaduje root@subdev, "
         "čo stream nemá — preto gk." % uid)
-    subprocess.run(
+    r = subprocess.run(
         [sys.executable, os.path.join(str(REPO_DIR), "airuleset.py"),
          "gk-request", "--issue", str(TRACKING_ISSUE), "--repo", TRACKING_REPO,
          "--comment", body],
         capture_output=True, text=True, timeout=60)
+    # #775 review F2: a non-zero gk-request (gh auth/network error on the
+    # sub-dev stream account — the likely state) is otherwise invisible; RAISE
+    # so resource_guard_verify logs its own "gk-request error" journal line.
+    if r.returncode != 0:
+        raise RuntimeError("gk-request rc=%s: %s"
+                           % (r.returncode, (r.stderr or "").strip()[:200]))
 
 
 def _watchdog_u_reconcile_clear(cwd, num):

@@ -226,7 +226,7 @@ def build_apply_script() -> str:
     # (the drop-in still applies from that slice's next restart).
     parts.append(
         'skipped=""\n'
-        'for slice in $(systemctl list-units --no-legend \'user-*.slice\' '
+        'for slice in $(systemctl list-units --plain --no-legend \'user-*.slice\' '
         '2>/dev/null | awk \'{print $1}\'); do\n'
         '    [ "$slice" = "user-0.slice" ] && continue\n'
         '    cur=$(systemctl show -p MemoryCurrent --value "$slice" 2>/dev/null '
@@ -253,7 +253,7 @@ def build_apply_script() -> str:
         'lo_max=$((exp_max * 3 / 4)); hi_max=$((exp_max * 3 / 2))\n'
         'lo_high=$((exp_high * 3 / 4)); hi_high=$((exp_high * 3 / 2))\n'
         'fail=0\n'
-        'for slice in $(systemctl list-units --no-legend \'user-*.slice\' '
+        'for slice in $(systemctl list-units --plain --no-legend \'user-*.slice\' '
         '2>/dev/null | awk \'{print $1}\'); do\n'
         '    [ "$slice" = "user-0.slice" ] && continue\n'
         '    case " $skipped " in *" $slice "*) continue ;; esac\n'
@@ -318,7 +318,15 @@ def provision_shared_stream_guards(hosts=None, run=None, control_opts=None):
     failed = []
     for h in hosts:
         name = h.get("name", h.get("host", "?"))
+        host = h.get("host")
         identity = h.get("identity")
+        # #775 review F5: a malformed guard entry must not raise out of a
+        # function documented to never raise — refuse it like the identity gate.
+        if not host:
+            print("  ⚠ RESOURCE-GUARDS FAILED (%s): guard entry has no host."
+                  % name, file=sys.stderr)
+            failed.append((name, "no-host"))
+            continue
         if not identity:
             print("  ⚠ RESOURCE-GUARDS FAILED (%s): no pinned ssh identity — a "
                   "root apply must never ride a shared password." % name,
@@ -332,7 +340,7 @@ def provision_shared_stream_guards(hosts=None, run=None, control_opts=None):
             "-o", "ConnectTimeout=15",
         ]
         argv = ssh_prefix + list(control_opts or []) + [
-            "%s@%s" % (h.get("admin_user", "root"), h["host"]), remote_cmd]
+            "%s@%s" % (h.get("admin_user", "root"), host), remote_cmd]
         try:
             r = run(argv, capture_output=True, text=True, timeout=180)
         except Exception as e:  # noqa: BLE001 — best-effort, never break push
@@ -346,7 +354,11 @@ def provision_shared_stream_guards(hosts=None, run=None, control_opts=None):
                   file=sys.stderr)
             failed.append((name, "rc=%s" % r.returncode))
         else:
-            out = (r.stdout or "").strip()
+            # #775 review F1: surface stderr too on a SUCCESSFUL apply — the
+            # script writes the design-mandated LOUD "NO SWAP present" warning
+            # (and any non-fatal sysctl warning) to >&2 WITHOUT failing, so a
+            # stdout-only success log would swallow it on a swapless box.
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
             print("  resource-guards: applied + verified on %s%s"
                   % (name, ("\n    " + out.replace("\n", "\n    ")) if out else ""))
     return failed
