@@ -103,6 +103,11 @@ const VW = (typeof HARNESS_VW !== 'undefined') ? HARNESS_VW : 1600;
 const VH = (typeof HARNESS_VH !== 'undefined') ? HARNESS_VH : 1000;
 const frameEl = { style: {} };            // #700: the PARENT-doc iframe fake
 const win = { term, document: doc, innerWidth: VW, innerHeight: VH, frameElement: frameEl };
+// #798: fitFixedGrid now reads the slot via slotOf(win). The fake frameEl has no
+// parentElement, so the REAL slotOf falls back to win.innerWidth/innerHeight -- this
+// stub reproduces exactly that fallback so the extracted fitFixedGrid runs unchanged
+// (the real slotOf's SOURCE is locked by test_webterm_short_viewport_798.py, not here).
+function slotOf(win) { return { w: win.innerWidth, h: win.innerHeight }; }
 %(fit)s
 %(fill)s
 %(stretch)s
