@@ -89,16 +89,32 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 #       Opus id, but a resumed session's transcript kept showing an older model — `-c`
 #       alone just continues whatever model the prior transcript was started with; only
 #       an explicit --model on the launch command line forces it.
+#   --allowedTools Grep,Glob        : #779 (owner ROZHODNUTÉ, comment 5479254695,
+#       2026-08-31) — baked into every mode except `plain`, the SAME placement as
+#       --model above. An Anthropic-collaborator-confirmed side effect of passing
+#       this flag is that Claude Code reinstates its built-in Grep/Glob tools and
+#       STOPS shadowing `grep`/`find` inside the Bash tool with its bundled
+#       ugrep/bfs binaries (anthropics/claude-code#69736 is open, no dedicated
+#       opt-out exists yet) — so plain `grep`/`find` in a managed session's Bash
+#       calls resolve to the real system binaries again, which correctly die on
+#       timeout instead of ugrep 7.5.0's proven busy-loop-on-timeout bug (#776).
+#       This neutralizes that runaway class AT THE SOURCE, fleet-wide; the #776
+#       hook (block-root-recursive-grep.sh) + watchdog Job 37 reaper stay in
+#       place as a backstop in case a future Claude Code update changes this
+#       undocumented shadowing behavior.
 # The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
 # FRESH branch (worse case: a new session instead of a cryptic error).
 # Modes (no managed mode carries ultracode any more — owner directive 2026-08-30):
-# `default` (claude — continue-or-new, skip-perms, model), `new` (claude-new —
-# always FRESH, skip-perms, model), `ultracode` (claude-ultracode — RETAINED alias
-# of the default mode for muscle-memory, NO ultracode flag now), `plain`
-# (claude-plain — vanilla, no managed flags), `fullscreen` (claude-fullscreen —
-# continue-or-new + skip-perms + model, PLUS CLAUDE_CODE_NO_FLICKER=1).
+# `default` (claude — continue-or-new, skip-perms, model, allowedTools), `new`
+# (claude-new — always FRESH, skip-perms, model, allowedTools), `ultracode`
+# (claude-ultracode — RETAINED alias of the default mode for muscle-memory, NO
+# ultracode flag now), `plain` (claude-plain — vanilla, no managed flags —
+# including no --allowedTools, so a deliberate stock-claude reproduction keeps
+# the real shadow-grep/find behavior uncontaminated, #445 precedent),
+# `fullscreen` (claude-fullscreen — continue-or-new + skip-perms + model +
+# allowedTools, PLUS CLAUDE_CODE_NO_FLICKER=1).
 #   CLAUDE_CODE_NO_FLICKER=1 : #376 REVERSED the `apply_managed_settings_defaults`
 #       pin from `"tui": "default"` (classic) to `"tui": "fullscreen"` fleet-wide
 #       (see that function's own docstring for the full history/tradeoff/citation)
@@ -174,34 +190,34 @@ case "$mode" in
     ;;
   new)
     exec claude --dangerously-skip-permissions \
-      --model '{{MANAGED_MODEL}}' "$@"
+      --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     ;;
   ultracode)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     fi
     ;;
   fullscreen)
     export CLAUDE_CODE_NO_FLICKER=1
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     fi
     ;;
   *)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model '{{MANAGED_MODEL}}' "$@"
+        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
     fi
     ;;
 esac
