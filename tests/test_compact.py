@@ -3016,5 +3016,209 @@ class TestCompactBgBashVeto599(unittest.TestCase):
         self.assertEqual(me2, compact.COMPACT_BG_BASH_MAX_ENTRIES)
 
 
+# --------------------------------------------------------------------------- #
+# #822 — the OWNER-ESCALATION fixture: 3x queued `❯ /compact` accumulated in a
+# stream pane under an armed /goal (ctx 448K, ZERO compaction). The pane-render
+# `_pane_has_queued_compact` detector MUST catch this exact render, or the
+# `already-queued` gate never fires and every boundary types another `/compact`.
+# Verbatim from issue #822 comment 5499555722.
+# --------------------------------------------------------------------------- #
+
+_FIXTURE_822_TRIPLE_QUEUED = (
+    "✅ DONE: bounce #5723/#5724 re-hand-off hotový (PR #5786 merged, gate PASS),"
+    " compact-request odoslaný — ďalšia várka: W-drain + bounce #5438\n"
+    "\n"
+    "◯ Goal not yet met… continuing\n"
+    "\n"
+    "✢ Recombobulating… (3m 5s · ↓ 7.3k tokens)\n"
+    "Tip: See an artifact you'd like to build on? Duplicate, in its title menu,"
+    " gives you your own editable copy.\n"
+    "\n"
+    "  ❯ /compact\n"
+    "  ❯ /compact\n"
+    "  ❯ /compact\n"
+    "                                                                          "
+    "                        ◎ /goal active (14m)\n"
+    "─────────────────────────────────────────────────────────────────────────"
+    "─────────────────────────── ultracode ─\n"
+    "❯ Press up to edit queued messages\n"
+    "─────────────────────────────────────────────────────────────────────────"
+    "───────────────────────────────────────\n"
+    "  5h 7%(4h)  wk 1%(4d)  F 3%(4d)  fable  I 1 · W 10 · gk 2  ctx 448K ~$0.45"
+    "  cloude-15@newlevel.media sub 13.9.(12d)  caveman\n"
+)
+
+
+class TestQueuedCompactDetector822(unittest.TestCase):
+    """The queued-`/compact` pane detector must see the #822 render.
+
+    The walk up from the input box (`_above_box_scan`) skips blanks and pure
+    separator rows, but CC renders TWO structural-chrome rows between the box
+    and the queued messages the old walk did NOT recognise: the box's LABELLED
+    top border (`──… ultracode ─`, which `_is_separator_line` rejects for the
+    `ultracode` text) and the armed-goal indicator (`◎ /goal active (Nm)`). So
+    the walk stopped BEFORE the `❯ /compact` rows and `_pane_has_queued_compact`
+    returned False, letting each boundary type another `/compact` (owner: 3x)."""
+
+    def test_detector_sees_the_three_queued_compacts(self):
+        self.assertTrue(
+            wd._pane_has_queued_compact(_FIXTURE_822_TRIPLE_QUEUED),
+            "the 3 queued `❯ /compact` rows must be detected under the armed-goal"
+            " glyph + the labelled top border")
+
+    def test_box_still_classifies_as_a_bare_input_pane(self):
+        # The whole trap: the box shows the `Press up to edit queued messages`
+        # placeholder, which normalises to a BARE input box — so the delivery
+        # thinks the pane is idle. The detector is the only guard here.
+        kind, draft = wd._classify_boundary(_FIXTURE_822_TRIPLE_QUEUED)
+        self.assertEqual((kind, draft), ("input", ""))
+
+
+class TestPostSendQueued822(unittest.TestCase):
+    """#822 (a): an empty input box after a `/compact` submit is AMBIGUOUS — the
+    command left the box whether it EXECUTED or merely QUEUED behind a running
+    turn. A queued `❯ /compact` row (or a running-turn spinner) after the submit
+    means QUEUED, not sent; a delivery must then NOT write `compact-delivered`
+    (the #135 lesson: delivery, not a claim), so a boundary compact that never
+    ran does not start a false cooldown."""
+
+    SID = "sess-queued-822"
+    CWD = "/home/newlevel/devel/queuedtest"
+
+    _BARE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _submit_run(self, post_send_render):
+        """A run() whose captures are BARE until the `/compact` Enter lands,
+        then render `post_send_render` (the queued/spinner/compacting state)."""
+        state = {"submitted": False}
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%9\tclaude\t" + self.CWD + "\t111"
+            if "display-message" in j:
+                return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
+            if "send-keys" in j:
+                if argv[-1] == "Enter":
+                    state["submitted"] = True
+                return ""
+            if "capture-pane" in j:
+                return post_send_render if state["submitted"] else self._BARE
+            return ""
+        return run
+
+    def test_submit_verified_reports_queued_when_a_compact_row_is_queued(self):
+        outcome = compact._compact_submit_verified(
+            "%9", self._submit_run(_FIXTURE_822_TRIPLE_QUEUED),
+            lambda *a, **k: None, lambda r: None)
+        self.assertEqual(outcome, "queued")
+
+    def test_deliver_compact_returns_queued_and_starts_no_cooldown(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run = self._submit_run(_FIXTURE_822_TRIPLE_QUEUED)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin="subagent-stop", run=run,
+            projects_dir=proj, delivered_path=self.delp, now=time.time())
+        self.assertEqual(word, "queued")
+        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
+        self.assertFalse(compact.compact_delivery_in_cooldown(
+            self.SID, time.time() + 1, path=self.delp))
+
+
+class TestGoalContinuingGate822(unittest.TestCase):
+    """#822 (c): a deterministic PRE-TYPE gate. Under an armed `/goal`
+    (`◎ /goal active`) with ZERO live tasks, a DRAINED-boundary (`self-callback`)
+    `/compact` cannot execute — the goal Stop hook blocks every boundary, so CC
+    would only append the `/compact` to its type-ahead queue (the owner's 3x
+    accumulation). So it is NOT typed; the boundary compact is delivered by the
+    session's own hold-turn instead (skills/autopilot Step 5)."""
+
+    SID = "sess-goalcont-822"
+    CWD = "/home/newlevel/devel/goalconttest"
+
+    _ARMED_IDLE = (
+        "● Predošlá várka integrovaná.\n"
+        "\n"
+        "                                                          ◎ /goal active (12m)\n"
+        "──────────────────────────────────────────────────────── ultracode ─\n"
+        "❯ \n"
+        "────────────────────────────────────────────────────────────────────\n"
+        "  5h 7%(4h)  wk 1%(4d)  fable  I 3  ctx 210K ~$0.30  caveman\n"
+    )
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _run(self, render):
+        typed = []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%9\tclaude\t" + self.CWD + "\t111"
+            if "display-message" in j:
+                return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
+            if "send-keys" in j:
+                if "-l" in argv:
+                    typed.append(argv[-1])
+                return ""
+            if "capture-pane" in j:
+                return render
+            return ""
+        return run, typed
+
+    def _deliver(self, origin, render=None):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run, typed = self._run(render if render is not None else self._ARMED_IDLE)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin=origin, run=run, projects_dir=proj,
+            delivered_path=self.delp, now=time.time())
+        return word, typed
+
+    def test_self_callback_under_armed_goal_skips_without_typing(self):
+        word, typed = self._deliver(compact._COMPACT_SELF_CALLBACK_ORIGIN)
+        self.assertEqual(word, "skip:goal-continuing")
+        self.assertEqual(typed, [])            # NEVER typed /compact
+
+    def test_gate_is_origin_scoped_subagent_stop_still_delivers(self):
+        # A NON-drained-boundary origin is NOT gated — it types and sends, proving
+        # the gate is scoped to the self-callback drained-boundary origin only.
+        word, typed = self._deliver("subagent-stop")
+        self.assertEqual(word, "sent")
+        self.assertEqual(typed, [compact.COMPACT_TEXT])
+
+    def test_gate_does_not_fire_on_an_unarmed_pane(self):
+        # Same self-callback origin, but the pane shows NO `◎ /goal` — the compact
+        # delivers normally (the gate is armed-goal-scoped, fail-open otherwise).
+        unarmed = ("● Predošlá várka integrovaná.\n❯ \n"
+                   "────────────────────────────────────────────\n"
+                   "  5h 7%(4h)  wk 1%(4d)  fable  ctx 210K  caveman\n")
+        word, typed = self._deliver(
+            compact._COMPACT_SELF_CALLBACK_ORIGIN, render=unarmed)
+        self.assertEqual(word, "sent")
+        self.assertEqual(typed, [compact.COMPACT_TEXT])
+
+
 if __name__ == "__main__":
     unittest.main()
