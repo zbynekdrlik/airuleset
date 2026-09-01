@@ -148,8 +148,13 @@ class TestResolvePublicLane(unittest.TestCase):
         # A marker matching subdev's registered lane host.
         dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.present)
 
-    def _r(self, want, have, marker, nodename="subdev"):
-        return dg.resolve_public_lane(want, have, marker_path=marker, nodename=nodename)
+    def _r(self, want, have, marker, nodename="subdev", username="newlevel"):
+        # username defaults to a NON-consumer account so the pre-#786 truth-table
+        # tests stay deterministic regardless of the REAL invoking account — the
+        # suite also runs on david1@subdev (a #786 consumer), where a username-less
+        # resolve would resolve the live account and flip the default to public.
+        return dg.resolve_public_lane(want, have, marker_path=marker,
+                                      nodename=nodename, username=username)
 
     def test_no_marker_never_offers_public(self):
         # Even with --public, no live drop lane on this box → None (no 404 URL).
