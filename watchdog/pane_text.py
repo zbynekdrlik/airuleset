@@ -13,8 +13,10 @@ trailing run of footer chrome (``_trailing_bottom_chrome``).
 Unlike ``pane_classify.py`` (a genuine leaf), this is a BACK-REFERENCE module:
 the bodies call primitives that stay resident in ``__init__.py`` (re-exported
 there from ``pane_classify.py``) -- ``_find_input_box``, ``_input_box_rows_raw``,
-``_find_input_box_from``, ``_is_bottom_chrome``, ``_is_separator_line`` -- and the
-constant ``_QUEUED_COMPACT_RX`` (defined in ``long_turn.py``, used only here). It
+``_find_input_box_from``, ``_is_bottom_chrome``, ``_is_separator_line``,
+``_is_border_rule`` -- and the constants ``_QUEUED_COMPACT_RX`` (``long_turn.py``,
+used only here) and ``_GOAL_HEADER_INDICATOR_RX`` (``__init__.py``, also read by
+``goal_scan.pane_goal_armed``). It
 also has two intra-module co-moved cross-calls (``_above_box_scan`` ->
 ``_above_input_box``, ``_pane_has_queued_compact`` -> ``_above_box_scan``). Every
 one of those references is written as call-time ``watchdog.<name>`` attribute
@@ -143,8 +145,18 @@ def _above_box_scan(captured, max_rows=25):
     queued = []
     n = 0
     for ln in reversed(rows):
-        if not ln or watchdog._is_separator_line(ln):
-            continue                       # spacer / the box's own top border
+        if (not ln or watchdog._is_separator_line(ln)
+                or watchdog._is_border_rule(ln)
+                or watchdog._GOAL_HEADER_INDICATOR_RX.match(ln)):
+            # spacer / the box's own top border. #822: a LABELLED top border
+            # (`──… ultracode ─`) is a border rule, not a pure separator
+            # (`_is_separator_line` rejects it for the `ultracode` text), and CC
+            # renders the armed-goal indicator (`◎ /goal active (Nm)`) as its own
+            # standalone row directly above the box's top border — BOTH are
+            # structural chrome sitting between the box and the queued messages,
+            # so the walk must skip past them (like a separator) to reach the
+            # `❯ /compact` rows, never stop ON them and report zero queued.
+            continue
         n += 1
         if n > max_rows:
             return queued, None

@@ -410,7 +410,7 @@
     "watchdog/one_glance.py": 425,
     "watchdog/ops_wait_recheck.py": 1038,
     "watchdog/pane_classify.py": 533,
-    "watchdog/pane_text.py": 199,
+    "watchdog/pane_text.py": 211,
     "watchdog/questions.py": 678,
     "watchdog/reaper.py": 412,
     "watchdog/release_gap.py": 532,
