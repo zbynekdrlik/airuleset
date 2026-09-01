@@ -1051,6 +1051,28 @@ gap in either.
    on a long (>30 min) batch lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
    every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT drained
    boundary — never lost, just not strictly deterministic per boundary.
+   **THE BOUNDARY-HOLD TURN — how the drained-boundary `/compact` ACTUALLY drains under an armed
+   `/goal` (#822).** Under an armed `/goal` the goal Stop hook blocks EVERY `✅` boundary
+   ("◯ Goal not yet met… continuing"), so a queued `❯ /compact` never drains on its own — CC drains
+   its type-ahead queue ONLY at an ACCEPTED Stop. And the ~60s sweep will NOT type a fresh `/compact`
+   under an armed goal with zero live tasks either (the #822 (c) pre-type gate returns
+   `skip:goal-continuing` — a typed `/compact` there would only queue and pile up, the owner's 3×
+   `❯ /compact` incident). So do NOT trust a bare `⏳ WORKING` turn to drain it. Instead, give the
+   pane an ACCEPTED Stop: after `compact-request --self`, launch ONE short tracked background task —
+   exactly the command `compact-request --self` PRINTS, `sleep 45 && echo boundary-hold` via
+   `run_in_background: true` — and end the turn `⏳ WORKING: boundary hold`. With a live background
+   task CC does not re-fire the goal, the pane is genuinely idle, the queued/pending `/compact`
+   drains, and the task's completion notification wakes the now-compacted session
+   (`hooks/stop-check-working-liveness.sh` accepts this tracked task — a `run_in_background` Bash job
+   registers as type "shell", status "running", so the `⏳ WORKING` turn passes). The HOLD probe now
+   has THREE verdicts: `--status` prints `PENDING` (recorded, not yet delivered → hold),
+   `QUEUED sid=… since=…` (typed but still sitting unexecuted in the pane → the boundary-hold turn
+   must drain it, do NOT dispatch), or `NONE` (drained → re-enter Step 1 for the next batch). This is
+   the one lever we have while CC's `/goal` continuation does not itself drain queued messages — the
+   UPSTREAM defect (item (f); a SendFeedback draft was filed from the dev1 session, sid 2d02a127).
+   **LIVE-VERIFY it on a real armed-goal pane after deploy: if the goal re-fires even with a live
+   task and the `/compact` still does NOT drain, record the evidence and ESCALATE to the owner —
+   never stack a further workaround** (the design's own hedge, #822).
    **WAIVER — a RE-DERIVABLE waiter never holds a drained boundary open forever (#730, owner
    incident 2026-08-26): gk `/autopilot-master` crossed batch 1 → drain → batch 2 → drain →
    batch 3 with ZERO compacts, because a release-lane waiter — shadow rerun → deploy →

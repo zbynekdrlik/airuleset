@@ -752,6 +752,23 @@ def _compact_live_bg_bash(cwd, sid, projects_dir=None):
 # --------------------------------------------------------------------------- #
 
 COMPACT_TEXT = "/compact"
+
+# #822 (d): the ONE short background command the session launches as a tracked
+# `run_in_background` Bash task at its drained batch boundary, so the pane gets an
+# ACCEPTED Stop that drains a queued/pending `/compact` under an armed `/goal` (the
+# goal Stop hook otherwise "continues" every `✅` boundary and CC never drains its
+# type-ahead queue). `compact-request --self` PRINTS it verbatim so the session
+# never guesses; `hooks/stop-check-working-liveness.sh` accepts this tracked task
+# (a `run_in_background` Bash job registers as type "shell", status "running").
+COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
+
+# The `--self` disposition words for which the boundary compact did NOT execute
+# and the session MUST do the boundary-hold to drain it: `skip:goal-continuing`
+# (the #822 (c) pre-type gate refused to type under the armed goal) and `queued`
+# (typed, but appended to CC's type-ahead queue). A clean `sent` / any other skip
+# does not print the hold hint.
+_COMPACT_HOLD_HINT_WORDS = frozenset(("skip:goal-continuing", "queued"))
+
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
 # first-seen" — #400's non-refreshable anchor is reversed). `ts` REFRESHES on
