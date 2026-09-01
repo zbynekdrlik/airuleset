@@ -1099,7 +1099,39 @@ for seg in split_top_level(skeleton):
         # newline would otherwise forge a second record (a `verdict=PASS`
         # for an arbitrary repo) in the tab-separated hand-off to bash /
         # scope-gate.log, re-opening the #329 field-injection.
-        reason = _clean_field(body_err) if (body is None and body_err) else _clean_field(crit)
+        #
+        # #802: EVERY branch of this block must emit a CONCRETE reason -- an
+        # empty criterion string (which the print loop renders as the opaque
+        # `-> none`) is itself a defect. The montalu1 incident: a body
+        # carrying `Scope-gate: user-request` inside a `--body "$(printf
+        # ...)"` command-substitution had no newline-anchored `Scope-gate:`
+        # LINE for CRITERION_RE, so crit=None; #483 only filled the reason
+        # for a `-F` disk-path failure (body_err set), leaving the two
+        # crit=None holes (body resolved but no line; body unresolvable with
+        # no body_err) rendering `-> none` -- an undiagnosable block. Each
+        # gets a concrete reason now:
+        if body is None:
+            # body could not be resolved: an unreadable `-F` disk path gives
+            # the explicit #483 reason; any other unreadable shape (no
+            # -F/--body, an unresolvable heredoc, a command-substitution /
+            # $VAR body a static PreToolUse scan cannot execute) gets a
+            # concrete body-unresolved reason instead of the empty `-> none`.
+            reason = _clean_field(body_err) if body_err else (
+                "body-unresolved -- could not read the issue body from this "
+                "command (no readable -F/--body; a $(...) / $VAR body cannot "
+                "be read at PreToolUse -- pass it via a heredoc `cat > body.md "
+                "<<'EOF' ... EOF` then `-F body.md`, or an inline --body \"...\")")
+        elif crit is None:
+            # body IS readable but carries no `Scope-gate: <criterion>` line
+            # at all -- the plain missing-line case.
+            reason = "no-scope-gate -- body carries no `Scope-gate: <criterion>` line"
+        else:
+            # crit present but not one of ALLOWED -- name the bad value.
+            reason = "invalid-scope-gate:%s" % _clean_field(crit)
+        # Defensive: no BLOCK may ever carry an empty reason (would print as
+        # `-> none`). Every branch above yields a non-empty string, but pin
+        # it so a future edit cannot silently re-open the opaque block.
+        reason = _clean_field(reason) or "unspecified-block"
         results.append(("BLOCK", clean_title, reason, parents_str,
                          target_repo, ""))
     else:
