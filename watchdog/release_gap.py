@@ -21,10 +21,12 @@ structural, traced in `watchdog/__init__.py` run_once():
     flight". So the owner gets, at best, a phone ping — never an in-session nudge
     to run the release.
 
-WHAT THIS DOES: on a per-session cadence (~6h, env-tunable), for an armed `/goal`
-pane on a FULL-authority box whose integration branch is ahead of prod AND no
-release is in flight, deliver ONE verified keystroke reminding the session to run
-its release pipeline. The FULL-authority gate is the INVERSE of #618: #618
+WHAT THIS DOES: on a per-session cadence (~1h, env-tunable — #812, owner "release
+train bez prestojov"; was 6h until a live gk stall proved 6h outlasts how often
+the release-in-flight signal flaps, so the anchor never aged to cadence), for an
+armed `/goal` pane on a FULL-authority box whose integration branch is ahead of
+prod AND no release is in flight, deliver ONE verified keystroke reminding the
+session to run its release pipeline. The FULL-authority gate is the INVERSE of #618: #618
 narrowed the lane-occupancy nudge's SKIP to `authority is None` (widening THAT
 nudge to reduced-authority stream boxes too), whereas a release train is run ONLY
 by the gatekeeper, so THIS nudge fires ONLY where `resolve_authority(cwd) ==
@@ -81,12 +83,19 @@ import watchdog
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
 # env AIRULESET_RELEASE_GAP_CADENCE_S — how long a stalled release gap sits (and
-# how long between re-nudges) before this job re-surfaces it. ~6h: a release
-# should not sit stalled a whole day, but the loop batches, so not per-sweep.
-RELEASE_GAP_CADENCE_S = 6 * 3600
-# floor for the env override (#504/#543 floor-clamp lesson): a sub-2h value would
-# nag the loop several times a day about a train it may be legitimately batching.
-RELEASE_GAP_MIN_S = 2 * 3600
+# how long between re-nudges) before this job re-surfaces it. 1h (#812, owner
+# "release train bez prestojov" — hourly checks, not more often): 6h was longer
+# than how often the release-in-flight signal FLAPS (each flap resets the stall
+# anchor via the `inflight` action), so the wait age never reached the cadence —
+# LIVE gk forensics 2026-09-01: 1103 decisions on a real 210->254-commit gap,
+# ZERO nudges all day (longest continuous wait window ~3h34m < 6h). An hourly
+# cadence fires in the STALL GAPS between flaps (4 such >1h windows that day).
+RELEASE_GAP_CADENCE_S = 1 * 3600
+# floor for the env override (#504/#543 floor-clamp lesson): the owner's intended
+# hourly cadence must be REACHABLE, so the floor is 1h (a 2h floor would have
+# clamped a 1h override back to 2h); it still clamps a units-error sub-hour value
+# so the nudge can never become a per-sweep nag.
+RELEASE_GAP_MIN_S = 1 * 3600
 # minimum integration-ahead-of-prod commit count before the gap is "real" (env
 # AIRULESET_RELEASE_GAP_MIN_AHEAD, floored at 1 — a units error must never make a
 # 0-commit "gap" nudge). Default 1: any unreleased integration commit qualifies.
@@ -488,7 +497,7 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
     # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke,
     # last_nudge unadvanced, `handled` unclaimed) so it retries a later sweep.
-    # release-gap carries NO per-category floor (its own ~6h cadence governs), so
+    # release-gap carries NO per-category floor (its own ~1h cadence governs), so
     # the gate is a pure family-spacing no-op except when a sibling fired recently.
     if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
         logs.append("release-gap %s -> hold:cadence-gate (shared family gap; "
