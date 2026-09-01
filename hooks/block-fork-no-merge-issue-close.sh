@@ -454,9 +454,6 @@ if [ -n "$ISSUE_NUM" ]; then
     # self-vs-assigned distinguishability the pre-App shared-PAT setup destroyed.
     ME=$(python3 "$REPO_DIR/airuleset.py" authority --self-login 2>/dev/null || echo "")
     MAINTAINER_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --maintainer-login 2>/dev/null || echo "")
-    # #773: the shared stream App bot login (a static constant, no network call,
-    # no App-token-box detection) — used ONLY by the fallback below.
-    APP_BOT_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
     if [ -n "$REPO_ARG" ]; then
         AUTHOR=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json author -q .author.login 2>/dev/null || echo "")
     else
@@ -486,11 +483,19 @@ if [ -n "$ISSUE_NUM" ]; then
     # keeps this a STRICT fallback: a resolved (non-bot) identity is unaffected.
     # The #349 discriminator is preserved verbatim — AUTHOR must be the App bot
     # (a maintainer-authored ticket is excluded), and the bot login is != the
-    # maintainer by construction (checked defensively).
-    if [ -z "$ME" ] && [ -n "$AUTHOR" ] && [ -n "$APP_BOT_LOGIN" ] \
-       && [ "$AUTHOR" = "$APP_BOT_LOGIN" ] \
-       && [ -n "$MAINTAINER_LOGIN" ] && [ "$APP_BOT_LOGIN" != "$MAINTAINER_LOGIN" ]; then
-        exit 0   # #773: stream-filed (bot-authored) ticket, self-login unresolvable — allowed
+    # maintainer by construction (checked defensively). `_repo_flag_unparseable`
+    # is the SAME fail-safe the #533/#756 carve-outs use: a -R flag present but
+    # unparseable (a glued `-Rowner/repo`) would read AUTHOR from the CWD repo
+    # while the close targets the named one — refuse the exemption (fail SAFE).
+    # APP_BOT_LOGIN (a static constant, no network call, no App-token-box
+    # detection) is fetched lazily INSIDE this branch, so a resolved-identity
+    # close never spawns the extra python3.
+    if [ -z "$ME" ] && [ -n "$AUTHOR" ] && ! _repo_flag_unparseable "$REPO_ARG"; then
+        APP_BOT_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
+        if [ -n "$APP_BOT_LOGIN" ] && [ "$AUTHOR" = "$APP_BOT_LOGIN" ] \
+           && [ -n "$MAINTAINER_LOGIN" ] && [ "$APP_BOT_LOGIN" != "$MAINTAINER_LOGIN" ]; then
+            exit 0   # #773: stream-filed (bot-authored) ticket, self-login unresolvable — allowed
+        fi
     fi
 fi
 

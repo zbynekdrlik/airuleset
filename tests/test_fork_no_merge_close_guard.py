@@ -365,6 +365,18 @@ class TestForkNoMergeCloseGuard(TestCase):
                 app_token_dir="/nonexistent-773-app-token-dir")
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_blocks_bot_authored_close_with_glued_repo_flag_when_selflogin_unresolvable(self):
+        # #773 review (MINOR): a glued `-Rowner/repo` (no separator) leaves
+        # REPO_ARG empty, so AUTHOR would be read from the CWD repo while the
+        # close targets the named one -- the fallback refuses via the same
+        # _repo_flag_unparseable fail-safe the #533/#756 carve-outs use, even
+        # though the ticket IS bot-authored.
+        r = run("gh issue close 5560 -Rzbynekdrlik/odoo-erp --comment done",
+                self.branch, api_user_403=True, me="",
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir="/nonexistent-773-app-token-dir")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
                     "gh issue view 5 --json title", "gh pr list"):
@@ -939,9 +951,11 @@ class TestGkVerdictArtifactClose(TestCase):
         # spuriously BLOCKED. A ~260KB payload with the verdict heading on line 1
         # makes the race DETERMINISTIC: grep -q matches line 1 and exits while
         # printf is still blocked writing past the full 64KB pipe -> SIGPIPE.
-        # Kept under the ~128KB single-env-var limit (MAX_ARG_STRLEN) that the
-        # hermetic fake gh passes it through. RED on the pipe form (12/12 spurious
-        # NOT-FOUND measured at this size), GREEN on the here-string.
+        # The payload is ~97KB (2500 filler lines): >64KB (the pipe capacity, so
+        # printf always blocks) yet under the ~128KB single-env-var limit
+        # (MAX_ARG_STRLEN) the hermetic fake gh passes it through. RED on the pipe
+        # form (12/12 spurious NOT-FOUND measured at ~97KB), GREEN on the
+        # here-string.
         big = self.HEADING + "\n" + ("filler line to pad the comment payload\n" * 2500)
         self.assertGreater(len(big), 90000)
         self.assertLess(len(big), 120000)
