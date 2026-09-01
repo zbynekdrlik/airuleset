@@ -224,7 +224,9 @@ class CallerProvenOwnDraft806(unittest.TestCase):
         self.assertTrue(ok, logs)
         self.assertEqual(tmux.box, "")                     # submitted (cleared)
         self.assertFalse(any("-l" in a for a in tmux.sent), tmux.sent)  # never retyped
-        self.assertIn("Odpoveď z Discordu:", p.read_text())  # real user turn landed
+        # a real `user` turn carrying the reply landed (JSON-escaped in the file)
+        self.assertIn('"type": "user"', p.read_text())
+        self.assertIn("Ticket #99", p.read_text())
 
     def test_default_mode_refuses_the_same_plain_text_draft(self):
         # The prefix gate is UNCHANGED by default: a plain-text reply has no

@@ -649,10 +649,16 @@ class ReplyTypedAnswerAdoption(unittest.TestCase):
 
     def _reply(self):
         return {"id": "repT", "author": {"id": "773451844110385193"},
-                "message_reference": {"message_id": self.REF}, "content": "1"}
+                "message_reference": {"message_id": self.REF}, "content": "1",
+                "_channel": self.CH}
 
     def _run(self, argv, timeout=8):
         return "0" if "display" in " ".join(argv) else ""
+
+    def _fetch(self, ch, token):
+        # a reply lives in exactly ONE channel — model it (else a swallowed
+        # reply that stays un-deduped is re-attempted once PER fetched channel).
+        return [self._reply()] if ch == self.CH else []
 
     def _go(self, panes, *, sv=None, so=None, state=None):
         state = state if state is not None else {}
@@ -662,7 +668,7 @@ class ReplyTypedAnswerAdoption(unittest.TestCase):
              m.patch.object(wd, "submit_own_draft_verified", so):
             logs = wd.deliver_discord_replies(
                 time.time(), self._run, state, panes, dry_run=False,
-                discord_fetch=lambda ch, t: [self._reply()],
+                discord_fetch=self._fetch,
                 gh_comment=lambda *a, **k: True, projects_dir=self.proj)
         return state, sv, so, logs
 

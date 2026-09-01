@@ -739,43 +739,38 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             if watchdog.pane_in_mode(pid, run):
                 continue
             if not dry_run:
+                # #806 — the single transcript-proof delivery family, not a
+                # bespoke render verify: a bare input box after our Enter never
+                # proved a SUBMIT (a swallow under the agent-strip selector, #36,
+                # clears it too, and so does a turn that STARTED under the send),
+                # so book "delivered" only on a TRANSCRIPT-confirmed `user` turn.
+                # `send_verified` TYPES + submits + self-recovers a swallow (one
+                # corrective Escape+Enter) and on a genuine swallow backs its own
+                # text off the box — nothing is ever left stranded; #594's
+                # `delivered_unconfirmed` (box cleared, transcript raced, e.g. a
+                # cycling armed /goal loop) reads as delivered so we never re-type.
+                # A pane holding OUR OWN previously-typed reply (own_stuck, proven
+                # head+tail by `_box_holds_our_own_text`) is SUBMITTED IN PLACE via
+                # the caller-proven family member, never retyped (the doubled-text
+                # corruption, #193) nor stashed-around.
+                tpath = watchdog._transcript_for_session(
+                    projects_dir, r["session"], r["cwd"])
                 if own_stuck:
-                    run(["tmux", "send-keys", "-t", pid, "Enter"])
+                    delivered = watchdog.submit_own_draft_verified(
+                        pid, prompt, run, tpath, sleep_fn=sleep_fn, logs=logs,
+                        caller_proven_own=True)
                 else:
                     _record_dreply_typed(state, pid, prompt, now)
-                    watchdog.send_continue(pid, prompt, run)
-                # verify the input box emptied — a swallowed Enter (#20) leaves
-                # the text at `❯`; up to 2 corrective Escape+Enter retries, then
-                # give up. Escape FIRST (issue #36) — a swallow while the
-                # agent-strip selector holds focus makes a bare Enter navigate
-                # ("view agent") instead of submitting; ONE Escape clears that.
-                # Never two Escapes in a row — that permanently deletes a draft.
-                #
-                # #372 (4th incident, forensically confirmed) — a FALSE
-                # "delivered" confirmation is a trust-breaking defect: the
-                # sender legitimately believes their reply reached the
-                # session while it never did. `_input_line_text` returns
-                # `None` (undeterminable — a dialog, a spinner, a genuinely
-                # unreadable capture) as a value DISTINCT from `""`
-                # (genuinely bare, confirmed empty) — the ORIGINAL `while t2`
-                # / `if t2:` checks treated `None` identically to `""` (both
-                # falsy), so an unreadable post-send capture was silently
-                # accepted as proof of delivery. Require the EXPLICIT `""`
-                # confirmation — never a merely-falsy one.
-                t2 = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=30))
-                tries = 0
-                while t2 != "" and tries < 2:
-                    run(["tmux", "send-keys", "-t", pid, "Escape"])
-                    run(["tmux", "send-keys", "-t", pid, "Enter"])
-                    t2 = watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=30))
-                    tries += 1
-                if t2 != "":
+                    send_out = {}
+                    delivered = watchdog.send_verified(
+                        pid, prompt, run, tpath, sleep_fn=sleep_fn, logs=logs,
+                        out=send_out) or send_out.get("delivered_unconfirmed")
+                if not delivered:
+                    # send_verified / submit_own_draft_verified already logged the
+                    # honest reason (swallow / unreadable / raced) to `logs`.
                     blocked.setdefault(r["reply_id"], now)
-                    logs.append(
-                        "reply wedged (enter swallowed) %s" % r["session"][:12]
-                        if t2 is not None else
-                        "reply wedged (verify unreadable) %s"
-                        % r["session"][:12])
+                    logs.append("reply wedged (submit unverified) %s"
+                                % r["session"][:12])
                     # An ACTIVE session with a DEAD input box (the 4th #20
                     # recurrence) is invisible to job 10 — count our own
                     # verify failures; >= 3 cycles → ONE deduped ping (the

@@ -836,7 +836,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
 
 
 def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
-                              sleep_fn=None, logs=None):
+                              sleep_fn=None, logs=None, caller_proven_own=False):
     """#501 — SUBMIT an EXISTING recognized-own nudge draft already sitting in
     the input box, transcript-verified — WITHOUT typing anything. The missing
     "submit an already-composed OWN draft" member of the delivery family
@@ -856,6 +856,20 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     ownership for them — the #372 janitor recovers those only WITH provenance).
     Any unrecognized/foreign draft is refused with ZERO keystrokes: NEVER a
     blind Enter on a user's parked draft.
+
+    `caller_proven_own` (#806): a CALLER-PROVEN own PLAIN-TEXT draft. When True,
+    the caller has ALREADY established ownership by a full head+tail match
+    against this exact expected `draft` (job 7's `_box_holds_our_own_text` over
+    a recorded `dreply_typed` reply — a STRONGER proof than the unambiguous-
+    nudge prefix, the SAME caller-proven shape `submit_own_goal_verified` (#566)
+    uses), so the prefix gate is SATISFIED by that proof: recognition + the
+    transcript token key on the box HEAD row being a leading substring of
+    `draft` (wrap-safe) rather than on a registered machine prefix. Default
+    False -> byte-identical prefix-gated behavior for every existing caller. The
+    two modes never mix: a caller-proven `draft` is PLAIN TEXT (transcript-
+    confirmable), never a slash command (`submit_own_goal_verified` owns the
+    pane-confirmed `/goal ` path — content proof there is a composite the
+    transcript can never match).
 
     Recognition + verification read the box HEAD row (`_input_box_head_text`),
     NEVER the tail (`_input_line_text`): every real own nudge is 289-720 chars
@@ -888,10 +902,22 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
         if isinstance(logs, list):
             logs.append(reason)
 
-    prefix = watchdog._own_nudge_submit_prefix(draft)
-    if not prefix:
-        _log("submit-own abort: draft is not an unambiguous own nudge")
-        return False
+    if caller_proven_own:
+        # #806 — the CALLER proved head+tail ownership of this exact PLAIN-TEXT
+        # `draft`; the box HEAD row (a leading substring of `draft`, wrap-safe)
+        # is the fresh-race recognizer, mirroring `submit_own_goal_verified`'s
+        # `text.startswith(head)`. `startswith` is robust to the tail-whitespace
+        # strip that would break an `endswith` (#720/#763).
+        def _still_own(h):
+            return bool(h) and draft.startswith(h)
+    else:
+        prefix = watchdog._own_nudge_submit_prefix(draft)
+        if not prefix:
+            _log("submit-own abort: draft is not an unambiguous own nudge")
+            return False
+
+        def _still_own(h):
+            return bool(h) and h.startswith(prefix)
     if not tpath:
         _log("submit-own abort: no transcript path")
         return False
@@ -905,7 +931,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # FOREIGN draft that raced IN must NEVER be Entered.
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     head = watchdog._input_box_head_text(cap)
-    if not head or not head.startswith(prefix):
+    if not _still_own(head):
         _log("submit-own abort: box no longer holds the recognized own draft")
         return False
     if "esc to interrupt" in (cap or ""):
@@ -918,7 +944,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
         cap = watchdog.capture_pane(pane_id, run, lines=40)
         head = watchdog._input_box_head_text(cap)
-        if not head or not head.startswith(prefix):
+        if not _still_own(head):
             _log("submit-own abort: own draft gone after strip Escape")
             return False
     try:
@@ -942,7 +968,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # Escape (#35), never an Escape into a box that already went bare (a turn
     # may have started, #233).
     still = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
-    if still and still.startswith(prefix):
+    if _still_own(still):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
         run(["tmux", "send-keys", "-t", pane_id, "Enter"])
         if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
@@ -955,7 +981,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     final = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
     if final is None:
         _log("submit-own unconfirmed: box unreadable, submit not proven")
-    elif final.startswith(prefix):
+    elif _still_own(final):
         _log("submit-own unconfirmed: own draft still in box, left in place "
              "(retryable)")
     elif final == "":
