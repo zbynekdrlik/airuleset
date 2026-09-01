@@ -822,6 +822,17 @@ class TestAddressRegisterPerPerson(TestCase):
         self.assertIn("TYKANIE: Patrik Javorský, Dominik Volek, Peter Hollý", w)
         self.assertIn("DEFAULT for anyone NOT listed here: VYKANIE", w)
 
+    def test_montalu_register_includes_barbora_cuhanicova_820(self):
+        """#820 -- Barbora Čuhaničová (montalu, účtovníčka) added to the
+        register, owner-approved VYKANIE via odoo-erp #4978 (client thread
+        „Docenenie na mieste 4", montalu PROD discuss.channel_390, msg
+        1777526, „pani Čuhaničová"). Anchored to the VYKANIE clause itself
+        (not just anywhere in the window) so a mis-placed entry (e.g. under
+        TYKANIE) still fails this test."""
+        w = self._bullet_window()
+        self.assertIn(
+            "VYKANIE: CEO Pavol Špetta (menovite), Barbora Čuhaničová", w)
+
     def test_new_person_defaults_to_vykanie(self):
         w = self._bullet_window()
         self.assertIn("A NEW client person you have not been told how to address is VYKANIE", w)
