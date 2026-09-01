@@ -74,7 +74,7 @@
     "tests/test_bg_bash_staleness_defer_604.py": 55,
     "tests/test_block_commit_without_design.py": 661,
     "tests/test_block_discuss_thread_name.py": 954,
-    "tests/test_block_foreign_airuleset_write.py": 182,
+    "tests/test_block_foreign_airuleset_write.py": 262,
     "tests/test_block_root_recursive_grep.py": 178,
     "tests/test_block_staged_content_values.py": 260,
     "tests/test_block_worker_close_trigger.py": 313,
