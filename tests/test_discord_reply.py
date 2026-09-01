@@ -27,10 +27,45 @@ import watchdog as wd
 # once delivered), not the keystroke mechanics, so `send_verified` is replaced
 # module-wide by a happy-path fake that byte-mirrors send_continue (type `-l --`
 # + Enter, returns True). Swallowed-submit handling: test_send_verified_adoption.
-def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
+                          out=None):
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True
+
+
+class _ReplySendVerifiedRec:
+    """#806 — a per-test stand-in for `send_verified` overriding the module
+    fake, so a WedgeSelfHeal / InputDeadPing contract test controls the True/
+    False (and #594 delivered_unconfirmed) outcome without the keystroke
+    mechanics (which live in test_send_verified.py)."""
+
+    def __init__(self, result=True, unconfirmed=False):
+        self.result = result
+        self.unconfirmed = unconfirmed
+        self.calls = []
+
+    def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
+                 out=None):
+        self.calls.append({"pid": pid, "text": text, "tpath": tpath})
+        if self.unconfirmed and isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
+        return self.result
+
+
+class _ReplySubmitOwnRec:
+    """#806 — a per-test stand-in for `submit_own_draft_verified` (the
+    own_stuck in-place submit), recording caller_proven_own + the draft."""
+
+    def __init__(self, result=True):
+        self.result = result
+        self.calls = []
+
+    def __call__(self, pid, draft, run=None, tpath=None, sleep_fn=None,
+                 logs=None, caller_proven_own=False):
+        self.calls.append({"pid": pid, "draft": draft,
+                           "caller_proven_own": caller_proven_own})
+        return self.result
 
 
 _SV_PATCHER = None
@@ -885,81 +920,63 @@ class WedgeSelfHeal(unittest.TestCase):
     def _wedged_pane(self, text):
         return ("──── ultracode ─\n❯\xa0" + text + "\n────\n  ctx ██░░  caveman\n")
 
-    def test_swallowed_enter_gets_corrective_enter_then_delivers(self):
-        # after typing, verify-capture still shows OUR text at ❯ (Enter was
-        # swallowed) → ONE corrective Escape+Enter; second verify shows bare
-        # → delivered. First item is send_continue's OWN pre-type capture
-        # (issue #36 — it now checks the agent-strip selector before typing);
-        # an ordinary IDLE pane there needs no escape.
-        composed_tail = "auto-arm ho nalepí sám."
-        run = ScriptedPaneRun([self.IDLE, self._wedged_pane(composed_tail), self.IDLE])
+    def _deliver(self, panes, *, sv=None, so=None):
+        # #806: the keystroke mechanics (swallow correction, unreadable-capture
+        # honesty, undo-on-swallow) moved INTO send_verified /
+        # submit_own_draft_verified (locked in test_send_verified.py /
+        # test_own_draft_submit.py). Here we drive job 7's CONTRACT with the
+        # family: patch the primitive to a recorder controlling True/False and
+        # assert delivered-vs-wedged, in-place-vs-retype.
         state = {}
-        wd.deliver_discord_replies(
-            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,
-            discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
-        enters = [a for a in run.sent if a[-1] == "Enter"]
-        self.assertGreaterEqual(len(enters), 2, run.sent)   # send + corrective
+        run = ScriptedPaneRun([self.IDLE])
+        sv = sv if sv is not None else _ReplySendVerifiedRec(result=True)
+        so = so if so is not None else _ReplySubmitOwnRec(result=True)
+        with m.patch.object(wd, "send_verified", sv), \
+             m.patch.object(wd, "submit_own_draft_verified", so):
+            logs = wd.deliver_discord_replies(
+                time.time(), run, state, panes, dry_run=False,
+                discord_fetch=lambda ch, t: [self._reply()],
+                gh_comment=lambda *a: True)
+        return state, sv, so, logs
+
+    def test_verified_submit_delivers_and_pops_the_question(self):
+        state, sv, so, _ = self._deliver({"sid-abc": ("%1", self.IDLE)},
+                                         sv=_ReplySendVerifiedRec(result=True))
+        self.assertEqual(len(sv.calls), 1)   # fresh type went through send_verified
         self.assertIn("repW", state["dreply_done"])
         self.assertNotIn("888001", notify.load_questions(self.qpath))
 
-    def test_still_wedged_after_retry_is_not_marked_delivered(self):
-        stuck = self._wedged_pane("auto-arm ho nalepí sám.")
-        run = ScriptedPaneRun([stuck, stuck, stuck])
-        state = {}
-        logs = wd.deliver_discord_replies(
-            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)}, dry_run=False,
-            discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
+    def test_unverified_submit_is_not_marked_delivered(self):
+        # send_verified could not transcript-confirm the submit (swallow /
+        # unreadable / raced) → NOT delivered, question stays tracked, blocked.
+        state, sv, so, logs = self._deliver(
+            {"sid-abc": ("%1", self.IDLE)}, sv=_ReplySendVerifiedRec(result=False))
         self.assertNotIn("repW", state.get("dreply_done", []))
         self.assertIn("888001", notify.load_questions(self.qpath))
         self.assertIn("repW", state.get("dreply_blocked", {}))
         self.assertTrue(any("wedge" in ln.lower() for ln in logs), logs)
 
-    def test_own_stuck_text_is_entered_not_retyped(self):
-        # a PRIOR wedged delivery left OUR composed text in the input box — the
-        # next cycle must press Enter only, never type the text again (the
-        # doubled-text corruption)
-        stuck = self._wedged_pane("auto-arm ho nalepí sám.")
-        run = ScriptedPaneRun([stuck, self.IDLE, self.IDLE])
-        state = {}
-        wd.deliver_discord_replies(
-            time.time(), run, state, {"sid-abc": ("%1", stuck)}, dry_run=False,
-            discord_fetch=lambda ch, t: [self._reply()], gh_comment=lambda *a: True)
-        literal = [a for a in run.sent if "-l" in a]
-        self.assertEqual(literal, [], "must NOT retype over own stuck text")
-        enters = [a for a in run.sent if a[-1] == "Enter"]
-        self.assertGreaterEqual(len(enters), 1)
+    def test_delivered_unconfirmed_is_treated_as_delivered(self):
+        # #594: box cleared (submit queued) but the transcript raced — do NOT
+        # re-deliver (else infinite re-type into a cycling armed /goal loop).
+        state, sv, so, _ = self._deliver(
+            {"sid-abc": ("%1", self.IDLE)},
+            sv=_ReplySendVerifiedRec(result=False, unconfirmed=True))
         self.assertIn("repW", state["dreply_done"])
+        self.assertNotIn("888001", notify.load_questions(self.qpath))
 
-    def test_an_unreadable_verify_capture_is_never_confirmed_delivered(self):
-        """#372 (4th incident, forensically flagged): a false "delivered"
-        confirmation is a trust-breaking defect — the sender legitimately
-        believes their Discord reply reached the session while it never
-        did. `_input_line_text` returns `None` (undeterminable — a dialog,
-        a spinner, a genuinely unreadable capture) as a DISTINCT value from
-        `""` (genuinely bare, confirmed empty) — but the verify loop's
-        `while t2 and tries < 2` / `if t2:` both treat `None` as FALSY,
-        identically to a confirmed-empty box, so an UNREADABLE post-send
-        capture was silently accepted as proof of delivery. This must be
-        treated exactly like "still wedged": not marked delivered, no
-        premature done-state, retried/reported next cycle."""
-        UNREADABLE = "some fullscreen dialog with no boundary at all\n"
-        # captures: [send_continue's own pre-type strip-selected check
-        # (ordinary idle, no escape needed), the verify capture -- made
-        # UNREADABLE, not merely "still shows our text"]
-        run = ScriptedPaneRun([self.IDLE, UNREADABLE])
-        state = {}
-        logs = wd.deliver_discord_replies(
-            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
-            dry_run=False, discord_fetch=lambda ch, t: [self._reply()],
-            gh_comment=lambda *a: True)
-        self.assertNotIn("repW", state.get("dreply_done", []),
-                         "an unreadable verify capture must NEVER be "
-                         "treated as a confirmed delivery: %r" % logs)
-        self.assertIn("888001", notify.load_questions(self.qpath),
-                      "the question must stay tracked -- not silently "
-                      "dropped on an unverified 'delivery'")
-        self.assertTrue(any("wedge" in ln.lower() or "unreadable" in ln.lower()
-                            for ln in logs), logs)
+    def test_own_stuck_reply_is_submitted_in_place_never_retyped(self):
+        # a PRIOR swallowed delivery left OUR composed text in the box — the
+        # next cycle SUBMITS IT IN PLACE (caller_proven_own), never retypes it
+        # (the doubled-text corruption) via send_verified.
+        stuck = self._wedged_pane("auto-arm ho nalepí sám.")
+        state, sv, so, _ = self._deliver(
+            {"sid-abc": ("%1", stuck)},
+            sv=_ReplySendVerifiedRec(result=True), so=_ReplySubmitOwnRec(result=True))
+        self.assertEqual(len(so.calls), 1, "own stuck reply submitted in place")
+        self.assertTrue(so.calls[0]["caller_proven_own"])
+        self.assertEqual(len(sv.calls), 0, "must NOT retype via send_verified")
+        self.assertIn("repW", state["dreply_done"])
 
 
 class ReceiptReaction(unittest.TestCase):
@@ -1131,13 +1148,15 @@ class InputDeadPing(unittest.TestCase):
                 "message_reference": {"message_id": "888001"}, "content": "1"}
 
     def _wedged_cycle(self, state):
-        stuck = ("──── ultracode ─\n❯\xa0auto-arm ho nalepí sám.\n────\n"
-                 "  ctx ██░░  caveman\n")
-        run = ScriptedPaneRun([stuck, stuck, stuck])
-        wd.deliver_discord_replies(
-            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
-            dry_run=False, discord_fetch=lambda ch, t: [self._reply()],
-            gh_comment=lambda *a: False)
+        # #806: an unverified submit (send_verified -> False) is the wedge signal
+        # job 7 counts. The keystroke mechanics live in test_send_verified.py;
+        # here we drive the CONTRACT with the primitive returning False.
+        run = ScriptedPaneRun([self.IDLE])
+        with m.patch.object(wd, "send_verified", _ReplySendVerifiedRec(result=False)):
+            wd.deliver_discord_replies(
+                time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
+                dry_run=False, discord_fetch=lambda ch, t: [self._reply()],
+                gh_comment=lambda *a: False)
 
     def test_three_wedged_cycles_ping_once(self):
         state = {}
