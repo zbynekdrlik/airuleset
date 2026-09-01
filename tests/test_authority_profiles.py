@@ -87,6 +87,19 @@ class TestAuthorityResolution(TestCase):
         with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
+    def test_resolve_miva1_no_marker_is_branch_merge(self):
+        # airuleset#821 REGRESSION: miva1 was PROMOTED 2026-08-14 (#3244 phase 2)
+        # to a full write stream "in the montalu mould" — branch-merge authority
+        # (push miva1/<topic>, open+merge own PR into develop, then hand-off).
+        # odoo-erp states this in PROSE (no HTML-comment marker), so with no
+        # marker the per-user table is the effective source and MUST resolve
+        # branch-merge — NOT the stale phase-1 fork-no-merge that armed the
+        # wrong /goal template on 2026-09-01.
+        import tempfile
+        d = tempfile.mkdtemp()  # no CLAUDE.md -> table is the effective source
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "branch-merge")
+
     def test_resolve_uses_the_map_for_david_family(self):
         for u in ("david2", "david3", "david4"):
             with m.patch.object(airuleset, "_current_user", return_value=u):
