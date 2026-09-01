@@ -5608,10 +5608,11 @@ def cmd_upload(args):
     # FRESH here (unsandboxed) so it always reflects the current network.
     ips = bind_ips()
 
-    # Public-TLS drop lane (#664): channel order tailscale -> public. On a box
-    # with a LIVE drop lane AND (--public OR no tailscale), bind loopback on the
-    # fixed drop port a managed cloudflared tunnel fronts and advertise ONE public
-    # HTTPS URL — never an scp/ssh -L ask.
+    # Public-TLS drop lane (#664/#786): channel order tailscale -> public. On a
+    # box with a LIVE drop lane AND (--public OR the invoking account has a
+    # no-tailscale consumer — #786, david1/david2 -> David's laptop — OR no
+    # tailscale), bind loopback on the fixed drop port a managed cloudflared tunnel
+    # fronts and advertise ONE public HTTPS URL — never an scp/ssh -L ask.
     from filedrop import _is_tailscale
     import cli_drop_gateway as _dg
     have_tailscale = any(_is_tailscale(ip) for ip in ips)

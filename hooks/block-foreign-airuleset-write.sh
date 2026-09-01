@@ -19,6 +19,16 @@ set -euo pipefail
 #   only ever arrives as a Bash command). Session identity = the payload
 #   transcript_path (its parent dir encodes the LAUNCH dir) or CLAUDE_PROJECT_DIR.
 #
+#   Write-op detection (#790, 2026-09-01) is SEGMENT-AWARE, cd-tracking,
+#   target-verified via hooks/foreign_repo_guard.py — never "a write verb
+#   appears anywhere in the composite command". The round-1 bash regex flagged
+#   ANY git write verb present anywhere in the whole command once "devel/
+#   airuleset" appeared anywhere too (even just as the PATH to airuleset.py
+#   itself in an unrelated `airuleset.py autopilot-lock` call), which
+#   false-blocked a git write op on a totally different (foreign) repo sitting
+#   alongside that call in the same composite — a routine shape during a
+#   foreign-repo integration cycle. See foreign_repo_guard.py's own docstring.
+#
 # RULE B (#496, 2026-08-15) — a worktree-isolated SUBAGENT must write ONLY
 #   inside its OWN worktree, never the shared main checkout. Live incident
 #   (worker #433 step 12): dispatched with `isolation: "worktree"` (worktree
@@ -157,14 +167,7 @@ fi
 
 [ "${AIRULESET_ALLOW_FOREIGN_WRITE:-0}" = "1" ] && exit 0
 
-# --- does the command TARGET an airuleset checkout? -------------------------
-# Raw-string path match (quoted or not) OR the tool call's cwd inside one.
-TARGETS=0
-case "$CMD" in *devel/airuleset*) TARGETS=1 ;; esac
-case "$CWD" in */devel/airuleset|*/devel/airuleset/*) TARGETS=1 ;; esac
-[ "$TARGETS" = "1" ] || exit 0
-
-# --- strip quoted spans, then match the WRITE ops + the bypass marker -------
+# --- strip quoted spans, then check the bypass marker -----------------------
 STRIPPED=$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g')
 case "$STRIPPED" in *"airuleset:foreign-ok"*)
   # #492: per-USER log path — a FIXED /tmp name collides across users on a
@@ -177,15 +180,38 @@ case "$STRIPPED" in *"airuleset:foreign-ok"*)
   exit 0 ;;
 esac
 
-is_write() {
-  printf '%s' "$STRIPPED" | grep -qE \
-    '(^|[;&|[:space:]])git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+(commit|push|pull|merge|rebase|cherry-pick|revert|reset|add|rm|mv|stash|tag|am|apply)([[:space:]]|$)' \
-    && return 0
-  printf '%s' "$STRIPPED" | grep -qE 'airuleset\.py[[:space:]]+(push|install)([[:space:]]|$)' \
-    && return 0
-  return 1
-}
-is_write || exit 0
+# --- cheap prefilter: "airuleset" absent from BOTH the command text and the
+# tool call's cwd means NO possible target the analyzer could resolve can
+# ever contain "devel/airuleset" either (a -C/--git-dir/cd target is always
+# either a literal token in $CMD or resolved relative to $CWD — normpath/
+# join cannot conjure the substring from nothing) — so skip the python3 spawn
+# entirely on the hot path of every OTHER foreign-session Bash call fleet-
+# wide (review finding #790 2/6: the old TARGETS-style textual prefilter was
+# deleted outright instead of demoted to a prefilter, so every non-airuleset
+# Bash call was paying a sed + a python3 startup for nothing).
+case "$CMD$CWD" in
+  *airuleset*) : ;;
+  *) exit 0 ;;
+esac
+
+# --- does the command ACTUALLY WRITE a devel/airuleset checkout? -----------
+# Segment-aware, cd-tracking, target-verified (#790) — never "a write verb
+# appears somewhere in the composite" (that false-blocked a git write on a
+# totally different repo sitting alongside an unrelated airuleset.py CLI
+# call, e.g. `autopilot-lock`, in the SAME composite command — autopilot-lock
+# is called routinely right next to a foreign repo's own integration git
+# steps). See hooks/foreign_repo_guard.py for the full rationale; it mirrors
+# the RULE B segment-aware shape (worktree_guard.py, #496) with a different
+# target test. Fail-open: no python3 / any parse error → allow (RULE A's own
+# documented "never brick an unknown context" stance).
+FRG="$(dirname "${BASH_SOURCE[0]}")/foreign_repo_guard.py"
+if command -v python3 >/dev/null 2>&1 && [ -r "$FRG" ]; then
+  rc=0
+  printf '%s' "$CMD" | python3 "$FRG" - "$CWD" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = "2" ] || exit 0
+else
+  exit 0
+fi
 
 cat >&2 <<'EOF'
 🚫 BLOCKED: the airuleset repo is written ONLY from its own session.

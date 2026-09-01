@@ -153,8 +153,19 @@ class TestReadReactionsCompanion(_Teeth, TestCase):
     def test_header_names_reaction_read(self):
         self._teeth("Reading a client's REACTION")
 
-    def test_reaction_model_recipe(self):
-        self._teeth("mail.message.reaction", "search_read", "message_id")
+    def test_reaction_guarded_method_recipe(self):
+        # #784: the real-time recipe calls the odoo-erp #5577 GUARDED method,
+        # never the raw model's search_read.
+        self._teeth("message_reactions_guarded", "mail.message", "message_id")
+
+    def test_raw_search_read_is_banned_not_recommended(self):
+        # #784: the raw `mail.message.reaction` search_read may still be
+        # NAMED (as the thing to avoid / the permanent 403), but must
+        # explicitly say it is BANNED -- co-occurrence with "403" alone is
+        # not enough teeth (a 403 could just as easily describe a working
+        # call that occasionally errors). Anchor on the anti-pattern's own
+        # explicit ban sentence.
+        self._teeth("search_read", "BANNED", "guarded method")
 
     def test_403_obstacle_documented(self):
         self._teeth("403", "base.group_user", "handover")
@@ -162,8 +173,28 @@ class TestReadReactionsCompanion(_Teeth, TestCase):
     def test_fresh_prod_copy_fallback(self):
         self._teeth("REFRESH-DEV-BOX-FROM-PROD", "psql")
 
-    def test_pending_odoo_erp_acl_crossref(self):
-        self._teeth("odoo-erp", "company_base", "ACL")
+    def test_shipped_odoo_erp_crossref(self):
+        # #784: the "pending ACL fix" framing is gone -- #5577 SHIPPED a
+        # guarded company_base method, it did not widen the raw ACL.
+        self._teeth("odoo-erp", "company_base", "#5577")
+
+    def test_no_pending_acl_fix_language(self):
+        # #784: the recipe must not still frame this as "pending" /
+        # "once the ACL below is live" -- that framing is now false (#5577
+        # already merged + shipped a guarded method, not an ACL widen).
+        self.assertNotIn("Pending ACL fix", self.text)
+        self.assertNotIn("once the ACL below is live", self.text)
+
+    def test_availability_check_documented(self):
+        # #784 review consideration: #5577 lives on develop and reaches a
+        # given client's PROD only via that client's own release train, so
+        # the recipe must tell the reader to CHECK per instance. Review
+        # finding (fable, 2026-09-01): the recipe's own call is XML-RPC
+        # `execute_kw`, which surfaces a `Fault`, not a literal HTTP 404 --
+        # the doc must hedge BOTH shapes (a Fault for XML-RPC, a 404 only
+        # over the JSON-2 endpoint that was actually live-verified),
+        # never claim an XML-RPC call returns a raw HTTP status.
+        self._teeth("Fault", "message_reactions_guarded", "404")
 
     def test_doctrine_pointer(self):
         self._teeth("statusline-vocabulary", "#745", "plnohodnotná")
@@ -196,12 +227,16 @@ class TestTriggerRow(TestCase):
     def test_recipe_reads_guest_id(self):
         # review finding: a Discuss GUEST reacts with partner_id=False + a set
         # guest_id; reading only partner_id would misclassify a real client
-        # reaction as no-answer, recreating the incident.
+        # reaction as no-answer, recreating the incident. #784: the guarded
+        # method takes only `message_id` (no explicit fields list), so the
+        # guest_id documentation now lives in prose (the guarded-method
+        # comment) + the psql fallback's SELECT list -- assert both.
         t = read(COMPANION)
         self.assertIn("guest_id", t, "recipe must read guest_id (guest reactor)")
-        # both the XML-RPC fields list and the psql SELECT carry it
-        self.assertIn('"guest_id"', t)
-        self.assertIn("partner_id, guest_id", t)
+        self.assertIn("partner_id` OR `guest_id`", t,
+                       "the guarded-method comment must document guest_id")
+        self.assertIn("partner_id, guest_id", t,
+                       "the psql fallback's SELECT must read guest_id too")
 
     def test_topic_is_unique(self):
         topics = [r[0] for r in load_conf_rows()]
