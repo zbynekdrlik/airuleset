@@ -148,15 +148,16 @@ def _pane_has_bg_agent(captured):
 # were private to its own delivery and are removed with it. The SHARED
 # helpers it also used (`_pane_compacting`/COMPACTING_MARKER,
 # `_reconcile_candidate_panes`) are KEPT -- but AFTER the #402 compact
-# collapse (below) neither is job 14's or job 21's own any more: job 14's
-# real code now lives in `watchdog/compact.py`, which never calls either
-# (it uses only `_pane_has_queued_compact`, which DOES survive as a
-# genuine job-14 dependency via `watchdog._pane_has_queued_compact`); job
-# 21 (`pane_turn_elapsed`/`long_turn_watch`) never called either to begin
-# with. Both remaining callers are GOAL-owned -- now `watchdog/goal.py`'s
-# own job-20 dark-watch/lane-sweep (formerly `_goal_*_nudge` family and
-# `goal_rearm`, both collapsed away by #403) -- kept for THAT reason, not
-# the one this comment originally gave. `_proc_fingerprint_alive`/
+# collapse (below) neither is job 21's own any more. job 14's real code now
+# lives in `watchdog/compact.py`, which uses `_pane_has_queued_compact` (a
+# genuine job-14 dependency via `watchdog._pane_has_queued_compact`) AND, since
+# #822 (a), `_pane_compacting` -- `_compact_post_send_classify` reads it to tell
+# an EXECUTED compact (`sent`) from a merely-QUEUED one; job 21
+# (`pane_turn_elapsed`/`long_turn_watch`) never called either to begin with. So
+# the callers now span compact.py (job 14, `_pane_has_queued_compact` +
+# `_pane_compacting`) AND `watchdog/goal.py`'s own job-20 dark-watch/lane-sweep
+# (formerly `_goal_*_nudge` family and `goal_rearm`, both collapsed away by
+# #403) -- kept for THOSE reasons, not the one this comment originally gave. `_proc_fingerprint_alive`/
 # `_pane_claude_proc_fingerprint`, the real `/compact` claim/lock system,
 # and its later #402 always-False/no-op compatibility stubs
 # (`compact_claim_active`/`compact_claim_set`) were ALL removed for good
@@ -182,8 +183,11 @@ COMPACTING_MARKER = "Compacting conversation"
 #     carries the turn's own elapsed time.
 #
 # The walk starts at the input box and moves UP through blank spacer rows,
-# the box's own top separator, and the queued `❯ …` rows; the FIRST other
-# content row it meets is the spinner (if the pane is running a turn at all)
+# the box's own top separator, a LABELLED top-border rule (`──… ultracode ─`)
+# and the armed-goal indicator row (`◎ /goal active`) — both structural chrome
+# CC renders between the box and the queue (#822 (b)) — and the queued `❯ …`
+# rows; the FIRST other content row it meets is the spinner (if the pane is
+# running a turn at all)
 # and also terminates the queue. That adjacency requirement is what keeps a
 # conversation that merely QUOTES a panel (a session working on this very
 # ticket) from being read as a live queue — real content below the quoted

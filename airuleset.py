@@ -5026,17 +5026,18 @@ def cmd_compact_request(args):
 
     `--status` (#741): a read-only HOLD probe — resolves the session like
     `--self` (or an explicit `--session <sid>`), prints one line (`PENDING
-    sid=<sid> age=<n>s` / `NONE`) and exits 0. Records nothing, types nothing;
-    the hold-turn doctrine's first action so a goal-fired turn can PROVE from the
-    transcript whether the drained-boundary compact is still pending (hold) or
-    done (dispatch the next batch).
+    sid=<sid> age=<n>s` / `QUEUED sid=<sid> since=<n>s` (#822 (e): typed but
+    still sitting unexecuted in the pane) / `NONE`) and exits 0. Records nothing,
+    types nothing; the hold-turn doctrine's first action so a goal-fired turn can
+    PROVE from the transcript whether the drained-boundary compact is still
+    pending/queued (hold) or done (dispatch the next batch).
 
-    Prints the disposition word verbatim (`sent` / `expired` /
-    `already-queued` / `cooldown` / `skip:<reason>` — `skip:no-session`
-    covers BOTH a blank session id and a genuine record-time disk-write
-    failure, since neither can be told apart from the caller's side) so
-    the calling hook's own decision log stays a faithful trace of what
-    actually happened."""
+    Prints the disposition word verbatim (`sent` / `queued` (#822: typed but
+    QUEUED behind the armed-goal continuation) / `expired` / `already-queued` /
+    `cooldown` / `skip:<reason>` — `skip:no-session` covers BOTH a blank session
+    id and a genuine record-time disk-write failure, since neither can be told
+    apart from the caller's side) so the calling hook's own decision log stays a
+    faithful trace of what actually happened."""
     from watchdog import compact
     if getattr(args, "status", False):
         # #741 read-only HOLD probe. Resolves the session like `--self` (via
@@ -5044,10 +5045,14 @@ def cmd_compact_request(args):
         # line — `PENDING sid=<sid> age=<n>s` (a `/compact` request is still
         # pending for this session) or `NONE` — and always exits 0. The hold-turn
         # doctrine (skills/autopilot Step 5) runs this as a goal-fired turn's
-        # FIRST action: PENDING -> end the turn immediately with one `⏳ WORKING`
-        # line and ZERO dispatches; NONE -> the boundary compact is done, the next
-        # batch may be dispatched. #822 (e) adds a third verdict, QUEUED, read from
-        # the LIVE pane. Transcript-provable, no pane keystroke.
+        # FIRST action: PENDING or QUEUED -> LAUNCH the boundary-hold task
+        # (`sleep 45 && echo boundary-hold`, run_in_background) and end the turn
+        # `⏳ WORKING: boundary hold` with ZERO dispatches (#822: a BARE `⏳` turn
+        # gives CC no accepted Stop under an armed goal, so it does NOT drain the
+        # queued /compact — the live hold task is what does); NONE -> the boundary
+        # compact is done, the next batch may be dispatched. #822 (e) adds the
+        # QUEUED verdict, read from the LIVE pane. Transcript-provable, no pane
+        # keystroke.
         sid = (getattr(args, "session", "") or "").strip()
         pane_id = ""
         if not sid:
@@ -6227,9 +6232,11 @@ def main():
     p_creq.add_argument("--status", action="store_true",
                         help="#741 read-only HOLD probe: resolve THIS session "
                              "(via $TMUX_PANE, or --session <sid>) and print one "
-                             "line -- `PENDING sid=<sid> age=<n>s` or `NONE` -- "
-                             "then exit 0. The hold-turn doctrine's first action: "
-                             "PENDING => end the turn `⏳ WORKING` with ZERO "
+                             "line -- `PENDING sid=<sid> age=<n>s`, `QUEUED "
+                             "sid=<sid> since=<n>s` (#822) or `NONE` -- then exit "
+                             "0. The hold-turn doctrine's first action: PENDING/"
+                             "QUEUED => launch the boundary-hold task + end the "
+                             "turn `⏳ WORKING: boundary hold` with ZERO "
                              "dispatches; NONE => the boundary compact is done. "
                              "Records + types nothing.")
 

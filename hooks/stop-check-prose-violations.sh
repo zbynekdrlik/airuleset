@@ -2077,8 +2077,9 @@ fi
 # the SOLE mechanical `/compact` recorder). `--origin self-callback` is the SAME proven-boundary
 # origin `--self` uses, so it flows through the exact same delivery path
 # (post-#599: the `⏳`-marker veto and its self-callback-only #425 exemption
-# were removed — a recorded boundary now delivers at the next safe moment, so
-# the origin only affects the #188 unresumed-api-error gate). Best-effort,
+# were removed — a recorded boundary now delivers at the next safe moment; the
+# `self-callback` drained-boundary origin also drives the #188 unresumed-api-error
+# gate AND the #805 in-window-cooldown supersede). Best-effort,
 # silent, non-blocking: a redundant call alongside a
 # compliant model's own `--self` invocation is a harmless no-op
 # (record_compact_request's own re-record/cooldown semantics already
