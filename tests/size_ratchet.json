@@ -271,7 +271,7 @@
     "tests/test_question_policy.py": 218,
     "tests/test_question_prune.py": 678,
     "tests/test_question_thread_install_718.py": 279,
-    "tests/test_release_gap.py": 890,
+    "tests/test_release_gap.py": 985,
     "tests/test_release_landed_698.py": 495,
     "tests/test_release_recheck_699.py": 211,
     "tests/test_replay_backlog_marker_corpus.py": 60,

@@ -886,5 +886,100 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
             {"ahead": 9, "in_flight": False, "train": True})
 
 
+# --------------------------------------------------------------------------- #
+# 9. #812 — hourly cadence defaults (owner "release train bez prestojov").
+#
+# LIVE FORENSICS (gk box, 2026-09-01): the rider ran every 60s all day (1103
+# decisions) on a REAL 210->254-commit gap, but produced ZERO nudges. The
+# release-in-flight signal flapped True ~7x across the day; every flap runs the
+# `inflight` action, which resets the stall anchor (first_seen=now), so the
+# `wait` age never reached the 6h cadence (longest continuous wait window
+# 06:16->09:50 ~= 3h34m < 6h). Threshold was never the blocker (gap 210-254 >>
+# min_ahead=1). Fix: cadence + floor -> 1h; keep min_ahead=1.
+# --------------------------------------------------------------------------- #
+
+class TestHourlyCadenceDefaults812(unittest.TestCase):
+    @staticmethod
+    def _no_env():
+        # A context with the two release-gap env overrides ABSENT, so the
+        # default constants govern (the gk box had no overrides).
+        ctx = m.patch.dict(os.environ, {}, clear=False)
+        return ctx
+
+    def test_default_cadence_is_hourly(self):
+        with self._no_env():
+            os.environ.pop("AIRULESET_RELEASE_GAP_CADENCE_S", None)
+            os.environ.pop("AIRULESET_RELEASE_GAP_MIN_S", None)
+            self.assertEqual(rg.RELEASE_GAP_CADENCE_S, 3600)
+            self.assertEqual(rg._cadence(), 3600)
+
+    def test_default_floor_is_hourly(self):
+        # The floor drops to 1h so the owner's intended hourly cadence is
+        # REACHABLE (a 2h floor would have clamped a 1h override back to 2h).
+        self.assertEqual(rg.RELEASE_GAP_MIN_S, 3600)
+        with self._no_env():
+            os.environ["AIRULESET_RELEASE_GAP_CADENCE_S"] = "1800"  # 30 min
+            self.assertEqual(rg._cadence(), 3600)                    # floored to 1h
+
+    def test_min_ahead_default_kept_at_one(self):
+        # DECISION LOCK (#812 rejected raising min_ahead to 15): the gap was
+        # 210-254, so the threshold was never what stopped the nudge. Hourly
+        # cadence + min_ahead=1 IS the "nonstop release train" intent.
+        self.assertEqual(rg.RELEASE_GAP_MIN_AHEAD, 1)
+
+    def test_incident_gap_nudges_after_one_hour(self):
+        # The incident, encoded on the PURE decider: a real gap (ahead=254, no
+        # release in flight) whose anchor is just over 1h old must NUDGE under
+        # the DEFAULT cadence. Under the old 6h default this was "wait" (the
+        # zero-nudges-all-day bug); under the new 1h default it nudges.
+        with self._no_env():
+            os.environ.pop("AIRULESET_RELEASE_GAP_CADENCE_S", None)
+            cad = rg._cadence()
+            rec = {"first_seen": NOW - 3601, "last_nudge": None}
+            rstate = {"ahead": 254, "in_flight": False, "train": True}
+            action, _out, reason = rg._release_decision(rec, rstate, NOW, cad, 1)
+            self.assertEqual(action, "nudge")
+            self.assertEqual(reason, "due")
+
+    def test_incident_gap_would_have_waited_under_old_6h(self):
+        # Companion proof the fix is causal: the SAME 1h-old gap, evaluated with
+        # the OLD 6h cadence, is "wait" — that is exactly the all-day stall.
+        rec = {"first_seen": NOW - 3601, "last_nudge": None}
+        rstate = {"ahead": 254, "in_flight": False, "train": True}
+        action, _out, _reason = rg._release_decision(rec, rstate, NOW, 6 * 3600, 1)
+        self.assertEqual(action, "wait")
+
+
+# --------------------------------------------------------------------------- #
+# 10. #812 (d) — decision-log invariant: EVERY decider action reaches an
+# explicit journalled line (#486 "no silent skip"). Confirmed live by the 1103
+# journalled lines; locked here so no future branch goes silent.
+# --------------------------------------------------------------------------- #
+
+class TestDecisionLogInvariant812(_OrchBase):
+    def _run_logs(self, fetch, rrecs):
+        return self._run(rrecs, fetch, self._tmux())
+
+    def test_every_action_emits_a_decision_line(self):
+        cases = [
+            # (label, fetch, seed rec)         -> expected decider action
+            ("undetermined", lambda cwd: None, {"first_seen": NOW - 5 * DAY}),
+            ("clear", lambda cwd: {"ahead": 0, "in_flight": False}, {}),
+            ("inflight", lambda cwd: {"ahead": 99, "in_flight": True},
+             {"first_seen": NOW - 5 * DAY}),
+            ("wait", lambda cwd: {"ahead": 5, "in_flight": False}, {}),
+            ("nudge", lambda cwd: {"ahead": 254, "in_flight": False},
+             {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - CAD - 1}),
+        ]
+        for label, fetch, seed in cases:
+            with self.subTest(action=label):
+                logs = self._run_logs(fetch, {self.sid: dict(seed)})
+                self.assertTrue(logs, "%s produced NO decision-log line" % label)
+                self.assertTrue(
+                    any("release-gap" in ln for ln in logs),
+                    "%s log line not journalled as release-gap: %r"
+                    % (label, logs))
+
+
 if __name__ == "__main__":
     unittest.main()
