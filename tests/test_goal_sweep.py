@@ -885,16 +885,14 @@ class TestGoalDarkWatch(unittest.TestCase):
                 self.assertEqual(goal.load_goal_requests(reqs), {},
                                  "%s cache must never re-arm" % label)
 
-    def test_re_arm_is_hard_capped_per_day_then_pings(self):
-        # #524 UPDATE: the OLD model (re-arm ATTEMPTS back off on the #459 ping
-        # schedule) is replaced
-        # by a per-sid 24h ATTEMPT CAP. A session that keeps confirming dead
-        # (delivery, not modelled here, never sticks) is auto-typed at most
-        # GOAL_DARK_REARM_MAX_PER_DAY times per rolling 24h; a further CONFIRMED
-        # cycle PINGS instead (fail toward the human). Each confirmed run resets
-        # the confirmation window, so the cap -- not a ping schedule -- bounds
-        # the total. Counted via a record_goal_request spy (it overwrites the
-        # SAME sid each time). mtime stays frozen -> no liveness veto.
+    def test_re_arm_base_cap_paces_the_first_burst_804(self):
+        # #524 base cap + #804 mode-2 backoff. Within ~1.7h (one 24h window) the
+        # loop auto-types the fast base cap (GOAL_DARK_REARM_MAX_PER_DAY) BEFORE
+        # the first 30m backoff window elapses -- the base cap still paces the
+        # first burst. (The pre-#804 flat cap then went SILENT until midnight;
+        # #804 mode-2 keeps re-arming on backoff past this point, proven by
+        # `test_re_arm_past_cap_backs_off_never_silent_804`.) Counted via a
+        # record_goal_request spy; mtime frozen -> no liveness veto.
         proj, tmux = self._dark("sess-dark-rearm-cap")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
@@ -912,16 +910,14 @@ class TestGoalDarkWatch(unittest.TestCase):
             return (5, now[0] - 60)                     # always workable + fresh
 
         with m.patch.object(goal, "record_goal_request", side_effect=spy):
-            # Many clean-dark sweeps within ONE 24h window (100s apart, ~1.7h
-            # total): several confirmed cycles, but only the first
-            # GOAL_DARK_REARM_MAX_PER_DAY of them TYPE; the rest ping.
-            for _ in range(80):
+            # ~50min of clean-dark sweeps (100s apart) -- BEFORE the first 30m
+            # backoff window (measured from the 2nd type) elapses, so only the
+            # fast base-cap types fire.
+            for _ in range(30):
                 now[0] += 100
                 self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
         self.assertEqual(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
-                         "auto-types are hard-capped per sid per rolling 24h")
-        self.assertTrue(sent,
-                        "a CONFIRMED dark loop past the attempt cap PINGS the human")
+                         "the fast base cap paces the first burst (backoff not yet due)")
 
     def test_re_arm_past_cap_backs_off_never_silent_804(self):
         # #804 mode-2 -- past the base 24h cap the dark-rearm is NOT silent until
