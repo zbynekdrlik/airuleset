@@ -247,6 +247,33 @@ class AutopilotLockComposite790(TestCase):
         self.assertEqual(r.returncode, 2,
                          f"expected BLOCK for genuine airuleset write: {r.stderr}")
 
+    def test_newline_separated_genuine_write_still_blocked(self):
+        # review finding on #790: shlex(posix=True) treats a literal newline
+        # as plain whitespace, so a multi-line composite silently merged into
+        # ONE token stream and a newline-separated airuleset write went
+        # UNDETECTED. Multi-line Bash commands are a common shape, so this
+        # was a genuine protection regression, not an exotic residual.
+        r = run("cd ~/devel/airuleset\ngit add -A\ngit commit -m fix",
+                cwd=self.FOREIGN_CWD)
+        self.assertEqual(r.returncode, 2,
+                         f"expected BLOCK for newline-separated write: {r.stderr}")
+
+    def test_newline_separated_dash_c_push_still_blocked(self):
+        r = run("echo syncing\ngit -C /home/newlevel/devel/airuleset push",
+                cwd=self.FOREIGN_CWD)
+        self.assertEqual(r.returncode, 2,
+                         f"expected BLOCK for newline-separated write: {r.stderr}")
+
+    # --- new over-block class the fix must NOT introduce --------------------
+    def test_airuleset_py_push_mentioned_as_plain_argument_not_blocked(self):
+        # review finding on #790: `airuleset.py push` appearing merely as an
+        # unquoted ARGUMENT of some other command (not as the invoked
+        # program) must NOT block — the cousin of the original whole-string
+        # TARGETS bug this fix set out to remove.
+        self.assertAllowed("echo airuleset.py push", cwd=self.FOREIGN_CWD)
+        self.assertAllowed("echo Run airuleset.py push on dev1",
+                           cwd=self.FOREIGN_CWD)
+
 
 class HookWired(TestCase):
     def test_registered_in_settings_fragment(self):

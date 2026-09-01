@@ -180,6 +180,20 @@ case "$STRIPPED" in *"airuleset:foreign-ok"*)
   exit 0 ;;
 esac
 
+# --- cheap prefilter: "airuleset" absent from BOTH the command text and the
+# tool call's cwd means NO possible target the analyzer could resolve can
+# ever contain "devel/airuleset" either (a -C/--git-dir/cd target is always
+# either a literal token in $CMD or resolved relative to $CWD — normpath/
+# join cannot conjure the substring from nothing) — so skip the python3 spawn
+# entirely on the hot path of every OTHER foreign-session Bash call fleet-
+# wide (review finding #790 2/6: the old TARGETS-style textual prefilter was
+# deleted outright instead of demoted to a prefilter, so every non-airuleset
+# Bash call was paying a sed + a python3 startup for nothing).
+case "$CMD$CWD" in
+  *airuleset*) : ;;
+  *) exit 0 ;;
+esac
+
 # --- does the command ACTUALLY WRITE a devel/airuleset checkout? -----------
 # Segment-aware, cd-tracking, target-verified (#790) — never "a write verb
 # appears somewhere in the composite" (that false-blocked a git write on a
