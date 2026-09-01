@@ -187,9 +187,14 @@ def _isolate_goal_roster():
     real os.environ entry) so any subprocess inherits it. The push-gate
     `unittest discover` gets its own floor in `cmd_push`."""
     with TemporaryDirectory() as d:
+        # #804 mode-5: force the resurrect ACTION flag deterministically OFF for
+        # every goal test (so the RED mode-5 test never keystrokes because a dev
+        # box happened to have the opt-in flag set); a test that needs it ON
+        # overrides with its own nested patch.dict.
         with mock.patch.dict(os.environ,
                              {"AIRULESET_GOAL_ROSTER_PATH":
-                              str(Path(d) / "goal-roster.json")}):
+                              str(Path(d) / "goal-roster.json"),
+                              "AIRULESET_RESURRECT_ACTION": ""}):
             yield
 
 

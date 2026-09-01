@@ -179,6 +179,7 @@ from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
+from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
 
 
 # --------------------------------------------------------------------------- #
@@ -4747,6 +4748,24 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # so every DEFERRED live stream would be falsely flagged dead).
     for _dcwd, _dentry in ([] if sweep_budget_broke
                            else _roster.dead_entries(roster_reg, visited_cwds)):
+        _dloc = watchdog.project_label(_dcwd)
+        # #804 mode-5 RESURRECT ladder -- a dead rostered stream gets a bounded
+        # relaunch ATTEMPT on its OWN RESURRECT_CADENCE_S (independent of the
+        # census line's hourly cadence). PURE decision + one explicit log line;
+        # the live keystroke is opt-in (AIRULESET_RESURRECT_ACTION, default OFF)
+        # and the supervisor verifies it live before enabling fleet-wide (design
+        # M5). `rgts` is the attempt anchor, re-spaced on EVERY outcome so a
+        # persistent no-pane/disabled state never floods the journal.
+        _rdue, _ = _resurrect.due(_dentry, now)
+        if _rdue:
+            _rpane = _resurrect.find_pane(_dcwd, run)
+            _rlog, _ract = _resurrect.decide(
+                _dentry, _dloc, _rpane, _resurrect.action_enabled(), dry_run)
+            logs.append(_rlog)
+            _dentry["rgts"] = now
+            roster_dirty = True
+            if _ract:
+                _resurrect.relaunch(_rpane, _resurrect.launch_cmd(_dentry), run)
         _last = _dentry.get("census_ts")
         if isinstance(_last, (int, float)) and (now - _last) < GOAL_ROSTER_CENSUS_S:
             continue
@@ -4755,7 +4774,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         logs.append(
             "one-glance %s -> dead-session (expected armed, no live session; "
             "sid=%s authority=%s last armed %s ago)"
-            % (watchdog.project_label(_dcwd), _dentry.get("sid", "?"),
+            % (_dloc, _dentry.get("sid", "?"),
                _dentry.get("authority", "?"),
                _roster_age_desc(now, _dentry.get("armed_ts"))))
     for _lcwd in visited_cwds:

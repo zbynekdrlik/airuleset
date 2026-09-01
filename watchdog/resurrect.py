@@ -92,6 +92,41 @@ def launch_cmd(entry):
     return _LAUNCH_FRESH if fails >= RESURRECT_MAX_FAILS else _LAUNCH_CONTINUE
 
 
+def decide(entry, loc, pane, enabled, dry_run):
+    """PURE mode-5 RESURRECT verdict for a DEAD roster entry the caller already
+    found `due`. Returns `(log_line, act)` — a single explicit decision-log line
+    (#486 structured state, no pane-render heuristic) plus `act`, True ONLY when
+    a live relaunch keystroke should fire. `act` requires ALL of: a bare-shell
+    relaunch pane was found, the opt-in flag ON, and not a dry-run. The CALLER
+    owns the keystroke + the `rgts` cadence anchor (re-spaced on EVERY outcome
+    so a persistent veto never floods); this function only decides and composes
+    the line. `loc` is the human project label; `cmd` is the staged launch
+    command (`claude --continue` until #805's fail-count fallback to a fresh
+    `claude`).
+
+    The relaunch itself is NOT booked as "delivered": a shell-command launch
+    into a bare bash prompt is outside `send_verified`'s CC-input-box domain (it
+    verifies a CC transcript, and REFUSES a non-CC pane), so there is no
+    transcript to confirm against this sweep. The line says the attempt is
+    `delivered_unconfirmed` — the #594 fail-safe direction — and the STRUCTURAL
+    confirmation is the NEXT census: a successful relaunch makes the cwd live
+    again, so it drops out of `roster.dead_entries` and its entry is refreshed.
+    Never claims a confirmed delivery from a bare send-keys (the mode-6 doctrine
+    the owner rejected)."""
+    cmd = launch_cmd(entry)
+    if pane is None:
+        return ("resurrect %s -> skip:no-relaunch-pane "
+                "(no bare-idle shell in the dead cwd)" % loc, False)
+    if not enabled:
+        return ("resurrect %s -> would relaunch (%s) -- disabled "
+                "(AIRULESET_RESURRECT_ACTION off)" % (loc, cmd), False)
+    if dry_run:
+        return ("resurrect %s -> would relaunch (%s) -- dry-run" % (loc, cmd),
+                False)
+    return ("resurrect %s -> relaunching (%s; delivered_unconfirmed, the next "
+            "census confirms the cwd came back live)" % (loc, cmd), True)
+
+
 def find_pane(cwd, run):
     """The bare-idle-SHELL pane whose `pane_current_path` EXACTLY matches `cwd`,
     or None. A dead session leaves its tmux pane at a bare shell prompt (foreground
