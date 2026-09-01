@@ -3074,5 +3074,68 @@ class TestQueuedCompactDetector822(unittest.TestCase):
         self.assertEqual((kind, draft), ("input", ""))
 
 
+class TestPostSendQueued822(unittest.TestCase):
+    """#822 (a): an empty input box after a `/compact` submit is AMBIGUOUS — the
+    command left the box whether it EXECUTED or merely QUEUED behind a running
+    turn. A queued `❯ /compact` row (or a running-turn spinner) after the submit
+    means QUEUED, not sent; a delivery must then NOT write `compact-delivered`
+    (the #135 lesson: delivery, not a claim), so a boundary compact that never
+    ran does not start a false cooldown."""
+
+    SID = "sess-queued-822"
+    CWD = "/home/newlevel/devel/queuedtest"
+
+    _BARE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _submit_run(self, post_send_render):
+        """A run() whose captures are BARE until the `/compact` Enter lands,
+        then render `post_send_render` (the queued/spinner/compacting state)."""
+        state = {"submitted": False}
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%9\tclaude\t%s\t111" % self.CWD
+            if "display-message" in j:
+                return "0" if argv[-1] == "#{pane_in_mode}" else "sess:0.0"
+            if "send-keys" in j:
+                if argv[-1] == "Enter":
+                    state["submitted"] = True
+                return ""
+            if "capture-pane" in j:
+                return post_send_render if state["submitted"] else self._BARE
+            return ""
+        return run
+
+    def test_submit_verified_reports_queued_when_a_compact_row_is_queued(self):
+        outcome = compact._compact_submit_verified(
+            "%9", self._submit_run(_FIXTURE_822_TRIPLE_QUEUED),
+            lambda *a, **k: None, lambda r: None)
+        self.assertEqual(outcome, "queued")
+
+    def test_deliver_compact_returns_queued_and_starts_no_cooldown(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run = self._submit_run(_FIXTURE_822_TRIPLE_QUEUED)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin="subagent-stop", run=run,
+            projects_dir=proj, delivered_path=self.delp, now=time.time())
+        self.assertEqual(word, "queued")
+        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
+        self.assertFalse(compact.compact_delivery_in_cooldown(
+            self.SID, time.time() + 1, path=self.delp))
+
+
 if __name__ == "__main__":
     unittest.main()
