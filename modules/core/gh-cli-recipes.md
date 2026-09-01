@@ -42,6 +42,18 @@ gh pr view  "$num" --json mergeable,mergeStateStatus,statusCheckRollup
 
 **Labels:** `-l/--label name` (repeatable or comma-list): `gh issue create ... -l bug -l "help wanted"`. Add to an existing issue: `gh issue edit <N> --add-label x --remove-label y`.
 
+**Editing a PR's title/body — `gh pr edit` can fail SILENTLY on gh ≤2.45.0 and leave the title unchanged. Use `gh api PATCH` instead, and ALWAYS verify after.** On fleet gh (2.45.0), `gh pr edit <N> --title "..."` issues a GraphQL query that reads `repository.pullRequest.projectCards` even when no project flag is passed; GitHub now rejects that field (Projects classic is deprecated) with `GraphQL: Projects (classic) is being deprecated ... (repository.pullRequest.projectCards)` — but `gh` swallows this into a warning, **exits 0, and does NOT apply the edit**. Live-reproduced: `gh pr edit` on a real PR exited 0 with the title left unchanged, confirmed via `gh pr view --json title`. Reportedly fixed in newer gh (~2.54+, which dropped the `projectCards` query from `pr edit`) — but since the fleet runs mixed gh versions, use the version-agnostic recipe below instead of `gh pr edit` for title/body:
+
+```bash
+gh api -X PATCH repos/OWNER/REPO/pulls/N -f title="New title" -F body=@body.md
+
+# THEN VERIFY — the failure above exits 0 with no visible error, so a
+# post-edit read-back is not optional here:
+gh pr view N --json title,body
+```
+
+Same `-f`/`-F` case rule as the `gh api` comment recipe above: `-f title="..."` is a literal string (fine for a plain title), `-F body=@body.md` reads the file's content (never `-f` for an `@file` reference — see the caution above). Omit `-f title=...` to edit only the body, or vice versa.
+
 **GitHub's issue-linking auto-close has NO negation awareness — writing "does NOT close #N" still closes #N on merge.** GitHub scans a merged PR's title/body for the literal substring `close`/`closes`/`closed`/`fix`/`fixes`/`fixed`/`resolve`/`resolves`/`resolved` immediately followed by `#N` (case-insensitive) and auto-closes #N — with zero understanding of any negation in front of it. So the natural, extra-explicit phrasing for "this PR does NOT close a ticket" (`"This PR does **NOT** close #435"`) contains the exact trigger substring (`close #435`) and closes it anyway — the opposite of the intended effect. **Never write those trigger words immediately before `#N` when the PR genuinely should NOT close it.** Use safe phrasing instead: `"leaves #N open"`, `"#N remains open"` — even `"resolve"` is a trigger word, so avoid it too when explaining a PR does not resolve something.
 
 The intent: use the known recipe (or `--help` once) instead of guessing a flag and looping on the same failure. Applies to all rewordings — and to any CLI where an invented flag failed once.
