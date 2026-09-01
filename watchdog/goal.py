@@ -176,6 +176,8 @@ from watchdog import session_status as _session_status  # #486 G3 (reaper)
 from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
 from watchdog import release_gap as _release_gap             # #616 (release gap)
 from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival)
+from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
+from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 
 
 # --------------------------------------------------------------------------- #
@@ -4108,6 +4110,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "human activity, never overwrite a live conversation"
                     % (loc, reason))
         return logs, True
+    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
+    # (u-freshness / partition-audit / release-gap / queue-arrival) nudged this
+    # session within NUDGE_FAMILY_GAP_S -> DEFER this lane nudge to a later sweep
+    # (no keystroke, no `_lane_record_nudge`/park/streak change), killing the
+    # cross-sweep burst. The family gap IGNORES the SAME category, so the lane's
+    # own cadence is untouched. `dry_run` READY below is unaffected (a dry-run
+    # never sends), so the gate sits before it.
+    if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
+        logs.append("lane-occupancy %s -> hold:cadence-gate (shared family gap; "
+                    "retry next sweep)" % loc)
+        return logs, True
     if dry_run:
         logs.append("READY (lane-occupancy) %s workers=%d waiters=%d "
                     "backlog=%d idle=%dm" % (loc, live_workers, waiters,
@@ -4233,6 +4246,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #479/#670 -- commit the LANDED nudge; see _lane_record_nudge. Only the
     # empty-lane branch reaches delivery (#726/#729), so live_workers is 0 here.
     _lane_record_nudge(rec, live_workers, backlog_n, n, now)
+    # #797 -- stamp the shared cadence clock on a DELIVERED lane nudge so a
+    # sibling family category defers within NUDGE_FAMILY_GAP_S (the burst fix).
+    _nudge_gate.mark_sent(state, sid, "lane-occupancy", now)
     # #442 THIRD GAP: the give-up counter bounds this 0-worker empty-lane branch,
     # so it logs "(n/MAX)". #726 removed the under-saturated "(fill)" variant + the
     # MemAvailable suffix (both were the retired fill nudge's).
@@ -4364,7 +4380,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
-                    release_state_fetch=None, queue_fetch=None):
+                    release_state_fetch=None, queue_fetch=None,
+                    u_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -4398,6 +4415,10 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     wrecs = state.setdefault("ops_wait_recheck", {}) if ops_wait_fetch else {}
     rrecs = state.setdefault("release_gap", {}) if release_state_fetch else {}
     qrecs = state.setdefault("queue_arrival", {}) if queue_fetch else {}
+    # #797 -- U-freshness reconcile: a LOCAL tickets-status cache read (ZERO gh),
+    # so unlike the gh-subprocess riders it is gated only on its seam being wired
+    # (`u_fetch`, default the statusbar-backed reader in run_once).
+    urecs = state.setdefault("u_freshness", {}) if u_fetch is not None else {}
     # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
@@ -4508,18 +4529,33 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 now, run, rrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 release_state_fetch=release_state_fetch, state=state,
                 sleep_fn=sleep_fn, captured=captured)  # #749 busy-pane gate
-        # #733 -- gk queue-ARRIVAL watcher for this armed pane; runs LAST (a pane
-        # an earlier keystroke job typed is deferred), owns its own handled +
-        # busy-gate check + verified send + dry-run-safe writes, full-authority
-        # gated (#616 MIRROR).
+        # #733 -- gk queue-ARRIVAL watcher for this armed pane; runs after the
+        # release-gap rider (a pane an earlier keystroke job typed is deferred),
+        # owns its own handled + busy-gate check + verified send + dry-run-safe
+        # writes, full-authority gated (#616 MIRROR). (#797 added the u-freshness
+        # rider AFTER this one — this is no longer the last rider in the loop.)
         if queue_fetch is not None:
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 queue_fetch=queue_fetch, state=state, sleep_fn=sleep_fn,
+                captured=captured)
+        # #797 -- U-freshness reconcile for this armed pane; runs LAST (a pane an
+        # earlier keystroke job already typed is deferred via `handled`), owns its
+        # own compact-latch + busy-gate + shared cadence-gate + verified send +
+        # dry-run-safe writes. Reads the SAME tickets-status cache the footer
+        # renders (ZERO gh calls); keystroke-only into the session, NEVER an owner
+        # ping (#795 invariant BY CONSTRUCTION -- the module imports no notify).
+        if u_fetch is not None:
+            logs += _u_freshness.goal_u_freshness_recheck(
+                now, run, urecs, sid, cwd, pid, tpath, loc, dry_run, handled,
+                u_fetch=u_fetch, state=state, sleep_fn=sleep_fn,
                 captured=captured)
     if not dry_run:   # #531 -- prune each rider namespace for gone+aged sessions
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547
         _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)     # #616
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
+        if u_fetch is not None:
+            _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797
+        _nudge_gate.prune(state, visited_sids, now)   # #797 shared cadence gate
     return logs

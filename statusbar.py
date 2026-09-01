@@ -110,9 +110,15 @@ def obligation_partition(cwd, home=None):
     full-authority entry, which has no such bucket by construction), `ts` is
     the cache write time or None. All-None when the cache file is absent or
     unparseable. Reads only — never spawns a refresh, never touches the
-    network. Caller: the watchdog lane give-up cause classifier
+    network. Callers: the watchdog lane give-up cause classifier
     (`watchdog/goal.py::_lane_giveup_cause`), which applies its OWN freshness
-    gate on `ts` — a stale partition classifies as `unknown`, never a guess."""
+    gate on `ts` — a stale partition classifies as `unknown`, never a guess —
+    and the #797 U-freshness reconcile seams (`airuleset._watchdog_u_fetch` /
+    `watchdog/u_freshness._default_u_fetch`), which read the `user_waiting` +
+    `ts` fields (the production seam is `_watchdog_u_fetch`, wired into run_once;
+    `_default_u_fetch` is the rider's direct-call fallback — do NOT delete it as
+    'duplicate', it is the seam's default when the orchestrator is called without
+    `u_fetch`)."""
     if not cwd:
         return None, None, None, None, None
     cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))

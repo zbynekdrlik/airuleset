@@ -78,6 +78,7 @@ nudge for days.
 import os
 
 import watchdog
+from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
 # env AIRULESET_RELEASE_GAP_CADENCE_S — how long a stalled release gap sits (and
 # how long between re-nudges) before this job re-surfaces it. ~6h: a release
@@ -484,6 +485,15 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
         logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep)" % loc)
         return logs
+    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
+    # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke,
+    # last_nudge unadvanced, `handled` unclaimed) so it retries a later sweep.
+    # release-gap carries NO per-category floor (its own ~6h cadence governs), so
+    # the gate is a pure family-spacing no-op except when a sibling fired recently.
+    if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
+        logs.append("release-gap %s -> hold:cadence-gate (shared family gap; "
+                    "retry next sweep)" % loc)
+        return logs
     if dry_run:
         logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, no release in "
                     "flight)" % (loc, ahead))
@@ -513,6 +523,7 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     new_rec["last_nudge"] = now
     new_rec["send_fails"] = 0   # #749: a delivered send clears the failure streak
     rrecs[sid] = new_rec
+    _nudge_gate.mark_sent(state, sid, "release-gap", now)   # #797
     if handled is not None:
         handled.add(sid)
     note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"
