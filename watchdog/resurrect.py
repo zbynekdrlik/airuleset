@@ -49,14 +49,27 @@ import os
 # with mode-1/mode-2 shipping inline, lower blast radius; 30 min is a reasonable
 # "a dead loop comes back within half an hour" cadence the owner asked for.
 RESURRECT_CADENCE_S = 30 * 60
-# #805 fallback: after this many consecutive still-dead relaunch attempts, switch
-# from `claude --continue` (restores context, incl. a ballooned one that may die
-# again immediately) to a FRESH `claude` -- so a ballooned-context session cannot
-# livelock the resurrect on --continue forever.
+# The #805-interface fallback: after this many consecutive still-dead relaunch
+# ATTEMPTS (an attempt that fired but did not bring the stream back), switch from
+# `claude --continue` (restores context, incl. a ballooned one that may die again
+# immediately) to a FRESH `claude` -- so a ballooned-context session cannot
+# livelock the resurrect on --continue forever. `rfails` is WRITTEN by the census
+# (`goal.goal_lane_sweep`): a due dead entry whose PREVIOUS due-cycle actually
+# fired a relaunch (`ratt`) yet is STILL dead increments it; it clears when the
+# stream comes back live (the visited-cwd reset). launch_cmd only READS it.
 RESURRECT_MAX_FAILS = 2
 _SHELL_COMMANDS = frozenset(("bash", "zsh", "sh", "fish", "dash", "ash", "ksh"))
+# Bare shell-prompt terminators for the bare-idle check. GLYPH terminators
+# (`❯➜»`) are prompt-only -- they end a bare prompt and essentially never end a
+# line of program output. ASCII terminators (`$#%`) DO occur at the end of output
+# ("... 45%", a `$price`), so they count as a bare prompt only when the char
+# before them is NOT a digit (excludes percentages/numbers). Deliberately EXCLUDES
+# `>` (bash PS2 continuation / a `read`-style prompt) -- typing into either would
+# corrupt a multiline command or feed a running read.
+_PROMPT_GLYPH_TERMINATORS = "❯➜»"
+_PROMPT_ASCII_TERMINATORS = "$#%"
 _LAUNCH_CONTINUE = "claude --continue"   # restores the session context incl. /goal
-_LAUNCH_FRESH = "claude"                 # #805 fallback (fresh start)
+_LAUNCH_FRESH = "claude"                 # #805-interface fallback (fresh start)
 
 
 def action_enabled():
@@ -86,29 +99,76 @@ def due(entry, now):
 
 def launch_cmd(entry):
     """The launch command for this entry's stage: `claude --continue` until
-    RESURRECT_MAX_FAILS consecutive still-dead attempts (`rfails`), then a fresh
-    `claude` (#805). Reads `rfails` off the entry, never mutates."""
-    fails = int(entry.get("rfails", 0) or 0) if isinstance(entry, dict) else 0
+    RESURRECT_MAX_FAILS consecutive still-dead relaunch attempts (`rfails`,
+    written by the census), then a fresh `claude` (the #805 interface). Reads
+    `rfails` off the entry, never mutates. A corrupt / non-numeric `rfails`
+    reads as 0 (fail-safe -> `--continue`); NEVER raises (the module contract) --
+    `launch_cmd` is `decide`'s FIRST line, so a raise here would abort the whole
+    goal_lane_sweep every sweep."""
+    fails = entry.get("rfails", 0) if isinstance(entry, dict) else 0
+    if not isinstance(fails, (int, float)):
+        fails = 0
     return _LAUNCH_FRESH if fails >= RESURRECT_MAX_FAILS else _LAUNCH_CONTINUE
 
 
-def decide(entry, loc, pane, human_recent, human_reason, enabled, dry_run):
+def pane_is_bare_idle(pane, run):
+    """True iff `pane`'s capture shows a shell at a BARE IDLE prompt — the last
+    non-blank line ends at a shell prompt (`_PROMPT_TERMINATORS`) with NOTHING
+    typed after it. This is the mode-4-review safety gate: `find_pane` matches a
+    pane only by shell-command name + exact cwd, which does NOT prove the pane is
+    idle — a human's STALE half-typed command (older than the 5-min client-input
+    veto window, so signals 1/2/3 are all blind) would have `claude --continue`
+    + Enter APPENDED to it and the concatenated line EXECUTED, and a foreground
+    bash script / `read` prompt would receive the text on its stdin. This gate
+    refuses (False) every such non-bare state so the caller logs `skip:pane-not-
+    bare` and never keystrokes. Fail-safe: run==None / no pane / a failed or
+    empty capture / no recognizable prompt terminator ALL read NOT-bare (never a
+    keystroke into an unread pane). Never raises."""
+    if run is None or not pane:
+        return False
+    try:
+        cap = run(["tmux", "capture-pane", "-t", str(pane), "-p"]) or ""
+    except Exception:
+        return False
+    lines = [ln.rstrip() for ln in cap.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    # rstrip so the check is robust to tmux stripping (or keeping) the prompt's
+    # trailing space: a bare prompt ENDS at its terminator, typed text does not.
+    last = lines[-1]
+    t = last[-1]
+    if t in _PROMPT_GLYPH_TERMINATORS:
+        return True
+    if t in _PROMPT_ASCII_TERMINATORS:
+        return len(last) == 1 or not last[-2].isdigit()
+    return False
+
+
+def decide(entry, loc, pane, pane_bare, human_recent, human_reason, enabled,
+           dry_run):
     """PURE mode-5 RESURRECT verdict for a DEAD roster entry the caller already
     found `due`. Returns `(log_line, act)` — a single explicit decision-log line
     (#486 structured state, no pane-render heuristic) plus `act`, True ONLY when
-    a live relaunch keystroke should fire. `act` requires ALL of: a bare-shell
-    relaunch pane was found, NO recent human on it (the mode-4 HARD veto — the
-    owner's hardest rule `feedback_never_touch_stopped_sessions`; never keystroke
-    a human-active pane), the opt-in flag ON, and not a dry-run. The CALLER owns
-    the keystroke + the `rgts` cadence anchor (re-spaced on EVERY outcome so a
-    persistent veto never floods); this function only decides and composes the
-    line. `loc` is the human project label; `cmd` is the staged launch command
-    (`claude --continue` until #805's fail-count fallback to a fresh `claude`).
+    a live relaunch keystroke should fire. `act` requires ALL of: a shell
+    relaunch pane was found (`pane`), that pane is at a BARE IDLE prompt
+    (`pane_bare` — the caller's `pane_is_bare_idle` read; never keystroke into a
+    human's half-typed command or a running process), NO recent human on it (the
+    mode-4 HARD veto — the owner's hardest rule
+    `feedback_never_touch_stopped_sessions`; never keystroke a human-active
+    pane), the opt-in flag ON, and not a dry-run. The CALLER owns the keystroke +
+    the `rgts` cadence anchor (re-spaced on EVERY outcome so a persistent veto
+    never floods); this function only decides and composes the line. `loc` is the
+    human project label; the launch command is derived internally via
+    `launch_cmd(entry)` (`claude --continue`, or a fresh `claude` after
+    RESURRECT_MAX_FAILS failed attempts) and named in the line — the CALLER
+    re-derives the SAME `launch_cmd(entry)` for the actual keystroke.
 
     Gate order is deliberate: no-pane first (nothing to type into), then the
-    recent-human HARD veto (a human-active pane is NEVER keystroked — logged with
-    the vetoing signal — even with the flag ON), then the opt-in flag, then
-    dry-run.
+    bare-idle gate (a non-bare pane holds typed text / a running process — refuse
+    keystroke-free), then the recent-human HARD veto (a human-active pane is
+    NEVER keystroked — logged with the vetoing signal — even with the flag ON),
+    then the opt-in flag, then dry-run. `act` is conjunctive over every gate, so
+    the order affects only which log the caller sees, never safety.
 
     The relaunch itself is NOT booked as "delivered": a shell-command launch
     into a bare bash prompt is outside `send_verified`'s CC-input-box domain (it
@@ -122,7 +182,10 @@ def decide(entry, loc, pane, human_recent, human_reason, enabled, dry_run):
     cmd = launch_cmd(entry)
     if pane is None:
         return ("resurrect %s -> skip:no-relaunch-pane "
-                "(no bare-idle shell in the dead cwd)" % loc, False)
+                "(no shell pane in the dead cwd)" % loc, False)
+    if not pane_bare:
+        return ("resurrect %s -> skip:pane-not-bare (shell pane holds typed "
+                "text or a running process — never keystroke it)" % loc, False)
     if human_recent:
         return ("resurrect %s -> skip:recent-human HARD veto (%s) — never "
                 "keystroke a human-active pane" % (loc, human_reason or "?"),
@@ -138,14 +201,15 @@ def decide(entry, loc, pane, human_recent, human_reason, enabled, dry_run):
 
 
 def find_pane(cwd, run):
-    """The bare-idle-SHELL pane whose `pane_current_path` EXACTLY matches `cwd`,
-    or None. A dead session leaves its tmux pane at a bare shell prompt (foreground
-    command a login/interactive shell, not claude/node/bun). ONLY such a pane --
-    never one running a foreground command (a human's process) -- is a relaunch
-    target; the exact-cwd match + the recent-human veto the caller applies bound
-    it further. Queries the SAME `list-panes -a` shape as
-    `_reconcile_candidate_panes` (3 fields, no `#{pane_pid}`). Returns the
-    FIRST match in first-seen order. Never raises."""
+    """The first pane whose foreground command is a SHELL (`_SHELL_COMMANDS`,
+    not claude/node/bun) AND whose `pane_current_path` EXACTLY matches `cwd`, or
+    None. A dead session leaves its tmux pane at a shell. This is a NECESSARY
+    (not sufficient) relaunch target: the command name + cwd do NOT prove the
+    pane is safe to type into, so the caller applies TWO further gates before any
+    keystroke — `pane_is_bare_idle` (the pane is at a bare prompt with nothing
+    typed / no running process) and the recent-human HARD veto. Queries the SAME
+    `list-panes -a` shape as `_reconcile_candidate_panes` (3 fields, no
+    `#{pane_pid}`). Returns the FIRST match in first-seen order. Never raises."""
     if run is None or not cwd:
         return None
     try:

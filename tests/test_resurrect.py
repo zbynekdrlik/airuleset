@@ -80,20 +80,62 @@ class TestResurrectActionEnabled(unittest.TestCase):
             self.assertTrue(self._enabled_with(v), v)
 
 
+_BASH_IDLE = "newlevel@dev1:~/devel/deadstream$ "
+
+
 class _Run:
-    """A minimal fake `run` that answers `list-panes -a` from a given pane list
-    and records send-keys argv."""
-    def __init__(self, panes):
+    """A minimal fake `run` that answers `list-panes -a` from a given pane list,
+    `capture-pane` with a fixed capture string, and records send-keys argv."""
+    def __init__(self, panes, capture=_BASH_IDLE):
         self.panes = panes          # (pane_id, cmd, cwd) triples
+        self.capture = capture
         self.sent = []
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)
         if "list-panes" in j:
             return "\n".join("%s\t%s\t%s" % t for t in self.panes)
+        if "capture-pane" in j:
+            return self.capture
         if "send-keys" in j:
             self.sent.append(argv)
         return ""
+
+
+class TestResurrectPaneIsBareIdle(unittest.TestCase):
+    def _bare(self, capture):
+        return resurrect.pane_is_bare_idle("%p", _Run([], capture=capture))
+
+    def test_bare_bash_prompt_is_idle(self):
+        self.assertTrue(self._bare("out line\nnewlevel@dev1:~/devel/x$ "))
+
+    def test_themed_prompt_is_idle(self):
+        self.assertTrue(self._bare("some output\n❯ "))
+
+    def test_typed_stale_command_is_not_bare(self):
+        # the owner's hardest hole: a stale half-typed command -> `claude
+        # --continue` would be APPENDED and executed.
+        self.assertFalse(self._bare("newlevel@dev1:~/x$ rm -rf /tmp/junk "))
+
+    def test_running_process_output_is_not_bare(self):
+        self.assertFalse(self._bare("Downloading package 5 of 12 ... 45%"))
+
+    def test_read_style_prompt_without_terminator_is_not_bare(self):
+        self.assertFalse(self._bare("Enter your name: "))
+
+    def test_ps2_continuation_gt_is_not_bare(self):
+        # `>` is deliberately not a terminator (PS2 / redirect).
+        self.assertFalse(self._bare("> "))
+
+    def test_empty_or_missing_capture_is_not_bare(self):
+        self.assertFalse(self._bare(""))
+        self.assertFalse(resurrect.pane_is_bare_idle("%p", None))
+        self.assertFalse(resurrect.pane_is_bare_idle("", _Run([])))
+
+    def test_raising_run_is_not_bare(self):
+        def boom(*a, **k):
+            raise RuntimeError("tmux gone")
+        self.assertFalse(resurrect.pane_is_bare_idle("%p", boom))
 
 
 class TestResurrectFindPane(unittest.TestCase):
@@ -128,15 +170,21 @@ class TestResurrectFindPane(unittest.TestCase):
 class TestResurrectDecide(unittest.TestCase):
     LOC = "deadstream"
 
-    def _decide(self, pane="%bash", human=False, reason="", enabled=True,
-                dry_run=False, entry=None):
-        return resurrect.decide(entry or {}, self.LOC, pane, human, reason,
-                                enabled, dry_run)
+    def _decide(self, pane="%bash", pane_bare=True, human=False, reason="",
+                enabled=True, dry_run=False, entry=None):
+        return resurrect.decide(entry or {}, self.LOC, pane, pane_bare, human,
+                                reason, enabled, dry_run)
 
     def test_no_pane_skips_no_relaunch_pane_and_does_not_act(self):
         log, act = self._decide(pane=None)
         self.assertFalse(act)
         self.assertIn("resurrect deadstream -> skip:no-relaunch-pane", log)
+
+    def test_non_bare_pane_skips_and_does_not_act(self):
+        # a shell pane holding typed text / a running process is NEVER keystroked.
+        log, act = self._decide(pane_bare=False, enabled=True)
+        self.assertFalse(act)
+        self.assertIn("skip:pane-not-bare", log)
 
     def test_recent_human_hard_veto_wins_over_enabled(self):
         log, act = self._decide(human=True, reason="client input 12s",

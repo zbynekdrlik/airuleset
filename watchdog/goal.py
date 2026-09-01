@@ -3318,6 +3318,59 @@ def _roster_age_desc(now, ts):
     return ("%dh%02dm" % (h, m)) if h else ("%dm" % m)
 
 
+def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
+    """#804 mode-5 -- evaluate + (opt-in) fire a RESURRECT for ONE dead roster
+    entry. Returns `(log_lines, dirty)`; mutates `dentry`'s resurrect anchors
+    (rgts/ratt/rfails). Extracted from goal_lane_sweep's census loop to keep it
+    under the function-line cap (#502/#511) and to isolate the irreversible
+    keystroke path into one place; the decision semantics live in `resurrect.py`.
+
+    A relaunch fires ONLY behind the opt-in AIRULESET_RESURRECT_ACTION flag AND
+    all of decide()'s gates (a bare-idle shell pane, no recent human, not
+    dry-run). The live keystroke is opt-in-until the supervisor verifies it live
+    (design M5); `rgts` bounds an attempt to once per RESURRECT_CADENCE_S so a
+    persistent no-pane/disabled/veto state never floods the journal."""
+    rdue, _ = _resurrect.due(dentry, now)
+    if not rdue:
+        return [], False
+    logs = []
+    # #805 interface -- a relaunch that fired last due-cycle (`ratt`) yet the
+    # stream is STILL dead now is a FAILED attempt; count it so launch_cmd
+    # escalates --continue -> fresh after RESURRECT_MAX_FAILS (a ballooned-context
+    # session that dies straight after --continue never livelocks). A cwd that
+    # came back live resets rfails/ratt (the sweep's visited-cwd loop).
+    if dentry.get("ratt"):
+        rf = dentry.get("rfails", 0)
+        dentry["rfails"] = (rf if isinstance(rf, (int, float)) else 0) + 1
+    rpane = _resurrect.find_pane(dcwd, run)
+    # mode-4 -- the HARD recent-human veto (all 3 signals: presence marker for the
+    # dead sid, its last transcript human prompt, and the attached tmux client's
+    # input on this pane's SESSION -- max client_activity across attached
+    # clients). A dead session's transcript is static, so signal 3 (a human at the
+    # shell pane NOW) is the operative one; signals 1/2 are threaded for
+    # completeness. `pane_is_bare_idle` is the SEPARATE structural guard against a
+    # stale half-typed command the 5-min signal-3 window no longer sees. Both are
+    # evaluated only when a relaunch pane exists.
+    rhuman, rreason, rbare = (False, "", False)
+    if rpane is not None:
+        rbare = _resurrect.pane_is_bare_idle(rpane, run)
+        rtinfo = watchdog.find_active_transcript(projects_dir, dcwd)
+        rhuman, rreason = watchdog._goal_autoarm_recent_human_activity(
+            dentry.get("sid", ""), rtinfo[0] if rtinfo else None, now,
+            pane_target=rpane, run=run)
+    rlog, ract = _resurrect.decide(
+        dentry, dloc, rpane, rbare, rhuman, rreason,
+        _resurrect.action_enabled(), dry_run)
+    logs.append(rlog)
+    dentry["rgts"] = now
+    dentry["ratt"] = bool(ract)   # did we fire a relaunch THIS cycle?
+    if ract and not _resurrect.relaunch(
+            rpane, _resurrect.launch_cmd(dentry), run):
+        logs.append("resurrect %s -> relaunch send FAILED (retry next cadence "
+                    "window)" % dloc)
+    return logs, True
+
+
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
 # shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
 # calibrated for the VIRGIN-ARM decision -- irreversibly arming a whole
@@ -4749,36 +4802,14 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     for _dcwd, _dentry in ([] if sweep_budget_broke
                            else _roster.dead_entries(roster_reg, visited_cwds)):
         _dloc = watchdog.project_label(_dcwd)
-        # #804 mode-5 RESURRECT ladder -- a dead rostered stream gets a bounded
-        # relaunch ATTEMPT on its OWN RESURRECT_CADENCE_S (independent of the
-        # census line's hourly cadence). PURE decision + one explicit log line;
-        # the live keystroke is opt-in (AIRULESET_RESURRECT_ACTION, default OFF)
-        # and the supervisor verifies it live before enabling fleet-wide (design
-        # M5). `rgts` is the attempt anchor, re-spaced on EVERY outcome so a
-        # persistent no-pane/disabled state never floods the journal.
-        _rdue, _ = _resurrect.due(_dentry, now)
-        if _rdue:
-            _rpane = _resurrect.find_pane(_dcwd, run)
-            # mode-4 -- the HARD recent-human veto on the relaunch keystroke: all
-            # 3 signals (presence marker for the dead sid, its last transcript
-            # human prompt, and the attached tmux client's input on THIS pane).
-            # A dead session's transcript is static, so signal 3 (a human at the
-            # bare-shell pane NOW) is the operative one; signals 1/2 are threaded
-            # for completeness. Only evaluated when a relaunch pane exists.
-            _rhuman, _rreason = (False, "")
-            if _rpane is not None:
-                _rtinfo = watchdog.find_active_transcript(projects_dir, _dcwd)
-                _rhuman, _rreason = watchdog._goal_autoarm_recent_human_activity(
-                    _dentry.get("sid", ""), _rtinfo[0] if _rtinfo else None, now,
-                    pane_target=_rpane, run=run)
-            _rlog, _ract = _resurrect.decide(
-                _dentry, _dloc, _rpane, _rhuman, _rreason,
-                _resurrect.action_enabled(), dry_run)
-            logs.append(_rlog)
-            _dentry["rgts"] = now
+        # #804 mode-5 -- evaluate + (opt-in) fire a RESURRECT for this dead entry
+        # (own RESURRECT_CADENCE_S, independent of the hourly census line);
+        # extracted to a helper to keep goal_lane_sweep under its function cap.
+        _rlogs, _rdirty = _resurrect_dead_entry(
+            _dcwd, _dentry, _dloc, now, run, projects_dir, dry_run)
+        logs.extend(_rlogs)
+        if _rdirty:
             roster_dirty = True
-            if _ract:
-                _resurrect.relaunch(_rpane, _resurrect.launch_cmd(_dentry), run)
         _last = _dentry.get("census_ts")
         if isinstance(_last, (int, float)) and (now - _last) < GOAL_ROSTER_CENSUS_S:
             continue
@@ -4792,11 +4823,21 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                _roster_age_desc(now, _dentry.get("armed_ts"))))
     for _lcwd in visited_cwds:
         _e = roster_reg.get(_lcwd)
-        if isinstance(_e, dict) and "census_ts" in _e:
-            _e.pop("census_ts", None)
+        # A cwd that is live again clears its census-flood latch AND its resurrect
+        # state (rgts/rfails/ratt) so a FUTURE death re-surfaces + re-resurrects
+        # from a clean slate (a resurrect that brought it back must never leave a
+        # stale fail count behind -- #805 escalation resets on success).
+        if isinstance(_e, dict) and any(
+                k in _e for k in ("census_ts", "rgts", "rfails", "ratt")):
+            for _k in ("census_ts", "rgts", "rfails", "ratt"):
+                _e.pop(_k, None)
             roster_dirty = True
-    if roster_dirty and not dry_run:
-        _roster.save_roster(roster_reg)
+    if roster_dirty and not dry_run and not _roster.save_roster(roster_reg):
+        # A persistently-failing save loses the rgts/census_ts anchors each
+        # reload -> the 30-min resurrect cadence + hourly census would degrade to
+        # every sweep; surface it (machine-channel) instead of silently churning.
+        logs.append("roster save FAILED (unwritable ~/.claude?) -- resurrect/"
+                    "census cadence not persisted this sweep")
     if not dry_run:   # #531 -- prune each rider namespace for gone+aged sessions
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547

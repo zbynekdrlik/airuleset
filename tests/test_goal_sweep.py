@@ -1142,8 +1142,30 @@ class TestGoalDarkWatch(unittest.TestCase):
 #    apply here (unlike arm delivery).
 # --------------------------------------------------------------------------- #
 
+# #804 mode-5 -- a REALISTIC capture for a DEAD stream's bare BASH pane (a login
+# shell at an idle prompt), not the CC `❯`+statusline GOAL_IDLE_CAP. resurrect's
+# `pane_is_bare_idle` reads the LAST non-blank line, which for a bash pane IS the
+# prompt (bash has no statusline below it).
+_BASH_IDLE_CAP = "newlevel@dev1:~/devel/deadstream$ "
+# a bash pane with a human's STALE half-typed command still on the prompt.
+_BASH_TYPED_CAP = "newlevel@dev1:~/devel/deadstream$ rm -rf /tmp/junk "
+
+
 class TestGoalLaneSweep(unittest.TestCase):
     CWD = "/home/newlevel/devel/lanesweep"
+
+    def setUp(self):
+        # #804(4)/review -- isolate the roster path for a DIRECT
+        # `python3 tests/test_goal_sweep.py` run too (conftest is pytest-only;
+        # cmd_push's test_env covers only `unittest discover`), so a resurrect/
+        # census test's roster.save_roster never writes the developer's real
+        # ~/.claude/goal-roster.json.
+        p = m.patch.dict(os.environ,
+                         {"AIRULESET_GOAL_ROSTER_PATH":
+                          str(Path(self._dir()) / "goal-roster.json"),
+                          "AIRULESET_RESURRECT_ACTION": ""})
+        p.start()
+        self.addCleanup(p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -1205,9 +1227,10 @@ class TestGoalLaneSweep(unittest.TestCase):
         r = {}
         roster.upsert(r, cwd, "old-sid", "full", now - 7200)
         roster.save_roster(r)
-        # a BARE-shell pane in the dead cwd -> not a claude candidate (so the cwd
-        # reads DEAD) but a valid relaunch target for find_pane.
-        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")], GOAL_IDLE_CAP)
+        # a BARE-idle shell pane in the dead cwd -> not a claude candidate (so the
+        # cwd reads DEAD) but a valid, safe-to-type relaunch target.
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)
         logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
                                     backlog_fetch=lambda c: 5, state={})
         self.assertTrue(any(ln.startswith("resurrect ") and "deadstream" in ln
@@ -1233,9 +1256,9 @@ class TestGoalLaneSweep(unittest.TestCase):
         r = {}
         roster.upsert(r, cwd, "old-sid", "full", now - 7200)
         roster.save_roster(r)
-        # a BARE-shell pane in the dead cwd WITH an attached client whose input
-        # activity is NOW (signal 3 -> a human is at this pane right now).
-        tmux = _ClientActiveFake([("%bash", "bash", cwd, "222")], GOAL_IDLE_CAP,
+        # a BARE-idle shell pane in the dead cwd WITH an attached client whose
+        # input activity is NOW (signal 3 -> a human is at this pane right now).
+        tmux = _ClientActiveFake([("%bash", "bash", cwd, "222")], _BASH_IDLE_CAP,
                                  client_epochs=[now])
         with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
             logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
@@ -1245,6 +1268,104 @@ class TestGoalLaneSweep(unittest.TestCase):
         # a human-active pane is NEVER keystroked, flag ON notwithstanding.
         self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
                          "resurrect must HARD-veto a human-active pane")
+
+    def test_804_resurrect_relaunches_when_enabled_no_human_bare_pane_mode5(self):
+        # #804 mode-5 ACT path -- flag ON + a bare-idle shell pane + no recent
+        # human -> the relaunch keystroke fires (`claude --continue` + Enter) and
+        # the line says 'relaunching'. This is the ACTION half the disabled/veto
+        # tests never exercise (both assert NO keystroke), so without this the
+        # whole relaunch call is mutant-survivable (#749).
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)   # no clients -> no signal-3
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any("resurrect deadstream -> relaunching" in ln
+                            for ln in logs), logs)
+        self.assertIn(
+            ["tmux", "send-keys", "-t", "%bash", "claude --continue", "Enter"],
+            [list(a) for a in tmux.sent])
+
+    def test_804_resurrect_refuses_a_pane_with_typed_text_mode4(self):
+        # #804 mode-4 review -- a shell pane holding a human's stale half-typed
+        # command is NOT bare: `claude --continue`+Enter would be APPENDED and
+        # executed. Even with the flag ON, resurrect refuses (skip:pane-not-bare)
+        # and NEVER keystrokes.
+        from watchdog import roster
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_TYPED_CAP)   # typed text on the prompt
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any("skip:pane-not-bare" in ln for ln in logs), logs)
+        self.assertEqual([a for a in tmux.sent if "send-keys" in " ".join(a)], [],
+                         "a pane with typed text is NEVER keystroked")
+
+    def test_804_resurrect_decision_is_cadenced_not_every_sweep(self):
+        # #804 -- the resurrect ATTEMPT (and its keystroke, when enabled) is
+        # bounded to once per RESURRECT_CADENCE_S by the `rgts` anchor, NOT every
+        # 60-s sweep (else a dead-stuck box would be re-typed every sweep -- the
+        # #749 'dokolecka promptuje' keystorm). Line cadence proven flag-OFF.
+        from watchdog import roster, resurrect
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)
+
+        def _sweep(t):
+            return goal.goal_lane_sweep(t, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        self.assertTrue(any(ln.startswith("resurrect ") for ln in _sweep(now)))
+        # a second sweep 5 min later is WITHIN the cadence window -> no attempt.
+        self.assertFalse(any(ln.startswith("resurrect ")
+                             for ln in _sweep(now + 300)))
+        # past the window -> a fresh attempt line.
+        self.assertTrue(any(ln.startswith("resurrect ")
+                            for ln in _sweep(now + resurrect.RESURRECT_CADENCE_S
+                                             + 10)))
+
+    def test_804_resurrect_escalates_continue_to_fresh_after_failed_attempts(self):
+        # #804 #805-interface -- a relaunch that fires but leaves the stream STILL
+        # dead is a FAILED attempt; after RESURRECT_MAX_FAILS the launch escalates
+        # `claude --continue` -> a fresh `claude` (a ballooned session that dies
+        # straight after --continue never livelocks). Locks the `rfails` census
+        # incrementer the reviewers flagged as never-written.
+        from watchdog import roster, resurrect
+        cwd = "/home/newlevel/devel/deadstream"
+        now = 100000
+        r = {}
+        roster.upsert(r, cwd, "old-sid", "full", now - 7200)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([("%bash", "bash", cwd, "222")],
+                                   _BASH_IDLE_CAP)
+        step = resurrect.RESURRECT_CADENCE_S + 1
+
+        def _sweep(t):
+            return goal.goal_lane_sweep(t, run=tmux, projects_dir=self._dir(),
+                                        backlog_fetch=lambda c: 5, state={})
+        with m.patch.dict(os.environ, {"AIRULESET_RESURRECT_ACTION": "1"}):
+            l0 = _sweep(now)                 # attempt 1 -> --continue, rfails 0
+            l1 = _sweep(now + step)          # still dead -> rfails 1, --continue
+            l2 = _sweep(now + 2 * step)      # still dead -> rfails 2 -> fresh
+        self.assertTrue(any("relaunching (claude --continue;" in ln
+                            for ln in l0), l0)
+        self.assertTrue(any("relaunching (claude --continue;" in ln
+                            for ln in l1), l1)
+        self.assertTrue(any("relaunching (claude;" in ln for ln in l2), l2)
 
     def test_804_census_skipped_when_the_sweep_budget_broke(self):
         # #804-review 🟡: a sweep budget break leaves deferred panes' cwds OUT of
