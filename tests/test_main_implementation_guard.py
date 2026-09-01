@@ -1582,11 +1582,16 @@ class BypassCarriesAReason128(unittest.TestCase):
     def test_marker_with_a_reason_is_honored(self):
         sid = "t-mg-reason-ok-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
+        pending = Path("/tmp/airuleset-main-exec-pending-%s" % sid)
         m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: pending.unlink(missing_ok=True))
         out = self._run(sid)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertFalse(m.exists(), "an honored marker is still consumed")
+        # #819: an honored marker is now DEFERRED, not consumed in PreToolUse —
+        # it survives + a pending flag is set for the PostToolUse consumer.
+        self.assertTrue(m.exists(), "an honored marker survives the PreToolUse allow")
+        self.assertTrue(pending.exists(), "a pending flag is written for post-exec consume")
 
     def test_empty_marker_is_refused(self):
         sid = "t-mg-reason-empty-" + uuid.uuid4().hex[:8]
