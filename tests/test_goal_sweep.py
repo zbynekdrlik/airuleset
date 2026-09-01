@@ -923,6 +923,43 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertTrue(sent,
                         "a CONFIRMED dark loop past the attempt cap PINGS the human")
 
+    def test_re_arm_past_cap_backs_off_never_silent_804(self):
+        # #804 mode-2 -- past the base 24h cap the dark-rearm is NOT silent until
+        # midnight (montalu2 "sam sa vypne a uz nezapne"): it re-arms on an
+        # ESCALATING backoff from the last attempt (30m -> 1h -> 3h -> 6h), so a
+        # persistently dead-stuck loop keeps getting bounded resurrection
+        # attempts. RED on the pre-#804 flat cap (EXACTLY 2 types then silent
+        # within 24h); GREEN once the backoff allows a 3rd type after its 30m
+        # window elapses, AND the 3rd type is spaced >= 30m from the 2nd (the
+        # backoff floor, distinct from the ~confirm-ramp spacing of the 2nd).
+        proj, tmux = self._dark("sess-dark-rearm-backoff-804")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        rearm = _rearm_ok
+        writes = []                                   # capture the record TIMES
+        real_record = goal.record_goal_request
+
+        def spy(*a, **k):
+            writes.append(now[0])
+            return real_record(*a, **k)
+
+        now = [1_700_000_000]
+
+        def obl(cwd):
+            return (5, now[0] - 60)                    # always workable + fresh
+
+        with m.patch.object(goal, "record_goal_request", side_effect=spy):
+            # ~4h of clean-dark sweeps (100s apart) -- long past the first (30m)
+            # backoff window, all within ONE 24h prune window.
+            for _ in range(150):
+                now[0] += 100
+                self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
+        self.assertGreater(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
+                           "past the base cap the loop re-arms on backoff, never silent")
+        self.assertGreaterEqual(
+            writes[2] - writes[1], goal.GOAL_DARK_REARM_BACKOFF_S[0],
+            "the 3rd re-arm is spaced >= the first (30m) backoff window from the 2nd")
+
     def test_dry_run_re_arm_records_nothing_and_consumes_no_slot(self):
         # #478/#524 review MINOR — a dry-run sweep must never WRITE the request
         # nor CONSUME an attempt slot, and must log "would record", never the
