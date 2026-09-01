@@ -102,9 +102,12 @@ RELEASE_GAP_MIN_S = 1 * 3600
 RELEASE_GAP_MIN_AHEAD = 1
 # env AIRULESET_RELEASE_STATE_FETCH_TTL_S — how long a `{ahead,in_flight,train}` read is
 # CACHED per repo (`state["release_state_cache"]`, keyed by cwd, shared across
-# every armed pane on that repo). 30 min — the nudge cadence is hours, so the
-# release state never needs minute-fresh; a resolved release is re-detected
-# within <=1 TTL. Floored so a units error can't turn it into a per-sweep gh call.
+# every armed pane on that repo). 30 min — half the #812 1h cadence (was ~8% of
+# the old 6h): a stale in_flight sample can delay a nudge by <=1 TTL, so a stall
+# window must exceed ~1.5h to guarantee a nudge — comfortably under the
+# multi-hour stalls this watches, so the release state never needs minute-fresh;
+# a resolved release is re-detected within <=1 TTL. Floored so a units error
+# can't turn it into a per-sweep gh call.
 RELEASE_STATE_FETCH_TTL_S = 30 * 60
 RELEASE_STATE_FETCH_TTL_MIN_S = 5 * 60
 # a FAILED/unmeasurable fetch (None) is cached only briefly so a transient gh
@@ -123,7 +126,9 @@ RELEASE_GAP_ORPHAN_TTL_S = 24 * 3600
 # advances on a CONFIRMED send: type -> head/tail verify fails -> undo -> retype,
 # endlessly (the owner's "dokolecka promptuje"). After MAX_SEND_FAILS consecutive
 # undelivered sends the nudge backs off one full cadence (advance `last_nudge`),
-# bounding the storm to <= MAX_SEND_FAILS keystrokes per cadence.
+# bounding the storm to <= MAX_SEND_FAILS keystrokes per cadence — i.e. per HOUR
+# since the #812 1h cadence (was per-6h); still bounded, and a bg-agent swallow
+# is caught earlier by the `_BG_AGENTS_WAIT_RX` busy-pane gate before it counts.
 MAX_SEND_FAILS = 3
 
 
@@ -167,9 +172,13 @@ def _prod_branch():
 
 
 def _fmt_age(seconds):
-    """Human age of a stalled gap for the decision log — hours under 48h, days
-    beyond. A negative age (a future anchor under clock skew) clamps to 0."""
+    """Human age of a stalled gap for the decision log — MINUTES under 2h (#812
+    review: with the 1h cadence a sub-hour wait rendered "~0h", hiding exactly
+    the window-length signal a flap-vs-cadence audit needs), hours under 48h,
+    days beyond. A negative age (a future anchor under clock skew) clamps to 0."""
     seconds = max(0, seconds)
+    if seconds < 2 * 3600:
+        return "~%dm" % int(seconds // 60)
     if seconds < 48 * 3600:
         return "~%dh" % int(seconds // 3600)
     return "~%dd" % int(seconds // 86400)
@@ -450,8 +459,17 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     ahead = rstate.get("ahead")
     sig = new_rec["sig"]
     if action == "inflight":
-        logs.append("release-gap %s -> skip:release-in-flight (ahead=%d, "
-                    "anchor reset)" % (loc, ahead))
+        # Surface the CUMULATIVE age the gap had been tracked BEFORE this
+        # in-flight flap reset the anchor (#812 review, finding 2): a flapping
+        # in-flight signal that resets `first_seen=now` faster than the cadence
+        # starves the nudge forever, and the pre-reset age is the one signal that
+        # turns such a starvation into a single journal grep instead of a day of
+        # forensics. `rec` is the OLD persisted rec (pre-reset).
+        prior = rec.get("first_seen") if isinstance(rec, dict) else None
+        was = (" tracked %s pre-reset," % _fmt_age(now - prior)
+               if isinstance(prior, (int, float)) else "")
+        logs.append("release-gap %s -> skip:release-in-flight (ahead=%d,%s "
+                    "anchor reset)" % (loc, ahead, was))
         return logs
     if action == "wait":
         anchor = new_rec["last_nudge"] or new_rec["first_seen"]

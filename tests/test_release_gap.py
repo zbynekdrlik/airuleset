@@ -901,15 +901,16 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
 class TestHourlyCadenceDefaults812(unittest.TestCase):
     @staticmethod
     def _no_env():
-        # A context with the two release-gap env overrides ABSENT, so the
-        # default constants govern (the gk box had no overrides).
+        # A patch.dict context that RESTORES os.environ after the test; the
+        # caller pops AIRULESET_RELEASE_GAP_CADENCE_S inside it so the default
+        # constant governs (the ONLY cadence override — the floor RELEASE_GAP_
+        # MIN_S is a plain constant, never env-read; the gk box had no overrides).
         ctx = m.patch.dict(os.environ, {}, clear=False)
         return ctx
 
     def test_default_cadence_is_hourly(self):
         with self._no_env():
             os.environ.pop("AIRULESET_RELEASE_GAP_CADENCE_S", None)
-            os.environ.pop("AIRULESET_RELEASE_GAP_MIN_S", None)
             self.assertEqual(rg.RELEASE_GAP_CADENCE_S, 3600)
             self.assertEqual(rg._cadence(), 3600)
 
@@ -979,6 +980,17 @@ class TestDecisionLogInvariant812(_OrchBase):
                     any("release-gap" in ln for ln in logs),
                     "%s log line not journalled as release-gap: %r"
                     % (label, logs))
+
+    def test_inflight_log_carries_pre_reset_age(self):
+        # #812 review F6: a flap that resets the stall anchor logs the CUMULATIVE
+        # age the gap was tracked BEFORE the reset, so a flap-vs-cadence
+        # starvation (the incident) is one journal grep, not a day of forensics.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        logs = self._run_logs(lambda cwd: {"ahead": 99, "in_flight": True}, rrecs)
+        self.assertTrue(
+            any("skip:release-in-flight" in ln and "pre-reset" in ln
+                for ln in logs),
+            "inflight log missing the pre-reset age: %r" % logs)
 
 
 if __name__ == "__main__":
