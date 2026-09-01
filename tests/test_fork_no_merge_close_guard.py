@@ -307,6 +307,24 @@ class TestForkNoMergeCloseGuard(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("fork-no-merge", r.stderr)
 
+    def test_blocks_self_authored_close_with_glued_repo_flag_on_app_token_box(self):
+        # #807: the PRIMARY author carve-out (ME==AUTHOR) shares the glued-`-R`
+        # cwd-repo residual the #773 ME-empty fallback already guards. On a
+        # DETECTED App-token box `authority --self-login` RESOLVES ME to the
+        # stream bot login (a LOCAL check, no `/user` call), so the ME-non-empty
+        # author carve-out -- NOT the #773 fallback -- is the branch reached. A
+        # glued `-Rzbynekdrlik/odoo-erp` (no separator) leaves REPO_ARG empty, so
+        # AUTHOR is read from the CWD repo's issue while the close targets
+        # odoo-erp. RED on pre-#807 code (the carve-out wrong-ALLOWS via a
+        # cwd-repo author read); GREEN once `! _repo_flag_unparseable "$REPO_ARG"`
+        # gates the carve-out -> fail toward hand-off (BLOCK), mirroring the #773
+        # review-fix's own glued-`-R` test above.
+        r = run("gh issue close 4006 -Rzbynekdrlik/odoo-erp --comment done",
+                self.branch, api_user_403=True,
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir=_app_token_dir())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     # --- #773: bot box whose App-token dir is NOT detected -> self-login empty ---
     #
     # `app_token_dir` points at a NON-EXISTENT path here, so

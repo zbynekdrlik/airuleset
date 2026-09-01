@@ -462,8 +462,16 @@ if [ -n "$ISSUE_NUM" ]; then
     # MAINTAINER_LOGIN unresolvable -> cannot PROVE $ME is not the maintainer
     # -> refuse the exemption (same fail-SAFE direction as the rest of this
     # hook: undeterminable never means "allow").
+    # #807: a glued `-Rowner/repo` (no separator) leaves REPO_ARG empty, so the
+    # AUTHOR above was read from the CWD repo while the close targets the named
+    # one — refuse the exemption via the SAME `_repo_flag_unparseable` fail-safe
+    # the #533/#756/#773 carve-outs already use (fail toward hand-off, never a
+    # wrong-allow). The author block was kept byte-frozen across #463/#533/#756
+    # (the additive-carve-out convention), but this residual can only be closed
+    # by tightening the carve-out's own condition; see the #807 design comment.
     if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ] \
-       && [ -n "$MAINTAINER_LOGIN" ] && [ "$ME" != "$MAINTAINER_LOGIN" ]; then
+       && [ -n "$MAINTAINER_LOGIN" ] && [ "$ME" != "$MAINTAINER_LOGIN" ] \
+       && ! _repo_flag_unparseable "$REPO_ARG"; then
         exit 0   # self-authored sub-finding — the stream's own bookkeeping, allowed
     fi
     # #773: identity FALLBACK for a bot box whose own login could not be
