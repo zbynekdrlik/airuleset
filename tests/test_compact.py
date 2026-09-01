@@ -1918,9 +1918,9 @@ class TestCompactSweep(unittest.TestCase):
                                        path=self.reqp, origin="self-callback")
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         handled = set()
-        logs = compact.compact_sweep(now + 5, run=tmux, projects_dir=proj,
-                                     requests_path=self.reqp,
-                                     delivered_path=self.delp, handled=handled)
+        compact.compact_sweep(now + 5, run=tmux, projects_dir=proj,
+                              requests_path=self.reqp,
+                              delivered_path=self.delp, handled=handled)
         self.assertIn("/compact", tmux.typed_texts())
         self.assertNotIn("sess-sc", compact.load_compact_requests(self.reqp))
         self.assertIn("BOUNDARY-PRIORITY", self.syncp.read_text())
