@@ -60,6 +60,13 @@ VERDICTS = (
     "no-backlog",     # armed + 0 workers + no/unmeasurable open backlog
     "warming",        # armed + 0 workers + backlog, but recently active (debounce)
     "stuck",          # armed + 0 workers + backlog + idle>N + not awaiting-user
+    "dead-session",   # #804 -- a rostered EXPECTED-armed stream with NO live
+                      # claude candidate pane at all (mode 5: the session died
+                      # and fell off the census entirely). NOT produced by
+                      # `evaluate` (which needs a live pane); emitted by
+                      # `goal_lane_sweep`'s roster census for a `dead_entries`
+                      # member, so an expected-armed stream can never go dark
+                      # silently.
 )
 
 # The verdicts that mean "the structured state says a /goal IS armed here" (a

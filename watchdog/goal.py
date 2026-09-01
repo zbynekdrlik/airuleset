@@ -178,6 +178,7 @@ from watchdog import release_gap as _release_gap             # #616 (release gap
 from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival)
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
+from watchdog import roster as _roster                       # #804 (armed roster)
 
 
 # --------------------------------------------------------------------------- #
@@ -3253,6 +3254,26 @@ GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 # classifier returns the honest `unknown`, never a guess.
 GOAL_LANE_GIVEUP_CACHE_MAX_AGE_S = 15 * 60
 
+# #804 -- how often the DEAD-SESSION roster census re-surfaces a persistently-
+# dead expected-armed stream: at most ONE verdict line per dead cwd per this
+# window, so a stream that stays dark does not flood the journal every 60s sweep
+# (the #766 once-per-episode latch lesson). A stream that comes back live clears
+# its own latch so a FUTURE death re-surfaces.
+GOAL_ROSTER_CENSUS_S = 60 * 60
+
+
+def _roster_age_desc(now, ts):
+    """A short human age ('3h12m' / '48m' / '?') for a roster entry's armed_ts
+    in a DEAD-SESSION census line. `?` on a missing/corrupt ts (never raises)."""
+    if not isinstance(ts, (int, float)):
+        return "?"
+    secs = int(now - ts)
+    if secs < 0:
+        return "0m"
+    h, m = secs // 3600, (secs % 3600) // 60
+    return ("%dh%02dm" % (h, m)) if h else ("%dm" % m)
+
+
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
 # shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
 # calibrated for the VIRGIN-ARM decision -- irreversibly arming a whole
@@ -4436,12 +4457,25 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     stuck_seen = set()     # #662 -- sids the stuck-alert decider ran on THIS sweep
     #                         (two panes sharing one cwd resolve the SAME sid, #645
     #                         -- guard the streak against a double-advance/sweep)
+    # #804 -- the durable EXPECTED-ARMED roster + the set of cwds with a live
+    # claude candidate pane THIS sweep. A rostered cwd absent from `visited_cwds`
+    # is a DEAD-SESSION (mode 5: the session died and fell off the census); a cwd
+    # confirmed ARMED refreshes its roster entry. Loaded ONCE (after the disable /
+    # unwired early returns above, so a disabled box never touches it), saved once
+    # at the end iff mutated.
+    visited_cwds = set()
+    roster_reg = _roster.load_roster()
+    roster_dirty = False
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
             logs.append("lane-sweep-budget-exceeded — deferring remaining "
                         "panes to next sweep")
             break
+        # #804 -- a live claude candidate pane exists for this cwd (ARMED or not),
+        # so it is NOT a mode-5 dead session. Recorded BEFORE the in-mode / no-
+        # transcript continues so a momentarily-busy live pane never false-flags.
+        visited_cwds.add(cwd)
         if watchdog.pane_in_mode(pid, run):
             continue
         tinfo = watchdog.find_active_transcript(projects_dir, cwd)
@@ -4495,6 +4529,19 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     for _k in ("soa", "soalert", "soa_ts"):
                         r.pop(_k, None)
             continue
+        # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
+        # one-glance verdict, not a render guess): refresh its durable roster
+        # entry so the DEAD-SESSION census + resurrect ladder have an accurate
+        # "expected-armed" fact. armed_ts is preserved (a re-observation is not a
+        # re-arm); sid/authority/last_seen refresh (a resurrected session's id
+        # changes). resolve_authority fails toward "full" (#478 direction).
+        import airuleset as _al
+        try:
+            _authority = _al.resolve_authority(cwd)
+        except Exception:
+            _authority = "full"
+        _roster.upsert(roster_reg, cwd, sid, _authority or "full", now)
+        roster_dirty = True
         rec = recs.get(sid)
         if not isinstance(rec, dict):
             rec = {}
@@ -4559,6 +4606,32 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 now, run, urecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 u_fetch=u_fetch, state=state, sleep_fn=sleep_fn,
                 captured=captured)
+    # #804 -- DEAD-SESSION census: a rostered EXPECTED-armed stream with NO live
+    # claude candidate pane this sweep is a mode-5 death (the session died and
+    # fell off the radar). Surface ONE verdict line per dead stream, cadenced at
+    # GOAL_ROSTER_CENSUS_S so a persistently-dead stream never floods the journal
+    # (#766 latch). A cwd that is live again clears its own latch so a FUTURE
+    # death re-surfaces. Emitted even in dry_run (a read-only log line); the
+    # roster is only PERSISTED when not dry_run.
+    for _dcwd, _dentry in _roster.dead_entries(roster_reg, visited_cwds):
+        _last = _dentry.get("census_ts")
+        if isinstance(_last, (int, float)) and (now - _last) < GOAL_ROSTER_CENSUS_S:
+            continue
+        _dentry["census_ts"] = now
+        roster_dirty = True
+        logs.append(
+            "one-glance %s -> dead-session (expected armed, no live session; "
+            "sid=%s authority=%s last armed %s ago)"
+            % (watchdog.project_label(_dcwd), _dentry.get("sid", "?"),
+               _dentry.get("authority", "?"),
+               _roster_age_desc(now, _dentry.get("armed_ts"))))
+    for _lcwd in visited_cwds:
+        _e = roster_reg.get(_lcwd)
+        if isinstance(_e, dict) and "census_ts" in _e:
+            _e.pop("census_ts", None)
+            roster_dirty = True
+    if roster_dirty and not dry_run:
+        _roster.save_roster(roster_reg)
     if not dry_run:   # #531 -- prune each rider namespace for gone+aged sessions
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547

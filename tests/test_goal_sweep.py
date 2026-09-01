@@ -1114,6 +1114,68 @@ class TestGoalLaneSweep(unittest.TestCase):
         logs = goal.goal_lane_sweep(1000, run=lambda *a, **k: "")
         self.assertEqual(logs, [])
 
+    def test_804_dead_rostered_stream_produces_a_dead_session_census_line(self):
+        # #804 -- a stream EXPECTED to be armed (in the roster) but with NO live
+        # candidate pane this sweep is a mode-5 death: the census surfaces it so
+        # it can never go dark silently ("sam sa vypne a nikto to nevidí").
+        from watchdog import roster
+        now = 100000
+        r = {}
+        roster.upsert(r, "/home/newlevel/devel/deadstream", "old-sid", "full",
+                      now - 7200)
+        roster.save_roster(r)
+        # NO panes at all -> visited_cwds empty -> the rostered cwd is dead.
+        tmux = DeliverGoalFakeTmux([], GOAL_IDLE_CAP)
+        logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                    backlog_fetch=lambda cwd: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln and "deadstream" in ln
+                            for ln in logs), logs)
+
+    def test_804_dead_session_line_is_cadenced_not_every_sweep(self):
+        from watchdog import roster
+        now = 100000
+        r = {}
+        roster.upsert(r, "/home/newlevel/devel/deadstream", "s", "full", now)
+        roster.save_roster(r)
+        tmux = DeliverGoalFakeTmux([], GOAL_IDLE_CAP)
+        l1 = goal.goal_lane_sweep(now, run=tmux, projects_dir=self._dir(),
+                                  backlog_fetch=lambda cwd: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln for ln in l1), l1)
+        # a second sweep 5 min later must NOT re-log (< GOAL_ROSTER_CENSUS_S)
+        l2 = goal.goal_lane_sweep(now + 300, run=tmux, projects_dir=self._dir(),
+                                  backlog_fetch=lambda cwd: 5, state={})
+        self.assertFalse(any("-> dead-session" in ln for ln in l2), l2)
+        # a sweep past the cadence window re-surfaces it.
+        l3 = goal.goal_lane_sweep(now + goal.GOAL_ROSTER_CENSUS_S + 10, run=tmux,
+                                  projects_dir=self._dir(),
+                                  backlog_fetch=lambda cwd: 5, state={})
+        self.assertTrue(any("-> dead-session" in ln for ln in l3), l3)
+
+    def test_804_armed_pane_is_upserted_into_the_roster(self):
+        # A CONFIRMED-armed candidate pane refreshes its durable roster entry, so
+        # the census has an accurate expected-armed fact if the session later dies.
+        from watchdog import roster
+        now = 1_000_000
+        proj = self._dir()
+        tpath = _write_marker_transcript(proj, self.CWD, "sess-armed-roster")
+        sid = tpath.stem
+        old = now - goal.GOAL_LANE_IDLE_S - 500
+        os.utime(tpath, (old, old))
+        # dark_watch's tail-proof goal_mark says the /goal IS armed (#486 G6).
+        state = {"goal_mark": {sid: {"off": 0, "mark": {"state": "set", "ts": now}}}}
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath)
+        with m.patch("airuleset.resolve_authority", return_value="branch-merge"), \
+                m.patch.object(wd, "_owner_disabled", return_value=False):
+            goal.goal_lane_sweep(now, run=tmux, projects_dir=proj, state=state,
+                                 backlog_fetch=lambda cwd: 5)
+        reg = roster.load_roster()
+        self.assertIn(self.CWD, reg)
+        self.assertEqual(reg[self.CWD]["sid"], sid)
+        self.assertEqual(reg[self.CWD]["authority"], "branch-merge")
+        self.assertEqual(reg[self.CWD]["armed_ts"], now)
+
     def test_kill_switch_disables_lane_sweep(self):
         with m.patch.object(wd, "_owner_disabled", return_value=True):
             logs = goal.goal_lane_sweep(1000, run=lambda *a, **k: "",
