@@ -420,9 +420,10 @@ fi
 # optional -R/--repo from the `gh issue close` form; the `gh api PATCH` form is
 # never exempted (use `gh issue close` for legit self-closes).
 #
-# #349 adversarial review, CRITICAL: every CURRENTLY REGISTERED branch-merge
-# stream (marek, montalu, montalu2/3/4) authenticates as the SAME shared gh
-# identity as the repo's MAINTAINER — on those boxes `ME` (below) resolves to
+# #349 adversarial review, CRITICAL: a branch-merge stream that authenticates as
+# the SAME shared gh identity as the repo's MAINTAINER (the montalu family, marek,
+# and miva1 today — treat this as a CLASS, not an enumeration to keep current, as
+# streams are added: #821 promoted miva1) — on such a box `ME` (below) resolves to
 # the maintainer's own login, and so does the AUTHOR of virtually every
 # assigned ticket (the maintainer files them). `ME == AUTHOR` is then ALWAYS
 # true regardless of whether the ticket is a genuine self-filed sub-finding or

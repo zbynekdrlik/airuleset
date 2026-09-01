@@ -88,22 +88,19 @@ class TestAuthorityResolution(TestCase):
         with m.patch.object(airuleset, "_current_user", return_value="miva1"):
             self.assertEqual(airuleset.resolve_authority(), "branch-merge")
 
-    def test_miva1_marker_still_overrides_the_table(self):
+    def test_miva1_marker_lowers_the_branch_merge_table(self):
         # airuleset#821: the table flip is the DEFAULT; an explicit HTML-comment
-        # marker must still win for miva1 in BOTH directions (single source of
-        # truth = marker over table). A fork-no-merge marker LOWERS it; a bogus
-        # marker is ignored and the branch-merge table value stands.
+        # marker must still win for miva1 (single source of truth = marker over
+        # table). A fork-no-merge marker LOWERS the branch-merge table value —
+        # the genuinely-new direction (a marker lowering a mapped branch-merge
+        # user; the bogus-marker case is covered by test_bogus_marker_value_ignored).
         import tempfile
         from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=fork-no-merge -->\n")
         with m.patch.object(airuleset, "_current_user", return_value="miva1"):
-            lower = tempfile.mkdtemp()
-            (Path(lower) / "CLAUDE.md").write_text(
-                "<!-- airuleset:authority=fork-no-merge -->\n")
-            self.assertEqual(airuleset.resolve_authority(cwd=lower), "fork-no-merge")
-            bogus = tempfile.mkdtemp()
-            (Path(bogus) / "CLAUDE.md").write_text(
-                "<!-- airuleset:authority=superuser -->\n")
-            self.assertEqual(airuleset.resolve_authority(cwd=bogus), "branch-merge")
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_resolve_miva1_no_marker_is_branch_merge(self):
         # airuleset#821 REGRESSION: miva1 was PROMOTED 2026-08-14 (#3244 phase 2)
@@ -145,15 +142,18 @@ class TestAuthorityResolution(TestCase):
         p.assert_any_call("branch-merge")
 
     def test_cli_explain_logs_the_resolution_source(self):
-        # airuleset#821 / #486: --explain makes the resolution ORDER explicit
-        # (which source won: the project marker or the per-user map) — the one
-        # command that diagnoses a stale-mapping bug. Assert BOTH branches.
+        # airuleset#821 / #486: --explain is a decision LOG naming which source
+        # won (marker / per-user map / unmapped default), distinguishing a 'none'
+        # from an INVALID marker (the typo'd-marker misconfig class). It derives
+        # from the SAME _authority_decision the resolver uses, so the printed
+        # source can never disagree with the resolved profile. Assert all four
+        # branches; the seam is _authority_marker_raw (the one shared file read).
         import cli_quals
 
-        def _explain_lines(user, marker):
+        def _explain(user, raw_marker):
             with m.patch.object(airuleset, "_current_user", return_value=user):
-                with m.patch.object(cli_quals, "_authority_marker",
-                                    return_value=marker):
+                with m.patch.object(cli_quals, "_authority_marker_raw",
+                                    return_value=raw_marker):
                     with m.patch("builtins.print") as p:
                         airuleset.cmd_authority(
                             m.Mock(explain=True, maintainer_login=False,
@@ -161,15 +161,24 @@ class TestAuthorityResolution(TestCase):
                                    app_bot_login=False))
             return " ".join(str(c.args[0]) for c in p.call_args_list if c.args)
 
-        # miva1, no marker → the per-user map wins and reports branch-merge.
-        out = _explain_lines("miva1", None)
-        self.assertIn("branch-merge", out)
-        self.assertIn("per-user map", out)
-        self.assertNotIn("project CLAUDE.md marker", out)
-        # a marker present → the marker source wins and is named.
-        out = _explain_lines("miva1", "fork-no-merge")
-        self.assertIn("project CLAUDE.md marker", out)
+        # miva1, no marker → per-user map wins and reports branch-merge.
+        out = _explain("miva1", None)
+        self.assertIn("resolved=branch-merge via per-user map", out)
+        self.assertIn("marker=none", out)
+        # a VALID marker present → the marker source wins AND is the resolved
+        # profile (locks that the named source is never a lie about a map value).
+        out = _explain("miva1", "fork-no-merge")
+        self.assertIn("resolved=fork-no-merge via project CLAUDE.md marker", out)
         self.assertIn("marker=fork-no-merge", out)
+        # an INVALID marker → ignored for resolution (table stands) but surfaced
+        # as invalid, the exact 'typo'd marker' class the log exists to diagnose.
+        out = _explain("miva1", "branch_merge")
+        self.assertIn("resolved=branch-merge via per-user map", out)
+        self.assertIn("marker=invalid('branch_merge')", out)
+        # an UNMAPPED user → the hardcoded `full` default decided, NOT a map row,
+        # and the log says so instead of the misleading "via per-user map".
+        out = _explain("nobody-here", None)
+        self.assertIn("resolved=full via default (unmapped)", out)
 
     def test_cli_prints_maintainer_login(self):
         # #349: the close-guard hook's shared-identity fix needs this to tell
