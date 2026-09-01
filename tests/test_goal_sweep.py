@@ -2403,12 +2403,35 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
 
     def test_530_min_backlog_floor_skips_two_workable(self):
-        # backlog 2 is still below the floor of 3 -> skip:min-backlog.
+        # backlog 2 is below the floor of 3 for a FRESHLY-idle box (idle ~15min,
+        # < GOAL_LANE_INTERVAL_S) -> skip:min-backlog. #804 mode-4 lowers the
+        # floor to 1 only once idle > 1h (see test_804_min_backlog_floor... below).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 2, now, tmtime)
         self.assertTrue(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    def test_804_min_backlog_floor_drops_to_1_after_an_hour_idle(self):
+        # #804 mode-4 RED: a loop that has stood idle > 1h over just 1 workable
+        # ticket is a stuck loop, not freshly-idle churn -- the #530 floor of 3 was
+        # parking it FOREVER (#791 "stojí navždy by design"). Once idle > 1h the
+        # floor drops to 1, so the box IS poked.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_INTERVAL_S - 100   # idle > 1h
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 1, now, tmtime)
+        self.assertTrue(owns)
+        self.assertFalse(any("skip:min-backlog" in ln for ln in logs), logs)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_804_freshly_idle_lone_ticket_still_skips(self):
+        # The anti-storm floor is UNCHANGED for a freshly-idle box (idle ~15min):
+        # a lone ticket there is still not batch-worthy (#530 preserved).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100   # idle ~15min, < 1h
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 1, now, tmtime)
+        self.assertTrue(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_530_min_backlog_floor_fires_at_threshold(self):
