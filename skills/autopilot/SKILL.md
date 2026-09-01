@@ -983,6 +983,30 @@ gap in either.
    > it never sees the final deployed state). The card header/format is unchanged (🎫/🎯/✅/📦/🔗),
    > deduped on repo-name#issue exactly as when the worker fires it itself.
 
+   > **Batch-integration ops — salvage + cleanup lessons (2026-09-01 várka).** (1) **A
+   > server-side 429 (`Server is temporarily limiting requests`, not your usage limit) can kill
+   > most lanes of a batch — worker death is NOT lost work: the worktree survives.** The instant a
+   > worker's death is confirmed, `git -C <worktree> status --porcelain`; if there are uncommitted
+   > changes, commit them as `wip: [#N] salvage … after worker died on API 429` (a WIP commit is
+   > legit — no history rewrite, `--no-ff` preserves it) and push the durability backup
+   > `git push origin <branch>:refs/autopilot-wip/<branch>` BEFORE re-dispatching. Re-dispatch a
+   > FRESH `isolation:"worktree"` worker (a NEW worktree — NEVER `cd` into the dead one, #817), its
+   > first step `git merge --no-ff <dead branch>` = takeover; the prompt carries the exact shas
+   > (bump/RED/GREEN/salvage), the design-comment id ("continue under THAT design, write no new
+   > one"), and where it stopped. A lane that died AFTER committing its review fixes AND posting
+   > its review verdicts (clean worktree, review comment on the ticket) is NOT re-dispatched — verify
+   > (status clean + comments) and merge it directly. A dead worker's in-flight review-subagent
+   > outputs survive at `/tmp/claude-*/…/tasks/<agent-id>.output` — the resume worker reads
+   > `tail -c 6000` (never the whole JSONL) and POSTS the verdicts, or the 2× Fable review is lost.
+   > (2) **A manual `/compact` (owner) drops the harness task handle of a `run_in_background`
+   > `airuleset.py push` — but the PROCESS survives.** Do NOT launch a second push (collision):
+   > `pgrep -af "airuleset.py push"`, then wait on the live PID (`while kill -0 $PID; do sleep 30;
+   > done`) + the durable read (`origin/main` sha, log tail). A double notification is harmless; a
+   > blind second push is not. (3) **Batch cleanup includes `refs/autopilot-wip/*` AND stray
+   > `worktree-agent-*`/`lane-*` branches on origin from prior rounds** (two-branch policy = only
+   > `dev`+`main`): ALWAYS `git merge-base --is-ancestor origin/<b> main` BEFORE any delete — never
+   > delete an unmerged branch (`salvage-before-discarding-work.md`).
+
    > **Release the integration mutex the instant THIS integration cycle's push has landed:**
    > `python3 ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees
    > the repo for another `/autopilot` session's integration `acquire` to succeed, and lets THIS
