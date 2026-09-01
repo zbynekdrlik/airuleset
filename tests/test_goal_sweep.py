@@ -1511,6 +1511,36 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:gave-up" in ln for ln in logs), logs)
 
+    def test_804_giveup_holds_during_backoff_window(self):
+        # #804 mode-1: within the give-up backoff window the box still holds
+        # (skip:gave-up) -- no nudge -- but the log now says it will RE-ARM.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True, "lna": 0,
+               "lgts": now - 100}   # gave up 100s ago, backoff[0]=1h not elapsed
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:gave-up (backoff" in ln for ln in logs), logs)
+
+    def test_804_giveup_re_arms_a_nudge_after_the_backoff_elapses(self):
+        # #804 mode-1 RED (pre-#804 this held `skip:gave-up` FOREVER): once the
+        # backoff window elapses the give-up RE-ARMS one bounded nudge attempt --
+        # a dead-stuck armed loop is never permanently silent again.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True, "lna": 0,
+               "lgts": now - (goal.GOAL_LANE_GIVEUP_BACKOFF_S[0] + 100)}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(owns)
+        self.assertTrue(any("giveup-backoff elapsed" in ln for ln in logs), logs)
+        # the re-arm falls through to a fresh nudge (the loop is poked again)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # the backoff schedule widened for the NEXT give-up cycle
+        self.assertEqual(rec.get("lgn"), 1, rec)
+
     def test_branch_merge_box_also_nudges(self):
         # #618: a reduced-authority STREAM box (branch-merge — montalu/marek)
         # DOES run a parallel worktree fleet under /autopilot (SKILL fleet
