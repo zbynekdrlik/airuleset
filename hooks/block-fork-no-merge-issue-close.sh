@@ -91,8 +91,18 @@ _is_patch_close_cmd() {
 # adversarial security — the whole system keys on the ARTIFACT, never on WHO closed,
 # per odoo-erp#5378).
 _has_gk_verdict_artifact() {
-    printf '%s\n' "$1" | grep -iqE '^#{1,3}[^[:alnum:]_#]*gatekeeper.*\b(review|verification|verdict)\b' && return 0
-    printf '%s\n' "$1" | grep -qE '^GATEKEEPER-CLOSE:' && return 0
+    # #772: here-string reads, NOT `printf … | grep -q`. On a long-lived ticket
+    # $1 (V_COMMENTS = all comment bodies) is hundreds of KB; under this hook's
+    # `set -o pipefail` a `printf '%s\n' "$1" | grep -q` collapses to printf's
+    # SIGPIPE-141 exit the moment grep -q short-circuits on the first-line match
+    # (printf still blocked writing past the 64KB pipe buffer), so the artifact
+    # read as ABSENT and a legitimate #756 self-close was spuriously BLOCKED
+    # (recurrence of the #192 SIGPIPE-under-pipefail class). A here-string feeds
+    # grep with NO producer process in a pipeline, so no SIGPIPE can arise and
+    # pipefail never applies — the command's status is grep's own regardless of
+    # input size. The ERE + per-line `^` anchoring are byte-for-byte preserved.
+    grep -iqE '^#{1,3}[^[:alnum:]_#]*gatekeeper.*\b(review|verification|verdict)\b' <<< "$1" && return 0
+    grep -qE '^GATEKEEPER-CLOSE:' <<< "$1" && return 0
     return 1
 }
 
