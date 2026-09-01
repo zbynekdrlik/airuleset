@@ -97,7 +97,7 @@ class Test788DispositionBullet(unittest.TestCase):
 
     def test_ttl_hide_not_archive(self):
         for tok in ("SAMO-SCHOVANIE (TTL)", "NIKDY `active=False`",
-                    "company_base_close_hide_at", "mail.closed_thread_hide_hours",
+                    "_company_base_schedule_close_hide", "mail.closed_thread_hide_hours",
                     "unpin_dt"):
             self.assertIn(tok, self.win,
                           "#788 disposition bullet lost token %r" % tok)
@@ -108,7 +108,7 @@ class Test788DispositionBullet(unittest.TestCase):
 
     def test_disarm_on_reply_decision(self):
         for tok in ("Disarm-on-reply", "DISARMuje hide",
-                    "NESMIE nikdy ticho zmiznúť", "EXPLICITNE (zlož marker)",
+                    "nikdy ticho nezmizne", "EXPLICITNE",
                     "last_interest_dt` race"):
             self.assertIn(tok, self.win,
                           "#788 disposition bullet lost disarm token %r" % tok)

@@ -1,15 +1,12 @@
 # Composing the client handover PROD Discuss proposal
 
 **This is the SINGLE canonical handover-proposal rule for EVERY sub-dev stream.**
-Each stream used to compose client PROD Discuss threads differently and the
-owner had to re-teach the rules every time (montalu5 2026-08-16: a proposal
-with no deep-link URL and no statement that the owner would be a member).
-Keep no private per-stream notes. SEND mechanics (body_is_html, partner_ids
-incl. the owner, sub-thread by name, post-verify) live in the sibling
-`odoo-discuss-xmlrpc` skill (`SKILL.md`); THIS file is the COMPOSE — what a
-message must contain — and EVERY message, opening AND follow-up, is presented
-to the OWNER for approval BEFORE posting (the approval rule below is first for
-a reason).
+Streams composed client PROD Discuss threads differently until the owner tired of
+re-teaching (montalu5 2026-08-16: a proposal with no deep-link URL, no owner
+membership). SEND mechanics (body_is_html, partner_ids incl. the owner, sub-thread
+by name, post-verify) live in the sibling `odoo-discuss-xmlrpc` skill (`SKILL.md`);
+THIS file is the COMPOSE — what a message must contain — and EVERY message, opening
+AND follow-up, is presented to the OWNER for approval BEFORE posting.
 
 - **The owner must APPROVE the exact text of EVERY client-facing Discuss message
   BEFORE it is posted — the OPENING message AND every follow-up reply / question /
@@ -100,26 +97,23 @@ a reason).
   it, never a menu path ("Predaj → Objednávky → …") and never the bare instance
   homepage. Open the URL and confirm it loads before putting it in the proposal.
   **This applies to EVERY openable reference in the message, not only the
-  handed-over feature:** a specific record, a screen, an action, a report, a
-  dashboard — each is named with its OWN direct functional URL, verified live
-  before sending, never only a prose menu path (owner directive, airuleset #595:
-  msg 1723308 described two live features only by menu path with no clickable
-  URL and was rejected). This generalizes completion-report.md's 🌐-line rule to
-  client-facing Discuss messages and notifications.
+  handed-over feature:** a record, screen, action, report or dashboard — each gets
+  its OWN direct functional URL, verified live before sending, never a prose menu
+  path (owner directive, airuleset #595: msg 1723308 described two live features
+  only by menu path, rejected). This generalizes completion-report.md's 🌐-line
+  rule to client-facing Discuss messages.
 - **State the owner's thread membership EXPLICITLY in the proposal.** The posting
   recipe already puts the owner on `partner_ids` (control ping) — but the PROPOSAL
   text you show the owner must SAY so ("teba pridám do vlákna ako člena"), so the
   owner knows they will see the thread and can catch a broken delivery.
 - **Announce ONLY functions that are ALREADY LIVE on the client's PROD.** Never a
-  feature that is merged-but-not-yet-deployed or scheduled — the client must be
-  able to act on it the moment they read the thread. Confirm it is live on their
-  PROD first.
+  merged-but-not-yet-deployed or scheduled feature — the client must be able to act
+  the moment they read. Confirm it is live on their PROD first.
 - **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
-  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Stream navrhol
-  klientovi (vlákno 263) budúci sľub („od zajtrajšieho ranného e-mailu bude
-  pri každej položke aj kód dodávateľa") kým sľúbený artefakt (digest e-mail)
-  ešte neexistoval. Keď je
-  viditeľný výstup funkcie plánovaný ARTEFAKT (digest e-mail, report, cron
+  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Incident (vlákno
+  263): stream sľúbil „od zajtrajšieho ranného e-mailu" digest kým ešte
+  neexistoval. Keď je viditeľný
+  výstup funkcie plánovaný ARTEFAKT (digest e-mail, report, cron
   výsledok), máš dve legálne cesty — obe končia správou v MINULOM ČASE: (1)
   spusti artefakt TERAZ (vlastnou právomocou, alebo `GATEKEEPER-ACTION:`) a
   OVER, že odišiel S prisľúbeným obsahom (read-back z čerstvej prod-kópie,
@@ -128,9 +122,8 @@ a reason).
   (`hooks/block-discuss-thread-name.sh`, airuleset #696): `message_post` s
   budúcim sľubom v tele je BLOKOVANÝ, kým obsah nenesie falsifikovateľnú značku
   `airuleset:artifact-verified <ref>` — referenciu na to, ČO si z reálneho
-  artefaktu odčítal, kde a kedy (model `airuleset:owner-approved`); iná
-  formulácia mimo zoznamu vzorov hookom prejde — doktrína platí na KAŽDÉ
-  preformulovanie.
+  artefaktu odčítal, kde a kedy (model `airuleset:owner-approved`) — doktrína
+  platí na KAŽDÉ preformulovanie.
 - **A client message NEVER tells the client what WE lack — it reports ONLY
   what is delivered and working (airuleset #742).** "Chýba nám X" / "nemáme
   prístup k Y" / "nevieme to overiť" / "nestihli sme Z" — any framing that
@@ -142,35 +135,27 @@ a reason).
   (`autonomous-verification.md`'s "What's on PROD?" tree), finish the step —
   THEN message the client about the COMPLETED result; or (2) DON'T message yet
   — wait until there is something real to report. The one legitimate exception
-  is a genuine REQUEST for something FROM the client (a missing input, a
-  decision, an access grant only they can give) — not our deficiency, a normal
-  ask, so phrase it as a concrete request, never as a complaint about what is
-  missing: "Potrebovali by sme od vás X, aby sme mohli pokračovať" — never
-  "Nemáme od vás X". The other carve-out is the mandated self-blame reassurance
-  in the closing template below ("chyba je na našej strane a hneď to
-  opravíme") — a HYPOTHETICAL fault-path, never an admission of an actual
-  current gap, so it stays mandatory as-is. Like the atomic-thread doctrine
-  below, this is a JUDGMENT call on message CONTENT, not something a
-  phrase-matching hook can gate without a real false-positive risk, so it stays
-  a prose doctrine enforced through the existing per-message owner-approval
-  gate — the owner reviewing the exact text before it is posted is the
-  backstop.
+  is a genuine REQUEST for something FROM the client (an input, a decision, an
+  access grant only they can give) — a normal ask phrased as a concrete request,
+  never as a complaint about what is missing: "Potrebovali by sme od vás X…" —
+  never "Nemáme od vás X". The closing template's self-blame line ("chyba je na
+  našej strane…") is a HYPOTHETICAL fault-path, not a current gap, so it stays
+  mandatory. This is a JUDGMENT call on message CONTENT a phrase-matching hook
+  cannot gate without false-positive risk, so it rides the per-message
+  owner-approval gate — the owner reviewing the text is the backstop.
 - **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
   `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
-  Doručenie má DVE polovice: `partner_ids` správu DORUČÍ (inbox/e-mail + owner
-  control ping), ale MENTION notifikáciu (pípnutie klientovi s nastavením „len
-  zmienky") spúšťa až mention ANCHOR v HTML tele. Tri schválené klientske správy
-  (montalu PROD, vlákna 262/287, 24.–25.8.) odišli len s `partner_ids` bez
-  pingu — opravené unlink+repost (msg 1742837/1742838). Anchor pre KAŽDÉHO
-  adresáta (over presné atribúty podľa `SKILL.md` proti reálnemu 19.0
-  composeru):
+  `partner_ids` správu DORUČÍ (inbox/e-mail + owner control ping); MENTION
+  notifikáciu (klient s „len zmienky") spúšťa až mention ANCHOR v HTML tele. Tri
+  schválené správy (montalu PROD 262/287) odišli len s `partner_ids` bez pingu —
+  opravené unlink+repost (msg 1742837/1742838). Anchor pre KAŽDÉHO adresáta
+  (atribúty podľa `SKILL.md` proti reálnemu 19.0 composeru):
   `<a href="/odoo/res.partner/<id>" class="o_mail_redirect" data-oe-id="<id>" data-oe-model="res.partner">@Meno</a>`.
   HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #702): stream
   `message_post` na `discuss.channel`, ktorého content menuje `partner_ids`, ale
   nenesie žiadny mention anchor, je BLOKOVANÝ — hook skenuje samotný tool-call
-  payload, takže platí bez ohľadu na to, ktorý skill si načítal. Bypass len pre
-  ozajstný interný post bez adresátov na označenie: `airuleset:discuss-mention-ok`
-  v contente (logged).
+  payload, takže platí bez ohľadu na to, ktorý skill si načítal. Bypass (interný
+  post bez adresátov): `airuleset:discuss-mention-ok` v contente (logged).
 - **The greeting (oslovenie — „Dobrý deň…" / „Ahoj…") belongs ONLY in the FIRST
   (opening) message of a thread.** A follow-up reply in an existing thread
   carries NO greeting — it continues directly with the content (a REAL
@@ -186,8 +171,7 @@ a reason).
   unreflected answer and OPEN by briefly reacting to it; only THEN ask the next
   thing. This applies to a follow-up into an existing thread, not just to
   opening one — a reply that reflects nothing reads as machine-sent (incident
-  montalu1, CEO Špetta's thread „Etapy zákaziek vo výrobe 1", airuleset #625,
-  2026-08-22).
+  montalu1, „Etapy zákaziek vo výrobe 1", airuleset #625).
 - **Address register PER PERSON — vykanie only for the CEO, tykanie for the other
   named contacts, VYKANIE by default for anyone not yet listed.** Before every
   `message_post`, check the register below and use the right register for that
@@ -219,56 +203,35 @@ a reason).
   YOUR stream's word, never the wrong person's.
 
 - **Closure protokol — dodané + JEDNA pripomienka → ticho = akceptované → close
-  (airuleset #799, owner direktíva 2026-09-01: „raz pripomenut a ked stale nic
-  tak povazovat za uzavrete a hidnut vlakno").** Keď je práca DODANÁ + overená
-  (#446 Výstup read-back) a klient ju nepotvrdzuje, NEpushuj donekonečna
-  (#570/#753) — closure má TERMINÁLNY stav: (1) JEDNA vecná pripomienka v #607
-  pracovnom okne; (2) ticho **N = 3 PRACOVNÉ dni** po nej (víkendovo-vedomé per
-  #607 `working_time` — Europe/Bratislava sobota+nedeľa sa NEPOČÍTAJÚ, piatková
-  pripomienka má deadline až v nasledujúci pracovný týždeň); (3) close s citáciou
+  (airuleset #799, owner 2026-09-01).** Dodané + overené (#446) a klient
+  nepotvrdzuje → NEpushuj donekonečna (#570/#753); closure má TERMINÁLNY stav:
+  (1) JEDNA vecná pripomienka v #607 pracovnom okne; (2) ticho **N = 3 PRACOVNÉ
+  dni** po nej (víkendovo-vedomé per #607 `working_time`); (3) close s
   `Acceptance-tacit: <msg-id doručenia> / <msg-id pripomienky>`; (4) closing nóta
-  (#627 — ostáva POSLEDNÁ správa vlákna, nikdy nie klientovo mlčanie); (5) thread
-  disposition NEhardcoduj ako „archív" — deferuj ju na #788 TTL-hide bullet nižšie.
-  `stale!` eskalácia (#570) KONČÍ týmto closure, nie ďalším pushom.
-  `Acceptance-tacit:` je DÔKAZ, nie dispozícia — close nesie AJ svoju #627
-  dispozíciu (`Discuss-defer:` pre ne-posledný súrodenec / `Discuss-closed: msg
-  <id>` pre posledný), presne ako #755 `Acceptance-cited:`. Ak klient odpovie KÝM
-  okno beží, NEuzatváraj tacitne: reaguj naň (#625 react-first) a buď potvrdzuje
-  → close cez #755, alebo je to NOVÁ téma → peeluj ju per #728 (nový ticket/vlákno
-  + prekopíruj spúšťaciu správu) KRÁTKOU šablónovou redirect odpoveďou, nech
-  pôvodné vlákno dokončí svoje closure a témy sa nemiešajú. **Dve mechanické správy
-  majú STANDING template grant:** finálna pripomienka a closing nóta sú jediné dva
-  mechanické typy — owner schváli ŠABLÓNU každého streamu RAZ, a tieto správy
-  potom citujú `airuleset:owner-approved template:final-reminder <ref>` /
-  `airuleset:owner-approved template:closing-note <ref>` namiesto per-message
-  schválenia (`<ref>` = odkaz na owner-schválenie tej šablóny). KAŽDÁ iná správa
-  ostáva per-message schvaľovaná; nesankcionovaný `template:<iný>` approval
-  NEudelí — stále blokuje. HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`,
-  airuleset #628/#799): `approval_present` rozpozná `template:<sankcionovaný>`
-  token, `template:<iný>` zúži na blok (fail-safe over-block).
+  (#627 — POSLEDNÁ správa vlákna, nikdy klientovo mlčanie); (5) thread disposition
+  NEhardcoduj ako „archív" — deferuj ju na #788 TTL-hide bullet nižšie. `stale!`
+  eskalácia (#570) KONČÍ týmto closure, nie ďalším pushom. `Acceptance-tacit:` je
+  DÔKAZ, nie dispozícia — close nesie AJ #627 dispozíciu (`Discuss-defer:` /
+  `Discuss-closed: msg <id>`), ako #755. Klient odpovie KÝM okno beží → NEuzatváraj
+  tacitne: reaguj (#625); potvrdzuje → close cez #755, NOVÁ téma → peeluj ju per
+  #728 KRÁTKOU šablónovou redirect odpoveďou. **Dva mechanické typy majú STANDING
+  template grant:** finálna pripomienka + closing nóta citujú
+  `airuleset:owner-approved template:final-reminder <ref>` / `template:closing-note
+  <ref>` (owner schváli ŠABLÓNU raz) namiesto per-message; nesankcionovaný
+  `template:<iný>` NEudelí — hook #628/#799.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
-  (airuleset #788, owner direktíva 2026-08-31: „radsej davat vlakno schovat … po
-  uzatváracej správe … na napr. 10h").** Keď #627 closing nóta landne, vlákno sa
-  NEARCHIVUJE hneď — ARMuje sa mu TTL self-hide, takže po definovanom čase samo
-  zmizne členom zo zoznamu, pričom HISTÓRIA ostáva dohľadateľná (adresát
-  uzatváraciu správu ešte NÁJDE). Mechanizmus je HOTOVÝ + RELEASED na PROD
-  (odoo-erp issue 5630, release 19.0.2.230.0, `company_base` shared benefit):
-  marker `discuss.channel.company_base_close_hide_at` (`groups=base.group_system`,
-  sudo helper `_company_base_schedule_close_hide()`, ICP
-  `mail.closed_thread_hide_hours` default 10) + hodinový
-  `_company_base_gc_hide_closed_threads()` cron → poháňa NATÍVNY `unpin_dt` +
-  `close_chat_window`, NIKDY `active=False`. Archivácia (`active=False`) ostáva
-  LEN ako fallback / gk cleanup (vlákno, ktoré má zmiznúť VŠETKÝM aj z
-  vyhľadávania), nikdy nie default disposition. **Disarm-on-reply (odoo-erp#5630
-  delegoval rozhodnutie SEM):** klientska odpoveď, ktorá príde KÝM je TTL-hide
-  ARMnutý (pred aj po tom, ako hide zabral), DISARMuje hide — stream/supervisor
-  zloží / nere-armuje marker a vlákno sa spracuje ako znovu-otvorené (#625
-  react-first, #728 topic-hygiena). Vlákno s ČERSTVOU klientskou aktivitou NESMIE
-  nikdy ticho zmiznúť; re-arm hide až keď je vlákno znovu skutočne uzavreté. Disarm
-  rob EXPLICITNE (zlož marker) — nikdy sa nespoliehaj na natívny `last_interest_dt`
-  race (ten drží vlákno pinnuté len kým je aktivita čerstvá, potom ho cron aj tak
-  schová). Model dáva len primitív; arm/re-arm/disarm POLICY je táto doktrína.
+  (airuleset #788, owner 2026-08-31 „radsej davat vlakno schovat … na napr. 10h").**
+  Keď #627 closing nóta landne, NEARCHIVUJ — ARMuj vláknu TTL self-hide (po čase
+  samo zmizne členom, HISTÓRIA ostáva dohľadateľná). Mechanizmus HOTOVÝ + RELEASED
+  (odoo-erp issue 5630, release 19.0.2.230.0, `company_base` — presné API tam):
+  helper `_company_base_schedule_close_hide()` + ICP `mail.closed_thread_hide_hours`
+  (default 10) poháňa natívny `unpin_dt`, NIKDY `active=False`. Archivácia
+  (`active=False`) ostáva LEN ako fallback / gk cleanup, nikdy default.
+  **Disarm-on-reply (odoo-erp#5630 delegoval SEM):** klientska odpoveď v ARMnutom
+  okne DISARMuje hide — zlož / nere-armuj marker EXPLICITNE (nikdy sa nespoliehaj
+  na `last_interest_dt` race); vlákno s čerstvou aktivitou nikdy ticho nezmizne,
+  re-arm až po skutočnom uzavretí. Model dáva len primitív; policy je #788.
 
 - **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
   closing note lands in that thread — the LAST message in the thread is ALWAYS
@@ -296,27 +259,22 @@ a reason).
   `airuleset:discuss-close-ok` in the close command.
 
 - **Rodinná (capability-group) akceptácia — jedno vlákno zavrie N ticketov
-  (airuleset #755, owner-request 2026-08-30).** Tickety JEDNEJ capability
-  rodiny (jedna dodaná vec z pohľadu klienta — „SMS z Odoo", „zákaznícke
-  e-maily"; rodina je **ĽUDSKÝ ÚSUDOK** pomenovaný v návrhu, **NIKDY kódová
-  detekcia** — anti-heuristic línia `discuss_close_guard.py`) smú zdieľať JEDNO
-  akceptačné vlákno; klientovo potvrdenie v ňom (správa ALEBO #745 emoji
-  reakcia) je akceptačný dôkaz pre VŠETKY tickety rodiny. „One thread = one
-  topic" platí ďalej — téma je CAPABILITY, nie ticket. **Povinná spätná
-  citácia + same-cycle close:** keď akceptačná udalosť landne, session ju v
-  **TOM ISTOM cykle** cituje na VŠETKÝCH ticketoch rodiny a zavrie ich — NIKDY
-  nečaká na per-ticket udalosť (14× sa to nestalo, montalu3 2026-08-30: dôkaz
-  už ležal v zdieľanom vlákne, len nebol citovaný). Každý close nesie
-  **`Acceptance-cited: vlákno „<meno>" (discuss.channel_<N>) / msg <id> / <kto>
-  <kedy>`**. **`Acceptance-cited:` je DÔKAZ, NIKDY dispozícia:** rodinný close
-  nesie VŽDY AJ svoju #627 dispozíciu — `Discuss-defer:` pre ne-posledný
-  súrodenec, `Discuss-closed: msg <id>` pre POSLEDNÝ ticket rodiny, ktorý
-  zavieraciu nótu reálne postne. Rodina NIKDY nezavrie všetky tickety len
-  citáciou — inak by posledná správa ostala klientova a #627 invariant padol.
-  `discuss_close_guard.py` preto ostáva **NEDOTKNUTÝ**: close len s
-  `Acceptance-cited:` bez #627 dispozície správne BLOKUJE (#516
-  falsifiable-claim; human review citácie je backstop). Batchovanie draftov
-  rodiny v #606 fronte je v `modules/core/statusline-vocabulary.md` (#755).
+  (airuleset #755, owner-request 2026-08-30).** Tickety JEDNEJ capability rodiny
+  (jedna dodaná vec z pohľadu klienta; rodina je **ĽUDSKÝ ÚSUDOK** v návrhu,
+  **NIKDY kódová detekcia** — anti-heuristic `discuss_close_guard.py`) smú zdieľať
+  JEDNO akceptačné vlákno; klientovo potvrdenie (správa ALEBO #745 emoji reakcia)
+  je dôkaz pre VŠETKY tickety rodiny. „One thread = one topic" platí — téma je
+  CAPABILITY, nie ticket. **Spätná citácia + same-cycle close:** keď akceptácia
+  landne, session ju v **TOM ISTOM cykle** cituje na VŠETKÝCH ticketoch a zavrie
+  ich — NIKDY nečaká na per-ticket udalosť (14× sa to nestalo, montalu3: dôkaz už
+  ležal vo vlákne, necitovaný). Každý close nesie **`Acceptance-cited: vlákno
+  „<meno>" (discuss.channel_<N>) / msg <id>`**. **`Acceptance-cited:` je DÔKAZ,
+  NIKDY dispozícia:** close nesie VŽDY AJ #627 dispozíciu — `Discuss-defer:` pre
+  ne-posledný, `Discuss-closed: msg <id>` pre POSLEDNÝ (ktorý postne zavieraciu
+  nótu). Rodina NIKDY nezavrie len citáciou — inak posledná správa ostane
+  klientova a #627 padne. `discuss_close_guard.py` ostáva **NEDOTKNUTÝ**: close
+  len s `Acceptance-cited:` bez #627 dispozície správne BLOKUJE (#516). Batchovanie
+  draftov rodiny je v `modules/core/statusline-vocabulary.md` (#606/#754).
 
 - **One thread = one topic — now the WHOLE lifecycle, not just addressing
   (airuleset #728, owner directive 2026-08-26).** Verbatim: „treba vlakna
@@ -333,27 +291,21 @@ a reason).
   had to order a full review + closure by hand.
 - **A NEW topic a participant (client / CEO / anyone) opens in an EXISTING
   client thread is NEVER developed there.** The stream creates a NEW ticket
-  immediately — and, once it reaches client communication, a NEW thread once
-  the owner approves its exact name + text (the SAME per-message approval
-  doctrine as the FIRST bullet of this file — a new-topic split is never an
-  excuse to skip approval) — and COPIES/quotes the
-  triggering message into the new ticket/thread WITH A CITATION (msg id +
-  author + date), so the context is never torn away from its origin. When the
-  new ticket binds its new thread, record it with the SAME
-  `Discuss-thread: <channel-id>` key the #627 closure doctrine above already
-  uses — one binding key for the whole thread lifecycle, never a second
-  mechanism. A long/resolved/multi-topic thread is CLOSED (the #627 bullet
-  above), never left to grow forever; THIS bullet's job is to peel a new topic
-  off the moment it appears, before the thread ever reaches that state. When
-  the triggering new-topic message is ALSO the client's not-yet-reacted-to
-  last message (the „React to the client's previous answer FIRST" bullet
-  above, #625), a brief APPROVED acknowledgement posted in the EXISTING
-  thread — pointing to the new ticket/thread, never developing the new topic
-  itself there — satisfies #625 without violating this bullet; that
-  acknowledgement is a normal client-facing message and needs the SAME owner
-  approval as any other. Precedent: odoo-erp #5319 (the new topic from msg
-  1724252/1724253 split out with the triggering messages copied across),
-  closure of thread 257 via msg 1743448.
+  immediately — and, once it reaches client communication, a NEW thread once the
+  owner approves its exact name + text (the SAME per-message approval doctrine as
+  the FIRST bullet of this file — a split is never an excuse to skip approval) — and
+  COPIES/quotes the triggering message into the new ticket/thread WITH A CITATION
+  (msg id + author + date), so the context is never torn away from its origin. When
+  the new ticket binds its thread, record it with the SAME `Discuss-thread:
+  <channel-id>` key the #627 closure doctrine above already uses, never a second
+  mechanism. A long/resolved/multi-topic thread is CLOSED (the #627 bullet above),
+  never left to grow forever; THIS bullet peels a new topic off the moment it
+  appears. If the triggering message is ALSO the client's not-yet-reacted last
+  message (#625), a brief APPROVED acknowledgement in the EXISTING thread — pointing
+  to the new ticket/thread, never developing the new topic itself there — satisfies
+  #625; it needs the SAME owner approval as any other. Precedent: odoo-erp #5319
+  (triggering msg 1724252/1724253 copied across), closure of thread 257 via msg
+  1743448.
 - **Atomicity also applies at CREATION, not only to organic growth
   (airuleset #742).** #728 above covers a topic that emerges INSIDE an
   already-open thread; this closes the other half — when YOU are drafting a
