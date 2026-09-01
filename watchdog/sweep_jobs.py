@@ -266,19 +266,28 @@ def _write_ok_lastok(sid, content, pending_prefix):
 # --------------------------------------------------------------------------- #
 # Job 22 — STALE EXEC-MARKER CLEANUP (#97, 2026-07-27). block-main-
 # implementation.sh's bypass markers (/tmp/airuleset-main-exec-ok-<sid>, and
-# the legacy /tmp/airuleset-fable-exec-ok-<sid>) are ONE-SHOT since #80 — the
-# hook itself deletes a marker the moment it honors it. But a marker touched
-# for a session that then just ENDS without ever making another main-agent
-# Bash/Edit/Write call never gets consumed, and sits in /tmp forever (a real
-# one found on gk: 0 bytes, ~21h old, for a session id that no longer ran
-# anywhere). This is HYGIENE, not a security hole — the hook pairs a marker
+# the legacy /tmp/airuleset-fable-exec-ok-<sid>) are ONE-SHOT since #80. Since
+# #819 the consumption is DEFERRED to a PostToolUse consumer (post-consume-
+# main-exec-marker.sh) that deletes the marker + its pending flag once the
+# exempted command actually RAN — so a marker touched for a session that then
+# just ENDS without ever making another main-agent Bash/Edit/Write call never
+# gets consumed, and sits in /tmp forever (a real one found on gk: 0 bytes,
+# ~21h old, for a session id that no longer ran anywhere). This is HYGIENE, not a security hole — the hook pairs a marker
 # to its session id, so a marker for a dead session is already inert; the
 # ONLY hazard is deleting a marker that belongs to a session STILL RUNNING
 # (that would silently revoke a deliberately granted exception mid-work).
 # So cleanup requires BOTH: the marker is older than `max_age_s`, AND no
 # currently-live pane's transcript stem matches its session id.
 MAIN_EXEC_MARKER_MAX_AGE_S = 6 * 3600     # a one-shot marker has no business outliving a session by this long
-_EXEC_MARKER_PREFIXES = ("airuleset-main-exec-ok-", "airuleset-fable-exec-ok-")
+# #819: the deferred-consume pending flag joins the sweep. When a marker-
+# exempted call is BLOCKED by a sibling PreToolUse hook, block-main-
+# implementation.sh has already written /tmp/airuleset-main-exec-pending-
+# <sid> but no PostToolUse consumer fires (the tool never ran), so the
+# pending flag (and its marker) survive — correctly, for the retry. If the
+# session then goes idle with no further call, both linger; the same age +
+# live-session gate that reaps a stale marker reaps a stale pending too.
+_EXEC_MARKER_PREFIXES = ("airuleset-main-exec-ok-", "airuleset-fable-exec-ok-",
+                         "airuleset-main-exec-pending-")
 
 
 def _session_id_is_live(sid, run=None, projects_dir=None):
