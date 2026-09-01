@@ -2473,6 +2473,22 @@ class TestCompactRequestCli(unittest.TestCase):
         self.assertIsNotNone(mobj, line)
         self.assertGreaterEqual(int(mobj.group(1)), 10)
 
+    def test_status_reports_queued_since_question_when_store_is_empty(self):
+        # #822 (e) fail-safe: a queued `❯ /compact` row is LIVE in the pane but the
+        # queued-since store has NO entry (never marked, or a corrupt/non-numeric
+        # value) -> --status still reports QUEUED (the pane is the source of truth
+        # for the HOLD decision) with `since=?s`, never a false NONE that would
+        # dispatch the next batch over the undrained compact.
+        with m.patch.object(compact, "resolve_self_pane",
+                            return_value=("%9", "/cwd", "sess-noqts")):
+            with m.patch.object(compact.watchdog, "capture_pane",
+                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
+                buf = []
+                with m.patch("sys.stdout") as out:
+                    out.write = lambda s: buf.append(s)
+                    airuleset.cmd_compact_request(_args(status=True))
+        self.assertEqual("".join(buf).strip(), "QUEUED sid=sess-noqts since=?s")
+
     def test_status_reports_none_when_pane_has_no_queued_row(self):
         # A stale queued record must NOT be reported once the pane no longer
         # shows a queued /compact (it drained): the LIVE pane gates the report,
@@ -3182,6 +3198,14 @@ class TestPostSendQueued822(unittest.TestCase):
             "%9", self._submit_run(_FIXTURE_822_TRIPLE_QUEUED),
             lambda *a, **k: None, lambda r: None)
         self.assertEqual(outcome, "queued")
+
+    def test_queued_is_a_terminal_disposition_word(self):
+        # `queued` MUST be terminal so `_compact_sync_attempt`/`compact_sweep`
+        # CLEAR the request after a queued delivery -- the queued row is now in
+        # the pane, and leaving the request pending would let the next sweep
+        # re-type a duplicate (the owner's 3x pile). Mutant lock: dropping
+        # `queued` from `_COMPACT_TERMINAL_WORDS` reopens the re-type.
+        self.assertIn("queued", compact._COMPACT_TERMINAL_WORDS)
 
     def test_submit_verified_reports_queued_on_a_busy_spinner_no_row(self):
         # #822 (a): a running-turn spinner occupying the boundary AFTER the Enter
