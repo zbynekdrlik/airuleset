@@ -20,7 +20,7 @@ arrival-triggered, in-session wake on a new gk hand-off.
   * Job 11's stale-handoff alarm fires only after 6h+ untouched, and is a
     Discord ping, never an in-session keystroke.
   * Job 20's three riders (`goal_lane_occupancy_nudge` lane occupancy,
-    `ops_wait_recheck` ~daily partition audit, `release_gap` ~6h release train)
+    `ops_wait_recheck` ~daily partition audit, `release_gap` ~1h release train)
     are the ONLY family that keystrokes into an armed `/goal` pane, but NONE
     reads the gk queue union for an arrival delta.
   * The "arm a standing queue-watcher when you arm a waiter" doctrine is
@@ -113,7 +113,7 @@ MAX_SEND_FAILS = 3
 
 # #780 — a per-sid MIN-INTERVAL floor between DELIVERED nudges (env
 # AIRULESET_QUEUE_ARRIVAL_NUDGE_FLOOR_S). The sibling riders have one
-# (ops_wait_recheck ~22h/6h, release_gap ~6h/2h); this rider originally had NONE
+# (ops_wait_recheck ~22h/6h, release_gap ~1h/1h); this rider originally had NONE
 # — its rate was bounded only by the FETCH TTL (~5 min), so during an active gk
 # batch EVERY landing hand-off was a fresh set-delta = a re-fire nearly every TTL
 # window (measured 8 nudges in 2h on gk). The floor rate-limits the KEYSTROKE,
