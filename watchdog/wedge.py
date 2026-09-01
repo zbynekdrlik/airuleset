@@ -77,11 +77,13 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
 
     Three refinements from issue #35 on top of the original ping-first
     design:
-      - MACHINE recognition now covers BOTH the static cross-stream prefixes
-        AND job 7's own compose-reply text (`state['dreply_typed']`, set by
-        `_record_dreply_typed`) — a swallowed delivery of OUR OWN text is
-        auto-submitted (Escape+Enter — #36), never pinged as if it were a
-        foreign draft.
+      - MACHINE recognition covers THREE things: the static cross-stream
+        prefixes (`MACHINE_NUDGE_PREFIX`), the #806 registered own-nudge prefixes
+        (`_own_nudge_submit_prefix` = lane-check/bounce/gk-request, so a stranded
+        `lane-check:` nudge is submitted, not pinged as foreign), AND job 7's own
+        compose-reply text (`state['dreply_typed']`, set by `_record_dreply_typed`)
+        — a swallowed delivery of OUR OWN text is auto-submitted (Escape+Enter —
+        #36), never pinged as if it were a foreign draft.
       - `waiting` (default True — callers that can't cheaply determine it,
         e.g. a sudo-hosted foreign transcript, keep the old always-eligible
         behavior): a genuine USER draft pings NOTHING while the session is

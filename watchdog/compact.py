@@ -961,7 +961,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                            but the request is fully handled. Discard.
       "cooldown"        — condition (d): a real send already happened for
                            this session too recently. A delayed send would
-                           only ever fire STALE — discard, never hold.
+                           only ever fire STALE — discard, never hold. Returned
+                           for a NON-drained-boundary origin only: a
+                           `self-callback` drained-boundary request SUPERSEDES an
+                           in-window cooldown (#805) and is delivered, never
+                           returns "cooldown".
       "skip:<reason>"   — not safe right now; the caller LEAVES the
                            request pending for the next periodic sweep.
 

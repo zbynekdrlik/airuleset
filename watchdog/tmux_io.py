@@ -465,9 +465,14 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
     # #806 -- no transcript = unverifiable delivery; never a raw unverified type.
     # The old tpath-less `send_continue` fallback returned True unconditionally,
     # so a swallowed Enter left the stuck-check stranded in the composer while
-    # the caller believed it delivered (the mode-6 class). Refuse instead: the
-    # caller's decide_working cadence retries next sweep once a supervisor
-    # transcript is resolvable, and its #372 janitor mark backstops any residue.
+    # the caller believed it delivered (the mode-6 class). Refuse instead (return
+    # False, exactly like a genuine swallow). BOTH production call sites derive
+    # the supervisor tpath before calling and so never reach this branch (it is a
+    # defensive floor, not a live path); the sole caller (`_nudge_dying_subagent`)
+    # treats a False like a swallowed nudge -- it logs "(submit-unverified)" and
+    # decide_working re-tries on its own cadence -- so no nudge is ever booked as
+    # delivered. (A persistently tpath-less pane, which cannot arise today, would
+    # escalate through decide_working's normal give-up like any un-landed nudge.)
     if isinstance(logs, list):
         logs.append("send-subagent-nudge refuse: no transcript path (unverifiable)")
     return False

@@ -10,8 +10,11 @@ own module docstring for the full design; this file locks its CONTRACT:
     `subagent-stop` whose producer was retired #610) — nothing text-sniffed.
   - `deliver_compact()`'s five named conditions (pane idle/no-draft, no live
     background tasks, not on a ⏳/❓ marker or unresumed API error, a 30-min
-    per-session cooldown, a hard non-refreshable age cap) are ALL
-    unconditional — no time-boxed override on any of them.
+    per-session cooldown, a REFRESHABLE age cap #727/#757) carry exactly ONE
+    origin-scoped override: the #805 drained-boundary priority, where a
+    `self-callback` request supersedes an IN-WINDOW cooldown (the cooldown stays
+    unconditional for any non-boundary origin); none of the other four has a
+    time-boxed override.
   - Every decision (SEND or SKIP) is logged from the ONE call site.
   - The kill-switch (`~/.claude/watchdog-disable-compact`) is honoured.
   - `compact_sweep` re-evaluates every still-pending request through the
@@ -1898,6 +1901,29 @@ class TestCompactSweep(unittest.TestCase):
         compact.compact_sweep(time.time(), run=tmux, projects_dir=proj,
                               requests_path=self.reqp, delivered_path=self.delp)
         self.assertIn("sess-b", compact.load_compact_requests(self.reqp))
+
+    def test_805_self_callback_supersedes_cooldown_via_the_sweep(self):
+        # #805-review 🟡: the #805 supersede must work through the PRODUCTION
+        # `compact_sweep` origin-threading path, not only a direct deliver_compact
+        # call. Mutating compact_sweep's `origin=origin` to `origin=None` would
+        # leave the two direct #805 tests green while the owner's reported
+        # second-batch-boundary scenario regresses -- this test pins it: a
+        # self-callback request behind an in-window cooldown is DELIVERED by the
+        # sweep, logging BOUNDARY-PRIORITY.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-sc")
+        now = time.time()
+        compact.mark_compact_delivery_ts("sess-sc", now=now - 60, path=self.delp)
+        compact.record_compact_request("sess-sc", self.CWD, now=now,
+                                       path=self.reqp, origin="self-callback")
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        handled = set()
+        logs = compact.compact_sweep(now + 5, run=tmux, projects_dir=proj,
+                                     requests_path=self.reqp,
+                                     delivered_path=self.delp, handled=handled)
+        self.assertIn("/compact", tmux.typed_texts())
+        self.assertNotIn("sess-sc", compact.load_compact_requests(self.reqp))
+        self.assertIn("BOUNDARY-PRIORITY", self.syncp.read_text())
 
     def test_expired_request_is_discarded_not_retried(self):
         proj = self._dir()

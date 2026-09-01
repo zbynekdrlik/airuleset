@@ -3247,13 +3247,28 @@ GOAL_LANE_MAX_NUDGES = 2
 # Escalating (1h -> 3h -> 6h cap; the last value holds), so a genuinely-wedged
 # box is re-probed rarely, not stormed (each attempt is still hourly-capped).
 GOAL_LANE_GIVEUP_BACKOFF_S = (60 * 60, 3 * 60 * 60, 6 * 60 * 60)
+
+
+def _lane_effective_min_backlog(idle):
+    """#804 mode-4 -- the empty-lane min-backlog floor, idle-aware. `GOAL_LANE_
+    MIN_BACKLOG` (3) is the #530 anti-storm floor for a FRESHLY-idle box; a loop
+    that has STOOD idle > GOAL_LANE_INTERVAL_S (1h) over just 1-2 workable tickets
+    is a stuck loop, not fresh churn (#791 "stojí navždy by design"), so the floor
+    drops to 1. Used in BOTH the empty-lane gate AND the #611 working-no-tasks
+    escalation clamp (a shared derivation so the two can never drift). `idle=None`
+    (a legacy caller / a test) keeps the static floor -- byte-identical pre-#804."""
+    return 1 if (isinstance(idle, (int, float)) and idle > GOAL_LANE_INTERVAL_S) \
+        else GOAL_LANE_MIN_BACKLOG
 # #530 -- EMPTY-LANE MIN-BACKLOG floor: a fully-stalled box (0 dispatched
 # workers) is nudged only with at least this many genuinely-workable open
 # tickets. A lone open umbrella epic / 1-2 held-or-foreign items reads as
 # "workable" for core-quals but is not dispatchable, and nudging it produced the
 # reported gk storm (nudge -> "nič workable" -> nudge ...). #726: this is now the
 # ONLY backlog floor -- the under-saturated surplus floor was retired with the
-# fill nudge (a running batch is never refilled under batch mode).
+# fill nudge (a running batch is never refilled under batch mode). #804 mode-4:
+# this is the FRESHLY-idle floor only -- once a box has stood idle > 1h the floor
+# drops to 1 (`_lane_effective_min_backlog`), so a long-stuck loop over 1-2
+# workable tickets is poked instead of parked forever.
 GOAL_LANE_MIN_BACKLOG = 3
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 # #693 -- how fresh the tickets-status cache must be for the give-up CAUSE
@@ -3571,10 +3586,13 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
     signature to the last landed nudge (`rec["lsw"]`/`rec["lsb"]`, stamped by
     `_lane_record_nudge`) returns `skip:dedup-unchanged` -- deliberately
     PERMANENTLY SILENT until the state MOVES (owner directive: rovnaký počet lán
-    + rovnaký backlog ⇒ žiadny nový prompt ani po hodine). This subsumes the
-    empty-lane MAX_NUDGES give-up on a frozen state (a correctly-declining
-    supervisor is not a stall). Only a genuinely CHANGED state re-nudges (still
-    under the 1h floor).
+    + rovnaký backlog ⇒ žiadny nový prompt ani po hodine). A correctly-declining
+    supervisor is not a stall, so a frozen state stays silent HERE -- EXCEPT the
+    #804 give-up-BACKOFF re-arm (`_lane_giveup_decision`) deliberately POPS
+    `lsw`/`lsb` before falling through, so a genuinely dead-stuck box IS re-probed
+    on the widening (1h/3h/6h) schedule instead of being permanently silent (the
+    "sam sa vypne a uz nezapne" report). Only a genuinely CHANGED state -- or a
+    give-up-backoff re-arm -- re-nudges (still under the 1h floor).
 
     #729: the under-saturated effectiveness backoff branch is gone -- only the
     empty-lane (batch-CLOSED) nudge reaches delivery under batch mode, so
@@ -3597,9 +3615,10 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
     # chvilu" spam. lsw/lsb are stamped by `_lane_record_nudge` on a LANDED nudge
     # ONLY, so: a never-nudged sid (last is None) returned above and always fires
     # its first; a pre-#670 rec (llast set, no lsw/lsb) sees None != int -> one
-    # grace nudge, then dedup engages. This subsumes the empty-lane MAX_NUDGES
-    # give-up on a FROZEN state (a correctly-declining supervisor is an explicit
-    # decision, not a stall -- #620/#670).
+    # grace nudge, then dedup engages. On a FROZEN state a correctly-declining
+    # supervisor is an explicit decision, not a stall (#620/#670) -- but the #804
+    # give-up-backoff re-arm pops lsw/lsb first, so a dead-stuck box IS re-probed
+    # on the widening schedule rather than staying silent here forever.
     if rec.get("lsw") == live_workers and rec.get("lsb") == backlog_n:
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                       "skip:dedup-unchanged (workers+backlog unchanged since "
@@ -3823,9 +3842,28 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
         lgn = int(rec.get("lgn", 0) or 0)
         back = _lane_giveup_backoff(lgn)
         lgts = rec.get("lgts")
-        if isinstance(lgts, (int, float)) and (now - lgts) >= back:
+        if not isinstance(lgts, (int, float)):
+            # #804-review 🟡 (reviewers A+B): a PRE-#804 already-latched rec
+            # (`lpinged=True`, no `lgts`) -- the exact fleet population that was
+            # stuck at deploy time -- has no window anchor, so it would never
+            # re-arm and the countdown log would lie. Start the first window NOW
+            # instead of holding forever (the honest re-arm, one backoff later).
+            rec["lgts"] = now
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                        "skip:gave-up (backoff window started, re-arm in %ds, "
+                        "retry #%d)" % (loc, live_workers, waiters, backlog_n,
+                                        back, lgn + 1))
+            return True, logs
+        if (now - lgts) >= back:
             rec["lgn"] = lgn + 1
-            for k in ("ln", "lnbk", "lpinged"):
+            # #804-review 🔴 (reviewer B): ALSO drop the #670 dedup signature
+            # (`lsw`/`lsb`), else the re-armed nudge hits `skip:dedup-unchanged`
+            # on a FROZEN (0-worker, unchanged-backlog) box -- exactly the
+            # dead-stuck box this backoff exists for -- and never lands, relocating
+            # the permanent silence from `skip:gave-up` to `skip:dedup-unchanged`.
+            # A give-up-backoff re-arm is a sanctioned override of the #670 "frozen
+            # state = silent" rule (the whole point is to re-probe a frozen box).
+            for k in ("ln", "lnbk", "lpinged", "lsw", "lsb"):
                 rec.pop(k, None)           # re-arm: next sweep nudges from ln=1
             logs.append("lane-occupancy %s -> giveup-backoff elapsed (%ds), "
                         "re-arming one nudge attempt (retry #%d)"
@@ -3868,7 +3906,7 @@ def _lane_pre_send_race(ok, fresh_armed, loc):
 
 
 def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
-                   backlog_fetch, state, loc, dry_run):
+                   backlog_fetch, state, loc, dry_run, idle=None):
     """#571 -- the STRUCTURED live-lane gate + working-no-tasks decision,
     extracted so the capped ``goal_lane_occupancy_nudge`` does not grow (the
     #509/#530/#511 "never grow the capped function, extract the new branch"
@@ -3892,7 +3930,7 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     wnt = _one_glance.lane_working_no_tasks_decision(
         marker=marker, render_waiters=waiters,
         structured_live=watchdog.lane_has_live_evidence(ev),
-        backlog=(backlog_n if isinstance(backlog_n, int) and backlog_n >= GOAL_LANE_MIN_BACKLOG else 0),  # #611: sub-min never escalates (would only skip:min-backlog)
+        backlog=(backlog_n if isinstance(backlog_n, int) and backlog_n >= _lane_effective_min_backlog(idle) else 0),  # #611: sub-FLOOR never escalates (would only skip:min-backlog); #804 mode-4: floor is idle-aware so a >1h-idle box with 1-2 tickets IS reachable
         defer_streak=rec.get("wntd", 0), max_defers=GOAL_LANE_WNT_MAX_DEFERS)
     if not dry_run:
         rec["wntd"] = wnt.streak
@@ -3993,7 +4031,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     waiters = watchdog._pane_live_task_count(captured)
     _wnt_defer, _wnt_log, live_workers, backlog_n = _lane_wnt_gate(
         rec, marker, waiters, projects_dir, cwd, sid, now, backlog_fetch, state,
-        loc, dry_run)   # #571 -- structured live-lane gate; counts reused below
+        loc, dry_run, idle=idle)   # #571 -- structured live-lane gate; counts
+    #   reused below. #804 mode-4: idle threaded so the #611 escalation clamp uses
+    #   the SAME idle-aware floor as the empty-lane gate (a >1h-idle box with 1-2
+    #   tickets is reachable through BOTH, never blocked at working-no-tasks).
     if _wnt_log:
         logs.append(_wnt_log)
     if _wnt_defer:
@@ -4108,7 +4149,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # navždy by design"). Drop the floor to 1 once idle > GOAL_LANE_INTERVAL_S, so
     # such a box is poked; if the ticket is genuinely non-dispatchable the nudge
     # count still climbs to the give-up backoff (mode-1), never a storm.
-    min_backlog = 1 if idle > GOAL_LANE_INTERVAL_S else GOAL_LANE_MIN_BACKLOG
+    min_backlog = _lane_effective_min_backlog(idle)
     if backlog_n < min_backlog:
         _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
                    % (backlog_n, min_backlog))
@@ -4523,11 +4564,15 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     visited_cwds = set()
     roster_reg = _roster.load_roster()
     roster_dirty = False
+    sweep_budget_broke = False   # #804-review 🟡: the budget break leaves the
+    #   remaining panes' cwds OUT of visited_cwds, so the DEAD-SESSION census must
+    #   NOT run this sweep (it would falsely flag every deferred LIVE stream).
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
             logs.append("lane-sweep-budget-exceeded — deferring remaining "
                         "panes to next sweep")
+            sweep_budget_broke = True
             break
         # #804 -- a live claude candidate pane exists for this cwd (ARMED or not),
         # so it is NOT a mode-5 dead session. Recorded BEFORE the in-mode / no-
@@ -4585,6 +4630,15 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 if isinstance(r, dict):
                     for _k in ("soa", "soalert", "soa_ts"):
                         r.pop(_k, None)
+                # #804-review 🔴 (reviewer B): a DEFINITE goal-clear (armed is
+                # False, not the transient None) means this stream is no longer
+                # EXPECTED-armed -- drop it from the roster so a deliberately
+                # retired / cleared stream is NOT falsely flagged dead once its
+                # session later exits (and never mis-drives a future resurrect).
+                # A transient None (armed-unknown) does NOT drop (the roster entry
+                # rides until a definite clear or a mode-5 death while armed).
+                if _roster.drop(roster_reg, cwd):
+                    roster_dirty = True
             continue
         # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
         # one-glance verdict, not a render guess): refresh its durable roster
@@ -4669,8 +4723,11 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # GOAL_ROSTER_CENSUS_S so a persistently-dead stream never floods the journal
     # (#766 latch). A cwd that is live again clears its own latch so a FUTURE
     # death re-surfaces. Emitted even in dry_run (a read-only log line); the
-    # roster is only PERSISTED when not dry_run.
-    for _dcwd, _dentry in _roster.dead_entries(roster_reg, visited_cwds):
+    # roster is only PERSISTED when not dry_run. #804-review 🟡: SKIPPED entirely
+    # when the sweep budget cut the pane loop short (visited_cwds is incomplete,
+    # so every DEFERRED live stream would be falsely flagged dead).
+    for _dcwd, _dentry in ([] if sweep_budget_broke
+                           else _roster.dead_entries(roster_reg, visited_cwds)):
         _last = _dentry.get("census_ts")
         if isinstance(_last, (int, float)) and (now - _last) < GOAL_ROSTER_CENSUS_S:
             continue

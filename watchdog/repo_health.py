@@ -223,9 +223,18 @@ def delivery_stall_watch(now, run, state, cwd_by_sid, send_fn=None,
         # herring the evidence pass followed). Demote to at most 1x/day per box.
         if isinstance(state, dict):
             _rlast = state.get("delivery_stall_reduced_authority_ts")
-            if isinstance(_rlast, (int, float)) and (now - _rlast) < 86400:
+            # #804-review 🟡: treat a FUTURE-skewed / corrupt-huge ts as unset
+            # (the #797 self-healing guard) -- a `_rlast > now` must never mute
+            # the line forever nor block the refreshing write below.
+            if isinstance(_rlast, (int, float)) and _rlast <= now \
+                    and (now - _rlast) < 86400:
                 return []
-            state["delivery_stall_reduced_authority_ts"] = now
+            # #804-review 🟡: dry_run-safe (the #516 convention) -- a
+            # `watchdog --once --dry-run` acceptance probe must not consume the
+            # 1x/day log slot for 24h of real sweeps (run_once persists state
+            # unconditionally).
+            if not dry_run:
+                state["delivery_stall_reduced_authority_ts"] = now
         return ["delivery-stall skip:reduced-authority (%s) -- #667 git-delivery "
                 "metric, NOT a goal-resume path" % authority]
     if stall is None:

@@ -5150,8 +5150,13 @@ def cmd_goal_roster(args):
     drop = (getattr(args, "drop", "") or "").strip()
     if drop:
         if _roster_mod.drop(reg, drop):
-            _roster_mod.save_roster(reg)
-            print("goal-roster: dropped %s" % drop)
+            if _roster_mod.save_roster(reg):
+                print("goal-roster: dropped %s" % drop)
+            else:
+                print("goal-roster: dropped %s in memory but the roster file "
+                      "could not be written (unwritable ~/.claude?)" % drop,
+                      file=sys.stderr)
+                sys.exit(1)
         else:
             print("goal-roster: %s not in roster" % drop, file=sys.stderr)
             sys.exit(1)

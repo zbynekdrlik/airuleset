@@ -5,6 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -93,7 +94,18 @@ class DeadEntries(unittest.TestCase):
 class RosterCli(unittest.TestCase):
     """`airuleset.py goal-roster` (list + --drop). The conftest
     `_isolate_goal_roster` fixture points AIRULESET_GOAL_ROSTER_PATH at a
-    per-test file, so these never touch the real ~/.claude."""
+    per-test file under pytest; the belt-and-braces setUp below ALSO isolates a
+    DIRECT `python3 tests/test_roster.py` (unittest.main, no conftest) so it can
+    never overwrite the developer's real ~/.claude/goal-roster.json."""
+
+    def setUp(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self._env = m.patch.dict(
+            os.environ,
+            {"AIRULESET_GOAL_ROSTER_PATH": str(Path(d.name) / "goal-roster.json")})
+        self._env.start()
+        self.addCleanup(self._env.stop)
 
     def _args(self, drop=""):
         return type("A", (), {"drop": drop})()
