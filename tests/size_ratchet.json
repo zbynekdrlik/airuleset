@@ -246,7 +246,7 @@
 "tests/test_probe_first_limit_recovery.py": 214,
 "tests/test_process_subdev_skill.py": 415,
 "tests/test_prod_read_self_service_500.py": 130,
-"tests/test_prompt_wedge.py": 477,
+"tests/test_prompt_wedge.py": 502,
 "tests/test_prose_gate_ascii_art.py": 50,
 "tests/test_prose_gate_cloudflare_invalid.py": 563,
 "tests/test_prose_gate_compact_boundary.py": 197,
@@ -289,7 +289,7 @@
 "tests/test_scope_gate.py": 1503,
 "tests/test_scoped_waiter_kill_701.py": 336,
 "tests/test_send_verified.py": 327,
-"tests/test_send_verified_adoption.py": 797,
+"tests/test_send_verified_adoption.py": 818,
 "tests/test_served_compact_boundary.py": 228,
 "tests/test_session_status.py": 319,
 "tests/test_shadow_box_fresh_refresh.py": 98,
@@ -416,12 +416,12 @@
 "watchdog/session_status.py": 400,
 "watchdog/stash.py": 1422,
 "watchdog/sweep_jobs.py": 325,
-"watchdog/tmux_io.py": 1042,
+"watchdog/tmux_io.py": 1051,
 "watchdog/transcripts.py": 1615,
 "watchdog/u_freshness.py": 365,
 "watchdog/u_labels.py": 369,
 "watchdog/usage.py": 395,
-"watchdog/wedge.py": 297,
+"watchdog/wedge.py": 313,
 "watchdog/wip_ref_sweep.py": 347,
 "working_time.py": 78
 },
@@ -451,7 +451,7 @@
 "watchdog/goal.py::goal_lane_occupancy_nudge": 422,
 "watchdog/ops_wait_recheck.py::goal_ops_wait_recheck": 222,
 "watchdog/stash.py::deliver_with_stash": 292,
-"watchdog/wedge.py::prompt_wedge_check": 235
+"watchdog/wedge.py::prompt_wedge_check": 248
 },
 "rule_bytes": {
 ".claude/rules/airuleset-internals.md": 8192,
