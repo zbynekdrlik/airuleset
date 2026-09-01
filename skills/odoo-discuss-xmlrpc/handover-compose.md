@@ -218,6 +218,58 @@ a reason).
   (montalu4) substitutes its own identity here: `MarekAI <N>` (#641) — sign
   YOUR stream's word, never the wrong person's.
 
+- **Closure protokol — dodané + JEDNA pripomienka → ticho = akceptované → close
+  (airuleset #799, owner direktíva 2026-09-01: „raz pripomenut a ked stale nic
+  tak povazovat za uzavrete a hidnut vlakno").** Keď je práca DODANÁ + overená
+  (#446 Výstup read-back) a klient ju nepotvrdzuje, NEpushuj donekonečna
+  (#570/#753) — closure má TERMINÁLNY stav: (1) JEDNA vecná pripomienka v #607
+  pracovnom okne; (2) ticho **N = 3 PRACOVNÉ dni** po nej (víkendovo-vedomé per
+  #607 `working_time` — Europe/Bratislava sobota+nedeľa sa NEPOČÍTAJÚ, piatková
+  pripomienka má deadline až v nasledujúci pracovný týždeň); (3) close s citáciou
+  `Acceptance-tacit: <msg-id doručenia> / <msg-id pripomienky>`; (4) closing nóta
+  (#627 — ostáva POSLEDNÁ správa vlákna, nikdy nie klientovo mlčanie); (5) thread
+  disposition NEhardcoduj ako „archív" — deferuj ju na #788 TTL-hide bullet nižšie.
+  `stale!` eskalácia (#570) KONČÍ týmto closure, nie ďalším pushom.
+  `Acceptance-tacit:` je DÔKAZ, nie dispozícia — close nesie AJ svoju #627
+  dispozíciu (`Discuss-defer:` pre ne-posledný súrodenec / `Discuss-closed: msg
+  <id>` pre posledný), presne ako #755 `Acceptance-cited:`. Ak klient odpovie KÝM
+  okno beží, NEuzatváraj tacitne: reaguj naň (#625 react-first) a buď potvrdzuje
+  → close cez #755, alebo je to NOVÁ téma → peeluj ju per #728 (nový ticket/vlákno
+  + prekopíruj spúšťaciu správu) KRÁTKOU šablónovou redirect odpoveďou, nech
+  pôvodné vlákno dokončí svoje closure a témy sa nemiešajú. **Dve mechanické správy
+  majú STANDING template grant:** finálna pripomienka a closing nóta sú jediné dva
+  mechanické typy — owner schváli ŠABLÓNU každého streamu RAZ, a tieto správy
+  potom citujú `airuleset:owner-approved template:final-reminder <ref>` /
+  `airuleset:owner-approved template:closing-note <ref>` namiesto per-message
+  schválenia (`<ref>` = odkaz na owner-schválenie tej šablóny). KAŽDÁ iná správa
+  ostáva per-message schvaľovaná; nesankcionovaný `template:<iný>` approval
+  NEudelí — stále blokuje. HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`,
+  airuleset #628/#799): `approval_present` rozpozná `template:<sankcionovaný>`
+  token, `template:<iný>` zúži na blok (fail-safe over-block).
+
+- **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
+  (airuleset #788, owner direktíva 2026-08-31: „radsej davat vlakno schovat … po
+  uzatváracej správe … na napr. 10h").** Keď #627 closing nóta landne, vlákno sa
+  NEARCHIVUJE hneď — ARMuje sa mu TTL self-hide, takže po definovanom čase samo
+  zmizne členom zo zoznamu, pričom HISTÓRIA ostáva dohľadateľná (adresát
+  uzatváraciu správu ešte NÁJDE). Mechanizmus je HOTOVÝ + RELEASED na PROD
+  (odoo-erp issue 5630, release 19.0.2.230.0, `company_base` shared benefit):
+  marker `discuss.channel.company_base_close_hide_at` (`groups=base.group_system`,
+  sudo helper `_company_base_schedule_close_hide()`, ICP
+  `mail.closed_thread_hide_hours` default 10) + hodinový
+  `_company_base_gc_hide_closed_threads()` cron → poháňa NATÍVNY `unpin_dt` +
+  `close_chat_window`, NIKDY `active=False`. Archivácia (`active=False`) ostáva
+  LEN ako fallback / gk cleanup (vlákno, ktoré má zmiznúť VŠETKÝM aj z
+  vyhľadávania), nikdy nie default disposition. **Disarm-on-reply (odoo-erp#5630
+  delegoval rozhodnutie SEM):** klientska odpoveď, ktorá príde KÝM je TTL-hide
+  ARMnutý (pred aj po tom, ako hide zabral), DISARMuje hide — stream/supervisor
+  zloží / nere-armuje marker a vlákno sa spracuje ako znovu-otvorené (#625
+  react-first, #728 topic-hygiena). Vlákno s ČERSTVOU klientskou aktivitou NESMIE
+  nikdy ticho zmiznúť; re-arm hide až keď je vlákno znovu skutočne uzavreté. Disarm
+  rob EXPLICITNE (zlož marker) — nikdy sa nespoliehaj na natívny `last_interest_dt`
+  race (ten drží vlákno pinnuté len kým je aktivita čerstvá, potom ho cron aj tak
+  schová). Model dáva len primitív; arm/re-arm/disarm POLICY je táto doktrína.
+
 - **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
   closing note lands in that thread — the LAST message in the thread is ALWAYS
   the sub-dev's (airuleset #627, owner directive 2026-08-22).** When you open
