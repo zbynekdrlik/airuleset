@@ -216,7 +216,7 @@
 "tests/test_nudge_family_gap.py": 182,
 "tests/test_nudge_gate.py": 176,
 "tests/test_oauth_revoked_resume_602.py": 229,
-"tests/test_oauth_stuck_alert_662.py": 503,
+"tests/test_oauth_stuck_alert_662.py": 507,
 "tests/test_oauth_suppression_676.py": 158,
 "tests/test_onboard_project.py": 485,
 "tests/test_onboard_project_review_fixes.py": 214,
