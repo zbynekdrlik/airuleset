@@ -67,6 +67,12 @@ class Test799ClosureBullet(unittest.TestCase):
     def test_stale_escalation_terminates_in_closure(self):
         self.assertIn("`stale!` eskalácia (#570) KONČÍ týmto closure", self.win)
 
+    def test_mid_window_reply_cancels_tacit_close(self):
+        # lock the operative negation: a client reply mid-window must NOT be
+        # tacitly closed, and silence must exclude a #745 reaction (review 🟡).
+        self.assertIn("NEuzatváraj tacitne", self.win)
+        self.assertIn("#745", self.win)
+
     def test_acceptance_tacit_is_evidence_not_disposition(self):
         # must still carry a #627 disposition (mirrors #755 Acceptance-cited).
         self.assertIn("`Acceptance-tacit:` je DÔKAZ, nie dispozícia", self.win)
@@ -109,7 +115,9 @@ class Test788DispositionBullet(unittest.TestCase):
     def test_disarm_on_reply_decision(self):
         for tok in ("Disarm-on-reply", "DISARMuje hide",
                     "nikdy ticho nezmizne", "EXPLICITNE",
-                    "last_interest_dt` race"):
+                    # lock the NEGATION itself so an inversion ("pokojne sa
+                    # spoliehaj na the race") cannot pass the teeth (review 🟡).
+                    "nikdy sa nespoliehaj na `last_interest_dt` race"):
             self.assertIn(tok, self.win,
                           "#788 disposition bullet lost disarm token %r" % tok)
 

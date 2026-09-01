@@ -467,11 +467,16 @@ _APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[ \t]+(\S+)")
 # #799 STANDING TEMPLATE GRANT. The two MECHANICAL client-message types (the
 # final reminder + the closing note) do not queue for per-message owner
 # approval: the owner approves each stream's TEMPLATE once, and those messages
-# cite `airuleset:owner-approved template:<TYPE> <ref>` with TYPE one of these
-# two sanctioned tokens. An UNsanctioned `template:<other>` does NOT grant
-# approval -- it still BLOCKS (fail-safe over-block) -- so the standing grant
-# can never be widened to an arbitrary client message. Owner directive
-# 2026-09-01 (montalu1); doctrine in handover-compose.md (#799 closure bullet).
+# cite `airuleset:owner-approved template:<TYPE>` with TYPE one of these two
+# sanctioned tokens (a trailing free-form ref is OPTIONAL -- the TYPE token IS
+# the falsifiable reference to the standing template, per
+# `test_sanctioned_type_alone_is_the_reference`). An UNsanctioned
+# `template:<other>` does NOT grant approval -- it still BLOCKS (fail-safe
+# over-block) -- so the standing grant can never be widened to an arbitrary
+# client message. The `template:` prefix + TYPE are matched CASE-INSENSITIVELY,
+# so a casing typo (`Template:closing-note`) is still routed through the
+# sanctioned-type check rather than slipping past as a free-form ref. Owner
+# directive 2026-09-01 (montalu1); doctrine in handover-compose.md (#799).
 _TEMPLATE_PREFIX = "template:"
 SANCTIONED_TEMPLATE_TYPES = ("final-reminder", "closing-note")
 
@@ -495,9 +500,11 @@ def approval_present(content):
         return False
     for m in _APPROVAL_RE.finditer(content):
         token = m.group(1)
-        if token.startswith(_TEMPLATE_PREFIX):
-            # a template-grant colon form: valid ONLY for a sanctioned type.
-            ttype = token[len(_TEMPLATE_PREFIX):]
+        if token.lower().startswith(_TEMPLATE_PREFIX):
+            # a template-grant colon form (case-insensitive): valid ONLY for a
+            # sanctioned type -- a casing typo is routed here, never slipped
+            # through as a free-form ref.
+            ttype = token[len(_TEMPLATE_PREFIX):].lower()
             if ttype in SANCTIONED_TEMPLATE_TYPES:
                 return True
             # unsanctioned type -> this occurrence grants nothing; keep scanning

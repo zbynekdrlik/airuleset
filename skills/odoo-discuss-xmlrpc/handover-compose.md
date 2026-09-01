@@ -3,8 +3,9 @@
 **This is the SINGLE canonical handover-proposal rule for EVERY sub-dev stream.**
 Streams composed client PROD Discuss threads differently until the owner tired of
 re-teaching (montalu5 2026-08-16: a proposal with no deep-link URL, no owner
-membership). SEND mechanics (body_is_html, partner_ids incl. the owner, sub-thread
-by name, post-verify) live in the sibling `odoo-discuss-xmlrpc` skill (`SKILL.md`);
+membership). Keep no private per-stream notes. SEND mechanics (body_is_html,
+partner_ids incl. the owner, sub-thread by name, post-verify) live in the sibling
+`odoo-discuss-xmlrpc` skill (`SKILL.md`);
 THIS file is the COMPOSE — what a message must contain — and EVERY message, opening
 AND follow-up, is presented to the OWNER for approval BEFORE posting.
 
@@ -16,7 +17,9 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   PROD, 2026-08-22, thread 283 — deleted within a minute, but the bus push +
   notification had already reached the client, irreversible). A stream reading the
   approval rule as applying only to thread CREATION is exactly what caused it; it
-  applies to every message. HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`,
+  applies to every message. Jediná výnimka: dva mechanické closure typy (final
+  reminder + closing note) majú #799 STANDING template grant (Closure bullet
+  nižšie). HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`,
   airuleset #628): a sub-dev stream `message_post` to a `discuss.channel` is
   BLOCKED until the content carries the falsifiable marker
   `airuleset:owner-approved <ref>` — a reference to HOW/WHEN the owner approved
@@ -206,19 +209,20 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   (airuleset #799, owner 2026-09-01).** Dodané + overené (#446) a klient
   nepotvrdzuje → NEpushuj donekonečna (#570/#753); closure má TERMINÁLNY stav:
   (1) JEDNA vecná pripomienka v #607 pracovnom okne; (2) ticho **N = 3 PRACOVNÉ
-  dni** po nej (víkendovo-vedomé per #607 `working_time`); (3) close s
-  `Acceptance-tacit: <msg-id doručenia> / <msg-id pripomienky>`; (4) closing nóta
-  (#627 — POSLEDNÁ správa vlákna, nikdy klientovo mlčanie); (5) thread disposition
-  NEhardcoduj ako „archív" — deferuj ju na #788 TTL-hide bullet nižšie. `stale!`
-  eskalácia (#570) KONČÍ týmto closure, nie ďalším pushom. `Acceptance-tacit:` je
-  DÔKAZ, nie dispozícia — close nesie AJ #627 dispozíciu (`Discuss-defer:` /
-  `Discuss-closed: msg <id>`), ako #755. Klient odpovie KÝM okno beží → NEuzatváraj
-  tacitne: reaguj (#625); potvrdzuje → close cez #755, NOVÁ téma → peeluj ju per
-  #728 KRÁTKOU šablónovou redirect odpoveďou. **Dva mechanické typy majú STANDING
-  template grant:** finálna pripomienka + closing nóta citujú
-  `airuleset:owner-approved template:final-reminder <ref>` / `template:closing-note
-  <ref>` (owner schváli ŠABLÓNU raz) namiesto per-message; nesankcionovaný
-  `template:<iný>` NEudelí — hook #628/#799.
+  dni** po nej (víkendovo-vedomé per #607 `working_time`; ticho = žiadna správa
+  ANI #745 emoji reakcia — over reakcie pred closure); (3) POSTni closing nótu
+  (#627 — POSLEDNÁ správa vlákna, nikdy klientovo mlčanie); (4) close s citáciou
+  `Acceptance-tacit: <msg-id doručenia> / <msg-id pripomienky>` + `Discuss-closed:
+  msg <id>`; (5) thread disposition NEhardcoduj ako „archív" — deferuj ju na #788
+  TTL-hide bullet nižšie. `stale!` eskalácia (#570) KONČÍ týmto closure, nie ďalším
+  pushom. `Acceptance-tacit:` je DÔKAZ, nie dispozícia — close nesie AJ #627
+  dispozíciu (`Discuss-defer:` / `Discuss-closed: msg <id>`), ako #755. Klient
+  odpovie KÝM okno beží → NEuzatváraj tacitne: reaguj (#625); potvrdzuje → close
+  cez #755, NOVÁ téma → peeluj ju per #728 KRÁTKOU šablónovou redirect odpoveďou.
+  **Dva mechanické typy majú STANDING template grant:** finálna pripomienka +
+  closing nóta citujú `airuleset:owner-approved template:final-reminder` /
+  `template:closing-note` (owner schváli ŠABLÓNU raz; ref voliteľný) namiesto
+  per-message; nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
   (airuleset #788, owner 2026-08-31 „radsej davat vlakno schovat … na napr. 10h").**
@@ -230,8 +234,9 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   (`active=False`) ostáva LEN ako fallback / gk cleanup, nikdy default.
   **Disarm-on-reply (odoo-erp#5630 delegoval SEM):** klientska odpoveď v ARMnutom
   okne DISARMuje hide — zlož / nere-armuj marker EXPLICITNE (nikdy sa nespoliehaj
-  na `last_interest_dt` race); vlákno s čerstvou aktivitou nikdy ticho nezmizne,
-  re-arm až po skutočnom uzavretí. Model dáva len primitív; policy je #788.
+  na `last_interest_dt` race). Odpoveď zachytí jej vlastná notifikácia + #625
+  react-first duty, takže vlákno s čerstvou aktivitou nikdy ticho nezmizne; re-arm
+  až po skutočnom uzavretí. Model dáva len primitív; policy je #788.
 
 - **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
   closing note lands in that thread — the LAST message in the thread is ALWAYS
@@ -268,13 +273,13 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   landne, session ju v **TOM ISTOM cykle** cituje na VŠETKÝCH ticketoch a zavrie
   ich — NIKDY nečaká na per-ticket udalosť (14× sa to nestalo, montalu3: dôkaz už
   ležal vo vlákne, necitovaný). Každý close nesie **`Acceptance-cited: vlákno
-  „<meno>" (discuss.channel_<N>) / msg <id>`**. **`Acceptance-cited:` je DÔKAZ,
+  „<meno>" (discuss.channel_<N>) / msg <id> / <kto> <kedy>`**. **`Acceptance-cited:` je DÔKAZ,
   NIKDY dispozícia:** close nesie VŽDY AJ #627 dispozíciu — `Discuss-defer:` pre
   ne-posledný, `Discuss-closed: msg <id>` pre POSLEDNÝ (ktorý postne zavieraciu
   nótu). Rodina NIKDY nezavrie len citáciou — inak posledná správa ostane
   klientova a #627 padne. `discuss_close_guard.py` ostáva **NEDOTKNUTÝ**: close
   len s `Acceptance-cited:` bez #627 dispozície správne BLOKUJE (#516). Batchovanie
-  draftov rodiny je v `modules/core/statusline-vocabulary.md` (#606/#754).
+  draftov rodiny je v `modules/core/statusline-vocabulary.md` (#755/#606).
 
 - **One thread = one topic — now the WHOLE lifecycle, not just addressing
   (airuleset #728, owner directive 2026-08-26).** Verbatim: „treba vlakna
@@ -285,10 +290,9 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   covered only ADDRESSING at creation — it now covers the thread's ENTIRE
   lifecycle: every follow-up, reminder and reply posted into an EXISTING
   thread must still belong to that thread's OWN topic, never a different one
-  it merely happens to sit in. Incident: the client thread „Etapy zákaziek vo
-  výrobe 1" (montalu PROD, discuss.channel_257) grew to 36 messages across ~6
-  unrelated topics, plus the CEO opening a brand-new topic in it — the owner
-  had to order a full review + closure by hand.
+  it merely happens to sit in. Incident: „Etapy zákaziek vo výrobe 1"
+  (discuss.channel_257) grew to 36 messages across ~6 topics + a CEO new-topic —
+  owner had to review + close by hand.
 - **A NEW topic a participant (client / CEO / anyone) opens in an EXISTING
   client thread is NEVER developed there.** The stream creates a NEW ticket
   immediately — and, once it reaches client communication, a NEW thread once the
@@ -308,17 +312,13 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   1743448.
 - **Atomicity also applies at CREATION, not only to organic growth
   (airuleset #742).** #728 above covers a topic that emerges INSIDE an
-  already-open thread; this closes the other half — when YOU are drafting a
-  brand-new proposal and it would need to cover MORE THAN ONE topic (two
-  unrelated features, a feature plus an unrelated status update, two separate
-  client asks), split it into SEPARATE threads from the start — never bundle
-  them into one opening message "to save a round of owner approval". One
-  thread = one topic is the rule at every point in a thread's life, including
-  message zero. Each split-out thread still gets its own name (ending in the
-  stream number, ≤ 30 chars — the naming rule above), its own `Discuss-ticket:`
-  (the #695 message-post binding marker, `hooks/block-discuss-thread-name.sh`)
-  / `Discuss-thread:` binding, and its own owner approval — never a shortcut
-  around any of those.
+  already-open thread; this closes the other half — when a brand-new proposal
+  would cover MORE THAN ONE topic, split it into SEPARATE threads from the start
+  — never bundle them into one opening message "to save a round of owner
+  approval". One thread = one topic is the rule at every point in a thread's
+  life, including message zero. Each split thread gets its own name (naming rule
+  above), its own `Discuss-ticket:` / `Discuss-thread:` binding, and its own
+  owner approval — never a shortcut around any of those.
 
 Every thread this file governs still follows the existing channel
 placement rule: a sub-thread under the channel the owner named (montalu:

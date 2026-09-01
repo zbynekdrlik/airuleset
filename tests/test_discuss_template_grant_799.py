@@ -63,6 +63,13 @@ class TestSanctionedTemplateTypes(unittest.TestCase):
             tuple(sorted(g.SANCTIONED_TEMPLATE_TYPES)),
             ("closing-note", "final-reminder"))
 
+    def test_template_prefix_and_type_are_case_insensitive(self):
+        # a casing typo must still be routed through the sanctioned-type check,
+        # not slip past as a free-form ref (review finding).
+        self.assertTrue(g.approval_present("# " + WORD + " Template:Closing-Note"))
+        self.assertTrue(g.approval_present("# " + WORD + " TEMPLATE:final-reminder ref"))
+        self.assertFalse(g.approval_present("# " + WORD + " TEMPLATE:new-feature"))
+
 
 class TestUnsanctionedTemplateBlocks(unittest.TestCase):
     """The RED→GREEN core: an unsanctioned `template:<other>` must NOT grant."""

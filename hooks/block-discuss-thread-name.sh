@@ -309,6 +309,16 @@ re-run:
   • airuleset:owner-approved <ref>
     e.g.  # airuleset:owner-approved owner odsúhlasil znenie 2026-08-22 na Discorde
 
+The TWO mechanical message types -- the final reminder + the closing note (#799
+closure protocol) -- instead use a STANDING template grant (owner approves the
+stream's TEMPLATE once):
+
+  • airuleset:owner-approved template:final-reminder <ref>
+  • airuleset:owner-approved template:closing-note  <ref>
+
+An UNsanctioned template type (`template:<anything-else>`) does NOT grant -- it
+still blocks -- so this shortcut can never widen to an arbitrary client message.
+
 This is the same logged-falsifiable-claim model as Discuss-closed: /
 Self-service-checked: -- a bare "airuleset:owner-approved" with no reference is
 NOT accepted. How to compose + present the message to the owner for approval
