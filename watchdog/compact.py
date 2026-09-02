@@ -479,6 +479,34 @@ def compact_delivery_in_cooldown(session, now, path=None, interval=None):
     return age < _compact_min_delivery_interval(interval)
 
 
+# #855 — the anti-DOUBLE veto window. Distinct from the 30-min anti-storm
+# cooldown above: this is a SHORT floor that no origin (not even the #805
+# drained-boundary `self-callback`) supersedes, so a second `/compact` can never
+# be typed within 2 min of a delivered one — the belt to the running-turn
+# refusal's suspenders against CC's non-idempotent queue drain.
+COMPACT_RECENTLY_COMPACTED_VETO_S = 120.0
+
+
+def compact_recently_compacted(session, now, path=None, veto_s=None):
+    """True while `session`'s last REAL `/compact` send is within
+    `COMPACT_RECENTLY_COMPACTED_VETO_S` (override `veto_s`) of `now`. No
+    recorded delivery reads as UNMEASURABLE → False (the veto engages only once
+    a real send has been observed). Reads the SAME `compact-delivered.json`
+    store as the cooldown; a blank/bad `now`/`ts` fails SAFE (False), never a
+    guessed veto."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    ts = _load_compact_delivered(path).get(session)
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return False
+    age = _safe_age(now, ts)
+    if age is None:
+        return False
+    window = veto_s if veto_s is not None else COMPACT_RECENTLY_COMPACTED_VETO_S
+    return age < window
+
+
 # --------------------------------------------------------------------------- #
 # #822 (e) — the queued-since store. When `deliver_compact` classifies a typed
 # `/compact` as QUEUED (behind a running turn, never executed), it records the
@@ -821,7 +849,12 @@ COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
 # `deliver_compact`; a `/compact` under an armed goal is typed and QUEUES, so
 # `queued` is the word that fires the hint, never a refuse-to-type skip.)
 _COMPACT_HOLD_HINT_WORDS = frozenset(
-    ("queued", "already-queued"))
+    # #855: a RUNNING-TURN refusal is the primary hint case now — the session
+    # must produce an accepted Stop (the boundary hold) so the pane goes idle and
+    # the next sweep types `/compact` into an idle prompt (never queued).
+    # `already-queued` still needs the hold; `queued` is kept DEFENSIVELY (it is
+    # unreachable as a `deliver_compact` disposition under #855's treat-as-sent).
+    ("skip:turn-running", "queued", "already-queued"))
 
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
@@ -1253,16 +1286,38 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP draft sid=%s cwd=%s" % (sid, cwd))
         return "skip:draft"
     if kind == "busy":
-        # A short send-keys DOES queue reliably even into a busy pane, but
-        # the queued `/compact` only DRAINS at whatever LATER turn's Stop
-        # is first accepted — under an active loop that is almost always
-        # either a real completion or a `❓`/`⏳`-blocked turn, exactly the
-        # boundary this whole function exists to refuse (#333).
-        _log_compact_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
-        return "skip:busy"
+        # #855 — a RUNNING TURN. A short send-keys DOES queue reliably even into
+        # a busy pane, but that is EXACTLY the queue #855 refuses to depend on:
+        # CC's type-ahead queue drain is NOT idempotent for a slash command (one
+        # queued `/compact` -> two submits — the owner's double-compact). So a
+        # `/compact` is typed ONLY into a genuinely idle pane, NEVER queued behind
+        # a running turn. Refuse here with NO keystroke; the record stays PENDING
+        # and the ~60s sweep re-polls. Under an armed `/goal` the session's
+        # boundary-hold turn (skills/autopilot Step 5) ends `⏳ WORKING` with a 45s
+        # sleep task, so its accepted Stop leaves the pane idle for ≥ one poll
+        # interval and the next sweep types `/compact` into an idle prompt where
+        # it executes immediately, exactly once. `skip:turn-running` is a
+        # HOLD-EXTEND word (#741) and a HOLD-HINT word (the session must produce
+        # that accepted Stop).
+        _log_compact_sync("SKIP turn-running sid=%s cwd=%s" % (sid, cwd))
+        return "skip:turn-running"
     if watchdog._pane_has_queued_compact(captured):
         _log_compact_sync("SKIP already-queued sid=%s cwd=%s" % (sid, cwd))
         return "already-queued"
+
+    # #855 — the RECENTLY-COMPACTED anti-double veto. A HARD 120s floor: never
+    # type a 2nd `/compact` within `COMPACT_RECENTLY_COMPACTED_VETO_S` of a
+    # DELIVERED one, for ANY origin. This is DISTINCT from — and NOT superseded
+    # by — the 30-min cooldown's drained-boundary priority below (#805): a
+    # `self-callback` boundary supersedes the 30-min anti-storm floor, but never
+    # this short anti-DOUBLE floor. It is the belt-and-suspenders that stops a
+    # second pending record / any re-entry from stacking a duplicate `/compact`
+    # seconds after a delivery, even should the running-turn refusal above be
+    # raced. Reads the SAME `compact-delivered.json` store; a leave-PENDING skip
+    # (the record re-polls, and once past the floor the next sweep delivers).
+    if compact_recently_compacted(sid, now, path=delivered_path):
+        _log_compact_sync("SKIP recently-compacted sid=%s cwd=%s" % (sid, cwd))
+        return "skip:recently-compacted"
 
     # #848 -- the old condition (b) live-tasks / live-bg-bash veto is REMOVED.
     # A live worker lane or a live `run_in_background` Bash job no longer blocks
@@ -1318,22 +1373,19 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # veto itself; only the #333 boundary re-check (`skip:raced` above) survives,
     # so a compact still never lands mid-turn / on a pane that raced busy.
 
-    # #822 — NO pre-type gate under an armed `/goal`, DELIBERATELY. An earlier
-    # cut added a `skip:goal-continuing` gate here (refuse to type when armed goal
-    # + zero live tasks, on the theory that a typed `/compact` would only queue).
-    # Two fresh-context adversarial reviews proved it FORECLOSED the boundary-hold
-    # mechanism (item d) it was meant to complement: under an armed goal neither
-    # `--self` nor the sweep would ever type, so CC's type-ahead queue stayed
-    # EMPTY and the hold turn's accepted Stop drained nothing — the compact never
-    # ran (the owner's ctx-448K incident, still unfixed). The gate was ALSO
-    # redundant: the 3x-pile it targeted is prevented by the (b)
-    # `_pane_has_queued_compact` detector fix ALONE (the next sweep reads
-    # `already-queued` and never re-types a duplicate). So a `/compact` IS typed
-    # under an armed goal — it queues a SINGLE row, classified `queued` by
-    # `_compact_post_send_classify` below (which writes NO false
-    # `compact-delivered`), and the session's boundary-hold turn (skills/autopilot
-    # Step 5) provides the accepted Stop that drains it. See the #822 review
-    # verdicts on the ticket for the full trace.
+    # #855 — the pane was proven IDLE at boundary-classify AND at the fresh
+    # re-check above, so this `/compact` executes IMMEDIATELY, exactly once — it
+    # is NEVER deliberately queued behind a running turn (the busy classifier
+    # refused that above with `skip:turn-running`). #855 REVERSES #822's reliance
+    # on CC's type-ahead queue: CC's queue drain is NOT idempotent for a slash
+    # command (one queued `/compact` -> two submits — the owner's double), so we
+    # do not queue. Under an armed `/goal` the delivery still happens: the
+    # session's boundary-hold turn (skills/autopilot Step 5) ends `⏳ WORKING`
+    # with a 45s sleep task, its accepted Stop leaves the pane idle for ≥ one poll
+    # interval, and the sweep types here into that idle prompt. A residual race
+    # (the pane goes busy in the microseconds after Enter) is caught DEFENSIVELY
+    # by `_compact_post_send_classify` returning `queued` below — treated as a
+    # real send, since the queued `/compact` WILL drain.
 
     # Mark provenance BEFORE typing so the shared janitor (#372) can
     # recover a stuck send for THIS pane — a delivering job's own
@@ -1344,23 +1396,23 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         pid, run, sleep_fn,
         lambda reason: _log_compact_sync("%s sid=%s cwd=%s" % (reason, sid, cwd)))
     if outcome == "queued":
-        # #822: `/compact` was typed but CC APPENDED it to the type-ahead queue
-        # (the pane went busy in the microseconds after Enter -- under an armed
-        # /goal it never drains until the next ACCEPTED Stop). It did NOT
-        # execute, so do NOT mark it delivered / start the cooldown (the #135
-        # lesson: delivery, not a claim). TERMINAL: the queued row is now in the
-        # pane, so the next sweep reads `already-queued` and never re-types a
-        # duplicate -- the fix for the owner's 3x-queued accumulation.
-        _log_compact_sync("QUEUED sid=%s cwd=%s origin=%s "
-                          "(typed, queued behind a running turn, not executed)"
+        # #855 DEFENSIVE: `QUEUED` is unreachable BY CONSTRUCTION — the
+        # running-turn refusal (`skip:turn-running`) means we only type into an
+        # idle pane, so a `/compact` is never deliberately queued. If a RESIDUAL
+        # race still produces it (the pane went busy in the microseconds after
+        # Enter), the queued `/compact` WILL drain at the next accepted Stop, so
+        # it is effectively delivered. Treat it as a real SEND: fall through to
+        # the `sent` handling below, which writes `compact-delivered` (ARMING the
+        # #855 120s recently-compacted veto so no 2nd `/compact` is typed) and
+        # returns "sent". This REVERSES #822's "queued is terminal, write no
+        # delivered" — depending on the queue was the double-compact root cause.
+        # We do NOT `mark_compact_queued_ts` (there is nothing to drain via the
+        # boundary-hold hint; the compact happened) — the log is DEFENSIVE only.
+        _log_compact_sync("QUEUED-DEFENSIVE sid=%s cwd=%s origin=%s "
+                          "(residual race under #855 idle-only typing; the "
+                          "queued /compact will drain — treated as sent)"
                           % (sid, cwd, origin or "-"))
-        # #822 (e): record the queued-since instant so `compact-request
-        # --status` reports `QUEUED sid=… since=…` (not a false `NONE`) while the
-        # `❯ /compact` row still sits unexecuted in the pane — the request store
-        # is cleared here (`queued` is terminal), so this durable anchor is the
-        # only `since` the read-only /goal HOLD probe can report.
-        mark_compact_queued_ts(sid, now=now)
-        return "queued"
+        outcome = "sent"
     if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed
         # the Enter, #36) or a draft raced into the box pre-send — either way the
@@ -1409,7 +1461,12 @@ _COMPACT_TERMINAL_WORDS = frozenset(
 # genuinely quiet stops emitting a hold word -> ts stops refreshing -> the age cap
 # resumes (wedge-bound).
 _COMPACT_HOLD_EXTEND_WORDS = frozenset((
-    "skip:recent-human", "skip:busy", "skip:client-active"))
+    # #855: `skip:turn-running` (the renamed running-turn refusal) is now the
+    # busy-pane hold word — a transiently-busy pane is the boundary being HELD
+    # while it waits for an idle window, so it REFRESHES `ts` (never ages out).
+    # `skip:busy` is kept for parity/defence (no longer produced by
+    # `deliver_compact`, which now emits `skip:turn-running`).
+    "skip:recent-human", "skip:turn-running", "skip:busy", "skip:client-active"))
 # RESIDUAL (design #741): a session that stays busy/human-active forever holds the
 # claim -- a pane that never returns to an idle window. Bounded (1-pending-per-
 # session + every new boundary supersedes + delivery is re-vetoed each sweep + a

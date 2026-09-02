@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6950,
+    "airuleset.py": 6954,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -400,7 +400,7 @@
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_worktree_write_guard.py": 416,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 4518,
+    "watchdog/__init__.py": 4522,
     "watchdog/burn_jobs.py": 338,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
@@ -437,7 +437,8 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "tests/test_double_compact_855.py": 366
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
@@ -455,7 +456,7 @@
     "cli_vault.py::cmd_secret": 228,
     "cli_worktree_sweep.py::purge_merged_lane_targets": 219,
     "cli_worktree_sweep.py::sweep_stale_worktrees": 203,
-    "watchdog/__init__.py::run_once": 2504,
+    "watchdog/__init__.py::run_once": 2508,
     "watchdog/cards.py::card_reconcile": 326,
     "watchdog/cards.py::report_reconcile": 225,
     "watchdog/cross_stream.py::gk_request_backstop": 240,

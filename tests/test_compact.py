@@ -600,10 +600,11 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
 
     def test_busy_pane_skips(self):
-        # #333: a queued-then-drained /compact fires at whatever LATER turn
-        # is first accepted -- typing into a busy pane is refused outright.
+        # #333/#855: a running turn is refused OUTRIGHT with `skip:turn-running`
+        # -- a `/compact` is typed ONLY into a genuinely idle pane, never queued
+        # behind a running turn (CC's queue drain is not idempotent).
         word, tmux, _ = self._go(CB_BUSY_CAP)
-        self.assertEqual(word, "skip:busy")
+        self.assertEqual(word, "skip:turn-running")
         self.assertEqual(tmux.sent, [])
 
     def test_no_boundary_at_all_skips(self):
@@ -1082,7 +1083,7 @@ class TestDeliverCompact(unittest.TestCase):
 
     def test_cooldown_drops_the_request(self):
         now = time.time()
-        compact.mark_compact_delivery_ts(self.SID, now=now - 60, path=self.delp)
+        compact.mark_compact_delivery_ts(self.SID, now=now - 300, path=self.delp)  # #855: >120s, clears the recently-compacted veto
         word, tmux, _ = self._go(CB_IDLE_CAP, now=now)
         self.assertEqual(word, "cooldown")
         self.assertEqual(tmux.sent, [])
@@ -1096,7 +1097,7 @@ class TestDeliverCompact(unittest.TestCase):
         # this returned "cooldown" (a TERMINAL word -> the boundary request was
         # CLEARED and the compact silently never ran). GREEN: delivered.
         now = time.time()
-        compact.mark_compact_delivery_ts(self.SID, now=now - 60, path=self.delp)
+        compact.mark_compact_delivery_ts(self.SID, now=now - 300, path=self.delp)  # #855: >120s, clears the recently-compacted veto
         word, tmux, _ = self._go(CB_IDLE_CAP, origin="self-callback", now=now)
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
@@ -1107,7 +1108,7 @@ class TestDeliverCompact(unittest.TestCase):
         # origin (here the retired `subagent-stop`, and equally any other) STAYS
         # subject to the 30-min cooldown -- the anti-storm floor is untouched.
         now = time.time()
-        compact.mark_compact_delivery_ts(self.SID, now=now - 60, path=self.delp)
+        compact.mark_compact_delivery_ts(self.SID, now=now - 300, path=self.delp)  # #855: >120s, clears the recently-compacted veto
         word, tmux, _ = self._go(CB_IDLE_CAP, origin="subagent-stop", now=now)
         self.assertEqual(word, "cooldown")
         self.assertEqual(tmux.sent, [])
@@ -1907,7 +1908,7 @@ class TestCompactSweep(unittest.TestCase):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, "sess-sc")
         now = time.time()
-        compact.mark_compact_delivery_ts("sess-sc", now=now - 60, path=self.delp)
+        compact.mark_compact_delivery_ts("sess-sc", now=now - 300, path=self.delp)  # #855: >120s, clears the recently-compacted veto
         compact.record_compact_request("sess-sc", self.CWD, now=now,
                                        path=self.reqp, origin="self-callback")
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
@@ -2062,8 +2063,8 @@ class TestCompactHoldExtend727(unittest.TestCase):
     def test_741_hold_preserves_cwd_origin_and_bts(self):
         # A #741 hold-extend refresh (a busy pane holding the boundary) advances
         # ONLY `ts`; `cwd`/`origin`/`bts` are the record's own values (bts = the
-        # ORIGINAL boundary, for the HOLD log). #848: the hold is now driven by a
-        # busy pane (skip:busy), not a live lane (that veto is removed).
+        # ORIGINAL boundary, for the HOLD log). #848/#855: the hold is now driven
+        # by a busy pane (skip:turn-running), not a live lane (that veto is gone).
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         T = 1_000_000.0
@@ -2080,21 +2081,22 @@ class TestCompactHoldExtend727(unittest.TestCase):
         # #741 REVERSES #727's "NEVER on skip:busy": under the hold-turn doctrine
         # a pending compact makes every goal-fired turn a cheap HOLD turn, so a
         # transiently-busy pane is the boundary being HELD (waiting for its idle
-        # window), NOT a superseding new turn. `skip:busy` is now a hold-extend
-        # word -> the sweep REFRESHES `ts` so an actively-held boundary never ages
-        # out. (Mutation target: removing "skip:busy" from
-        # _COMPACT_HOLD_EXTEND_WORDS fails this.)
+        # window), NOT a superseding new turn. #855 RENAMED the busy word to
+        # `skip:turn-running` -> it is a hold-extend word so the sweep REFRESHES
+        # `ts` so an actively-held boundary never ages out. (Mutation target:
+        # removing "skip:turn-running" from _COMPACT_HOLD_EXTEND_WORDS fails this.)
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         T = 1_000_000.0
         compact.record_compact_request(self.SID, self.CWD, now=T,
                                        path=self.reqp, origin="self-callback")
         logs, _ = self._sweep(proj, T + 5 * 60, cap=CB_BUSY_CAP)
-        self.assertTrue(any("skip:busy" in ln for ln in logs), logs)
-        self.assertTrue(any("HOLD" in ln and "skip:busy" in ln for ln in logs),
-                        logs)
+        self.assertTrue(any("skip:turn-running" in ln for ln in logs), logs)
+        self.assertTrue(
+            any("HOLD" in ln and "skip:turn-running" in ln for ln in logs), logs)
         self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(T + 5 * 60), "skip:busy must NOW refresh ts (#741)")
+                         int(T + 5 * 60),
+                         "skip:turn-running must NOW refresh ts (#741/#855)")
 
     def test_741_recent_human_now_refreshes_the_hold(self):
         # #741: recent-human is nearly always true in an interactive session
@@ -2154,7 +2156,8 @@ class TestCompactHoldExtend727(unittest.TestCase):
     def test_741_hold_log_line_carries_boundary_held(self):
         # The HOLD decision line names the word AND how long the boundary has
         # been held (now - bts), so triage reads the hold from the journal.
-        # #848: driven by a busy pane (skip:busy), not the removed live-tasks veto.
+        # #848/#855: driven by a busy pane (skip:turn-running), not the removed
+        # live-tasks veto.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         T = 1_000_000.0
@@ -2162,7 +2165,7 @@ class TestCompactHoldExtend727(unittest.TestCase):
                                        path=self.reqp, origin="self-callback")
         logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
         self.assertTrue(
-            any("HOLD" in ln and "skip:busy" in ln
+            any("HOLD" in ln and "skip:turn-running" in ln
                 and "boundary held %ds" % (29 * 60) in ln for ln in logs),
             "HOLD line must carry the word + boundary-held seconds: %r" % logs)
 
@@ -3137,10 +3140,14 @@ class TestQueuedCompactDetector822(unittest.TestCase):
 class TestPostSendQueued822(unittest.TestCase):
     """#822 (a): an empty input box after a `/compact` submit is AMBIGUOUS — the
     command left the box whether it EXECUTED or merely QUEUED behind a running
-    turn. A queued `❯ /compact` row (or a running-turn spinner) after the submit
-    means QUEUED, not sent; a delivery must then NOT write `compact-delivered`
-    (the #135 lesson: delivery, not a claim), so a boundary compact that never
-    ran does not start a false cooldown."""
+    turn. `_compact_submit_verified`/`_compact_post_send_classify` still return
+    `"queued"` from that classification (unchanged). #855 REVISED how
+    `deliver_compact` HANDLES a `queued` outcome: a `/compact` is typed ONLY into
+    an idle pane, so `queued` is a residual race that WILL drain -> it is treated
+    DEFENSIVELY as a real send (writes `compact-delivered`, arms the cooldown +
+    the 120s recently-compacted veto), never left as a false `queued` with no
+    cooldown. So the classifier tests below assert `"queued"`, but the
+    deliver_compact end-to-end test asserts the treat-as-sent contract."""
 
     SID = "sess-queued-822"
     CWD = "/home/newlevel/devel/queuedtest"
@@ -3203,37 +3210,40 @@ class TestPostSendQueued822(unittest.TestCase):
             lambda *a, **k: None, lambda r: None)
         self.assertEqual(outcome, "queued")
 
-    def test_deliver_compact_returns_queued_and_starts_no_cooldown(self):
+    def test_deliver_compact_treats_a_queued_race_as_sent(self):
+        # #855 REVERSES #822 here: a `/compact` is typed ONLY into an idle pane,
+        # so `queued` is unreachable by construction. If a RESIDUAL race still
+        # produces it (the pane went busy in the µs after Enter), the queued
+        # /compact WILL drain -> it is treated DEFENSIVELY as a real send: the
+        # word is "sent" (never a false "queued"), and `compact-delivered` IS
+        # written so the cooldown + the #855 recently-compacted veto arm,
+        # preventing a 2nd /compact. This mutation-locks the treat-as-sent path.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         run = self._submit_run(_FIXTURE_822_TRIPLE_QUEUED)
+        now = time.time()
         word = compact.deliver_compact(
             self.SID, self.CWD, origin="subagent-stop", run=run,
-            projects_dir=proj, delivered_path=self.delp, now=time.time())
-        self.assertEqual(word, "queued")
-        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
-        self.assertFalse(compact.compact_delivery_in_cooldown(
-            self.SID, time.time() + 1, path=self.delp))
-        # #822 (e): the queued branch MUST record the queued-since instant through
-        # the PRODUCTION write path (mark_compact_queued_ts), or `--status` would
-        # print `since=?s` forever. Assert it landed as a real number (this kills
-        # the mutant where the `mark_compact_queued_ts` call is deleted).
-        self.assertIsInstance(
-            compact.compact_queued_since(self.SID), (int, float))
+            projects_dir=proj, delivered_path=self.delp, now=now)
+        self.assertEqual(word, "sent")
+        # A defensively-treated-as-sent queued /compact DOES start the cooldown
+        # (it will drain) -- so the 120s recently-compacted veto is armed.
+        self.assertTrue(compact.compact_delivery_in_cooldown(
+            self.SID, now + 1, path=self.delp))
+        self.assertIn("QUEUED-DEFENSIVE", self.syncp.read_text())
 
 
 class TestArmedGoalTypesNotRefuses822(unittest.TestCase):
     """#822 — under an armed `/goal` (`◎ /goal active`) with ZERO live tasks a
-    `self-callback` boundary `/compact` IS typed (there is deliberately NO
-    `skip:goal-continuing` pre-type gate). Two adversarial reviews proved an
-    earlier refuse-to-type gate FORECLOSED the boundary-hold mechanism it was
-    meant to complement: a refused `/compact` never queues, so the hold turn's
-    accepted Stop drains nothing and the compact never runs (the owner's ctx-448K
-    incident). The 3x pile-up the gate targeted is prevented by the (b)
-    `_pane_has_queued_compact` detector fix ALONE. So the correct behaviour is:
-    type it, let it QUEUE a single row, and the session's boundary-hold turn
-    drains it. THIS class is the regression lock — re-adding a refuse-to-type
-    gate turns the first test RED."""
+    `self-callback` boundary `/compact` typed into an IDLE bare box IS typed
+    (there is deliberately NO `skip:goal-continuing` armed-goal refuse-to-type
+    gate — a refused armed-goal compact never runs, the owner's ctx-448K
+    incident). #855 KEEPS that: it refuses only a BUSY/running-turn pane
+    (`skip:turn-running`), never an idle pane under an armed goal; the
+    boundary-hold turn's role is to produce the accepted Stop so the pane goes
+    idle for the sweep to type into (no longer to drain a queue). THIS class is
+    the regression lock — re-adding an armed-goal refuse-to-type gate empties the
+    `typed` list and turns the first test RED."""
 
     SID = "sess-armedtype-822"
     CWD = "/home/newlevel/devel/armedtypetest"
@@ -3296,16 +3306,26 @@ class TestArmedGoalTypesNotRefuses822(unittest.TestCase):
             now=time.time())
         return word, typed
 
-    def test_self_callback_under_armed_goal_types_and_queues(self):
-        # The regression lock: an armed goal + self-callback + zero live tasks
-        # TYPES `/compact` (never `skip:goal-continuing`), and a queued post-send
-        # render classifies it `queued` — the row the hold turn later drains.
-        word, typed = self._deliver(_FIXTURE_822_TRIPLE_QUEUED)
+    def test_self_callback_under_armed_goal_types_into_the_idle_pane(self):
+        # The #822 regression lock, PRESERVED under #855: an armed goal +
+        # self-callback + an IDLE bare box still TYPES `/compact` (there is NO
+        # `skip:goal-continuing` refuse-to-type gate — #855 refuses only a
+        # BUSY/running-turn pane, never an idle pane under an armed goal). #855
+        # CHANGES the outcome: a queued post-send render is a residual race that
+        # WILL drain -> treated DEFENSIVELY as "sent" (not a false "queued"),
+        # arming the cooldown + the 120s veto.
+        now = time.time()
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        run, typed = self._submit_run(_FIXTURE_822_TRIPLE_QUEUED)
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin=compact._COMPACT_SELF_CALLBACK_ORIGIN,
+            run=run, projects_dir=proj, delivered_path=self.delp, now=now)
         self.assertEqual(typed, [compact.COMPACT_TEXT])   # typed, NOT refused
-        self.assertEqual(word, "queued")
-        # A queued (never-executed) /compact must NOT start the 30-min cooldown.
-        self.assertFalse(compact.compact_delivery_in_cooldown(
-            self.SID, time.time() + 1, path=self.delp))
+        self.assertEqual(word, "sent")                    # #855 defensive sent
+        # The defensively-treated-as-sent /compact DOES arm the cooldown.
+        self.assertTrue(compact.compact_delivery_in_cooldown(
+            self.SID, now + 1, path=self.delp))
 
     def test_self_callback_under_armed_goal_executing_reports_sent(self):
         # If the post-send capture shows CC's "Compacting conversation" indicator,
