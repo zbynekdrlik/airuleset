@@ -558,10 +558,26 @@ def test_disk_segment_hidden_below_notice(tmp_path):
     assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
 
 
-def test_disk_segment_shown_at_notice(tmp_path):
+def test_disk_segment_hidden_in_drain_band(tmp_path):
+    # #854: the footer is narrowed to show ONLY at >= 90 % (red) — a 80-95 %
+    # "drain"-band reading is HIDDEN so the footer isn't cluttered while gk
+    # oscillates 80-90 %. This overturns the #834 "yellow 75-89 %" behavior.
     _write_disk_cache(tmp_path, 82, 1000.0)
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
+    _write_disk_cache(tmp_path, 89, 1000.0)
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
+
+
+def test_disk_segment_shown_red_at_critical(tmp_path):
+    # #854: shown ONLY at >= 90 %, and RED (colour 196), never yellow.
+    _write_disk_cache(tmp_path, 95, 1000.0)
     seg = statusbar.disk_segment(home=str(tmp_path), now=1000.0)
-    assert "82%" in seg and "disk" in seg
+    assert "95%" in seg and "disk" in seg
+    assert "38;5;196m" in seg          # red, not yellow (214)
+    assert "214m" not in seg
+    # exactly at the 90 % boundary it is shown
+    _write_disk_cache(tmp_path, 90, 1000.0)
+    assert "90%" in statusbar.disk_segment(home=str(tmp_path), now=1000.0)
 
 
 def test_disk_segment_hidden_when_cache_stale(tmp_path):
