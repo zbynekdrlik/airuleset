@@ -765,6 +765,11 @@ def _box_authority():
     # wins first (restrictive), then the explicit full allow-list, then fail-SAFE.
     if user in airuleset.AUTHORITY_BY_USER:
         return airuleset.AUTHORITY_BY_USER[user]
+    # airuleset#839: the ci-runner recognition (`_is_github_ci_runner`) is
+    # DELIBERATELY NOT wired here — the watchdog never runs on the GitHub CI
+    # runner, so it would be a dead branch. Identity is already the hardened
+    # `_current_user()` (uid-based, env-spoof-proof); do not "fix" the asymmetry
+    # with the resolver's ci-runner branch.
     if user in airuleset.FULL_AUTHORITY_USERS:
         return "full"
     return "fork-no-merge"

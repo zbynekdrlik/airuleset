@@ -1556,6 +1556,15 @@ def _authority_decision(cwd=None):
     user = airuleset._current_user()
     if user in airuleset.AUTHORITY_BY_USER:
         return airuleset.AUTHORITY_BY_USER[user], "per-user map", raw
+    # airuleset#839: the GitHub-hosted CI runner (unspoofable pw_name `runner`
+    # AND GITHUB_ACTIONS=true) is a legitimate full-authority context for THIS
+    # repo's OWN CI — it is in neither registry, so #827's fail-safe would leave
+    # it `fork-no-merge` and break ~28 FULL-authority-gated tests. Placed AFTER
+    # the map so a mapped stream can never be elevated (defense-in-depth; no
+    # stream's pw_name is ever `runner`) and BEFORE the full allow-list. `user`
+    # is the hardened `_current_user()` pw_name, so this AND is un-spoofable.
+    if airuleset._is_github_ci_runner(user):
+        return "full", "ci-runner (GitHub-hosted)", raw
     if user in airuleset.FULL_AUTHORITY_USERS:
         return "full", "full-authority account", raw
     return "fork-no-merge", "default (unmapped)", raw
@@ -1651,6 +1660,9 @@ def cmd_authority(args):
         user = airuleset._current_user()
         if user in airuleset.AUTHORITY_BY_USER:
             map_val = airuleset.AUTHORITY_BY_USER[user]
+        elif airuleset._is_github_ci_runner(user):
+            # airuleset#839: same order as _authority_decision above.
+            map_val = "GitHub-hosted CI runner -> full"
         elif user in airuleset.FULL_AUTHORITY_USERS:
             map_val = "full-authority account -> full"
         else:

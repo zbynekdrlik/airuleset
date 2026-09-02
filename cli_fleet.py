@@ -461,6 +461,37 @@ AUTHORITY_BY_USER = {
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 
 
+def _is_github_ci_runner(user) -> bool:
+    """True when THIS process is the GitHub-hosted CI runner for airuleset's own
+    CI — the UNSPOOFABLE unix account `runner` AND `GITHUB_ACTIONS=true` together
+    (airuleset#839). The runner is in neither authority registry, so #827's
+    fail-safe resolves it `fork-no-merge`, which broke ~28 tests that shell out
+    to the FULL-authority-gated `core-quals` / `tickets-status --refresh` /
+    run-card backlog count (all of which silently assumed the box was full). The
+    hosted runner IS a legitimate full-authority context for THIS repo's OWN CI:
+    no fleet box has a `runner` unix user (creating one needs root), so `pw_name`
+    is unforgeable by a stream — a stream controls its env and its repo files,
+    NEVER its uid.
+
+    The AND is load-bearing and un-spoofable in BOTH directions: `pw_name ==
+    "runner"` WITHOUT `GITHUB_ACTIONS` stays reduced (an unmapped `runner` on a
+    real box — #827 preserved, constraint 4), and `GITHUB_ACTIONS=true` WITHOUT
+    `pw_name == "runner"` elevates nobody (a stream setting the env var can never
+    make its uid resolve to `runner`). `user` is the already-resolved
+    `_current_user()` pw_name — an env-spoofable `getpass.getuser()` would defeat
+    the whole point, so this MUST be fed the hardened identity.
+
+    Fork-PR CI resolving `full` is harmless: the profile only unblocks CLI
+    *behavior*; all real power lives in credentials the hosted runner does not
+    hold.
+
+    INVARIANT (airuleset#839): NEVER provision a self-hosted runner under a unix
+    account literally named `runner` — that would grant it full authority here.
+    """
+    import os
+    return user == "runner" and os.environ.get("GITHUB_ACTIONS") == "true"
+
+
 # Base-stream rename map (#537): old base name -> new numbered name. The SINGLE
 # explicit source of truth for the in-progress rename, so `cli_quals`'
 # `_stream_rename_equivalents()` (the alias primitive that `_slice_quals` and
