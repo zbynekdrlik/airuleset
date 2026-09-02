@@ -283,7 +283,7 @@ AGENT_ID=$(_ai_field '.agent_id // empty' '' "$_AI_AGENT_RE")
 TOOL_NAME=$(_ai_field '.tool_name // empty' '' "$_AI_TOOL_RE")
 
 RAW_SID=$(_ai_field '.session_id // "unknown"' 'unknown' "$_AI_SID_RE")
-RAW_SID=$(printf '%s' "$RAW_SID" | tr -cd 'A-Za-z0-9_-')
+RAW_SID="${RAW_SID//[!A-Za-z0-9_-]/}"   # #835: fork-free sanitize (was `tr -cd`)
 RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 
 # #492: per-USER audit/bypass log paths. A FIXED /tmp name is owned by the
@@ -473,7 +473,14 @@ else
         2>/dev/null || echo "")
     LEN=$(echo "$INPUT" | jq -r \
         '(.tool_input.new_string // .tool_input.content // "") | length' \
-        2>/dev/null || echo 0)
+        2>/dev/null) || LEN=""
+    # #835: a TRANSIENT jq spawn failure under fork pressure USED TO give LEN=0
+    # → an OVERSIZE implementation Write/Edit was silently ALLOWED (the same
+    # fork-fragility class as the OneShotBypass80 marker flake, wrong direction).
+    # jq gives a genuine numeric length (0 for absent content); only a jq FAILURE
+    # yields empty/non-numeric → fail SAFE to an over-threshold length so the
+    # guard ENGAGES (never a silent allow), never fails open under load.
+    case "$LEN" in ''|*[!0-9]*) LEN=1000000000 ;; esac
     BOOKKEEPING_READ_MAX="${AIRULESET_MAIN_READ_MAX_BYTES:-131072}"
     case "$BOOKKEEPING_READ_MAX" in
         ''|*[!0-9]*) BOOKKEEPING_READ_MAX=131072 ;;
@@ -575,21 +582,35 @@ if [ -n "$BYPASS_MARK" ]; then
     BYPASS_CLEAN=$(tr '\n\r\t' '   ' < "$BYPASS_FILE" 2>/dev/null \
         | tr -d '\000-\010\013\014\016-\037\177' \
         | sed 's/  */ /g; s/^ //; s/ $//') || BYPASS_CLEAN=""
-    BYPASS_JQ_RC=0
-    BYPASS_REASON=$(printf '%s' "$BYPASS_CLEAN" | jq -Rrs '.[0:200]' 2>/dev/null) \
-        || BYPASS_JQ_RC=$?
-    BYPASS_REASON=$(printf '%s' "$BYPASS_REASON" | sed 's/^ *//; s/ *$//')
+    BYPASS_REASON=$(printf '%s' "$BYPASS_CLEAN" | jq -Rrs '.[0:200]' 2>/dev/null) || BYPASS_REASON=""
+    # fork-free trim (was `sed 's/^ *//; s/ *$//'` — a fork under load).
+    BYPASS_REASON="${BYPASS_REASON#"${BYPASS_REASON%%[![:space:]]*}"}"
+    BYPASS_REASON="${BYPASS_REASON%"${BYPASS_REASON##*[![:space:]]}"}"
+    # #835: the BYPASS_CLEAN `tr|tr|sed` + the jq slice above are fork-fragile.
+    # A transient fork failure under load (the OneShotBypass80 `-n auto` flake)
+    # USED TO be reported as "reason extraction FAILED" and REFUSE — DELETING a
+    # VALID marker (rc 2, no pending), a jq-call the fake-jq test never covered.
+    # So on an empty/short result, RE-DERIVE the reason FORK-FREE from the marker
+    # content (`$(<file)` + bash string ops, no subprocess): a genuinely
+    # no-reason marker is still refused (#128), but a valid marker whose
+    # extraction merely forked-failed is honored. The #180 jq-hiccup-vs-empty
+    # LOGGING distinction is now moot — a jq hiccup no longer refuses.
+    if [ "${#BYPASS_REASON}" -lt "$BYPASS_MIN_REASON" ]; then
+        # `$(<file)` on an UNREADABLE file (chmod 0000 / TOCTOU vanish) aborts the
+        # hook via set -e, so GUARD it with `[ -r ]` FIRST (fork-free) and the
+        # `&&`-in-condition catches a vanish (both inside `if`, set -e suspended).
+        _R=""
+        if [ -r "$BYPASS_FILE" ] && _R=$(<"$BYPASS_FILE"); then
+            _R="${_R//[$'\n\r\t']/ }"        # flatten whitespace (fork-free)
+            _R="${_R#"${_R%%[![:space:]]*}"}"; _R="${_R%"${_R##*[![:space:]]}"}"
+            BYPASS_REASON="${_R:0:200}"
+        fi
+    fi
     # #819: the marker is NO LONGER deleted unconditionally here. The VALID-
     # reason path DEFERS to PostToolUse (writes a pending flag, keeps the
-    # marker); only the two REFUSE paths clear the bad marker in PreToolUse.
+    # marker); only the REFUSE path clears the bad marker in PreToolUse.
     BYPASS_PENDING="/tmp/airuleset-main-exec-pending-${SESSION_ID:-unknown}"
-    if [ "$BYPASS_JQ_RC" -ne 0 ]; then
-        # refuse: clear the bad marker AND any stranded pending (a stale
-        # pending must never phantom-consume the NEXT armed marker).
-        rm -f "$BYPASS_FILE" "$BYPASS_PENDING" 2>/dev/null || true
-        { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (reason extraction FAILED jq_rc=$BYPASS_JQ_RC, cleared)" \
-            >> "$BYPASS_LOG"; } 2>/dev/null || true
-    elif [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
+    if [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
         # DEFER consumption to PostToolUse: leave the marker, drop a pending
         # flag so post-consume-main-exec-marker.sh consumes it once the tool
         # RAN. The reason rides in the pending file for the consumer's log.

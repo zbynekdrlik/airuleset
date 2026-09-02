@@ -413,12 +413,13 @@ def compact_delivery_in_cooldown(session, now, path=None, interval=None):
 # #822 (e) — the queued-since store. When `deliver_compact` classifies a typed
 # `/compact` as QUEUED (behind a running turn, never executed), it records the
 # instant here so `compact-request --status` reports `QUEUED sid=… since=…` for
-# as long as the `❯ /compact` row still sits unexecuted in the pane — the honest
-# signal the /goal HOLD doctrine (skills/autopilot Step 5) needs instead of a
-# false `NONE` (the request itself was cleared, `queued` being terminal). Same
-# `{sid: ts}` shape + shared load/save as `compact-delivered.json`; the LIVE
-# pane (`_pane_has_queued_compact`) gates the report, so a stale record is never
-# surfaced.
+# as long as a queued row / box-hint still sits unexecuted in the pane — the
+# honest signal the /goal HOLD doctrine (skills/autopilot Step 5) needs instead
+# of a false `NONE` (the request itself was cleared, `queued` being terminal).
+# Same `{sid: ts}` shape + shared load/save as `compact-delivered.json`; the
+# LIVE pane gates the report (`compact_queued_in_pane` — the `❯ /compact` row
+# OR, since #833, the `Press up to edit [N] queued messages` box hint), so a
+# stale record is never surfaced.
 # --------------------------------------------------------------------------- #
 
 def compact_queued_path():
@@ -457,11 +458,15 @@ def compact_queued_since(session, path=None):
 
 
 def compact_queued_in_pane(pane_id, run=None):
-    """#822 (e): True iff pane `pane_id` currently shows a queued `/compact` —
-    the LIVE half of `--status`'s QUEUED report. Reuses the (b) queued-row
-    detector `_pane_has_queued_compact` AND, since #833, the box's `Press up to
-    edit [N] queued messages` hint (`_pane_shows_queued_messages_hint`) — the
-    latter is read straight off the input-box boundary, so it survives the
+    """#822 (e): True iff pane `pane_id` currently shows a queued `❯ /compact`
+    ROW **or** the box's `Press up to edit [N] queued messages` HINT — the LIVE
+    half of `--status`'s QUEUED report. This is gated by a durable
+    `compact_queued_since` record (only consulted once a `/compact` was itself
+    classified QUEUED), so the box hint (which proves ANY queued message, not
+    specifically a `/compact`) is a fail-safe QUEUED confirmation, never a
+    standalone claim. Reuses the (b) queued-row detector
+    `_pane_has_queued_compact` AND, since #833, `_pane_shows_queued_messages_hint`
+    — the latter is read straight off the input-box boundary, so it survives the
     combined `✔ Update installed …` banner that stops the row walk and the
     slightly-later render of the queued row (either signal → QUEUED). A blank
     pane_id or an unreadable/empty capture reads False (fail-safe: report NONE,

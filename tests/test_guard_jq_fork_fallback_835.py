@@ -29,6 +29,7 @@ from tempfile import TemporaryDirectory
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "block-main-implementation.sh"
+CONSUMER = REPO / "hooks" / "post-consume-main-exec-marker.sh"
 
 # #128: a valid bypass marker CARRIES a >=8-char reason.
 BYPASS_REASON = "authoring the policy text itself — the content IS the judgment"
@@ -124,6 +125,80 @@ class GuardJqForkFallback835(unittest.TestCase):
     def test_command_jq_failure_still_honored(self):
         # pre-fix: BASH_CMD empty -> `[ -n "$BASH_CMD" ] || exit 0` strands it.
         self._assert_marker_honored(".tool_input.command")
+
+    def test_reason_slice_jq_failure_still_honored(self):
+        # #835 review (MAJOR): the reason-slice `jq -Rrs '.[0:200]'` was an
+        # UNCOVERED jq call — a transient failure there REFUSED and DELETED the
+        # valid marker (rc 2). The fork-free re-derive of the reason must honor
+        # it. FAIL_ON="0:200" targets only the reason-slice filter.
+        self._assert_marker_honored("0:200")
+
+
+class ConsumerJqForkFallback835(unittest.TestCase):
+    """#835 review (MAJOR): the PostToolUse CONSUMER also parsed agent_id /
+    session_id via fork-fragile jq. A transient failure (i) makes a SUBAGENT's
+    agent_id read empty → it consumes the MAIN session's marker (the #819
+    wrong-consume), and (ii) leaves the marker un-consumed → the
+    OneShotBypass80 flake (`test_legacy_marker_is_also_consumed`). The fork-free
+    fallback must consume correctly under a jq failure, and never wrong-consume
+    for a subagent."""
+
+    def setUp(self):
+        realjq = shutil.which("jq")
+        if not realjq:
+            self.skipTest("jq not installed")
+        self.realjq = realjq
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.jqdir = Path(d.name)
+        fj = self.jqdir / "jq"
+        fj.write_text(FAKE_JQ)
+        fj.chmod(0o755)
+
+    def _env(self, fail_on):
+        env = dict(os.environ)
+        env["PATH"] = str(self.jqdir) + os.pathsep + env.get("PATH", "")
+        env["AIRULESET_FAKEJQ_REAL"] = self.realjq
+        if fail_on:
+            env["AIRULESET_FAKEJQ_FAIL_ON"] = fail_on
+        return env
+
+    def _paths(self, sid):
+        return (Path("/tmp/airuleset-main-exec-ok-%s" % sid),
+                Path("/tmp/airuleset-main-exec-pending-%s" % sid))
+
+    def _arm(self, sid):
+        m, p = self._paths(sid)
+        m.write_text(BYPASS_REASON)
+        p.write_text(BYPASS_REASON + "\n")     # the pending flag the guard leaves
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: p.unlink(missing_ok=True))
+        return m, p
+
+    def _consume(self, sid, fail_on, agent_id=None):
+        payload = {"session_id": sid, "hook_event_name": "PostToolUse",
+                   "tool_name": "Bash", "tool_input": {"command": "x"}}
+        if agent_id:
+            payload["agent_id"] = agent_id
+        return subprocess.run(["bash", str(CONSUMER)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=self._env(fail_on))
+
+    def test_consumer_session_id_jq_failure_still_consumes(self):
+        sid = "t-mg-cons-" + uuid.uuid4().hex[:10]
+        m, _p = self._arm(sid)
+        self._consume(sid, ".session_id")
+        self.assertFalse(m.exists(),
+                         "the marker must be CONSUMED despite a session_id jq failure")
+
+    def test_subagent_agent_id_jq_failure_does_not_consume_main(self):
+        sid = "t-mg-cons-sub-" + uuid.uuid4().hex[:10]
+        m, _p = self._arm(sid)
+        # a SUBAGENT PostToolUse (agent_id present) whose agent_id jq fails must
+        # NOT consume the main session's marker (the #819 subagent guard).
+        self._consume(sid, ".agent_id", agent_id="aWORKER1")
+        self.assertTrue(m.exists(),
+                        "a subagent must NOT consume the main marker on an "
+                        "agent_id jq failure (the #819 wrong-consume)")
 
 
 if __name__ == "__main__":

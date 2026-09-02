@@ -46,16 +46,39 @@ set -euo pipefail
 command -v jq >/dev/null 2>&1 || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 
+# #835: extract a payload field via jq with a FORK-FREE bash fallback used ONLY
+# when the jq SPAWN transiently fails under fork pressure — mirrors the sibling
+# block-main-implementation.sh `_ai_field`. WITHOUT this, a transient jq failure
+# in a SUBAGENT's PostToolUse makes `agent_id` read empty → the consumer treats
+# the subagent as the MAIN session and consumes the main's marker (the exact
+# wrong-consume the #819 subagent guard forbids); and a session_id jq failure
+# leaves the marker un-consumed → the OneShotBypass80 `-n auto` flake (both
+# `test_marker_is_consumed_after_the_command_runs` and
+# `test_legacy_marker_is_also_consumed`). jq stays PRIMARY (byte-for-byte on
+# success); the regex fallback is correct for CC's well-formed payload.
+_AI_AGENT_RE='"agent_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
+_AI_SID_RE='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
+_ai_field() {   # $1 = jq filter, $2 = default, $3 = fallback ERE (capture grp 1)
+    local _out
+    if _out=$(printf '%s' "$INPUT" | jq -r "$1" 2>/dev/null); then
+        printf '%s' "$_out"
+    elif [[ "$INPUT" =~ $3 ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    else
+        printf '%s' "$2"
+    fi
+}
+
 # #819 change 2 — subagent guard: a background subagent (autopilot-worker)
 # runs Bash CONCURRENTLY with the main session and its PostToolUse fires with
 # the same <sid>. It must NEVER consume the main session's pending marker
 # (which would nondeterministically re-break the very bug this hook fixes on
 # worker-heavy boxes). Mirrors block-main-implementation.sh's own agent_id
 # early-exit — only the MAIN session ever writes or consumes the marker.
-AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
+AGENT_ID=$(_ai_field '.agent_id // empty' '' "$_AI_AGENT_RE")
 [ -z "$AGENT_ID" ] || exit 0
 
-SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+SESSION_ID=$(_ai_field '.session_id // empty' '' "$_AI_SID_RE")
 # #819 review: sanitize the sid EXACTLY as block-main-implementation.sh does
 # (r.245: `tr -cd 'A-Za-z0-9_-'`). The guard writes the pending flag + markers
 # under the sanitized sid, so the consumer MUST look them up under the same
@@ -63,7 +86,7 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || 
 # consumer miss the pending flag and the marker would survive every executed
 # call (the wrong-allow direction that recreates the pre-#80 kill switch). It
 # also keeps a raw payload string out of the `rm -f` paths below.
-SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
+SESSION_ID="${SESSION_ID//[!A-Za-z0-9_-]/}"     # #835: fork-free sanitize (was `tr -cd`)
 [ -n "$SESSION_ID" ] || exit 0
 
 PENDING="/tmp/airuleset-main-exec-pending-${SESSION_ID}"

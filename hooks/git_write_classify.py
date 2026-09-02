@@ -58,7 +58,17 @@ def normalize_newlines(cmd):
     state + backslash escapes), so a newline inside a quoted span is untouched.
     A newline inside a heredoc BODY is not "quoted" in this sense and DOES get
     converted — the same blind spot both callers' old whole-string regexes had,
-    not a new one (documented in each caller's residual notes)."""
+    not a new one (documented in each caller's residual notes).
+
+    Accepted residual (#831 review, pre-existing PARITY in BOTH guards, not a
+    #831 divergence): a bash line-CONTINUATION (`\`+newline) is NOT spliced —
+    bash removes both chars and runs `git \<newline>-C <path> commit` as one
+    `git -C <path> commit`, but here the escaped newline survives and shlex
+    emits `\n-C` as the token that `classify_git_command` reads as the
+    subcommand → not in GIT_WRITE → the write escapes. Same #319-class confusion
+    residual as heredoc/`sudo -u`/symlink; the repo owns a splice technique
+    (`join_line_continuations`, block-main-implementation.sh, #88) if this ever
+    needs closing."""
     out = []
     in_single = in_double = escaped = False
     for ch in cmd:

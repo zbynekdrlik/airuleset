@@ -1952,13 +1952,14 @@ class GoalArmedJqFails180(unittest.TestCase):
 
 
 class BypassReasonJqFails180(unittest.TestCase):
-    """(#180) The bypass-reason extraction's own jq call sits at the end of
-    one pipe collapsed by `|| echo ""` -- a genuine jq hiccup and a
-    genuinely-too-short reason both used to produce the SAME "no reason,
-    cleared" log line, misleading whoever reads the bypass audit log. A
-    jq failure here already fails CLOSED overall (the bypass is refused,
-    implementation stays blocked) -- the fix is making the LOG say which
-    one actually happened."""
+    """(#180, REVERSED by #835) The bypass-reason extraction's own jq call
+    (`jq -Rrs '.[0:200]'`) is fork-fragile. #180 made a jq hiccup fail CLOSED
+    (refuse) and merely distinguished it in the LOG; but under `-n auto` fork
+    pressure that refuse DELETED a VALID marker (the OneShotBypass80 flake
+    through an uncovered jq call). #835 re-derives the reason FORK-FREE from the
+    marker content, so a jq hiccup no longer refuses a valid marker — it HONORS
+    it (the first test); the read-crash-safety half (#180's own adversarial
+    finding) still holds via a `[ -r ]` guard (the second test)."""
 
     def _marker(self, sid):
         return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
@@ -1969,16 +1970,23 @@ class BypassReasonJqFails180(unittest.TestCase):
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
 
-    def test_jq_failure_extracting_a_real_reason_still_refuses_the_bypass(self):
+    def test_jq_failure_extracting_a_real_reason_now_HONORS_via_fork_free_fallback(self):
+        # #835 REVERSAL of the #180 "jq failure -> refuse" behavior: a transient
+        # reason-slice jq failure under fork pressure USED TO refuse (DELETE) a
+        # VALID marker (rc 2) — the OneShotBypass80 `-n auto` flake through an
+        # uncovered jq call. The guard now RE-DERIVES the reason FORK-FREE from
+        # the marker content, so a VALID reason is HONORED (rc 0, marker+pending)
+        # despite the jq failure; a genuinely no-reason marker is still refused
+        # (locked separately). The #180 log-distinction premise is moot (a jq
+        # hiccup no longer refuses).
         sid = "t-mg-jqfail-bypass-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
-        # a perfectly good, long reason -- with a WORKING jq this bypass
-        # would be HONORED (exit 0).
+        pending = Path("/tmp/airuleset-main-exec-pending-%s" % sid)
         m.write_text("authoring the policy text itself — the content IS the judgment")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: pending.unlink(missing_ok=True))
         # the bypass-reason jq call is the only one in the hook using the
-        # exact filter '.[0:200]' (every other slice uses '.[0:120]') --
-        # verified against the shipped hook.
+        # exact filter '.[0:200]' -- verified against the shipped hook.
         stubdir = _stub_jq_dir(self, ".[0:200]")
         env = dict(os.environ)
         env["PATH"] = stubdir + ":" + env["PATH"]
@@ -1989,19 +1997,16 @@ class BypassReasonJqFails180(unittest.TestCase):
                           extra_env={"PATH": env["PATH"],
                                      "AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertEqual(
-            out.returncode, 2,
-            "a jq failure must never accidentally HONOR a bypass it "
-            "couldn't actually read: " + out.stdout + out.stderr)
+            out.returncode, 0,
+            "a reason-slice jq failure must NOT strand a valid marker "
+            "(#835): " + out.stdout + out.stderr)
+        self.assertTrue(m.exists(), "the valid marker must survive the jq failure")
+        self.assertTrue(pending.exists(),
+                        "the deferred-consume pending flag must be written")
         lines = self._bypass_lines(sid, byp)
-        self.assertTrue(lines, "the refusal must be logged")
-        self.assertIn(
-            "FAILED", lines[-1],
-            "the log must distinguish a jq FAILURE from a genuinely "
-            "too-short/absent reason, got: %r" % lines[-1])
-        self.assertNotIn(
-            "no reason", lines[-1],
-            "a real reason existed -- the log must not claim there was "
-            "none, got: %r" % lines[-1])
+        self.assertTrue(lines, "the deferred bypass must still be logged")
+        self.assertIn("allowed", lines[-1],
+                      "the log must record an allow, not a refusal: %r" % lines[-1])
 
     def test_unreadable_marker_file_never_crashes_the_hook(self):
         # (adversarial review of this batch's own #180 diff) Splitting the
