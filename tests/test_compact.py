@@ -298,6 +298,84 @@ class DeliverCompactFakeTmux:
         return [a[-1] for a in self.sent]
 
 
+class _CompactBoxFake:
+    """#852 D — a stateful compact fake whose input box STARTS holding `box`
+    (an own leftover, or a human draft) and models backspacing, so the janitor
+    reclaim can clear a proven own leftover and the sweep re-classifies bare."""
+
+    def __init__(self, panes, box):
+        self.panes, self.box, self.sent = panes, box, []
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return "\n".join("%s\t%s\t%s\t%s" % t for t in self.panes)
+        if "display-message" in j:
+            if argv[-1] == "#{pane_in_mode}":
+                return "0"
+            return "sess:0.0"
+        if "send-keys" in j:
+            self.sent.append(argv)
+            if "-l" in argv:
+                self.box += argv[-1]
+            elif "BSpace" in argv:
+                self.box = self.box[:-argv.count("BSpace")]
+            elif argv[-1] == "Enter":
+                self.box = ""
+            return ""
+        if "capture-pane" in j:
+            return "● Hotovo.\n❯ %s\n  ctx ███░  caveman:lite\n" % self.box
+        return ""
+
+    def keys(self):
+        return [a[-1] for a in self.sent]
+
+    def typed_texts(self):
+        return [a[-1] for a in self.sent if "-l" in a]
+
+
+class OwnLeftoverVetoConsultsOwnership(unittest.TestCase):
+    """#852 D — the `skip:draft` veto is ownership-blind: a box holding our OWN
+    leaked leftover (a swallowed `/compact` / nudge, provenance-gated) vetoed
+    `/compact` forever (gk ctx 441K -> 628K). Now the sweep reclaims a PROVEN
+    own leftover first, re-classifies, and proceeds if bare; a genuine human
+    draft (no provenance) still `skip:draft`, and nothing not-provenance-proven
+    is ever auto-cleared."""
+
+    SID = "sess-veto-own-1"
+    CWD = "/home/newlevel/devel/vetotest"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+
+    def _go(self, box, state):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name)
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tmux = _CompactBoxFake([("%9", "claude", self.CWD, "111")], box)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="subagent-stop",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp, state=state)
+        return word, tmux
+
+    def test_proven_own_leftover_is_reclaimed_then_compact_proceeds(self):
+        # A swallowed `/compact` leftover + fresh janitor provenance -> reclaim
+        # to bare, then the compact is delivered (never vetoed forever).
+        state = {"janitor_watch": {"%9": time.time() - 30}}
+        word, tmux = self._go("/compact", state)
+        self.assertEqual(word, "sent", tmux.sent)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_a_genuine_human_draft_still_vetoes(self):
+        # No provenance -> the janitor reclaim no-ops, the draft is untouched,
+        # and the compact still `skip:draft`.
+        word, tmux = self._go("rozpisany draft od cloveka", {})
+        self.assertEqual(word, "skip:draft", tmux.sent)
+        self.assertNotIn("BSpace", [k for a in tmux.sent for k in a],
+                         "a human draft must never be backspaced: %r" % tmux.sent)
+
+
 class CompactSubmitFake:
     """Stateful fake for the SUBMIT-VERIFY path (#375 part 2). Unlike
     `DeliverCompactFakeTmux` (static/scripted captures), this one MODELS the
