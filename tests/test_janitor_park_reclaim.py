@@ -214,6 +214,38 @@ class ParkRecordHelpers(unittest.TestCase):
         # clear on a missing key is a no-op, not a KeyError
         wd._janitor_clear_park({}, PID)
 
+    # #852 C/E -- a park record may CARRY the exact typed string so a later
+    # janitor reclaim can backspace exactly the OWN part (recorded length),
+    # preserving a human prefix. The record is a dict {"ts","typed"}; a bare
+    # float stays a valid record (back-compat), and _janitor_park_seen accepts
+    # BOTH shapes.
+    def test_record_can_carry_the_typed_string(self):
+        state = {}
+        wd._janitor_park_record(state, PID, 123.0, text="lane-check: backlog=7")
+        self.assertTrue(wd._janitor_park_seen(state, PID))
+        self.assertEqual(wd._janitor_park_typed(state, PID),
+                         "lane-check: backlog=7")
+
+    def test_bare_float_record_has_no_typed_string(self):
+        state = {}
+        wd._janitor_park_record(state, PID, 123.0)          # no text -> bare float
+        self.assertEqual(state["stash_parks"][PID], 123.0)  # back-compat shape
+        self.assertTrue(wd._janitor_park_seen(state, PID))
+        self.assertIsNone(wd._janitor_park_typed(state, PID))
+
+    def test_park_typed_is_none_state_safe(self):
+        self.assertIsNone(wd._janitor_park_typed(None, PID))
+        self.assertIsNone(wd._janitor_park_typed({}, PID))
+
+    def test_dict_record_is_seen_and_type_checked(self):
+        # A dict record with a numeric ts is seen; a corrupt ts inside the dict
+        # (or a bool) is rejected exactly like the bare-float form.
+        self.assertTrue(wd._janitor_park_seen(
+            {"stash_parks": {PID: {"ts": NOW, "typed": "x"}}}, PID))
+        for bad in (True, "x", None, [1]):
+            self.assertFalse(wd._janitor_park_seen(
+                {"stash_parks": {PID: {"ts": bad, "typed": "x"}}}, PID), bad)
+
 
 class PruneParksHelper(unittest.TestCase):
     """#488 review-1: the age-unbounded record must not orphan forever for a
