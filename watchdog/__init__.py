@@ -759,9 +759,15 @@ def _box_authority():
     from `FULL_AUTHORITY_USERS`."""
     import airuleset
     user = airuleset._current_user()
-    return (airuleset.AUTHORITY_BY_USER.get(user)
-            or ("full" if user in airuleset.FULL_AUTHORITY_USERS
-                else "fork-no-merge"))
+    # airuleset#827 (review): EXPLICIT membership, mirroring _authority_decision's
+    # marker-free half — no `.get(user) or ...` truthiness dependency (a falsy
+    # profile value would otherwise silently degrade to fork-no-merge). Map row
+    # wins first (restrictive), then the explicit full allow-list, then fail-SAFE.
+    if user in airuleset.AUTHORITY_BY_USER:
+        return airuleset.AUTHORITY_BY_USER[user]
+    if user in airuleset.FULL_AUTHORITY_USERS:
+        return "full"
+    return "fork-no-merge"
 
 
 from watchdog.stash import (  # noqa: E402

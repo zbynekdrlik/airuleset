@@ -126,9 +126,11 @@ class TestAuthorityResolution(TestCase):
         # SAFE to the MOST restrictive profile, NEVER fail-OPEN to `full` (which
         # would silently grant merge/deploy/close authority). The pre-#827 code
         # returned "full" here — the security fail-open this ticket fixes.
+        import tempfile
+        d = tempfile.mkdtemp()  # marker-free cwd: the registries alone decide
         with m.patch.object(airuleset, "_current_user",
                             return_value="miva2-forgotten-stream"):
-            self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_full_authority_accounts_resolve_full(self):
         # airuleset#827: the fail-safe flip must NOT regress the legitimate
@@ -137,9 +139,11 @@ class TestAuthorityResolution(TestCase):
         # (newlevel = dev1/dev2 + spinbike-vps; gatekeeper = gk box; admin +
         # stepan = forestshop-dev, cli_fleet.py "the owner's own trusted box").
         # They are enumerated in FULL_AUTHORITY_USERS and MUST still resolve full.
+        import tempfile
+        d = tempfile.mkdtemp()  # marker-free cwd: the registries alone decide
         for u in ("newlevel", "gatekeeper", "admin", "stepan"):
             with m.patch.object(airuleset, "_current_user", return_value=u):
-                self.assertEqual(airuleset.resolve_authority(), "full", u)
+                self.assertEqual(airuleset.resolve_authority(cwd=d), "full", u)
 
     def test_full_authority_users_are_the_intended_full_accounts(self):
         # airuleset#827: the explicit full-authority allow-list — a hand-maintained
@@ -161,6 +165,13 @@ class TestAuthorityResolution(TestCase):
         self.assertEqual(
             set(airuleset.FULL_AUTHORITY_USERS) & set(airuleset.AUTHORITY_BY_USER),
             set())
+        # airuleset#827 (review): AUTHORITY_BY_USER is the REDUCED-stream registry —
+        # it must NEVER carry a `full` value. A `full`-valued row would resolve full
+        # in _authority_decision ("per-user map" wins) yet be stripped of full-only
+        # skills by skill_names_for_user's FULL_AUTHORITY_USERS membership gate — a
+        # restrictive-direction inconsistency. A full account belongs in
+        # FULL_AUTHORITY_USERS, never here.
+        self.assertNotIn("full", set(airuleset.AUTHORITY_BY_USER.values()))
 
     def test_every_remote_hosts_user_is_classified(self):
         # airuleset#827: the fail-safe flip strands any REMOTE_HOSTS box whose unix
