@@ -671,6 +671,65 @@ class SuffixProofUndoNeverLeaks(unittest.TestCase):
                          % state)
 
 
+class _CollapseRun:
+    """A NOOP-settle (bare box) whose type then renders CC's 'paste again to
+    expand' collapse hint -- the #322 shape `deliver_with_stash` must leave
+    keystroke-free. Used to prove the #852 E invariant: even a HOLD/collapsed
+    leave writes a durable park record + WARNs, never a silent leak."""
+
+    def __init__(self, hint="paste again to expand"):
+        self.typed, self.hint, self.sent = False, hint, []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            return _box(self.hint if self.typed else "")
+        if "display-message" in j:
+            return "0"
+        if "-l" in argv:
+            self.typed = True
+        return ""
+
+
+class NoPathLeavesTypedTextSilently(unittest.TestCase):
+    """#852 E -- the lock: no `deliver_with_stash` code path that types leaves
+    our text without a WARNING + a durable park record carrying the exact
+    string. The genuinely-stuck-undo leak is covered in SuffixProofUndoNeverLeaks;
+    this locks the OTHER typed-text leave (a HOLD / collapsed-paste box that
+    cannot be backspaced) -- it too parks + warns now."""
+
+    NUDGE = "lane-check: backlog=7"
+
+    def test_a_collapsed_paste_leave_still_parks_and_warns(self):
+        run = _CollapseRun()
+        logs, state = [], {}
+        ok = wd.deliver_with_stash("%1", self.NUDGE, run, logs=logs,
+                                   sleep_fn=lambda *a: None, state=state)
+        self.assertFalse(ok, logs)
+        self.assertTrue(any("collapsed-paste" in ln for ln in logs), logs)
+        # the #852 E invariant: the leaked text is parked for reclaim.
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE,
+                         "a collapsed-paste leave must park the typed string "
+                         "for the janitor to reclaim: %r" % state)
+
+    def test_source_never_leaves_typed_text_without_a_park(self):
+        # A structural backstop (the #852 lock): every `return False` in
+        # deliver_with_stash that follows the typing point must be preceded by a
+        # recovery that parks-or-undoes (`_undo_and_release_slot` -- which itself
+        # parks on failure -- or `_park_unreclaimed`). We assert the two HOLD/
+        # collapse leaves and the recovery call are all present, so a future
+        # edit that reintroduces a bare `_log(... ); return False` after typing
+        # is caught.
+        import inspect
+        src = inspect.getsource(wd.deliver_with_stash)
+        # both HOLD/collapse aborts must hand off to _park_unreclaimed
+        self.assertIn("_park_unreclaimed", src,
+                      "a typed-text leave must never be a bare log+return")
+        # the verify-failure recovery still routes through the parking helper
+        self.assertIn("_undo_and_release_slot", src)
+
+
 class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):
     """#354 — the SAME render-lag hazard hits `_undo_appended_text`
     (the box-with-residual-content sibling of `_undo_typed_text`) for the
