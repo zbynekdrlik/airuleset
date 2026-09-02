@@ -665,8 +665,16 @@ case "$N_CLOSE_WIDE" in ''|*[!0-9]*) N_CLOSE_WIDE=0 ;; esac
 # close phrase itself) never creates a spurious extra match → N_CLOSE_DEQUOTED ==
 # N_CLOSE for every legit shape. (Only the CHAINED quoted form is caught; a STANDALONE
 # `"gh" issue close` bypasses the is_close front gate entirely — the #837 residual.)
+# #824 review-#3 F1/F2: the de-quoted boundary class ADDS `)`/`}`/`{` (beyond the
+# narrow class's `(`), so an EMPTY expansion GLUED to a chained close — `$(:)gh …`,
+# `$()gh …`, `${x}gh …` (bash expands the sub/param empty and glues onto `gh`, so the
+# close really runs) — is a `)gh`/`}gh` boundary match here → N_CLOSE_DEQUOTED > N_CLOSE
+# → blank → BLOCK. The narrowed `$(` guard alone misses a gh-LESS decoy substitution
+# (that was the F1 regression vs the old blanket `$(` guard); this boundary catches it
+# WITHOUT reopening N-3's over-block, since the value is stripped first and a legit
+# close never carries a `)gh`/`}gh` adjacency.
 _CMD_DEQUOTED=$(tr -d '\\'\''"' <<< "$_CMD_STRIPPED" 2>/dev/null || true)
-CLOSE_HITS_DEQUOTED=$(grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' <<< "$_CMD_DEQUOTED" 2>/dev/null || true)
+CLOSE_HITS_DEQUOTED=$(grep -oE '(^|[;&|[:space:](){}])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' <<< "$_CMD_DEQUOTED" 2>/dev/null || true)
 N_CLOSE_DEQUOTED=$(grep -c . <<< "$CLOSE_HITS_DEQUOTED" 2>/dev/null || true)
 case "$N_CLOSE_DEQUOTED" in ''|*[!0-9]*) N_CLOSE_DEQUOTED=0 ;; esac
 # #540: uses the SAME `_is_patch_close_cmd` predicate as the front gate above —
@@ -710,13 +718,17 @@ if grep -zqE '\$\([^)]*gh[[:space:]]' <<< "$CMD"; then
 fi
 # #824 N-4: a bash>=5.3 command-substitution funsub `${ cmd; }` / `${| cmd; }` runs a
 # nested command with NO `$(`, so the guard above misses it; the value-strip erases a
-# `--comment "${ gh issue close 999; }"` value → wrong-ALLOW on a self carve-out. Any
-# `${` immediately followed by whitespace or `|` is a funsub (an ordinary parameter
-# expansion `${VAR}`/`${#x}`/`${x:-y}` never starts with a space or `|`), so blank the
-# exemption (fail toward hand-off; a legit close rarely carries `${ `). DETECTION on
-# the ORIGINAL $CMD. (On this box bash 5.2 the funsub is inert, but the GUARD is a
-# static grep and fires regardless of the running bash version.)
-if grep -qE '\$\{[[:space:]|]' <<< "$CMD"; then
+# `--comment "${ gh issue close 999; }"` value → wrong-ALLOW on a self carve-out. A
+# funsub opens with `${` + whitespace or `|` (an ordinary parameter expansion
+# `${VAR}`/`${#x}`/`${x:-y}` never starts with either). #824 review-#3 F3/F4: `grep -z`
+# so the funsub whitespace may be a NEWLINE (a per-line grep missed `${` at end-of-line),
+# and require a `gh` command INSIDE the funsub (`[^}]*gh[[:space:]]`, symmetric with the
+# N-3 `$(` narrowing) so a legit close whose comment merely mentions `${ }` is not
+# over-blocked while a real `${ gh issue close; }` smuggle still fires. DETECTION on the
+# ORIGINAL $CMD. (On this box bash 5.2 the funsub is inert, but the GUARD is a static
+# grep and fires regardless of the running bash version. A funsub running a NON-gh
+# interpreter — `${ eval …; }` — is caught by the eval/xargs branch above.)
+if grep -zqE '\$\{[[:space:]|][^}]*gh[[:space:]]' <<< "$CMD"; then
     HAS_INTERP=1
 fi
 if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ] \
