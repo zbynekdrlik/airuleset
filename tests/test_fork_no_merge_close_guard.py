@@ -43,10 +43,12 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
+from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                                          # noqa: E402
+import cli_quals                                          # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
@@ -104,19 +106,15 @@ def _fake_gh_dir():
 
 def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
         app_token_dir=None, api_user_403=False, labels="", labels_fail=False,
-        user=None, comments="", verdict_fail=False):
+        comments="", verdict_fail=False):
+    # airuleset#839 dropped the `user=` param: `_current_user()` is now uid-based,
+    # so LOGNAME/USER no longer set the subprocess's own identity (a stream can't
+    # spoof another stream's `stream:<user>` ownership). Tests that need a
+    # specific renamed identity assert the ownership SET in-process instead (see
+    # TestStreamLabelAcceptanceClose).
     payload = json.dumps({"tool_input": {"command": cmd}})
     env = dict(os.environ)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
-    if user is not None:
-        # #564: force the subprocess's own unix identity (getpass.getuser()
-        # reads LOGNAME/USER) so `authority --stream-label` resolves a specific
-        # stream — e.g. a rename target (montalu1) whose equivalents include the
-        # legacy `montalu`. The authority PROFILE still comes from the cwd
-        # marker (resolve_authority is marker-first), so this does not change
-        # branch-merge/fork-no-merge selection.
-        env["LOGNAME"] = user
-        env["USER"] = user
     env["FAKE_GH_ME"] = me
     env["FAKE_GH_AUTHOR"] = author
     env["FAKE_GH_FAIL"] = "1" if gh_fail else "0"
@@ -502,44 +500,53 @@ class TestStreamLabelAcceptanceClose(TestCase):
                 author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_allows_acceptance_close_of_ticket_with_legacy_prerename_stream_label(self):
-        # #564 (the live residual): a montalu1 box (post base-stream rename)
-        # closing its OWN needs-acceptance ticket that still carries the OLD
-        # `stream:montalu` label during the transition. `authority --stream-label`
-        # must emit BOTH equivalents and the hook must match ANY of them. RED
-        # before the fix (only `stream:montalu1` emitted → old label never
-        # matches → BLOCK). The subprocess runs as unix user montalu1 (a real
-        # STREAM_RENAME_ALIASES target), so this uses the real rename table.
-        labels = "stream:montalu needs-acceptance"
-        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp "
-                "--comment 'client confirmed on PROD'",
-                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
-                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
-                user="montalu1")
-        self.assertEqual(r.returncode, 0, r.stderr)
+    # #564 rename-equivalents — verified IN-PROCESS since airuleset#839.
+    #
+    # These two used to run the hook as unix user montalu1 via LOGNAME/USER so
+    # `authority --stream-label` (a `python3 airuleset.py …` subprocess) resolved
+    # `montalu1`. #839 hardened `_current_user()` to the UNSPOOFABLE
+    # `pwd.getpwuid(os.getuid()).pw_name`, so the env no longer sets a subprocess
+    # identity — the montalu1-box round-trip is only exercisable on a real
+    # montalu1 uid. The hook's ownership decision is `ticket-label ∈ the set
+    # `authority --stream-label` emits`, so we assert that SET (the exact thing
+    # the hook matches against) IN-PROCESS with the identity patched — mirroring
+    # test_authority_profiles.py::test_cli_stream_label_emits_rename_equivalents.
+    # The hook's subprocess set-matching + carve-out is still exercised end-to-end
+    # by the real-identity tests above (own label ALLOWS, foreign BLOCKS).
+    def _stream_label_set(self, user):
+        with m.patch.object(cli_quals, "resolve_authority",
+                            return_value="branch-merge"):
+            with m.patch.object(airuleset, "_current_user", return_value=user):
+                with m.patch("builtins.print") as p:
+                    airuleset.cmd_authority(m.Mock(
+                        explain=False, maintainer_login=False, self_login=False,
+                        stream_label=True, app_bot_login=False))
+        return [str(c.args[0]) for c in p.call_args_list if c.args]
 
-    def test_allows_acceptance_close_with_current_name_label_after_rename(self):
-        # #564 regression lock: emitting MULTIPLE equivalents must not break the
-        # exact CURRENT-name match — a montalu1 box closing a ticket carrying the
-        # current `stream:montalu1` label still ALLOWS.
-        labels = "stream:montalu1 needs-acceptance"
-        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp "
-                "--comment 'client confirmed'",
-                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
-                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
-                user="montalu1")
-        self.assertEqual(r.returncode, 0, r.stderr)
+    def test_ownership_set_includes_legacy_prerename_stream_label(self):
+        # #564: a montalu1 box's ownership set MUST include the OLD `stream:montalu`
+        # label (transition tickets still carry it), so the hook allows their
+        # acceptance-close. RED before #564 (only `stream:montalu1` emitted).
+        labels = self._stream_label_set("montalu1")
+        self.assertIn("stream:montalu", labels, labels)
 
-    def test_blocks_acceptance_close_with_foreign_stream_label_even_with_alias(self):
-        # #564 fail-safe: a montalu1 box must NOT get the carve-out for a
-        # DIFFERENT stream's ticket. `stream:david` is neither montalu1 nor its
-        # legacy montalu equivalent → BLOCK, exactly like the pre-alias
-        # foreign-label case.
+    def test_ownership_set_includes_current_name_label_after_rename(self):
+        # #564 regression lock: emitting MULTIPLE equivalents must not drop the
+        # exact CURRENT-name label — `stream:montalu1` stays in the set.
+        labels = self._stream_label_set("montalu1")
+        self.assertIn("stream:montalu1", labels, labels)
+
+    def test_blocks_acceptance_close_with_foreign_stream_label(self):
+        # #564 fail-safe: a reduced box must NOT get the carve-out for a DIFFERENT
+        # stream's ticket. `stream:david` is not in THIS box's own stream-label
+        # set (the real uid's equivalents), so BLOCK — the un-spoofable half of
+        # the alias fail-safe (that a stream can't reach another stream's alias is
+        # now guaranteed by the uid-based identity, #839; the montalu-alias-not-
+        # david-alias distinction is asserted in-process above).
         labels = "stream:david needs-acceptance"
         r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
                 self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
-                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
-                user="montalu1")
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_allows_acceptance_close_with_short_c_comment_flag(self):
