@@ -25,6 +25,29 @@ _TOKEN_RE = re.compile(r"\A[A-Za-z0-9_-]{16,128}\Z")
 # segments (so a "." name fails the 2-segment count) and rejects any "../.." first.
 _NAME_RE = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
 
+# #825: mimetypes.guess_type() never includes a charset, so a browser
+# receiving e.g. "text/markdown" with no charset falls back to Windows-1252
+# and UTF-8 Slovak diacritics (žčšťýáíéúäô) render as mojibake — the file
+# on disk is correct, only the header lies about its encoding. Every
+# text/* MIME type gets "; charset=utf-8" appended, plus the two common
+# non-"text/"-prefixed textual types the ticket names explicitly (JSON is
+# never text/*; JS is application/javascript on some mimetypes DBs, though
+# this repo's runtime already resolves .js to text/javascript). A BINARY
+# type (image/*, audio/*, application/pdf, application/zip, ...) is left
+# untouched — a charset on a binary payload is meaningless and would be an
+# unforced, unrequested behavior change outside this bug's scope.
+_EXTRA_TEXTLIKE_TYPES = ("application/json", "application/javascript")
+
+
+def _with_charset_if_textual(ctype):
+    """Append '; charset=utf-8' to a text/* (or JSON/JS) MIME type. Passes
+    a binary type, or a falsy ctype, through unchanged."""
+    if not ctype:
+        return ctype
+    if ctype.startswith("text/") or ctype in _EXTRA_TEXTLIKE_TYPES:
+        return ctype + "; charset=utf-8"
+    return ctype
+
 
 def safe_resolve(raw_path, base_dir):
     """Map a request path to a real file under base_dir, or None if unsafe.
@@ -99,8 +122,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny(404, "not found")
         try:
             ctype, _enc = mimetypes.guess_type(str(target))
+            ctype = _with_charset_if_textual(ctype) or "application/octet-stream"
             self.send_response(200)
-            self.send_header("Content-Type", ctype or "application/octet-stream")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(size))
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Disposition",
