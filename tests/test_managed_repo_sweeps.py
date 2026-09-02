@@ -468,10 +468,12 @@ class TestRunOnceWiring(_RepoHealthStoreIsolated):
         self.assertFalse(any(line.startswith("stuck-main") for line in logs))
 
     def test_job_27_fires_through_run_once(self):
+        # #850: job 27 still fires (still measures + logs) through run_once,
+        # but never sends -- a repo-health finding is machine-channel only.
         logs = self._run(repo_roots=["/repos/x"],
                          issue_counts_fetch=lambda label, w: (40, 5))
         self.assertTrue(any(line.startswith("net-drift") for line in logs))
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
 
     def test_job_28_fires_through_run_once(self):
         r = _make_repo(self.tmp, "camera-box", base_ts=NOW - 6 * DAY,
@@ -644,8 +646,10 @@ class TestDedupPersistedBeforeThePing_172(_RepoHealthStoreIsolated):
                        state_path=self.state_path,
                        repo_roots=["/repos/a", "/repos/b"],
                        issue_counts_fetch=fetch)
-        self.assertEqual(len(self.sent), 1,
-                         "repo a must have alerted (open) before repo b's kill")
+        # #850: repo a's onset is never a SEND any more -- the crash-safety
+        # claim under test is the episode STORE persistence (below), which
+        # is unaffected; assert the send stays permanently empty instead.
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
         ep = self.episodes()
         self.assertTrue(
             ep.get("net-drift:a", {}).get("active"),

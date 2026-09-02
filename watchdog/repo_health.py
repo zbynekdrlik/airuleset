@@ -644,7 +644,20 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
     episode_gate`) for tests, same "wired = injected" convention as
     `issue_counts_fetch`/`send_fn`. The `persist`/cadence/cursor
     crash-safety (#172 F4 above) is UNCHANGED; only the per-repo dedup
-    memory moved to the gate's own atomic store."""
+    memory moved to the gate's own atomic store.
+
+    #850: `send_fn` is NEVER actually invoked by this function any more --
+    a net-drift open/recover is a repo-health FINDING, not a genuine
+    ❓/✅/run-card event, and the owner's standing #693/#704 "analyze-not-
+    ping" ruling puts findings on the machine channel only (the `I N▲`
+    footer signal, #842, already surfaces the same thing to the owner).
+    `send_fn` stays a parameter (every existing caller still passes one, and
+    `send_fn is None` still means "no delivery path configured" for the
+    gate-consultation gate above) purely so no caller/signature changes;
+    the gate is still consulted on every decision (open/hold/clearing/
+    recover/quiet) and the `net-drift GATE %s -> %s` line plus a plain
+    `net-drift %s -> open|recover (machine-channel only, #850 -- never an
+    owner ping)` line ARE the machine channel this job now reports through."""
     if issue_counts_fetch is None:
         return []
     gate = episode_gate if episode_gate is not None else notify.episode_gate
@@ -715,32 +728,22 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
         healthy = net <= threshold
         decision = gate("net-drift:%s" % label, healthy, now=now)
         logs.append("net-drift GATE %s -> %s" % (label, decision))
+        # #850: a repo-health FINDING (this gate's onset/recovery) is NEVER
+        # an owner ping any more -- the owner's standing #693/#704 "analyze-
+        # not-ping" ruling, and #842 already surfaces the same signal in the
+        # footer (`I N▲`). The gate is STILL consulted above (it still feeds
+        # that footer signal + this journal) and `owner`/`deliver` are STILL
+        # resolved above (unchanged #717 ambiguity-skip semantics -- an
+        # ambiguous-owner box still skips the gate itself, unrelated to
+        # #850); only the two `send_fn(...)` calls that used to follow are
+        # gone. `send_fn` stays in the signature (every caller still passes
+        # it) but this function no longer invokes it on either decision.
         if decision == "open":
-            status = send_fn(
-                "\U0001f4c8 **%s** -- backlog rastie: +%d ticketov za posledny "
-                "tyzden\n"
-                "> Za poslednych 7 dni pribudlo %d novych a zavrelo sa len %d -- "
-                "backlog rastie rychlejsie, ako sa stiha spracovavat."
-                % (label, net, opened, closed),
-                owner=owner,   # #717: repo-derived / single-owner, never a coin flip
-                # send-layer key is FRESH per instant (int(now), the gk_request
-                # / #535 / #543 pattern), never a coarser bucket than the gate's
-                # own primary dedup -- else notify's TTL would swallow a genuine
-                # re-open of a NEW episode.
-                dedup_key="net-drift-open:%s:%d" % (label, int(now)),
-                dry_run=dry_run)
-            logs.append("net-drift PING %s -> %s" % (label, status))
+            logs.append("net-drift %s -> open (machine-channel only, #850 "
+                        "-- never an owner ping)" % label)
         elif decision == "recover":
-            status = send_fn(
-                "✅ **%s** -- backlog uz nerastie\n"
-                "> Za posledny tyzden pribudlo %d novych a zavrelo sa %d "
-                "ticketov -- backlog sa vratil pod kontrolu (predtym nahlaseny "
-                "rast je vyrieseny)."
-                % (label, opened, closed),
-                owner=owner,   # #717
-                dedup_key="net-drift-recover:%s:%d" % (label, int(now)),
-                dry_run=dry_run)
-            logs.append("net-drift RECOVER %s -> %s" % (label, status))
+            logs.append("net-drift %s -> recover (machine-channel only, "
+                        "#850 -- never an owner ping)" % label)
     return logs
 
 
