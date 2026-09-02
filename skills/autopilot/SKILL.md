@@ -1084,10 +1084,9 @@ gap in either.
    **ARMED GOAL** Claude Code shows in its footer (`◎ /goal`) plus any lanes still running. **The
    supervisor calls `airuleset.py compact-request --self` FIRST (before writing the report) at
    EVERY integration cycle's `## ✅ Work Complete` — live lanes or not (#848)**: the STEP-0
-   experiment (CC 2.1.258) proved a compact over live worktree lanes + a bg-bash waiter + an armed
-   `/goal` does not break the task registry, so the compact no longer waits for the fleet to drain
-   (the batch premise, CC issue 29193, is gone for the idle-boundary delivery case). Lanes still
-   running is NO longer a reason to withhold it.
+   experiment (CC 2.1.258) proved a compact over live lanes does not break the task registry, so
+   it no longer waits for the fleet to drain (the batch premise is gone). Lanes still running is
+   NO longer a reason to withhold it.
    (#400: `notify-compact-request.sh`, the old passive Stop-hook text-sniff, is now a
    permanent no-op — `compact-request --self` is the only mechanism left for the supervisor's own
    turn boundary.) The idle Discord ping is separately guarded while
