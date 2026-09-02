@@ -3853,3 +3853,10 @@ class TestMarkerIsLowerOnly828(TestCase):
         out = self._explain("david1", "full")
         self.assertIn("resolved=fork-no-merge via per-user map", out)
         self.assertIn("marker=full ignored (would raise fork-no-merge)", out)
+
+    def test_explain_marks_a_redundant_marker_as_equal_base(self):
+        # a marker EQUAL to the base is neither lowered nor a raise — the base
+        # source stands and the annotation flags it redundant.
+        out = self._explain("marek", "branch-merge")
+        self.assertIn("resolved=branch-merge via per-user map", out)
+        self.assertIn("marker=branch-merge (== base branch-merge)", out)

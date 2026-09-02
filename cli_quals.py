@@ -1517,19 +1517,6 @@ def _authority_marker_raw(cwd=None):
     return None
 
 
-def _authority_marker(cwd=None):
-    """The project CLAUDE.md `<!-- airuleset:authority=<profile> -->` override for
-    `cwd` — a VALID profile string or None. Lets a project raise/lower a stream's
-    default authority (e.g. grant `full` to a montalu repo). The single place the
-    marker is VALIDATED, so the CLI, the autopilot skill, and the issue-close guard
-    hook agree; reads the raw token via `_authority_marker_raw` and keeps only a
-    value in `AUTHORITY_PROFILES` (a bogus/typo'd token resolves to None → the
-    per-user table stands, the fail-safe direction)."""
-    import airuleset
-    raw = _authority_marker_raw(cwd)
-    return raw if raw in airuleset.AUTHORITY_PROFILES else None
-
-
 def _more_restrictive(a, b):
     """The MORE RESTRICTIVE (lower-authority) of two profiles on the lattice
     full > branch-merge > fork-no-merge. `AUTHORITY_PROFILES` is ordered
@@ -1694,25 +1681,25 @@ def cmd_authority(args):
         # close-guard call every cycle. Resolved against the invoking cwd — the
         # same anchoring the plain `authority` output has always used.
         user = airuleset._current_user()
-        if user in airuleset.AUTHORITY_BY_USER:
-            map_val = airuleset.AUTHORITY_BY_USER[user]
-        elif airuleset._is_github_ci_runner(user):
-            # airuleset#839: same order as _authority_decision above; name the
-            # CONTAINER arm distinctly so the map= annotation matches the source
-            # line (which already distinguishes the container vs runner arm).
-            ci_src = airuleset._github_ci_runner_source(user)
-            map_val = ("GitHub-hosted CI runner (container) -> full"
-                       if ci_src and "container" in ci_src
-                       else "GitHub-hosted CI runner -> full")
-        elif user in airuleset.FULL_AUTHORITY_USERS:
+        # #486/#828: derive BOTH the base profile AND the map= classification from
+        # the SINGLE `_authority_base` (the same function `_authority_decision`
+        # used), so the printed map= can never desync from the resolved source —
+        # no parallel registry re-derivation. The CONTAINER arm is named distinctly
+        # (airuleset#839) exactly as its source string is.
+        base_profile, base_source = _authority_base(user)
+        if base_source == "per-user map":
+            map_val = base_profile
+        elif base_source == "ci-runner (GitHub-hosted, container)":
+            map_val = "GitHub-hosted CI runner (container) -> full"
+        elif base_source == "ci-runner (GitHub-hosted)":
+            map_val = "GitHub-hosted CI runner -> full"
+        elif base_source == "full-authority account":
             map_val = "full-authority account -> full"
-        else:
+        else:  # "default (unmapped)"
             map_val = ("unmapped -> fork-no-merge (fail-safe; add to "
                        "AUTHORITY_BY_USER or FULL_AUTHORITY_USERS)")
         # #828: annotate what the marker actually DID — lowered / ignored-as-a-
-        # raise / redundant / absent / invalid — derived from the SAME base
-        # (`_authority_base`) the decision used, so the log can never desync.
-        base_profile, _base_source = _authority_base(user)
+        # raise / redundant / absent / invalid.
         if raw is None:
             mark = "none"
         elif raw not in airuleset.AUTHORITY_PROFILES:
