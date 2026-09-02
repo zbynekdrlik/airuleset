@@ -1906,5 +1906,150 @@ class TestReviewFindings3_824(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
 
 
+class TestPythonSegmenter837(TestCase):
+    """#837 — the sed/grep EXTRACTION+COUNTING+DETECTION layer is replaced by the
+    python quote/backslash-aware segmenter `hooks/close_guard_segment.py`, closing the
+    four STRUCTURAL residuals a regex fundamentally cannot reach (the #824 review-#2
+    N-6/N-7 comment + the A-4 / REPO_ARG-in-quoted-arg shapes). Every RED below is a
+    genuine wrong-ALLOW on the pre-#837 hook (rc 0), GREEN (BLOCK, rc 2) after the
+    segmenter lands; the controls pass on BOTH.
+
+    `_GH_NUMBER_SCOPED_AUTHOR` reads issue 3312 as SELF, everything else FOREIGN;
+    `_GH_REPO_SCOPED_AUTHOR` reads repo baz/qux as SELF, every other repo FOREIGN —
+    so a close that rides a carve-out against the WRONG target is a wrong-ALLOW today.
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- N-6: a STANDALONE quoted/backslashed/aliased command word bypasses the
+    # front gate entirely (is_close=0 → exit 0) on the pre-#837 hook. The segmenter
+    # de-quotes the command word to a clean `gh` close → a foreign close BLOCKS. ---
+
+    def test_n6_standalone_double_quoted_command_word(self):
+        r = run('"gh" issue close 3399', self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_n6_standalone_single_quoted_command_word(self):
+        r = run("'gh' issue close 3399", self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fork-no-merge", r.stderr)
+
+    def test_n6_standalone_backslash_in_command_word(self):
+        # `g\h` — bash strips the backslash and runs `gh`.
+        r = run("g\\h issue close 3399", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n6_standalone_backslash_in_close_keyword(self):
+        # `clo\se` — the intra-keyword backslash the `*close*` prefilter would miss;
+        # the de-backslashed prefilter still routes it to the segmenter, which
+        # de-quotes it to `close`.
+        r = run("gh issue clo\\se 3399", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n6_standalone_quoted_close_keyword(self):
+        r = run('gh issue "close" 3399', self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n6_standalone_absolute_path_to_gh(self):
+        r = run("/usr/bin/gh issue close 3399", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n6_ansi_c_obfuscated_subcommand_blocks(self):
+        # `gh issue $'close'` — shlex yields `$close` (not the literal `close`); the
+        # ANSI-C / expansion-obfuscated subcommand fails CLOSED (the load-bearing
+        # invariant: an unresolvable command/subcommand word blocks).
+        r = run("gh issue $'close' 3399", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n6_allows_self_close_via_absolute_path(self):
+        # CONTROL (passes on BOTH): a LEGIT self-close invoked as `/usr/bin/gh` must
+        # still be ALLOWED — the segmenter recognises the basename `gh`.
+        r = run("/usr/bin/gh issue close 1408 --comment 'fixed on fork'",
+                self.fork, me="kvaskodev", author="kvaskodev")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- N-7: a non-shell interpreter hides a nested close the shell-only HAS_INTERP
+    # enumeration misses. On the pre-#837 hook the self close 3312 rides while the
+    # python payload's foreign close is invisible (rc 0). ---
+
+    def test_n7_python_interpreter_hides_nested_close(self):
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && '
+            'python3 -c \'import os;os.system("gh issue close 3399")\'',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n7_node_interpreter_hides_nested_close(self):
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && node -e \'run("gh issue close 3399")\'',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_n7_allows_python_without_a_gh_close(self):
+        # CONTROL (passes on BOTH): a `python3 -c` that merely calls `.close()` (no
+        # `gh issue close`) is NOT a close → allowed. The interpreter check must key
+        # on the `gh issue close` PHRASE, not the bare word `close`.
+        r = run("python3 -c 'db.close()'", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- A-4: a `-c` INSIDE a quoted argument makes the sed value-strip's single-quote
+    # arm span a REAL top-level close, erasing it from the count (rc 0 today). The
+    # segmenter tokenises each segment, so both closes are counted → BLOCK. ---
+
+    def test_a4_quoted_c_flag_erases_a_top_level_close(self):
+        r = _run_with_gh_body(
+            "gh issue close 3312 ; echo \"y -c '\" ; gh issue close 3399 ; echo \"'z\"",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_a4_allows_self_close_with_harmless_trailing_echo(self):
+        # CONTROL (passes on BOTH): a legit single self-close followed by a harmless
+        # echo must still ALLOW — the segmenter must not over-count a non-close echo.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment ok ; echo 'harmless note'",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- REPO_ARG-in-quoted-arg: a balanced-quote `-R x/y` inside a NON-value argument
+    # poisons the whole-command REPO_ARG grep (rc 0 today). The segmenter reads -R only
+    # from the close segment's own tokens → the poison is neutralised → BLOCK. ---
+
+    def test_poison_balanced_quote_repo_flag_in_echo(self):
+        # The ticket's exact shape: `-R baz/qux` (SELF in the fixture) inside a
+        # separate `echo` argument; the close targets the cwd repo (FOREIGN).
+        r = _run_with_gh_body(
+            "gh issue close 4 && echo 'foo -R baz/qux'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_poison_balanced_quote_repo_flag_via_semicolon(self):
+        r = _run_with_gh_body(
+            "gh issue close 4 ; echo 'ref -R baz/qux'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_poison_control_real_repo_flag_in_close_wins(self):
+        # A real `-R baz/qux` (SELF) ON THE CLOSE plus a stray `-R other/repo` in a
+        # later echo must ALLOW — the segmenter reads the CLOSE segment's own -R
+        # (baz/qux), never the echo's. This ALSO removes a pre-#837 over-BLOCK: the
+        # old `>=2 -R tokens` belt counted the echo's `-R` and refused the exemption
+        # (rc 2, a false-block); the segment-scoped read allows the legit self-close.
+        r = _run_with_gh_body(
+            "gh issue close 4 -R baz/qux --comment ok ; echo 'note -R other/repo'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     main()
