@@ -133,9 +133,21 @@ class TestCompositionRulesInCompanionFile(TestCase):
     def test_r5_only_functions_already_live_on_prod(self):
         self.assertIn("Announce ONLY functions that are ALREADY LIVE on the client's PROD", self.t)
 
-    def test_reassurance_named_recipients_and_self_blame_template(self):
-        self.assertIn("named recipients + the self-blame reassurance", self.t)
-        self.assertIn("chyba je na našej strane a hneď to opravíme", self.t)
+    def test_closing_named_recipients_no_mandatory_self_blame_823(self):
+        """#823 — owner ruling 2026-09-01: the fixed self-blame closing
+        sentence read as spam once it repeated across client threads. The
+        template must no longer carry it, and the bullet heading must no
+        longer mandate it."""
+        self.assertIn("named recipients", self.t)
+        self.assertIn("NO mandatory self-blame", self.t)
+        self.assertNotIn("named recipients + the self-blame reassurance", self.t)
+        self.assertNotIn("chyba je na našej strane a hneď to opravíme", self.t)
+
+    def test_742_exemption_no_longer_claims_self_blame_stays_mandatory_823(self):
+        """The #742 bullet used to carve a mandatory exception out of its own
+        'never surface our gaps' rule for the self-blame line. #823 removed
+        the mandate, so that carve-out sentence must be gone too."""
+        self.assertNotIn("stays mandatory", self.t)
 
 
 class TestSkillStaysLeanAndPoints(TestCase):
