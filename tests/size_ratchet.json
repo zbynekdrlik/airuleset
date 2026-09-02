@@ -113,6 +113,7 @@
     "tests/test_content_dedup_687.py": 249,
     "tests/test_context_diet_tier1.py": 195,
     "tests/test_count_live_workers.py": 800,
+    "tests/test_dead_lane_resume_836.py": 126,
     "tests/test_delegation_meter.py": 653,
     "tests/test_delivery_first_byte_670.py": 193,
     "tests/test_delivery_stall.py": 429,
