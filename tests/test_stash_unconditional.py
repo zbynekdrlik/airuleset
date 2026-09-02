@@ -535,34 +535,63 @@ class UndoVerifyRaceIsSettledNotLeftHanging(unittest.TestCase):
                         "LOUDLY, never silently: %r" % logs)
 
 
+def _box(buf):
+    """A single-row Claude Code input box holding `buf`, the way a stripped
+    `capture-pane -p` renders it — enough for `_input_line_text` to read the
+    tail."""
+    return "\n".join(["● turn done", "────────────",
+                      "❯\xa0" + buf if buf else "❯\xa0",
+                      "────────────", "  ctx ░░"]) + "\n"
+
+
+class _UndoRun:
+    """A minimal recording `run` for a DIRECT `_undo_appended_text` call: the
+    box holds `pre + text`; the BSpace batch trims exactly what it removes;
+    `lag` captures render the PRE-backspace state first (the #354 render-lag).
+    `never_settles` models a genuinely-stuck box (the backspaces do nothing)."""
+
+    def __init__(self, pre, text, lag=0, never_settles=False):
+        self.pre, self.buf = pre, pre + text
+        self.lag, self.never_settles = lag, never_settles
+        self.sent = []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            if self.lag > 0:
+                self.lag -= 1
+                return _box(self.pre + self.buf[len(self.pre):])
+            return _box(self.buf)
+        if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+            if not self.never_settles:
+                n = argv.count("BSpace")
+                self.buf = self.buf[:-n] if n < len(self.buf) else ""
+        return ""
+
+
 class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):
     """#354 — the SAME render-lag hazard hits `_undo_appended_text`
-    (the UNRESOLVED-box sibling of `_undo_typed_text`, reached when the
-    `C-s` toggle is lost and our type APPENDS to a real draft rather than
-    landing on a bare box) for the identical reason: one immediate capture
-    right after the backspace batch, no settle poll."""
+    (the box-with-residual-content sibling of `_undo_typed_text`) for the
+    identical reason: one immediate capture right after the backspace batch,
+    no settle poll. #852 A stopped `deliver_with_stash` from ever typing into
+    an unresolved box, so `_undo_appended_text` is now exercised DIRECTLY as
+    the standalone suffix-proof helper it is — the #354 settle coverage is
+    preserved on the function itself."""
 
     def test_a_lagged_append_undo_still_verifies_as_recovered(self):
-        pane = FakePane(draft=DRAFT, lose_next_ctrl_s=True,
-                        bspace_lag_captures=1)
-        logs = []
-        ok = deliver(pane, logs=logs)
-        self.assertFalse(ok, logs)
-        self.assertEqual(pane.draft, DRAFT,
-                         "the user's draft must survive byte-identical, "
-                         "even when the undo's own verify races: %r" % logs)
-        self.assertIn("stash-abort: append-undone", logs, logs)
-        self.assertNotIn("stash-abort: append-NOT-undone", logs, logs)
+        run = _UndoRun(DRAFT, TEXT, lag=1)
+        ok = wd._undo_appended_text("%1", run, DRAFT, TEXT,
+                                    sleep_fn=lambda *a: None)
+        self.assertTrue(ok, "a lagged undo verify must still confirm recovery: "
+                        "%r" % run.sent)
 
-    def test_a_genuinely_stuck_append_undo_still_logs_the_reason(self):
-        pane = FakePane(draft=DRAFT, lose_next_ctrl_s=True,
-                        bspace_lag_captures=999999)
-        logs = []
-        ok = deliver(pane, logs=logs)
-        self.assertFalse(ok, logs)
-        self.assertIn("stash-abort: append-NOT-undone", logs,
-                      "a genuine double failure must still be logged "
-                      "LOUDLY, never silently: %r" % logs)
+    def test_a_genuinely_stuck_append_undo_still_reports_failure(self):
+        run = _UndoRun(DRAFT, TEXT, never_settles=True)
+        ok = wd._undo_appended_text("%1", run, DRAFT, TEXT,
+                                    sleep_fn=lambda *a: None)
+        self.assertFalse(ok, "a genuinely stuck undo must report failure, never "
+                         "a false success: %r" % run.sent)
 
 
 class UndoSettlePollHasRealTeeth(unittest.TestCase):

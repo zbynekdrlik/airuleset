@@ -547,12 +547,15 @@ class AShortTailIsNotAnIdentity(unittest.TestCase):
 
 
 class NeverTypeIntoABoxWeCouldNotUndo(unittest.TestCase):
+    # #852 item A — an UNRESOLVED box (our C-s did not park what it showed, so
+    # the box still holds a POTENTIAL FOREIGN draft) is NEVER typed into: the
+    # nudge can never be appended to a human draft. These three cases used to
+    # type-then-recover (wrapped-abort / append-undone / append-unprovable);
+    # under A all three abort `stash-abort: stash-unresolved` BEFORE any
+    # keystroke, leaving the box byte-identical. This is the incident fix: the
+    # owner's forgotten `s` got `slane-check:` glued onto it because the nudge
+    # was typed onto an unresolved box.
     def test_an_unresolved_wrapped_box_gets_no_keystrokes_at_all(self):
-        # Reading wrapped boxes newly ADMITS a pane holding a wrapped foreign
-        # draft. If our stash toggle is then lost, appending to it can neither
-        # be verified nor undone — so refuse while refusing is still free.
-        # Before the box was readable this shape aborted at the precondition;
-        # this restores exactly that guarantee.
         class LostStash(WrapTmux):
             def _key(self, k):
                 if k == "C-s":
@@ -570,13 +573,13 @@ class NeverTypeIntoABoxWeCouldNotUndo(unittest.TestCase):
         self.assertEqual(run.typed(), [],
                          "nothing may be typed into a box we cannot undo")
         self.assertEqual(run.submitted, [])
-        self.assertTrue(any("unresolved wrapped box" in ln for ln in logs), logs)
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
-    def test_an_unresolved_single_row_box_undoes_what_it_typed(self):
-        # The box is single-row, so the pre-content is COMPLETE and known: our
-        # payload wraps it, which no exact `pre + text` signature can match,
-        # but the box provably ends with our text, so the undo is sound and is
-        # verified byte-for-byte afterwards.
+    def test_an_unresolved_single_row_box_gets_no_keystrokes_at_all(self):
+        # #852 A — a SINGLE-ROW unresolved box (the incident shape: the box
+        # still shows the human's forgotten char our C-s did not park) is ALSO
+        # never typed into. This is the direct RED repro: current code TYPES
+        # here (then tries to undo the append); A aborts before typing.
         class LostStash(WrapTmux):
             def _key(self, k):
                 if k == "C-s":
@@ -591,12 +594,15 @@ class NeverTypeIntoABoxWeCouldNotUndo(unittest.TestCase):
         self.assertEqual(run.buf, USER_DRAFT,
                          "our payload was left glued to the user's draft: %r"
                          % run.buf[:90])
+        self.assertEqual(run.typed(), [],
+                         "nothing may be typed into an unresolved box")
         self.assertEqual(run.submitted, [])
-        self.assertTrue(any("append-undone" in ln for ln in logs), logs)
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
     def test_a_truncated_type_onto_a_draft_sends_no_backspaces(self):
-        # The box does NOT end with our text, so we cannot prove which
-        # characters are ours. Protecting the possible draft wins over tidying.
+        # A — even a would-be-truncated type never begins: the box is
+        # unresolved, so it aborts before typing, sends no backspaces, and
+        # leaves the human's draft exactly as found.
         class LostStash(WrapTmux):
             def _key(self, k):
                 if k == "C-s":
@@ -608,11 +614,13 @@ class NeverTypeIntoABoxWeCouldNotUndo(unittest.TestCase):
         ok = wd.deliver_with_stash("%1", PAYLOAD, run, logs=logs,
                                    sleep_fn=_nosleep)
         self.assertFalse(ok, logs)
+        self.assertEqual(run.typed(), [],
+                         "an unresolved box is never typed into: %r" % run.sent)
         self.assertNotIn("BSpace", [a[-1] for a in run.sent if a],
                          "must not backspace an unproven buffer: %r" % run.sent)
-        self.assertTrue(run.buf.startswith(USER_DRAFT),
-                        "the user's draft must still be there: %r" % run.buf[:60])
-        self.assertTrue(any("append-unprovable" in ln for ln in logs), logs)
+        self.assertEqual(run.buf, USER_DRAFT,
+                         "the user's draft must still be there: %r" % run.buf[:60])
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
