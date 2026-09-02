@@ -39,16 +39,18 @@ one), and one-off numbered lint/ruff/mcp venvs (``~/.venvs/*-<pid>`` +
 stance is thus DELIBERATELY narrowed by #854 to these bounded cache-class cases;
 each drain logs ``disk-guard: NN% -> drain rung=<name> freed=<bytes> -> MM%``.
 
-PERMISSION NOTE (#854 review 🟡): the drain still runs per-USER (``euid==0``
-refuses the whole ladder — the root/system leg is #841). The box-level rungs are
-therefore BEST-EFFORT: ``~/.cache``/stale-Claude-versions/one-off-venvs/scratch/
-worktree are own-home and always effective; docker works when the invoking user
-is in the ``docker`` group; but the ROOT-owned paths (apt cache, ``/var/log``,
-another user's ``/home/gh-runner``) will ``PermissionError``/``CalledProcessError``
-for an unprivileged user — the executor FAIL-LOGS them (fail-safe, no data loss)
-and they reclaim ~0 where the user lacks permission. They are effective only on a
-box where the invoking user can reach those paths (e.g. via sudo / group
-membership); where it cannot, the #841 root-ssh leg is the reclaim path for them.
+PERMISSION NOTE (#854): the drain still runs per-USER (``euid==0`` refuses the
+whole ladder). The ROOT-owned cache classes (:data:`SUDO_CLASSES` — apt cache,
+rotated ``/var/log``, another user's ``/home/gh-runner`` ``_update``/``_temp``/
+checkouts) delete through ``sudo -n`` when NOPASSWD sudo is present (probed ONCE
+per drain via ``sudo -n true``) — gk ``gatekeeper`` and dev1/dev2 ``newlevel``
+all have it, so these rungs are FULLY effective there (the live gk reclaim was
+exactly ``btmp.1`` 449 M + ``auth``/``syslog`` ``.1`` 242 M + runner ``_update``
+678 M). Where NOPASSWD sudo is ABSENT they fall back to the unprivileged attempt
+and FAIL-safe-LOG (no data loss, no retry, never interactive) — best-effort, and
+the #841 root-ssh leg remains the reclaim path there. Own-home classes
+(``~/.cache``/stale-Claude-versions/one-off-venvs/scratch/worktree) and docker
+(docker-group) never need sudo and are always effective.
 
 stdlib-only at module level; every reuse of a ``cli_*`` discovery function and
 of ``watchdog.reaper`` is a DEFERRED import inside the function that needs it,
@@ -92,6 +94,12 @@ RECLAIMABLE_CLASSES = frozenset({
     "apt-cache", "rotated-log", "runner-update", "docker-image",
     "runner-checkout", "user-cache", "claude-version", "oneoff-venv",
 })
+
+# #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
+# NOPASSWD sudo is available (gk `gatekeeper`, dev1/dev2 `newlevel` all have it),
+# else the unprivileged attempt (fail-safe, no retry). docker (docker-group) and
+# own-home classes never need sudo, so are deliberately ABSENT here.
+SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-checkout"})
 
 DISK_GUARD_DIRNAME = "disk-guard"
 STATUS_CACHE_NAME = "status.json"
@@ -1042,11 +1050,15 @@ def _default_planners(home, now):
 # --------------------------------------------------------------------------- #
 # action execution
 # --------------------------------------------------------------------------- #
-def _rm_path(path):
+def _rm_path(path, sudo=False, run_fn=None):
     """Delete a file or directory, never crossing a filesystem
     (``--one-file-system``). TOCTOU re-verify (review 🟡): re-lstat immediately
     and REFUSE a path that has become a symlink since discovery (never delete
-    THROUGH a symlink). Raises on failure (the caller logs it)."""
+    THROUGH a symlink). When ``sudo`` (a root-owned cache class + NOPASSWD sudo
+    present, #854) the delete goes through ``sudo -n rm`` for BOTH files and dirs
+    (an unprivileged ``os.unlink`` cannot remove a root-owned file). Raises on
+    failure (the caller logs it)."""
+    run_fn = run_fn or subprocess.run
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -1054,9 +1066,13 @@ def _rm_path(path):
     import stat as _stat
     if _stat.S_ISLNK(st.st_mode):
         raise OSError("refusing to delete %s — it is now a symlink (TOCTOU)" % path)
-    if os.path.isdir(path):
-        subprocess.run(["rm", "-rf", "--one-file-system", "--", path],
-                       check=True, capture_output=True, text=True, timeout=300)
+    if sudo:
+        # RED (#854 sudo seam): prefix not yet applied — GREEN commit adds `sudo -n`.
+        run_fn(["rm", "-rf", "--one-file-system", "--", path],
+               check=True, capture_output=True, text=True, timeout=300)
+    elif os.path.isdir(path):
+        run_fn(["rm", "-rf", "--one-file-system", "--", path],
+               check=True, capture_output=True, text=True, timeout=300)
     else:
         os.unlink(path)
 
@@ -1094,10 +1110,30 @@ def _worktree_status_clean_recheck(path):
     return r.stdout.strip() == ""
 
 
-def _perform_action(a):
+def _sudo_available(probe_fn=None):
+    """True iff ``sudo -n true`` succeeds (NOPASSWD sudo present — gk `gatekeeper`,
+    dev1/dev2 `newlevel`). Probed ONCE per drain and cached by the caller. Any
+    error/timeout → False (fall back to the unprivileged attempt); NEVER
+    interactive (`-n`), NEVER a retry."""
+    if probe_fn is None:
+        def probe_fn():
+            return subprocess.run(["sudo", "-n", "true"],
+                                  capture_output=True, text=True, timeout=10).returncode == 0
+    try:
+        return bool(probe_fn())
+    except Exception as e:
+        _dbg("sudo -n probe failed: %r" % e)
+        return False
+
+
+def _perform_action(a, sudo_ok=False, run_fn=None):
+    run_fn = run_fn or subprocess.run
     kind = a.get("kind")
     path = a.get("path")
     nbytes = a.get("bytes", 0) or 0
+    # #854: a ROOT-owned cache class deletes via `sudo -n` when NOPASSWD sudo is
+    # present; own-home/docker classes never get the prefix.
+    use_sudo = bool(sudo_ok) and a.get("cls") in SUDO_CLASSES
     if kind == "gzip":
         from cli_scratch_sweep import _compress_transcript_file
         res = _compress_transcript_file(path)
@@ -1114,25 +1150,25 @@ def _perform_action(a):
         subprocess.run(["journalctl", "--user", "--vacuum-size=100M"],
                        check=True, capture_output=True, text=True, timeout=60)
         return nbytes
-    if kind == "apt-clean":                 # #854 rung (a) — `apt-get clean` (best-effort)
-        subprocess.run(["apt-get", "clean"],
-                       check=True, capture_output=True, text=True, timeout=120)
+    if kind == "apt-clean":                 # #854 rung (a) — `apt-get clean`
+        cmd = ["apt-get", "clean"]          # RED: no sudo prefix yet — GREEN adds it
+        run_fn(cmd, check=True, capture_output=True, text=True, timeout=120)
         return nbytes
-    if kind == "docker-rmi":                # #854 rung (d) — `path` is the image id
-        subprocess.run(["docker", "rmi", path],
-                       check=True, capture_output=True, text=True, timeout=120)
+    if kind == "docker-rmi":                # #854 rung (d) — `path` is the image id (docker group, no sudo)
+        run_fn(["docker", "rmi", path],
+               check=True, capture_output=True, text=True, timeout=120)
         return nbytes
     if kind == "delete":
-        _rm_path(path)
+        _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes
     return 0
 
 
-def _make_do_action(dry_run):
+def _make_do_action(dry_run, sudo_ok=False, run_fn=None):
     def _do(a):
         if dry_run:
             return a.get("bytes", 0) or 0
-        return _perform_action(a)
+        return _perform_action(a, sudo_ok=sudo_ok, run_fn=run_fn)
     return _do
 
 
@@ -1374,7 +1410,7 @@ def _release_lock(fd):
 # --------------------------------------------------------------------------- #
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
-                   planners_fn=None):
+                   planners_fn=None, sudo_probe_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -1436,7 +1472,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
                                mounts=mounts, now=now)["worst_pct"]
 
-        do_action = _make_do_action(dry_run)
+        # #854: probe NOPASSWD sudo ONCE per drain — the root-owned rungs
+        # (apt/rotated-log/runner-*) delete via `sudo -n` where it exists, else
+        # the unprivileged attempt. Never probed in a dry-run (deletes nothing).
+        sudo_ok = _sudo_available(sudo_probe_fn) if not dry_run else False
+        do_action = _make_do_action(dry_run, sudo_ok=sudo_ok, run_fn=None)
         logs += execute_drain(status, home, planners, recheck, do_action,
                               geteuid_fn=geteuid_fn, log_path=_log_path(home),
                               now=now, dry_run=dry_run)

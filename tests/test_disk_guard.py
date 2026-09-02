@@ -864,6 +864,67 @@ def test_claude_versions_keep_running_delete_rest_failsafe(tmp_path):
     assert rows_fs and all(r["kind"] == "skip" for r in rows_fs)
 
 
+def test_root_owned_rung_deletes_via_sudo_when_available():
+    # #854: a ROOT-owned cache class (apt-cache / rotated-log / runner-*) deletes
+    # via `sudo -n` when NOPASSWD sudo is present. Assert the executor prefixes it.
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    # apt-clean → `sudo -n apt-get clean`
+    dg._perform_action({"cls": "apt-cache", "kind": "apt-clean", "path": "apt-get clean",
+                        "bytes": 100}, sudo_ok=True, run_fn=fake_run)
+    assert calls[-1] == ["sudo", "-n", "apt-get", "clean"]
+
+
+def test_root_owned_delete_via_sudo_rm(tmp_path):
+    # a rotated-log delete of a root-owned file → `sudo -n rm -rf --one-file-system`
+    f = tmp_path / "btmp.1"
+    f.write_bytes(b"x" * 10)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    dg._perform_action({"cls": "rotated-log", "kind": "delete", "path": str(f),
+                        "bytes": 10}, sudo_ok=True, run_fn=fake_run)
+    assert calls[-1][:4] == ["sudo", "-n", "rm", "-rf"]
+    assert str(f) in calls[-1]
+
+
+def test_no_sudo_prefix_when_unavailable_or_own_home(tmp_path):
+    # sudo_ok False → NO prefix (unprivileged fall-back). And an OWN-HOME class
+    # (user-cache) never gets sudo even when sudo_ok is True.
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    # root class, sudo NOT available → bare apt-get clean
+    dg._perform_action({"cls": "apt-cache", "kind": "apt-clean", "path": "apt-get clean",
+                        "bytes": 1}, sudo_ok=False, run_fn=fake_run)
+    assert calls[-1] == ["apt-get", "clean"]
+    # own-home class, sudo AVAILABLE → still no sudo (docker/own-home never sudo)
+    d = tmp_path / "cachedir"
+    d.mkdir()
+    dg._perform_action({"cls": "user-cache", "kind": "delete", "path": str(d),
+                        "bytes": 1}, sudo_ok=True, run_fn=fake_run)
+    assert calls[-1][0] != "sudo"          # a bare `rm`, no sudo prefix
+
+
+def test_sudo_available_probe_failsafe():
+    # `sudo -n true` succeeds → True; failure/exception → False (fall back, never raise).
+    assert dg._sudo_available(probe_fn=lambda: True) is True
+    assert dg._sudo_available(probe_fn=lambda: False) is False
+    def _boom():
+        raise OSError("no sudo")
+    assert dg._sudo_available(probe_fn=_boom) is False
+
+
 def test_norm_action_kept_row_executes_as_skip_never_deleted(tmp_path):
     # #854 review 🟡: the LOAD-BEARING data-loss guard — a `reason`-set (KEPT)
     # #854 discovery row must execute as a SKIP through _norm_action → the ladder,
