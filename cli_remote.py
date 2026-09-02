@@ -838,6 +838,30 @@ def unregistered_home_accounts(host, home_listing):
     return sorted(names - registered - {"lost+found"})
 
 
+def _report_paused_hosts(all_hosts):
+    """#851: print one `SKIPPED (paused): <name> — <reason>` line per paused
+    REMOTE_HOSTS entry (before any ssh in the run) and return the paused
+    list, for `_deploy_to_all_remotes()`'s own "N deployed, M paused, K
+    failed" summary. Extracted so that summary/report logic stays a small,
+    separately-readable unit rather than growing the deploy loop further."""
+    import cli_fleet  # #851: is_paused/paused_reason -- deferred (L-E)
+    paused_entries = [h for h in all_hosts if cli_fleet.is_paused(h)]
+    for h in paused_entries:
+        print(f"\n{'=' * 50}")
+        print(f"SKIPPED (paused): {h['name']} — {cli_fleet.paused_reason(h)}")
+    return paused_entries
+
+
+def _print_deploy_summary(deployable_list, paused_entries, distinct_failed):
+    """#851: the deploy loop's own `<N> deployed, <M> paused, <K> failed`
+    line -- paused is its own bucket (never subtracted from "deployed" as a
+    failure; `deployable_list` already excludes pending+paused, so this is
+    exactly "how many of the hosts actually attempted succeeded")."""
+    n_deployed = len(deployable_list) - len(distinct_failed)
+    print(f"\n{n_deployed} deployed, {len(paused_entries)} paused, "
+          f"{len(distinct_failed)} failed")
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -881,12 +905,7 @@ def _deploy_to_all_remotes(failed, auth_failed):
         # `_deployable_hosts()` below, which already excludes them) — a
         # paused account is skipped, never re-healed, never counted as a
         # FAILED deploy target.
-        import cli_fleet  # #851: is_paused/paused_reason -- deferred (L-E)
-        paused_entries = [h for h in airuleset.REMOTE_HOSTS
-                          if cli_fleet.is_paused(h)]
-        for h in paused_entries:
-            print(f"\n{'=' * 50}")
-            print(f"SKIPPED (paused): {h['name']} — {cli_fleet.paused_reason(h)}")
+        paused_entries = _report_paused_hosts(airuleset.REMOTE_HOSTS)
 
         # #537: iterate only LIVE targets — a `"pending": True` entry (a
         # not-yet-created base-stream rename account) is never ssh'd until the
@@ -1112,13 +1131,7 @@ def _deploy_to_all_remotes(failed, auth_failed):
         # len(failed) double-counts -- report the DISTINCT host count; the
         # full list still shows each reason.
         distinct_failed = {name for name, _reason in failed}
-        # #851: a paused entry is counted in its OWN bucket -- never in
-        # `failed`, never subtracted from the "deployed" count as a failure.
-        # `deployable_list` already excludes both pending and paused, so this
-        # is exactly "how many of the hosts we actually attempted succeeded".
-        n_deployed = len(deployable_list) - len(distinct_failed)
-        print(f"\n{n_deployed} deployed, {len(paused_entries)} paused, "
-              f"{len(distinct_failed)} failed")
+        _print_deploy_summary(deployable_list, paused_entries, distinct_failed)
 
         if failed:
             # #826: emit an UNMISTAKABLE deploy-failure summary at the END of the
