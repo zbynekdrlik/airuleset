@@ -48,10 +48,25 @@ set -euo pipefail
 #   track an in-Bash `cd` (agent threads reset cwd between calls), so it points
 #   at the worker's OWN worktree even after a `cd`. `.transcript_path` is SHARED
 #   across sibling workers (the supervisor's) — never usable to distinguish, so
-#   Rule B keys on cwd + agent_id only. A subagent WITHOUT a worktree cwd (the
-#   serial-fallback dispatch) legitimately works the shared tree — ALLOWED. The
-#   MAIN session (no agent_id — the supervisor's own integration merges) is
-#   ALLOWED. Override (rare, logged): AIRULESET_ALLOW_WORKTREE_ESCAPE=1.
+#   Rule B keys on cwd + agent_id only. A subagent WITHOUT a worktree cwd is
+#   handled by RULE B2 below (#817), NOT here: on airuleset an `autopilot-
+#   worker` whose isolation failed is blocked from mutating the shared checkout
+#   (a genuine serial-fallback dispatch sets the STANDING env override); a NON-
+#   autopilot-worker subagent (SDD implementer, cavecrew, general-purpose, fork)
+#   is untouched by B2 and works the shared tree freely. The MAIN session (no
+#   agent_id — the supervisor's own integration merges) is ALLOWED. Override
+#   (rare, logged): AIRULESET_ALLOW_WORKTREE_ESCAPE=1 as a STANDING env export
+#   (a per-command `VAR=1 …` prefix never reaches this hook's own process env).
+#
+# RULE B2 (#817) — an `autopilot-worker` whose `isolation:"worktree"` SILENTLY
+#   did not apply runs in the SHARED airuleset checkout (cwd is NOT a worktree)
+#   and can hijack HEAD during the supervisor's serial `git merge --no-ff`
+#   integration (a merge commit was LOST). RULE B is BLIND to it (it only
+#   engages on a worktree cwd). B2 blocks any git branch-state write / file-
+#   write whose resolved target is the shared checkout (CHECKOUT = this hook's
+#   own REPO_ROOT), keyed on worktree_guard.py's target RESOLUTION. Scoped to
+#   agent_type=="autopilot-worker" (the incident class) so no other subagent is
+#   false-blocked. Per-Bash escape: `# airuleset:worktree-ok <reason>`.
 #
 # Reads the tool payload on STDIN. Exit 2 = block; exit 0 = allow.
 
@@ -62,6 +77,7 @@ CMD=$(jqr '.tool_input.command // empty')
 CWD=$(jqr '.cwd // empty')
 TRP=$(jqr '.transcript_path // empty')
 AGENT_ID=$(jqr '.agent_id // empty')
+AGENT_TYPE=$(jqr '.agent_type // empty')
 
 # ======================= RULE B — worktree escape ==========================
 # Fires ONLY for a subagent (agent_id) whose session cwd is an isolated worktree.
@@ -139,6 +155,103 @@ EOF
                 printf '%s' "$CMD" | python3 "$WG" - "$MAIN" "$WT" >/dev/null 2>&1 || rc=$?
                 if [ "$rc" = "2" ]; then
                   deny_write "Bash command mutating the main checkout: $CMD"
+                fi
+              fi
+              ;;
+          esac
+        fi
+      fi
+      ;;
+    *)
+      # RULE B2 (#817) — an `autopilot-worker` whose `isolation:"worktree"`
+      # SILENTLY did not apply: agent_id present, cwd is NOT a worktree, so it
+      # runs in the SHARED airuleset checkout. RULE B above is BLIND to this (it
+      # only engages on a `*/.claude/worktrees/*` cwd), which is exactly how a
+      # worker hijacked the shared HEAD during the supervisor's `git merge
+      # --no-ff` integration and a merge commit was LOST. Block any git
+      # branch-state write / file-write whose RESOLVED target is this shared
+      # checkout. CHECKOUT = the installed hook's OWN checkout (REPO_ROOT,
+      # dirname-dirname of this script) — inherently airuleset-scoped (a worker
+      # on another repo targets a different tree → not under CHECKOUT → allowed).
+      # Keying on worktree_guard.py's target RESOLUTION (cwd + `cd`-tracking +
+      # `-C`) rather than a cwd string catches a subdir cwd AND `git -C
+      # <checkout> …` from any cwd. SCOPED to agent_type=="autopilot-worker" (the
+      # incident class): a NON-autopilot-worker subagent (SDD/cavecrew/general-
+      # purpose/fork doing sanctioned shared-tree work) is never false-blocked,
+      # and the per-command hot path only reaches the python3 spawn for a
+      # (rare) isolation-FAILED autopilot worker. The MAIN session (no agent_id)
+      # is exempt by the enclosing `if`.
+      CHECKOUT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" || CHECKOUT=""
+      if [ "$AGENT_TYPE" = "autopilot-worker" ] && [ -n "$CHECKOUT" ] && [ -n "$CWD" ]; then
+        CO=$(realpath -m -- "$CHECKOUT" 2>/dev/null) || CO="$CHECKOUT"
+        # #492: per-uid log path — a FIXED /tmp name collides across users on a
+        # shared box (first user owns it, others' append EACCES leaks to stderr).
+        B2LOG="/tmp/airuleset-worktree-escape-block-${EUID:-$(id -u)}.log"
+
+        b2_is_under() {  # is $1 under (or equal to) $2 ?
+          local p="${1%/}/" base="${2%/}/"
+          case "$p" in "$base"*) return 0 ;; *) return 1 ;; esac
+        }
+        b2_deny() {  # $1 = human description of the offending target
+          cat >&2 <<EOF
+🚫 BLOCKED: your isolation:"worktree" did NOT apply — you (autopilot-worker
+$AGENT_ID) are running in the SHARED airuleset checkout, not an isolated
+worktree. A dispatched worker must NEVER mutate the shared checkout's HEAD /
+branches / tree: it hijacks the supervisor's serial-integration merge and can
+LOSE a merge commit (#817).
+
+  shared checkout : $CO
+  refused         : $1
+
+STOP now. Your FIRST step is the isolation self-check: 'git rev-parse
+--show-toplevel' must be a .claude/worktrees/ path (NOT the bare main checkout)
+and 'git symbolic-ref --short HEAD' must NOT be main/dev (a worktree branch:
+worktree-agent-* / worktree-issue-*). If it is the shared checkout on main/dev,
+return "ISOLATION FAILED" so the supervisor re-dispatches — never work here.
+Genuine serial-fallback override: a STANDING env export
+AIRULESET_ALLOW_WORKTREE_ESCAPE=1 (a per-command VAR=1 prefix does NOT reach
+this hook), or per-Bash-command append '# airuleset:worktree-ok <reason>'.
+EOF
+          { echo "[block-foreign-airuleset-write:ruleB2] $AGENT_ID -> $1" \
+            >> "$B2LOG"; } 2>/dev/null || true
+          exit 2
+        }
+
+        # --- Write / Edit / NotebookEdit : ANY target under the shared checkout.
+        # No worktree carve-out here (#817 review): an isolation-failed worker
+        # owns NO worktree, so a write into `.claude/worktrees/*` would corrupt a
+        # SIBLING's checkout. Relative paths resolve against the worker's cwd.
+        RAW=""
+        case "$TOOL" in
+          Write|Edit)   RAW=$(jqr '.tool_input.file_path // empty') ;;
+          NotebookEdit) RAW=$(jqr '.tool_input.notebook_path // .tool_input.file_path // empty') ;;
+        esac
+        if [ -n "$RAW" ]; then
+          case "$RAW" in /*) _t="$RAW" ;; *) _t="$CWD/$RAW" ;; esac
+          ABS=$(realpath -m -- "$_t" 2>/dev/null) || ABS="$_t"
+          if b2_is_under "$ABS" "$CO"; then
+            b2_deny "$ABS"
+          fi
+        fi
+
+        # --- Bash : a git branch-state op / file-write targeting the shared
+        # checkout. worktree_guard.py --shared resolves the effective target
+        # (newline-split + cd-tracking + -C + env/wrapper prefix strip) and also
+        # covers rm/cp/mv/sed -i/tee/redirect writes.
+        if [ "$TOOL" = "Bash" ] && [ -n "$CMD" ]; then
+          STRIPPED=$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g') || STRIPPED="$CMD"
+          case "$STRIPPED" in
+            *"airuleset:worktree-ok"*)
+              { echo "[block-foreign-airuleset-write:ruleB2] bypass marker: $CMD" \
+                >> "$B2LOG"; } 2>/dev/null || true
+              ;;
+            *)
+              WG="$(dirname "${BASH_SOURCE[0]}")/worktree_guard.py"
+              if command -v python3 >/dev/null 2>&1 && [ -r "$WG" ]; then
+                rc=0
+                printf '%s' "$CMD" | python3 "$WG" --shared - "$CO" "$CWD" >/dev/null 2>&1 || rc=$?
+                if [ "$rc" = "2" ]; then
+                  b2_deny "Bash git/file op mutating the shared checkout: $CMD"
                 fi
               fi
               ;;

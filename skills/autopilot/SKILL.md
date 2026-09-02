@@ -514,7 +514,10 @@ turn overlaps a unit already claimed in this batch (nothing left to safely paral
 a worktree merge you can already see will conflict — serialize instead. A batch of size 1 (fleet
 dispatch with a single worker) and the serial fallback are behaviorally identical except for the
 `isolation:` flag; the fallback exists for the environments/situations where even THAT flag is
-unsafe to use.
+unsafe to use. **On airuleset, a serial-fallback `autopilot-worker` (cwd = the shared main checkout)
+is blocked by `block-foreign-airuleset-write.sh` RULE B2 (#817) from mutating the shared tree** —
+so a GENUINE airuleset serial-fallback dispatch must set the STANDING env `AIRULESET_ALLOW_WORKTREE_ESCAPE=1`
+on the worker (a per-command `VAR=1 …` prefix does NOT reach the hook); other repos are unaffected.
 
 **Repo-flow policy — which target a round's branches integrate into:**
 - **Local-merge repo** (pushes straight to `main`, no PR/CI — e.g. airuleset itself): the round's
@@ -929,7 +932,14 @@ gap in either.
    >    <worktree-path> log --oneline` / `git -C <worktree-path> diff <base>` — confirm the
    >    claimed commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review`
    >    results genuinely exist on that branch before trusting it enough to merge.
-   > 2. Merge each READY worker's branch **`--no-ff`** into the cycle's target — local `main` for a
+   > 2. **BEFORE each `--no-ff` merge, ASSERT the shared checkout's HEAD is still the integration
+   >    target** — `git symbolic-ref --short HEAD` MUST print exactly `main` (local-merge repo) or
+   >    `dev` (`dev`→`main` PR repo). If it names a `worktree-agent-*`/`worktree-issue-*` branch
+   >    instead, a worker whose `isolation:"worktree"` failed HIJACKED the shared HEAD (#817): do NOT
+   >    merge onto it — a merge onto a hijacked HEAD lands on the worker's branch and its later
+   >    deletion LOSES the merge commit. `git checkout main` (or `dev`) to restore HEAD and
+   >    investigate the isolation-failed lane FIRST. Then merge each READY worker's branch
+   >    **`--no-ff`** into the cycle's target — local `main` for a
    >    local-merge repo, local `dev` for a `dev`→`main` PR repo (repo-flow policy above) — ONE AT
    >    A TIME, in a fixed order (e.g. lowest issue number first). Resolve any conflict yourself; a
    >    worktree's branch is a normal ref shared via the ONE `.git`, so it merges cleanly even after
@@ -975,6 +985,30 @@ gap in either.
    > DOM>" --url "<Label=URL where the change shows>"` (never the worker's own call in this mode —
    > it never sees the final deployed state). The card header/format is unchanged (🎫/🎯/✅/📦/🔗),
    > deduped on repo-name#issue exactly as when the worker fires it itself.
+
+   > **Batch-integration ops — salvage + cleanup lessons (2026-09-01 várka).** (1) **A
+   > server-side 429 (`Server is temporarily limiting requests`, not your usage limit) can kill
+   > most lanes of a batch — worker death is NOT lost work: the worktree survives.** The instant a
+   > worker's death is confirmed, `git -C <worktree> status --porcelain`; if there are uncommitted
+   > changes, commit them as `wip: [#N] salvage … after worker died on API 429` (a WIP commit is
+   > legit — no history rewrite, `--no-ff` preserves it) and push the durability backup
+   > `git push origin <branch>:refs/autopilot-wip/<branch>` BEFORE re-dispatching. Re-dispatch a
+   > FRESH `isolation:"worktree"` worker (a NEW worktree — NEVER `cd` into the dead one, #817), its
+   > first step `git merge --no-ff <dead branch>` = takeover; the prompt carries the exact shas
+   > (bump/RED/GREEN/salvage), the design-comment id ("continue under THAT design, write no new
+   > one"), and where it stopped. A lane that died AFTER committing its review fixes AND posting
+   > its review verdicts (clean worktree, review comment on the ticket) is NOT re-dispatched — verify
+   > (status clean + comments) and merge it directly. A dead worker's in-flight review-subagent
+   > outputs survive at `/tmp/claude-*/…/tasks/<agent-id>.output` — the resume worker reads
+   > `tail -c 6000` (never the whole JSONL) and POSTS the verdicts, or the 2× Fable review is lost.
+   > (2) **A manual `/compact` (owner) drops the harness task handle of a `run_in_background`
+   > `airuleset.py push` — but the PROCESS survives.** Do NOT launch a second push (collision):
+   > `pgrep -af "airuleset.py push"`, then wait on the live PID (`while kill -0 $PID; do sleep 30;
+   > done`) + the durable read (`origin/main` sha, log tail). A double notification is harmless; a
+   > blind second push is not. (3) **Batch cleanup includes `refs/autopilot-wip/*` AND stray
+   > `worktree-agent-*`/`lane-*` branches on origin from prior rounds** (two-branch policy = only
+   > `dev`+`main`): ALWAYS `git merge-base --is-ancestor origin/<b> main` BEFORE any delete — never
+   > delete an unmerged branch (`salvage-before-discarding-work.md`).
 
    > **Release the integration mutex the instant THIS integration cycle's push has landed:**
    > `python3 ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees
