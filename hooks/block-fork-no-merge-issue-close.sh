@@ -35,6 +35,20 @@ set -euo pipefail
 # a direct result. Only `full` authority legitimately closes issues itself —
 # resolved per-stream via `airuleset.py authority` (marker-aware).
 
+# #824 review residuals (accepted; the structural fix is python segmenter #837):
+#   - A-4: `_strip_value_flags` matches a `-c`/`--comment` INSIDE a double-quoted
+#     argument (`echo "pad -c 'A"`) and its single-quote arm spans a REAL top-level
+#     close, erasing it from _CMD_STRIPPED → the count under-counts (wrong-ALLOW).
+#     Text-only it is indistinguishable from a comment that genuinely mentions the
+#     close phrase (the case the strip EXISTS for), so it needs quote-context-aware
+#     parsing — deferred to #837. Contrived-but-constructible.
+#   - `-R x/y` inside a NON-value quoted arg with BALANCED quotes
+#     (`… && echo 'foo -R x/y'`) poisons REPO_ARG. The A-2 unbalanced-quote leg (c)
+#     catches only the ESCAPED-quote residue (odd quote count), not a balanced-quote
+#     `-R` in a separate arg — also #837.
+#   - flag-first widening (correct, not a residual): the #824 value-strip makes
+#     `gh issue close --reason done 100` newly extract ISSUE_NUM=100 (the number is a
+#     real close target); pinned by test_flag_first_reason_self_close_extracts_number.
 command -v jq >/dev/null 2>&1 || exit 0
 
 INPUT=$(cat)
@@ -133,6 +147,24 @@ _cmd_has_comment_flag() {
       || grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)' <<< "$CMD"
 }
 
+# #824 A-2: does the stripped copy have an UNBALANCED quote — an ODD number of `'`
+# or `"`? The ORIGINAL $CMD always has balanced quotes (bash accepted the command),
+# so an odd count in the value-stripped copy means the strip broke on an
+# escaped-quote value (`'x'\''y'`) and left a residue. Used by
+# `_repo_flag_unparseable` leg (c) to refuse a residual `-R`. `tr`/`wc` consume ALL
+# stdin (no `grep -q` short-circuit), so no SIGPIPE can arise under pipefail; the
+# `wc -c` count is de-whitespaced + numeric-guarded so the arithmetic never aborts.
+# Called only from `_repo_flag_unparseable` (itself reached from `if`/`&&`/`!`), so
+# `set -e` is suspended for its body.
+_stripped_has_unbalanced_quote() {
+    local _sq _dq
+    _sq=$(tr -cd "'" <<< "$1" | wc -c | tr -d '[:space:]' || true)
+    _dq=$(tr -cd '"' <<< "$1" | wc -c | tr -d '[:space:]' || true)
+    case "$_sq" in ''|*[!0-9]*) _sq=0 ;; esac
+    case "$_dq" in ''|*[!0-9]*) _dq=0 ;; esac
+    [ $(( _sq % 2 )) -ne 0 ] || [ $(( _dq % 2 )) -ne 0 ]
+}
+
 # The `-R`/`--repo`-present-but-unparseable fail-safe shared by ALL FOUR carve-outs
 # (author / #773 fallback / #533 acceptance / #756 verdict) ($1 = the extracted
 # REPO_ARG). True (0) iff a -R/--repo FLAG is present in $CMD but the arg came back
@@ -192,25 +224,40 @@ _cmd_has_comment_flag() {
 # #824: reads $_CMD_STRIPPED (the ORIGINAL $CMD with `--comment`/`-c`/`--reason`/`-r`
 # VALUES removed), NOT $CMD — a `-R x/y`-looking string INSIDE a comment/reason value
 # must not read as a present-but-unparseable flag (which would over-block a legit
-# self-close whose comment merely mentions `-R`). Two legs, both fail toward BLOCK
+# self-close whose comment merely mentions `-R`). THREE legs, all fail toward BLOCK
 # (over-block is the safe direction for this fail-safe):
 #   (a) a boundary -R/--repo flag is present in the stripped copy but the
 #       STRIPPED-copy REPO_ARG came back empty (a glued `-Rowner/repo`, a
 #       quote-glued `'-Rowner/repo'`, or a backslash `\-Rowner/repo` form the
 #       `[[:space:]=]+` REPO_ARG parser cannot read) — the pre-#824 leg, now on
 #       the stripped copy;
-#   (b) the stripped copy still carries >=2 -R/--repo boundary tokens — a genuinely
-#       ambiguous command, OR the escaped-quote residue (`--comment 'it'\''s -R x'`)
-#       the value-strip cannot fully remove (its `'[^']*'` arm eats only `'it'`,
-#       leaving a space-separated `-R x` behind). A legit close carries EXACTLY one
-#       -R, so this never false-blocks one (#824 concern-4 escaped-quote closer).
+#   (b) the stripped copy carries >=2 -R/--repo boundary tokens — a genuinely
+#       ambiguous command, OR a REAL `-R` plus a second `-R` residue from an
+#       escaped-quote value. NOTE: this leg only fires when a SECOND `-R` is
+#       present, so the SINGLE-residue escaped-quote poison (no real `-R`, just the
+#       residue — `gh issue close N --comment 'it'\''s -R x/y'`) is NOT caught here
+#       (the pre-#824 comment claimed it was — that overclaim is the #824 A-2 fix);
+#   (c) #824 A-2: the stripped copy carries a residual -R/--repo AND an UNBALANCED
+#       quote (an odd count of ' or "). The ORIGINAL $CMD has balanced quotes (bash
+#       accepted it), so an odd count in the stripped copy proves the value-strip
+#       broke on an escaped-quote value and left a `-R …` residue — the residual `-R`
+#       is then suspect, so refuse. ACCEPTED over-block residual: a LEGIT self-close
+#       carrying BOTH a real `-R` AND an escaped-quote (`'x'\''y'`) comment leaves an
+#       odd quote count too → over-blocks (the worker double-quotes the comment).
+# A legit close carries EXACTLY one -R and (normally) no escaped-quote residue, so
+# these never false-block the common self-close.
 _repo_flag_unparseable() {
-    local _rf _n_r
-    _rf=$(grep -oE '(^|[\;&|[:space:]('\''"])(-R|--repo)' <<< "${_CMD_STRIPPED:-$CMD}" 2>/dev/null || true)
+    local _rf _n_r _src
+    _src="${_CMD_STRIPPED:-$CMD}"
+    _rf=$(grep -oE '(^|[\;&|[:space:]('\''"])(-R|--repo)' <<< "$_src" 2>/dev/null || true)
     _n_r=$(grep -c . <<< "$_rf" 2>/dev/null || true)
     case "$_n_r" in ''|*[!0-9]*) _n_r=0 ;; esac
-    [ "$_n_r" -ge 2 ] && return 0
-    grep -qE '(^|[\;&|[:space:]('\''"])(-R|--repo)' <<< "${_CMD_STRIPPED:-$CMD}" && [ -z "$1" ]
+    [ "$_n_r" -ge 2 ] && return 0                              # (b) >=2 -R boundary tokens
+    if grep -qE '(^|[\;&|[:space:]('\''"])(-R|--repo)' <<< "$_src"; then
+        [ -z "$1" ] && return 0                               # (a) -R present but REPO_ARG empty
+        _stripped_has_unbalanced_quote "$_src" && return 0    # (c) escaped-quote residue
+    fi
+    return 1
 }
 
 # Whole-line fixed-string label membership ($1 = newline-separated label list,
@@ -228,16 +275,40 @@ _labels_contain() {
 # close targets another repo — the #824 concern-4 wrong-ALLOW. The flag is anchored
 # at a token boundary `(^|[[:space:]])` (its leading char preserved via \1) so a
 # `-c`/`-r` inside a repo value is never mistaken for the flag; the value arm
-# `'[^']*'|"[^"]*"|[^[:space:]]+` handles single/double-quoted and unquoted values.
+# `'[^']*'|"[^"]*"|[^[:space:];&|<>()]+` handles single/double-quoted and unquoted
+# values (the unquoted arm operator-bounded per #824 A-1 above).
 # Only for EXTRACTION — DETECTION (is_close/_is_patch_close_cmd/HAS_INTERP/
 # _cmd_has_comment_flag) always runs on the ORIGINAL $CMD, since an over-eager strip
 # on a detector flips it toward wrong-ALLOW (e.g. it would eat a real `bash -c '…'`
 # nested-close payload, or delete _cmd_has_comment_flag's own target).
 # Accepted residual (confusion guard, not adversarial security): a shell escaped-quote
 # value (`--comment 'it'\''s -R x/y'`) leaves a `-R x/y` residue the single-quote arm
-# cannot span — caught instead by _repo_flag_unparseable's >=2-`-R` leg above.
+# cannot span. It is caught by _repo_flag_unparseable's UNBALANCED-QUOTE leg (#824
+# A-2): the value-strip leaves an ODD quote count in the stripped copy, and with a
+# residual `-R` present the flag is treated as unparseable → fail SAFE. (The pre-#824
+# note claimed the >=2-`-R` leg caught it; that leg only fires when a SECOND real `-R`
+# is present, so the single-residue case escaped — the honesty fix behind #824 A-2.)
 _strip_value_flags() {
-    sed -E "s/(^|[[:space:]])(--comment|--reason|-c|-r)([[:space:]]+|=)('[^']*'|\"[^\"]*\"|[^[:space:]]+)/\1/g" <<< "$1"
+    # #824 (A-1): the UNQUOTED value arm is bounded at shell OPERATORS
+    # `;&|<>()` — the pre-#824 `[^[:space:]]+` spanned them, so
+    # `--comment done&&gh issue close 999` ate `done&&gh` as ONE "value",
+    # ERASING a real top-level close from the stripped copy → N_CLOSE
+    # under-counted it → the carve-out fired on the self close and ALLOWED the
+    # whole command (a wrong-ALLOW regression). Bounding at operators keeps the
+    # trailing `&&gh …` visible so N_CLOSE sees BOTH closes and blanks
+    # ISSUE_NUM. It stops before `$(` too (via `(`), whose nested close is
+    # separately caught by the `$(` HAS_INTERP guard on the ORIGINAL $CMD (A-4/D-1).
+    # #824 (A-3): the SHORT flags -c/-r additionally strip a GLUED value
+    # (`-c'…'`, `-cVALUE`, `-c=VALUE`) — a valid pflag shorthand form the
+    # pre-#824 `([[:space:]]+|=)` separator (a space or `=` REQUIRED) missed, so a
+    # `-R x/y`-looking string inside a glued `-c` value poisoned REPO_ARG. The
+    # LONG flags keep the space/`=`-required separator (a glued `--commentX` is
+    # not a valid long-flag form). Run LONG first, so a `-c` INSIDE a stripped
+    # `--comment`/`--reason` value is gone before the short pass sees it.
+    sed -E \
+      -e "s/(^|[[:space:]])(--comment|--reason)([[:space:]]+|=)('[^']*'|\"[^\"]*\"|[^[:space:];&|<>()]+)/\1/g" \
+      -e "s/(^|[[:space:]])(-c|-r)([[:space:]]*=?[[:space:]]*)('[^']*'|\"[^\"]*\"|[^[:space:];&|<>()]+)/\1/g" \
+      <<< "$1"
 }
 
 # Reduce a -R/--repo VALUE (or, when $1 is empty, the CWD git remote URL) to a
@@ -322,7 +393,9 @@ fi
 # #824: the STRIPPED working copy for EXTRACTION/COUNTING (never for detection —
 # computed AFTER the is_close gate, so detection above ran on the original). Every
 # repo/number/count read below uses this; DETECTION keeps reading $CMD.
-_CMD_STRIPPED=$(_strip_value_flags "$CMD")
+_CMD_STRIPPED=$(_strip_value_flags "$CMD" || true)   # #824 E-1: fail SAFE — a sed
+# failure leaves _CMD_STRIPPED empty → every extraction/count reads empty → N_CLOSE=0
+# → no carve-out fires → BLOCK (never abort the hook mid-way under `set -e`).
 
 # ---------------------------------------------------------------------------
 # #627 Discuss closing-note gate — authority-INDEPENDENT, odoo-erp-scoped.
@@ -551,6 +624,17 @@ REPO_ARG=$(grep -oE "(-R|--repo)[[:space:]=]+[\"']?[A-Za-z0-9._/-]+" <<< "$_CMD_
 # HAS_INTERP (which runs on the ORIGINAL $CMD, below), not by this top-level count.
 CLOSE_HITS=$(grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' <<< "$_CMD_STRIPPED" 2>/dev/null || true)
 N_CLOSE=$(grep -c . <<< "$CLOSE_HITS" 2>/dev/null || true)
+# #824 C-1: also count top-level closes with the WIDE `_CLOSE_OPEN` boundary class
+# (which carries the `\`/quote chars the narrow N_CLOSE class deliberately omits). A
+# `\gh issue close FOREIGN` (or a `''gh …`/`"gh" …` boundary form) chained after a
+# self close is INVISIBLE to the narrow N_CLOSE + the narrow ISSUE_NUM extractor, so
+# the self carve-out `exit 0`ed and the foreign close rode through. If the WIDE count
+# differs from the NARROW count, a close hides behind a `\`/quote boundary → blank
+# ISSUE_NUM (below) → BLOCK. Runs on the SAME stripped copy as N_CLOSE, so a `\gh
+# issue close` MENTIONED inside a comment value never inflates it (it was stripped).
+CLOSE_HITS_WIDE=$(grep -oE "${_CLOSE_OPEN}gh[[:space:]]+issue[[:space:]]+close([[:space:]]|\$)" <<< "$_CMD_STRIPPED" 2>/dev/null || true)
+N_CLOSE_WIDE=$(grep -c . <<< "$CLOSE_HITS_WIDE" 2>/dev/null || true)
+case "$N_CLOSE_WIDE" in ''|*[!0-9]*) N_CLOSE_WIDE=0 ;; esac
 # #540: uses the SAME `_is_patch_close_cmd` predicate as the front gate above —
 # one definition, so the single-action guard and the detector can never drift on
 # what a PATCH-close is (incl. the #540 hidden-body `--input`/`=@file` forms).
@@ -575,7 +659,19 @@ fi
 if grep -qF '`' <<< "$CMD"; then   # #824: here-string; DETECTION on original $CMD
     HAS_INTERP=1
 fi
-if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ]; then
+# #824 D-1: `$(…)` command substitution is the SIBLING of the backtick smuggle. Pre
+# #824 the `(` in N_CLOSE's boundary class caught a `$(gh issue close X)` nested
+# close (the `(` sits immediately before `gh`); the #824 value-strip removes the
+# WHOLE `"$(…)"` comment value from _CMD_STRIPPED, so N_CLOSE no longer sees it → a
+# nested foreign close (`--comment "$(gh issue close 999)"`) rode a self carve-out.
+# Mirror the backtick guard: ANY `$(` alongside a close blanks the exemption (fail
+# toward hand-off; a legit close rarely carries a `$(` substitution). DETECTION on
+# the ORIGINAL $CMD, where the substitution is still visible.
+if grep -qF '$(' <<< "$CMD"; then
+    HAS_INTERP=1
+fi
+if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ] \
+   || [ "${N_CLOSE_WIDE:-0}" -ne "${N_CLOSE:-0}" ]; then   # #824 C-1: a `\`/quote-hidden close
     ISSUE_NUM=""   # not a single simple close — fail toward hand-off (no exemption)
 fi
 
