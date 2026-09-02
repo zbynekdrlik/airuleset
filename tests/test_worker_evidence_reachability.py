@@ -204,6 +204,7 @@ COVERAGE_TABLE = {
     "local_verify": ("self-audit", ()),
     "ready_for_review": ("supervisor-reverify", ()),
     "obsolete_handed_off": ("supervisor-reverify", ()),
+    "lane_return": ("hook", ("subagent-stop-check-lane-return.sh",)),
 }
 
 

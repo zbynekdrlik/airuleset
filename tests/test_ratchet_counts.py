@@ -7,7 +7,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest import TestCase, main, mock
+from unittest import TestCase, main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))

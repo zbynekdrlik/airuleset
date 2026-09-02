@@ -105,8 +105,9 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_branch_ahead_with_lane_return_gets_one_nudge(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)   # fresh compaction
-        fetch = lambda cwd: [("worktree-agent-abc", 700, "fix the money gate"),
-                             ("worktree-agent-def", 701, "add sms lane")]
+        def fetch(cwd):
+            return [("worktree-agent-abc", 700, "fix the money gate"),
+                    ("worktree-agent-def", 701, "add sms lane")]
         logs, tmux, state = self._run(now, tpath, fetch)
         typed = tmux.typed()
         self.assertTrue(typed, "a reconcile nudge must be typed: %r" % logs)
@@ -121,7 +122,8 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_gh_error_none_yields_no_nudge(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)
-        fetch = lambda cwd: None    # a gh/git error
+        def fetch(cwd):
+            return None    # a gh/git error
         logs, tmux, state = self._run(now, tpath, fetch)
         self.assertEqual(tmux.typed(), [],
                          "a fetch error must NOT nudge: %r" % logs)
@@ -129,7 +131,8 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_no_compaction_no_nudge(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=None)   # never compacted
-        fetch = lambda cwd: [("worktree-agent-abc", 700, "x")]
+        def fetch(cwd):
+            return [("worktree-agent-abc", 700, "x")]
         logs, tmux, state = self._run(now, tpath, fetch)
         self.assertEqual(tmux.typed(), [],
                          "no observed compaction -> no reconcile: %r" % logs)
@@ -137,7 +140,8 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_deduped_per_compaction(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)
-        fetch = lambda cwd: [("worktree-agent-abc", 700, "x")]
+        def fetch(cwd):
+            return [("worktree-agent-abc", 700, "x")]
         state = {}
         logs1, tmux1, state = self._run(now, tpath, fetch, state=state)
         self.assertTrue(tmux1.typed(), "first reconcile nudges: %r" % logs1)
@@ -149,7 +153,8 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_not_full_authority_skips(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)
-        fetch = lambda cwd: [("worktree-agent-abc", 700, "x")]
+        def fetch(cwd):
+            return [("worktree-agent-abc", 700, "x")]
         logs, tmux, state = self._run(now, tpath, fetch, authority="fork-no-merge")
         self.assertEqual(tmux.typed(), [],
                          "a reduced-authority box never reconciles lanes: %r"
@@ -158,7 +163,8 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_pending_compact_holds_the_nudge(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)
-        fetch = lambda cwd: [("worktree-agent-abc", 700, "x")]
+        def fetch(cwd):
+            return [("worktree-agent-abc", 700, "x")]
         # A NEW compact is pending for this sid -> the #741 latch HOLDS the nudge.
         wd_compact.record_compact_request(self.SID, self.CWD, now=now,
                                           path=self.creqp, origin="self-callback")
@@ -170,7 +176,8 @@ class ReconcileRider844(unittest.TestCase):
     def test_844_dry_run_types_nothing(self):
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)
-        fetch = lambda cwd: [("worktree-agent-abc", 700, "x")]
+        def fetch(cwd):
+            return [("worktree-agent-abc", 700, "x")]
         logs, tmux, state = self._run(now, tpath, fetch, dry_run=True)
         self.assertEqual(tmux.typed(), [],
                          "dry-run sends nothing: %r" % logs)

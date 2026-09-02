@@ -277,11 +277,17 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # line as u_fetch=None, so the closing `):` moved along it; the
                # anchor's last line grew, the mutation target vault_purge=None
                # is untouched.
+               # #844 re-pin: reconcile_fetch=None (the queued /compact
+               # reconcile-fetch seam) was inserted on the SAME trailing line,
+               # right before disk_guard_enabled=False — the anchor's last
+               # line grew again, the mutation target vault_purge=None is
+               # untouched.
                "             gkorphan_fetch=None, gkorphan_handoff_fetch=None,\n"
                "             release_state_fetch=None, queue_fetch=None,\n"
                "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
                "             resource_guard_gk_request=None,\n"
-               "             u_fetch=None, disk_guard_enabled=False):")
+               "             u_fetch=None, reconcile_fetch=None, "
+               "disk_guard_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

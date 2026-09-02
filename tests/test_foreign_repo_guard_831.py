@@ -25,7 +25,6 @@ helper AND the real hook.
 
 import importlib.util
 import json
-import os
 import subprocess
 from pathlib import Path
 from unittest import TestCase, main

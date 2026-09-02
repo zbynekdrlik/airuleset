@@ -6,7 +6,6 @@ absent/fresh, away when stale, threshold-tunable, 0 disables)."""
 
 import os
 import subprocess
-import tempfile
 import time
 import uuid
 from pathlib import Path

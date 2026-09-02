@@ -38,7 +38,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 from git_write_classify import (  # noqa: E402
-    GIT_WRITE as _GIT_WRITE,
+    GIT_WRITE as _GIT_WRITE,  # noqa: F401 -- re-exported: tests/test_isolation_guard_817.py reads wg._GIT_WRITE directly
     normalize_newlines as _normalize_newlines,
     strip_command_prefix as _strip_command_prefix,
     classify_git_command as _classify_git_command,
