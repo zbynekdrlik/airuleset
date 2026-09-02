@@ -168,21 +168,38 @@ def _janitor_clear_watch(state, pid):
     state.get("janitor_watch", {}).pop(pid, None)
 
 
-def _janitor_park_record(state, pid, now):
+def _janitor_park_record(state, pid, now, text=None):
     """#488 — the WRITE side of the DURABLE, park-specific provenance record.
     Called by a stash-delivery caller when `deliver_with_stash` returned
     False (an abort that may have left a park in the single slot) — records
-    `state['stash_parks'][pid] = now` in the SAME already-persisted watchdog
+    `state['stash_parks'][pid]` in the SAME already-persisted watchdog
     `state` (`~/.claude/api-watchdog-state.json`, `save_state`), so the fact
     survives a restart/deploy AND, unlike `_janitor_watch_seen`'s 6h mark,
     does NOT expire: a genuinely-ours park can sit unresolved for far longer
     than 6h (the gk goal ran `(1d)`, the exact live gap this fixes). `now`
     is stored for observability only — the reclaim gate is age-UNBOUNDED,
     never a timeout band-aid. A no-op when `state` is `None`, mirroring
-    `_janitor_mark_watch`."""
+    `_janitor_mark_watch`.
+
+    #852 — `text`, when given, is the EXACT string we typed and left in the
+    box (a leak the recovery could not remove). The record then carries it as
+    `{"ts": now, "typed": text}` so a later janitor reclaim can backspace
+    exactly `len(text)` OWN characters, preserving any stray human prefix
+    (`_janitor_park_typed` reads it). When `text` is None (the #488 case: a
+    parked FOREIGN draft whose content we do not know, reclaimed by popping the
+    stash slot) the record stays the bare float `now`, byte-identical to
+    pre-#852, so every existing consumer is unchanged."""
     if state is None:
         return
-    state.setdefault("stash_parks", {})[pid] = now
+    state.setdefault("stash_parks", {})[pid] = (
+        now if text is None else {"ts": now, "typed": text})
+
+
+def _park_record_ts(v):
+    """#852 — the timestamp of a park record in EITHER shape: the bare float
+    `now` (#488) or the `{"ts","typed"}` dict (#852). `None` for any other
+    value; the caller type-checks the result."""
+    return v.get("ts") if isinstance(v, dict) else v
 
 
 def _janitor_park_seen(state, pid):
@@ -192,9 +209,19 @@ def _janitor_park_seen(state, pid):
     human's own parked draft is never given a record, so this is the signal
     that keeps the age-unbounded reclaim from ever acting on one. Type-
     checked like `_janitor_watch_seen` so a corrupt state entry never reads
-    as provenance; no age bound (deliberately — see `_janitor_park_record`)."""
-    ts = (state or {}).get("stash_parks", {}).get(pid)
+    as provenance; no age bound (deliberately — see `_janitor_park_record`).
+    #852 — accepts BOTH the bare-float and the `{"ts","typed"}` dict shape."""
+    ts = _park_record_ts((state or {}).get("stash_parks", {}).get(pid))
     return isinstance(ts, (int, float)) and not isinstance(ts, bool)
+
+
+def _janitor_park_typed(state, pid):
+    """#852 — the exact string a park record CARRIES (the leaked own text), or
+    None (a bare-float #488 record, a missing record, or `None` state). Used by
+    the janitor reclaim to backspace exactly the OWN part, preserving a stray
+    human prefix."""
+    v = (state or {}).get("stash_parks", {}).get(pid)
+    return v.get("typed") if isinstance(v, dict) else None
 
 
 def _janitor_clear_park(state, pid):
