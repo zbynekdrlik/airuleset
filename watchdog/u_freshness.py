@@ -305,7 +305,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     # for its quiet window. Defer WITHOUT a keystroke (last_nudge unadvanced,
     # `handled` unclaimed) so it retries a later sweep once the compact delivers.
     from watchdog import compact as _compact
-    if _compact.has_pending_request(sid):
+    if _compact.pending_compact_hold(sid, now):   # #848 bounded
         logs.append("u-freshness %s -> hold:compact-pending (pending /compact; "
                     "no nudge until it delivers)" % loc)
         return logs

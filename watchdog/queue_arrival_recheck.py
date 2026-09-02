@@ -452,7 +452,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # watchdog package-init ordering; fail-safe False on any error (writer proceeds
     # as pre-#741).
     from watchdog import compact as _compact
-    if _compact.has_pending_request(sid):
+    if _compact.pending_compact_hold(sid, now):   # #848 bounded
         logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
                     "no arrival nudge until it delivers, %d new)"
                     % (loc, len(arrivals)))

@@ -59,7 +59,11 @@ class _LatchBase(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _seed_compact(self, sid, now=1000):
+    def _seed_compact(self, sid, now=99980):
+        # #848: the riders now consult `pending_compact_hold` (bounded to a few
+        # sweeps), so a held compact must be FRESH relative to the rider's `now`
+        # (the 100000.0 riders default here; goal_sweep passes its own). A STALE
+        # seed no longer holds — locked by the stale-no-hold tests below.
         wd_compact.record_compact_request(sid, self.CWD, now=now,
                                           path=self.creqp, origin="self-callback")
 
@@ -78,7 +82,7 @@ class TestGoalSweepLatch(_LatchBase):
         proj = self._dir()
         sid = "sess-sweep-hold"
         _write_marker_transcript(proj, self.CWD, sid)
-        self._seed_compact(sid)
+        self._seed_compact(sid, now=1980)   # fresh vs the goal_sweep now=2000
         logs, tmux = self._sweep(proj, sid)
         self.assertTrue(any("hold:compact-pending" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [], "no keystroke while a compact is pending")
@@ -92,6 +96,19 @@ class TestGoalSweepLatch(_LatchBase):
         sid = "sess-sweep-nohold"
         _write_marker_transcript(proj, self.CWD, sid)
         logs, _ = self._sweep(proj, sid)
+        self.assertFalse(any("hold:compact-pending" in ln for ln in logs), logs)
+        self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
+
+    def test_848_a_stale_pending_compact_no_longer_holds(self):
+        # #848 BOUND teeth: a compact pending for MANY sweeps (its `bts` is old
+        # relative to the rider's now) is wedged on recent-human/busy — the rider
+        # STOPS freezing and arms normally. (A revert to the unbounded
+        # `has_pending_request` re-introduces the indefinite hold and fails this.)
+        proj = self._dir()
+        sid = "sess-sweep-stale"
+        _write_marker_transcript(proj, self.CWD, sid)
+        self._seed_compact(sid, now=1000)   # ~1000s old vs the goal_sweep now=2000
+        logs, tmux = self._sweep(proj, sid)
         self.assertFalse(any("hold:compact-pending" in ln for ln in logs), logs)
         self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
 

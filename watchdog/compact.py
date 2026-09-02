@@ -278,16 +278,20 @@ def clear_compact_request(session, path=None):
 
 
 def has_pending_request(sid, path=None):
-    """#741 WRITER-SIDE LATCH: True iff `sid` has a pending `/compact` request
-    in `~/.claude/compact-requests.json`. EVERY work-pushing watchdog writer
-    (goal_sweep goal-arm delivery, the job-20 lane-occupancy nudge, goal_dark_
-    watch re-arm, goal_question_repoke_watch disarm) consults this BEFORE typing
-    into that session's pane and HOLDS (logs `hold:compact-pending`, types
-    nothing) while it returns True, so a drained-boundary compact is delivered in
-    a quiet pane before any next-batch work is pushed in — the owner's "callback
-    v pokojovom stave, pokračovanie až po compacte" model. Job 7 (a human's
-    Discord answer, `watchdog/discord_replies.py`) is the SOLE exception — it
-    delivers regardless, the human's answer wins.
+    """#741 WRITER-SIDE LATCH (raw): True iff `sid` has a pending `/compact`
+    request in `~/.claude/compact-requests.json`. #848: the work-pushing watchdog
+    riders (goal_sweep goal-arm delivery, the job-20 lane-occupancy nudge,
+    goal_dark_watch re-arm, goal_question_repoke_watch disarm, and the
+    ops-wait/queue-arrival/release-gap/u-freshness/lane-reconcile riders) no
+    longer consult THIS unbounded latch — they consult `pending_compact_hold`
+    (the same check bounded to a few sweeps), so a compact that never delivers
+    (wedged on recent-human / busy) no longer freezes them for hours. This raw
+    predicate is still used by `--status` and internal store checks. When it (or
+    its bounded sibling) returns True a rider HOLDS (logs `hold:compact-pending`,
+    types nothing) so a boundary compact is delivered in a quiet pane before more
+    work is pushed in — the owner's "callback v pokojovom stave, pokračovanie až
+    po compacte" model. Job 7 (a human's Discord answer,
+    `watchdog/discord_replies.py`) is the SOLE exception — it delivers regardless.
 
     Fail-safe: a blank sid, a missing/unreadable file, or any error → False
     (never raises, via `load_compact_requests`), so a latch read that cannot see
@@ -301,6 +305,43 @@ def has_pending_request(sid, path=None):
     if not sid:
         return False
     return isinstance(load_compact_requests(path).get(sid), dict)
+
+
+# The nominal watchdog sweep cadence (seconds). `pending_compact_hold`'s bound is
+# expressed in sweeps so it self-scales with the timer; the constant just names
+# the ~60s cadence the systemd `--user` timer runs at.
+COMPACT_SWEEP_INTERVAL_S = 60
+COMPACT_PENDING_HOLD_SWEEPS = 2   # #848: bound the rider hold to this many sweeps
+
+
+def pending_compact_hold(sid, now=None, sweeps=None, path=None):
+    """#848 BOUNDED writer-side latch: True iff `sid` has a pending `/compact`
+    request AND that request is YOUNGER than `sweeps` sweep intervals (measured
+    from its `bts`, fallback `ts`). Every work-pushing watchdog rider that used
+    `has_pending_request` as its `hold:compact-pending` gate now uses THIS, so the
+    hold is bounded: with the #848 veto removed a boundary compact delivers within
+    ~1 sweep, so a request still pending after `sweeps` sweeps is wedged on
+    recent-human / busy (whose own keystroke gates already protect the pane) — the
+    rider stops freezing and retries. The in-sweep `compact_sweep(handled=...)` set
+    still prevents a same-sweep keystroke collision, independent of this bound.
+
+    Fail-OPEN (never a hold) on: a blank sid, no pending request, a corrupt/non-dict
+    entry, or an unreadable/malformed age anchor — the pre-#741 behaviour, so a
+    read that cannot see the store never wedges a writer."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    entry = load_compact_requests(path).get(sid)
+    if not isinstance(entry, dict):
+        return False
+    anchor = entry.get("bts", entry.get("ts"))
+    now = time.time() if now is None else now
+    age = _safe_age(now, anchor)
+    if age is None:
+        return False   # unmeasurable anchor -> fail-open (no hold)
+    if sweeps is None:
+        sweeps = COMPACT_PENDING_HOLD_SWEEPS
+    return age < sweeps * COMPACT_SWEEP_INTERVAL_S
 
 
 def _touch_compact_request_ts(sid, now, path=None):

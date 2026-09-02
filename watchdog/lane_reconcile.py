@@ -190,7 +190,7 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
     # dedup anchor, so it retries once the compact delivers. Lazy import (goal.py
     # convention); fail-safe False on any error.
     from watchdog import compact as _compact
-    if _compact.has_pending_request(sid):
+    if _compact.pending_compact_hold(sid, now):   # #848 bounded
         logs.append("lane-reconcile %s -> hold:compact-pending "
                     "(a new /compact is pending; reconcile after it delivers)"
                     % loc)
