@@ -4466,6 +4466,88 @@ def _watchdog_u_fetch(cwd):
     return user_waiting, ts
 
 
+def _watchdog_reconcile_fetch(cwd):
+    """#844 — the RETURNED worktree lanes for the repo at `cwd`: a list of
+    `(branch, issue_num, title)` for `worktree-agent-*` branches that are (a)
+    ahead of the integration branch AND (b) carry a `LANE-RETURN:` comment on
+    their ticket, or None on ANY error/refusal (the #844 rider fails safe to NO
+    nudge; the doctrine `git worktree list` net covers a crashed lane with no
+    comment). FULL-authority ONLY — only a gk/full box integrates worktree lanes.
+    Wired HERE (like every other network seam) so run_once's unit tests stay
+    network-free (`reconcile_fetch` None disables the rider there)."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        if resolve_authority(cwd=root) != "full":
+            return None
+        slug = None
+        r = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            slug = _parse_origin_slug(r.stdout.strip())
+        if not slug:
+            return None
+        # Integration branch: origin/HEAD's target (origin/main | origin/develop),
+        # falling back to main. Any failure -> None (never guess wrong).
+        integ = "main"
+        r = subprocess.run(
+            ["git", "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
+            integ = r.stdout.strip().split("/", 1)[1]
+        r = subprocess.run(
+            ["git", "-C", root, "for-each-ref", "--format=%(refname:short)",
+             "refs/heads/worktree-agent-*"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None
+        branches = [b for b in r.stdout.splitlines() if b.strip()][:20]
+        out = []
+        for br in branches:
+            # Ahead of integration?
+            rc = subprocess.run(
+                ["git", "-C", root, "rev-list", "--count", "%s..%s" % (integ, br)],
+                capture_output=True, text=True, timeout=10)
+            if rc.returncode != 0:
+                return None
+            try:
+                if int(rc.stdout.strip() or "0") <= 0:
+                    continue
+            except ValueError:
+                continue
+            # Issue number from the branch's commit messages ([#N] tags).
+            rl = subprocess.run(
+                ["git", "-C", root, "log", "%s..%s" % (integ, br),
+                 "--format=%s%n%b", "-n", "50"],
+                capture_output=True, text=True, timeout=10)
+            if rl.returncode != 0:
+                return None
+            mm = re.search(r"#(\d+)", rl.stdout or "")
+            if not mm:
+                continue
+            num = int(mm.group(1))
+            # A LANE-RETURN comment on the ticket qualifies it.
+            rc2 = subprocess.run(
+                ["gh", "issue", "view", str(num), "-R", slug,
+                 "--json", "title,comments"],
+                capture_output=True, text=True, timeout=20)
+            if rc2.returncode != 0:
+                return None
+            try:
+                data = json.loads(rc2.stdout or "{}")
+            except (ValueError, TypeError):
+                return None
+            title = (data.get("title") or "")[:80]
+            bodies = " ".join(
+                (c.get("body") or "") for c in (data.get("comments") or [])
+                if isinstance(c, dict))
+            if "LANE-RETURN:" in bodies:
+                out.append((br, num, title))
+        return out
+    except Exception:
+        return None
+
+
 def _parse_origin_slug(url):
     """owner/name from a git remote URL, or None. Pure + testable (#616). Handles
     the https form (`https://github.com/owner/name[.git]`), the scp form
@@ -4970,6 +5052,13 @@ def cmd_watchdog(args):
                     # rider self-heals a stale cache and is per-session floored at
                     # 1x/hour by the shared nudge_gate.
                     u_fetch=_watchdog_u_fetch,
+                    # #844 — job 20's post-compact lane reconcile rider reads the
+                    # returned worktree lanes (branches ahead of integration with
+                    # a LANE-RETURN comment) per repo, but ONLY when a compaction
+                    # is actually OBSERVED in the transcript, so the git/gh work
+                    # fires at most once per observed compaction, never every
+                    # sweep. FULL-authority only; the rider self-gates authority.
+                    reconcile_fetch=_watchdog_reconcile_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.

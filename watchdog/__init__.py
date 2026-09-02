@@ -2036,7 +2036,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              release_state_fetch=None, queue_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
-             u_fetch=None, disk_guard_enabled=False):
+             u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False):
     """Scan every `claude` pane once. 40 numbered jobs per poll — 34 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2300,8 +2300,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           label + question-map entry that is no longer a live owner question
           (so the footer `U`, the owner's ONLY question surface since #795,
           stays truthful) — NEVER an owner ping, and hard-floored at 1×/hour
-          per session by the shared cadence gate. All five riders (lane /
-          ops-wait / release-gap / queue-arrival / u-freshness) now consult that
+          per session by the shared cadence gate. And, when `reconcile_fetch` is
+          wired, the #844 POST-COMPACT LANE RECONCILE rider
+          (`lane_reconcile.goal_lane_reconcile_recheck`) — keyed on the
+          transcript's OBSERVED compaction (newest `isCompactSummary` epoch, ZERO
+          gh unless a compaction is observed), FULL-authority only, it keystrokes
+          the armed session to integrate returned worktree lanes from durable
+          state (the branch + its LANE-RETURN comment) after the #844 forced
+          compact may have lost a lane-completion notification — NEVER an owner
+          ping, deduped one attempt per observed compaction. All six riders (lane
+          / ops-wait / release-gap / queue-arrival / u-freshness / lane-reconcile)
+          now consult that
           SHARED `nudge_gate` (`state["nudge_cadence"]`, #797): a per-category
           floor (only u-freshness's 1×/hour strop is non-zero) plus a
           cross-category family-spacing floor that DEFERS a second category's
@@ -4215,7 +4224,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
             release_state_fetch=release_state_fetch,     # #616
             queue_fetch=queue_fetch,                     # #733
-            u_fetch=u_fetch)                             # #797
+            u_fetch=u_fetch,                             # #797
+            reconcile_fetch=reconcile_fetch)             # #844
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 
