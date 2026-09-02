@@ -1067,8 +1067,7 @@ def _rm_path(path, sudo=False, run_fn=None):
     if _stat.S_ISLNK(st.st_mode):
         raise OSError("refusing to delete %s — it is now a symlink (TOCTOU)" % path)
     if sudo:
-        # RED (#854 sudo seam): prefix not yet applied — GREEN commit adds `sudo -n`.
-        run_fn(["rm", "-rf", "--one-file-system", "--", path],
+        run_fn(["sudo", "-n", "rm", "-rf", "--one-file-system", "--", path],
                check=True, capture_output=True, text=True, timeout=300)
     elif os.path.isdir(path):
         run_fn(["rm", "-rf", "--one-file-system", "--", path],
@@ -1151,7 +1150,7 @@ def _perform_action(a, sudo_ok=False, run_fn=None):
                        check=True, capture_output=True, text=True, timeout=60)
         return nbytes
     if kind == "apt-clean":                 # #854 rung (a) — `apt-get clean`
-        cmd = ["apt-get", "clean"]          # RED: no sudo prefix yet — GREEN adds it
+        cmd = (["sudo", "-n"] if use_sudo else []) + ["apt-get", "clean"]
         run_fn(cmd, check=True, capture_output=True, text=True, timeout=120)
         return nbytes
     if kind == "docker-rmi":                # #854 rung (d) — `path` is the image id (docker group, no sudo)
