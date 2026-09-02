@@ -2686,17 +2686,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           or a finite ceiling → NOTHING; `dry_run` files nothing. Machine
           channel only, never a Discord ping (#546). See `resource_guard_verify`
           in `watchdog/resource_guard.py`.
-      (40) PER-BOX DISK-PRESSURE GUARD (#834), gated on `disk_guard_enabled`
-          (cmd_watchdog passes True → runs every real poll). Reads `statvfs`
-          every poll, writes the `disk NN%` footer cache, and at >= 80 % runs a
-          per-USER auto-drain ladder over THIS user's OWN home (scratch,
-          fork-no-merge worktree DIRECTORIES whose HEAD is reachable from an
-          origin ref, CLI versions, uploads > 14 d, transcripts > 7 d gzip,
-          shared-stream toolchain dirs), fail-LOUD (every action + skip logged
-          to `disk-guard.log`), never deleting on uncertainty, never crossing a
-          filesystem, never as root (the root/system leg is #841). >= 90 %
-          after the drain → machine-channel escalation, box-wide deduped
-          once/day. `watchdog/disk_guard.py`'s docstring is the SSOT.
+      (40) PER-BOX DISK-PRESSURE GUARD (#834, hardened #854), gated on
+          `disk_guard_enabled` (cmd_watchdog passes True → runs every real
+          poll). Reads `statvfs` every poll, writes the `disk NN%` footer cache
+          (footer shown only >= 90 %, #854), and at >= 80 % runs an auto-drain
+          ladder — CADENCE-GATED (once/10 min) in the 80-95 % band, but at
+          CRITICAL pressure (>= 95 %, #854) it drains EVERY poll (severity beats
+          cadence; a guard that only logs at 97 % is the bug #854 fixes). The
+          cache-class ladder (each rung a pure dry-run-able selector logging
+          `disk-guard: NN% → drain rung=<name> freed=<b> → MM%`): apt cache,
+          rotated `/var/log/*.1|*.gz`, gh-runner `_work/_update|_temp` + stale
+          `_work/<repo>` checkouts, docker images (0-containers AND untagged OR
+          > 14 d — Runner.Worker-gated, never a tagged in-use image, never
+          `docker system prune`), stale Claude self-update binaries (except the
+          running one), one-off numbered venvs > 2 d, per-user `~/.cache` > 30 d,
+          own-home scratch/uploads/CLI-versions/worktrees/toolchain, transcripts
+          > 7 d gzip (LAST). Fail-LOUD (every action + skip logged to
+          `disk-guard.log`), never deleting on uncertainty, never crossing a
+          filesystem, never as root (the root/system leg is #841). >= 90 % after
+          the drain → machine-channel escalation, box-wide deduped once/day.
+          `watchdog/disk_guard.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
