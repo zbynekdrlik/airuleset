@@ -5239,6 +5239,7 @@ from cli_fleet import (  # noqa: E402, F401
     AUTHORITY_BY_USER as AUTHORITY_BY_USER,
     FULL_AUTHORITY_USERS as FULL_AUTHORITY_USERS,
     _is_github_ci_runner as _is_github_ci_runner,
+    _github_ci_runner_source as _github_ci_runner_source,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
     SHARED_STREAM_GUARD_HOSTS as SHARED_STREAM_GUARD_HOSTS,
 )

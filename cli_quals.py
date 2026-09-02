@@ -1534,7 +1534,8 @@ def _authority_decision(cwd=None):
     """The authority resolution WITH its provenance, from ONE decision point:
     `(profile, source, raw_marker)`, where `source` is one of
     'project CLAUDE.md marker' | 'per-user map' | 'ci-runner (GitHub-hosted)' |
-    'full-authority account' | 'default (unmapped)'.
+    'ci-runner (GitHub-hosted, container)' | 'full-authority account' |
+    'default (unmapped)'.
     `resolve_authority` (the hot path) and `cmd_authority --explain` (the #486
     decision log) both derive from this single function, so the printed log can
     never desync from the resolved profile, and it distinguishes the reduced-stream
@@ -1559,16 +1560,18 @@ def _authority_decision(cwd=None):
     user = airuleset._current_user()
     if user in airuleset.AUTHORITY_BY_USER:
         return airuleset.AUTHORITY_BY_USER[user], "per-user map", raw
-    # airuleset#839: the GitHub-HOSTED CI runner (unspoofable pw_name `runner` +
-    # GITHUB_ACTIONS=true + RUNNER_ENVIRONMENT=github-hosted) is a legitimate
-    # full-authority context for THIS repo's OWN CI — it is in neither registry,
-    # so #827's fail-safe would leave it `fork-no-merge` and break ~28 FULL-
-    # authority-gated tests. Placed AFTER the map so a mapped stream can never be
-    # elevated (defense-in-depth; no stream's pw_name is ever `runner`) and BEFORE
-    # the full allow-list. `user` is the hardened `_current_user()` pw_name, so
-    # the whole conjunction is un-spoofable.
-    if airuleset._is_github_ci_runner(user):
-        return "full", "ci-runner (GitHub-hosted)", raw
+    # airuleset#839: the GitHub-HOSTED CI runner (unspoofable pw_name `runner`
+    # OR uid 0 in a container job, AND GITHUB_ACTIONS=true AND
+    # RUNNER_ENVIRONMENT=github-hosted) is a legitimate full-authority context
+    # for THIS repo's OWN CI — it is in neither registry, so #827's fail-safe
+    # would leave it `fork-no-merge` and break ~33 FULL-authority-gated tests.
+    # Placed AFTER the map so a mapped stream can never be elevated
+    # (defense-in-depth; no stream is ever `runner`/uid-0) and BEFORE the full
+    # allow-list. `user` is the hardened `_current_user()` pw_name, so the whole
+    # conjunction is un-spoofable. The source names the CONTAINER arm distinctly.
+    ci_src = airuleset._github_ci_runner_source(user)
+    if ci_src is not None:
+        return "full", ci_src, raw
     if user in airuleset.FULL_AUTHORITY_USERS:
         return "full", "full-authority account", raw
     return "fork-no-merge", "default (unmapped)", raw

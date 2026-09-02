@@ -458,54 +458,100 @@ AUTHORITY_BY_USER = {
 # CLAUDE.md `<!-- airuleset:authority=full -->` marker ELEVATES an unmapped user
 # to `full` (checked FIRST in `_authority_decision`) — pre-existing owner-
 # sanctioned trusted-file design, tracked for an owner decision as #828; (2) the
-# GITHUB-HOSTED CI runner (`_is_github_ci_runner`: unix `runner` + GITHUB_ACTIONS
-# + RUNNER_ENVIRONMENT=github-hosted, airuleset#839) — a legitimate full context
-# for THIS repo's own CI, un-spoofable by a stream (uid-derived pw_name; no fleet
-# box has a `runner` account) and gated off a self-hosted runner. Everything ELSE
-# in neither registry still fails SAFE to `fork-no-merge`.
+# GITHUB-HOSTED CI runner (`_is_github_ci_runner`: unix `runner` OR uid 0 — a
+# container job — AND GITHUB_ACTIONS AND RUNNER_ENVIRONMENT=github-hosted,
+# airuleset#839) — a legitimate full context for THIS repo's own CI, un-spoofable
+# by a stream (uid-derived pw_name; a stream can never be uid 0; no fleet box has
+# a `runner` account) and gated off a self-hosted runner. Everything ELSE in
+# neither registry still fails SAFE to `fork-no-merge`.
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 
 
-def _is_github_ci_runner(user) -> bool:
-    """True when THIS process is the GITHUB-HOSTED CI runner for airuleset's own
-    CI — the UNSPOOFABLE unix account `runner`, `GITHUB_ACTIONS=true`, AND
-    `RUNNER_ENVIRONMENT=github-hosted`, all three together (airuleset#839). The
-    runner is in neither authority registry, so #827's fail-safe resolves it
+def _github_ci_runner_source(user):
+    """The `--explain` `source` string IF this process is the GITHUB-HOSTED CI
+    runner for airuleset's own CI, else None (airuleset#839). Named DISTINCTLY
+    per arm so the printed decision log stays consistent with the resolved
+    profile: `ci-runner (GitHub-hosted, container)` when the uid-0 CONTAINER arm
+    matched, `ci-runner (GitHub-hosted)` for the `runner` arm.
+
+    The runner is in neither authority registry, so #827's fail-safe resolves it
     `fork-no-merge`, which broke ~28 tests that shell out to the FULL-authority-
     gated `core-quals` / `tickets-status --refresh` / run-card backlog count (all
     of which silently assumed the box was full). The hosted runner IS a
-    legitimate full-authority context for THIS repo's OWN CI: no fleet box has a
-    `runner` unix user (creating one needs root), so `pw_name` is unforgeable by
-    a stream — a stream controls its env and its repo files, NEVER its uid.
+    legitimate full-authority context for THIS repo's OWN CI.
 
-    The conjunction is load-bearing and un-spoofable in EVERY direction: `pw_name
-    == "runner"` WITHOUT `GITHUB_ACTIONS` stays reduced (an unmapped `runner` on
-    a real box — #827 preserved, constraint 4); `GITHUB_ACTIONS=true` WITHOUT
-    `pw_name == "runner"` elevates nobody (a stream setting the env var can never
-    make its uid resolve to `runner`); and `RUNNER_ENVIRONMENT == "github-hosted"`
-    is what distinguishes the GitHub-HOSTED runner from a SELF-HOSTED actions
-    runner (the runner app sets it `github-hosted`/`self-hosted`), so a
-    self-hosted runner provisioned under a `runner` unix account — the one
-    non-stream actor that could carry that pw_name (owner misconfig, needs root)
-    — is NOT elevated. Fail-safe: were GitHub ever to drop `RUNNER_ENVIRONMENT`,
-    airuleset's own CI would go visibly RED (a stream can never reach full by it),
-    never silently-full. `user` is the already-resolved `_current_user()` pw_name
-    — an env-spoofable `getpass.getuser()` would defeat the whole point, so this
-    MUST be fed the hardened identity.
+    Recognition needs BOTH hosted-CI env conjuncts (`GITHUB_ACTIONS=true` AND
+    `RUNNER_ENVIRONMENT=github-hosted`) PLUS an UNSPOOFABLE identity signal —
+    either the unix account `runner` OR uid 0 (`root`). Two identity arms because
+    the `gate` job runs its pytest step INSIDE a `container: python:3.12`, where
+    the process is uid 0 / `pw_name = root`, NEVER `runner` (attempt 1's
+    `pw_name == "runner"`-only recognition never fired on CI). Both are
+    un-spoofable by a stream: a stream can never be uid 0 (that needs root), and
+    no fleet box has a `runner` unix user (creating one needs root) — a stream
+    controls its env and its repo files, NEVER its uid. Root on a fleet box is
+    already all-powerful, so recognising it under the hosted-CI env grants
+    nothing new; and a plain root shell WITHOUT the env stays `fork-no-merge`
+    (root is in NO registry).
+
+    The conjunction is load-bearing and un-spoofable in EVERY direction: an
+    identity signal WITHOUT `GITHUB_ACTIONS`/`RUNNER_ENVIRONMENT` stays reduced (a
+    real `runner`/`root` box — #827 preserved, constraint 4); the env WITHOUT
+    `runner`/uid-0 elevates nobody (a stream setting the env vars can never make
+    its uid 0 or its pw_name `runner`); and `RUNNER_ENVIRONMENT == "github-hosted"`
+    distinguishes the GitHub-HOSTED runner from a SELF-HOSTED actions runner (the
+    runner app sets it `github-hosted`/`self-hosted`), so a self-hosted runner
+    provisioned under a `runner` unix account — the one non-stream actor that
+    could carry that pw_name (owner misconfig, needs root) — is NOT elevated.
+    Fail-safe: were GitHub ever to drop `RUNNER_ENVIRONMENT`, airuleset's own CI
+    would go visibly RED (a stream can never reach full by it), never
+    silently-full. `user` is the already-resolved `_current_user()` pw_name — an
+    env-spoofable `getpass.getuser()` would defeat the whole point, so this MUST
+    be fed the hardened identity.
 
     Fork-PR CI resolving `full` is harmless: the profile only unblocks CLI
     *behavior*; all real power lives in credentials the hosted runner does not
     hold.
 
-    INVARIANT (airuleset#839): `runner` must never appear in `AUTHORITY_BY_USER`
-    or `FULL_AUTHORITY_USERS` (lock-tested), so this predicate is the ONLY path
-    that recognises it — a self-hosted runner under a `runner` account stays
-    reduced by the `github-hosted` term above.
+    INVARIANT (airuleset#839): neither `runner` nor `root` may ever appear in
+    `AUTHORITY_BY_USER` or `FULL_AUTHORITY_USERS` (lock-tested), so this predicate
+    is the ONLY path that recognises them — a self-hosted `runner`, or a plain
+    root shell, stays reduced by the `github-hosted` / env terms above.
     """
     import os
-    return (user == "runner"
-            and os.environ.get("GITHUB_ACTIONS") == "true"
-            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
+    if (os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
+        return None
+    # uid-0 CONTAINER arm checked FIRST so a container job (the real CI shape)
+    # is named as such; a hosted runner outside a container (uid != 0) is named
+    # by the `runner` arm. The container arm requires BOTH the real uid to be 0
+    # AND the RESOLVED identity to be `root` (`user`, the hardened
+    # `_current_user()` pw_name). In the real container both hold together
+    # (`pwd.getpwuid(0).pw_name == "root"`), so it fires; and keying on the
+    # resolved identity — exactly as the `runner` arm does — means a test (or
+    # any process) whose `_current_user()` is patched/derived to a NON-root
+    # value never trips this arm merely because it happens to run as uid 0
+    # (e.g. the CI container itself running the hermetic suite). Without the
+    # `user == "root"` half, the ambient uid-0 would elevate EVERY
+    # authority-resolving test on CI to `full`, breaking the ones that assert a
+    # reduced result while patching only `_current_user` (found by running the
+    # hermetic subset in the real `python:3.12` container as root, airuleset#839
+    # attempt 2). Still un-spoofable: a stream can never be uid 0 AND can never
+    # carry the `root` pw_name.
+    if os.getuid() == 0 and user == "root":
+        return "ci-runner (GitHub-hosted, container)"
+    if user == "runner":
+        return "ci-runner (GitHub-hosted)"
+    return None
+
+
+def _is_github_ci_runner(user) -> bool:
+    """True when THIS process is the GITHUB-HOSTED CI runner for airuleset's own
+    CI (airuleset#839). Thin bool over `_github_ci_runner_source` — the ONE
+    definition point of the recognition — so `_authority_decision`'s hot-path
+    check and its `--explain` `map_val` annotation can never disagree with the
+    named source.
+    """
+    return _github_ci_runner_source(user) is not None
 
 
 # Base-stream rename map (#537): old base name -> new numbered name. The SINGLE
