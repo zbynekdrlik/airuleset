@@ -603,10 +603,12 @@ class TestMessageSignatureRule(TestCase):
         self.assertIn("NOT derived from those", w)
 
     def test_signature_stays_in_the_copy_paste_template(self):
-        # #598 review MINOR: a stream copies the reassurance template verbatim,
+        # #598 review MINOR: a stream copies the closing template verbatim,
         # so the mandated `ZbynekAI <N>` signature line must appear IN it or the
         # template itself would violate the rule at the point of use.
-        i = self.raw.index("Ak ju u seba nevidíte")
+        # (#823 dropped the mandatory self-blame sentence from this template —
+        # anchor on the opening greeting line, which stayed.)
+        i = self.raw.index("Ahoj `<mená>`, funkcia")
         j = self.raw.index("One thread = one topic", i)
         template = self.raw[i:j]
         self.assertIn("ZbynekAI `<N>`", template)
