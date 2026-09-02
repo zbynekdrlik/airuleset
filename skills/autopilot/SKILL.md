@@ -1128,9 +1128,12 @@ gap in either.
    your FIRST action on the first goal turn AFTER a compaction is to reconcile lanes from DURABLE
    STATE, never from memory: `git worktree list` for every live worktree, and read the
    `LANE-RETURN:` comment (#844 step 2) on each in-flight ticket. A worktree branch AHEAD of the
-   integration branch WITH a `LANE-RETURN:` comment → integrate it (its lane finished; the
-   notification may just have been lost) — the watchdog's post-compact reconcile rider also
-   keystrokes this reminder. A worktree branch ahead WITH NO `LANE-RETURN:` comment is an explicit
+   integration branch WITH a `LANE-RETURN:` comment → CHECK + integrate it (the notification may
+   just have been lost) — the watchdog's post-compact reconcile rider also keystrokes this reminder.
+   A LANE-RETURN comment is a POINTER ("this branch returned"), NOT an integration authorization:
+   your normal integration cycle still RE-VERIFIES the branch (its local test suite green, `/review`
+   clean) before merging, so a lane that returned early / partial is caught there, never merged on
+   the comment's say-so. A worktree branch ahead WITH NO `LANE-RETURN:` comment is an explicit
    INVESTIGATE state (a possibly-crashed lane whose SubagentStop never fired, so it never posted) —
    check whether that worker is genuinely dead (re-dispatch from durable state) before assuming the
    lane is still live. Never treat "I don't remember a lane there" as "no lane there"; the branch +

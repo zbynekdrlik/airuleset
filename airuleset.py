@@ -4476,67 +4476,95 @@ def _watchdog_reconcile_fetch(cwd):
     Wired HERE (like every other network seam) so run_once's unit tests stay
     network-free (`reconcile_fetch` None disables the rider there)."""
     import subprocess
+    import time as _time
+    # Bounds (review): NEVER an 800s serial blob inside the 60s sweep. Cap the
+    # branch count AND enforce a total wall-clock budget; a branch not reached is
+    # simply left for the NEXT observed compaction (the rider is a backstop).
+    MAX_BRANCHES = 6
+    BUDGET_S = 40
+    started = _time.monotonic()
+
+    def _git(root, *args, timeout=8):
+        return subprocess.run(["git", "-C", root] + list(args),
+                              capture_output=True, text=True, timeout=timeout)
     try:
         root = _repo_root(cwd=cwd) or cwd
         if resolve_authority(cwd=root) != "full":
             return None
-        slug = None
-        r = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"],
-                           capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            slug = _parse_origin_slug(r.stdout.strip())
+        r = _git(root, "remote", "get-url", "origin")
+        slug = _parse_origin_slug(r.stdout.strip()) if r.returncode == 0 else None
         if not slug:
             return None
-        # Integration branch: origin/HEAD's target (origin/main | origin/develop),
-        # falling back to main. Any failure -> None (never guess wrong).
-        integ = "main"
-        r = subprocess.run(
-            ["git", "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            capture_output=True, text=True, timeout=10)
+        # Integration candidates: a returned worktree branch is INTEGRATED once it
+        # is contained in ANY integration branch, NOT just the GitHub default. This
+        # fleet's lanes merge into "develop unless the project CLAUDE.md names
+        # another", and "merged to the integration branch but not yet in
+        # origin/main" is a DOCUMENTED normal state — so comparing against a single
+        # `origin/HEAD` (which may be main) would count every unreleased develop-
+        # merged lane as "ahead" forever. Gather every LOCAL + origin candidate
+        # among {origin/HEAD target, main, develop} that exists; a branch contained
+        # in ANY of them is integrated -> skipped.
+        cands = []
+        r = _git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
         if r.returncode == 0 and r.stdout.strip().startswith("origin/"):
-            integ = r.stdout.strip().split("/", 1)[1]
-        r = subprocess.run(
-            ["git", "-C", root, "for-each-ref", "--format=%(refname:short)",
-             "refs/heads/worktree-agent-*"],
-            capture_output=True, text=True, timeout=10)
+            cands.append(r.stdout.strip())
+        for c in ("main", "develop", "origin/main", "origin/develop"):
+            rc = _git(root, "rev-parse", "--verify", "--quiet", c)
+            if rc.returncode == 0 and c not in cands:
+                cands.append(c)
+        if not cands:
+            return None
+        r = _git(root, "for-each-ref", "--format=%(refname:short)",
+                 "refs/heads/worktree-agent-*", "refs/heads/worktree-issue-*")
         if r.returncode != 0:
             return None
-        branches = [b for b in r.stdout.splitlines() if b.strip()][:20]
+        branches = [b for b in r.stdout.splitlines() if b.strip()][:MAX_BRANCHES]
         out = []
         for br in branches:
-            # Ahead of integration?
-            rc = subprocess.run(
-                ["git", "-C", root, "rev-list", "--count", "%s..%s" % (integ, br)],
-                capture_output=True, text=True, timeout=10)
-            if rc.returncode != 0:
-                return None
-            try:
-                if int(rc.stdout.strip() or "0") <= 0:
+            if _time.monotonic() - started > BUDGET_S:
+                break   # budget spent — remaining branches wait for the next compaction
+            # INTEGRATED = an ancestor of ANY integration candidate.
+            integrated = False
+            ahead_of = None
+            for c in cands:
+                anc = _git(root, "merge-base", "--is-ancestor", br, c)
+                if anc.returncode == 0:
+                    integrated = True
+                    break
+                if anc.returncode == 1 and ahead_of is None:
+                    ahead_of = c   # a real "not contained" answer (not a git error)
+            if integrated or ahead_of is None:
+                continue
+            # Issue number: prefer the newest commit SUBJECT's `[#N]`/`#N` tag
+            # (the worker's own tag), fall back to the body — a body citing another
+            # ticket ("mirrors #616") must not mis-attribute.
+            rl = _git(root, "log", "%s..%s" % (ahead_of, br),
+                      "--format=%s", "-n", "1")
+            num = None
+            if rl.returncode == 0:
+                ms = re.search(r"#(\d+)", rl.stdout or "")
+                if ms:
+                    num = int(ms.group(1))
+            if num is None:
+                rb = _git(root, "log", "%s..%s" % (ahead_of, br),
+                          "--format=%s%n%b", "-n", "50")
+                if rb.returncode != 0:
                     continue
-            except ValueError:
-                continue
-            # Issue number from the branch's commit messages ([#N] tags).
-            rl = subprocess.run(
-                ["git", "-C", root, "log", "%s..%s" % (integ, br),
-                 "--format=%s%n%b", "-n", "50"],
-                capture_output=True, text=True, timeout=10)
-            if rl.returncode != 0:
-                return None
-            mm = re.search(r"#(\d+)", rl.stdout or "")
-            if not mm:
-                continue
-            num = int(mm.group(1))
+                mm = re.search(r"#(\d+)", rb.stdout or "")
+                if not mm:
+                    continue
+                num = int(mm.group(1))
             # A LANE-RETURN comment on the ticket qualifies it.
             rc2 = subprocess.run(
                 ["gh", "issue", "view", str(num), "-R", slug,
                  "--json", "title,comments"],
-                capture_output=True, text=True, timeout=20)
+                capture_output=True, text=True, timeout=15)
             if rc2.returncode != 0:
-                return None
+                continue   # transient gh error on ONE ticket: skip it, keep the rest
             try:
                 data = json.loads(rc2.stdout or "{}")
             except (ValueError, TypeError):
-                return None
+                continue
             title = (data.get("title") or "")[:80]
             bodies = " ".join(
                 (c.get("body") or "") for c in (data.get("comments") or [])

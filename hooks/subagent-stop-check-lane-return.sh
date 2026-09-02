@@ -62,6 +62,15 @@ ev = notify.parse_worker_evidence(msg)
 if ev["merged"]:
     sys.exit(0)
 
+# Skip a NOT-COMPLETED return (a worker that hit a wall / is blocked / lost its
+# isolation): its `branch:` line does not mean "lane finished", so demanding a
+# LANE-RETURN with green evidence would manufacture a false completion signal.
+# The completed worktree stop-point is a clean local-green return; a blocked/
+# failed one carries one of these signals instead.
+if re.search(r"ISOLATION FAILED|^\s*UNVERIFIED\s*:|❓\s*(?:NEEDS YOU|ASKED)",
+             msg, re.I | re.M):
+    sys.exit(0)
+
 # It must claim a WORKTREE branch (the worktree-mode return's `branch:` line
 # naming a worktree-agent-*/worktree-issue-*/worktree-* branch). No such claim
 # -> not a worktree-mode return this gate governs (a fork-no-merge/branch-merge

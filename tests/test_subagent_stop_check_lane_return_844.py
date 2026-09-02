@@ -130,6 +130,19 @@ class TestLaneReturnGate844(_Base):
         r = self.run_gate(msg)
         self.assertFalse(self.blocked(r), (r.stdout, r.stderr))
 
+    def test_a_blocked_or_failed_worktree_return_is_not_gated(self):
+        # A return carrying a branch: line but a NOT-COMPLETED signal (❓-blocked /
+        # ISOLATION FAILED / UNVERIFIED) must NOT be forced to post a green
+        # LANE-RETURN — that would manufacture a false completion signal.
+        for signal in (
+                "\n❓ NEEDS YOU: which reset behaviour?",
+                "\nISOLATION FAILED: /home/x main",
+                "\nUNVERIFIED: could not reach the rig"):
+            r = self.run_gate(WORKTREE_RETURN + signal)
+            self.assertFalse(self.blocked(r),
+                             "a not-completed return must not be gated: %r"
+                             % ((signal, r.stdout, r.stderr),))
+
 
 if __name__ == "__main__":
     main()

@@ -419,15 +419,18 @@ def _compact_min_delivery_interval(interval=None):
     return raw
 
 
-# #844 -- the BOUNDED live-hold cap. Once a boundary has been HELD on the
-# live-tasks / live-bg-bash veto for this long (measured `now - hbts`, the
-# INHERITABLE held-boundary anchor), the veto becomes a DELIVERY: a 776K main is
-# strictly worse than re-collecting lanes from durable state (the step-0
-# experiment proved forcing the compact at an IDLE prompt while a lane is live
-# does NOT kill the lane, its commit is durable, and its completion notification
-# survives). The force bypasses ONLY the two live-tasks/bg-bash vetoes -- never
-# idle-reverify (`fresh_kind == "input"`), recent-human, busy, draft, dialog,
-# in-mode, not-a-boundary, or `❓` (all load-bearing, per the Fable consult).
+# #844 -- the BOUNDED live-hold cap. Once the UN-DRAINED boundary chain has been
+# held for this long (measured `now - hbts`, the INHERITABLE held-boundary anchor
+# = time since the last actual compact/clear, NOT time on the live-tasks veto
+# alone -- see `_compact_live_hold_reached`), a live-tasks/bg-bash veto becomes a
+# DELIVERY instead of an indefinite hold: a 776K main is strictly worse than
+# re-collecting lanes from durable state (the step-0 experiment proved forcing
+# the compact at an IDLE prompt while a lane is live does NOT kill the lane, its
+# commit is durable, and its completion notification survives). The force
+# bypasses ONLY the two live-tasks/bg-bash vetoes -- never idle-reverify
+# (`fresh_kind == "input"`), recent-human, busy, draft, dialog, in-mode,
+# not-a-boundary, or `❓` (all load-bearing, per the Fable consult; those veto
+# EARLIER so an actively-watched pane never force-compacts).
 COMPACT_LIVE_HOLD_CAP_S = 1800   # 30 min; env AIRULESET_COMPACT_LIVE_HOLD_CAP_S
 COMPACT_LIVE_HOLD_CAP_MIN_S = 10 * 60    # floor: a units-error must never force every sweep
 COMPACT_LIVE_HOLD_CAP_MAX_S = 6 * 3600   # ceiling: nor make the cap effectively never fire
@@ -454,12 +457,23 @@ def _compact_live_hold_cap(cap=None):
 
 
 def _compact_live_hold_reached(boundary_ts, now, cap=None):
-    """True iff a boundary held on the live-tasks/bg-bash veto has been held
-    (`now - boundary_ts`) for at least the live-hold cap. `boundary_ts` is the
-    request's `hbts` (inheritable held-boundary anchor). None (a legacy pre-#844
-    entry with no `hbts`) -> False (fail-safe: hold exactly as before, never
-    force blind). A non-numeric/corrupt anchor also fails safe to False."""
-    if boundary_ts is None:
+    """True iff the UN-DRAINED-BOUNDARY chain has been held (`now - boundary_ts`)
+    for at least the live-hold cap. `boundary_ts` is the request's `hbts`
+    (inheritable held-boundary anchor) — it measures "time since the last actual
+    compact/clear", NOT "time on the live-tasks veto specifically": a boundary
+    held on recent-human/busy (#741) also inherits `hbts`, so the chain age
+    reflects total context growth regardless of WHY the boundary was held. That
+    is deliberate — context growth is the harm variable — and it is SAFE because
+    `deliver_compact` consults this ONLY at the two live-tasks/bg-bash veto
+    branches: recent-human / busy / draft / dialog / not-a-boundary / `❓` all
+    veto EARLIER and are NEVER bypassed, so an actively-watched pane never
+    force-compacts; the force fires only once those clear AND a live-tasks veto
+    is the sole thing left blocking (the step-0 idle-prompt experiment's exact
+    case). None (a legacy pre-#844 entry with no `hbts`) or a bool / non-numeric
+    / corrupt anchor -> False (fail-safe: hold as before, never force blind — the
+    bool guard mirrors `record_compact_request`, since a bool read from a corrupt
+    store would otherwise `float(True)==1.0` and force)."""
+    if boundary_ts is None or isinstance(boundary_ts, bool):
         return False
     try:
         held = now - float(boundary_ts)
@@ -860,7 +874,12 @@ COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
 # (#822: there is deliberately NO `skip:goal-continuing` pre-type gate — see
 # `deliver_compact`; a `/compact` under an armed goal is typed and QUEUES, so
 # `queued` is the word that fires the hint, never a refuse-to-type skip.)
-_COMPACT_HOLD_HINT_WORDS = frozenset(("queued", "already-queued"))
+# #844: `queued:live-hold-cap` -- a FORCED delivery that queued behind an armed-
+# goal continuation -- is the likeliest queued path on a saturated master, so it
+# ALSO needs the boundary-hold hint (a plain `queued` and the forced one drain the
+# same way, at an accepted Stop).
+_COMPACT_HOLD_HINT_WORDS = frozenset(
+    ("queued", "already-queued", "queued:live-hold-cap"))
 
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since

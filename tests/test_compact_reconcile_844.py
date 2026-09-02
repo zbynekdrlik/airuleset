@@ -35,17 +35,14 @@ def _iso(epoch):
 
 
 class _FakeTmux:
-    """A minimal `run` seam: resolves the pane, serves capture-pane, records
-    send-keys — enough for the rider's verified-send path."""
+    """A minimal `run` seam. `send_verified` is patched separately (below), so
+    this only has to answer capture/display calls the rider makes directly."""
 
     def __init__(self):
-        self.sent = []
+        self.texts = []
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)
-        if "send-keys" in j:
-            self.sent.append(argv)
-            return ""
         if "capture-pane" in j:
             return "● Hotovo.\n❯ \n  ctx ███░\n"
         if "display-message" in j:
@@ -53,7 +50,7 @@ class _FakeTmux:
         return ""
 
     def typed(self):
-        return [a[-1] for a in self.sent if "-l" in a]
+        return self.texts
 
 
 class ReconcileRider844(unittest.TestCase):
@@ -89,7 +86,16 @@ class ReconcileRider844(unittest.TestCase):
         state = state if state is not None else {}
         lrecs = state.setdefault("lane_reconcile", {})
         tmux = _FakeTmux()
-        with m.patch("airuleset.resolve_authority", return_value=authority):
+
+        def _fake_send_verified(pane_id, text, run=None, tpath=None,
+                                sleep_fn=None, logs=None, out=None):
+            tmux.texts.append(text)
+            return True   # transcript-confirmed submit
+
+        with m.patch("airuleset.resolve_authority", return_value=authority), \
+                m.patch.object(wd, "send_verified", _fake_send_verified), \
+                m.patch.object(wd, "_janitor_mark_watch", lambda *a, **k: None), \
+                m.patch.object(wd, "_janitor_clear_watch", lambda *a, **k: None):
             logs = lane_reconcile.goal_lane_reconcile_recheck(
                 now, tmux, lrecs, self.SID, self.CWD, "%9", tpath,
                 "reconcile844", dry_run, handled if handled is not None else set(),

@@ -29,8 +29,6 @@ Module-import safety mirrors `nudge_gate.py`/`compact.py`: a top-level
 `from watchdog import nudge_gate` is safe (nudge_gate imports nothing from the
 package); everything else is reached lazily inside the function body.
 """
-import json
-
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
 CATEGORY = "lane-reconcile"
@@ -62,24 +60,29 @@ def _entry_epoch(entry):
         return None
 
 
-def _last_compaction_epoch(tpath, max_lines=400):
-    """The epoch of the NEWEST `isCompactSummary` user entry in `tpath`'s tail,
-    or None (no compaction observed / unreadable). A compaction writes an
-    `isCompactSummary: true` user summary entry — the SAME structural flag every
-    sibling reader (`transcripts.py`, `questions.py`) already keys on — so this is
-    a structured signal, never a pane-render heuristic. Fail-safe None on any
-    error (never raises)."""
+# A compaction writes an `isCompactSummary: true` user summary entry (the SAME
+# structural flag every sibling reader keys on). Read a BOUNDED byte-tail, never a
+# whole-file `f.read()` — a saturated master's transcript reaches hundreds of MB
+# (#764: cambox's 670 MB measured 1.17s whole vs 0.005s seek), and this runs every
+# sweep for every armed pane. The tail is generous (4 MB / ~4000 entries) so a
+# recent compaction stays findable even on a busy transcript that scrolls fast —
+# addressing the "compaction scrolls out of a small window on a busy master" miss.
+COMPACT_TAIL_BYTES = 4 * 1024 * 1024
+COMPACT_TAIL_MAX_ENTRIES = 4000
+
+
+def _last_compaction_epoch(tpath):
+    """The epoch of the NEWEST `isCompactSummary` user entry in `tpath`'s BOUNDED
+    byte-tail, or None (no compaction observed / unreadable). Structured signal,
+    never a pane-render heuristic. Fail-safe None on any error (never raises)."""
+    import watchdog
     newest = None
     try:
-        with open(tpath, "rb") as f:
-            raw = f.read()
-    except OSError:
+        entries = watchdog._read_jsonl_byte_tail(
+            tpath, COMPACT_TAIL_BYTES, COMPACT_TAIL_MAX_ENTRIES)
+    except Exception:
         return None
-    for ln in raw.splitlines()[-max_lines:]:
-        try:
-            entry = json.loads(ln)
-        except Exception:
-            continue
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         if entry.get("type") == "user" and entry.get("isCompactSummary") is True:
@@ -89,17 +92,39 @@ def _last_compaction_epoch(tpath, max_lines=400):
     return newest
 
 
+# The #714 keystroke-rider guard set for a new rider is busy-gate + bounded retry
+# + a NUDGE_MAX_CHARS cap: never type an unbounded blob into a live pane. The
+# reconcile lists the returned branches but truncates to a bounded prefix + a
+# "…and K more" tail so a big multi-lane burst stays a small keystroke.
+NUDGE_MAX_CHARS = 700
+
+
 def _nudge_text(branches):
-    """The ONE reconcile nudge — lists ALL returned branches (a multi-lane
+    """The ONE reconcile nudge — lists the returned branches (a multi-lane
     completion burst is under-reported by a singular nudge, per the Fable
-    consult), each with its ticket + topic (`issue-reference-context.md`)."""
-    items = "; ".join(
-        "%s (#%s, %s)" % (b[0], b[1], b[2]) for b in branches)
+    consult), each with its ticket + topic (`issue-reference-context.md`),
+    truncated to NUDGE_MAX_CHARS with an "…and K more" tail so a large burst is
+    still a bounded keystroke (#714)."""
     n = len(branches)
-    return ("lane-reconcile: %d worktree lane%s returned during a compaction — "
+    head = ("lane-reconcile: %d worktree lane%s returned during a compaction — "
             "integrate %s from durable state (the branch + its LANE-RETURN "
-            "comment), never from memory: %s"
-            % (n, "" if n == 1 else "s", "it" if n == 1 else "them", items))
+            "comment; the supervisor re-verifies before merging), never from "
+            "memory: " % (n, "" if n == 1 else "s", "it" if n == 1 else "them"))
+    shown = []
+    used = len(head)
+    for i, b in enumerate(branches):
+        item = "%s (#%s, %s)" % (b[0], b[1], (b[2] or "")[:60])
+        # reserve room for the "; …and K more" tail before committing this item.
+        tail_reserve = len("; …and %d more" % (n - i)) if i < n else 0
+        if shown and used + len("; ") + len(item) + tail_reserve > NUDGE_MAX_CHARS:
+            break
+        shown.append(item)
+        used += (len("; ") if len(shown) > 1 else 0) + len(item)
+    body = "; ".join(shown)
+    more = n - len(shown)
+    if more > 0:
+        body += "; …and %d more (see git worktree list)" % more
+    return head + body
 
 
 def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
