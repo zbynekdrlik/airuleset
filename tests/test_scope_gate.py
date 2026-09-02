@@ -69,7 +69,8 @@ def _default_gh_stub():
     return _DEFAULT_EMPTY_GH_DIR
 
 
-def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
+def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None,
+        spoof_login=None):
     """`user` (#390): the simulated filer's sub-dev stream identity. Two halves,
     since airuleset#839:
     - The AUTHORITY PROFILE gate (`resolve_authority(cwd) != full`) is now
@@ -77,13 +78,24 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
       it — run() writes a `<!-- airuleset:authority=<profile> -->` marker into
       the hook's cwd (honored FIRST by `resolve_authority`), the profile derived
       from `user` via AUTHORITY_BY_USER.
-    - The OWN-STREAM half (`stream:<x>` comparison) still derives from the hook's
-      `getpass.getuser()` (a labeling-HYGIENE read deliberately left un-hardened
-      in the #839 hotfix — the merge/deploy/close boundary is the profile gate,
-      not this; hardening it needs a test-identity seam, tracked as a follow-up),
-      so run() STILL sets LOGNAME/USER to give the own-stream identity.
+    - The OWN-STREAM half (`stream:<x>` comparison) now derives from the hook's
+      un-spoofable `airuleset._current_user()` (uid-based, airuleset#840), NOT
+      the env-spoofable `getpass.getuser()`. Because a test cannot change its own
+      uid, run() supplies the true own-stream identity through the un-spoofable
+      TEST-IDENTITY SEAM env `AIRULESET_SCOPE_GATE_TEST_STREAM_USER` = `user`,
+      which the hook honors ONLY when the REAL invoking account is NOT itself a
+      reduced stream (a full/maintainer/test-runner box — never a real stream,
+      whose uid IS in AUTHORITY_BY_USER). The test runner (newlevel/runner/root)
+      is such a box, so the seam is active in the suite and unreachable in prod.
     A reduced `user` therefore both writes the reduced-profile marker AND sets
-    the own-stream; a full account / None writes no marker (the real full box).
+    the own-stream seam; a full account / None writes no marker (the real full box).
+
+    `spoof_login` (#840): a DIFFERENT env `LOGNAME`/`USER` value — the env-spoof a
+    real stream would attempt. Under the pre-fix `getpass.getuser()` path the
+    own-stream would FOLLOW `spoof_login` (the vulnerability); under the uid-based
+    fix it follows the SEAM (`user`, the true identity), ignoring the env spoof.
+    Default `None` → LOGNAME/USER == `user`, so every pre-existing test keeps both
+    the seam and the (now vestigial) env in agreement and passes on either hook.
 
     `hook_path` (#390 adversarial-review MINOR-2): run a DIFFERENT copy of
     the hook script (e.g. one deliberately isolated under a directory with
@@ -96,8 +108,10 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-scopegate-test-")
     env["PATH"] = (gh_bin or _default_gh_stub()) + os.pathsep + env.get("PATH", "")
     if user is not None:
-        env["LOGNAME"] = user
-        env["USER"] = user
+        env["AIRULESET_SCOPE_GATE_TEST_STREAM_USER"] = user
+        login = spoof_login if spoof_login is not None else user
+        env["LOGNAME"] = login
+        env["USER"] = login
     profile = airuleset.AUTHORITY_BY_USER.get(user) if user else None
     run_cwd = cwd
     if profile is not None:
@@ -1271,10 +1285,14 @@ class TestStreamRoutingGate(TestCase):
     filing carries no stream label by design (`_core_search_excl()`). Since
     airuleset#839 the PROFILE gate is uid-based, so a reduced fixture (`david2`)
     writes a `fork-no-merge` marker into the hook's cwd to engage the gate (via
-    AUTHORITY_BY_USER), while LOGNAME still supplies the own-stream identity for
-    the getpass-based comparison; a `gatekeeper` fixture writes NO marker -> the
-    real full box -> not gated (the profile half is what makes the gate engage,
-    proven load-bearing by the reduced-marker tests that DO block)."""
+    AUTHORITY_BY_USER); a `gatekeeper` fixture writes NO marker -> the real full
+    box -> not gated (the profile half is what makes the gate engage, proven
+    load-bearing by the reduced-marker tests that DO block). Since airuleset#840
+    the OWN-STREAM identity is the un-spoofable uid-based `_current_user()`,
+    supplied to the subprocess via the `AIRULESET_SCOPE_GATE_TEST_STREAM_USER`
+    seam, NOT the env-spoofable `getpass.getuser()` -- so a `LOGNAME`/`USER`
+    spoof (`spoof_login`) can no longer route a filing under a foreign stream
+    (`test_env_spoofed_own_stream_cannot_bypass_routing`)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-streamroute-test-")
@@ -1324,6 +1342,21 @@ class TestStreamRoutingGate(TestCase):
                           scope_gate="cross-cutting"),
                 gh_bin=gh_bin, user="gatekeeper")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_env_spoofed_own_stream_cannot_bypass_routing(self):
+        # airuleset#840: a stream whose TRUE identity is david2 sets
+        # LOGNAME/USER=david to spoof its own-stream, then files a stream:david
+        # ticket with NO Stream-routing justification. Under the pre-#840
+        # getpass.getuser() path the own-stream would follow the env spoof
+        # (stream:david == the applied label -> silent PASS). The un-spoofable
+        # uid-based own-stream (stream:david2) makes the applied stream:david a
+        # FOREIGN label -> BLOCKED. This is the vulnerability #840 closes.
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run(body_cmd("env spoof", "found this while working my own module",
+                          scope_gate="cross-cutting", labels=["stream:david"]),
+                gh_bin=gh_bin, user="david2", spoof_login="david")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Stream-routing", r.stderr)
 
     def test_label_list_lookup_failure_degrades_never_blocks_on_its_own(self):
         # gh label list itself fails (offline/unauthenticated) -- must
