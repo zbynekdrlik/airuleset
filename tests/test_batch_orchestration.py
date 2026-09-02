@@ -1,25 +1,26 @@
-"""Locks the #723 BATCH-mode autopilot orchestration doctrine.
+"""Locks the #848 CONTINUOUS-REFILL autopilot orchestration doctrine.
 
-Owner directive (2026-08-26, verbatim): "rozbehne sa 5 subagentov a nechaju sa
-vsetky dokoncit a tak sa spravi compact a znova dalsich 5." Root cause it fixes:
-the continuous-saturation doctrine (#317/#456) kept a worker lane ALWAYS live,
-so `compact-request --self`'s live-tasks veto (watchdog/compact.py condition (b))
-always skipped and the boundary compact NEVER fired -> the Fable main context
-grew unbounded; and a compact forced mid-fleet breaks task handles / the armed
-goal (CC #29193, unfixed as of CC 2.1.246).
+Owner decision (2026-09-02, verbatim): "no ale na co sme potom robili pracu po
+varkach ked ju ignorujes?! v takom pripade sa mozme vratit k compact za kazdym
+work complete!". #848 RETIRES the #723/#724 BATCH doctrine after the STEP-0 live
+experiment (CC 2.1.258) proved a `/compact` over live worktree lanes + a bg-bash
+waiter + an armed `/goal` does NOT break the task registry (lanes commit,
+notifications survive, task IDs resolve, the goal survives). The batch model's
+premise (a compact mid-fleet breaks task handles, CC issue 29193) is gone.
 
-The fix (BATCH mode, reversing #456 FOR autopilot): dispatch a batch of up to 5
-parallel worktree lanes, NO refill while a batch is open, integrate each returned
-branch serially under the mutex, and compact ONLY at the DRAINED batch boundary
-(whole batch returned + integrated = zero live tasks) before the next batch.
+The doctrine (CONTINUOUS REFILL, restoring the #456 shape FOR autopilot): keep up
+to 5 parallel worktree lanes live, refill a returned lane's slot immediately,
+integrate each returned branch serially under the mutex, and compact at EVERY
+integration cycle's `## ✅ Work Complete` — live lanes or not.
 
 These are content-locks (the tests/test_model_tiering.py pattern) so a future
-edit cannot silently revert the three load-bearing sentences -- the batch cap,
-no-refill-while-open, and compact-at-drained-boundary -- back to continuous mode.
-The registry char-budget / drift / clause-coverage locks live in
-tests/test_goal_registry.py; the fleet/turn-boundary reconciliations in
-tests/test_fleet_concurrency_doctrine.py + test_goal_turn_boundary.py +
-test_goal_backlog_proof.py. This file is the single dedicated batch-doctrine lock.
+edit cannot silently revert the load-bearing sentences -- the lane cap, the
+immediate refill, and the compact-at-every-cycle -- back to batch mode. Flipped
+from the #723 batch locks (flip-never-delete, #723 lesson). The registry
+char-budget / drift / clause-coverage locks live in tests/test_goal_registry.py;
+the fleet/turn-boundary reconciliations in tests/test_fleet_concurrency_doctrine.py
++ test_goal_turn_boundary.py + test_goal_backlog_proof.py. This file is the single
+dedicated continuous-refill lock.
 """
 
 import sys
@@ -51,182 +52,180 @@ def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
-class TestRegistryClausesAreBatch(TestCase):
-    """The three edited /goal clauses carry the batch directive, not the
-    superseded continuous / paces-one-per-turn framing."""
+class TestRegistryClausesAreContinuous(TestCase):
+    """The three edited /goal clauses carry the continuous-refill directive, not
+    the retired batch / drained-boundary framing."""
 
     def _clause(self, cid, profile="full"):
         return next(c for c in gr.CLAUSES if c.id == cid).text_for(profile)
 
-    def test_saturation_core_is_batch_no_refill(self):
+    def test_saturation_core_is_continuous_refill(self):
         core = self._clause("saturation-core")
-        for tok in ("BATCH MODE", "up to 5", "PARALLEL", "isolation:worktree",
-                    "autopilot-worker", "NO refill while a batch runs"):
+        for tok in ("CONTINUOUS REFILL", "up to 5", "PARALLEL",
+                    "isolation:worktree", "autopilot-worker", "IMMEDIATELY"):
             self.assertIn(tok, core)
-        # the continuous directive it replaced must be gone
-        self.assertNotIn("SATURATE", core)
-        self.assertNotIn("refill PARALLEL", core)
-        self.assertNotIn("to saturation", core)
+        # the batch directive it replaced must be gone
+        self.assertNotIn("BATCH MODE", core)
+        self.assertNotIn("NO refill while a batch runs", core)
 
-    def test_compact_boundary_fires_at_drained_boundary_every_profile(self):
+    def test_compact_boundary_fires_every_cycle_every_profile(self):
         for p in gr.PROFILES:
             cb = self._clause("compact-boundary", p)
-            self.assertIn("WHOLE batch has returned", cb)
-            self.assertIn("ZERO live tasks", cb)
-            self.assertIn("next batch", cb)
-            self.assertIn("NEVER compact while lanes live", cb)
-            self.assertIn("#29193", cb)
-            # the superseded continuous tails
+            self.assertIn("compact-request --self", cb)
+            self.assertIn("live lanes or not", cb)
+            self.assertIn("#848", cb)
+            # the retired batch/mid-fleet framing must be gone
+            self.assertNotIn("WHOLE batch has returned", cb)
+            self.assertNotIn("ZERO live tasks", cb)
+            self.assertNotIn("next batch", cb)
+            self.assertNotIn("NEVER compact while lanes live", cb)
+            self.assertNotIn("#29193", cb)
+            # the pre-#723 one-at-a-time tails stay banned
             self.assertNotIn("paces ONE", cb)
             self.assertNotIn("keep building", cb)
             self.assertNotIn("do NOT dispatch the next", cb)
 
-    def test_every_rendered_goal_line_carries_batch_mode(self):
+    def test_every_rendered_goal_line_carries_continuous_refill(self):
         for p in gr.PROFILES:
             line = gr.render(p)
-            self.assertIn("BATCH MODE", line)
-            self.assertIn("NO refill while a batch runs", line)
-            self.assertIn("ZERO live tasks", line)
+            self.assertIn("CONTINUOUS REFILL", line)
+            self.assertIn("live lanes or not", line)
+            self.assertNotIn("BATCH MODE", line)
+            self.assertNotIn("ZERO live tasks", line)
 
 
-class TestSkillBatchDoctrine(TestCase):
-    """The autopilot SKILL body states the three load-bearing batch sentences."""
+class TestSkillContinuousDoctrine(TestCase):
+    """The autopilot SKILL body states the continuous-refill sentences."""
 
-    def test_the_batch_dispatch_section_exists(self):
+    def test_the_continuous_refill_section_exists(self):
         body = read(SKILL)
-        self.assertIn("**Batch dispatch — up to 5 lanes, NO refill while a batch is open", body)
+        self.assertIn("**Continuous refill — up to 5 live lanes", body)
 
-    def test_no_refill_while_a_batch_is_open_is_stated(self):
+    def test_refill_a_returned_slot_immediately_is_stated(self):
         body = read(SKILL).lower()
-        self.assertIn("no refill while a batch", body)
-        self.assertIn("no new lane is dispatched while the batch is open", body)
+        self.assertIn("refill a returned lane's slot", body)
+        self.assertNotIn("no new lane is dispatched while the batch is open", body)
 
-    def test_compact_only_at_the_drained_batch_boundary(self):
+    def test_compact_at_every_integration_cycle(self):
         body = read(SKILL)
-        self.assertIn("DRAINED BATCH BOUNDARY", body)
-        # the compact is gated on zero live tasks, never per integration cycle
-        self.assertIn("zero live tasks", body.lower())
-        self.assertNotIn("fires PER INTEGRATION CYCLE", body)
+        self.assertIn("compact at EVERY integration cycle", body)
+        self.assertIn("live lanes or not", body)
+        self.assertNotIn("DRAINED BATCH BOUNDARY", body)
 
-    def test_the_batch_cap_is_five(self):
+    def test_the_lane_cap_is_five(self):
         body = read(SKILL).lower()
-        self.assertIn("batch cap", body)
+        self.assertIn("lane cap", body)
         self.assertIn("up to 5", body)
 
-    def test_the_tail_lane_tradeoff_is_named_honestly(self):
-        body = read(SKILL).lower()
-        self.assertIn("tail-lane", body)
-        # the #456 reversal is acknowledged, not hidden ("deliberately reverses
-        # #456's continuous refill" contains this substring)
-        self.assertIn("reverses #456's continuous refill", body)
+    def test_the_doctrine_reversal_is_named_honestly(self):
+        body = read(SKILL)
+        # #848 restores #456's continuous refill, retiring #723's batch mode —
+        # acknowledged, not hidden.
+        self.assertIn("#848", body)
+        self.assertIn("restores #456's continuous refill", body)
 
 
 class TestSkillBakesInTheResearchFacts(TestCase):
-    """Both research facts from the #723 comment must be in the doctrine so a
-    future editor cannot re-introduce a mid-fleet compact."""
+    """The STEP-0 experiment fact must be in the doctrine so a future editor
+    cannot re-introduce the batch veto premise."""
 
-    def test_never_compact_with_live_background_tasks(self):
+    def test_compact_over_live_lanes_is_safe(self):
         body = read(SKILL)
-        self.assertIn("#29193", body)
-        self.assertIn("NEVER break task handles", body)
+        self.assertIn("STEP-0", body)
+        self.assertIn("task registry", body)
+        # the old affirmative "NEVER break task handles" veto claim is gone
+        self.assertNotIn("NEVER break task handles", body)
 
     def test_goal_survives_a_normal_compaction_is_documented(self):
         body = read(SKILL)
         self.assertIn("PRESERVES the armed `/goal`", body)
         self.assertIn("goal.md", body)
 
-    def test_cc_version_of_the_unfixed_upstream_is_cited(self):
-        # the research was run on the latest CC; the doctrine cites it so a
-        # future re-check knows the baseline the "unfixed" claim was true at.
-        self.assertIn("CC 2.1.246", read(SKILL))
+    def test_cc_version_of_the_experiment_is_cited(self):
+        # the STEP-0 experiment ran on this CC build; the doctrine cites it so a
+        # future re-check knows the baseline the "safe" claim was proven at.
+        self.assertIn("CC 2.1.258", read(SKILL))
 
 
-class TestNoContinuousReversion(TestCase):
-    """Negative lock (review finding, #723; scope extended to master by #724):
-    an ADDITIVE re-introduction of the pre-#723 continuous-refill phrasing
-    ALONGSIDE the batch text passes every positive-presence lock above, so guard
-    the exact affirmative phrases too. #724 migrated autopilot-MASTER to batch
-    mode as well (LANE 3's drained batch = the compact boundary), so this lock
-    now covers BOTH skills — master no longer legitimately keeps continuous
-    refill phrasing. Both bodies use 'continuous refill' solely inside the
-    reverses/superseding-#456's-continuous-refill negations, which none of these
-    affirmative phrases hit. The membership check is case-insensitive so a
-    lower-case re-add ('dispatch is continuous') cannot slip the lock."""
+class TestNoBatchReversion(TestCase):
+    """Negative lock (flip of #723's TestNoContinuousReversion): an ADDITIVE
+    re-introduction of the retired batch phrasing ALONGSIDE the continuous text
+    passes every positive-presence lock above, so guard the exact batch phrases
+    too, on BOTH skills. The membership check is case-insensitive so a lower-case
+    re-add cannot slip the lock. (Both bodies may still mention 'batch' inside a
+    retiring/reversal negation — the banned phrases below are the affirmative
+    directives only.)"""
 
     BANNED_AFFIRMATIVE = (
-        "refilling to saturation",
-        "refill to saturation",
-        "refills the next lanes",
-        "it refills the next lanes",
-        "keep every lane full",
-        "saturating lanes",
-        "DISPATCH is CONTINUOUS",
-        "CONTINUOUSLY refill",
-        "refills continuously",
+        "no refill while a batch",
+        "drained batch boundary",
+        "whole batch has returned",
+        "whole batch has drained",
+        "zero live tasks",
+        "no new lane is dispatched while the batch is open",
+        "no new lane is dispatched while this batch",
+        "batch-open state",
+        "never compact while lanes live",
+        "batch cap",
     )
 
-    def test_neither_skill_re_adds_the_old_continuous_directive(self):
+    def test_neither_skill_re_adds_the_batch_directive(self):
         for rel in (SKILL, SKILL_MASTER):
             body = read(rel).lower()
             present = [p for p in self.BANNED_AFFIRMATIVE if p.lower() in body]
             self.assertEqual(present, [],
-                             "%s re-introduced pre-#723 continuous phrasing: %r"
+                             "%s re-introduced the retired batch phrasing: %r"
                              % (rel, present))
 
 
 class TestToolingModuleReconciled(TestCase):
-    """The always-on max-acceleration module points at the batch boundary
-    without re-deriving the doctrine (pointer-class, #701)."""
+    """The always-on max-acceleration module points at continuous refill without
+    re-deriving the doctrine (pointer-class, #701)."""
 
-    def test_the_pointer_names_bounded_batches(self):
+    def test_the_pointer_names_continuous_refill(self):
         body = read(TOOLING)
-        self.assertIn("BOUNDED BATCHES", body)
-        self.assertIn("#723", body)
-        # parallel lanes stay the default WITHIN a batch
-        self.assertIn("Parallel lanes stay the default WITHIN a batch", body)
+        self.assertIn("CONTINUOUS REFILL", body)
+        self.assertIn("#848", body)
+        self.assertNotIn("BOUNDED BATCHES", body)
 
 
-class TestWatchdogLaneNudgeIsBatch(TestCase):
-    """#726 -- the job-20 lane-check nudge (`watchdog/goal.py`) carries the BATCH
-    doctrine, not the superseded continuous saturation (#456). The validator
-    found this the ONE batch surface with no coverage: the skill/registry locks
-    above never touched the watchdog nudge, which kept firing "fill lanes to 5"
-    into a DRAINING batch (2 false nudges live, 2026-08-26). Two invariants:
-    (1) the empty-lane nudge TEXT teaches "start a NEW batch", never "fill
-    lanes"; (2) a RUNNING batch (live_workers>0 -- saturated OR draining) is
-    NEVER nudged to refill: it logs skip:batch-running and delivers nothing. The
-    under-saturated fill TEXT + surplus constant are RETIRED."""
+class TestWatchdogLaneNudgeIsContinuous(TestCase):
+    """#848 -- the job-20 lane-check nudge (`watchdog/goal.py`) carries the
+    CONTINUOUS REFILL doctrine, not the retired #723/#726 batch mode. Two
+    invariants: (1) the nudge TEXT teaches "refill a returned slot", never
+    "start a NEW batch"; (2) a box with ROOM (live_workers < min(5, backlog),
+    whether empty OR partially-full) IS nudged to refill; only a SATURATED box
+    (>= 5 lanes) skips."""
 
-    CWD = "/home/newlevel/devel/lanenudge726"
-    SID = "sess-lane-726"
+    CWD = "/home/newlevel/devel/lanenudge848"
+    SID = "sess-lane-848"
 
     # ---- content locks (stable, no driving) ----
 
-    def test_empty_lane_text_teaches_start_a_new_batch(self):
+    def test_nudge_text_teaches_refill(self):
         rendered = goal.GOAL_LANE_NUDGE_TEXT % (37, 2)
         low = rendered.lower()
-        # batch doctrine language (goal_registry.py::saturation-core / master LANE 3)
-        self.assertIn("várk", low)          # "začni NOVÚ várku"
-        self.assertIn("refill", low)        # "ŽIADNY refill kým várka beží"
+        self.assertIn("refill", low)        # "CONTINUOUS REFILL"
+        self.assertIn("doplň", low)         # "doplň vrátený slot HNEĎ"
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
         self.assertIn("sériovo", low)       # serial integration under the mutex
-        self.assertIn("5", rendered)        # a BATCH of up to 5
-        # the within-batch bound is the canonical post-#723 resource-signal
-        # backoff, NOT the retired #442 fixed "cap 8" (review finding 2)
+        self.assertIn("5", rendered)        # up to 5 lanes
         self.assertIn("rate-limit", low)
-        self.assertNotIn("8", rendered)
+        self.assertNotIn("cap 8", low)      # not the retired #442 fixed "cap 8"
+        # the retired batch noun must be GONE
+        self.assertNotIn("várk", low)
 
-    def test_empty_lane_text_dropped_the_continuous_refill_phrasing(self):
+    def test_nudge_text_dropped_the_batch_phrasing(self):
         low = goal.GOAL_LANE_NUDGE_TEXT.lower()
-        # the retired #456 "dispatch MORE lanes NOW" refill wording is gone
-        self.assertNotIn("dispatchni teraz ďalšie", low)
+        self.assertNotIn("začni novú várku", low)
+        self.assertNotIn("žiadny refill kým", low)
 
     def test_under_saturated_fill_text_and_surplus_constant_are_retired(self):
         self.assertFalse(hasattr(goal, "GOAL_LANE_UNDERSAT_NUDGE_TEXT"))
         self.assertFalse(hasattr(goal, "GOAL_LANE_UNDERSAT_SURPLUS"))
 
-    # ---- behavioral lock: a running batch is never nudged to refill ----
+    # ---- behavioral lock: a box with room IS nudged to refill ----
 
     def _drive(self, workers, backlog, now=100000):
         d = TemporaryDirectory()
@@ -238,8 +237,6 @@ class TestWatchdogLaneNudgeIsBatch(TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
-        # #726/#729: the nudge consults no memory gate (the memory OOM subsystem
-        # was under-saturated-only and is now deleted), so no mem patch is needed.
         with m.patch("airuleset.resolve_authority", return_value="full"), \
              m.patch.object(wd, "count_live_workers",
                             return_value=(workers, [])):
@@ -250,33 +247,32 @@ class TestWatchdogLaneNudgeIsBatch(TestCase):
                 sleep_fn=lambda s: None)
         return logs, tmux
 
-    def test_running_batch_is_skipped_never_refilled(self):
-        # a DRAINING batch: 2 live lanes < 5, large backlog (surplus 35). Under
-        # the retired #456 doctrine this fired the "fill to 5" nudge; under batch
-        # mode (#723/#724) it must SKIP -- NO refill while a batch is open.
+    def test_partially_full_box_is_nudged_to_refill(self):
+        # #848 FLIP (was test_running_batch_is_skipped_never_refilled): 2 live
+        # lanes < 5 + a large backlog means there are FREE slots — the refill
+        # nudge FIRES now (under batch mode it was skip:batch-running).
         logs, tmux = self._drive(workers=2, backlog=37)
-        self.assertTrue(any("skip:batch-running" in ln for ln in logs), logs)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        # the retired under-saturated decision lines are gone
-        self.assertFalse(any("surplus-floor" in ln for ln in logs), logs)
-        self.assertFalse(any("(fill)" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [], tmux.sent)
-
-    def test_one_worker_draining_batch_is_skipped_at_the_boundary(self):
-        # the exact live shape (#726 incident): 1 lane still draining, backlog
-        # waiting. The `live_workers > 0` boundary must SKIP, never nudge -- a
-        # `> 1` off-by-one would refill a single-lane draining batch.
-        logs, tmux = self._drive(workers=1, backlog=37)
-        self.assertTrue(any("skip:batch-running" in ln for ln in logs), logs)
-        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [], tmux.sent)
-
-    def test_closed_batch_with_backlog_still_fires_the_start_a_batch_nudge(self):
-        # live_workers==0 (batch CLOSED) + workable backlog -> the empty-lane
-        # nudge DOES fire: "you should have started a NEW batch and did not".
-        logs, tmux = self._drive(workers=0, backlog=37)
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertFalse(any("skip:batch-running" in ln for ln in logs), logs)
+
+    def test_single_lane_box_is_nudged_to_refill(self):
+        # #848 FLIP (was test_one_worker_draining_batch_is_skipped...): 1 live
+        # lane < 5 has room to refill up to 5 — the nudge fires.
+        logs, tmux = self._drive(workers=1, backlog=37)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:batch-running" in ln for ln in logs), logs)
+
+    def test_empty_box_with_backlog_still_fires_the_refill_nudge(self):
+        # live_workers==0 + workable backlog -> the refill nudge DOES fire.
+        logs, tmux = self._drive(workers=0, backlog=37)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_saturated_box_skips(self):
+        # #848: a FULL box (>= 5 lanes) has no free slot — it skips, no refill.
+        logs, tmux = self._drive(workers=5, backlog=37)
+        self.assertTrue(any("saturated" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [], tmux.sent)
 
 
 if __name__ == "__main__":

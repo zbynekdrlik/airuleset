@@ -124,16 +124,20 @@ class TestClauseCoverage(TestCase):
 
 
 class TestSaturationDirectiveIsReal(TestCase):
-    """Acceptance guard (#723 BATCH mode): "the template contains the word
-    worktree" is NOT the fix. Lock the actual directive — a BOUNDED parallel
-    batch (up to 5 worktree lanes, NO refill while a batch runs) with serial
-    integration as branches return."""
+    """Acceptance guard (#848 CONTINUOUS REFILL, retiring the #723 batch mode):
+    "the template contains the word worktree" is NOT the fix. Lock the actual
+    directive — keep up to 5 parallel worktree lanes live, refilling a returned
+    lane's slot immediately, with serial integration as branches return; and it
+    must NOT read as batch mode."""
 
     def test_saturation_core_states_the_full_directive(self):
         core = next(c for c in gr.CLAUSES if c.id == "saturation-core").text
-        for token in ("BATCH MODE", "up to 5", "PARALLEL", "isolation:worktree",
-                      "autopilot-worker", "NO refill"):
+        for token in ("CONTINUOUS REFILL", "up to 5", "PARALLEL",
+                      "isolation:worktree", "autopilot-worker", "IMMEDIATELY"):
             self.assertIn(token, core)
+        # TEETH: the retired batch wording must be GONE.
+        self.assertNotIn("BATCH MODE", core)
+        self.assertNotIn("NO refill", core)
 
     def test_saturation_delivery_integrates_serially(self):
         for p in gr.PROFILES:
@@ -144,38 +148,45 @@ class TestSaturationDirectiveIsReal(TestCase):
 
 class TestSaturationReconcilesCompactBoundary(TestCase):
     """The owner required the reconciliation to be VISIBLE in the registry, not
-    buried in prose (#723 BATCH mode): saturation-core dispatches a bounded
-    parallel batch (no refill while it runs); saturation-delivery integrates
-    each returned branch serially; compact-boundary fires the compact ONLY at
-    the DRAINED batch boundary (whole batch returned + integrated = zero live
-    tasks) then dispatches the next batch — never mid-fleet. They cannot
-    contradict."""
+    buried in prose (#848 CONTINUOUS REFILL, retiring #723 batch mode):
+    saturation-core keeps up to 5 parallel lanes live and refills a returned
+    slot immediately; saturation-delivery integrates each returned branch
+    serially; compact-boundary fires the compact at EVERY integration cycle,
+    live lanes or not. They cannot contradict."""
 
     def test_the_reconciled_pair_is_registered(self):
         self.assertEqual(gr.SATURATION_RECONCILES_COMPACT,
                          ("saturation-core", "saturation-delivery",
                           "compact-boundary"))
 
-    def test_compact_boundary_fires_at_the_drained_batch_boundary(self):
+    def test_compact_boundary_fires_every_integration_cycle(self):
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
-            self.assertIn("WHOLE batch has returned", cb)
-            self.assertIn("ZERO live tasks", cb)
-            self.assertIn("next batch", cb)
-
-    def test_compact_boundary_never_compacts_mid_fleet(self):
-        # #723: the whole point — a compact fired while lanes are live breaks
-        # task handles / the armed goal (CC #29193). It must say so.
+            self.assertIn("compact-request --self", cb)
+            self.assertIn("live lanes or not", cb)
+            self.assertIn("#848", cb)
+        # TEETH: the retired drained-batch-boundary framing must be GONE.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
-            self.assertIn("NEVER compact while lanes live", cb)
-            self.assertIn("#29193", cb)
+            self.assertNotIn("WHOLE batch has returned", cb)
+            self.assertNotIn("ZERO live tasks", cb)
+            self.assertNotIn("next batch", cb)
+            self.assertNotIn("waiver #730", cb)
 
-    def test_compact_boundary_no_longer_serializes_or_continuously_refills(self):
-        # the OLD continuous-mode framing — "compact boundary paces ONE
+    def test_compact_boundary_compacts_over_live_lanes(self):
+        # #848: the whole point — a compact over live lanes is SAFE (the STEP-0
+        # experiment), so the old "NEVER compact while lanes live (CC #29193)"
+        # framing that held the boundary undelivered forever must be GONE.
+        for p in gr.PROFILES:
+            cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
+            self.assertIn("compact over live lanes is safe", cb)
+            self.assertNotIn("NEVER compact while lanes live", cb)
+            self.assertNotIn("#29193", cb)
+
+    def test_compact_boundary_no_longer_serializes_or_paces_one(self):
+        # the pre-#723 one-at-a-time framing — "compact boundary paces ONE
         # integration per turn / parallel lanes keep building" and the older
-        # "do NOT dispatch the next issue in the same turn" — is exactly what
-        # suppressed the compact/fleet; both must be gone.
+        # "do NOT dispatch the next issue in the same turn" — stays banned.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
             self.assertNotIn("do NOT dispatch the next", cb)
@@ -184,11 +195,12 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
 
 
 class TestCompactBoundaryHoldTurn741(TestCase):
-    """#741: after `compact-request --self` at a drained boundary the loop HOLDS
-    until the compact is delivered — it does NOT dispatch the next batch first.
+    """#741: after `compact-request --self` at an integration boundary the loop
+    HOLDS until the compact is delivered — it does NOT dispatch a new lane first.
     The buggy pre-#741 ORDERING claim (the armed goal 'fires the NEXT TURN,
     compacting then dispatching the next batch' — an order nothing enforced) is
-    removed from every profile's clause, and the terse HOLD pointer is present."""
+    removed from every profile's clause, and the terse HOLD pointer is present.
+    #848 replaced 'no next batch first' with 'no new lane first' (continuous refill)."""
 
     def _cb(self, p):
         return next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
@@ -198,7 +210,8 @@ class TestCompactBoundaryHoldTurn741(TestCase):
             cb = self._cb(p)
             self.assertIn("HOLD each later goal turn until that compact runs", cb,
                           "%s missing the #741 hold sentence" % p)
-            self.assertIn("no next batch first", cb)
+            self.assertIn("no new lane first", cb)
+            self.assertNotIn("no next batch first", cb)
 
     def test_old_ordering_claim_removed_from_every_profile(self):
         # TEETH: a revert to the pre-#741 wording re-introduces exactly these.
@@ -286,14 +299,17 @@ class TestShippedSkillMatchesRegistry(TestCase):
                          "SKILL.md /goal lines drifted from the registry: %r"
                          % [p for p, _, _ in d])
 
-    def test_every_shipped_goal_line_carries_the_batch_directive(self):
+    def test_every_shipped_goal_line_carries_the_continuous_refill_directive(self):
         import re
         lines = re.findall(r"^/goal STOP CONDITIONS.*$", skill_text(), re.MULTILINE)
         self.assertEqual(len(lines), 3)
         for line in lines:
-            self.assertIn("BATCH MODE", line)
+            self.assertIn("CONTINUOUS REFILL", line)
             self.assertIn("isolation:worktree", line)
-            self.assertIn("NO refill while a batch runs", line)
+            self.assertIn("refill a returned lane's slot IMMEDIATELY", line)
+            # TEETH: no batch wording survives in the shipped lines.
+            self.assertNotIn("BATCH MODE", line)
+            self.assertNotIn("NO refill while a batch runs", line)
 
 
 class TestRenderIntoIsSurgical(TestCase):

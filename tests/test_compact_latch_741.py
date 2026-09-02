@@ -7,6 +7,7 @@ RED against the pre-#741 tree: none of the goal writers consult the compact
 store, so each keeps typing / re-arming into a pane with a pending /compact.
 """
 
+import json
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -59,7 +60,11 @@ class _LatchBase(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _seed_compact(self, sid, now=1000):
+    def _seed_compact(self, sid, now=99980):
+        # #848: the riders now consult `pending_compact_hold` (bounded to a few
+        # sweeps), so a held compact must be FRESH relative to the rider's `now`
+        # (the 100000.0 riders default here; goal_sweep passes its own). A STALE
+        # seed no longer holds — locked by the stale-no-hold tests below.
         wd_compact.record_compact_request(sid, self.CWD, now=now,
                                           path=self.creqp, origin="self-callback")
 
@@ -78,7 +83,7 @@ class TestGoalSweepLatch(_LatchBase):
         proj = self._dir()
         sid = "sess-sweep-hold"
         _write_marker_transcript(proj, self.CWD, sid)
-        self._seed_compact(sid)
+        self._seed_compact(sid, now=1980)   # fresh vs the goal_sweep now=2000
         logs, tmux = self._sweep(proj, sid)
         self.assertTrue(any("hold:compact-pending" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [], "no keystroke while a compact is pending")
@@ -92,6 +97,19 @@ class TestGoalSweepLatch(_LatchBase):
         sid = "sess-sweep-nohold"
         _write_marker_transcript(proj, self.CWD, sid)
         logs, _ = self._sweep(proj, sid)
+        self.assertFalse(any("hold:compact-pending" in ln for ln in logs), logs)
+        self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
+
+    def test_848_a_stale_pending_compact_no_longer_holds(self):
+        # #848 BOUND teeth: a compact pending for MANY sweeps (its `bts` is old
+        # relative to the rider's now) is wedged on recent-human/busy — the rider
+        # STOPS freezing and arms normally. (A revert to the unbounded
+        # `has_pending_request` re-introduces the indefinite hold and fails this.)
+        proj = self._dir()
+        sid = "sess-sweep-stale"
+        _write_marker_transcript(proj, self.CWD, sid)
+        self._seed_compact(sid, now=1000)   # ~1000s old vs the goal_sweep now=2000
+        logs, tmux = self._sweep(proj, sid)
         self.assertFalse(any("hold:compact-pending" in ln for ln in logs), logs)
         self.assertTrue(any("OK (goal-sweep)" in ln for ln in logs), logs)
 
@@ -216,6 +234,64 @@ class TestJob7StillDelivers741(unittest.TestCase):
         src = inspect.getsource(discord_replies)
         self.assertNotIn("has_pending_request", src,
                          "job 7 must deliver regardless of a pending compact")
+
+
+class TestPendingCompactHoldBound848(_LatchBase):
+    """#848 direct unit tests for the bounded latch `pending_compact_hold` — the
+    fail-open branches the rider tests only exercise indirectly."""
+
+    SID = "sess-pch-848"
+
+    def _seed(self, now, **extra):
+        wd_compact.record_compact_request(self.SID, self.CWD, now=now,
+                                          path=self.creqp, origin="self-callback")
+        if extra:
+            d = wd_compact.load_compact_requests(self.creqp)
+            d[self.SID].update(extra)
+            wd_compact._save_compact_requests(d, self.creqp)
+
+    def test_fresh_request_holds(self):
+        self._seed(1000)
+        self.assertTrue(wd_compact.pending_compact_hold(self.SID, 1030,
+                                                        path=self.creqp))
+
+    def test_stale_request_past_the_bound_does_not_hold(self):
+        self._seed(1000)
+        # 2 sweeps * 60s = 120s; age 200s > bound -> no hold.
+        self.assertFalse(wd_compact.pending_compact_hold(self.SID, 1200,
+                                                         path=self.creqp))
+
+    def test_no_request_fails_open(self):
+        self.assertFalse(wd_compact.pending_compact_hold("nope", 1000,
+                                                         path=self.creqp))
+
+    def test_blank_sid_fails_open(self):
+        self.assertFalse(wd_compact.pending_compact_hold("", 1000,
+                                                         path=self.creqp))
+
+    def test_corrupt_non_dict_entry_fails_open(self):
+        Path(self.creqp).write_text(json.dumps({self.SID: "not-a-dict"}))
+        self.assertFalse(wd_compact.pending_compact_hold(self.SID, 1000,
+                                                         path=self.creqp))
+
+    def test_unmeasurable_anchor_fails_open(self):
+        self._seed(1000, bts="garbage", ts="garbage")
+        self.assertFalse(wd_compact.pending_compact_hold(self.SID, 1030,
+                                                         path=self.creqp))
+
+    def test_future_skewed_anchor_fails_open(self):
+        # a corrupt bts AFTER `now` -> negative age -> must NOT hold indefinitely.
+        self._seed(5000)
+        self.assertFalse(wd_compact.pending_compact_hold(self.SID, 1000,
+                                                         path=self.creqp))
+
+    def test_bts_missing_falls_back_to_ts(self):
+        self._seed(1000)
+        d = wd_compact.load_compact_requests(self.creqp)
+        d[self.SID].pop("bts", None)   # legacy-shaped entry with only ts
+        wd_compact._save_compact_requests(d, self.creqp)
+        self.assertTrue(wd_compact.pending_compact_hold(self.SID, 1030,
+                                                        path=self.creqp))
 
 
 if __name__ == "__main__":

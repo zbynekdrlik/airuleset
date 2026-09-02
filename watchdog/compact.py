@@ -42,21 +42,18 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
 
   DELIVERY — ONE function, `deliver_compact()`. It checks, in order:
             (a) the pane is idle, with no unsent draft and no open dialog;
-            (b) the session has no live background tasks of its own — neither a
-                dispatched worker lane (`count_live_workers`) NOR a live
-                `run_in_background` Bash job (#599: a START with no completion
-                notification in the transcript tail; a `/compact` would orphan
-                its completion notification, the #29193 class). #844 makes this
-                veto BOUNDED: once the boundary has been held on live-tasks/
-                bg-bash past `COMPACT_LIVE_HOLD_CAP_S` (measured `now - hbts`, the
-                inheritable held-boundary anchor), the veto becomes a DELIVERY
-                (`sent:live-hold-cap`/`queued:live-hold-cap`) — a 776K main is
-                strictly worse than re-collecting lanes from durable state, and
-                the step-0 experiment proved forcing at an idle prompt while a
-                lane is live is safe (lane not killed, commit durable,
-                notification survives; the residual loss is backed by the #844
-                durable LANE-RETURN comment + the post-compact reconcile rider).
-                ONLY this veto is bounded; every other veto below is unchanged;
+            (b) #848 REMOVED the old live-tasks / live-bg-bash veto entirely.
+                A boundary compact now DELIVERS even with a dispatched worker
+                lane or a live `run_in_background` Bash job present: the STEP-0
+                experiment (CC 2.1.258) proved a `/compact` at an idle prompt
+                with worktree lanes + a bg-bash waiter + an armed `/goal` all
+                live does NOT break the task registry — lanes commit,
+                notifications survive, task IDs still resolve, the goal survives
+                — while holding the boundary until the fleet drains is exactly
+                the 776K-context failure this corrects. The #844 BOUNDED cap
+                (`COMPACT_LIVE_HOLD_CAP_S`/`hbts`/`:live-hold-cap` words) is gone
+                with the veto. The residual lost-notification case is backed by
+                the #844 LANE-RETURN comment + the post-compact reconcile rider;
             (c) the session's last real turn is not a `❓` marker (blocked on
                 the user — #333/#228; the `⏳` marker NO LONGER blocks, #599),
                 AND is not stuck on an unread API error (#188 — a proven
@@ -77,23 +74,20 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
                 `COMPACT_REQUEST_MAX_AGE_S`, whose `ts` REFRESHES both on every
                 re-record (#599 supersede, REVERSING #400's non-refreshable
                 anchor) AND on every hold-extend veto during the periodic sweep
-                (#727 live-own-task holds; #741 actively-held-boundary holds —
-                recent-human / busy; the set also carries the goal-arm
-                `skip:client-active` for parity though `deliver_compact` never
-                returns it), so the cap measures "time
-                since the claim was last JUSTIFIED" (a genuine boundary OR a
-                measured live own-task hold OR an actively-held boundary) — a
-                busy/mid-batch/held loop holds until delivered, a gone-quiet
-                session ages out after 30 min.
+                (#741 actively-held-boundary holds — recent-human / busy; the set
+                also carries the goal-arm `skip:client-active` for parity though
+                `deliver_compact` never returns it; #848 removed the #727
+                live-own-task holds), so the cap measures "time
+                since the claim was last JUSTIFIED" (a genuine boundary OR an
+                actively-held boundary) — a busy/held loop holds until delivered,
+                a gone-quiet session ages out after 30 min.
             Two more checks ride along, both closing real previously-live
             production incidents scoped to the two proven origins, not
             merely the 5 named above: the user must not be actively
             engaged with this session right now (#377), and — on the
             record-time synchronous attempt only — the request must be at
             least `COMPACT_MIN_REQUEST_AGE_S` (2s) old, a fixed floor (NOT
-            a loop) against the same-turn-dispatch race (#238): a sibling
-            worker dispatched in the very same turn can be briefly
-            invisible to the live-tasks signals.
+            a loop) against the same-turn-dispatch race (#238).
             Every condition above is an UNCONDITIONAL hard skip with ONE
             origin-scoped supersede — none has a TIME-BOXED override. The one
             supersede is condition (d)'s #805 drained-boundary priority above:
@@ -104,10 +98,10 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             `_compact_self_reported_*` machinery): a recorded boundary request
             already PROVES a boundary occurred, and a 24/7 loop moves on to `⏳`
             within seconds, so the marker is no longer a delivery proxy — the
-            DIRECT live-work conditions ((a)/(b)) are. (#565 had already removed
-            the same exemption from condition (b)'s live-tasks veto — a
-            per-ticket boundary must never override a DETECTED live sibling
-            lane; #599 finishes the job on (c).) `❓` is NEVER exempted, under
+            DIRECT boundary condition (a) is. (#848 REMOVED condition (b)'s
+            live-tasks/bg-bash veto outright — a boundary compact delivers over
+            live lanes, so there is no longer a "detected live sibling lane"
+            override to reconcile.) `❓` is NEVER exempted, under
             any origin or content, ever (#333/#228 — the session is
             mid-decision; the pending question + the in-flight ticket the
             user's answer needs would be lost). All pass → type
@@ -129,11 +123,11 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             and drained by the session's boundary-hold turn (item d).
             "No infinite waiting" is the hard age cap's
             job — EXCEPT while a hold-extend veto keeps refreshing the claim
-            (#727 a mid-batch loop holds past 30 min by design; #741 an
-            actively-held boundary — recent-human / busy / client-active — holds
-            until a quiet window delivers it; the wedge-bound, the ❓-not-a-
-            boundary escape, and the named forever-live residual bound it, see
-            `_COMPACT_HOLD_EXTEND_WORDS`). A request that arrives while a
+            (#741 an actively-held boundary — recent-human / busy / client-active
+            — holds until a quiet window delivers it; #848 removed the #727
+            live-own-task holds; the ❓-not-a-boundary escape and the named
+            forever-live residual bound it, see `_COMPACT_HOLD_EXTEND_WORDS`). A
+            request that arrives while a
             sibling task is finishing (the autopilot-batch common case) still
             compacts once the sweep observes a quiet moment, never lost to a race.
 
@@ -235,15 +229,16 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     non-refreshable because the delivery logic then relied on the boundary
     MARKER still being present as a proxy for "still an appropriate moment".
     #599 replaces that proxy with the DIRECT delivery conditions (pane idle, no
-    live worker, no live bg-bash, no draft, no recent-human, not `❓`), so an
+    draft, no recent-human, not `❓`; #848 removed the live-worker/bg-bash
+    conditions), so an
     appropriate moment is checked AT DELIVERY and the age cap no longer has to be
     the safety mechanism. A recorded boundary request is now a STANDING claim: it
     HOLDS until delivered or SUPERSEDED, not discarded by an arbitrary timeout a
     24/7 loop's boundaries never align with (cambox: 244 SKIP / 0 SEND). The
     30-min cap stays but with `ts` refreshing (every genuine boundary #599, AND
-    every hold-extend veto — #727 live-own-task holds, #741 actively-held-boundary
-    holds: recent-human / busy) it measures "time since the claim was last
-    JUSTIFIED": a busy/mid-batch/held loop never expires (holds until delivered), a
+    every #741 actively-held-boundary hold: recent-human / busy — #848 removed the
+    #727 live-own-task holds) it measures "time since the claim was last
+    JUSTIFIED": a busy/held loop never expires (holds until delivered), a
     GONE-QUIET session ages out after 30 min. The #400 text-sniff
     trigger that could refresh forever is structurally gone (a permanent no-op);
     the only re-records now are genuine boundaries, which SHOULD supersede.
@@ -258,25 +253,14 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
         return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
-    # #844: `hbts` = the INHERITABLE held-boundary anchor for the live-hold cap
-    # (`deliver_compact`'s `boundary_ts`). A prior PENDING entry means the
-    # previous boundary was HELD, never delivered/expired (both CLEAR the
-    # request), so the un-drained chain CONTINUES: inherit its `hbts` so a
-    # frequent `## ✅ Work Complete` re-record cadence can never reset the cap
-    # clock below the cap (the Fable-consult hole in a raw-`bts` anchor — a busy
-    # master re-records every ~15min and #844 silently recurs). No prior entry =
-    # a fresh chain (the last compact was delivered/cleared) -> `hbts = now`.
-    # `bts` stays the PER-RECORD boundary anchor (HOLD-log observability), `ts`
-    # the refreshable age-cap anchor; only `hbts` is inheritable. `min()` is the
-    # #519 future-skew guard (a corrupt future prior_hbts never delays the cap).
-    prior = d.get(session)
-    hbts = int(now)
-    if isinstance(prior, dict):
-        prior_hbts = prior.get("hbts", prior.get("bts"))
-        if isinstance(prior_hbts, (int, float)) and not isinstance(prior_hbts, bool):
-            hbts = min(int(prior_hbts), int(now))
+    # #848: the #844 live-hold CAP is retired (the live-tasks/bg-bash veto it
+    # bounded is REMOVED outright — a boundary compact now delivers even with
+    # lanes live, per the STEP-0 experiment), so its inheritable `hbts` anchor is
+    # gone. Only `ts` (refreshable age-cap anchor) and `bts` (PER-RECORD boundary
+    # anchor for HOLD-log observability) are written. A legacy on-disk rec still
+    # carrying `hbts` is simply overwritten here (no reader consults the key).
     d[session] = {"cwd": str(cwd or ""), "ts": int(now), "bts": int(now),
-                  "hbts": hbts, "origin": str(origin or "").strip()}
+                  "origin": str(origin or "").strip()}
     return _save_compact_requests(d, path)
 
 
@@ -294,16 +278,23 @@ def clear_compact_request(session, path=None):
 
 
 def has_pending_request(sid, path=None):
-    """#741 WRITER-SIDE LATCH: True iff `sid` has a pending `/compact` request
-    in `~/.claude/compact-requests.json`. EVERY work-pushing watchdog writer
-    (goal_sweep goal-arm delivery, the job-20 lane-occupancy nudge, goal_dark_
-    watch re-arm, goal_question_repoke_watch disarm) consults this BEFORE typing
-    into that session's pane and HOLDS (logs `hold:compact-pending`, types
-    nothing) while it returns True, so a drained-boundary compact is delivered in
-    a quiet pane before any next-batch work is pushed in — the owner's "callback
-    v pokojovom stave, pokračovanie až po compacte" model. Job 7 (a human's
-    Discord answer, `watchdog/discord_replies.py`) is the SOLE exception — it
-    delivers regardless, the human's answer wins.
+    """#741 WRITER-SIDE LATCH (raw): True iff `sid` has a pending `/compact`
+    request in `~/.claude/compact-requests.json`. #848: the work-pushing watchdog
+    riders (goal_sweep goal-arm delivery, the job-20 lane-occupancy nudge,
+    goal_dark_watch re-arm, goal_question_repoke_watch disarm, and the
+    ops-wait/queue-arrival/release-gap/u-freshness/lane-reconcile riders) no
+    longer consult THIS unbounded latch — they consult `pending_compact_hold`
+    (the same check bounded to a few sweeps), so a compact that never delivers
+    (wedged on recent-human / busy) no longer freezes them for hours. This raw
+    predicate has NO production caller after #848 (the riders moved to
+    `pending_compact_hold`; `--status` reads the store directly via
+    `load_compact_requests`); it is retained as the unbounded store-presence check
+    for tests + any future consumer. When `pending_compact_hold` (its bounded
+    sibling) returns True a rider HOLDS (logs `hold:compact-pending`,
+    types nothing) so a boundary compact is delivered in a quiet pane before more
+    work is pushed in — the owner's "callback v pokojovom stave, pokračovanie až
+    po compacte" model. Job 7 (a human's Discord answer,
+    `watchdog/discord_replies.py`) is the SOLE exception — it delivers regardless.
 
     Fail-safe: a blank sid, a missing/unreadable file, or any error → False
     (never raises, via `load_compact_requests`), so a latch read that cannot see
@@ -317,6 +308,45 @@ def has_pending_request(sid, path=None):
     if not sid:
         return False
     return isinstance(load_compact_requests(path).get(sid), dict)
+
+
+# The nominal watchdog sweep cadence (seconds). `pending_compact_hold`'s bound is
+# expressed in sweeps so it self-scales with the timer; the constant just names
+# the ~60s cadence the systemd `--user` timer runs at.
+COMPACT_SWEEP_INTERVAL_S = 60
+COMPACT_PENDING_HOLD_SWEEPS = 2   # #848: bound the rider hold to this many sweeps
+
+
+def pending_compact_hold(sid, now=None, sweeps=None, path=None):
+    """#848 BOUNDED writer-side latch: True iff `sid` has a pending `/compact`
+    request AND that request is YOUNGER than `sweeps` sweep intervals (measured
+    from its `bts`, fallback `ts`). Every work-pushing watchdog rider that used
+    `has_pending_request` as its `hold:compact-pending` gate now uses THIS, so the
+    hold is bounded: with the #848 veto removed a boundary compact delivers within
+    ~1 sweep, so a request still pending after `sweeps` sweeps is wedged on
+    recent-human / busy (whose own keystroke gates already protect the pane) — the
+    rider stops freezing and retries. The in-sweep `compact_sweep(handled=...)` set
+    still prevents a same-sweep keystroke collision, independent of this bound.
+
+    Fail-OPEN (never a hold) on: a blank sid, no pending request, a corrupt/non-dict
+    entry, an unreadable/malformed age anchor, OR a FUTURE-skewed anchor
+    (`age < 0` — a corrupt anchor timestamped after `now`; the retired `hbts` path
+    guarded the same case with `min(prior, now)`). All of these are the pre-#741
+    behaviour, so a read that cannot trust the store never wedges a writer."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    entry = load_compact_requests(path).get(sid)
+    if not isinstance(entry, dict):
+        return False
+    anchor = entry.get("bts", entry.get("ts"))
+    now = time.time() if now is None else now
+    age = _safe_age(now, anchor)
+    if age is None or age < 0:
+        return False   # unmeasurable / future-skewed anchor -> fail-open (no hold)
+    if sweeps is None:
+        sweeps = COMPACT_PENDING_HOLD_SWEEPS
+    return age < sweeps * COMPACT_SWEEP_INTERVAL_S
 
 
 def _touch_compact_request_ts(sid, now, path=None):
@@ -419,67 +449,17 @@ def _compact_min_delivery_interval(interval=None):
     return raw
 
 
-# #844 -- the BOUNDED live-hold cap. Once the UN-DRAINED boundary chain has been
-# held for this long (measured `now - hbts`, the INHERITABLE held-boundary anchor
-# = time since the last actual compact/clear, NOT time on the live-tasks veto
-# alone -- see `_compact_live_hold_reached`), a live-tasks/bg-bash veto becomes a
-# DELIVERY instead of an indefinite hold: a 776K main is strictly worse than
-# re-collecting lanes from durable state (the step-0 experiment proved forcing
-# the compact at an IDLE prompt while a lane is live does NOT kill the lane, its
-# commit is durable, and its completion notification survives). The force
-# bypasses ONLY the two live-tasks/bg-bash vetoes -- never idle-reverify
-# (`fresh_kind == "input"`), recent-human, busy, draft, dialog, in-mode,
-# not-a-boundary, or `❓` (all load-bearing, per the Fable consult; those veto
-# EARLIER so an actively-watched pane never force-compacts).
-COMPACT_LIVE_HOLD_CAP_S = 1800   # 30 min; env AIRULESET_COMPACT_LIVE_HOLD_CAP_S
-COMPACT_LIVE_HOLD_CAP_MIN_S = 10 * 60    # floor: a units-error must never force every sweep
-COMPACT_LIVE_HOLD_CAP_MAX_S = 6 * 3600   # ceiling: nor make the cap effectively never fire
-
-
-def _compact_live_hold_cap(cap=None):
-    """The effective live-hold cap: an explicit `cap=` (test/caller override) is
-    returned verbatim; the CONSTANT/ENV value is clamped to
-    `[COMPACT_LIVE_HOLD_CAP_MIN_S, COMPACT_LIVE_HOLD_CAP_MAX_S]` so a misconfigured
-    env var can neither force on every sweep (too small) nor make the cap never
-    fire (too large). Mirrors `_compact_min_delivery_interval`."""
-    if cap is not None:
-        return cap
-    try:
-        raw = int(os.environ.get("AIRULESET_COMPACT_LIVE_HOLD_CAP_S",
-                                 COMPACT_LIVE_HOLD_CAP_S))
-    except ValueError:
-        raw = COMPACT_LIVE_HOLD_CAP_S
-    if raw < COMPACT_LIVE_HOLD_CAP_MIN_S:
-        return COMPACT_LIVE_HOLD_CAP_MIN_S
-    if raw > COMPACT_LIVE_HOLD_CAP_MAX_S:
-        return COMPACT_LIVE_HOLD_CAP_MAX_S
-    return raw
-
-
-def _compact_live_hold_reached(boundary_ts, now, cap=None):
-    """True iff the UN-DRAINED-BOUNDARY chain has been held (`now - boundary_ts`)
-    for at least the live-hold cap. `boundary_ts` is the request's `hbts`
-    (inheritable held-boundary anchor) — it measures "time since the last actual
-    compact/clear", NOT "time on the live-tasks veto specifically": a boundary
-    held on recent-human/busy (#741) also inherits `hbts`, so the chain age
-    reflects total context growth regardless of WHY the boundary was held. That
-    is deliberate — context growth is the harm variable — and it is SAFE because
-    `deliver_compact` consults this ONLY at the two live-tasks/bg-bash veto
-    branches: recent-human / busy / draft / dialog / not-a-boundary / `❓` all
-    veto EARLIER and are NEVER bypassed, so an actively-watched pane never
-    force-compacts; the force fires only once those clear AND a live-tasks veto
-    is the sole thing left blocking (the step-0 idle-prompt experiment's exact
-    case). None (a legacy pre-#844 entry with no `hbts`) or a bool / non-numeric
-    / corrupt anchor -> False (fail-safe: hold as before, never force blind — the
-    bool guard mirrors `record_compact_request`, since a bool read from a corrupt
-    store would otherwise `float(True)==1.0` and force)."""
-    if boundary_ts is None or isinstance(boundary_ts, bool):
-        return False
-    try:
-        held = now - float(boundary_ts)
-    except (TypeError, ValueError):
-        return False
-    return held >= _compact_live_hold_cap(cap)
+# #848 -- the #844 BOUNDED live-hold cap is RETIRED. It bounded the live-tasks/
+# bg-bash veto to 30 min so a saturated master's boundary compact was not held
+# forever; #848 removes that veto OUTRIGHT (a boundary compact delivers even with
+# lanes live — the STEP-0 experiment on CC 2.1.258 proved a `/compact` at an idle
+# prompt with worktree lanes + a bg-bash waiter + an armed `/goal` all live does
+# NOT break the task registry: lanes commit, completion notifications survive,
+# task IDs still resolve, `◎ /goal` survives), so there is no veto left to cap.
+# `COMPACT_LIVE_HOLD_CAP_S` + `_compact_live_hold_cap` + `_compact_live_hold_reached`
+# + the request's `hbts` anchor are all gone (net subtraction, #486). The residual
+# lost-notification case is covered by the #844 LANE-RETURN gate + lane-reconcile
+# rider (a SEPARATE, retained safety net).
 
 
 def compact_delivery_in_cooldown(session, now, path=None, interval=None):
@@ -646,8 +626,9 @@ _COMPACT_DRAINED_BOUNDARY_ORIGINS = frozenset((_COMPACT_SELF_CALLBACK_ORIGIN,))
 # per-origin relaxation was reversed). The `⏳` marker NO LONGER vetoes (#599):
 # a recorded boundary request already PROVES a boundary occurred (durable state
 # in git/GitHub), and a 24/7 loop moves on to `⏳` within seconds; safety at the
-# delivery instant is held by the DIRECT live-work conditions (pane idle/busy,
-# no live worker, no live bg-bash, no draft, recent-human), not by this marker
+# delivery instant is held by the DIRECT boundary conditions (pane idle/busy,
+# no draft, recent-human, `skip:raced`; #848 removed the live-worker/bg-bash
+# conditions), not by this marker
 # proxy — which only ever additionally blocked the idle-after-`⏳` case, exactly
 # the case the owner wants compacted. Dropping the `⏳` veto for ALL origins
 # unifies the former self-callback-only #425 exemption (point 4); its
@@ -672,8 +653,9 @@ def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
     (durable state in git/GitHub), so delivery must not require the last turn to
     STILL be that boundary; a 24/7 loop moves on to `⏳` within seconds, and the
     idle-after-`⏳` case is exactly what the owner wants compacted. Safety at the
-    delivery instant is held by the DIRECT live-work conditions (pane busy/idle,
-    no live worker, no live bg-bash, no draft, recent-human), not by this marker
+    delivery instant is held by the DIRECT boundary conditions (pane busy/idle,
+    no draft, recent-human, `skip:raced`; #848 removed the live-worker/bg-bash
+    conditions), not by this marker
     proxy. `❓` STAYS an UNCONDITIONAL veto for every origin (#333/#228 — the
     session is mid-decision and the pending question + the in-flight ticket the
     user's answer needs would be lost by a compaction). Dropping the `⏳` veto
@@ -767,11 +749,12 @@ COMPACT_LIVE_WORKER_FRESHNESS_S = 15 * 60
 
 
 def _live_bg_tasks_detail(sid, cwd, projects_dir=None, now=None):
-    """The compact ``agent-id(state)`` label(s) of this session's LIVE worker
-    lane(s), joined by ",", or "" when none — condition (b) of `deliver_compact`:
-    a fresh subagent lane the supervisor still owns means a `/compact` would
-    orphan it (#565), and the DETAIL names it for the decision log (#605 thread
-    3 — the incident was blind-diagnosed twice from a bare `SKIP live-tasks`).
+    """The ``agent-id(state)`` label(s) of this session's LIVE worker lane(s),
+    joined by ",", or "" when none. #848: this is NO LONGER a compact-delivery
+    veto (a boundary compact now delivers over live lanes). It and its bool
+    wrapper `_session_has_live_bg_tasks` are retained (with test coverage) as the
+    structured live-lane reader for any future consumer, but are no longer wired
+    into `deliver_compact`. The DETAIL still names the lane(s) for a decision log.
 
     #605: the STRUCTURED `count_live_workers` signal is now the ONLY signal — the
     pane `_BG_AGENTS_WAIT_RX` scrape (former signal (a)) was REMOVED (no
@@ -780,20 +763,11 @@ def _live_bg_tasks_detail(sid, cwd, projects_dir=None, now=None):
     coverage — a genuinely-live agent always has a fresh subagent transcript
     inside the 15-min window (> the 10-min Bash cap, #518) — and is the #486
     direction: replace a pane-render heuristic with structured transcript state.
-    This same freshness partition is the #727 hold-extend WEDGE-BOUND: a wedged
-    lane whose transcript stops growing goes stale -> stops reading live -> the
-    veto stops firing -> the held claim stops refreshing -> the age cap resumes.
-
-    Vetoes on ANY FRESH lane via the SAME `_LANE_NOT_LIVE_STATES` partition
+    Reports ANY FRESH lane via the SAME `_LANE_NOT_LIVE_STATES` partition
     `lane_has_live_evidence` uses (`live_lane_labels`, single source of truth):
     a `live`/`wedged`/`unreadable` lane counts live (#565-review: a wedged lane
     pending job-1 auto-resume is recoverable in-flight work), a `finished` lane
-    is EXCLUDED (#587). Unreadable → [] → "" (a deferral, never a new block on
-    "we don't know").
-
-    `count_live_workers` is disk-only and blind to a generic background Bash
-    CI-wait — that is a SEPARATE compact-only signal (`_compact_live_bg_bash`,
-    #599/#604), never folded in here (#565/#571 shared-primitive isolation)."""
+    is EXCLUDED (#587). Unreadable → [] → "" (a deferral, never a false live)."""
     now_ts = now if now is not None else time.time()
     pdir = projects_dir or watchdog.PROJECTS_DIR
     # `count_live_workers` never raises (fail-safe to no lanes); its `on_warn`
@@ -806,58 +780,18 @@ def _live_bg_tasks_detail(sid, cwd, projects_dir=None, now=None):
 
 def _session_has_live_bg_tasks(sid, cwd, projects_dir=None, now=None):
     """True iff `_live_bg_tasks_detail` names any live worker lane — the bool
-    form of condition (b). #605: STRUCTURED-only (the pane signal (a) was
-    removed); see `_live_bg_tasks_detail` for the full reasoning."""
+    form; #848 no longer a compact-delivery veto (retained for a future
+    consumer, not wired into `deliver_compact`). #605: STRUCTURED-only (the pane
+    signal (a) was removed); see `_live_bg_tasks_detail` for the full reasoning."""
     return bool(_live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir, now=now))
 
 
-# --------------------------------------------------------------------------- #
-# Condition (b), SECOND signal (#599) — no live `run_in_background` Bash job.
-# --------------------------------------------------------------------------- #
-
-# The bounded transcript-tail window for the bg-bash liveness read. TIGHT on
-# purpose (200 entries ≈ the death-detector sibling window): an ABANDONED older
-# bg job scrolls out of the window and stops vetoing (self-healing), while a
-# genuinely-recent live job is still caught — measured on cambox, a trailing
-# 200-entry window is free of open bg jobs ~71% of the time, so this veto never
-# permanently blocks compaction. Byte-bounded (1MB seek) so the read stays
-# ~0.005s even on a 670MB transcript. Both env-tunable (via
-# ~/.claude/watchdog.env, #574), each floored so a misconfigured value can
-# never silently disable the veto.
-COMPACT_BG_BASH_TAIL_BYTES = 1_000_000   # env AIRULESET_COMPACT_BG_BASH_TAIL_BYTES
-COMPACT_BG_BASH_MAX_ENTRIES = 200        # env AIRULESET_COMPACT_BG_BASH_MAX_ENTRIES
-
-
-def _compact_bg_bash_window():
-    """(tail_bytes, max_entries) for the bg-bash read — the constants or their
-    env overrides, each floored to a positive minimum so a malformed / disabling
-    value (0 / negative / unparseable) falls back to the constant, never off."""
-    def _pos(env, const):
-        try:
-            v = int(os.environ.get(env, const))
-        except ValueError:
-            return const
-        return v if v > 0 else const
-    return (_pos("AIRULESET_COMPACT_BG_BASH_TAIL_BYTES", COMPACT_BG_BASH_TAIL_BYTES),
-            _pos("AIRULESET_COMPACT_BG_BASH_MAX_ENTRIES", COMPACT_BG_BASH_MAX_ENTRIES))
-
-
-def _compact_live_bg_bash(cwd, sid, projects_dir=None):
-    """The live `run_in_background` Bash bgid(s) of the session's OWN transcript
-    (a START with no later completion/kill in the bounded tail), joined by ",",
-    or "" when none — so a `/compact` never orphans a live bg job's completion
-    (#29193). #605: returns the DETAIL (not a bare bool) so the SKIP live-bg-bash
-    log NAMES the job, via `session_live_bg_bash_ids`. DELIBERATELY SEPARATE from
-    the worker-lane `count_live_workers` signal (a bg-bash job is NOT a lane, so
-    the #571/#565 lane-occupancy/gk-fill consumers never see it — this compact-only
-    reader leaves them structurally unaffected). No transcript → ""."""
-    pdir = projects_dir or watchdog.PROJECTS_DIR
-    tpath = watchdog._transcript_for_session(pdir, sid, cwd)
-    if tpath is None:
-        return ""
-    tail_bytes, max_entries = _compact_bg_bash_window()
-    return ",".join(watchdog.session_live_bg_bash_ids(
-        str(tpath), tail_bytes=tail_bytes, max_entries=max_entries))
+# #848 -- the "Condition (b), SECOND signal" live `run_in_background` Bash veto
+# (`_compact_live_bg_bash` + `_compact_bg_bash_window` + the COMPACT_BG_BASH_*
+# window constants) is DELETED: with the live-tasks veto removed, a live bg-bash
+# job no longer blocks the boundary compact, so its detector has no caller. The
+# underlying `watchdog.session_live_bg_bash_ids` primitive is retained (used by
+# other readers); only this compact-only wrapper is gone.
 
 
 # --------------------------------------------------------------------------- #
@@ -886,29 +820,22 @@ COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
 # (#822: there is deliberately NO `skip:goal-continuing` pre-type gate — see
 # `deliver_compact`; a `/compact` under an armed goal is typed and QUEUES, so
 # `queued` is the word that fires the hint, never a refuse-to-type skip.)
-# #844: `queued:live-hold-cap` -- a FORCED delivery that queued behind an armed-
-# goal continuation -- is the likeliest queued path on a saturated master, so it
-# ALSO needs the boundary-hold hint (a plain `queued` and the forced one drain the
-# same way, at an accepted Stop).
 _COMPACT_HOLD_HINT_WORDS = frozenset(
-    ("queued", "already-queued", "queued:live-hold-cap"))
+    ("queued", "already-queued"))
 
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
 # first-seen" — #400's non-refreshable anchor is reversed). `ts` REFRESHES on
 # a genuine boundary re-record (#599 supersede — `record_compact_request`) AND
-# on any hold-extend veto during the sweep (#727 a structurally-measured live
-# own-task hold; #741 an actively-held boundary — recent-human / busy — via
-# `_touch_compact_request_ts`). So a busy/mid-batch/held loop NEVER bites (the
-# claim HOLDS until it delivers at the first safe moment, fixing cambox's 244
-# SKIP / 0 SEND and #727's mid-batch expiry); a GONE-QUIET session (no hold word
-# fires) ages out after 30 min — including a ❓-blocked session, whose
-# `skip:not-a-boundary` is deliberately NOT hold-extended (#741); a WEDGED lane
-# goes stale -> the veto stops -> the hold stops -> expiry resumes (the
-# wedge-bound). The "late
+# on any #741 actively-held-boundary hold during the sweep (recent-human / busy —
+# via `_touch_compact_request_ts`; #848 removed the #727 live-own-task holds). So
+# a busy/held loop NEVER bites (the claim HOLDS until it delivers at the first
+# safe moment, fixing cambox's 244 SKIP / 0 SEND); a GONE-QUIET session (no hold
+# word fires) ages out after 30 min — including a ❓-blocked session, whose
+# `skip:not-a-boundary` is deliberately NOT hold-extended (#741). The "late
 # inappropriate moment" hazard #400 guarded is now handled by the DIRECT
-# delivery conditions (pane idle, no live worker/bg-bash, no draft/recent-human,
-# not `❓`), never by this cap.
+# delivery conditions (pane idle, no draft/recent-human, not `❓`; #848 removed
+# the live-worker/bg-bash conditions), never by this cap.
 COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 
 COMPACT_MIN_REQUEST_AGE_S = 2.0   # env AIRULESET_COMPACT_MIN_REQUEST_AGE_S
@@ -1226,7 +1153,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
 
 def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                     delivered_path=None, now=None, state=None,
-                    request_ts=None, sleep_fn=None, boundary_ts=None):
+                    request_ts=None, sleep_fn=None):
     """Evaluate every delivery condition for `sid` ONCE and act. Called
     from BOTH entry points' own immediate synchronous attempt (`--record`/
     `--self`) AND from the periodic sweep (`compact_sweep`) — both thread
@@ -1237,14 +1164,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 
     Returns:
       "sent"            — `/compact` was typed AND observed executing / not
-                           queued (`_compact_post_send_classify`, #822).
-      "sent:live-hold-cap" — #844: the same, but delivered by FORCING past a
-                           live-tasks/bg-bash veto because the boundary was held
-                           past `COMPACT_LIVE_HOLD_CAP_S` (`boundary_ts`=`hbts`).
-                           Terminal; journal-mapped distinctly by the sweep.
-      "queued:live-hold-cap" — #844: a forced delivery that CC appended to the
-                           type-ahead queue behind an armed-goal continuation
-                           (drained by the boundary-hold turn). Terminal.
+                           queued (`_compact_post_send_classify`, #822). #848:
+                           delivered even with worker lanes / a bg-bash job live
+                           (the live-tasks veto is gone — no cap, no force word).
       "queued"          — `/compact` was typed but CC appended it to the
                            type-ahead queue behind a running turn (#822); it did
                            NOT execute, so `compact-delivered` is NOT written (no
@@ -1276,14 +1198,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     site, immediately after any real send and BEFORE any other state
     write, so a later exception can never leave a genuine send unlogged."""
     now = now if now is not None else time.time()
-    # #844 -- the BOUNDED live-hold cap. `force` becomes True once the boundary
-    # has been held on the live-tasks/bg-bash veto past the cap; it authorises
-    # bypassing ONLY those two vetoes (condition (b) + its raced re-check), never
-    # any other gate. `did_force` records whether a veto was ACTUALLY bypassed
-    # (there WAS a live lane at the veto), so a boundary that DRAINED before the
-    # cap fired still returns the plain "sent"/"queued".
-    force = _compact_live_hold_reached(boundary_ts, now)
-    did_force = False
+    # #848 -- the live-tasks / live-bg-bash veto (old condition (b)) is REMOVED
+    # outright: a boundary compact delivers even with lanes live. So the #844
+    # `force`/`did_force`/`_compact_live_hold_reached` cap machinery is gone too.
     if watchdog._owner_disabled("compact"):
         _log_compact_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
         return "skip:disabled"
@@ -1298,7 +1215,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         if age is not None and age > COMPACT_REQUEST_MAX_AGE_S:
             # #523: name the ORIGIN on the discard record — post-#610 the sole
             # producer is `self-callback`, so a lapse now means a gone-quiet
-            # session (no new boundary in 30 min AND no #727 live-task hold);
+            # session (no new boundary in 30 min AND no #741 actively-held hold);
             # the #486 explicit-decision-log guardrail, logging-only (no
             # delivery decision changed).
             _log_compact_sync("SKIP expired sid=%s cwd=%s origin=%s"
@@ -1347,39 +1264,14 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP already-queued sid=%s cwd=%s" % (sid, cwd))
         return "already-queued"
 
-    # Condition (b) — no live background tasks of this session's own. NOT
-    # exempted by a Work Complete heading (#565): a per-ticket boundary does not
-    # imply the sibling lanes finished. #605: STRUCTURED-only (the pane
-    # `_BG_AGENTS_WAIT_RX` scrape was removed — it false-positived on stale
-    # scrollback at an idle prompt), and the log NAMES the live lane(s) so the
-    # veto is never blind-diagnosed again (thread 3).
-    lanes = _live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir)
-    if lanes:
-        if not force:
-            _log_compact_sync("SKIP live-tasks sid=%s cwd=%s lanes=%s"
-                              % (sid, cwd, lanes))
-            return "skip:live-tasks"
-        # #844 -- the boundary has been held on live-tasks past the cap: DELIVER
-        # anyway (the experiment proved this is safe at an idle prompt). Only
-        # this veto is bypassed; everything below still runs.
-        did_force = True
-        _log_compact_sync("LIVE-HOLD-CAP forcing sid=%s cwd=%s held>=%ds "
-                          "lanes=%s (delivering past live-tasks veto)"
-                          % (sid, cwd, _compact_live_hold_cap(), lanes))
-    # Condition (b), SECOND signal (#599) — a live `run_in_background` Bash job
-    # (invisible to `count_live_workers`) whose completion `/compact` would
-    # orphan (#29193). Distinct reason + bgid so the forensic log keeps the two
-    # apart AND names the job (#605 thread 3).
-    bgjobs = _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir)
-    if bgjobs:
-        if not force:
-            _log_compact_sync("SKIP live-bg-bash sid=%s cwd=%s jobs=%s"
-                              % (sid, cwd, bgjobs))
-            return "skip:live-bg-bash"
-        did_force = True
-        _log_compact_sync("LIVE-HOLD-CAP forcing sid=%s cwd=%s held>=%ds "
-                          "jobs=%s (delivering past live-bg-bash veto)"
-                          % (sid, cwd, _compact_live_hold_cap(), bgjobs))
+    # #848 -- the old condition (b) live-tasks / live-bg-bash veto is REMOVED.
+    # A live worker lane or a live `run_in_background` Bash job no longer blocks
+    # the boundary compact: the STEP-0 experiment proved a `/compact` at an idle
+    # prompt with those live does not break the task registry, and holding the
+    # boundary until the fleet drains is exactly the 776K-context failure #848
+    # corrects. Every OTHER veto above (recent-human, busy, draft, dialog,
+    # not-a-boundary, unresumed, `❓`) and below (`skip:raced` #333, cooldown)
+    # stays — only the two live-task rungs go.
     if _compact_request_too_young(request_ts, now):
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return "skip:too-young"
@@ -1388,8 +1280,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # DRAINED-BOUNDARY PRIORITY exemption. A drained-boundary request
     # (`self-callback` — the SOLE production origin) that
     # reached here has already cleared EVERY gate above: at-boundary (c), no
-    # recent human, no draft, not busy, zero live worker lanes / bg-bash (b),
-    # aged past too-young. That is a genuine DRAINED boundary, and the boundary
+    # recent human, no draft, not busy, aged past too-young (#848 removed the old
+    # condition (b) live-tasks/bg-bash veto, so a live lane no longer gates here).
+    # That is a genuine integration boundary, and the boundary
     # is the authoritative "compact NOW" signal — it SUPERSEDES an in-window
     # cooldown left by a PRIOR delivery, so the next batch never starts on an
     # uncompacted, growing context (the owner's report). ROOT (why the direct-
@@ -1421,21 +1314,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     if fresh_kind != "input" or fresh_draft:
         _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:raced"
-    lanes = _live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir)
-    if lanes:
-        if not force:
-            _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s lanes=%s"
-                              % (sid, cwd, lanes))
-            return "skip:live-tasks-raced"
-        did_force = True   # #844 -- bypass the raced veto too, else the force
-        #                     would be undone by the racing re-check.
-    bgjobs = _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir)
-    if bgjobs:
-        if not force:
-            _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s jobs=%s"
-                              % (sid, cwd, bgjobs))
-            return "skip:live-bg-bash-raced"
-        did_force = True
+    # #848 -- the raced live-tasks / live-bg-bash re-check is REMOVED with the
+    # veto itself; only the #333 boundary re-check (`skip:raced` above) survives,
+    # so a compact still never lands mid-turn / on a pane that raced busy.
 
     # #822 — NO pre-type gate under an armed `/goal`, DELIBERATELY. An earlier
     # cut added a `skip:goal-continuing` gate here (refuse to type when armed goal
@@ -1479,9 +1360,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         # is cleared here (`queued` is terminal), so this durable anchor is the
         # only `since` the read-only /goal HOLD probe can report.
         mark_compact_queued_ts(sid, now=now)
-        # #844 -- name the forced-queued case distinctly so triage can see the
-        # cap fired even when the armed-goal continuation queued the row.
-        return "queued:live-hold-cap" if did_force else "queued"
+        return "queued"
     if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed
         # the Enter, #36) or a draft raced into the box pre-send — either way the
@@ -1496,11 +1375,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         return "skip:submit-%s" % outcome
     # Log the send IMMEDIATELY, before any other write — an exception in
     # mark_compact_delivery_ts below must never leave a real send unlogged.
-    _log_compact_sync("SEND%s sid=%s cwd=%s origin=%s"
-                      % (" live-hold-cap" if did_force else "", sid, cwd,
-                         origin or "-"))
+    _log_compact_sync("SEND sid=%s cwd=%s origin=%s" % (sid, cwd, origin or "-"))
     mark_compact_delivery_ts(sid, now=now, path=delivered_path)
-    return "sent:live-hold-cap" if did_force else "sent"
+    return "sent"
 
 
 # The dispositions that fully HANDLE a request — the caller clears it
@@ -1509,46 +1386,38 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 # accepted Stop, and the queued row is now in the pane — re-typing would only
 # stack a duplicate (the owner's 3x accumulation), so the request is done.
 _COMPACT_TERMINAL_WORDS = frozenset(
-    ("sent", "queued", "expired", "already-queued", "cooldown",
-     # #844 -- a FORCED delivery (past the live-tasks cap) is delivered exactly
-     # like "sent"/"queued": terminal, request cleared, never re-typed.
-     "sent:live-hold-cap", "queued:live-hold-cap"))
+    ("sent", "queued", "expired", "already-queued", "cooldown"))
 
-# #727/#741 hold-extend: the STRUCTURED live-own-task veto words PLUS the #741
-# ACTIVELY-HELD-BOUNDARY words. While one is the SWEEP's verdict, `compact_sweep`
-# REFRESHES the request's `ts` so an actively-held boundary never ages out of the
-# 30-min cap while it waits for a quiet window. Two families:
-#   * live-own-task (#727) -- a measured live worker lane / live run_in_background
-#     bash job vetoed delivery, correctly (CC #29193): the session is mid-batch,
-#     not gone-quiet.
+# #741 hold-extend (the #727 live-own-task words are GONE with #848's veto
+# removal). While one of these is the SWEEP's verdict, `compact_sweep` REFRESHES
+# the request's `ts` so an ACTIVELY-HELD boundary never ages out of the 30-min cap
+# while it waits for a quiet window:
 #   * actively-held boundary (#741) -- `skip:recent-human`/`skip:busy`/`skip:client-
 #     active`. Under the #741 hold-turn doctrine a pending compact makes every
 #     goal-fired turn a HOLD turn (cheap `compact-request --status` -> `⏳ WORKING:
-#     čakám na compact hranice várky`, zero dispatches), so the pane transiently
-#     reads busy / a human is transiently active while the boundary is being held
-#     for delivery, NOT superseded. This REVERSES #727's "NEVER on skip:busy" (a
-#     busy pane during a HOLD turn is the held boundary, not a new turn) and makes
-#     `recent-human` a DEFERRAL rather than a discard (the owner's directive: in an
-#     interactive session recent-human is nearly always true while the owner
-#     watches, so it must postpone the compact, not throw it away).
+#     boundary hold`, zero dispatches), so the pane transiently reads busy / a
+#     human is transiently active while the boundary is being held for delivery,
+#     NOT superseded. `recent-human` is a DEFERRAL rather than a discard (the
+#     owner's directive: in an interactive session recent-human is nearly always
+#     true while the owner watches, so it must postpone the compact, not throw it
+#     away).
 # NEVER a pane-render signal, and NEVER `skip:not-a-boundary` (a ❓-blocked session
 # is a legitimate END of the boundary -- the request may correctly age out there,
-# so `expired` still fires for a request with no ACTIVE hold). A wedged lane / a
-# session that goes genuinely quiet stops emitting a hold word -> ts stops
-# refreshing -> the age cap resumes (wedge-bound).
+# so `expired` still fires for a request with no ACTIVE hold). #848: a live worker
+# lane / bg-bash job NO LONGER holds a boundary (the veto is removed), so the
+# `skip:live-tasks*` words are gone from this set too. A session that goes
+# genuinely quiet stops emitting a hold word -> ts stops refreshing -> the age cap
+# resumes (wedge-bound).
 _COMPACT_HOLD_EXTEND_WORDS = frozenset((
-    "skip:live-tasks", "skip:live-bg-bash",
-    "skip:live-tasks-raced", "skip:live-bg-bash-raced",
     "skip:recent-human", "skip:busy", "skip:client-active"))
-# RESIDUAL (design #727 §5 + #741): a genuinely-forever-live own task OR a session
-# that stays busy/human-active forever holds the claim -- a 24/7 bg job, a #604
-# launched-then-vanished bg-bash orphan, or a pane that never returns to an idle
-# window. Bounded (1-pending-per-session + every new boundary supersedes + delivery
-# is re-vetoed each sweep + a genuinely-blocked ❓ turn is NOT extended and ages
-# out), NOT a delivery risk; reopen trigger = a HOLD journal line whose `boundary
-# held` exceeds hours. (`skip:client-active` is a goal-arm verdict, not currently
-# a `deliver_compact` return; it is kept here for parity so the set stays the
-# single source of truth if compact delivery ever gains that gate.)
+# RESIDUAL (design #741): a session that stays busy/human-active forever holds the
+# claim -- a pane that never returns to an idle window. Bounded (1-pending-per-
+# session + every new boundary supersedes + delivery is re-vetoed each sweep + a
+# genuinely-blocked ❓ turn is NOT extended and ages out), NOT a delivery risk;
+# reopen trigger = a HOLD journal line whose `boundary held` exceeds hours.
+# (`skip:client-active` is a goal-arm verdict, not currently a `deliver_compact`
+# return; it is kept here for parity so the set stays the single source of truth
+# if compact delivery ever gains that gate.)
 
 # A small margin over `COMPACT_MIN_REQUEST_AGE_S` so a `time.sleep()` that
 # very slightly undershoots its requested duration (never observed on this
@@ -1572,9 +1441,10 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     in the SAME call, so a request's age is ~0 when `deliver_compact` checks it;
     without the wait the min-age floor refuses EVERY fresh request and defers it
     to the ~60s sweep (the pre-#402 regression: "18 of 87 real sends" took that
-    slow path). The floor's purpose is real — a same-turn-dispatched sibling
-    worker can be briefly invisible to `_live_bg_tasks_detail` — and this wait
-    gives that signal a chance to catch up without resurrecting the retry loop.
+    slow path). The floor historically also gave a same-turn-dispatched sibling
+    lane a beat to become visible to the (now-#848-removed) live-tasks veto; it
+    is retained as a small same-call age-clearance margin, without resurrecting
+    the retry loop.
     The wait is computed from the REQUEST's own recorded `ts`; #599 sets `ts`
     to `now` on every record, so `req_ts` is ~now here and the fresh boundary
     sleeps the ~2s floor once (the #238 same-turn-dispatch race protection).
@@ -1601,8 +1471,7 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     word = deliver_compact(sid, cwd, origin=origin, run=run,
                            projects_dir=projects_dir,
                            delivered_path=delivered_path, now=now_fn(),
-                           state=state, request_ts=req_ts, sleep_fn=sleep_fn,
-                           boundary_ts=entry.get("hbts"))
+                           state=state, request_ts=req_ts, sleep_fn=sleep_fn)
     if word in _COMPACT_TERMINAL_WORDS:
         clear_compact_request(sid, path=requests_path)
     return word
@@ -1615,7 +1484,7 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
     replacement for the old job 14) — wired at the SAME `run_once()` slot.
     Re-checks each still-pending request's SAME unmodified conditions
     every sweep; nothing here overrides a hard DELIVERY condition, but the
-    #727/#741 hold branch below DOES refresh the request's `ts` on any
+    #741 hold branch below DOES refresh the request's `ts` on any
     hold-extend word. Otherwise a request that keeps failing a condition sits
     until it clears (delivered) or the age cap (condition e) discards it — "no
     infinite waiting" is the cap's job, bounded per `_COMPACT_HOLD_EXTEND_WORDS`.
@@ -1646,16 +1515,12 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
         cwd = entry.get("cwd", "")
         origin = entry.get("origin") or None
         if dry_run:
-            # #844 -- surface the canonical live-hold cap + how long THIS
-            # boundary has been held, so `--dry-run --verbose` shows whether a
-            # force would fire (the constant is otherwise invisible).
-            held = _safe_age(now, entry.get("hbts"))
+            # #848 -- the #844 live-hold cap is retired; a boundary compact
+            # delivers over live lanes, so there is no force to surface.
+            held = _safe_age(now, entry.get("bts"))
             held_s = "?" if held is None else "%d" % int(held)
-            cap = _compact_live_hold_cap()
-            would = "yes" if (held is not None and held >= cap) else "no"
             logs.append("DRY-RUN compact-sweep would evaluate sid=%s "
-                        "(live-hold cap=%ds, held=%ss, would-force=%s)"
-                        % (sid, cap, held_s, would))
+                        "(boundary held=%ss)" % (sid, held_s))
             continue
         # `request_ts` is the entry's own `ts` anchor -- REQUIRED here so
         # condition (e), the hard age cap, is actually enforced by the sweep
@@ -1667,24 +1532,11 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
         word = deliver_compact(sid, cwd, origin=origin, run=run,
                                projects_dir=projects_dir,
                                delivered_path=delivered_path, now=now,
-                               state=state, request_ts=entry.get("ts"),
-                               boundary_ts=entry.get("hbts"))
+                               state=state, request_ts=entry.get("ts"))
         if word in _COMPACT_TERMINAL_WORDS:
             clear_compact_request(sid, path=requests_path)
-        if word == "sent" or word == "sent:live-hold-cap":
-            # #844 -- a forced delivery is journalled distinctly (the string the
-            # supervisor greps for after deploy) but handled exactly like a
-            # normal send.
-            logs.append("OK (compact-sweep) sid=%s -> %s" % (sid, word))
-            if handled is not None:
-                handled.add(sid)
-        elif word == "queued:live-hold-cap":
-            # #844 -- a forced /compact that queued behind an armed-goal
-            # continuation (drained by the boundary-hold turn); a real keystroke
-            # landed, so job 20 must avoid typing a burst into it (handled).
-            logs.append("OK (compact-sweep) sid=%s -> queued:live-hold-cap "
-                        "(forced past live-tasks cap, queued behind a running "
-                        "turn)" % sid)
+        if word == "sent":
+            logs.append("OK (compact-sweep) sid=%s -> sent" % sid)
             if handled is not None:
                 handled.add(sid)
         elif word == "queued":
@@ -1705,10 +1557,10 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
                         "(age > cap, discarded)" % (sid, origin or "-"))
         elif word in _COMPACT_HOLD_EXTEND_WORDS:
-            # #727/#741 hold-extend: a live-own-task veto (mid-batch) OR an
-            # actively-held-boundary veto (recent-human / busy — the #741 hold
-            # turn) PROVES the boundary is being HELD -> REFRESH `ts` so the
-            # 30-min cap never expires a still-held boundary out from under it.
+            # #741 hold-extend: an actively-held-boundary veto (recent-human /
+            # busy — the #741 hold turn) PROVES the boundary is being HELD ->
+            # REFRESH `ts` so the 30-min cap never expires a still-held boundary
+            # out from under it (#848 removed the #727 live-own-task hold words).
             # `bts` (the ORIGINAL boundary) is untouched, so the line reports
             # how long the boundary has been held; a refresh WRITE failure (or a
             # vanished entry) logs HOLD-FAIL and behaves as an ordinary SKIP --

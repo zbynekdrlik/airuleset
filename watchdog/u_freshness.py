@@ -242,7 +242,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     module helpers.
 
     Keystroke coordination reuses the sibling machinery verbatim: the compact latch
-    (#741, `compact.has_pending_request`), `send_verified` (transcript-proof
+    (#741/#848, `compact.pending_compact_hold`), `send_verified` (transcript-proof
     submit), `_janitor_mark_watch`/`_janitor_clear_watch`, the per-sweep `handled`
     set (this rider runs LAST in the loop, after queue-arrival, so a pane an earlier
     keystroke job typed is deferred), `_pane_busy_waiting` (#714 busy-pane gate),
@@ -305,7 +305,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     # for its quiet window. Defer WITHOUT a keystroke (last_nudge unadvanced,
     # `handled` unclaimed) so it retries a later sweep once the compact delivers.
     from watchdog import compact as _compact
-    if _compact.has_pending_request(sid):
+    if _compact.pending_compact_hold(sid, now):   # #848 bounded
         logs.append("u-freshness %s -> hold:compact-pending (pending /compact; "
                     "no nudge until it delivers)" % loc)
         return logs

@@ -1725,10 +1725,11 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
              m.patch.object(wd, "count_live_workers", return_value=(1, live_ev)):
             logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
         self.assertFalse(any("skip:working-no-tasks" in ln for ln in logs), logs)
-        # positive proof it proceeded past working-no-tasks into the batch
-        # decision (#726: 1 live lane -> a batch is running -> skip:batch-running
-        # is the next decision the path reaches).
-        self.assertTrue(any("skip:batch-running" in ln for ln in logs), logs)
+        # positive proof it proceeded past working-no-tasks into the refill
+        # decision (#848: 1 live lane < 5 -> free slots -> the refill nudge fires,
+        # the next decision the path reaches).
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:batch-running" in ln for ln in logs), logs)
 
     def test_571_genuinely_zero_structured_lanes_still_defers(self):
         # #571 LOCK (b) at the goal.py level: a ⏳ marker, 0 render badges, AND 0
@@ -1902,7 +1903,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
         self.assertFalse(owns)
-        self.assertTrue(any("saturated (>= 5 workers)" in ln for ln in logs), logs)
+        self.assertTrue(any("saturated (>= 5 lanes)" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     # ---------------------------------------------------------------- #
@@ -1959,7 +1960,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
         self.assertFalse(owns)
-        self.assertTrue(any("saturated (>= 5 workers)" in ln for ln in logs), logs)
+        self.assertTrue(any("saturated (>= 5 lanes)" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_zero_workers_small_backlog_still_nudges(self):
@@ -2206,7 +2207,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 3,
                                           now, tmtime)
         self.assertFalse(owns)
-        self.assertTrue(any("saturated (>= 3 workers)" in ln for ln in logs),
+        self.assertTrue(any("saturated (>= 3 lanes)" in ln for ln in logs),
                         logs)
         self.assertEqual(tmux.sent, [])
 
@@ -2805,27 +2806,27 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
 
 
 class TestGoalLaneNudgeDoctrine(unittest.TestCase):
-    """#442/#726 — the (empty-lane, batch-CLOSED) nudge TEXT must teach the BATCH
-    doctrine (skills/autopilot SKILL.md, #723/#724), not the retired continuous
-    saturation: parallel worktree worker dispatch, the account-wide cap of 8,
-    NO refill while a batch runs, and serialize-only integration. (The
-    comprehensive batch-language lock lives in
-    tests/test_batch_orchestration.py::TestWatchdogLaneNudgeIsBatch.)"""
+    """#848 — the lane nudge TEXT must teach the CONTINUOUS REFILL doctrine
+    (skills/autopilot SKILL.md, retiring #723/#724's batch mode): parallel
+    worktree worker dispatch, refill a returned slot immediately, serialize-only
+    integration, and a resource-signal backoff. (The comprehensive continuous-
+    refill lock lives in
+    tests/test_batch_orchestration.py::TestWatchdogLaneNudgeIsContinuous.)"""
 
-    def test_nudge_text_commands_batch_dispatch_doctrine(self):
+    def test_nudge_text_commands_continuous_refill_doctrine(self):
         rendered = goal.GOAL_LANE_NUDGE_TEXT % (7, 2)
         low = rendered.lower()
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
         self.assertIn("sériovo", low)
-        # #726: batch doctrine, not the retired "fill lanes" continuous refill.
-        self.assertIn("várk", low)
+        # #848: continuous refill, not the retired batch "start a NEW batch".
         self.assertIn("refill", low)
-        self.assertNotIn("dispatchni teraz ďalšie", low)
-        # #726 (review finding 2): the within-batch bound is the canonical
-        # post-#723 resource-signal backoff, NOT the retired #442 fixed "cap 8".
+        self.assertIn("doplň", low)
+        self.assertNotIn("várk", low)
+        # #848: the within-cycle bound is the canonical resource-signal backoff,
+        # NOT the retired #442 fixed "cap 8".
         self.assertIn("rate-limit", low)
-        self.assertNotIn("8", rendered)
+        self.assertNotIn("cap 8", low)
 
     def test_saturation_workers_is_a_named_constant(self):
         # #481: the batch ceiling is a named constant. #729 removed the

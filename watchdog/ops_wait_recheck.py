@@ -951,7 +951,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # avoid any dependence on the watchdog package-init ordering; fail-safe False on
     # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
     from watchdog import compact as _compact
-    if _compact.has_pending_request(sid):
+    if _compact.pending_compact_hold(sid, now):   # #848 bounded
         logs.append("ops-wait-recheck %s -> hold:compact-pending (pending "
                     "/compact; no nudge until it delivers)" % loc)
         return logs
