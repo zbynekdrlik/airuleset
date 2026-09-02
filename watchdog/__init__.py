@@ -1889,6 +1889,10 @@ from watchdog.wip_ref_sweep import (  # noqa: E402
 # import at its top level → no cycle; reuses the per-class discovery functions
 # under pressure).
 from watchdog import disk_guard as disk_guard  # noqa: E402,F401
+# #841 leg C — the owner-daily root-level finding surface Job 40 records at
+# CRITICAL pressure (stdlib-only, no top-level watchdog/notify import → no
+# cycle, never pings; a SESSION reads the finding cache and raises the ❓).
+from watchdog import disk_guard_root as disk_guard_root  # noqa: E402,F401
 
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to

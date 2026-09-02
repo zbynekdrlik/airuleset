@@ -742,6 +742,18 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         logs.append("disk-guard: %d%% but euid==0 — per-user drain refused (root leg #841)"
                     % status["worst_pct"])
         return logs
+    # #841 leg C: at CRITICAL pressure, surface the root-level reclaimable
+    # candidates the per-user drain cannot reach (read from the root reporter's
+    # world-readable /run report). Cheap file read — runs even when the du-heavy
+    # drain below is cadence-gated. Records a finding a SESSION raises the
+    # owner-daily ❓ from; NEVER pings (notify stays out of the guard).
+    if status["level"] == "critical":
+        try:
+            from watchdog import disk_guard_root
+            logs += disk_guard_root.maybe_record_root_finding(
+                status, home, now, dry_run=dry_run)
+        except Exception as e:
+            logs.append("disk-guard: root-finding error: %r" % e)
     if not dry_run and not _drain_due(home, now, min_drain_interval_s):
         logs.append("disk-guard: %d%% (%s) — drain cadence-gated this poll"
                     % (status["worst_pct"], status["dim"]))
