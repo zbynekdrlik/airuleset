@@ -5669,7 +5669,6 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
-    _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
     _label_exists_on_repo as _label_exists_on_repo,

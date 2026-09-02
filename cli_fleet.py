@@ -370,8 +370,9 @@ REMOTE_HOSTS = [
 #   fork-no-merge — fork branch pushed + local verification green + ready-for-review
 #                   hand-off on the issue; never opens/merges a PR, never closes
 #                   the issue itself (the maintainer does, at merge)
-# A project CLAUDE.md marker `airuleset:authority=<profile>` OVERRIDES the user
-# default (checked by the /autopilot skill, not here). Only the user adds markers.
+# A project CLAUDE.md marker `airuleset:authority=<profile>` can only LOWER the
+# per-user default (a CAP, never a raise — airuleset#828, `_authority_decision`);
+# `full` is granted ONLY via the registries below. Only the user adds markers.
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
     "marek": "branch-merge",
@@ -454,16 +455,15 @@ AUTHORITY_BY_USER = {
 # user must appear in one registry or the other
 # (`test_every_remote_hosts_user_is_classified`) — a new provisioned box that is
 # neither is a RED test, forcing an explicit decision, never a silent grant.
-# Two unmapped->full paths survive, both narrow and deliberate: (1) a project
-# CLAUDE.md `<!-- airuleset:authority=full -->` marker ELEVATES an unmapped user
-# to `full` (checked FIRST in `_authority_decision`) — pre-existing owner-
-# sanctioned trusted-file design, tracked for an owner decision as #828; (2) the
-# GITHUB-HOSTED CI runner (`_is_github_ci_runner`: unix `runner` OR uid 0 — a
-# container job — AND GITHUB_ACTIONS AND RUNNER_ENVIRONMENT=github-hosted,
-# airuleset#839) — a legitimate full context for THIS repo's own CI, un-spoofable
-# by a stream (uid-derived pw_name; a stream can never be uid 0; no fleet box has
-# a `runner` account) and gated off a self-hosted runner. Everything ELSE in
-# neither registry still fails SAFE to `fork-no-merge`.
+# ONE unmapped->full path survives, narrow and deliberate: the GITHUB-HOSTED CI
+# runner (`_is_github_ci_runner`: unix `runner` OR uid 0 — a container job — AND
+# GITHUB_ACTIONS AND RUNNER_ENVIRONMENT=github-hosted, airuleset#839) — a
+# legitimate full context for THIS repo's own CI, un-spoofable by a stream
+# (uid-derived pw_name; a stream can never be uid 0; no fleet box has a `runner`
+# account) and gated off a self-hosted runner. A project CLAUDE.md
+# `authority=full` marker does NOT elevate an unmapped user: airuleset#828 (owner
+# decision A) made the marker a CAP that can only LOWER, never raise. Everything
+# ELSE in neither registry still fails SAFE to `fork-no-merge`.
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 
 

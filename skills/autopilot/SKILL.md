@@ -102,7 +102,8 @@ gh auth status
 python3 ~/devel/airuleset/airuleset.py core-quals --list    # full authority: the obligation set
 # reduced authority: python3 ~/devel/airuleset/airuleset.py slice-quals --list
 grep -n "airuleset:merge=manual" CLAUDE.md || true                              # merge mode
-grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.py authority   # authority profile
+python3 ~/devel/airuleset/airuleset.py authority                                 # authority profile — AUTHORITATIVE (a CLAUDE.md marker can only LOWER, never raise, #828)
+grep -n "airuleset:authority=" CLAUDE.md || true                                # any project marker (informational — the CLI above already caps it)
 ```
 
 - Confirm the `autopilot-worker` subagent is available (`@agent-autopilot-worker` resolves). If
@@ -255,10 +256,13 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   hardware / prod / streaming / OBS / HDMI / DRM issue is worked end-to-end on the rig like any other;
   the USER alone guards whether prod is live and stops you in the moment. (Same in Slovak: no
   `off-air okná`, `musíš byť pri tom`, `odporúčam autopilot-skip`, `vedene so mnou nie naslepo`.)
-- **Authority profile (issue #16):** resolve it FIRST — a project CLAUDE.md marker
-  `airuleset:authority=<full|branch-merge|fork-no-merge>` wins; else `python3
-  ~/devel/airuleset/airuleset.py authority` (maps the linux user: david=fork-no-merge,
-  marek/montalu=branch-merge, default full). The profile decides WHICH /goal template Step 2
+- **Authority profile (issue #16):** resolve it FIRST via `python3
+  ~/devel/airuleset/airuleset.py authority` — that CLI is AUTHORITATIVE (maps the linux user:
+  david=fork-no-merge, marek/montalu=branch-merge; an UNMAPPED user fails SAFE to fork-no-merge,
+  #827). A project CLAUDE.md marker `airuleset:authority=<full|branch-merge|fork-no-merge>` can
+  only LOWER that per-user result, NEVER raise it (#828) — `full` is granted ONLY by the map /
+  allow-list, never a stream-editable marker; do NOT read the marker yourself and treat it as the
+  answer. The profile decides WHICH /goal template Step 2
   prints and what "done" means per ticket. **Reduced authority (branch-merge / fork-no-merge)
   additionally scopes the backlog to ISSUES ASSIGNED TO THIS STREAM** — use `python3
   ~/devel/airuleset/airuleset.py slice-quals --list` everywhere this skill lists the backlog. This
