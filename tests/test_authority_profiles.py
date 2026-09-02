@@ -3471,45 +3471,99 @@ class TestCIRunnerAuth839(TestCase):
     neither registry) resolved fork-no-merge and broke ~28 tests that shell out
     to the FULL-authority-gated core-quals / tickets-status / run-card. This
     recognises the runner as a legitimate full-authority context for THIS repo's
-    OWN CI by the UNSPOOFABLE (`pw_name == "runner"` AND `GITHUB_ACTIONS=true`),
-    hardens `_current_user()` against the `$USER`/`$LOGNAME` env-spoof, and
-    proves no stream can reach `full` through the new seam. RED on v0.1.128."""
+    OWN CI by the UNSPOOFABLE (`pw_name == "runner"` AND `GITHUB_ACTIONS=true`
+    AND `RUNNER_ENVIRONMENT=github-hosted`), hardens `_current_user()` against
+    the `$USER`/`$LOGNAME` env-spoof, and proves no stream reaches `full` through
+    the seam. The recognition + hardening tests are RED on v0.1.128; the
+    no-elevation guards (stream / non-runner / self-hosted) are green-by-design on
+    both sides — they lock that the seam does NOT widen."""
+
+    # ci-runner (GitHub-HOSTED) recognition needs all three signals.
+    _HOSTED = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
 
     # -- ci-runner recognition in the resolver ----------------------------- #
     def test_ci_runner_with_github_actions_resolves_full(self):
         with m.patch.object(airuleset, "_current_user", return_value="runner"):
-            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with m.patch.dict(os.environ, self._HOSTED):
                 self.assertEqual(airuleset.resolve_authority(), "full")
 
     def test_ci_runner_explain_source_is_named_ci_runner(self):
         import cli_quals
         with m.patch.object(airuleset, "_current_user", return_value="runner"):
-            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with m.patch.dict(os.environ, self._HOSTED):
                 profile, source, _raw = cli_quals._authority_decision()
         self.assertEqual(profile, "full")
         self.assertIn("ci-runner", source,
                       "the --explain source must NAME the ci-runner path (#839)")
 
+    def test_cmd_authority_explain_output_names_ci_runner(self):
+        # 🔵4: lock cmd_authority's PRINTED --explain map_val (the elif whose
+        # order-correctness was comment-only), not just _authority_decision.
+        import cli_quals
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "_current_user", return_value="runner"):
+            with m.patch.dict(os.environ, self._HOSTED):
+                with m.patch.object(cli_quals, "_authority_marker_raw",
+                                    return_value=None):
+                    with contextlib.redirect_stdout(buf):
+                        cli_quals.cmd_authority(m.Mock(
+                            maintainer_login=False, self_login=False,
+                            app_bot_login=False, stream_label=False,
+                            explain=True))
+        out = buf.getvalue()
+        self.assertIn("full", out)
+        self.assertIn("ci-runner (GitHub-hosted)", out)
+        self.assertIn("GitHub-hosted CI runner -> full", out)
+
     def test_runner_without_github_actions_stays_fork_no_merge(self):
         # #827 preserved (constraint 4): an unmapped `runner` on a REAL box
-        # (no GITHUB_ACTIONS) is NOT full -- the AND is load-bearing.
+        # (no GITHUB_ACTIONS) is NOT full -- the conjunction is load-bearing.
         with m.patch.dict(os.environ):
             os.environ.pop("GITHUB_ACTIONS", None)
+            os.environ.pop("RUNNER_ENVIRONMENT", None)
             with m.patch.object(airuleset, "_current_user", return_value="runner"):
                 self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
-    def test_stream_with_github_actions_cannot_reach_full(self):
-        # constraint 5: a stream pw_name + GITHUB_ACTIONS still resolves its
-        # reduced profile -- the ci-runner branch requires pw_name == "runner".
+    def test_self_hosted_runner_named_runner_stays_fork_no_merge(self):
+        # 🟡3: a SELF-hosted actions runner provisioned under a `runner` unix
+        # account (owner misconfig, the one non-stream actor that could carry
+        # that pw_name) is NOT elevated -- RUNNER_ENVIRONMENT distinguishes it.
+        with m.patch.object(airuleset, "_current_user", return_value="runner"):
+            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true",
+                                           "RUNNER_ENVIRONMENT": "self-hosted"}):
+                self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+
+    def test_runner_is_in_no_authority_registry(self):
+        # 🟡3 belt-and-braces: the predicate is the ONLY path recognising
+        # `runner`; it must never leak into a registry (which would grant a
+        # self-hosted runner full authority, bypassing the github-hosted gate).
+        self.assertNotIn("runner", airuleset.FULL_AUTHORITY_USERS)
+        self.assertNotIn("runner", airuleset.AUTHORITY_BY_USER)
+
+    def test_stream_with_hosted_env_cannot_reach_full(self):
+        # constraint 5: a stream pw_name + the full hosted-runner env STILL
+        # resolves its reduced profile -- the branch requires pw_name=="runner".
         with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
-            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with m.patch.dict(os.environ, self._HOSTED):
                 self.assertEqual(airuleset.resolve_authority(), "branch-merge")
 
-    def test_unmapped_non_runner_with_github_actions_is_fork_no_merge(self):
-        # proves the branch REQUIRES pw_name == "runner", not just the env var:
-        # an unmapped non-runner identity with GITHUB_ACTIONS stays fork-no-merge.
+    def test_mapped_runner_is_never_elevated_map_wins(self):
+        # 🔵5: locks "placed AFTER the map". If `runner` were ever mapped
+        # reduced, the map row wins over the ci-runner branch (defense-in-depth).
+        with m.patch.object(airuleset, "_current_user", return_value="runner"):
+            with m.patch.dict(airuleset.AUTHORITY_BY_USER,
+                              {"runner": "fork-no-merge"}):
+                with m.patch.dict(os.environ, self._HOSTED):
+                    self.assertEqual(airuleset.resolve_authority(),
+                                     "fork-no-merge")
+
+    def test_unmapped_non_runner_with_hosted_env_is_fork_no_merge(self):
+        # proves the branch REQUIRES pw_name == "runner", not just the env:
+        # an unmapped non-runner identity with the hosted env stays fork-no-merge.
         with m.patch.object(airuleset, "_current_user", return_value="ci-bot"):
-            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with m.patch.dict(os.environ, self._HOSTED):
                 self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     # -- _current_user() env-spoof hardening ------------------------------- #

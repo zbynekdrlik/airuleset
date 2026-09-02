@@ -1533,22 +1533,25 @@ def _authority_marker(cwd=None):
 def _authority_decision(cwd=None):
     """The authority resolution WITH its provenance, from ONE decision point:
     `(profile, source, raw_marker)`, where `source` is one of
-    'project CLAUDE.md marker' | 'per-user map' | 'full-authority account' |
-    'default (unmapped)'.
+    'project CLAUDE.md marker' | 'per-user map' | 'ci-runner (GitHub-hosted)' |
+    'full-authority account' | 'default (unmapped)'.
     `resolve_authority` (the hot path) and `cmd_authority --explain` (the #486
     decision log) both derive from this single function, so the printed log can
     never desync from the resolved profile, and it distinguishes the reduced-stream
     map ROW and the explicit full-authority allow-list from the fail-safe default
     that decides a genuinely unmapped user.
-    Resolution order (airuleset#827): a valid marker wins; else the reduced-stream
-    map row (`AUTHORITY_BY_USER`); else the explicit full-authority allow-list
-    (`FULL_AUTHORITY_USERS`); else the fail-SAFE `fork-no-merge` default. The map is
-    checked BEFORE the full allow-list, so a reduced stream can never be elevated by
-    a (bug) dual membership — restrictive wins. The pre-#827 default was the
-    fail-OPEN `full`: an unmapped stream account (provisioned but forgotten in the
-    map) silently got full merge/deploy/close authority; it now fails SAFE to the
-    most restrictive profile, and the legitimate full accounts are enumerated in
-    `FULL_AUTHORITY_USERS` rather than relying on that open catch-all."""
+    Resolution order (airuleset#827/#839): a valid marker wins; else the reduced-
+    stream map row (`AUTHORITY_BY_USER`); else the GitHub-hosted CI runner
+    (`_is_github_ci_runner` — airuleset's OWN CI, unspoofable, #839); else the
+    explicit full-authority allow-list (`FULL_AUTHORITY_USERS`); else the fail-SAFE
+    `fork-no-merge` default. The map is checked BEFORE the ci-runner branch and the
+    full allow-list, so a reduced stream can never be elevated by a (bug) dual
+    membership — restrictive wins. The pre-#827 default was the fail-OPEN `full`:
+    an unmapped stream account (provisioned but forgotten in the map) silently got
+    full merge/deploy/close authority; it now fails SAFE to the most restrictive
+    profile, and the legitimate full accounts are enumerated in
+    `FULL_AUTHORITY_USERS` (plus the un-spoofable CI-runner recognition) rather
+    than relying on that open catch-all."""
     import airuleset
     raw = _authority_marker_raw(cwd)
     if raw in airuleset.AUTHORITY_PROFILES:
@@ -1556,13 +1559,14 @@ def _authority_decision(cwd=None):
     user = airuleset._current_user()
     if user in airuleset.AUTHORITY_BY_USER:
         return airuleset.AUTHORITY_BY_USER[user], "per-user map", raw
-    # airuleset#839: the GitHub-hosted CI runner (unspoofable pw_name `runner`
-    # AND GITHUB_ACTIONS=true) is a legitimate full-authority context for THIS
-    # repo's OWN CI — it is in neither registry, so #827's fail-safe would leave
-    # it `fork-no-merge` and break ~28 FULL-authority-gated tests. Placed AFTER
-    # the map so a mapped stream can never be elevated (defense-in-depth; no
-    # stream's pw_name is ever `runner`) and BEFORE the full allow-list. `user`
-    # is the hardened `_current_user()` pw_name, so this AND is un-spoofable.
+    # airuleset#839: the GitHub-HOSTED CI runner (unspoofable pw_name `runner` +
+    # GITHUB_ACTIONS=true + RUNNER_ENVIRONMENT=github-hosted) is a legitimate
+    # full-authority context for THIS repo's OWN CI — it is in neither registry,
+    # so #827's fail-safe would leave it `fork-no-merge` and break ~28 FULL-
+    # authority-gated tests. Placed AFTER the map so a mapped stream can never be
+    # elevated (defense-in-depth; no stream's pw_name is ever `runner`) and BEFORE
+    # the full allow-list. `user` is the hardened `_current_user()` pw_name, so
+    # the whole conjunction is un-spoofable.
     if airuleset._is_github_ci_runner(user):
         return "full", "ci-runner (GitHub-hosted)", raw
     if user in airuleset.FULL_AUTHORITY_USERS:

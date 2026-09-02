@@ -454,42 +454,58 @@ AUTHORITY_BY_USER = {
 # user must appear in one registry or the other
 # (`test_every_remote_hosts_user_is_classified`) — a new provisioned box that is
 # neither is a RED test, forcing an explicit decision, never a silent grant.
-# Residual: a project CLAUDE.md `<!-- airuleset:authority=full -->` marker still
-# ELEVATES an unmapped user to `full` (the marker is checked FIRST in
-# `_authority_decision`) — the one surviving unmapped->full path, pre-existing
-# owner-sanctioned trusted-file design, tracked for an owner decision as #828.
+# Two unmapped->full paths survive, both narrow and deliberate: (1) a project
+# CLAUDE.md `<!-- airuleset:authority=full -->` marker ELEVATES an unmapped user
+# to `full` (checked FIRST in `_authority_decision`) — pre-existing owner-
+# sanctioned trusted-file design, tracked for an owner decision as #828; (2) the
+# GITHUB-HOSTED CI runner (`_is_github_ci_runner`: unix `runner` + GITHUB_ACTIONS
+# + RUNNER_ENVIRONMENT=github-hosted, airuleset#839) — a legitimate full context
+# for THIS repo's own CI, un-spoofable by a stream (uid-derived pw_name; no fleet
+# box has a `runner` account) and gated off a self-hosted runner. Everything ELSE
+# in neither registry still fails SAFE to `fork-no-merge`.
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 
 
 def _is_github_ci_runner(user) -> bool:
-    """True when THIS process is the GitHub-hosted CI runner for airuleset's own
-    CI — the UNSPOOFABLE unix account `runner` AND `GITHUB_ACTIONS=true` together
-    (airuleset#839). The runner is in neither authority registry, so #827's
-    fail-safe resolves it `fork-no-merge`, which broke ~28 tests that shell out
-    to the FULL-authority-gated `core-quals` / `tickets-status --refresh` /
-    run-card backlog count (all of which silently assumed the box was full). The
-    hosted runner IS a legitimate full-authority context for THIS repo's OWN CI:
-    no fleet box has a `runner` unix user (creating one needs root), so `pw_name`
-    is unforgeable by a stream — a stream controls its env and its repo files,
-    NEVER its uid.
+    """True when THIS process is the GITHUB-HOSTED CI runner for airuleset's own
+    CI — the UNSPOOFABLE unix account `runner`, `GITHUB_ACTIONS=true`, AND
+    `RUNNER_ENVIRONMENT=github-hosted`, all three together (airuleset#839). The
+    runner is in neither authority registry, so #827's fail-safe resolves it
+    `fork-no-merge`, which broke ~28 tests that shell out to the FULL-authority-
+    gated `core-quals` / `tickets-status --refresh` / run-card backlog count (all
+    of which silently assumed the box was full). The hosted runner IS a
+    legitimate full-authority context for THIS repo's OWN CI: no fleet box has a
+    `runner` unix user (creating one needs root), so `pw_name` is unforgeable by
+    a stream — a stream controls its env and its repo files, NEVER its uid.
 
-    The AND is load-bearing and un-spoofable in BOTH directions: `pw_name ==
-    "runner"` WITHOUT `GITHUB_ACTIONS` stays reduced (an unmapped `runner` on a
-    real box — #827 preserved, constraint 4), and `GITHUB_ACTIONS=true` WITHOUT
+    The conjunction is load-bearing and un-spoofable in EVERY direction: `pw_name
+    == "runner"` WITHOUT `GITHUB_ACTIONS` stays reduced (an unmapped `runner` on
+    a real box — #827 preserved, constraint 4); `GITHUB_ACTIONS=true` WITHOUT
     `pw_name == "runner"` elevates nobody (a stream setting the env var can never
-    make its uid resolve to `runner`). `user` is the already-resolved
-    `_current_user()` pw_name — an env-spoofable `getpass.getuser()` would defeat
-    the whole point, so this MUST be fed the hardened identity.
+    make its uid resolve to `runner`); and `RUNNER_ENVIRONMENT == "github-hosted"`
+    is what distinguishes the GitHub-HOSTED runner from a SELF-HOSTED actions
+    runner (the runner app sets it `github-hosted`/`self-hosted`), so a
+    self-hosted runner provisioned under a `runner` unix account — the one
+    non-stream actor that could carry that pw_name (owner misconfig, needs root)
+    — is NOT elevated. Fail-safe: were GitHub ever to drop `RUNNER_ENVIRONMENT`,
+    airuleset's own CI would go visibly RED (a stream can never reach full by it),
+    never silently-full. `user` is the already-resolved `_current_user()` pw_name
+    — an env-spoofable `getpass.getuser()` would defeat the whole point, so this
+    MUST be fed the hardened identity.
 
     Fork-PR CI resolving `full` is harmless: the profile only unblocks CLI
     *behavior*; all real power lives in credentials the hosted runner does not
     hold.
 
-    INVARIANT (airuleset#839): NEVER provision a self-hosted runner under a unix
-    account literally named `runner` — that would grant it full authority here.
+    INVARIANT (airuleset#839): `runner` must never appear in `AUTHORITY_BY_USER`
+    or `FULL_AUTHORITY_USERS` (lock-tested), so this predicate is the ONLY path
+    that recognises it — a self-hosted runner under a `runner` account stays
+    reduced by the `github-hosted` term above.
     """
     import os
-    return user == "runner" and os.environ.get("GITHUB_ACTIONS") == "true"
+    return (user == "runner"
+            and os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted")
 
 
 # Base-stream rename map (#537): old base name -> new numbered name. The SINGLE

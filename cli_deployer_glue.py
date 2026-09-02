@@ -51,7 +51,12 @@ REPO_DIR = Path(__file__).resolve().parent
 
 def skill_names_for_user(user=None):
     """The skill set THIS box's user should have installed (the resident skill
-    registries + their scoping comment stay in airuleset.py)."""
+    registries + their scoping comment stay in airuleset.py).
+
+    A caller-supplied `user` must be a `pwd`-derived or literal identity, NEVER
+    an env-spoofable `getpass.getuser()` value (airuleset#839) — the default
+    below resolves the hardened `_current_user()`, and the FULL_AUTHORITY_USERS
+    gate makes this an authority surface."""
     import airuleset
     # airuleset#839: resolve identity via the HARDENED `_current_user()`
     # (`pwd.getpwuid(os.getuid()).pw_name`), NEVER `getpass.getuser()` — the
