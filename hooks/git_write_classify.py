@@ -52,7 +52,7 @@ ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def normalize_newlines(cmd):
-    """Replace every UNQUOTED literal newline in `cmd` with ';' — bash treats an
+    r"""Replace every UNQUOTED literal newline in `cmd` with ';' — bash treats an
     unquoted newline exactly like a semicolon at the top level, which
     shlex(posix=True) does not model. Quote-aware char scan (single/double quote
     state + backslash escapes), so a newline inside a quoted span is untouched.
@@ -60,20 +60,30 @@ def normalize_newlines(cmd):
     converted — the same blind spot both callers' old whole-string regexes had,
     not a new one (documented in each caller's residual notes).
 
-    Accepted residual (#831 review, pre-existing PARITY in BOTH guards, not a
-    #831 divergence): a bash line-CONTINUATION (`\`+newline) is NOT spliced —
-    bash removes both chars and runs `git \<newline>-C <path> commit` as one
-    `git -C <path> commit`, but here the escaped newline survives and shlex
-    emits `\n-C` as the token that `classify_git_command` reads as the
-    subcommand → not in GIT_WRITE → the write escapes. Same #319-class confusion
-    residual as heredoc/`sudo -u`/symlink; the repo owns a splice technique
-    (`join_line_continuations`, block-main-implementation.sh, #88) if this ever
-    needs closing."""
+    Also splices a bash line-CONTINUATION (`\`+newline) so `git \<newline>-C
+    <path> commit` normalizes to `git -C <path> commit` and classifies as the
+    write it is (#842 — the #831-review residual, CLOSED for BOTH guards; this
+    used to survive and shlex emitted `\n-C` as the subcommand → not in
+    GIT_WRITE → the write escaped both). Remaining #319-class confusion
+    residuals: heredoc bodies / `sudo -u <user>` / symlinked checkout."""
     out = []
     in_single = in_double = escaped = False
     for ch in cmd:
         if escaped:
-            out.append(ch)
+            # #842: a bash line-CONTINUATION (`\`+newline, only reachable OUTSIDE
+            # single quotes — `escaped` is set only there) is SPLICED OUT: bash
+            # removes both chars and joins the lines, so `git \<newline>-C x
+            # commit` really runs as `git -C x commit`. Without this the escaped
+            # newline survived and shlex emitted `\n-C` as the subcommand → not in
+            # GIT_WRITE → the write escaped BOTH guards (the #831-review residual).
+            # We already appended the backslash on the previous char → pop it and
+            # drop the newline. Same semantics as block-main-implementation.sh's
+            # own `join_line_continuations` (#88), applied inside this existing
+            # quote-aware pass rather than duplicating that heredoc-embedded fn.
+            if ch == "\n":
+                out.pop()
+            else:
+                out.append(ch)
             escaped = False
             continue
         if ch == "\\" and not in_single:
