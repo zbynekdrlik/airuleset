@@ -2586,11 +2586,21 @@ class TestCompactSyncAttempt(unittest.TestCase):
             self.SID, self.CWD, "self-callback", run=tmux,
             projects_dir=self.proj.name, delivered_path=self.delp,
             requests_path=self.reqp, now_fn=now_fn, sleep_fn=sleep_fn)
-        self.assertEqual(len(calls), 1)
-        self.assertAlmostEqual(
-            calls[0],
-            compact.COMPACT_MIN_REQUEST_AGE_S + compact.COMPACT_SYNC_ATTEMPT_MARGIN_S,
-            places=6)
+        # The #238/#599 FLOOR wait is a SINGLE bounded call, never a poll loop:
+        # exactly one sleep of `floor + margin`.
+        floor = compact.COMPACT_MIN_REQUEST_AGE_S + compact.COMPACT_SYNC_ATTEMPT_MARGIN_S
+        floor_calls = [c for c in calls if abs(c - floor) < 1e-9]
+        self.assertEqual(len(floor_calls), 1,
+                         "the #238 floor wait must be one bounded call, not a loop")
+        self.assertAlmostEqual(calls[0], floor, places=6)   # and it is first
+        # #833: any OTHER sleeps are the bounded post-send re-read (the
+        # queued-vs-sent race resolver in `_compact_post_send_classify`), which
+        # shares this injected sleep_fn — each `COMPACT_POST_SEND_RECAPTURE_S`,
+        # bounded to `< COMPACT_POST_SEND_RECAPTURES`. Still not a poll loop.
+        reread = [c for c in calls if abs(c - floor) >= 1e-9]
+        self.assertLessEqual(len(reread), compact.COMPACT_POST_SEND_RECAPTURES - 1)
+        for c in reread:
+            self.assertAlmostEqual(c, compact.COMPACT_POST_SEND_RECAPTURE_S, places=6)
 
     def test_sync_attempt_records_fresh_anchor_then_sleeps_the_floor_and_sends(self):
         # #599 supersede (reverses #400's non-refreshable anchor): the sync
@@ -2615,7 +2625,11 @@ class TestCompactSyncAttempt(unittest.TestCase):
             projects_dir=self.proj.name, delivered_path=self.delp,
             requests_path=self.reqp, now_fn=now_fn, sleep_fn=sleep_fn)
         self.assertEqual(word, "sent")
-        self.assertEqual(len(calls), 1)       # slept the #238 floor exactly once
+        # slept the #238 floor EXACTLY once (a single bounded wait); the #833
+        # bounded post-send re-read may add up to COMPACT_POST_SEND_RECAPTURES-1
+        # further `COMPACT_POST_SEND_RECAPTURE_S` sleeps via the same sleep_fn.
+        floor = compact.COMPACT_MIN_REQUEST_AGE_S + compact.COMPACT_SYNC_ATTEMPT_MARGIN_S
+        self.assertEqual(sum(1 for c in calls if abs(c - floor) < 1e-9), 1)
 
     def test_record_failure_reports_skip_no_session_and_never_sleeps(self):
         calls = []

@@ -33,6 +33,7 @@ HOOKS = REPO / "hooks"
 HOOK_SRC = HOOKS / "block-foreign-airuleset-write.sh"
 GUARD_SRC = HOOKS / "worktree_guard.py"
 FOREIGN_SRC = HOOKS / "foreign_repo_guard.py"
+CLASSIFY_SRC = HOOKS / "git_write_classify.py"
 
 # An airuleset-session transcript so RULE A's own allow-all short-circuit is the
 # state under test for the ALLOW cases (RULE B2 runs BEFORE RULE A).
@@ -66,9 +67,14 @@ class HookB2Base(TestCase):
         # a real worktree of the fake checkout — a `cd` here is legitimate.
         self.wt = os.path.join(self.checkout, ".claude", "worktrees", "agent-x")
         os.makedirs(self.wt, exist_ok=True)
+        # #831: worktree_guard.py + foreign_repo_guard.py now import the shared
+        # git-write classifier, so the hermetic checkout must carry it too, or
+        # `import git_write_classify` fails and the python helper crashes (the
+        # hook then fails-open and every BLOCK case would silently ALLOW).
         for src, name in ((HOOK_SRC, "block-foreign-airuleset-write.sh"),
                           (GUARD_SRC, "worktree_guard.py"),
-                          (FOREIGN_SRC, "foreign_repo_guard.py")):
+                          (FOREIGN_SRC, "foreign_repo_guard.py"),
+                          (CLASSIFY_SRC, "git_write_classify.py")):
             shutil.copy(src, os.path.join(self.checkout, "hooks", name))
         self.hook = os.path.join(self.checkout, "hooks",
                                  "block-foreign-airuleset-write.sh")
@@ -341,6 +347,17 @@ class TestGuardUnit(TestCase):
                   "git update-ref refs/heads/main HEAD~3",
                   "rm -rf watchdog",
                   "rm hooks/worktree_guard.py"):
+            self.assertTrue(self.M(c), c)
+
+    def test_line_continuation_842_blocks(self):
+        # #842: a bash `\`+newline line-continuation is spliced (bash joins the
+        # lines), so `git \<newline>checkout -b evil` / `git \<newline>-C <co>
+        # commit` really run as writes to the shared checkout — before #842 the
+        # escaped newline survived `normalize_newlines` and shlex read `\n-C`/
+        # `\ncheckout` as the subcommand → not in GIT_WRITE → escaped.
+        for c in ("git \\\ncheckout -b evil",
+                  "git \\\n-C %s commit -m x" % self.co,
+                  "git checkout\\\n -b evil"):
             self.assertTrue(self.M(c), c)
 
     def test_worktree_dir_and_siblings_block(self):

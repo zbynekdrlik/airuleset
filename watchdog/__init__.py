@@ -1975,6 +1975,7 @@ from watchdog.pane_classify import (  # noqa: E402
     _find_boundary_line as _find_boundary_line,
     _normalize_queued_hint as _normalize_queued_hint,
     _find_boundary_line_raw as _find_boundary_line_raw,
+    _pane_shows_queued_messages_hint as _pane_shows_queued_messages_hint,
     _input_box_rows_raw as _input_box_rows_raw,
     _box_is_wrapped as _box_is_wrapped,
     _is_draft_head as _is_draft_head,

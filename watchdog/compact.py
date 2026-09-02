@@ -503,12 +503,13 @@ def compact_delivery_in_cooldown(session, now, path=None, interval=None):
 # #822 (e) — the queued-since store. When `deliver_compact` classifies a typed
 # `/compact` as QUEUED (behind a running turn, never executed), it records the
 # instant here so `compact-request --status` reports `QUEUED sid=… since=…` for
-# as long as the `❯ /compact` row still sits unexecuted in the pane — the honest
-# signal the /goal HOLD doctrine (skills/autopilot Step 5) needs instead of a
-# false `NONE` (the request itself was cleared, `queued` being terminal). Same
-# `{sid: ts}` shape + shared load/save as `compact-delivered.json`; the LIVE
-# pane (`_pane_has_queued_compact`) gates the report, so a stale record is never
-# surfaced.
+# as long as a queued row / box-hint still sits unexecuted in the pane — the
+# honest signal the /goal HOLD doctrine (skills/autopilot Step 5) needs instead
+# of a false `NONE` (the request itself was cleared, `queued` being terminal).
+# Same `{sid: ts}` shape + shared load/save as `compact-delivered.json`; the
+# LIVE pane gates the report (`compact_queued_in_pane` — the `❯ /compact` row
+# OR, since #833, the `Press up to edit [N] queued messages` box hint), so a
+# stale record is never surfaced.
 # --------------------------------------------------------------------------- #
 
 def compact_queued_path():
@@ -548,15 +549,26 @@ def compact_queued_since(session, path=None):
 
 def compact_queued_in_pane(pane_id, run=None):
     """#822 (e): True iff pane `pane_id` currently shows a queued `❯ /compact`
-    row — the LIVE half of `--status`'s QUEUED report, reusing the (b) detector
-    `_pane_has_queued_compact` on a fresh capture. A blank pane_id or an
-    unreadable/empty capture reads False (fail-safe: report NONE, never a false
-    QUEUED)."""
+    ROW **or** the box's `Press up to edit [N] queued messages` HINT — the LIVE
+    half of `--status`'s QUEUED report. This is gated by a durable
+    `compact_queued_since` record (only consulted once a `/compact` was itself
+    classified QUEUED), so the box hint (which proves ANY queued message, not
+    specifically a `/compact`) is a fail-safe QUEUED confirmation, never a
+    standalone claim. Reuses the (b) queued-row detector
+    `_pane_has_queued_compact` AND, since #833, `_pane_shows_queued_messages_hint`
+    — the latter is read straight off the input-box boundary, so it survives the
+    combined `✔ Update installed …` banner that stops the row walk and the
+    slightly-later render of the queued row (either signal → QUEUED). A blank
+    pane_id or an unreadable/empty capture reads False (fail-safe: report NONE,
+    never a false QUEUED)."""
     pane_id = (pane_id or "").strip()
     if not pane_id:
         return False
     cap = watchdog.capture_pane(pane_id, run, lines=40)
-    return bool(cap) and watchdog._pane_has_queued_compact(cap)
+    if not cap:
+        return False
+    return (watchdog._pane_has_queued_compact(cap)
+            or watchdog._pane_shows_queued_messages_hint(cap))
 
 
 # --------------------------------------------------------------------------- #
@@ -1050,6 +1062,15 @@ def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
 COMPACT_SUBMIT_SETTLE_POLLS = 6
 COMPACT_SUBMIT_SETTLE_S = 0.3
 
+# #833: `_compact_post_send_classify` re-captures a BOUNDED number of times,
+# spaced apart, before it concludes `"sent"`. A `/compact` that QUEUES behind a
+# running turn can render its queued row / box hint a beat AFTER the submit, so
+# a single-shot read of a still-bare pane at t0 falsely reads `"sent"` (the
+# owner's t0→t+1s race). 3 captures ~1s apart resolve it; the loop RETURNS the
+# instant a positive queued/compacting/busy signal appears (usually the 1st).
+COMPACT_POST_SEND_RECAPTURES = 3
+COMPACT_POST_SEND_RECAPTURE_S = 1.0
+
 
 def _compact_still_in_box(pid, run, sleep_fn):
     """True while `/compact` is STILL sitting in the input box after a submit
@@ -1068,9 +1089,9 @@ def _compact_still_in_box(pid, run, sleep_fn):
     return True                                # still there -> swallowed
 
 
-def _compact_post_send_classify(pid, run):
-    """#822 — after the input box went empty following a `/compact` submit, ONE
-    fresh re-capture distinguishes an EXECUTED compact (`"sent"`) from one that
+def _compact_post_send_classify(pid, run, sleep_fn=None):
+    """#822/#833 — after the input box went empty following a `/compact` submit,
+    a BOUNDED re-read distinguishes an EXECUTED compact (`"sent"`) from one that
     merely QUEUED behind a running turn (`"queued"`).
 
     An empty box is AMBIGUOUS: `/compact` leaves the box whether it executes OR
@@ -1082,25 +1103,45 @@ def _compact_post_send_classify(pid, run):
       * CC's own "Compacting conversation" progress indicator -> `"sent"`: a
         genuine compaction is IN FLIGHT, whatever put it there (#69);
       * a queued `❯ /compact` row above the box -> `"queued"`;
+      * the greyed `Press up to edit [N] queued messages` box hint -> `"queued"`
+        (#833: an INDEPENDENT, race-/banner-proof signal read straight off the
+        input-box boundary — no walk UP past the transient `✔ Update installed`
+        banner, and it renders the instant a message queues);
       * a running-turn spinner occupying the boundary -> `"queued"` (the submit
         was appended behind a turn CC started right after the Enter).
 
+    #833 — the RACE: the queued row / box hint can render a beat AFTER the
+    submit, so a SINGLE re-capture at t0 reads a still-bare pane and falsely
+    concludes `"sent"` (the owner's t0→t+1s case). So this re-captures up to
+    `COMPACT_POST_SEND_RECAPTURES` times, ~`COMPACT_POST_SEND_RECAPTURE_S` apart,
+    and concludes `"sent"` only if NO positive signal appears across all of
+    them; it RETURNS the instant one does (usually the first capture).
+
     Reuses the existing pane scanners (`_pane_compacting`,
-    `_pane_has_queued_compact`, `_classify_boundary`) — NO new detector family.
-    Classifying a never-executed compact `"queued"` is what keeps
-    `deliver_compact` from writing `compact-delivered` / starting the 30-min
-    cooldown for a compaction that did not happen (#135: delivery, not a claim).
-    An unreadable / idle-and-quiet re-capture reads `"sent"` (the pre-#822
-    behaviour): only a POSITIVE queued/spinner signal downgrades to `"queued"`,
-    so a genuinely-executed compact whose indicator has already cleared is never
-    mislabelled."""
-    recap = watchdog.capture_pane(pid, run, lines=40)
-    if watchdog._pane_compacting(recap):
-        return "sent"                          # genuinely executing right now
-    if watchdog._pane_has_queued_compact(recap):
-        return "queued"                        # queued behind a running turn
-    if watchdog._classify_boundary(recap)[0] == "busy":
-        return "queued"                        # a running-turn spinner ate it
+    `_pane_has_queued_compact`, `_pane_shows_queued_messages_hint`,
+    `_classify_boundary`) — NO new detector family. Classifying a never-executed
+    compact `"queued"` is what keeps `deliver_compact` from writing
+    `compact-delivered` / starting the 30-min cooldown for a compaction that did
+    not happen (#135: delivery, not a claim). An unreadable / idle-and-quiet
+    re-capture across every attempt reads `"sent"` (the pre-#822 behaviour):
+    only a POSITIVE queued/hint/spinner signal downgrades to `"queued"`, and the
+    fail-safe direction is QUEUED (a false QUEUED costs one boundary-hold turn;
+    a false NONE lets the next batch dispatch over a queued compact, #822/#723)."""
+    sleep_fn = sleep_fn or time.sleep
+    for attempt in range(COMPACT_POST_SEND_RECAPTURES):
+        recap = watchdog.capture_pane(pid, run, lines=40)
+        if watchdog._pane_compacting(recap):
+            return "sent"                      # genuinely executing right now
+        if watchdog._pane_has_queued_compact(recap):
+            return "queued"                    # queued `❯ /compact` row above box
+        if watchdog._pane_shows_queued_messages_hint(recap):
+            return "queued"                    # #833: the box's queued-msgs hint
+        if watchdog._classify_boundary(recap)[0] == "busy":
+            return "queued"                    # a running-turn spinner ate it
+        # no positive signal yet — the queued row/hint may still be rendering
+        # (#833 race); wait a beat and re-read, unless this was the last attempt.
+        if attempt < COMPACT_POST_SEND_RECAPTURES - 1:
+            sleep_fn(COMPACT_POST_SEND_RECAPTURE_S)
     return "sent"
 
 
@@ -1162,7 +1203,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
         return "raced-busy"
     watchdog.send_continue(pid, COMPACT_TEXT, run)
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return _compact_post_send_classify(pid, run)     # #822: sent vs queued
+        return _compact_post_send_classify(pid, run, sleep_fn)  # #822/#833: sent vs queued
     # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective
     # Escape+Enter. The box holds ONLY our own `/compact` (verified bare above),
     # and a single Escape never deletes a CC draft (#35), so this only deselects
@@ -1170,7 +1211,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return _compact_post_send_classify(pid, run)     # #822: sent vs queued
+        return _compact_post_send_classify(pid, run, sleep_fn)  # #822/#833: sent vs queued
     # Still stuck. Backspace our own text off the bare-verified box so the next
     # sweep retries from a clean prompt; the janitor (job 20, provenance already
     # marked by the caller) is the backstop if this undo itself fails.
