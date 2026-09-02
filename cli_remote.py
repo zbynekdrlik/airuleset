@@ -1074,8 +1074,20 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # len(failed) double-counts -- report the DISTINCT host count; the
             # full list still shows each reason.
             distinct_failed = {name for name, _reason in failed}
-            print(f"\n⚠ {len(distinct_failed)} of {len(airuleset.REMOTE_HOSTS)} remote(s) "
-                  f"FAILED: {failed}", file=sys.stderr)
+            # #826: emit an UNMISTAKABLE deploy-failure summary at the END of the
+            # deploy phase. The real per-target FAILED line was hidden among the
+            # ~33 mock-"FAILED" lines the pre-push test suite prints into the SAME
+            # log stream, so a bare "FAILED" token is not diagnostic and `push`
+            # reported OK while a target silently ran stale config. The
+            # `DEPLOY FAILED` / `DEPLOY FAILURES:` token is emitted ONLY by this
+            # phase (which runs AFTER "Pushing to GitHub"), so a targeted digest
+            # of the deploy section finds the real failure reliably; the non-zero
+            # exit below is never swallowed.
+            for name, reason in failed:
+                print(f"DEPLOY FAILED {name}: {reason}", file=sys.stderr)
+            print(f"\n⚠ DEPLOY FAILURES: {len(distinct_failed)} of "
+                  f"{len(airuleset.REMOTE_HOSTS)} remote(s) FAILED: {failed}",
+                  file=sys.stderr)
             sys.exit(1)
         print("\nAll deployments complete.")
     finally:

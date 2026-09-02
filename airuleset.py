@@ -1255,10 +1255,21 @@ def cmd_install(args):
     # --- 5c. #664: re-assert the public-TLS drop ingress AFTER webterm setup.
     # setup_webterm_david_tunnel rewrites subdev's config.yml from scratch, which
     # would delete a live drop ingress; this idempotently re-adds it (no-op unless
-    # this box has a LIVE drop lane). Never raises. ---
+    # this box has a LIVE drop lane). Never raises. #826: a GENUINE reconcile
+    # failure (e.g. the tunnel restart failing 'No medium found') now returns
+    # False and LATCHES install_failed, so this install exits non-zero and `push`
+    # never reports OK over a stale tunnel — a benign no-op returns True and never
+    # trips it. install_failed is declared HERE (before the plugin steps) so this
+    # is the first step that can latch it. ---
+    install_failed = False
     try:
         import cli_drop_gateway
-        cli_drop_gateway.reconcile_drop_ingress_on_install()
+        if not cli_drop_gateway.reconcile_drop_ingress_on_install():
+            install_failed = True
+            print("  drop-gateway ingress re-assert FAILED — a deploy step did "
+                  "not complete (see the error above); this install exits "
+                  "non-zero so `push` never reports OK over it (#826)",
+                  file=sys.stderr)
     except Exception as e:                             # pragma: no cover - defensive
         print(f"  drop-gateway ingress re-assert error (non-fatal): {e}",
               file=sys.stderr)
@@ -1267,14 +1278,13 @@ def cmd_install(args):
     # A still-failing plugin install (after correct marketplace registration)
     # is now a REQUIRED-step failure, not a silent best-effort one (issue:
     # push: plugin installs fail on fresh stream accounts, 2026-08-06) — it
-    # latches `install_failed`, which turns "Install complete." into a loud
-    # non-zero exit below, per script-failure-policy. An unexpected
-    # EXCEPTION from either function stays non-fatal-to-the-whole-install
-    # (the outer try/except here guards against a bug in OUR OWN code, not
-    # against the plugin-marketplace failure this ticket is about — that
-    # case is already caught INSIDE each setup_* function and reflected in
-    # its own `ok` return value).
-    install_failed = False
+    # latches `install_failed` (declared at step 5c above), which turns
+    # "Install complete." into a loud non-zero exit below, per
+    # script-failure-policy. An unexpected EXCEPTION from either function stays
+    # non-fatal-to-the-whole-install (the outer try/except here guards against a
+    # bug in OUR OWN code, not against the plugin-marketplace failure this ticket
+    # is about — that case is already caught INSIDE each setup_* function and
+    # reflected in its own `ok` return value).
     try:
         if not maybe_setup_caveman():
             install_failed = True
@@ -1500,9 +1510,9 @@ def cmd_install(args):
 
     print()
     if install_failed:
-        print("Install FAILED — a managed plugin's marketplace registration "
-              "or install did not complete (see warnings above).",
-              file=sys.stderr)
+        print("Install FAILED — a required step (a managed plugin's marketplace "
+              "registration/install, or the drop-gateway tunnel re-assert) did "
+              "not complete (see warnings above).", file=sys.stderr)
         sys.exit(1)
     print("Install complete. Restart Claude Code for changes to take effect.")
 

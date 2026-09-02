@@ -304,6 +304,24 @@ def _restart_argv(lane):
     return ["systemctl", "--user", "restart", lane.tunnel_service]
 
 
+def _restart_env(lane):
+    """The subprocess env for the tunnel restart, or None to inherit (#826).
+
+    A `--user` unit runs over a NON-LOGIN ssh install session, where
+    XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are unset, so a bare
+    `systemctl --user restart` fails 'Failed to connect to bus: No medium found'
+    (the exact david1@subdev incident). Route it through the ONE shared
+    systemd-user env helper (`cli_filedrop_watchdog._xdg_runtime_env` — the same
+    helper every other remote `--user` call site uses; a LAZY import matching
+    this leaf's existing lazy-import-of-siblings pattern, #433). A SYSTEM unit
+    runs via `sudo -n systemctl`, which resets env itself, so it needs none →
+    inherit (None)."""
+    if lane.tunnel_system_unit:
+        return None
+    from cli_filedrop_watchdog import _xdg_runtime_env
+    return _xdg_runtime_env()
+
+
 def _config_tunnel_uuid(config_text):
     """The `tunnel:` UUID declared in a cloudflared config, or None."""
     m = re.search(r"(?m)^\s*tunnel:\s*(\S+)\s*$", config_text)
@@ -421,7 +439,7 @@ def cmd_drop_gateway(args):
     if changed or read_drop_marker(marker_path) is None:
         argv = _restart_argv(lane)
         try:
-            r = run(argv, capture_output=True, text=True)
+            r = run(argv, capture_output=True, text=True, env=_restart_env(lane))
             rc = getattr(r, "returncode", 1)
         except Exception as e:                         # pragma: no cover - defensive
             print("  tunnel restart errored (%s) — config written; restart %s "
@@ -467,16 +485,21 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None)
     is a pure no-op on any box without a live drop lane (the overwhelming
     majority — no lane, or a lane whose marker was never written).
 
-    Returns True when the ingress is present+live after this call, False on any
-    skip/failure.
+    Returns True when NOTHING is wrong (the ingress is present+live after this
+    call, OR this box has no live drop lane at all — a benign no-op), and False
+    ONLY on a GENUINE failure (config unreadable / wrong tunnel / no catch-all /
+    restart failed / unexpected exception). This un-overloads the earlier return
+    (#826): `cmd_install` latches `install_failed` on a False, so a False MUST
+    mean a real failure — else every one of the fleet's no-drop-lane boxes (the
+    majority) would fail its install.
     """
     run = run or __import__("subprocess").run
     try:
         lane = drop_lane_for_box(nodename)
         if lane is None:
-            return False                        # no drop lane on this box — no-op
+            return True                         # no drop lane on this box — benign no-op (ok)
         if read_drop_marker(marker_path) is None:
-            return False                        # lane never went live — nothing to preserve
+            return True                         # lane never went live — nothing to preserve (ok)
         try:
             config_text = Path(lane.tunnel_config).read_text(encoding="utf-8")
         except OSError as e:
@@ -498,7 +521,7 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None)
             return True                         # ingress already present — no restart
         Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
         argv = _restart_argv(lane)
-        r = run(argv, capture_output=True, text=True)
+        r = run(argv, capture_output=True, text=True, env=_restart_env(lane))
         if getattr(r, "returncode", 1) != 0:
             print("  drop-gateway: re-added the drop ingress to %s but restart "
                   "FAILED (%s) — restart %s by hand"
