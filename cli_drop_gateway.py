@@ -73,10 +73,21 @@ class DropLane:
     cloudflared tunnel it rides (uuid + config path + restart unit), and whether
     Cloudflare Access fronts it. `access=True` = double protection Access+token
     (the no-tailscale CLIENT case, David → subdev); `access=False` = token-only
-    TLS (the no-tailscale owner BOX, spinbike)."""
+    TLS (the no-tailscale owner BOX, spinbike).
+
+    `gateway_account` (#838): the unix account that OWNS this lane's tunnel
+    config + restart unit on this box. `DROP_LANES` is nodename-keyed, so on a
+    SHARED box (subdev) both the gateway account (david1) AND its SIBLING
+    accounts (david2, …, whose drop marker is seeded per the #786 runbook but
+    whose own `~/.cloudflared/config.yml` never exists — the tunnel lives under
+    the gateway) resolve to the SAME lane. A sibling account has nothing to
+    re-assert at install time, so `reconcile_drop_ingress_on_install` diverts it
+    to a benign no-op. `None` = no sibling concept — the invoking account always
+    owns the tunnel (spinbike, single-account boxes) → today's behaviour, so
+    #826's loud failure stays intact on the tunnel-owning account."""
 
     def __init__(self, host, tunnel_uuid, tunnel_config, tunnel_service,
-                 tunnel_system_unit, access):
+                 tunnel_system_unit, access, gateway_account=None):
         self.host = host
         self.tunnel_uuid = tunnel_uuid
         self.tunnel_config = tunnel_config
@@ -85,6 +96,8 @@ class DropLane:
         # False → a `--user` unit (`systemctl --user restart`).
         self.tunnel_system_unit = tunnel_system_unit
         self.access = access
+        # #838: the tunnel-owning unix account, or None (no sibling concept).
+        self.gateway_account = gateway_account
 
 
 # Per-box drop lanes, keyed by os.uname().nodename — the SAME box-identity
@@ -102,14 +115,18 @@ DROP_LANES = {
         tunnel_system_unit=True,
         access=False),
     # no-tailscale CLIENT (David's laptop) → subdev; rides the existing david
-    # tunnel, behind Cloudflare Access (email OTP) = double protection.
+    # tunnel, behind Cloudflare Access (email OTP) = double protection. The
+    # tunnel config + `--user` unit belong to the gateway account david1 (#838):
+    # sibling accounts (david2, …) share the lane by nodename but own no config,
+    # so their install-time ingress re-assert is a benign no-op.
     "subdev": DropLane(
         host=DROP_HOST_DAVID,
         tunnel_uuid="1564fe31-a95f-4053-93d4-baff2b8a6e97",
         tunnel_config=_CFDIR / "config.yml",
         tunnel_service="webterm-david-tunnel.service",
         tunnel_system_unit=False,
-        access=True),
+        access=True,
+        gateway_account="david1"),
 }
 
 # Access spec for the drop-david host — reconciled via cli_webterm_access.
@@ -470,7 +487,8 @@ def cmd_drop_gateway(args):
     return 0
 
 
-def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None):
+def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
+                                      username=None):
     """Re-assert the drop ingress into this box's tunnel config at install time —
     idempotently, and ONLY when the lane already went LIVE (marker present)
     (#664 review A-M1).
@@ -488,12 +506,27 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None)
     written).
 
     Returns True when NOTHING is wrong (the ingress is present+live after this
-    call, OR this box has no live drop lane at all — a benign no-op), and False
-    ONLY on a GENUINE failure (config unreadable / wrong tunnel / no catch-all /
-    restart failed / unexpected exception). This un-overloads the earlier return
-    (#826): `cmd_install` latches `install_failed` on a False, so a False MUST
-    mean a real failure — else every one of the fleet's no-drop-lane boxes (the
-    majority) would fail its install.
+    call, OR this box has no live drop lane at all, OR this account is a SIBLING
+    of a shared drop tunnel it does not own — all benign no-ops), and False ONLY
+    on a GENUINE failure (config unreadable / wrong tunnel / no catch-all /
+    restart failed / unexpected exception) ON THE TUNNEL-OWNING account. This
+    un-overloads the earlier return (#826): `cmd_install` latches `install_failed`
+    on a False, so a False MUST mean a real failure — else every one of the
+    fleet's no-drop-lane boxes (the majority) would fail its install.
+
+    #838: on a SHARED box `DROP_LANES` is nodename-keyed, so a SIBLING account
+    (david2@subdev: marker seeded per the #786 runbook, but no own
+    `~/.cloudflared/config.yml` — the tunnel config + `--user` unit live under the
+    gateway account david1) resolves to the SAME lane as the gateway account.
+    Left unhandled, the sibling's absent config raised OSError → False → the
+    install failed on EVERY release push. A sibling has nothing to re-assert (the
+    gateway account's own install pass heals the ingress), so when the lane names
+    a `gateway_account` and the invoking account (`username`, defaulting to
+    `_current_username()`) differs from it, this is a benign no-op (True). The
+    check sits BEFORE the config read, so a sibling never touches a config it does
+    not own — and #826's loud failure stays on the tunnel-owning account (a lane
+    with `gateway_account=None`, or the gateway account itself, still returns
+    False on a genuine broken config).
     """
     run = run or __import__("subprocess").run
     try:
@@ -502,6 +535,21 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None)
             return True                         # no drop lane on this box — benign no-op (ok)
         if read_drop_marker(marker_path) is None:
             return True                         # lane never went live — nothing to preserve (ok)
+        if lane.gateway_account is not None:
+            # #838: a sibling account of a shared drop tunnel owns no config —
+            # nothing to re-assert here. Fail-safe: an unresolvable account does
+            # NOT divert (proceed → the tunnel-owner path keeps #826's loud fail).
+            try:
+                me = username if username is not None else _current_username()
+            except Exception:
+                me = None
+            if me is not None and me != lane.gateway_account:
+                print("  drop-gateway: this account (%s) is a SIBLING of the "
+                      "shared drop tunnel owned by the gateway account %r on this "
+                      "box — the gateway account re-asserts the ingress; nothing "
+                      "to heal here (#838)" % (me, lane.gateway_account),
+                      file=sys.stderr)
+                return True
         try:
             config_text = Path(lane.tunnel_config).read_text(encoding="utf-8")
         except OSError as e:

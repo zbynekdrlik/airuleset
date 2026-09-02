@@ -660,8 +660,10 @@ class TestReconcileRestartCarriesUserBusEnv(unittest.TestCase):
             captured["kw"] = kw
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
+        # #838: pin the GATEWAY account (david1) so the shape-(b) restart runs —
+        # a sibling account would (correctly) divert to a benign no-op before it.
         dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="subdev", marker_path=self.marker)
+            run=r, nodename="subdev", marker_path=self.marker, username="david1")
         self.assertEqual(captured["argv"][:2], ["systemctl", "--user"])
         env = captured["kw"].get("env")
         self.assertIsNotNone(env, "the --user restart MUST carry an env (#826)")
@@ -738,6 +740,38 @@ class TestReconcileSiblingAccount838(unittest.TestCase):
         self.assertEqual(calls, [], "a sibling account attempts no restart")
         self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before,
                          "a sibling account never rewrites the stale config")
+
+    def test_gateway_account_missing_config_still_fails_loud(self):
+        # #838 must NOT silently undo #826: the GATEWAY account (david1) that OWNS
+        # the tunnel, with a live marker but a genuinely absent/broken config, is a
+        # REAL failure (False) — the sibling divert applies ONLY to non-owners.
+        from unittest import mock
+        calls, r = self._run_recorder()
+        with mock.patch.object(dg, "_current_username", return_value="david1"):
+            self.assertFalse(dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker))
+        self.assertEqual(calls, [], "no restart when the owner's config is unreadable")
+
+    def test_gateway_account_reasserts_and_restarts(self):
+        # The gateway account (david1) with a clobbered-but-present config re-adds
+        # the ingress and restarts — shape (b) proceeds normally for the owner.
+        from unittest import mock
+        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        calls, r = self._run_recorder()
+        with mock.patch.object(dg, "_current_username", return_value="david1"):
+            self.assertTrue(dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker))
+        self.assertIn("- hostname: drop-david.newlevel.media",
+                      Path(self.cfg).read_text(encoding="utf-8"))
+        self.assertTrue(calls, "gateway account restarts after re-adding the ingress")
+
+    def test_injected_username_overrides_current_username(self):
+        # The injectable `username=` seam (the #786 pin-the-account lesson) drives
+        # the divert directly, without resolving the real invoking account.
+        calls, r = self._run_recorder()
+        self.assertTrue(dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="subdev", marker_path=self.marker, username="david2"))
+        self.assertEqual(calls, [], "injected sibling account is a benign no-op")
 
 
 class TestSecretShowLeadingFlagName(unittest.TestCase):
