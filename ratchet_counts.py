@@ -70,7 +70,11 @@ def _local_now(now=None):
 def _day_start_iso(now=None):
     """Midnight of the current LOCAL day, ISO-8601 WITH the box-local UTC offset
     (e.g. `2026-09-02T00:00:00+0200`) — GitHub search reads a bare date as UTC,
-    which would shift the boundary by the offset, so the offset is mandatory."""
+    which would shift the boundary by the offset, so the offset is mandatory.
+    #842-review 🔵 residual: the CURRENT offset is attached to midnight, so on a
+    DST-transition day the boundary is off by the shift (one hour miscounted, two
+    days a year) — counting-only, accepted. A caller-supplied NAIVE `now` would
+    strftime an empty `%z` (bare = UTC); all real callers pass None/aware."""
     start = _local_now(now).replace(hour=0, minute=0, second=0, microsecond=0)
     return start.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -176,9 +180,14 @@ def bump_created(repo, now=None, home=None):
     the within-TTL burst race across SEPARATE hook invocations (each hook
     subprocess reads a fresh cache, so without this a burst of unattended
     filings inside one 120s window would all pass on the same stale count).
-    Best-effort: no cache / day-rolled / non-int → no-op, never raises. Safe
-    because only the single-threaded MAIN session ever reaches this (workers are
-    hard-blocked), so no concurrent write races the cache."""
+    Best-effort: no cache / day-rolled / non-int → no-op, never raises. NOT
+    fully race-free (#842-review 🔵): `cmd_tickets_status --refresh` (statusbar-
+    spawned, detached) writes the SAME `ratchet-<slug>.json`, and two main
+    sessions can work one repo — `os.replace` keeps the file corruption-free, but
+    a stale refresh whose gh reads finished pre-create can overwrite a bump, so a
+    burst can leak ONE extra filing inside a 120s window. The bump NARROWS the
+    race, it does not close it; the ratchet's whole-day `created >= closed` gate
+    is the durable backstop."""
     today = _today_str(now)
     c = _read_cache(repo, home)
     if not isinstance(c, dict) or c.get("day") != today:

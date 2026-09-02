@@ -1813,6 +1813,30 @@ class TestNetDrainHarness842(TestCase):
         r = run("echo hello", gh_bin=_default_gh_stub(), agent_id="sub-worker-4")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_worker_graphql_create_issue_blocked(self):
+        # #842-review 🔴: a graphql createIssue mutation carries no lowercase
+        # `issues` substring, so it would slip the pre-filter — the worker block
+        # sits ABOVE the pre-filter and catches it.
+        r = run("gh api graphql -f query='mutation{createIssue(input:{repositoryId:"
+                "\"R_x\",title:\"t\",body:\"b\"}){issue{number}}}'",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-gql")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("followup_candidates", r.stderr)
+
+    def test_worker_api_issues_get_read_not_blocked(self):
+        # #842-review 🟡: a bare GET (reading a design comment) is NOT a create
+        # — the worker block must not false-block it.
+        r = run("gh api repos/owner/repo/issues/842/comments",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-get")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_worker_grep_mentioning_issue_create_not_blocked(self):
+        # #842-review 🟡: a grep whose PATTERN contains "issue create" is not a
+        # `gh issue create` command — must not false-block a worker.
+        r = run('grep -n "issue create" hooks/block-ungated-issue-filing.sh',
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-grep")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     # ---- req 3: presence-gated user-request / planned-work ----
     def test_unattended_user_request_is_blocked(self):
         r = run(body_cmd("loop wants this", "an unattended loop cannot claim the owner asked",
