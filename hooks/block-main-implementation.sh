@@ -82,10 +82,19 @@ set -euo pipefail
 # the reason a running loop on one of 6 managed boxes stalls on a routine
 # gh/git call.
 #
-# Bypass (rare, logged, ONE-SHOT since #80 — honoring the marker DELETES it,
-# so one marker exempts exactly one call; and since #128 the marker must
-# CARRY the reason, which is logged, an empty one being refused and cleared):
+# Bypass (rare, logged, ONE-SHOT since #80; since #819 consumed when the
+# command actually RUNS — a PostToolUse consumer, post-consume-main-exec-
+# marker.sh — not the moment this guard allows it, so a sibling-hook block
+# never strands the one-shot; and since #128 the marker must CARRY the
+# reason, which is logged, an empty one being refused and cleared):
 #   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-<session_id>
+# Accepted residuals of the deferred consume (all bounded, fail-safe toward
+# CONSUME): (a) N PARALLEL guarded calls in one turn all see the marker before
+# the first one's PostToolUse fires, so one marker exempts that whole parallel
+# batch (bounded to one turn, all of them RUN); (b) a user Ctrl+C mid-Bash may
+# skip PostToolUse, leaving the marker one call longer; (c) a benign non-arming
+# call between a sibling-blocked impl call and its retry consumes the marker
+# early (one extra re-echo).
 # (generalized name). The original Fable-only marker
 # /tmp/airuleset-fable-exec-ok-<session_id> is STILL honored for backward
 # compatibility (nothing outside this hook + its own tests referenced the
@@ -390,6 +399,15 @@ PYEOF
         echo\ *airuleset-main-exec-ok-*|echo\ *airuleset-fable-exec-ok-*|\
         printf\ *airuleset-main-exec-ok-*|printf\ *airuleset-fable-exec-ok-*|\
         cat\ *airuleset-main-exec-ok-*|cat\ *airuleset-fable-exec-ok-*)
+            # #819: consumption is DEFERRED to PostToolUse via a pending flag
+            # (see the marker block below). A sibling-blocked call leaves a
+            # STALE pending behind; a re-echo (this arming command) then RUNS,
+            # so its OWN PostToolUse would consume the freshly-armed marker
+            # unless we clear that stale pending here first. The arming echo
+            # never reaches the marker block, so it never sets a pending of
+            # its own — clearing here only removes a stranded one.
+            rm -f "/tmp/airuleset-main-exec-pending-${RAW_SID:-unknown}" \
+                2>/dev/null || true
             ARM_SNIP=$(printf '%s' "$NORM_CMD" | jq -Rr '.[0:120]' 2>/dev/null \
                 || echo "")
             { echo "$(date -Is) main-exec bypass-arm session=$RAW_SID cmd=$ARM_SNIP" \
@@ -451,6 +469,28 @@ SESSION_ID="${RAW_SID:-unknown}"
 # rest of the session" (gk, 2026-07-26: one touch at 01:24 → 332 unguarded
 # calls). Re-touching always works, so the escape hatch never dead-ends;
 # the cost of abuse just grows with the abuse instead of being paid once.
+#
+# #819: the consumption POINT moved. This hook ALLOWING a call is NOT the
+# same as the command RUNNING — a LATER sibling PreToolUse hook (block-local-
+# poll-repeat #119, block-ci-poll-repeat, block-history-rewrite, …) can still
+# exit 2 on the same call, so the command never runs. Consuming the marker
+# here would then strand the one-shot on a call that never executed, forcing
+# a needless re-echo (the #819 bug). So on the VALID-reason path this hook
+# now DEFERS: it leaves the marker and writes a session-scoped pending flag
+# (/tmp/airuleset-main-exec-pending-<sid>); the PostToolUse consumer
+# (post-consume-main-exec-marker.sh) deletes marker + pending ONLY after the
+# tool actually RAN (PostToolUse fires after a tool that ran — including a
+# Bash command that exited non-zero — and NOT for a call a PreToolUse hook
+# denied, exactly the wanted behaviour). The REFUSE paths (bad reason / jq
+# failure) still delete the marker here in PreToolUse, since the tool is then
+# blocked and no PostToolUse fires.
+# Fail-safe: if in doubt whether the command ran, CONSUME — a marker that
+# survives too long is the security regression; an extra re-echo is the mild
+# cost. Residuals, all bounded to ONE extra call in the SAFE (over-survive-
+# briefly) direction: a user Ctrl+C mid-Bash may skip PostToolUse; and whether
+# PostToolUse fires for a tool CC treats as a hard ERROR (e.g. a failed Edit)
+# is not independently verified here — if it does not, that edit's marker
+# survives one call. Both self-heal on the next executed guarded call.
 BYPASS_MARK=""
 BYPASS_FILE=""
 if [ -e "/tmp/airuleset-main-exec-ok-${SESSION_ID:-unknown}" ]; then
@@ -507,15 +547,41 @@ if [ -n "$BYPASS_MARK" ]; then
     BYPASS_REASON=$(printf '%s' "$BYPASS_CLEAN" | jq -Rrs '.[0:200]' 2>/dev/null) \
         || BYPASS_JQ_RC=$?
     BYPASS_REASON=$(printf '%s' "$BYPASS_REASON" | sed 's/^ *//; s/ *$//')
-    rm -f "$BYPASS_FILE" 2>/dev/null || true
+    # #819: the marker is NO LONGER deleted unconditionally here. The VALID-
+    # reason path DEFERS to PostToolUse (writes a pending flag, keeps the
+    # marker); only the two REFUSE paths clear the bad marker in PreToolUse.
+    BYPASS_PENDING="/tmp/airuleset-main-exec-pending-${SESSION_ID:-unknown}"
     if [ "$BYPASS_JQ_RC" -ne 0 ]; then
+        # refuse: clear the bad marker AND any stranded pending (a stale
+        # pending must never phantom-consume the NEXT armed marker).
+        rm -f "$BYPASS_FILE" "$BYPASS_PENDING" 2>/dev/null || true
         { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (reason extraction FAILED jq_rc=$BYPASS_JQ_RC, cleared)" \
             >> "$BYPASS_LOG"; } 2>/dev/null || true
     elif [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
-        { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed) reason=$BYPASS_REASON" \
-            >> "$BYPASS_LOG"; } 2>/dev/null || true
+        # DEFER consumption to PostToolUse: leave the marker, drop a pending
+        # flag so post-consume-main-exec-marker.sh consumes it once the tool
+        # RAN. The reason rides in the pending file for the consumer's log.
+        #
+        # #819 review (CRITICAL): if the pending WRITE fails (ENOSPC / inode
+        # exhaustion — a real fleet condition, dev1 hit 714k inodes — or an
+        # unwritable path), fall back to consuming the marker HERE, in
+        # PreToolUse. Otherwise the call would be allowed with no pending, the
+        # consumer would no-op, and the marker would survive EVERY subsequent
+        # executed call — the pre-#80 session-wide kill switch resurrected
+        # under disk pressure. `rm` needs no free space, so the fail-safe
+        # direction (consume when in doubt) always holds.
+        if { printf '%s\n' "$BYPASS_REASON" > "$BYPASS_PENDING"; } 2>/dev/null; then
+            { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (allowed, deferred consume pending post-exec) reason=$BYPASS_REASON" \
+                >> "$BYPASS_LOG"; } 2>/dev/null || true
+        else
+            rm -f "$BYPASS_FILE" 2>/dev/null || true      # write failed → consume now (fail-safe)
+            { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (allowed, pending-write FAILED, consumed in PreToolUse) reason=$BYPASS_REASON" \
+                >> "$BYPASS_LOG"; } 2>/dev/null || true
+        fi
         exit 0
     else
+        # refuse: clear the bad marker AND any stranded pending.
+        rm -f "$BYPASS_FILE" "$BYPASS_PENDING" 2>/dev/null || true
         { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
             >> "$BYPASS_LOG"; } 2>/dev/null || true
     fi
@@ -1296,7 +1362,8 @@ This is a nudge, not a wall: the counter is already reset, so re-running
 this exact command right now will pass. Ignoring the nudge is what the
 measurement will show.
 
-Deliberate exception (one-shot, logged, and it must SAY WHY):
+Deliberate exception (one-shot — consumed when the command actually RUNS, not
+when this hook allows it; logged, and it must SAY WHY):
   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
 MSG
         exit 2
@@ -1318,7 +1385,8 @@ hour, each re-sending the whole context — #66):
     dump — main-context-hygiene.md.
   • then act on the conclusion here — that is the coordinator's job.
 
-Deliberate exception (one-shot, logged, and it must SAY WHY):
+Deliberate exception (one-shot — consumed when the command actually RUNS, not
+when this hook allows it; logged, and it must SAY WHY):
   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
 MSG
     exit 2
@@ -1349,7 +1417,8 @@ david@subdev inline-354-edits incident):
     none of those, is over that cap, or its path contains ".." (never
     exempt, #178 review).
 
-Deliberate exception (one-shot, logged, and it must SAY WHY):
+Deliberate exception (one-shot — consumed when the command actually RUNS, not
+when this hook allows it; logged, and it must SAY WHY):
   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
 MSG
 exit 2

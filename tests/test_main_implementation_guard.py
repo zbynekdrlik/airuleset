@@ -165,6 +165,12 @@ class MainImplementationGuard(unittest.TestCase):
                 Path(marker).write_text(BYPASS_REASON if bypass_reason is None
                                         else bypass_reason)
                 self.addCleanup(lambda: Path(marker).unlink(missing_ok=True))
+                # #819: the PreToolUse allow now DEFERS consumption (writes a
+                # pending flag instead of deleting the marker), so a bypass
+                # run leaves this session-scoped pending file behind — clean
+                # it up too, or it litters /tmp across the suite.
+                pending = "/tmp/airuleset-main-exec-pending-%s" % sid
+                self.addCleanup(lambda: Path(pending).unlink(missing_ok=True))
             # #128: the presence marker clear-question-dedup.sh stamps on
             # UserPromptSubmit. `presence_age` = seconds since the user last
             # typed a REAL prompt; None = no marker at all (unprovable).
@@ -958,73 +964,283 @@ class LineContinuationInsideSubstitution_88(unittest.TestCase):
 
 
 class OneShotBypass80(unittest.TestCase):
-    """#80: the bypass marker was a PERMANENT, self-servable kill switch — a
-    single `touch /tmp/airuleset-main-exec-ok-<sid>` disabled this hook for
-    the rest of the session. gk's main did exactly that at 01:24 ("Hook's
-    documented exception applies... Taking it (it's logged)") and then ran
-    304 Bash + 20 Write calls through it unguarded. "Deliberate exception"
-    means ONE deliberate action, so the hook now CONSUMES the marker: one
-    marker = one exempted call, still logged. Nothing dead-ends (it can
-    always be re-touched) but the cost of abuse grows linearly with abuse
-    instead of being paid once."""
+    """#80 + #819: the bypass marker is ONE-SHOT — but as of #819 the
+    consumption POINT moved: it is consumed when the exempted command
+    actually RUNS (a PostToolUse consumer, post-consume-main-exec-marker.sh),
+    NOT the moment block-main-implementation.sh ALLOWS it in PreToolUse.
+    #80's invariant (one marker = one exempted call, re-touchable, never a
+    permanent kill switch) is PRESERVED; only the point moved, so a call a
+    later sibling PreToolUse hook blocks no longer strands the one-shot on a
+    command that never ran (the #819 bug)."""
+
+    CONSUMER = REPO / "hooks" / "post-consume-main-exec-marker.sh"
 
     def _marker(self, sid, legacy=False):
         name = "fable" if legacy else "main"
         return Path("/tmp/airuleset-%s-exec-ok-%s" % (name, sid))
 
+    def _pending(self, sid):
+        return Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+
+    def _arm(self, sid, legacy=False):
+        m = self._marker(sid, legacy=legacy)
+        m.write_text(BYPASS_REASON)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: self._pending(sid).unlink(missing_ok=True))
+        return m
+
     def _run(self, sid, command="grep -rn 'TODO' .", **kw):
+        # the PreToolUse guard hook (block-main-implementation.sh)
         helper = MainImplementationGuard()
         return helper._run(tool="Bash", command=command, sid=sid,
                            transcript_text=goal_armed_transcript(), **kw)
 
-    def test_marker_is_consumed_after_one_use(self):
+    def _post(self, sid, tool="Bash", agent_id=None, extra_env=None):
+        # the PostToolUse consumer hook — fires only when a tool actually RAN
+        payload = {"session_id": sid, "hook_event_name": "PostToolUse",
+                   "tool_name": tool, "tool_input": {"command": "x"}}
+        if agent_id:
+            payload["agent_id"] = agent_id
+        env = dict(os.environ)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(["bash", str(self.CONSUMER)],
+                              input=json.dumps(payload), env=env,
+                              capture_output=True, text=True)
+
+    def test_pre_allows_and_defers_consume(self):
+        # #819: PreToolUse allows but does NOT consume; a pending flag is set.
         sid = "t-mg-oneshot-" + uuid.uuid4().hex[:8]
-        m = self._marker(sid)
-        m.write_text(BYPASS_REASON)
-        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        m = self._arm(sid)
         first = self._run(sid)
         self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertFalse(m.exists(), "marker must be consumed by the one use")
+        self.assertTrue(m.exists(), "marker must SURVIVE the PreToolUse allow")
+        self.assertTrue(self._pending(sid).exists(),
+                        "a pending flag must be written for the PostToolUse consumer")
+
+    def test_marker_is_consumed_after_the_command_runs(self):
+        sid = "t-mg-oneshot1b-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        self.assertEqual(self._run(sid).returncode, 0)
+        self._post(sid)                      # the command RAN -> consume now
+        self.assertFalse(m.exists(), "marker must be consumed once the command ran")
+        self.assertFalse(self._pending(sid).exists(), "pending flag cleared too")
 
     def test_second_call_after_the_marker_was_used_is_blocked_again(self):
         sid = "t-mg-oneshot2-" + uuid.uuid4().hex[:8]
-        m = self._marker(sid)
-        m.write_text(BYPASS_REASON)
-        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._arm(sid)
         self.assertEqual(self._run(sid).returncode, 0)
+        self._post(sid)                      # the command ran -> consumed
         second = self._run(sid)
         self.assertEqual(second.returncode, 2,
                          "a used marker must not keep the hook disabled")
 
     def test_legacy_marker_is_also_consumed(self):
         sid = "t-mg-oneshot3-" + uuid.uuid4().hex[:8]
-        m = self._marker(sid, legacy=True)
-        m.write_text(BYPASS_REASON)
-        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        m = self._arm(sid, legacy=True)
         self.assertEqual(self._run(sid).returncode, 0)
+        self._post(sid)
         self.assertFalse(m.exists())
 
     def test_re_touching_the_marker_works_again(self):
         sid = "t-mg-oneshot4-" + uuid.uuid4().hex[:8]
-        m = self._marker(sid)
-        self.addCleanup(lambda: m.unlink(missing_ok=True))
-        m.write_text(BYPASS_REASON)
+        m = self._arm(sid)
         self.assertEqual(self._run(sid).returncode, 0)
+        self._post(sid)                      # consumed
         self.assertEqual(self._run(sid).returncode, 2)
-        m.write_text(BYPASS_REASON)
+        m.write_text(BYPASS_REASON)          # re-arm
         self.assertEqual(self._run(sid).returncode, 0,
                          "the escape hatch must never dead-end")
 
     def test_bypass_is_still_logged(self):
         sid = "t-mg-oneshot5-" + uuid.uuid4().hex[:8]
-        m = self._marker(sid)
-        m.write_text(BYPASS_REASON)
-        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._arm(sid)
         logdir, _block, byp = _isolated_exec_logs(self)   # #732
         self._run(sid, extra_env={"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)})
         self.assertTrue(byp.exists())
         self.assertTrue([ln for ln in byp.read_text().splitlines() if sid in ln],
-                        "a consumed bypass must still be logged")
+                        "a deferred bypass must still be logged")
+
+
+class DeferredConsume819(unittest.TestCase):
+    """#819: the one-shot bypass marker used to be CONSUMED the instant
+    block-main-implementation.sh ALLOWED a call in PreToolUse — not when the
+    command actually RAN. A later sibling PreToolUse hook (block-local-poll-
+    repeat #119, block-ci-poll-repeat, block-history-rewrite, …) that exits 2
+    on the SAME call left the command un-run with the one-shot already gone,
+    forcing a needless re-echo. Fix: PreToolUse leaves the marker + writes a
+    session-scoped pending flag; a PostToolUse consumer deletes marker +
+    pending ONLY after the tool ran."""
+
+    CONSUMER = REPO / "hooks" / "post-consume-main-exec-marker.sh"
+
+    def _marker(self, sid, legacy=False):
+        name = "fable" if legacy else "main"
+        return Path("/tmp/airuleset-%s-exec-ok-%s" % (name, sid))
+
+    def _pending(self, sid):
+        return Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+
+    def _arm(self, sid, legacy=False):
+        m = self._marker(sid, legacy=legacy)
+        m.write_text(BYPASS_REASON)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: self._pending(sid).unlink(missing_ok=True))
+        return m
+
+    def _pre(self, sid, command="grep -rn 'TODO' .", **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command, sid=sid,
+                           transcript_text=goal_armed_transcript(), **kw)
+
+    def _post(self, sid, tool="Bash", agent_id=None, extra_env=None):
+        payload = {"session_id": sid, "hook_event_name": "PostToolUse",
+                   "tool_name": tool, "tool_input": {"command": "x"}}
+        if agent_id:
+            payload["agent_id"] = agent_id
+        env = dict(os.environ)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(["bash", str(self.CONSUMER)],
+                              input=json.dumps(payload), env=env,
+                              capture_output=True, text=True)
+
+    def test_sibling_block_preserves_the_marker(self):
+        # THE #819 BUG: Pre allows (sets pending); a later sibling PreToolUse
+        # hook exits 2 so the command never runs -> the PostToolUse consumer
+        # never fires -> the marker SURVIVES -> the retry is still exempted.
+        # (RED on current code: PreToolUse deletes the marker, so the retry
+        # would be blocked and the user must re-echo.)
+        sid = "t-mg-819-sib-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        self.assertEqual(self._pre(sid).returncode, 0)      # Pre allows
+        # a sibling PreToolUse hook now exits 2; we model "the command never
+        # ran" by simply NOT invoking the PostToolUse consumer.
+        self.assertTrue(m.exists(),
+                        "a sibling-blocked call must NOT consume the one-shot")
+        self.assertEqual(self._pre(sid).returncode, 0,
+                         "the retry must still be exempted (no re-echo needed)")
+
+    def test_consumer_ignores_subagent(self):
+        # change 2: a background subagent's PostToolUse (agent_id set) fires
+        # with the same <sid> as the main session; it must NEVER consume the
+        # main session's pending marker (mirrors block-main-implementation's
+        # own r.240 subagent early-exit).
+        sid = "t-mg-819-sub-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        self.assertEqual(self._pre(sid).returncode, 0)
+        self._post(sid, agent_id="sub-xyz")                 # subagent Post -> no-op
+        self.assertTrue(m.exists(),
+                        "a subagent Post must not consume the main marker")
+        self.assertTrue(self._pending(sid).exists())
+
+    def test_arming_clears_stale_pending(self):
+        # change 1 / edge A: after a sibling-block strands a pending flag, a
+        # re-echo (arming) must CLEAR the stale pending so the arming echo's
+        # OWN PostToolUse cannot eat the freshly-armed marker.
+        sid = "t-mg-819-arm-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        # model the stranded state: marker present + a STALE pending present
+        self._pending(sid).write_text("stale reason from a sibling-blocked call")
+        out = self._pre(
+            sid,
+            command="echo 'a fresh reason for the retry' "
+                    "> /tmp/airuleset-main-exec-ok-%s" % sid)
+        self.assertEqual(out.returncode, 0, out.stderr)     # arming is allowed
+        self.assertFalse(self._pending(sid).exists(),
+                         "arming must clear a stale pending flag")
+        self.assertTrue(m.exists(), "the freshly-armed marker must survive")
+
+    def test_consumer_noop_without_pending(self):
+        # a marker present but NO pending flag (nothing deferred) -> the
+        # consumer must leave the marker alone.
+        sid = "t-mg-819-nopending-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        m.write_text(BYPASS_REASON)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self._post(sid)
+        self.assertTrue(m.exists(),
+                        "consumer must no-op when no pending flag exists")
+
+    def test_write_edit_deferred_consume(self):
+        # the marker also guards oversized Write/Edit; the deferred-consume
+        # path must cover them too (the consumer matcher is Bash|Write|Edit).
+        sid = "t-mg-819-write-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        helper = MainImplementationGuard()
+        out = helper._run(tool="Write", content=BIG, sid=sid,
+                          transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(m.exists(), "Write allow must defer, not consume")
+        self.assertTrue(self._pending(sid).exists())
+        self._post(sid, tool="Write")
+        self.assertFalse(m.exists(), "Write's PostToolUse must consume the marker")
+
+    def test_pending_write_failure_consumes_in_pretooluse(self):
+        # #819 review CRITICAL: if the pending WRITE fails (ENOSPC / inode
+        # exhaustion / unwritable path), the guard must fall back to consuming
+        # the marker HERE (PreToolUse) — otherwise the call is allowed with no
+        # pending, the consumer no-ops, and the marker survives every executed
+        # call (the pre-#80 kill switch under disk pressure). Model the write
+        # failure by making the pending PATH a directory (printf > dir fails).
+        sid = "t-mg-819-wf-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        p = self._pending(sid)
+        m.write_text(BYPASS_REASON)
+        p.mkdir()                            # -> `printf > "$p"` fails
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: p.rmdir() if p.is_dir() else p.unlink(missing_ok=True))
+        out = self._pre(sid)
+        self.assertEqual(out.returncode, 0, out.stderr)   # still allowed
+        self.assertFalse(m.exists(),
+                         "a failed pending write must CONSUME the marker in PreToolUse")
+
+    def test_stranded_pending_consumed_by_any_later_post(self):
+        # #819 review: after a sibling-block strands pending+marker, the NEXT
+        # ran tool call's PostToolUse consumes the marker even if that call
+        # never itself drew on it (keyed on pending PRESENCE). This is the
+        # chosen fail-safe (over-consume, never wrong-allow) behavior — lock it
+        # so a future edit cannot silently flip it.
+        sid = "t-mg-819-strand-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        self.assertEqual(self._pre(sid).returncode, 0)   # impl allowed, pending set
+        # sibling blocks the impl call (no Post for it). Now an UNRELATED tool
+        # call runs and its PostToolUse fires:
+        self._post(sid, tool="Edit")
+        self.assertFalse(m.exists(),
+                         "a stranded pending is consumed by the next ran call")
+
+    def test_consumer_logs_consumed_line_to_isolated_dir(self):
+        # #819 review: the consumer replicates the #732 log seam; lock that it
+        # actually writes an auditable "(consumed, post-exec)" line there.
+        sid = "t-mg-819-log-" + uuid.uuid4().hex[:8]
+        self._arm(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        env = {"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)}
+        self._pre(sid, extra_env=env)
+        self._post(sid, extra_env=env)
+        self.assertTrue(byp.exists())
+        lines = [ln for ln in byp.read_text().splitlines()
+                 if sid in ln and "consumed, post-exec" in ln]
+        self.assertTrue(lines, "consumer must log a (consumed, post-exec) line")
+
+    def test_consumer_sanitizes_the_sid_like_the_guard(self):
+        # #819 review (wrong-allow direction): the guard sanitizes the sid with
+        # `tr -cd 'A-Za-z0-9_-'`, so it writes the pending flag + markers under
+        # the SANITIZED sid. The consumer must sanitize identically or it would
+        # miss the pending for an exotic sid and never consume the marker.
+        clean = "819san" + uuid.uuid4().hex[:8]
+        raw = clean + "!@ /"                   # a suffix the guard strips WHOLE
+        m = self._marker(clean)               # armed under the SANITIZED name
+        p = self._pending(clean)
+        m.write_text(BYPASS_REASON)
+        p.write_text(BYPASS_REASON)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: p.unlink(missing_ok=True))
+        self._post(raw)                       # consumer gets the RAW sid
+        self.assertFalse(m.exists(),
+                         "consumer must sanitize the sid to find the marker")
+        self.assertFalse(p.exists())
 
 
 class DispatchRatioNudge80(unittest.TestCase):
@@ -1435,11 +1651,16 @@ class BypassCarriesAReason128(unittest.TestCase):
     def test_marker_with_a_reason_is_honored(self):
         sid = "t-mg-reason-ok-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
+        pending = Path("/tmp/airuleset-main-exec-pending-%s" % sid)
         m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: pending.unlink(missing_ok=True))
         out = self._run(sid)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertFalse(m.exists(), "an honored marker is still consumed")
+        # #819: an honored marker is now DEFERRED, not consumed in PreToolUse —
+        # it survives + a pending flag is set for the PostToolUse consumer.
+        self.assertTrue(m.exists(), "an honored marker survives the PreToolUse allow")
+        self.assertTrue(pending.exists(), "a pending flag is written for post-exec consume")
 
     def test_empty_marker_is_refused(self):
         sid = "t-mg-reason-empty-" + uuid.uuid4().hex[:8]
@@ -2242,6 +2463,31 @@ class TestWiringAndSkill(unittest.TestCase):
                              if mm.get("matcher") == tool])
             self.assertIn("block-main-implementation.sh", ms,
                           "counter reset missing for PreToolUse(%s)" % tool)
+
+    def test_post_consume_hook_exists_and_wired_for_bash_write_edit(self):
+        # #819: the deferred-consume PostToolUse consumer must be wired, or the
+        # whole fix dies silently (PreToolUse defers, nothing ever consumes ->
+        # the one-shot never gets spent). Every #819 unit test invokes the
+        # consumer directly, so ONLY this test locks the settings entry.
+        consumer = REPO / "hooks" / "post-consume-main-exec-marker.sh"
+        self.assertTrue(consumer.exists(),
+                        "post-consume-main-exec-marker.sh must exist")
+        # NOTE: do NOT assert os.access(X_OK) — the repo invokes hooks via
+        # `bash <hook>` and Write leaves the file 644 (#610).
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
+        wired = [mm for mm in cfg["hooks"].get("PostToolUse", [])
+                 if "post-consume-main-exec-marker.sh"
+                 in json.dumps(mm.get("hooks", []))]
+        self.assertEqual(len(wired), 1,
+                         "consumer must be wired in exactly one PostToolUse block")
+        matcher = wired[0].get("matcher", "")
+        toks = set(matcher.split("|"))
+        # the consumer must cover EXACTLY the tool set that can reach the
+        # marker block in block-main-implementation.sh (Bash / oversized
+        # Write / Edit); Agent|Task|Workflow exit early and never defer.
+        for tool in ("Bash", "Write", "Edit"):
+            self.assertIn(tool, toks,
+                          "consumer matcher %r must cover %s" % (matcher, tool))
 
     def test_fable_advisor_skill_exists_and_registered(self):
         sk = REPO / "skills" / "fable-advisor" / "SKILL.md"

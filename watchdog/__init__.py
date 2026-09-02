@@ -2300,17 +2300,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           breaking a running turn is the user's call.
       (22) STALE EXEC-MARKER CLEANUP (#97) — always on. block-main-
           implementation.sh's one-shot bypass markers
-          (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) are
-          consumed the moment the hook honors one, but a session that ends
-          without another guarded call never consumes its own marker — it
+          (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) plus,
+          since #819, their deferred-consume pending flag
+          (/tmp/airuleset-main-exec-pending-<sid>) are consumed when the
+          exempted command actually RUNS (a PostToolUse consumer,
+          post-consume-main-exec-marker.sh), but a session that ends without
+          another guarded call never consumes its own marker/pending — it
           sits in /tmp forever (a real orphan found live: 0 bytes, ~21h
           old, no session anywhere still matching it). Hygiene, not a
           security hole (a marker is matched by session id, so a stale one
-          is already inert) — a marker older than `MAIN_EXEC_MARKER_MAX_AGE_S`
-          (default 6h) is removed ONLY when no currently-live pane's
-          transcript stem still resolves to its session id
-          (`cleanup_stale_exec_markers`); a live session's marker is never
-          touched no matter its age, since removing it would silently
+          is already inert) — a marker/pending older than
+          `MAIN_EXEC_MARKER_MAX_AGE_S` (default 6h) is removed ONLY when no
+          currently-live pane's transcript stem still resolves to its session
+          id (`cleanup_stale_exec_markers`); a live session's marker/pending
+          is never touched no matter its age, since removing it would silently
           revoke a deliberately granted exception mid-work.
       (23) MANAGED_MODEL GENERATION RECONCILE — REMOVED (#132, 2026-07-28).
           Compared the session's LAUNCH-time model — an API model id, always

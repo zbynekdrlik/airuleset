@@ -362,6 +362,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/post-consume-main-exec-marker.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
