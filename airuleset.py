@@ -2560,6 +2560,21 @@ def cmd_tickets_status(args):
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
         entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
+        # #842 -- record the per-repo net-drain counters (created_today /
+        # closed_today) into the cwd cache entry so statusbar.tickets_segment can
+        # render `I N▲` when the repo is net-inflating, at ZERO extra gh cost per
+        # render. Shares ratchet_counts' per-repo counter cache with the
+        # scope-gate hook (single source; each refresh helps the other within the
+        # TTL). A gh error just leaves the counters absent (no ▲) -- never blocks
+        # the refresh, so this is guarded to fail silent.
+        if slug:
+            try:
+                import ratchet_counts as _rc
+                _counts = _rc.cached_counts(slug, root, gh_env=gh_env)
+            except Exception:
+                _counts = None
+            if _counts is not None:
+                entry["created_today"], entry["closed_today"], _ = _counts
         # A reduced-authority stream (sub-dev box: david/montalu/marek — resolved
         # marker-aware via resolve_authority) counts only ITS OWN slice: open,
         # non-skip, assigned-to-me OR authored-by-me. The full repo backlog on a

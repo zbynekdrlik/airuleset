@@ -774,6 +774,16 @@ gap in either.
      branch-merge: PR merged into integration AND the `READY-FOR-REVIEW:` comment present;
      fork-no-merge: the `READY-FOR-REVIEW:` comment present — NEVER a merge to main for either
      reduced profile, and NEVER the ticket closed by the worker itself.
+   - **Worker filing authority — NONE (#842).** A worker has NO `gh issue create` / `gh api
+     …/issues` POST authority — the scope-gate hook hard-BLOCKS a subagent's filing (payload
+     `agent_id`). It FIXES every discovery in-lane and returns a `followup_candidates:` line
+     (title + which of the six criteria it clears + est. LoC) for YOU to decide and file. At
+     integration (Step 4) a worker return carrying a `filed:` line is REJECTED — send that lane
+     back (`SendMessage` if it is alive, else re-dispatch fresh) to fix it in-lane; never accept
+     a worker-filed ticket. This is the same net-drain discipline that gates YOUR OWN
+     unattended main-session filings: the scope-gate hook blocks a discovery filing while
+     `created_today >= closed_today` on the repo (footer shows `I N▲`), so file only while the
+     repo is draining — otherwise fix in-lane or fold the finding onto the existing ticket.
    - **Every dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting on any of them. End
      the turn `⏳ WORKING`; ANY worker returning RE-INVOKES this loop, and on each re-invocation you
      integrate any ready branches (Step 4) under the integration mutex as they return — but you do
@@ -1040,7 +1050,10 @@ gap in either.
    > blind second push is not. (3) **Batch cleanup includes `refs/autopilot-wip/*` AND stray
    > `worktree-agent-*`/`lane-*` branches on origin from prior rounds** (two-branch policy = only
    > `dev`+`main`): ALWAYS `git merge-base --is-ancestor origin/<b> main` BEFORE any delete — never
-   > delete an unmerged branch (`salvage-before-discarding-work.md`).
+   > delete an unmerged branch (`salvage-before-discarding-work.md`). After a FAILED dead-lane
+   > resume attempt (#836 shapes), the fresh `isolation: "worktree"` worker's OWN stray worktree +
+   > `worktree-agent-*` branch are swept by this SAME `git merge-base --is-ancestor`-guarded cleanup
+   > — never deleted while unmerged.
 
    > **Release the integration mutex the instant THIS integration cycle's push has landed:**
    > `python3 ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees

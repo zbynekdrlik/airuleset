@@ -39,6 +39,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -69,7 +71,8 @@ def _default_gh_stub():
     return _DEFAULT_EMPTY_GH_DIR
 
 
-def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
+def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None,
+        spoof_login=None, session_id=None, agent_id=None):
     """`user` (#390): the simulated filer's sub-dev stream identity. Two halves,
     since airuleset#839:
     - The AUTHORITY PROFILE gate (`resolve_authority(cwd) != full`) is now
@@ -77,13 +80,24 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
       it — run() writes a `<!-- airuleset:authority=<profile> -->` marker into
       the hook's cwd (honored FIRST by `resolve_authority`), the profile derived
       from `user` via AUTHORITY_BY_USER.
-    - The OWN-STREAM half (`stream:<x>` comparison) still derives from the hook's
-      `getpass.getuser()` (a labeling-HYGIENE read deliberately left un-hardened
-      in the #839 hotfix — the merge/deploy/close boundary is the profile gate,
-      not this; hardening it needs a test-identity seam, tracked as a follow-up),
-      so run() STILL sets LOGNAME/USER to give the own-stream identity.
+    - The OWN-STREAM half (`stream:<x>` comparison) now derives from the hook's
+      un-spoofable `airuleset._current_user()` (uid-based, airuleset#840), NOT
+      the env-spoofable `getpass.getuser()`. Because a test cannot change its own
+      uid, run() supplies the true own-stream identity through the un-spoofable
+      TEST-IDENTITY SEAM env `AIRULESET_SCOPE_GATE_TEST_STREAM_USER` = `user`,
+      which the hook honors ONLY when the REAL invoking account is NOT itself a
+      reduced stream (a full/maintainer/test-runner box — never a real stream,
+      whose uid IS in AUTHORITY_BY_USER). The test runner (newlevel/runner/root)
+      is such a box, so the seam is active in the suite and unreachable in prod.
     A reduced `user` therefore both writes the reduced-profile marker AND sets
-    the own-stream; a full account / None writes no marker (the real full box).
+    the own-stream seam; a full account / None writes no marker (the real full box).
+
+    `spoof_login` (#840): a DIFFERENT env `LOGNAME`/`USER` value — the env-spoof a
+    real stream would attempt. Under the pre-fix `getpass.getuser()` path the
+    own-stream would FOLLOW `spoof_login` (the vulnerability); under the uid-based
+    fix it follows the SEAM (`user`, the true identity), ignoring the env spoof.
+    Default `None` → LOGNAME/USER == `user`, so every pre-existing test keeps both
+    the seam and the (now vestigial) env in agreement and passes on either hook.
 
     `hook_path` (#390 adversarial-review MINOR-2): run a DIFFERENT copy of
     the hook script (e.g. one deliberately isolated under a directory with
@@ -91,13 +105,22 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
     genuinely skips the gate rather than blocking). `None` (the default)
     runs the real `HOOK` in this checkout, exactly like every pre-existing
     test."""
-    payload = json.dumps({"tool_input": {"command": cmd}, "session_id": "test-scope-gate"})
+    # #842: session_id drives the shared presence marker
+    # (/tmp/claude-user-active-<sid>); agent_id makes the payload look like a
+    # SUBAGENT (a worktree autopilot-worker) for the req-1 hard-block.
+    _payload = {"tool_input": {"command": cmd},
+                "session_id": session_id or "test-scope-gate"}
+    if agent_id is not None:
+        _payload["agent_id"] = agent_id
+    payload = json.dumps(_payload)
     env = dict(os.environ)
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-scopegate-test-")
     env["PATH"] = (gh_bin or _default_gh_stub()) + os.pathsep + env.get("PATH", "")
     if user is not None:
-        env["LOGNAME"] = user
-        env["USER"] = user
+        env["AIRULESET_SCOPE_GATE_TEST_STREAM_USER"] = user
+        login = spoof_login if spoof_login is not None else user
+        env["LOGNAME"] = login
+        env["USER"] = login
     profile = airuleset.AUTHORITY_BY_USER.get(user) if user else None
     run_cwd = cwd
     if profile is not None:
@@ -1271,10 +1294,14 @@ class TestStreamRoutingGate(TestCase):
     filing carries no stream label by design (`_core_search_excl()`). Since
     airuleset#839 the PROFILE gate is uid-based, so a reduced fixture (`david2`)
     writes a `fork-no-merge` marker into the hook's cwd to engage the gate (via
-    AUTHORITY_BY_USER), while LOGNAME still supplies the own-stream identity for
-    the getpass-based comparison; a `gatekeeper` fixture writes NO marker -> the
-    real full box -> not gated (the profile half is what makes the gate engage,
-    proven load-bearing by the reduced-marker tests that DO block)."""
+    AUTHORITY_BY_USER); a `gatekeeper` fixture writes NO marker -> the real full
+    box -> not gated (the profile half is what makes the gate engage, proven
+    load-bearing by the reduced-marker tests that DO block). Since airuleset#840
+    the OWN-STREAM identity is the un-spoofable uid-based `_current_user()`,
+    supplied to the subprocess via the `AIRULESET_SCOPE_GATE_TEST_STREAM_USER`
+    seam, NOT the env-spoofable `getpass.getuser()` -- so a `LOGNAME`/`USER`
+    spoof (`spoof_login`) can no longer route a filing under a foreign stream
+    (`test_env_spoofed_own_stream_cannot_bypass_routing`)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-streamroute-test-")
@@ -1324,6 +1351,21 @@ class TestStreamRoutingGate(TestCase):
                           scope_gate="cross-cutting"),
                 gh_bin=gh_bin, user="gatekeeper")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_env_spoofed_own_stream_cannot_bypass_routing(self):
+        # airuleset#840: a stream whose TRUE identity is david2 sets
+        # LOGNAME/USER=david to spoof its own-stream, then files a stream:david
+        # ticket with NO Stream-routing justification. Under the pre-#840
+        # getpass.getuser() path the own-stream would follow the env spoof
+        # (stream:david == the applied label -> silent PASS). The un-spoofable
+        # uid-based own-stream (stream:david2) makes the applied stream:david a
+        # FOREIGN label -> BLOCKED. This is the vulnerability #840 closes.
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run(body_cmd("env spoof", "found this while working my own module",
+                          scope_gate="cross-cutting", labels=["stream:david"]),
+                gh_bin=gh_bin, user="david2", spoof_login="david")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Stream-routing", r.stderr)
 
     def test_label_list_lookup_failure_degrades_never_blocks_on_its_own(self):
         # gh label list itself fails (offline/unauthenticated) -- must
@@ -1686,6 +1728,201 @@ class TestBlockReasonHardening(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertNotIn("\x1b", r.stderr)
         self.assertNotIn("\x1b", self._block_line(home))
+
+
+def _fake_gh_netdrain(tmpdir, created, closed, open_issues=(), labels=None):
+    """#842 fake `gh` for the net-drain ratchet tests. Answers:
+      - `issue list --search "created:>=…" … -q length` -> `created`
+      - `issue list --search "closed:>=…"  … -q length` -> `closed`
+      - `issue list --state open … --json number,title` (near-dup) -> open_issues JSON
+      - `label list …` -> labels rows (None -> exit 1, so not stream-aware)
+    `created`/`closed` = None makes the matching count query exit 1 (a gh error,
+    so the ratchet BLOCKS fail-safe)."""
+    bin_dir = Path(tmpdir) / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    label_rows = None if labels is None else [{"name": n} for n in labels]
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "argv = sys.argv[1:]\n"
+        "joined = ' '.join(argv)\n"
+        "created = %r\n"
+        "closed = %r\n"
+        "open_issues = %r\n"
+        "label_rows = %r\n"
+        "if len(argv) >= 2 and argv[0] == 'label' and argv[1] == 'list':\n"
+        "    if label_rows is None:\n"
+        "        sys.exit(1)\n"
+        "    print(json.dumps(label_rows)); sys.exit(0)\n"
+        "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
+        "    if 'created:' in joined:\n"
+        "        if created is None: sys.exit(1)\n"
+        "        print(created); sys.exit(0)\n"
+        "    if 'closed:' in joined:\n"
+        "        if closed is None: sys.exit(1)\n"
+        "        print(closed); sys.exit(0)\n"
+        "    print(json.dumps(list(open_issues))); sys.exit(0)\n"
+        "sys.exit(1)\n" % (created, closed, list(open_issues), label_rows))
+    (bin_dir / "gh").chmod(0o755)
+    return str(bin_dir)
+
+
+class TestNetDrainHarness842(TestCase):
+    """#842 — the worker hard-block, presence-gated user-request/planned-work,
+    dismissal-word block, and the per-repo net-drain ratchet. All the new gates
+    engage ONLY on the UNATTENDED path (a stale presence marker) or the SUBAGENT
+    path (agent_id); the ATTENDED path is unchanged."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-netdrain-test-")
+        self.home = tempfile.mkdtemp(prefix="airuleset-netdrain-home-")
+
+    def _away_sid(self):
+        """A unique session id whose presence marker is stale (> 900s) -> the
+        hook reads the session as UNATTENDED."""
+        sid = "t-nd-" + uuid.uuid4().hex[:10]
+        mark = Path("/tmp/claude-user-active-%s" % sid)
+        mark.write_text("")
+        old = time.time() - 1000
+        os.utime(mark, (old, old))
+        self.addCleanup(lambda: mark.unlink(missing_ok=True))
+        return sid
+
+    # ---- req 1: worker (subagent) cannot file ----
+    def test_worker_subagent_cannot_file_even_a_valid_issue(self):
+        r = run(body_cmd("worker finding", "genuinely out of scope work",
+                          scope_gate="security-boundary"),
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-1")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("followup_candidates", r.stderr)
+
+    def test_worker_block_ignores_the_scope_gate_ok_bypass(self):
+        # The worker block sits ABOVE the bypass, so a worker cannot self-exempt.
+        r = run(body_cmd("worker finding", "out of scope\n# airuleset:scope-gate-ok worker",
+                          scope_gate="security-boundary"),
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_worker_api_issues_post_also_blocked(self):
+        r = run("gh api repos/o/r/issues -X POST -f title=x -f body=y",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-3")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_main_session_non_filing_command_untouched_for_worker(self):
+        # A worker running a NON-filing command is not gated by this hook.
+        r = run("echo hello", gh_bin=_default_gh_stub(), agent_id="sub-worker-4")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_worker_graphql_create_issue_blocked(self):
+        # #842-review 🔴: a graphql createIssue mutation carries no lowercase
+        # `issues` substring, so it would slip the pre-filter — the worker block
+        # sits ABOVE the pre-filter and catches it.
+        r = run("gh api graphql -f query='mutation{createIssue(input:{repositoryId:"
+                "\"R_x\",title:\"t\",body:\"b\"}){issue{number}}}'",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-gql")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("followup_candidates", r.stderr)
+
+    def test_worker_api_issues_get_read_not_blocked(self):
+        # #842-review 🟡: a bare GET (reading a design comment) is NOT a create
+        # — the worker block must not false-block it.
+        r = run("gh api repos/owner/repo/issues/842/comments",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-get")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_worker_grep_mentioning_issue_create_not_blocked(self):
+        # #842-review 🟡: a grep whose PATTERN contains "issue create" is not a
+        # `gh issue create` command — must not false-block a worker.
+        r = run('grep -n "issue create" hooks/block-ungated-issue-filing.sh',
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-grep")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- req 3: presence-gated user-request / planned-work ----
+    def test_unattended_user_request_is_blocked(self):
+        r = run(body_cmd("loop wants this", "an unattended loop cannot claim the owner asked",
+                          scope_gate="user-request"),
+                gh_bin=_default_gh_stub(), session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("presence", r.stderr.lower())
+
+    def test_unattended_planned_work_is_blocked(self):
+        r = run(body_cmd("plan step", "converged-plan decomposition",
+                          scope_gate="planned-work"),
+                gh_bin=_default_gh_stub(), session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_attended_user_request_still_passes(self):
+        # PRESENT (no stale marker) -> user-request is accepted, unchanged.
+        r = run(body_cmd("owner asked", "the owner asked for this ticket",
+                          scope_gate="user-request"),
+                gh_bin=_default_gh_stub(), session_id="t-nd-present-" + uuid.uuid4().hex[:6])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- req 4: dismissal-word block for an unattended filing ----
+    def test_unattended_flaky_body_word_is_blocked(self):
+        r = run(body_cmd("flaky test", "this test is flaky, skip it for now",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=0, closed=9),
+                session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("dismissal", r.stderr.lower())
+
+    def test_unattended_pre_existing_body_word_is_blocked(self):
+        r = run(body_cmd("known break", "this is a pre-existing failure",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=0, closed=9),
+                session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_attended_flaky_body_word_is_not_blocked_by_this_gate(self):
+        # The dismissal-word gate engages only on the UNATTENDED path.
+        r = run(body_cmd("flaky note", "mentions the word flaky in prose",
+                          scope_gate="security-boundary"),
+                gh_bin=_default_gh_stub(),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- req 2: net-drain ratchet ----
+    def test_unattended_discovery_blocked_when_not_draining(self):
+        # created(9) >= closed(5) -> repo is NOT draining -> BLOCK.
+        r = run(body_cmd("net drain", "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=9, closed=5),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("drain", r.stderr.lower())
+
+    def test_unattended_discovery_blocked_at_parity(self):
+        # created == closed -> parity blocks (0/0 too, the day's first).
+        r = run(body_cmd("parity", "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=5, closed=5),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_unattended_discovery_passes_when_draining(self):
+        # created(3) < closed(9) -> repo IS draining -> the ratchet allows.
+        r = run(body_cmd("draining ok", "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=3, closed=9),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_ratchet_gh_error_blocks_fail_safe(self):
+        # A gh error computing the counts -> BLOCK, never a wrong ALLOW.
+        r = run(body_cmd("gh error", "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=None, closed=None),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_attended_discovery_never_ratchet_blocked(self):
+        # PRESENT session -> the ratchet never engages, even when NOT draining.
+        r = run(body_cmd("attended ok", "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

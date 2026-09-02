@@ -279,6 +279,26 @@ def _ops_wait_sfx(cache):
     return ""
 
 
+def _drift_marker(cache):
+    """The `▲` net-drain drift marker appended to `I N` (#842) when this repo
+    created strictly MORE issues than it closed today — the black-hole shape the
+    owner must see the moment it starts, never days later. Reads the
+    created_today/closed_today counts `cmd_tickets_status --refresh` recorded, so
+    ZERO gh at render. Every value is isinstance-guarded (a legacy cache without
+    the counts, a non-int on a gh error, or a missing ratchet_counts leaf renders
+    NOTHING — never a crash, never a false ▲; #133 payload-coercion discipline)."""
+    c = cache.get("created_today")
+    x = cache.get("closed_today")
+    if not (isinstance(c, int) and isinstance(x, int)):
+        return ""
+    try:
+        import ratchet_counts
+        drift = ratchet_counts.footer_drift(c, x)
+    except Exception:
+        drift = c > x            # single-source fallback if the leaf is absent
+    return "▲" if drift else ""
+
+
 def tickets_segment(cwd, now=None, home=None, spawn=True):
     """The GitHub-tickets statusline segment for the session at `cwd`
     (label shortened 'Issues' -> 'I', #223): 'I N' where N is the LIVE
@@ -363,8 +383,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     skip_sfx = (" \033[38;5;245m· skip %d\033[0m" % skipped
                 if isinstance(skipped, int) and skipped > 0 else "")
 
-    return "\033[38;5;75mI %d\033[0m%s%s%s%s" % (
-        cache["open"], _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
+    return "\033[38;5;75mI %d%s\033[0m%s%s%s%s" % (
+        cache["open"], _drift_marker(cache),
+        _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
         _stream_split_sfx(cache), skip_sfx)
 
 

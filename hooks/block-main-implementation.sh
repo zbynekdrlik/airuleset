@@ -708,18 +708,17 @@ esac
 # This condition is OR'd with the two below it and replaces neither: a
 # Fable main and a goal-armed main stay engaged exactly as before, attended
 # or not.
-AWAY=0
+# #842: the away/UNATTENDED decision is now the SHARED helper both this hook
+# and block-ungated-issue-filing.sh source (one definition, never two drifting
+# mtime comparisons). AWAY_S is still computed HERE for the REASON message text
+# below (`${AWAY_S}s`); the DECISION delegates to airuleset_presence_is_away.
 AWAY_S="${AIRULESET_MAIN_GUARD_AWAY_S:-900}"
 case "$AWAY_S" in ''|*[!0-9]*) AWAY_S=900 ;; esac
-ACTIVE_MARK="/tmp/claude-user-active-${SESSION_ID:-unknown}"
-if [ "$AWAY_S" -gt 0 ] && [ -f "$ACTIVE_MARK" ]; then
-    ACTIVE_AT=$(stat -c %Y "$ACTIVE_MARK" 2>/dev/null || echo 0)
-    case "$ACTIVE_AT" in ''|*[!0-9]*) ACTIVE_AT=0 ;; esac
-    if [ "$ACTIVE_AT" -gt 0 ] \
-       && [ "$(( $(date +%s) - ACTIVE_AT ))" -ge "$AWAY_S" ]; then
-        AWAY=1
-    fi
-fi
+_PRESENCE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-presence.sh"
+[ -r "$_PRESENCE_LIB" ] && . "$_PRESENCE_LIB"
+type airuleset_presence_is_away >/dev/null 2>&1 || airuleset_presence_is_away() { return 1; }
+AWAY=0
+if airuleset_presence_is_away "${SESSION_ID:-unknown}"; then AWAY=1; fi
 
 # ---- condition 2: armed /goal main (#54) ----
 # #180: the whole block/allow decision used to hinge on ONE jq call — a

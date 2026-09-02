@@ -9,6 +9,8 @@
 
 **The single rule: any piece of work you IDENTIFY but do NOT complete in this session MUST be captured as a tracked GitHub issue BEFORE you stop. Work is never silently dropped. The only three fates for an identified task are: (1) do it now, (2) `gh issue create` and cite the returned `#N`, (3) it was already a tracked issue you can point at. There is no fourth fate.**
 
+**Default fate = FIX NOW; filing is the EXCEPTION, and it is RATE-GATED (#842, 2026-09-02).** The autopilot loop was filing more issues than it closed (a black hole that never drains), so the scope-gate hook now BLOCKS an unattended automation filing while the repo is not net-draining today (`created_today >= closed_today`), and a worktree WORKER cannot `gh issue create` at all — it fixes in-lane and returns `followup_candidates:` for the supervisor to decide. The "never silently drop" invariant is UNCHANGED: a finding that genuinely cannot be filed today must be FIXED today, never forgotten. Filing stays available for the owner (present) and for the legit channels; it is only the unattended discovery-filing that must yield to draining first.
+
 This rule exists because the same work keeps getting lost the same three ways, forcing the user to re-explain things they already asked for. Each is a violation:
 
 #### Failure mode 1 — Decomposition-shedding (the most common loss)

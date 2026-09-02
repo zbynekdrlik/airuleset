@@ -189,15 +189,64 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null ||
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$CMD" ] && exit 0
 
+# #842 req 1 -- a WORKTREE WORKER (subagent, payload `.agent_id` — the SAME
+# subagent signal block-subagent-bg-ci-poll.sh / subagent-stop-check-*.sh, #496,
+# already use) may NOT file a GitHub issue: it FIXES what it finds in-lane and
+# returns a `followup_candidates:` line for anything genuinely out of scope; the
+# SUPERVISOR decides + files. Placed BEFORE the pre-filter below (so a `gh api …
+# graphql … createIssue` mutation, which carries no lowercase `issues` substring
+# and would `exit 0` at the pre-filter, is still caught — the #842-review 🔴) and
+# BEFORE the `airuleset:scope-gate-ok` bypass (so a worker can NEVER self-exempt
+# by appending that marker). Fires ONLY on a genuine CREATE shape, NOT on a GET
+# read (`gh api …/issues/N/comments` — reading a design comment), a `grep`, or a
+# doc mention (the #842-review 🟡 false-block of legit worker reads):
+#   - `gh issue create`
+#   - a `gh api …/issues …` WRITE (an explicit/implicit POST or a field/input
+#     flag; a bare GET has none of these)
+#   - a `gh api … graphql … createIssue` mutation
+# Each check is an `if` CONDITION so `set -e` is suspended for the grep (a
+# no-match exit 1 never aborts the hook). Accepted residual: a worker writing a
+# DOC/test file via a bash heredoc that literally contains `gh issue create`
+# false-blocks (workers edit via Write/Edit, not bash heredocs — rare).
+AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
+if [ -n "$AGENT_ID" ]; then
+    _wf=0
+    if printf '%s' "$CMD" | grep -qE 'gh[[:space:]]+issue[[:space:]]+create'; then _wf=1; fi
+    if [ "$_wf" = 0 ] && printf '%s' "$CMD" | grep -qE 'gh[[:space:]]+api'; then
+        if printf '%s' "$CMD" | grep -q 'createIssue'; then _wf=1; fi
+        if [ "$_wf" = 0 ] && printf '%s' "$CMD" | grep -q 'issues' \
+           && printf '%s' "$CMD" | grep -qE '(-X[[:space:]]*POST|--method[[:space:]]+POST|-XPOST|(^|[[:space:]])-f([[:space:]]|$)|(^|[[:space:]])-F([[:space:]]|$)|--field|--raw-field|--input)'; then
+            _wf=1
+        fi
+    fi
+    if [ "$_wf" = 1 ]; then
+        cat >&2 <<'MSG'
+BLOCKED: you are a worktree WORKER (subagent) — you may NOT `gh issue create`
+(nor a `gh api …/issues` POST, nor a `gh api graphql … createIssue`) a new
+GitHub issue. A worker FIXES what it finds in-lane, in THIS branch — a small
+adjacent problem, a flaky test, a review finding all land here, not a new ticket.
+
+Anything you genuinely believe is out of scope (>300 LoC / schema / API-break /
+security-boundary / cross-cutting / needs-user-decision) goes in your RETURN
+block as a `followup_candidates:` line (title + which criterion it clears + est.
+LoC) — the SUPERVISOR decides and files it, never the worker (#842). A return
+containing a `filed:` line is REJECTED at integration and the lane is sent back.
+MSG
+        exit 2
+    fi
+fi
+
 # Cheap pre-filter: only classify commands that could plausibly contain a
-# gh issue-creation call at all.
+# gh issue-creation call at all. (A worker's genuine filing already returned
+# above; this gates the MAIN-session classifier.)
 case "$CMD" in
     *"issue create"*) ;;
     *"gh api"*"issues"*) ;;
     *) exit 0 ;;
 esac
 
-# Deliberate bypass for a genuine edge.
+# Deliberate bypass for a genuine edge. (A worker's genuine create already
+# returned above, so this can never self-exempt a worker filing.)
 case "$CMD" in *"airuleset:scope-gate-ok"*) exit 0 ;; esac
 
 LOG="$HOME/.claude/scope-gate.log"
@@ -214,10 +263,24 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || HOOK_DIR
 REPO_ROOT_DIR=""
 [ -n "$HOOK_DIR" ] && REPO_ROOT_DIR="$(dirname "$HOOK_DIR")"
 
+# #842 -- the UNATTENDED/away signal, from the SHARED presence helper (the same
+# 900s marker read block-main-implementation.sh uses). Only the UNATTENDED path
+# engages the new presence-gate / dismissal-word / net-drain-ratchet gates; an
+# ATTENDED (owner-present) filing keeps the pre-#842 behaviour exactly. Fail-OPEN
+# on an unmeasurable presence state (missing helper, absent marker) -> PRESENT,
+# so a /tmp cleanup or a deploy gap never manufactures an unattended BLOCK.
+UNATTENDED=0
+if [ -n "$HOOK_DIR" ] && [ -r "$HOOK_DIR/lib-presence.sh" ]; then
+    . "$HOOK_DIR/lib-presence.sh"
+    if type airuleset_presence_is_away >/dev/null 2>&1; then
+        airuleset_presence_is_away "$SID" && UNATTENDED=1
+    fi
+fi
+
 # python3 - "$CMD" <<'PYEOF' (argv, never a pipe into the heredoc's own
 # stdin — see the repo's own #96 gotcha).
 RC=0
-OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" "$REPO_ROOT_DIR" <<'PYEOF' 2>/dev/null
+OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" "$REPO_ROOT_DIR" "$UNATTENDED" <<'PYEOF' 2>/dev/null
 import json
 import os
 import re
@@ -231,6 +294,18 @@ sid = sys.argv[2]
 cwd = sys.argv[3]
 log_path = sys.argv[4]
 repo_dir = sys.argv[5] if len(sys.argv) > 5 else ""
+# #842 -- UNATTENDED ("1") vs attended (anything else). Only the unattended
+# path engages the presence-gate / dismissal-word / net-drain-ratchet gates.
+unattended = (sys.argv[6] == "1") if len(sys.argv) > 6 else False
+
+# #842-review 🟡 -- put the hook's own checkout root on sys.path ONCE, up front,
+# so `import ratchet_counts` (the net-drain ratchet) and `import airuleset`
+# resolve on EVERY path. Previously sys.path gained `repo_dir` only as a side
+# effect of `_filer_authority_and_own_stream`, which returns early for a `gh api`
+# filing before that insert ran -- so the ratchet import raised for an api
+# filing from any managed-repo cwd and fell to the fail-safe permanent BLOCK.
+if repo_dir and repo_dir not in sys.path:
+    sys.path.insert(0, repo_dir)
 
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
@@ -260,6 +335,63 @@ DAILY_CAP = 8
 # (e.g. a security finding + a schema finding from the same PR review), a
 # 3rd is the storm signature -- so 2 pass, the 3rd blocks.
 CHAIN_WIDTH_CAP = 2
+
+# #842 req 4 -- dismissal words in a NEW issue body from an UNATTENDED session.
+# `test-strictness.md` + `no-dropped-work.md` already ban these as dismissals of
+# a test failure; a ticket that merely SAYS "the test is flaky" / "pre-existing
+# failure" is the same dismissal in durable form -- the loop must FIX the test,
+# not file its excuse. Word-boundary-ish, case-insensitive. `out of scope` is
+# the weakest signal (it is also a legitimate scope-gate justification), so a
+# discovery filing that uses the literal phrase in prose is OVER-blocked here --
+# an accepted false-block bias (the remedy: name the SPECIFIC criterion instead
+# of the vague phrase), consistent with this hook's documented "get it wrong
+# toward strict, a false block costs one line" stance, and bounded to the
+# unattended path only (an attended owner filing is never dismissal-blocked).
+DISMISSAL_WORD_RE = re.compile(
+    r"\bflak(?:e|es|y|iness)\b|\bpre-?existing\b|\bintermittent(?:ly)?\b|"
+    r"\bout\s+of\s+scope\b",
+    re.IGNORECASE)
+
+
+def _dismissal_word(body):
+    """The first dismissal word/phrase found in `body`, or None."""
+    if not body:
+        return None
+    m = DISMISSAL_WORD_RE.search(body)
+    return m.group(0).strip() if m else None
+
+
+def _ratchet_should_block(target_repo, cwd):
+    """#842 req 2 -- True when the per-repo net-drain ratchet must BLOCK an
+    UNATTENDED non-exempt discovery filing on `target_repo`: the repo is NOT
+    strictly draining today (`created_today >= closed_today`). Fail-SAFE: any
+    inability to compute the counts -- a gh error, or a ratchet_counts import
+    failure (`repo_dir` is now on sys.path from the top of the heredoc, so this
+    import works on every path; a genuine failure means a broken/absent leaf, a
+    real deploy fault) -- returns True (BLOCK), never a wrong ALLOW (#842 (d))."""
+    try:
+        import ratchet_counts as _rc
+    except Exception:
+        return True
+    got = _rc.cached_counts(target_repo, cwd)
+    if got is None:
+        return True
+    created, closed, _day = got
+    return _rc.ratchet_blocks(created, closed)
+
+
+def _ratchet_bump(target_repo):
+    """Record a ratchet-PASS forward (increment the cached created_today), so a
+    burst of unattended filings inside one TTL window does not all pass on the
+    same stale count. Best-effort (returns False on any failure) -- a bump
+    failure never blocks a filing that already PASSED."""
+    try:
+        import ratchet_counts as _rc
+        _rc.bump_created(target_repo)
+        return True
+    except Exception:
+        return False
+
 
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1\s*$")
 CATFILE_RE = re.compile(r'^\s*cat\s*>>?\s*([^\s<>&;|]+)')
@@ -909,19 +1041,41 @@ def _filer_authority_and_own_stream(cwd, repo_dir):
         return _authority_cache[key]
     result = (None, None)
     try:
-        import getpass
         if repo_dir and repo_dir not in sys.path:
             sys.path.insert(0, repo_dir)
         import airuleset as _ar
         profile = _ar.resolve_authority(cwd)
-        # airuleset#839: the PROFILE half (resolve_authority -> _current_user) is
-        # uid-based/un-spoofable; the OWN-STREAM half below still uses
-        # getpass.getuser() (env-spoofable). This is a labeling-HYGIENE gate, not
-        # the merge/deploy/close authority boundary, so hardening it (which needs
-        # a subprocess test-identity seam) is deferred to issue 840. Do NOT switch
-        # to _current_user() here without reworking test_scope_gate.py's own-stream
-        # simulation at the same time.
-        user = getpass.getuser()
+        # airuleset#840: derive the filer's OWN stream from the un-spoofable
+        # uid-based identity (`_current_user()` = pwd.getpwuid(os.getuid()), the
+        # #839 single source), NOT `getpass.getuser()` -- the latter reads
+        # $LOGNAME/$USER FIRST, so a reduced stream could set USER=<other-stream>
+        # to make its own-stream appear FOREIGN and file under that stream's
+        # `stream:<other>` label with no `Stream-routing:` justification,
+        # bypassing this whole #390 labeling-HYGIENE gate. `_current_user()`
+        # reads the real uid; a stream controls its env and its repo files, never
+        # its uid.
+        #
+        # TEST-IDENTITY SEAM (airuleset#840): because `_current_user()` reads the
+        # real uid, a subprocess test cannot change it in-process, so the own-
+        # stream identity is taken from `AIRULESET_SCOPE_GATE_TEST_STREAM_USER`
+        # -- but ONLY when the REAL invoking account is a genuine
+        # full-authority / CI-runner box: `user in FULL_AUTHORITY_USERS`
+        # (newlevel/gatekeeper/admin/stepan — the dev1 test box) OR the
+        # GitHub-hosted CI runner (`_github_ci_runner_source(user)` — runner/root
+        # under the CI env, where the #390 suite runs). #842-review 🔵: the
+        # earlier `not in AUTHORITY_BY_USER` guard ALSO admitted an UNMAPPED box
+        # (which resolves fork-no-merge via the #827 fail-safe AND engages the
+        # #390 gate), letting it spoof its own-stream label via the env var; this
+        # positive allow-list closes that. A real reduced stream's uid is in
+        # AUTHORITY_BY_USER (never in either allow), so it can never activate the
+        # seam. The seam is on THIS own-stream read alone, NEVER on
+        # `_current_user()` itself, which would re-open the env-spoof on the
+        # merge/deploy/close authority path #839 hardened.
+        user = _ar._current_user()
+        _seam = os.environ.get("AIRULESET_SCOPE_GATE_TEST_STREAM_USER")
+        if _seam and (user in _ar.FULL_AUTHORITY_USERS
+                      or _ar._github_ci_runner_source(user)):
+            user = _seam
         result = (profile, ("stream:%s" % user).lower())
     except Exception:
         result = (None, None)
@@ -1194,6 +1348,32 @@ for seg in split_top_level(skeleton):
         results.append(("BLOCK", clean_title, reason, parents_str,
                          target_repo, ""))
     else:
+        crit_l = crit.lower()
+        # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
+        # pre-#842 flow untouched, so these never touch the owner). presence-gate
+        # (req 3): an unattended loop cannot claim the owner asked for a
+        # user-request / planned-work ticket. dismissal-word (req 4): a NEW issue
+        # body dismissing a test failure (flaky / pre-existing / intermittent /
+        # out-of-scope) is the same dismissal in durable form -- fix the test /
+        # root cause, never file its excuse. Both BLOCK BEFORE the dedup/cap/
+        # near-dup/ratchet checks (cheapest first) and `continue` this segment.
+        if unattended:
+            unattended_reason = None
+            if crit_l in EXEMPT_FROM_CAP:
+                unattended_reason = (
+                    "presence-required (an unattended loop cannot claim the "
+                    "owner asked -- %s is accepted only when the owner is "
+                    "PRESENT)" % crit_l)
+            else:
+                _dw = _dismissal_word(body)
+                if _dw:
+                    unattended_reason = (
+                        "dismissal-word:%s (fix the test / root cause -- do not "
+                        "file its excuse as a ticket)" % _clean_field(_dw))
+            if unattended_reason:
+                results.append(("BLOCK", clean_title, unattended_reason,
+                                 parents_str, target_repo, ""))
+                continue
         dedup_match = DEDUP_RE.search(body) if body else None
         if not dedup_match:
             # #329 -- structural half of the dedup gate: prove you searched.
@@ -1201,7 +1381,6 @@ for seg in split_top_level(skeleton):
                              target_repo, ""))
         else:
             dedup_claim = _clean_field(dedup_match.group(1))[:80]
-            crit_l = crit.lower()
             today = _today_str()
             batch_titles = _batch_titles_by_repo.setdefault(target_repo, [])
 
@@ -1242,10 +1421,32 @@ for seg in split_top_level(skeleton):
                         reason = "near-duplicate:#%s" % near_dup
                     results.append(("BLOCK", clean_title, reason, parents_str,
                                      target_repo, dedup_claim))
+                elif (unattended and crit_l not in EXEMPT_FROM_CAP
+                      and _ratchet_should_block(target_repo, cwd)):
+                    # #842 req 2 -- net-drain ratchet, checked LAST (the only gate
+                    # costing a gh call, so it is never paid for a filing already
+                    # blocked more cheaply). An UNATTENDED non-exempt discovery
+                    # filing is allowed ONLY while the repo is strictly draining
+                    # today (created_today < closed_today); otherwise BLOCK. A gh
+                    # error -> BLOCK (fail-safe). user-request / planned-work are
+                    # exempt (already presence-gated above).
+                    results.append((
+                        "BLOCK", clean_title,
+                        "net-drain (created_today >= closed_today on this repo "
+                        "-- fix it in-lane now, or fold it as a comment onto the "
+                        "existing ticket it belongs to; this repo must drain "
+                        "today before an unattended loop files more)",
+                        parents_str, target_repo, dedup_claim))
                 else:
                     results.append(("PASS", clean_title, crit, parents_str,
                                      target_repo, dedup_claim))
                     batch_titles.append(title or "")
+                    # #842 -- the per-repo counter bump (to close the within-TTL
+                    # burst race) is DEFERRED to the print loop below, where
+                    # `has_block` is known: a PASS in a batch that ALSO blocks is
+                    # NOTFILED (the whole command is refused, nothing filed), so
+                    # bumping it here would be a phantom +1 (#842-review 🔵,
+                    # mirroring the #329 phantom-PASS / NOTFILED discipline).
                     if crit_l not in EXEMPT_FROM_CAP:
                         _local_day_count[target_repo] = \
                             _local_day_count.get(target_repo, 0) + 1
@@ -1265,6 +1466,15 @@ for verdict, title, crit, parents_str, target_repo, dedup_claim in results:
     # only ever counts an EXACT "PASS" token -- never charges cap budget
     # for a filing that never happened (#329 adversarial-review CRITICAL).
     log_verdict = "NOTFILED" if (has_block and verdict == "PASS") else verdict
+    # #842 -- record a GENUINELY-FILED PASS forward in the per-repo counter cache
+    # (created_today += 1), closing the within-TTL burst race across separate
+    # hook invocations. Deferred to here so a phantom PASS (NOTFILED because a
+    # sibling segment blocked the whole command) never bumps the counter for a
+    # filing that never happened. Only an UNATTENDED non-exempt discovery filing
+    # is ratchet-counted (user-request/planned-work are exempt).
+    if unattended and log_verdict == "PASS" \
+            and (crit or "").lower() not in EXEMPT_FROM_CAP:
+        _ratchet_bump(target_repo)
     # bash's `read` with IFS=<tab> still treats tab as "IFS whitespace" and
     # COLLAPSES consecutive delimiters, silently swallowing an empty field
     # (discovered live testing this hook) -- never emit an empty field.
@@ -1318,6 +1528,15 @@ stream-aware and this filing (from a known sub-dev stream account) carries
 no explicit `stream:<x>` label at all (#390), or (i) it carries a
 `stream:<x>` label naming a DIFFERENT stream than your own, with no
 `Stream-routing: <reason>` line justifying the hand-off (#390).
+
+#842 (UNATTENDED sessions only — an attended/owner-present filing is never
+subject to these): (j) `presence-required` — a `user-request`/`planned-work`
+criterion is accepted only when the OWNER is PRESENT; an unattended loop cannot
+claim the owner asked. (k) `dismissal-word` — the body dismisses a test failure
+(flaky / pre-existing / intermittent / out of scope); FIX the test/root cause,
+do not file its excuse as a ticket. (l) `net-drain` — this repo has created at
+least as many issues as it closed today; the loop must DRAIN it (fix in-lane, or
+fold this onto the existing ticket) before filing more.
 
 Per complete-planned-work.md's Follow-up gate: a discovered cleanup under
 ~100 LoC in a file your current work already touches gets FIXED NOW in this
