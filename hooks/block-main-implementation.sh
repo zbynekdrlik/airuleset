@@ -245,12 +245,44 @@ set -euo pipefail
 command -v jq &>/dev/null || exit 0
 
 INPUT=$(cat 2>/dev/null || echo "")
-AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
+
+# #835: extract a payload field via jq, with a FORK-FREE bash fallback used ONLY
+# when the jq SPAWN transiently FAILS. Under fleet-wide fork pressure (the whole
+# test suite + concurrent worker lanes + the supervisor, all one uid) an
+# `echo "$INPUT" | jq` can fail to fork and exit non-zero; the old
+# `|| echo "<default>"` then SILENTLY mis-scoped every per-session marker/pending
+# to the literal default ("unknown"), so a valid one-shot bypass marker went
+# UN-honored — the OneShotBypass80 `-n auto` flake (both routing shapes proven:
+# a session_id / tool_name / command extraction failure each strand the marker).
+# A bash `[[ =~ ]]` cannot itself fail to fork, so on a jq failure the field is
+# re-derived structurally. jq stays PRIMARY (its result is used byte-for-byte
+# whenever it succeeds — ZERO behaviour change on the normal path), and the regex
+# fallback is correct for CC's well-formed hook payload, degrading to the SAME
+# default jq would have on a genuinely-absent field. Residual: an exotic payload
+# whose value contains the field pattern before the real field, or a command
+# whose JSON escapes the fallback leaves un-decoded (the pattern-matching
+# consumers tolerate it — it runs only on a jq failure).
+_AI_SID_RE='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
+_AI_TOOL_RE='"tool_name"[[:space:]]*:[[:space:]]*"([^"]*)"'
+_AI_AGENT_RE='"agent_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
+_AI_CMD_RE='"command"[[:space:]]*:[[:space:]]*"((\\.|[^"\\])*)"'
+_ai_field() {   # $1 = jq filter, $2 = default, $3 = fallback ERE (capture grp 1)
+    local _out
+    if _out=$(printf '%s' "$INPUT" | jq -r "$1" 2>/dev/null); then
+        printf '%s' "$_out"                     # jq succeeded — use it verbatim
+    elif [[ "$INPUT" =~ $3 ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"        # jq spawn failed — fork-free fallback
+    else
+        printf '%s' "$2"
+    fi
+}
+
+AGENT_ID=$(_ai_field '.agent_id // empty' '' "$_AI_AGENT_RE")
 [ -z "$AGENT_ID" ] || exit 0            # subagent — execution belongs there
 
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
+TOOL_NAME=$(_ai_field '.tool_name // empty' '' "$_AI_TOOL_RE")
 
-RAW_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+RAW_SID=$(_ai_field '.session_id // "unknown"' 'unknown' "$_AI_SID_RE")
 RAW_SID=$(printf '%s' "$RAW_SID" | tr -cd 'A-Za-z0-9_-')
 RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 
@@ -305,7 +337,7 @@ case "$TOOL_NAME" in
 esac
 
 if [ "$TOOL_NAME" = "Bash" ]; then
-    BASH_CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
+    BASH_CMD=$(_ai_field '.tool_input.command // empty' '' "$_AI_CMD_RE")  # #835 fork-free fallback
     [ -n "$BASH_CMD" ] || exit 0
 
     # #174: manual pane revival must deliver only 'continue' -- never text
