@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6805,
+    "airuleset.py": 6818,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -402,7 +402,7 @@
     "watchdog/decide.py": 791,
     "watchdog/discord_api.py": 187,
     "watchdog/discord_replies.py": 856,
-    "watchdog/disk_guard.py": 787,
+    "watchdog/disk_guard.py": 790,
     "watchdog/goal.py": 4849,
     "watchdog/goal_scan.py": 672,
     "watchdog/handoff_alarm.py": 235,
@@ -436,7 +436,7 @@
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 214,
     "airuleset.py::cmd_watchdog": 243,
-    "airuleset.py::main": 730,
+    "airuleset.py::main": 741,
     "cli_quals.py::_slice_mine_and_handed": 217,
     "cli_quals_cmd.py::cmd_core_quals": 219,
     "cli_remote.py::_deploy_to_all_remotes": 280,

@@ -179,28 +179,54 @@ class TestReporterIsReportOnly(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def _seed_scan_tree(self, root, sizes):
+        # seed a tiny fixture tree the reporter du's via AIRULESET_DGROOT_SCAN_ROOT,
+        # so the test is HERMETIC + fast (never du's the developer's live disk).
+        for rel, nbytes in sizes.items():
+            d = os.path.join(root, rel)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "blob"), "wb") as fh:
+                fh.write(b"\0" * nbytes)
+
     def test_reporter_run_produces_valid_parseable_json(self):
-        # BEHAVIORAL (not a string tautology): run the reporter against a temp
-        # dir (redirecting the hardcoded /run/airuleset) and load the JSON it
-        # writes — proving the du/JSON pipeline actually works.
+        # BEHAVIORAL (not a string tautology) + HERMETIC: the reporter du's a
+        # SEEDED fixture tree (via AIRULESET_DGROOT_SCAN_ROOT), never the live
+        # box — so it is deterministic and fast, and the JSON pipeline is proven.
         with tempfile.TemporaryDirectory() as td:
-            script = g.render_reporter_script().replace("/run/airuleset", td)
+            run_dir = os.path.join(td, "run")
+            scan = os.path.join(td, "scan")
+            self._seed_scan_tree(scan, {
+                "var/cache/apt": 1000,
+                "var/lib/docker": 5000,
+                "home/gh-runner/actions-runner/_work": 2000,
+                "var/log/journal": 3000,
+                "tmp": 4000,
+            })
+            script = g.render_reporter_script().replace("/run/airuleset", run_dir)
             spath = os.path.join(td, "reporter.sh")
             with open(spath, "w") as fh:
                 fh.write(script)
+            env = dict(os.environ, AIRULESET_DGROOT_SCAN_ROOT=scan)
             subprocess.run(["bash", spath], check=True, capture_output=True,
-                           text=True, timeout=120)
-            out = os.path.join(td, "disk-guard-root.json")
+                           text=True, timeout=60, env=env)
+            out = os.path.join(run_dir, "disk-guard-root.json")
             self.assertTrue(os.path.exists(out), "reporter wrote no JSON")
             d = json.load(open(out))
             self.assertIn("generated_at", d)
             self.assertIn("generated_ts", d)
-            self.assertIn("estimate_bytes", d)
             self.assertIsInstance(d["candidates"], list)
             self.assertGreaterEqual(len(d["candidates"]), 3)
             for c in d["candidates"]:
                 self.assertIn("cls", c)
                 self.assertIsInstance(c["bytes"], int)
+            # docker is DELIBERATELY EXCLUDED from the ask estimate (it holds
+            # persistent volumes) — the estimate must NOT include the 5000-byte
+            # docker blob (apt 1000 + gh-runner 2000 are the reclaimable set).
+            classes = {c["cls"]: c["bytes"] for c in d["candidates"]}
+            self.assertIn("docker-incl-volumes", classes)
+            self.assertGreater(classes["docker-incl-volumes"], 0)
+            self.assertLess(d["estimate_bytes"], classes["docker-incl-volumes"] + 3000)
+            self.assertNotIn("docker", classes)  # relabeled honestly
 
 
 class TestProvision(unittest.TestCase):
@@ -301,6 +327,29 @@ class TestGuardHostsDriftLock(unittest.TestCase):
     def test_facade_reexports_the_list(self):
         self.assertEqual(airuleset.DISK_GUARD_ROOT_HOSTS,
                          cli_fleet.DISK_GUARD_ROOT_HOSTS)
+
+
+class TestPushWiringLock(unittest.TestCase):
+    """A source-lock so reverting the cmd_push step (un-deploying the whole root
+    leg) cannot pass green — a security-boundary install step deserves teeth."""
+
+    def test_cmd_push_calls_provision_disk_guard_root(self):
+        import inspect
+        import cli_remote
+        src = inspect.getsource(cli_remote.cmd_push)
+        self.assertIn("provision_disk_guard_root", src,
+                      "cmd_push must invoke the disk-guard root provisioning step")
+
+
+class TestNotifyImportForbidden(unittest.TestCase):
+    """The watchdog side NEVER pings — notify must not be importable from it."""
+
+    def test_disk_guard_root_never_imports_notify(self):
+        src = (REPO / "watchdog" / "disk_guard_root.py").read_text()
+        for ln in src.splitlines():
+            s = ln.strip()
+            self.assertFalse(s.startswith("import notify") or s.startswith("from notify"),
+                             "notify must never be imported in watchdog/disk_guard_root.py")
 
 
 if __name__ == "__main__":

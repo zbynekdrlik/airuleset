@@ -74,7 +74,7 @@ FAIL2BAN_BANTIME = "1d"            # was 600 s — reduces auth.log growth at so
 # loopback + tailscale (100.64.0.0/10) so a recidive misfire never locks out an
 # admin session on the fleet's own tailnet (Fable-flagged).
 FAIL2BAN_IGNOREIP = "127.0.0.1/8 ::1 100.64.0.0/10"
-REPORTER_TIMEOUT_S = 60            # the reporter is `du`-heavy; never hang the push
+REPORTER_TIMEOUT_S = 120           # the reporter is `du`-heavy; never hang the push
 
 
 def render_logrotate_btmp():
@@ -125,9 +125,11 @@ def render_journald_cap():
     (intentional, ROTATION by owner rule — disclosed in the PR)."""
     return (
         "# Managed by airuleset (#841) — cap the system journal. journald's OWN\n"
-        "# rotation (config-driven); it vacuums to this size on the next rotate.\n"
-        "# NOTE: first application may drop older journal history (intentional,\n"
-        "# ROTATION by owner rule).\n"
+        "# rotation (config-driven); journald re-reads this ONLY at (re)start, so\n"
+        "# the apply script restarts systemd-journald before rotating (a bare\n"
+        "# daemon-reload would leave the cap inert until a reboot). NOTE: first\n"
+        "# application may drop older journal history (intentional, ROTATION by\n"
+        "# owner rule).\n"
         "[Journal]\n"
         "SystemMaxUse=%s\n" % JOURNAL_MAX_USE
     )
@@ -184,6 +186,10 @@ def render_reporter_script():
         "set -uo pipefail\n"
         "run_dir=%s\n"
         "out=%s\n"
+        "# scan-root PREFIX — empty in production (real /var, /tmp, /home, /opt);\n"
+        "# a test/dev set it to a seeded fixture tree so the du set is tiny +\n"
+        "# hermetic (never du's the developer's live disk). Report-only either way.\n"
+        "r=\"${AIRULESET_DGROOT_SCAN_ROOT:-}\"\n"
         "mkdir -p \"$run_dir\" 2>/dev/null || true\n"
         "chmod 0755 \"$run_dir\" 2>/dev/null || true\n"
         "now=$(date -u +%%s)\n"
@@ -191,27 +197,31 @@ def render_reporter_script():
         "# bytes, one filesystem, 0 on any error (report-only, never fails hard)\n"
         "_du() { local b; b=$(du -sxb \"$1\" 2>/dev/null | awk 'NR==1{print $1+0}'); "
         "echo \"${b:-0}\"; }\n"
-        "apt=$(_du /var/cache/apt)\n"
-        "jrn=$(_du /var/log/journal)\n"
-        "vlog=$(_du /var/log)\n"
-        "dkr=0; command -v docker >/dev/null 2>&1 && dkr=$(_du /var/lib/docker)\n"
+        "apt=$(_du \"$r/var/cache/apt\")\n"
+        "jrn=$(_du \"$r/var/log/journal\")\n"
+        "vlog=$(_du \"$r/var/log\")\n"
+        "dkr=0; command -v docker >/dev/null 2>&1 && dkr=$(_du \"$r/var/lib/docker\")\n"
         "ghr=0\n"
-        "for d in /home/*/actions-runner*/_work /opt/actions-runner*/_work "
-        "/home/*/_work; do\n"
+        "for d in \"$r\"/home/*/actions-runner*/_work \"$r\"/opt/actions-runner*/_work "
+        "\"$r\"/home/*/_work; do\n"
         "    [ -d \"$d\" ] && ghr=$((ghr + $(_du \"$d\")))\n"
         "done\n"
-        "otmp=$(_du /tmp)\n"
-        "# estimate = the CLEARLY-reclaimable set (apt cache re-fills on next\n"
-        "# apt; docker images re-pull on next CI; gh-runner _work is scratch).\n"
-        "# journal/var-log are rotation-managed by the caps we install; /tmp\n"
-        "# ages out on its own — surfaced, not summed into the ask estimate.\n"
-        "est=$((apt + dkr + ghr))\n"
+        "otmp=$(_du \"$r/tmp\")\n"
+        "# estimate = the CLEARLY-reclaimable set ONLY (apt cache re-fills on\n"
+        "# next apt; gh-runner _work is CI scratch). docker is DELIBERATELY\n"
+        "# EXCLUDED from the ask estimate — /var/lib/docker holds named volumes +\n"
+        "# container writable layers (PERSISTENT data), so summing it would\n"
+        "# overstate the safe reclaim; it is SURFACED as a candidate (labelled as\n"
+        "# incl. volumes) for the session to judge, never a `prune --volumes`\n"
+        "# invitation. journal/var-log are rotation-managed by the caps we\n"
+        "# install; /tmp ages out on its own — surfaced, not summed.\n"
+        "est=$((apt + ghr))\n"
         "tmp=$(mktemp \"$run_dir/.report-XXXXXX\") || exit 0\n"
         "cat > \"$tmp\" <<JSON\n"
         "{\"generated_at\":\"$gen\",\"generated_ts\":$now,\"estimate_bytes\":$est,"
         "\"candidates\":[\n"
         "{\"cls\":\"apt-cache\",\"path\":\"/var/cache/apt\",\"bytes\":$apt},\n"
-        "{\"cls\":\"docker\",\"path\":\"/var/lib/docker\",\"bytes\":$dkr},\n"
+        "{\"cls\":\"docker-incl-volumes\",\"path\":\"/var/lib/docker\",\"bytes\":$dkr},\n"
         "{\"cls\":\"gh-runner\",\"path\":\"actions-runner/_work\",\"bytes\":$ghr},\n"
         "{\"cls\":\"journal\",\"path\":\"/var/log/journal\",\"bytes\":$jrn},\n"
         "{\"cls\":\"var-log\",\"path\":\"/var/log\",\"bytes\":$vlog},\n"
@@ -342,8 +352,17 @@ def build_apply_script():
     )
     parts.append("chmod 0755 %s 2>/dev/null || true" % shlex.quote(RUN_DIR))
     parts.append("systemctl daemon-reload")
-    # journalctl --rotate makes the SystemMaxUse cap bite promptly (rotation,
-    # not deletion — journald then vacuums to the cap on this rotate).
+    # The journald cap only takes effect once journald RE-READS journald.conf.d,
+    # which it does ONLY at (re)start — `daemon-reload` reloads the systemd
+    # MANAGER, not journald's own config, and `journalctl --rotate` alone would
+    # vacuum to the OLD (running) limit until an unrelated reboot (the #618/#623
+    # "deployed != effective" trap). So restart journald FIRST (it re-reads the
+    # cap), THEN rotate (journald now vacuums to the new SystemMaxUse). Both are
+    # rotation, not deletion of user data; both non-fatal.
+    parts.append(
+        'systemctl try-restart systemd-journald.service >/dev/null 2>&1 '
+        '|| echo "  ⚠ disk-guard-root: systemd-journald restart failed (non-fatal)"'
+    )
     parts.append(
         'journalctl --rotate >/dev/null 2>&1 '
         '|| echo "  ⚠ disk-guard-root: journalctl --rotate failed (non-fatal)"'
@@ -371,12 +390,16 @@ def build_apply_script():
     )
     # 2. logrotate config parses WITHOUT the duplicate-entry fail-open (the
     #    Fable-flagged silent no-rotation). `logrotate --debug` never rotates.
+    #    The grep is unscoped (logrotate reports the offending path in the SAME
+    #    line but not always parseably), so the message says "a logrotate
+    #    duplicate log entry" rather than over-attributing to btmp/wtmp.
     parts.append(
         'if command -v logrotate >/dev/null 2>&1; then\n'
         '    if logrotate --debug /etc/logrotate.conf 2>&1 | grep -qi '
         '"duplicate log entry"; then\n'
-        '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: logrotate duplicate log '
-        'entry — btmp/wtmp would silently NOT rotate" >&2; fail=1\n'
+        '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: a logrotate duplicate log '
+        'entry — a log (likely btmp/wtmp) would silently NOT rotate; check '
+        '/etc/logrotate.d for a second stanza" >&2; fail=1\n'
         '    fi\n'
         'fi'
     )
@@ -388,12 +411,19 @@ def build_apply_script():
         '>&2; fail=1\n'
         'fi'
     )
-    # 4. the report JSON exists + parses (the owner-daily ❓ reads it).
+    # NON-FATAL: the report JSON existing on day 0 depends on the bounded seed
+    # run finishing; on a huge box (gk: tens of GB of du) that seed can time out
+    # legitimately, and the DAILY timer produces the report within a day anyway.
+    # So a missing/unparseable report is a WARNING, never exit 4 — the ROTATION
+    # config + the enabled timer are the load-bearing install, the report is a
+    # SURFACE the timer refreshes. (The owner-daily ❓ reads it once it exists;
+    # the per-user guard's ≥90 % escalation is the standing backstop meanwhile.)
     parts.append(
         'if ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" %s '
         '>/dev/null 2>&1; then\n'
-        '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: report JSON missing/unparseable '
-        'at %s" >&2; fail=1\n'
+        '    echo "  ⚠ disk-guard-root: report JSON not yet present/parseable at '
+        '%s (seed may have timed out on a large box — the daily timer will '
+        'produce it; non-fatal)"\n'
         'fi' % (shlex.quote(ROOT_REPORT_PATH), ROOT_REPORT_PATH)
     )
     parts.append(
@@ -470,3 +500,45 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
             print("  disk-guard-root: applied + verified on %s%s"
                   % (name, ("\n    " + out.replace("\n", "\n    ")) if out else ""))
     return failed
+
+
+def cmd_disk_guard_root(args):
+    """Session-facing reader for the owner-daily root-level finding (#841 leg C).
+
+    ``airuleset.py disk-guard-root`` prints the current fresh finding (the
+    root-level reclaimable candidates the per-user guard cannot reach) so a
+    SESSION can raise ONE owner-daily ``❓`` from it — or ``none`` when there is
+    no fresh finding above threshold. ``--mark-asked`` records that the ``❓``
+    was raised (the once-per-EPISODE dedup, #795 no re-ask); ``--json`` output.
+
+    The watchdog (Job 40) is the only WRITER of the finding; this command only
+    READS it (and, with ``--mark-asked``, stamps the dedup date). NO ping is
+    ever fired from here (`notify` is not touched)."""
+    import json as _json
+    from watchdog import disk_guard_root as _r
+    finding = _r.read_finding()
+    if getattr(args, "mark_asked", False):
+        if finding is None:
+            print("disk-guard-root: no fresh finding to mark asked")
+            return 0
+        day = _r.mark_asked()
+        print("disk-guard-root: marked asked_on=%s" % day)
+        return 0
+    if getattr(args, "json", False):
+        print(_json.dumps(finding))
+        return 0
+    if finding is None:
+        print("disk-guard-root: none (no fresh root-level finding above threshold)")
+        return 0
+    est = finding.get("estimate_bytes", 0)
+    asked = finding.get("asked_on")
+    cands = finding.get("candidates") or []
+    summary = ", ".join("%s=%s" % (c.get("cls"), _r._human(c.get("bytes", 0)))
+                        for c in cands[:6]) or "(none)"
+    print("disk-guard-root: FINDING reclaimable~=%s (report %s, asked_on=%s)"
+          % (_r._human(est), finding.get("report_generated_at"), asked))
+    print("  candidates: %s" % summary)
+    if not asked:
+        print("  → a SESSION should raise ONE owner-daily ❓ (Slovak, self-"
+              "contained) then run `airuleset.py disk-guard-root --mark-asked`")
+    return 0

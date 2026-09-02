@@ -18,8 +18,11 @@ root-level reclaimable estimate crosses a threshold, it:
     (the #486 decision-log shape, ONCE per fresh daily report — never per poll);
   * writes ``~/.claude/disk-guard/root-candidates.json`` = ``{ts,
     report_generated_at, estimate_bytes, threshold_bytes, candidates, asked_on}``
-    that a session reads to raise ONE `❓` (the `asked_on` date field is the
-    once/day no-re-ask, #795).
+    that a session reads to raise ONE `❓` per EPISODE. The `asked_on` date is
+    STAMPED once and PRESERVED across every poll (#795 retired re-ask — ask
+    ONCE, the footer's red ``disk NN%`` is the persistent surface); it is reset
+    only when the episode RESOLVES (the estimate drops below threshold and the
+    finding cache is cleared) and later recurs — never a daily re-ask.
 
 Fail-open toward SILENCE for the `❓` (an absent/stale/unparseable report → no
 finding, no `❓`), but NOT perfectly silent: a stale report while the disk is
@@ -249,9 +252,10 @@ def read_finding(home=None, now=None):
 
 
 def mark_asked(home=None, now=None, today=None):
-    """Record that the owner-daily `❓` was asked TODAY (the once/day dedup a
-    session sets after raising the question). Best-effort; returns the date
-    written or None on failure."""
+    """Record that the owner-daily `❓` was asked (the once-per-EPISODE dedup a
+    session sets after raising the question — #795 no re-ask; preserved until
+    the episode resolves). Stores today's date as the stamp. Best-effort;
+    returns the date written or None on failure."""
     now = time.time() if now is None else now
     today = today or time.strftime("%Y%m%d", time.gmtime(now))
     p = _candidates_path(home)

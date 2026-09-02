@@ -3813,6 +3813,7 @@ from cli_disk_guard_root import (  # noqa: E402, F401
     provision_disk_guard_root as provision_disk_guard_root,
     build_apply_script as build_disk_guard_root_apply_script,
     guard_files as disk_guard_root_files,
+    cmd_disk_guard_root as cmd_disk_guard_root,
 )
 
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
@@ -6387,6 +6388,17 @@ def main():
                       help="explicit no-op flag (dry-run is already the default "
                            "without --apply); accepted for clarity")
 
+    p_dgr = sub.add_parser(
+        "disk-guard-root",
+        help="#841: read the owner-daily root-level disk finding (the root-owned "
+             "reclaimable candidates the per-user guard cannot reach) so a "
+             "SESSION can raise ONE ❓; --mark-asked stamps the once/day dedup")
+    p_dgr.add_argument("--mark-asked", action="store_true",
+                       help="record that the owner-daily ❓ was raised (#795 "
+                            "once-per-episode dedup, no re-ask) — call after asking")
+    p_dgr.add_argument("--json", action="store_true",
+                       help="print the finding as JSON (null when none)")
+
     p_burn = sub.add_parser(
         "burn",
         help="Token-spend report from local Claude Code transcripts — "
@@ -6784,6 +6796,7 @@ SUBCOMMANDS = {
     "fable-gate": cmd_fable_gate,
     "webterm-access": cmd_webterm_access,
     "drop-gateway": cmd_drop_gateway,
+    "disk-guard-root": cmd_disk_guard_root,
     "burn": cmd_burn,
     "delegation": cmd_delegation,
     "authority": cmd_authority,

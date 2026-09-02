@@ -207,6 +207,84 @@ class TestRunDiskGuardWiring(unittest.TestCase):
             r.maybe_record_root_finding = orig
         self.assertEqual(calls, [], "recorder must not run below critical")
 
+    def test_drain_level_does_not_invoke_the_recorder(self):
+        # 85% = DRAIN (80-89), NOT critical — gives the `== "critical"` gate
+        # teeth against a mutant widening it to include drain (85% is past the
+        # ok/notice early return, so this exercises the critical gate itself).
+        calls = []
+        orig = r.maybe_record_root_finding
+        r.maybe_record_root_finding = lambda *a, **k: calls.append(a) or []
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                dg.run_disk_guard(
+                    now=1_000_000, home=td, dry_run=True,
+                    statvfs_fn=self._statvfs(85), dev_fn=lambda p: 1,
+                    geteuid_fn=lambda: 1000, mounts=("/",))
+        finally:
+            r.maybe_record_root_finding = orig
+        self.assertEqual(calls, [], "recorder must run ONLY at critical, not drain")
+
+
+class TestSessionCLI(unittest.TestCase):
+    """`airuleset.py disk-guard-root` — the session-facing reader/mark-asked."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.td, ignore_errors=True))
+        # HOME isolation (saved + restored per the #385 HOME-leak discipline).
+        self._home = os.environ.get("HOME")
+        os.environ["HOME"] = self.td
+        self.addCleanup(self._restore_home)
+        import cli_disk_guard_root as cdgr
+        self.cdgr = cdgr
+
+    def _restore_home(self):
+        if self._home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._home
+
+    def _args(self, **kw):
+        class A:
+            mark_asked = kw.get("mark_asked", False)
+            json = kw.get("json", False)
+        return A()
+
+    def _capture(self, args):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.cdgr.cmd_disk_guard_root(args)
+        return rc, buf.getvalue()
+
+    def test_none_when_no_finding(self):
+        rc, out = self._capture(self._args())
+        self.assertEqual(rc, 0)
+        self.assertIn("none", out)
+
+    def test_prints_finding_and_marks_asked(self):
+        now = time.time()
+        r.maybe_record_root_finding(CRIT, self.td, now,
+                                    read_fn=lambda p: _report(now, 800 * 1024 * 1024))
+        rc, out = self._capture(self._args())
+        self.assertEqual(rc, 0)
+        self.assertIn("FINDING", out)
+        self.assertIn("owner-daily", out)      # the session-prompt hint
+        # mark asked, then the hint disappears
+        _rc, mout = self._capture(self._args(mark_asked=True))
+        self.assertIn("marked asked_on", mout)
+        _rc2, out2 = self._capture(self._args())
+        self.assertNotIn("should raise ONE owner-daily", out2)
+
+
+class TestCliRegistration(unittest.TestCase):
+    def test_subcommand_is_registered(self):
+        import airuleset
+        self.assertIn("disk-guard-root", airuleset.SUBCOMMANDS)
+        self.assertIs(airuleset.SUBCOMMANDS["disk-guard-root"],
+                      airuleset.cmd_disk_guard_root)
+
 
 if __name__ == "__main__":
     unittest.main()

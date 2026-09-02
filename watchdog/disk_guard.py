@@ -721,8 +721,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
-    drain ladder over this user's own home; if still ≥90 % after, escalate.
-    Best-effort; returns log lines for the sweep's own log."""
+    drain ladder over this user's own home; if still ≥90 % after, escalate. At
+    CRITICAL (≥90 %), also record the root-level finding surfaced from the root
+    reporter's world-readable report (#841 leg C, `disk_guard_root`) — a cheap
+    read that runs even when the du-heavy drain is cadence-gated, and NEVER
+    pings. Best-effort; returns log lines for the sweep's own log."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     mounts = mounts or MOUNTS
