@@ -22,6 +22,23 @@ outside the :data:`RECLAIMABLE_CLASSES` fence. The reclaimable classes are OURS
 only — the CI runner, docker-at-root, ``/var/log`` and other users' homes are
 SURFACED in the ≥90 % escalation, never auto-deleted (those are #841).
 
+#854 (2026-09-02, live gk 97 % incident): TWO gaps closed. (1) The drain cadence
+gate was applied UNCONDITIONALLY, so at CRITICAL pressure (>= DISK_CRITICAL_PCT)
+the guard just LOGGED "cadence-gated" every poll for 20+ min and freed nothing —
+now, at CRITICAL, the drain runs EVERY poll (the cadence gate applies only in the
+80-95 % band). (2) The ladder's rungs missed what actually fills a CI/gatekeeper
+box, so even an ungated drain freed ~0 — new cache-class rungs are added, each a
+pure dry-run-able selector deleting ONLY provenance-proven cache-class artifacts:
+apt cache, rotated ``/var/log/*.1|*.gz``, gh-runner ``_work/_update|_temp`` +
+stale ``_work/<repo>`` checkouts, docker images (0 containers AND untagged OR
+> 14 d — NEVER while a ``Runner.Worker`` runs, NEVER ``docker system prune``,
+NEVER a tagged in-use image), per-user ``~/.cache`` > 30 d, stale Claude Code
+self-update binaries (``~/.local/share/claude/versions/*`` except the running
+one), and one-off numbered lint/ruff/mcp venvs (``~/.venvs/*-<pid>`` +
+``/tmp/lintvenv-*`` > 2 d). The #834 "surface-not-delete for runner/docker/log"
+stance is thus DELIBERATELY narrowed by #854 to these bounded cache-class cases;
+each drain logs ``disk-guard: NN% -> drain rung=<name> freed=<bytes> -> MM%``.
+
 stdlib-only at module level; every reuse of a ``cli_*`` discovery function and
 of ``watchdog.reaper`` is a DEFERRED import inside the function that needs it,
 so this module has no import cycle with the ``watchdog`` package that hosts it.
@@ -31,6 +48,7 @@ import fcntl
 import json
 import math
 import os
+import re as _re
 import socket
 import subprocess
 import sys
@@ -38,23 +56,30 @@ import time
 from pathlib import Path
 
 # --- thresholds (#834 req 1) ------------------------------------------------ #
-NOTICE_PCT = 75            # footer shows `disk NN%` (yellow) at/above this
+NOTICE_PCT = 75            # footer NOTICE band (footer render itself narrowed to >=90% by #854)
 DRAIN_PCT = 80             # AUTO-DRAIN at/above this
 CRITICAL_PCT = 90          # machine-channel escalation at/above this (red footer)
+DISK_CRITICAL_PCT = 95     # #854: at/above this the drain runs EVERY poll (cadence gate bypassed)
 TARGET_PCT = 75            # drain stops once the worst mount is back below this
 MOUNTS = ("/", "/home", "/tmp")
 
-# The scope FENCE (#834 — "surface-not-delete for runner/docker/logs/other
-# users"). The executor NEVER acts on a class outside this literal allowlist;
-# a rogue planner emitting one is skipped+logged. Every member here is OUR own
-# per-user reclaimable class — never a root/cross-user one. NOTE: `docker` is
-# deliberately ABSENT — a `docker image prune` for a docker-group user talks to
-# the ROOT daemon and prunes shared/cross-user images (CI images, other
-# streams'), which is a box-wide op, so docker stays fully in the root-leg
-# follow-up (surfaced there, never auto-pruned here) — review 🔴.
+# The scope FENCE. The executor NEVER acts on a class outside this literal
+# allowlist; a rogue planner emitting one is skipped+logged. #834 kept this to
+# OUR own per-user reclaimable classes and deliberately EXCLUDED docker/runner/
+# /var/log as box-wide/root ops. #854 (live gk 97 %) NARROWS that exclusion to a
+# set of bounded, provenance-proven CACHE-CLASS reclaims that the guard now DOES
+# act on: apt cache, rotated logs (`*.1`/`*.gz`), gh-runner `_work/_update|_temp`
+# + stale `_work/<repo>` checkouts, docker images (0-containers AND untagged OR
+# unused>14d — Runner.Worker-gated, never a tagged in-use image, never `docker
+# system prune`), per-user `~/.cache`, stale Claude self-update binaries, and
+# one-off numbered venvs. Everything else (a runner's LIVE checkout, a tagged
+# in-use image, user data) stays out of the fence and is never touched.
 RECLAIMABLE_CLASSES = frozenset({
     "scratch", "tmp-stray", "worktree", "cli-version",
     "uploads", "transcript", "toolchain", "journal",
+    # #854 cache-class additions:
+    "apt-cache", "rotated-log", "runner-update", "docker-image",
+    "runner-checkout", "user-cache", "claude-version", "oneoff-venv",
 })
 
 DISK_GUARD_DIRNAME = "disk-guard"
@@ -68,6 +93,24 @@ UPLOADS_MAX_AGE_DAYS = 14
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS = 7        # owner-authorised pressure path (#834 rung e)
 TOOLCHAIN_DIRS = ("Android", ".gradle", ".android")
 TOOLCHAIN_PROC_RE = "gradle|java|emulator|qemu-system"
+
+# #854 cache-class rung parameters (all provenance-proven cache; never user data).
+APT_ARCHIVES_DIR = "/var/cache/apt/archives"
+VARLOG_DIR = "/var/log"
+ROTATED_LOG_MIN_AGE_DAYS = 1                # `*.1`/`*.gz` older than this
+GH_RUNNER_HOME = "/home/gh-runner"          # the CI runner user's home (box-level)
+RUNNER_WORK_RESERVED = frozenset({          # `_work/*` entries that are NOT repo checkouts
+    "_actions", "_temp", "_tool", "_update", "_diag", "_PipelineMapping",
+})
+RUNNER_CHECKOUT_MIN_AGE_DAYS = 7
+RUNNER_WORKER_PROC_RE = "Runner.Worker"     # a live CI job — gates docker + checkout rungs
+DOCKER_UNUSED_MIN_AGE_DAYS = 14
+USER_CACHE_MIN_AGE_DAYS = 30
+CLAUDE_VERSIONS_DIR = ".local/share/claude/versions"   # under $HOME; self-update binaries
+ONEOFF_VENV_MIN_AGE_DAYS = 2
+# one-off numbered venvs: `~/.venvs/lint-3907`, `ruff31522`, `mcp-4574`, … + `/tmp/lintvenv-*`
+ONEOFF_VENV_NAME_RE = _re.compile(r"^(lint|ruff|mcp)[-]?\d+$")
+ONEOFF_VENV_TMP_RE = _re.compile(r"^lintvenv-")
 
 
 def _dbg(msg):
@@ -321,6 +364,460 @@ def discover_toolchain_dirs(home=None, box_class_fn=None, pgrep_fn=None,
 
 
 # --------------------------------------------------------------------------- #
+# NEW cache-class planners (#854) — each a PURE selector; tests inject fakes /
+# fake trees, so a `run_disk_guard --dry-run` NEVER deletes and a unit test
+# NEVER touches a real system path.
+# --------------------------------------------------------------------------- #
+def _default_pgrep_any(pattern):
+    """`pgrep -f <pattern>` across ALL users (the CI runner runs as a DIFFERENT
+    user than this guard). Returns matching output; on any error returns the
+    fail-safe sentinel so an unknown state is treated as "process live" → skip."""
+    try:
+        r = subprocess.run(["pgrep", "-f", pattern],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout or ""
+    except Exception as e:
+        _dbg("pgrep -f failed: %r" % e)
+        return "PGREP-ERROR"          # fail-safe: unknown → treat as live → skip
+
+
+def discover_apt_cache(archives_dir=APT_ARCHIVES_DIR, dir_stats_fn=None):
+    """The `.deb` download cache under /var/cache/apt/archives — pure cache
+    (apt re-downloads on demand). Returns ONE `apt-clean` action when the dir
+    exists and holds > 0 bytes, else nothing. No dir at all is nothing to do."""
+    if not os.path.isdir(archives_dir):
+        return []
+    size = _safe_dir_size(archives_dir, dir_stats_fn)
+    if size <= 0:
+        return []
+    return [{"cls": "apt-cache", "path": "apt-get clean", "bytes": size,
+             "kind": "apt-clean", "reason": None}]
+
+
+def discover_rotated_logs(varlog_dir=VARLOG_DIR, now=None,
+                          min_age_days=ROTATED_LOG_MIN_AGE_DAYS):
+    """ROTATED logs under /var/log — `*.1`/`*.N` numbered rotations and `*.gz`
+    compressed rotations older than `min_age_days`. NEVER a LIVE log (a name
+    with no numeric/`.gz` rotation suffix), so `syslog`/`auth.log`/`btmp` itself
+    are never touched — only `btmp.1`, `auth.log.1`, `syslog.1`, `*.gz`. Walks
+    the top level + immediate subdirs (rotations live there); the `journal`
+    subdir is skipped (journald vacuum owns it). Rows delete/skip."""
+    now = time.time() if now is None else now
+    d = Path(varlog_dir)
+    if not d.is_dir():
+        return []
+    cutoff = min_age_days * 86400
+    out = []
+
+    def _consider(fp):
+        name = os.path.basename(fp)
+        rotated = name.endswith(".gz") or bool(_re.search(r"\.\d+$", name))
+        if not rotated:
+            return
+        try:
+            st = os.lstat(fp)
+        except OSError as e:
+            out.append({"cls": "rotated-log", "path": fp, "bytes": 0,
+                        "reason": "could not stat: %s" % e})
+            return
+        if os.path.islink(fp):
+            out.append({"cls": "rotated-log", "path": fp, "bytes": st.st_size,
+                        "reason": "symlink — never followed"})
+            return
+        age = now - st.st_mtime
+        row = {"cls": "rotated-log", "path": fp, "bytes": st.st_size, "reason": None}
+        if age < cutoff:
+            row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, min_age_days)
+        out.append(row)
+
+    try:
+        for entry in d.iterdir():
+            if entry.name == "journal":
+                continue
+            if entry.is_file() and not entry.is_symlink():
+                _consider(str(entry))
+            elif entry.is_dir() and not entry.is_symlink():
+                # one unreadable subdir (e.g. a root-only /var/log/chrony) must
+                # NOT abort the whole rung — log it and keep going.
+                try:
+                    for sub in entry.iterdir():
+                        if sub.is_file() and not sub.is_symlink():
+                            _consider(str(sub))
+                except OSError as e:
+                    out.append({"cls": "rotated-log", "path": str(entry), "bytes": 0,
+                                "reason": "could not walk subdir: %s" % e})
+    except OSError as e:
+        return [{"cls": "rotated-log", "path": None,
+                 "reason": "could not walk %s: %s" % (varlog_dir, e)}]
+    return out
+
+
+def discover_runner_update(runner_root=GH_RUNNER_HOME, dir_stats_fn=None):
+    """gh-runner `_work/_update` + `_work/_temp` leftovers under each
+    `actions-runner*` dir — pure cache the runner re-creates. Rows delete. No
+    runner root / no such dirs = nothing to do. Not gated on Runner.Worker
+    (these are safe to delete even mid-job — the runner re-creates them)."""
+    root = Path(runner_root)
+    if not root.is_dir():
+        return []
+    out = []
+    try:
+        for rd in sorted(root.glob("actions-runner*")):
+            for sub in ("_work/_update", "_work/_temp"):
+                p = rd / sub
+                if p.is_dir() and not p.is_symlink():
+                    out.append({"cls": "runner-update", "path": str(p),
+                                "bytes": _safe_dir_size(str(p), dir_stats_fn),
+                                "kind": "delete", "reason": None})
+    except OSError as e:
+        return [{"cls": "runner-update", "path": None,
+                 "reason": "could not walk %s: %s" % (runner_root, e)}]
+    return out
+
+
+def discover_stale_runner_checkouts(runner_root=GH_RUNNER_HOME, now=None,
+                                    min_age_days=RUNNER_CHECKOUT_MIN_AGE_DAYS,
+                                    pgrep_fn=None, dir_stats_fn=None):
+    """Stale `_work/<repo>` checkouts under each `actions-runner*` dir, older
+    than `min_age_days`. SKIPPED ENTIRELY when ANY `Runner.Worker` process is
+    live (a CI job may be using a checkout — never race it). Reserved runner
+    dirs (`_actions`/`_temp`/`_tool`/`_update`/`_diag`/`_PipelineMapping`) are
+    NEVER checkouts. Rows delete/skip."""
+    now = time.time() if now is None else now
+    root = Path(runner_root)
+    if not root.is_dir():
+        return []
+    pgrep_fn = pgrep_fn or _default_pgrep_any
+    try:
+        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
+    except Exception as e:
+        _dbg("runner-checkout pgrep failed: %r" % e)
+        live = "PGREP-ERROR"
+    if live.strip():
+        return [{"cls": "runner-checkout", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "Runner.Worker live — CI job may hold a checkout, kept"}]
+    cutoff = min_age_days * 86400
+    out = []
+    try:
+        for rd in sorted(root.glob("actions-runner*")):
+            work = rd / "_work"
+            if not work.is_dir():
+                continue
+            for entry in work.iterdir():
+                if entry.name in RUNNER_WORK_RESERVED:
+                    continue
+                if not entry.is_dir() or entry.is_symlink():
+                    continue
+                try:
+                    age = now - entry.stat().st_mtime
+                except OSError as e:
+                    out.append({"cls": "runner-checkout", "path": str(entry),
+                                "bytes": 0, "reason": "could not stat: %s" % e})
+                    continue
+                row = {"cls": "runner-checkout", "path": str(entry),
+                       "bytes": _safe_dir_size(str(entry), dir_stats_fn),
+                       "reason": None}
+                if age < cutoff:
+                    row["reason"] = "checkout too recent (%.1fd < %dd)" % (age / 86400.0, min_age_days)
+                out.append(row)
+    except OSError as e:
+        return [{"cls": "runner-checkout", "path": None,
+                 "reason": "could not walk %s: %s" % (runner_root, e)}]
+    return out
+
+
+def _default_docker_images():
+    """Parse `docker images` → [{id, repo, tag, size, created_ts}]. Any error
+    (docker absent / daemon down) returns None so the planner does nothing."""
+    try:
+        r = subprocess.run(
+            ["docker", "images", "--no-trunc",
+             "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return None
+    except Exception as e:
+        _dbg("docker images failed: %r" % e)
+        return None
+    out = []
+    for ln in (r.stdout or "").splitlines():
+        parts = ln.split("\t")
+        if len(parts) < 5:
+            continue
+        out.append({"id": parts[0].strip(), "repo": parts[1].strip(),
+                    "tag": parts[2].strip(), "size": _parse_docker_size(parts[3]),
+                    "created_ts": _parse_docker_created(parts[4])})
+    return out
+
+
+def _default_docker_ps():
+    """Set of image refs (name and/or id) currently used by ANY container."""
+    try:
+        r = subprocess.run(["docker", "ps", "-a", "--no-trunc", "--format", "{{.Image}}"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return set()
+        return {x.strip() for x in (r.stdout or "").splitlines() if x.strip()}
+    except Exception as e:
+        _dbg("docker ps failed: %r" % e)
+        return None          # unknown → fail-safe: caller treats as "cannot prove unused"
+
+
+def _parse_docker_size(s):
+    s = (s or "").strip().upper()
+    m = _re.match(r"^([\d.]+)\s*([KMGT]?)B?$", s)
+    if not m:
+        return 0
+    val = float(m.group(1))
+    mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}.get(m.group(2), 1)
+    return int(val * mult)
+
+
+def _parse_docker_created(s):
+    """`docker`'s CreatedAt `2026-06-30 16:50:03 +0200 CEST` → epoch, or None."""
+    s = (s or "").strip()
+    m = _re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*([+-]\d{4})?", s)
+    if not m:
+        return None
+    try:
+        import calendar
+        t = time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+        epoch = calendar.timegm(t)          # treat the wall-clock as UTC-ish
+        if m.group(2):
+            sign = 1 if m.group(2)[0] == "+" else -1
+            off = int(m.group(2)[1:3]) * 3600 + int(m.group(2)[3:5]) * 60
+            epoch -= sign * off
+        return epoch
+    except Exception as e:
+        _dbg("docker created parse failed: %r" % e)
+        return None
+
+
+def _image_in_use(img, in_use_refs):
+    fullid = img.get("id") or ""
+    shortid = fullid[:12] if fullid else ""
+    reftag = None
+    if img.get("repo") and img.get("repo") != "<none>" and img.get("tag") and img.get("tag") != "<none>":
+        reftag = "%s:%s" % (img["repo"], img["tag"])
+    for ref in in_use_refs:
+        if not ref:
+            continue
+        if ref == fullid or (shortid and ref == shortid) or (reftag and ref == reftag):
+            return True
+        if shortid and (ref.startswith(shortid) or shortid.startswith(ref.replace("sha256:", ""))):
+            return True
+    return False
+
+
+def discover_docker_images(now=None, images_fn=None, ps_fn=None, pgrep_fn=None,
+                           min_unused_days=DOCKER_UNUSED_MIN_AGE_DAYS):
+    """Docker images SAFE to reclaim: no container references them AND
+    (untagged `<none>` OR created > `min_unused_days` ago). SKIPPED ENTIRELY
+    while any `Runner.Worker` process runs (a CI job may pull/build). A TAGGED,
+    recent, referenced or in-use image is NEVER selected; never `docker system
+    prune`. Docker absent / ps unknown → does nothing (fail-safe KEEP). Rows
+    `docker-rmi`/skip; `path` is the image id `docker rmi` acts on."""
+    now = time.time() if now is None else now
+    pgrep_fn = pgrep_fn or _default_pgrep_any
+    try:
+        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
+    except Exception as e:
+        _dbg("docker rung pgrep failed: %r" % e)
+        live = "PGREP-ERROR"
+    if live.strip():
+        return [{"cls": "docker-image", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "Runner.Worker live — CI may pull/build, docker rung skipped"}]
+    images = (images_fn or _default_docker_images)()
+    if not images:
+        return []                       # docker absent / no images → nothing
+    in_use = (ps_fn or _default_docker_ps)()
+    if in_use is None:
+        return [{"cls": "docker-image", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "docker ps unreadable — cannot prove unused, kept"}]
+    cutoff = min_unused_days * 86400
+    out = []
+    for img in images:
+        if _image_in_use(img, in_use):
+            out.append({"cls": "docker-image", "path": img.get("id") or "-",
+                        "bytes": img.get("size") or 0, "kind": "skip",
+                        "reason": "referenced by a container — kept"})
+            continue
+        untagged = img.get("repo") == "<none>" or img.get("tag") == "<none>"
+        created = img.get("created_ts")
+        old = (created is not None) and ((now - created) > cutoff)
+        if untagged or old:
+            why = "untagged <none>" if untagged else "unused > %dd" % min_unused_days
+            out.append({"cls": "docker-image", "path": img.get("id") or "-",
+                        "bytes": img.get("size") or 0, "kind": "docker-rmi",
+                        "reason": None, "why": why})
+        else:
+            out.append({"cls": "docker-image", "path": img.get("id") or "-",
+                        "bytes": img.get("size") or 0, "kind": "skip",
+                        "reason": "tagged + recent (0 containers) — kept"})
+    return out
+
+
+def discover_stale_user_cache(home=None, now=None,
+                              min_age_days=USER_CACHE_MIN_AGE_DAYS, dir_stats_fn=None):
+    """Own `~/.cache` TOP-LEVEL entries not modified in `min_age_days` (pip /
+    npm / playwright caches — regenerated on demand). Uses mtime (atime is
+    unreliable on `noatime` mounts). Rows delete/skip. No `~/.cache` = nothing."""
+    now = time.time() if now is None else now
+    cache = Path(home or os.path.expanduser("~")) / ".cache"
+    if not cache.is_dir():
+        return []
+    cutoff = min_age_days * 86400
+    out = []
+    try:
+        for entry in cache.iterdir():
+            if entry.is_symlink():
+                out.append({"cls": "user-cache", "path": str(entry), "bytes": 0,
+                            "reason": "symlink — never followed"})
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError as e:
+                out.append({"cls": "user-cache", "path": str(entry), "bytes": 0,
+                            "reason": "could not stat: %s" % e})
+                continue
+            row = {"cls": "user-cache", "path": str(entry),
+                   "bytes": _safe_dir_size(str(entry), dir_stats_fn) if entry.is_dir()
+                   else (entry.stat().st_size if entry.exists() else 0),
+                   "reason": None}
+            if age < cutoff:
+                row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, min_age_days)
+            out.append(row)
+    except OSError as e:
+        return [{"cls": "user-cache", "path": None,
+                 "reason": "could not walk %s: %s" % (cache, e)}]
+    return out
+
+
+def _default_running_claude_version():
+    """The Claude Code version currently in use — resolve via `claude --version`
+    (e.g. `2.1.258 (Claude Code)` → `2.1.258`). None on any failure → the guard
+    then KEEPS every version dir (fail-safe: never delete the active binary)."""
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
+        m = _re.search(r"(\d+\.\d+\.\d+)", r.stdout or "")
+        return m.group(1) if m else None
+    except Exception as e:
+        _dbg("claude --version failed: %r" % e)
+        return None
+
+
+def discover_stale_claude_versions(home=None, running_fn=None, dir_stats_fn=None,
+                                   versions_dir=None):
+    """Old Claude Code self-update binaries under `~/.local/share/claude/
+    versions/*` — each a full CC install left behind after a self-update. Delete
+    every version dir EXCEPT the currently-running one. FAIL-SAFE: when the
+    running version cannot be resolved, KEEP EVERYTHING (never delete the active
+    binary). A dir whose name matches the running version is always skipped; the
+    `versions/` symlink target (if the layout uses one) is also never removed.
+    Rows delete/skip."""
+    home = home or os.path.expanduser("~")
+    vdir = Path(versions_dir) if versions_dir else (Path(home) / CLAUDE_VERSIONS_DIR)
+    if not vdir.is_dir():
+        return []
+    running = (running_fn or _default_running_claude_version)()
+    out = []
+    # resolve a `current`/`latest` symlink target so it is never removed
+    protected = set()
+    if running:
+        protected.add(running)
+    try:
+        for entry in vdir.iterdir():
+            if entry.is_symlink():
+                out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                            "reason": "symlink (active pointer) — never followed"})
+                try:
+                    protected.add(os.path.basename(os.path.realpath(str(entry))))
+                except OSError as e:
+                    _dbg("claude-version symlink realpath failed: %r" % e)
+    except OSError as e:
+        return [{"cls": "claude-version", "path": None,
+                 "reason": "could not walk %s: %s" % (vdir, e)}]
+    if running is None:
+        # cannot prove which is active → keep everything (fail-safe)
+        try:
+            for entry in vdir.iterdir():
+                if entry.is_symlink():
+                    continue
+                out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                            "kind": "skip",
+                            "reason": "running version unknown — kept (fail-safe)"})
+        except OSError as e:
+            _dbg("claude-version fail-safe walk failed: %r" % e)
+        return out
+    try:
+        for entry in vdir.iterdir():
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            if entry.name in protected:
+                out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                            "kind": "skip", "reason": "running version %s — kept" % entry.name})
+                continue
+            out.append({"cls": "claude-version", "path": str(entry),
+                        "bytes": _safe_dir_size(str(entry), dir_stats_fn),
+                        "kind": "delete", "reason": None})
+    except OSError as e:
+        return [{"cls": "claude-version", "path": None,
+                 "reason": "could not walk %s: %s" % (vdir, e)}]
+    return out
+
+
+def discover_oneoff_venvs(home=None, now=None, min_age_days=ONEOFF_VENV_MIN_AGE_DAYS,
+                          tmp_dir="/tmp", dir_stats_fn=None):
+    """One-off numbered lint/ruff/mcp venvs left behind by ad-hoc tooling:
+    `~/.venvs/{lint,ruff,mcp}-<pid>` (and `lint4197`/`ruff31522` — optional
+    hyphen) plus `/tmp/lintvenv-*`, older than `min_age_days`. A STABLE venv
+    name (e.g. `airuleset-lint`, `lint` with no digits) is NEVER matched — only
+    the numbered per-run ones. Rows delete/skip."""
+    now = time.time() if now is None else now
+    cutoff = min_age_days * 86400
+    out = []
+
+    def _consider(cls, path):
+        try:
+            st = os.lstat(path)
+        except OSError as e:
+            out.append({"cls": cls, "path": path, "bytes": 0,
+                        "reason": "could not stat: %s" % e})
+            return
+        if os.path.islink(path):
+            out.append({"cls": cls, "path": path, "bytes": 0,
+                        "reason": "symlink — never followed"})
+            return
+        age = now - st.st_mtime
+        row = {"cls": cls, "path": path,
+               "bytes": _safe_dir_size(path, dir_stats_fn) if os.path.isdir(path) else st.st_size,
+               "reason": None}
+        if age < cutoff:
+            row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, min_age_days)
+        out.append(row)
+
+    venvs = Path(home or os.path.expanduser("~")) / ".venvs"
+    if venvs.is_dir():
+        try:
+            for entry in venvs.iterdir():
+                if ONEOFF_VENV_NAME_RE.match(entry.name):
+                    _consider("oneoff-venv", str(entry))
+        except OSError as e:
+            out.append({"cls": "oneoff-venv", "path": None,
+                        "reason": "could not walk %s: %s" % (venvs, e)})
+    tmp = Path(tmp_dir)
+    if tmp.is_dir():
+        try:
+            for entry in tmp.iterdir():
+                if ONEOFF_VENV_TMP_RE.match(entry.name):
+                    _consider("oneoff-venv", str(entry))
+        except OSError as e:
+            out.append({"cls": "oneoff-venv", "path": None,
+                        "reason": "could not walk %s: %s" % (tmp, e)})
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # rung PLANNERS (adapters over the existing per-class discovery functions)
 # --------------------------------------------------------------------------- #
 def _row_to_action(cls, row, kind):
@@ -418,18 +915,84 @@ def _plan_journal(home, now):
              "bytes": 0, "kind": "journal-vacuum", "reason": None}]
 
 
+def _norm_action(cls, row, default_kind):
+    """Normalize a #854 discovery row (which carries `bytes`, an optional
+    explicit `kind`, and a `reason` set only when the candidate is KEPT) into an
+    executor action. A row with `reason` set is ALWAYS a skip (never acted on) —
+    this is what stops a "too recent" / "kept" candidate from being deleted; a
+    candidate (`reason` is None) uses its own `kind` or the rung's default."""
+    path = row.get("path")
+    if path is None:
+        return {"cls": cls, "path": "-", "bytes": 0, "kind": "skip",
+                "reason": row.get("reason", "discovery error")}
+    nbytes = row.get("bytes", 0) or 0
+    reason = row.get("reason")
+    if reason is not None:
+        return {"cls": cls, "path": path, "bytes": nbytes, "kind": "skip", "reason": reason}
+    return {"cls": cls, "path": path, "bytes": nbytes,
+            "kind": row.get("kind") or default_kind, "reason": None, "why": row.get("why")}
+
+
+def _plan_apt_cache(home, now):
+    return [_norm_action("apt-cache", r, "apt-clean") for r in discover_apt_cache()]
+
+
+def _plan_rotated_logs(home, now):
+    return [_norm_action("rotated-log", r, "delete") for r in discover_rotated_logs(now=now)]
+
+
+def _plan_runner_update(home, now):
+    return [_norm_action("runner-update", r, "delete") for r in discover_runner_update()]
+
+
+def _plan_runner_checkouts(home, now):
+    return [_norm_action("runner-checkout", r, "delete")
+            for r in discover_stale_runner_checkouts(now=now)]
+
+
+def _plan_docker(home, now):
+    return [_norm_action("docker-image", r, "docker-rmi")
+            for r in discover_docker_images(now=now)]
+
+
+def _plan_user_cache(home, now):
+    return [_norm_action("user-cache", r, "delete")
+            for r in discover_stale_user_cache(home=home, now=now)]
+
+
+def _plan_claude_versions(home, now):
+    return [_norm_action("claude-version", r, "delete")
+            for r in discover_stale_claude_versions(home=home)]
+
+
+def _plan_oneoff_venvs(home, now):
+    return [_norm_action("oneoff-venv", r, "delete")
+            for r in discover_oneoff_venvs(home=home, now=now)]
+
+
 def _default_planners(home, now):
-    """The auto-drain LADDER, cheapest/safest first (#834 rung order a→g,
-    own-home + own-user only). Docker (rung h) is a box-wide/root op and stays
-    in the root-leg follow-up — never auto-pruned here (review 🔴)."""
+    """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
+    worst mount is back under target. #854 added the cache-class box-level rungs
+    (apt / rotated logs / runner cache / docker / user-cache / stale Claude
+    binaries / one-off venvs); the existing own-home rungs stay, and
+    transcripts-gzip stays LAST (the most conservative reclaim). Docker + stale
+    runner checkouts are Runner.Worker-gated inside their planners."""
     return [
+        ("apt-cache", lambda: _plan_apt_cache(home, now)),
+        ("rotated-log", lambda: _plan_rotated_logs(home, now)),
+        ("runner-update", lambda: _plan_runner_update(home, now)),
+        ("claude-version", lambda: _plan_claude_versions(home, now)),
+        ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now)),
-        ("worktree", lambda: _plan_worktrees(home, now)),
-        ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("uploads", lambda: _plan_uploads(home, now)),
-        ("transcript", lambda: _plan_transcripts(home, now)),
-        ("toolchain", lambda: _plan_toolchain(home, now)),
+        ("cli-version", lambda: _plan_cli_versions(home, now)),
+        ("user-cache", lambda: _plan_user_cache(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
+        ("docker-image", lambda: _plan_docker(home, now)),
+        ("runner-checkout", lambda: _plan_runner_checkouts(home, now)),
+        ("worktree", lambda: _plan_worktrees(home, now)),
+        ("toolchain", lambda: _plan_toolchain(home, now)),
+        ("transcript", lambda: _plan_transcripts(home, now)),
     ]
 
 
@@ -508,6 +1071,14 @@ def _perform_action(a):
         subprocess.run(["journalctl", "--user", "--vacuum-size=100M"],
                        check=True, capture_output=True, text=True, timeout=60)
         return nbytes
+    if kind == "apt-clean":                 # #854 rung (a) — `apt-get clean` (best-effort)
+        subprocess.run(["apt-get", "clean"],
+                       check=True, capture_output=True, text=True, timeout=120)
+        return nbytes
+    if kind == "docker-rmi":                # #854 rung (d) — `path` is the image id
+        subprocess.run(["docker", "rmi", path],
+                       check=True, capture_output=True, text=True, timeout=120)
+        return nbytes
     if kind == "delete":
         _rm_path(path)
         return nbytes
@@ -541,8 +1112,27 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         _append_log(log_path, [line])
         return logs
     dim = status.get("dim", "bytes")
+    # #854: a per-rung SUMMARY line `disk-guard: NN% → drain rung=<name>
+    # freed=<bytes> → MM%`. To avoid a second recheck_fn() call per rung (which
+    # would exhaust a finite injected-recheck test fixture), the summary is
+    # DEFERRED: rung i's "after" pct is read at rung i+1's own start-recheck, and
+    # the LAST rung's after is a single recheck after the loop.
+    pending = None                          # (label, before_pct, freed_total)
+
+    def _emit_summary(summary, after_pct):
+        label, before_pct, freed_total = summary
+        verb = "WOULD-DRAIN" if dry_run else "DRAIN"
+        line = _log_line(now, verb, "rung=" + label, freed_total,
+                         "disk-guard: %d%% → drain rung=%s freed=%s → %d%%"
+                         % (before_pct, label, _human(freed_total), after_pct))
+        logs.append(line)
+        _append_log(log_path, [line])
+
     for _label, planner in planners:
         worst = recheck_fn()
+        if pending is not None:
+            _emit_summary(pending, worst)
+            pending = None
         if worst < TARGET_PCT:
             line = _log_line(now, "STOP", "-", 0,
                              "worst mount %d%% < target %d%% (dim=%s) — drain complete"
@@ -558,6 +1148,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             _append_log(log_path, [line])
             continue
         rung_lines = []
+        rung_freed = 0
+        rung_acted = 0
         for a in actions:
             acls = a.get("cls", _label)
             path = a.get("path", "-")
@@ -584,9 +1176,15 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 continue
             verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
             rung_lines.append(_log_line(now, verb, path, planned,
-                                        "freed~=%s %s" % (freed, reason or "")))
+                                        "freed~=%s %s" % (freed, a.get("why") or reason or "")))
+            rung_freed += (freed or 0)
+            rung_acted += 1
         logs.extend(rung_lines)
         _append_log(log_path, rung_lines)
+        if rung_acted > 0:                  # a rung that only skipped gets no summary
+            pending = (_label, worst, rung_freed)
+    if pending is not None:
+        _emit_summary(pending, recheck_fn())
     return logs
 
 
@@ -656,6 +1254,20 @@ def escalate(status, home, now, dry_run):
 # --------------------------------------------------------------------------- #
 # cadence + single-instance lock
 # --------------------------------------------------------------------------- #
+def _cadence_allows_drain(worst_pct, due, dry_run):
+    """#854 — SEVERITY BEATS CADENCE. At CRITICAL pressure (>= DISK_CRITICAL_PCT)
+    the drain runs EVERY poll (the cadence gate is BYPASSED) — a guard that only
+    LOGGED "cadence-gated" for 20+ min at 97 % while the box filled is exactly
+    the failure this fixes. In the 80-95 % band the cadence gate applies (the
+    du-heavy ladder runs at most once per MIN_DRAIN_INTERVAL_S). A dry-run
+    always proceeds (it deletes nothing)."""
+    if dry_run:
+        return True
+    if worst_pct >= DISK_CRITICAL_PCT:
+        return True
+    return due
+
+
 def _drain_due(home, now, min_interval_s=None):
     min_interval_s = MIN_DRAIN_INTERVAL_S if min_interval_s is None else min_interval_s
     p = _guard_dir(home) / LAST_DRAIN_NAME
@@ -718,7 +1330,8 @@ def _release_lock(fd):
 # Job 40 entry
 # --------------------------------------------------------------------------- #
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
-                   geteuid_fn=None, mounts=None, min_drain_interval_s=None):
+                   geteuid_fn=None, mounts=None, min_drain_interval_s=None,
+                   planners_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -757,10 +1370,14 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 status, home, now, dry_run=dry_run)
         except Exception as e:
             logs.append("disk-guard: root-finding error: %r" % e)
-    if not dry_run and not _drain_due(home, now, min_drain_interval_s):
-        logs.append("disk-guard: %d%% (%s) — drain cadence-gated this poll"
-                    % (status["worst_pct"], status["dim"]))
-        return logs
+    # #854: severity beats cadence — at CRITICAL pressure the drain runs EVERY
+    # poll; only the 80-95 % band is cadence-gated.
+    if not dry_run:
+        due = _drain_due(home, now, min_drain_interval_s)
+        if not _cadence_allows_drain(status["worst_pct"], due, dry_run=False):
+            logs.append("disk-guard: %d%% (%s) — drain cadence-gated this poll (< %d%% critical)"
+                        % (status["worst_pct"], status["dim"], DISK_CRITICAL_PCT))
+            return logs
     lock = _acquire_lock(home)
     if lock is None:
         logs.append("disk-guard: %d%% — another drain holds the lock, skipping"
@@ -770,7 +1387,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         logs.append("disk-guard: %d%% — lock uncreatable (disk full?), draining LOCKLESS"
                     % status["worst_pct"])
     try:
-        planners = _default_planners(home, now)
+        planners = (planners_fn or _default_planners)(home, now)
 
         def recheck():
             return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,

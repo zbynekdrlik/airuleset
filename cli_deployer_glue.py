@@ -287,9 +287,10 @@ try:
     seg = statusbar.tickets_segment(cwd)   # I/U/W/gk/skip; #512 folds the old
     if seg:                                # standalone `Q` ❓ badge into `U N`
         segs.append(seg)
-    # --- disk pressure: 'disk NN%' (#834) — hidden < 75%, yellow 75-89, red
-    # >= 90; reads the machine-local disk-guard cache watchdog Job 40 writes,
-    # hidden when that cache is stale (a dead watchdog never paints a frozen %).
+    # --- disk pressure: 'disk NN%' (#834, narrowed #854) — shown ONLY at >= 90%
+    # (red), hidden otherwise; reads the machine-local disk-guard cache watchdog
+    # Job 40 writes, hidden when that cache is stale (a dead watchdog never
+    # paints a frozen %).
     dsk = statusbar.disk_segment()
     if dsk:
         segs.append(dsk)

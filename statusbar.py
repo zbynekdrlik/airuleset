@@ -389,17 +389,19 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         _stream_split_sfx(cache), skip_sfx)
 
 
-DISK_SEGMENT_NOTICE_PCT = 75        # below this the segment is hidden
-DISK_SEGMENT_RED_PCT = 90           # red at/above this, yellow below
+DISK_SEGMENT_RED_PCT = 90           # shown (red) at/above this, HIDDEN below (#854)
 DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
 
 
 def disk_segment(home=None, now=None):
-    """The `disk NN%` footer segment (#834 req 1): hidden below 75 %, yellow
-    75-89 %, red >= 90 %, and HIDDEN when the disk-guard cache is stale
-    (> DISK_SEGMENT_STALE_S) so a dead watchdog never paints a frozen % forever.
-    Reads ONLY the machine-local cache the watchdog Job 40 writes; renders as no
-    segment on any error (never blocks, never touches the network)."""
+    """The `disk NN%` footer segment (#834 req 1, narrowed by #854): shown ONLY
+    at >= 90 % (`critical`, RED) and HIDDEN otherwise — the owner sees disk
+    pressure the moment it is a real problem, without the footer cluttering
+    while a box oscillates 80-90 % (gk). Also HIDDEN when the disk-guard cache is
+    stale (> DISK_SEGMENT_STALE_S) so a dead watchdog never paints a frozen %
+    forever. Reads ONLY the machine-local cache the watchdog Job 40 writes;
+    renders as no segment on any error (never blocks, never touches the
+    network)."""
     import time as _time
     now = _time.time() if now is None else now
     cache = _load(_claude_dir(home) / "disk-guard" / "status.json")
@@ -412,13 +414,13 @@ def disk_segment(home=None, now=None):
     if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
         return ""
     # Use the guard's own LEVEL from the cache (no threshold re-derivation /
-    # drift; #834 review 🔵). Fall back to the pct thresholds only if the cache
-    # predates the level field.
+    # drift; #834 review 🔵). Fall back to the pct threshold only if the cache
+    # predates the level field. #854: shown ONLY at critical (>= 90 %), red.
     level = cache.get("level")
-    if level == "ok" or (level is None and worst < DISK_SEGMENT_NOTICE_PCT):
+    shown = (level == "critical") if level is not None else (worst >= DISK_SEGMENT_RED_PCT)
+    if not shown:
         return ""
-    colour = 196 if (level == "critical" or (level is None and worst >= DISK_SEGMENT_RED_PCT)) else 214
-    return "\033[38;5;%dmdisk %d%%\033[0m" % (colour, int(worst))
+    return "\033[38;5;196mdisk %d%%\033[0m" % int(worst)
 
 
 def _fmt_tokens(n):

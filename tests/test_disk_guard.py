@@ -101,13 +101,13 @@ def test_disk_status_skips_unstattable_mount():
 # scope fence
 # --------------------------------------------------------------------------- #
 def test_reclaimable_classes_is_the_fence():
-    # The literal allowlist must NOT contain any root/cross-user/surface-only
-    # class (runner, docker-at-root, /var/log, other users' /tmp).
+    # The literal allowlist holds the own-home reclaimable classes (#834) plus
+    # the bounded cache-class reclaims #854 added (see test_854_* below). The
+    # bare/ambiguous root-level names stay OUT — the executor acts only on the
+    # specific bounded classes, never a raw "docker"/"runner"/"var-log".
     fence = dg.RECLAIMABLE_CLASSES
     assert "worktree" in fence and "cli-version" in fence and "uploads" in fence
     assert "transcript" in fence and "toolchain" in fence and "scratch" in fence
-    # docker is a box-wide/root op (prunes shared images) → deferred to #841,
-    # deliberately NOT in the fence (#834 review 🔴).
     for forbidden in ("runner", "var-log", "other-home", "gh-runner", "docker"):
         assert forbidden not in fence
 
@@ -588,3 +588,250 @@ def test_disk_segment_hidden_when_cache_stale(tmp_path):
 
 def test_disk_segment_absent_cache(tmp_path):
     assert statusbar.disk_segment(home=str(tmp_path), now=1.0) == ""
+
+
+# --------------------------------------------------------------------------- #
+# #854 — severity beats cadence
+# --------------------------------------------------------------------------- #
+def test_cadence_allows_drain_severity_beats_cadence():
+    # >= DISK_CRITICAL_PCT: drain EVERY poll even when the cadence gate says
+    # "not due"; below it, honour the cadence gate; dry-run always proceeds.
+    assert dg._cadence_allows_drain(dg.DISK_CRITICAL_PCT, due=False, dry_run=False) is True
+    assert dg._cadence_allows_drain(97, due=False, dry_run=False) is True
+    assert dg._cadence_allows_drain(85, due=False, dry_run=False) is False
+    assert dg._cadence_allows_drain(85, due=True, dry_run=False) is True
+    assert dg._cadence_allows_drain(50, due=False, dry_run=True) is True
+
+
+def _seed_last_drain(home, when):
+    d = home / ".claude" / "disk-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "last-drain").write_text("%f" % when)
+
+
+def test_run_disk_guard_critical_bypasses_cadence(tmp_path):
+    # 96 % with a last-drain 5 s ago (cadence NOT due) → the drain STILL runs,
+    # never a "cadence-gated" line. A no-op planner keeps the test safe (no real
+    # deletion, no real system path).
+    _seed_last_drain(tmp_path, 1000.0)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    logs = dg.run_disk_guard(
+        now=1005.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (96, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop)
+    assert not any("cadence-gated" in ln for ln in logs)
+    assert ran["drained"] is True
+
+
+def test_run_disk_guard_drain_band_stays_cadence_gated(tmp_path):
+    # 85 % with a recent last-drain → cadence-gated, the ladder does NOT run.
+    _seed_last_drain(tmp_path, 1000.0)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    logs = dg.run_disk_guard(
+        now=1005.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop)
+    assert any("cadence-gated" in ln for ln in logs)
+    assert ran["drained"] is False
+
+
+def test_execute_logs_per_rung_freed_summary(tmp_path):
+    # #854: every drain logs `disk-guard: NN% → drain rung=<name> freed=<b> → MM%`.
+    logp = tmp_path / "disk-guard.log"
+
+    def planner():
+        return [{"cls": "user-cache", "path": str(tmp_path / "c"), "bytes": 2048,
+                 "kind": "delete", "reason": None}]
+
+    seq = iter([97, 88])           # before rung: 97 ; after (next start): 88
+    dg.execute_drain(
+        status={"worst_pct": 97, "dim": "bytes", "level": "critical",
+                "mounts": [{"mount": "/", "worst_pct": 97}]},
+        home=str(tmp_path),
+        planners=[("user-cache", planner), ("noop", lambda: [])],
+        recheck_fn=lambda: next(seq),
+        do_action_fn=lambda a: a["bytes"],
+        geteuid_fn=lambda: 1000, log_path=str(logp), now=1.0)
+    text = logp.read_text()
+    assert "drain rung=user-cache" in text
+    assert "97%" in text and "88%" in text and "freed=" in text
+
+
+# --------------------------------------------------------------------------- #
+# #854 — the fence now INCLUDES the bounded cache-class reclaims
+# --------------------------------------------------------------------------- #
+def test_854_cache_classes_are_in_the_fence():
+    fence = dg.RECLAIMABLE_CLASSES
+    for c in ("apt-cache", "rotated-log", "runner-update", "docker-image",
+              "runner-checkout", "user-cache", "claude-version", "oneoff-venv"):
+        assert c in fence, c
+    # the bare/ambiguous root-level class names are still NOT in the fence — the
+    # executor acts only on the specific bounded classes above.
+    for forbidden in ("runner", "var-log", "other-home", "gh-runner", "docker"):
+        assert forbidden not in fence
+
+
+# --------------------------------------------------------------------------- #
+# #854 — new cache-class planners (pure selection on fake trees / fake seams)
+# --------------------------------------------------------------------------- #
+def test_apt_cache_selects_when_nonempty(tmp_path):
+    arch = tmp_path / "archives"
+    arch.mkdir()
+    (arch / "pkg.deb").write_bytes(b"x" * 4096)
+    rows = dg.discover_apt_cache(archives_dir=str(arch))
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "apt-clean" and rows[0]["cls"] == "apt-cache"
+    assert rows[0]["bytes"] > 0
+    # no dir / empty → nothing
+    assert dg.discover_apt_cache(archives_dir=str(tmp_path / "absent")) == []
+
+
+def test_rotated_logs_select_rotations_never_live(tmp_path):
+    vl = tmp_path / "var-log"
+    vl.mkdir()
+    now = 1_000_000_000.0
+    for name in ("btmp.1", "syslog.1", "auth.log.2.gz"):
+        p = vl / name
+        p.write_bytes(b"x" * 100)
+        os.utime(p, (now - 5 * 86400, now - 5 * 86400))       # 5d old
+    live = vl / "syslog"           # LIVE log — never a rotation
+    live.write_bytes(b"y" * 100)
+    fresh = vl / "messages.1"      # rotation but too recent
+    fresh.write_bytes(b"z" * 100)
+    os.utime(fresh, (now - 3600, now - 3600))
+    (vl / "journal").mkdir()       # journald owns this — skipped
+    rows = dg.discover_rotated_logs(varlog_dir=str(vl), now=now)
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert set(by) == {"btmp.1", "syslog.1", "auth.log.2.gz", "messages.1"}
+    assert by["btmp.1"]["reason"] is None
+    assert by["auth.log.2.gz"]["reason"] is None
+    assert by["messages.1"]["reason"] is not None        # too recent → kept
+    assert "syslog" not in by                            # live log never selected
+
+
+def test_runner_update_selects_update_and_temp(tmp_path):
+    root = tmp_path / "gh-runner"
+    upd = root / "actions-runner-1" / "_work" / "_update"
+    tmp = root / "actions-runner-1" / "_work" / "_temp"
+    upd.mkdir(parents=True)
+    tmp.mkdir(parents=True)
+    (upd / "f").write_bytes(b"x" * 50)
+    rows = dg.discover_runner_update(runner_root=str(root))
+    kinds = {os.path.basename(r["path"]): r["kind"] for r in rows if r.get("kind")}
+    assert kinds.get("_update") == "delete" and kinds.get("_temp") == "delete"
+    assert dg.discover_runner_update(runner_root=str(tmp_path / "absent")) == []
+
+
+def test_runner_checkouts_gated_on_runner_worker(tmp_path):
+    root = tmp_path / "gh-runner"
+    work = root / "actions-runner-1" / "_work"
+    (work / "odoo-erp").mkdir(parents=True)
+    (work / "_actions").mkdir(parents=True)        # reserved, never a checkout
+    now = 1_000_000_000.0
+    os.utime(work / "odoo-erp", (now - 10 * 86400, now - 10 * 86400))
+    # a live Runner.Worker → the whole rung skips
+    rows_live = dg.discover_stale_runner_checkouts(
+        runner_root=str(root), now=now, pgrep_fn=lambda _re: "999 Runner.Worker")
+    assert rows_live and all(r["kind"] == "skip" for r in rows_live)
+    # no live worker → the stale checkout is selected; reserved dir untouched
+    rows = dg.discover_stale_runner_checkouts(
+        runner_root=str(root), now=now, pgrep_fn=lambda _re: "")
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["odoo-erp"]["reason"] is None
+    assert "_actions" not in by
+
+
+def test_docker_selects_untagged_and_old_never_inuse(tmp_path):
+    now = 1_000_000_000.0
+    images = [
+        {"id": "aaa", "repo": "<none>", "tag": "<none>", "size": 3_000_000_000,
+         "created_ts": now - 60 * 86400},                       # untagged → rmi
+        {"id": "bbb", "repo": "postgres", "tag": "16", "size": 600_000_000,
+         "created_ts": now - 2 * 86400},                        # tagged + recent → keep
+        {"id": "ccc", "repo": "old", "tag": "v1", "size": 400_000_000,
+         "created_ts": now - 30 * 86400},                       # tagged but >14d → rmi
+        {"id": "ddd", "repo": "used", "tag": "now", "size": 100_000_000,
+         "created_ts": now - 40 * 86400},                       # in-use → keep
+    ]
+    rows = dg.discover_docker_images(
+        now=now, images_fn=lambda: images, ps_fn=lambda: {"used:now"},
+        pgrep_fn=lambda _re: "")
+    by = {r["path"]: r for r in rows}
+    assert by["aaa"]["kind"] == "docker-rmi"
+    assert by["bbb"]["kind"] == "skip"
+    assert by["ccc"]["kind"] == "docker-rmi"
+    assert by["ddd"]["kind"] == "skip"          # referenced by a container
+    # a live Runner.Worker skips the whole rung
+    rows_live = dg.discover_docker_images(
+        now=now, images_fn=lambda: images, ps_fn=lambda: set(),
+        pgrep_fn=lambda _re: "1 Runner.Worker")
+    assert rows_live and all(r["kind"] == "skip" for r in rows_live)
+
+
+def test_user_cache_selects_stale_only(tmp_path):
+    cache = tmp_path / ".cache"
+    (cache / "pip").mkdir(parents=True)
+    (cache / "fresh").mkdir(parents=True)
+    now = 1_000_000_000.0
+    os.utime(cache / "pip", (now - 60 * 86400, now - 60 * 86400))
+    os.utime(cache / "fresh", (now - 5 * 86400, now - 5 * 86400))
+    rows = dg.discover_stale_user_cache(home=str(tmp_path), now=now)
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["pip"]["reason"] is None
+    assert by["fresh"]["reason"] is not None
+
+
+def test_claude_versions_keep_running_delete_rest_failsafe(tmp_path):
+    vdir = tmp_path / ".local" / "share" / "claude" / "versions"
+    for v in ("2.1.252", "2.1.257", "2.1.258"):
+        (vdir / v).mkdir(parents=True)
+    rows = dg.discover_stale_claude_versions(
+        home=str(tmp_path), running_fn=lambda: "2.1.258")
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["2.1.258"]["kind"] == "skip"          # running → kept
+    assert by["2.1.252"]["kind"] == "delete"
+    assert by["2.1.257"]["kind"] == "delete"
+    # FAIL-SAFE: running unknown → keep everything
+    rows_fs = dg.discover_stale_claude_versions(
+        home=str(tmp_path), running_fn=lambda: None)
+    assert rows_fs and all(r["kind"] == "skip" for r in rows_fs)
+
+
+def test_oneoff_venvs_select_numbered_never_stable(tmp_path):
+    venvs = tmp_path / ".venvs"
+    venvs.mkdir()
+    now = 1_000_000_000.0
+    for name in ("lint-3907", "ruff31522", "mcp-4574"):
+        d = venvs / name
+        d.mkdir()
+        os.utime(d, (now - 10 * 86400, now - 10 * 86400))
+    stable = venvs / "airuleset-lint"       # stable name → never matched
+    stable.mkdir()
+    os.utime(stable, (now - 10 * 86400, now - 10 * 86400))
+    fresh = venvs / "lint-99"               # numbered but too recent → kept
+    fresh.mkdir()
+    os.utime(fresh, (now - 3600, now - 3600))
+    tmpd = tmp_path / "tmp"
+    tmpd.mkdir()
+    (tmpd / "lintvenv-r5").mkdir()
+    os.utime(tmpd / "lintvenv-r5", (now - 10 * 86400, now - 10 * 86400))
+    rows = dg.discover_oneoff_venvs(home=str(tmp_path), now=now, tmp_dir=str(tmpd))
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert set(by) == {"lint-3907", "ruff31522", "mcp-4574", "lint-99", "lintvenv-r5"}
+    assert "airuleset-lint" not in by
+    assert by["lint-3907"]["reason"] is None
+    assert by["lint-99"]["reason"] is not None      # too recent → kept
