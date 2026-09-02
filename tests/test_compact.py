@@ -631,12 +631,11 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
 
-    def test_605_live_tasks_log_names_the_lane(self):
-        # #605 thread 3: the SKIP live-tasks decision log must NAME the live
-        # lane(s) so the veto is never blind-diagnosed again (the incident was
-        # diagnosed twice from a bare `SKIP live-tasks sid=... cwd=...`). A
-        # genuine fresh live lane → skip:live-tasks AND the log carries
-        # `lanes=<agent-id>(<state>)`.
+    def test_848_a_live_lane_no_longer_vetoes_and_delivers(self):
+        # #848 FLIP (was test_605_live_tasks_log_names_the_lane): the live-tasks
+        # veto is REMOVED — a genuine fresh live lane no longer blocks the
+        # boundary compact, which delivers as a PLAIN `sent` (no `skip:live-tasks`
+        # decision line at all).
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID)
@@ -646,10 +645,9 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
                                        now=now)
-        self.assertEqual(word, "skip:live-tasks")
-        log_text = self.syncp.read_text()
-        self.assertIn("lanes=", log_text)
-        self.assertIn("ghost123", log_text)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
+        self.assertNotIn("skip:live-tasks", self.syncp.read_text())
 
     def test_605_refreshed_request_with_stale_waiting_row_delivers_not_expired(self):
         # #605 threads 1+2 together: the incident's self-callback request had its
@@ -670,7 +668,9 @@ class TestDeliverCompact(unittest.TestCase):
                                        request_ts=now - 10)
         self.assertEqual(word, "sent")
 
-    def test_live_bg_task_transcript_signal_skips(self):
+    def test_848_live_bg_task_transcript_signal_no_longer_skips(self):
+        # #848 FLIP (was test_live_bg_task_transcript_signal_skips): a live worker
+        # lane no longer vetoes — the boundary compact delivers.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         _write_subagent_transcript(proj, self.CWD, self.SID, mtime=time.time())
@@ -678,8 +678,8 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
                                        now=time.time())
-        self.assertEqual(word, "skip:live-tasks")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
 
     def test_stale_subagent_transcript_does_not_block(self):
         proj = self._dir()
@@ -715,12 +715,10 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
 
-    def test_587_finished_lane_beside_a_running_lane_still_vetoes(self):
-        # #587 no-false-send regression: a FINISHED lane must not mask a genuine
-        # RUNNING sibling. With one finished + one still-mid-work lane (the bare
-        # `{"type":"assistant"}` synthetic that reads `live`), compact still
-        # vetoes -- the running lane is real in-flight work compaction would
-        # orphan. The finish-immediate reclassification never over-reaches.
+    def test_848_finished_lane_beside_a_running_lane_delivers(self):
+        # #848 FLIP (was test_587_finished_lane_beside_a_running_lane_still_vetoes):
+        # a genuine RUNNING sibling lane no longer vetoes — the boundary compact
+        # delivers over it (the residual is backed by the #844 LANE-RETURN net).
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID)
@@ -732,14 +730,13 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
                                        now=now)
-        self.assertEqual(word, "skip:live-tasks")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
 
-    def test_587_finished_lane_beside_a_wedged_lane_still_vetoes(self):
-        # #587 x #565: a wedged (unrecovered-api-error) lane pending job-1
-        # auto-resume is recoverable in-flight work the supervisor still owns, so
-        # it must keep vetoing compact even when a sibling lane is finished. The
-        # #565 direction (wedged stays live for compact) is preserved.
+    def test_848_wedged_lane_beside_a_finished_lane_delivers(self):
+        # #848 FLIP (was test_587_finished_lane_beside_a_wedged_lane_still_vetoes):
+        # a wedged (unrecovered-api-error) lane no longer vetoes the boundary
+        # compact either — it delivers.
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID)
@@ -751,14 +748,11 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
                                        now=now)
-        self.assertEqual(word, "skip:live-tasks")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
 
-    def test_587_fresh_settling_worker_still_vetoes_until_it_settles(self):
-        # #587-review: a fresh worker whose last turn is a text reply with a
-        # NON-terminal (None) stop_reason could be a text block streamed just
-        # before a large tool_use (~14s gap) — it must keep vetoing compact until
-        # it has settled, so a running worker mid-large-edit is never orphaned.
+    def test_848_fresh_settling_worker_no_longer_vetoes(self):
+        # #848 FLIP (was test_587_fresh_settling_worker_still_vetoes_until_it_settles):
+        # a fresh not-yet-settled worker no longer vetoes the boundary compact.
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID)
@@ -768,8 +762,7 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
                                        now=now)
-        self.assertEqual(word, "skip:live-tasks")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
 
     def test_587_settled_worker_no_longer_blocks_compact(self):
         # the same settling worker, aged past FINISH_SETTLE_S (any pending tool_use
@@ -786,16 +779,13 @@ class TestDeliverCompact(unittest.TestCase):
                                        now=now)
         self.assertEqual(word, "sent")
 
-    def test_565_saturated_supervisor_live_lanes_not_compacted_on_self_callback(self):
-        # #565 RED -- the reported live incident: a per-ticket
-        # `compact-request --self` on a saturated supervisor with ~10 live
-        # worker lanes typed /compact and killed them all. The subagent
-        # transcript is >120s old (a lane inside a long CI poll), the pane
-        # shows live agent-strip rows but NO "Waiting for N background agents"
-        # row, the last turn carries `## ✅ Work Complete` (a per-ticket
-        # boundary for ONE lane), and origin is self-callback. It MUST skip:
-        # the other lanes are live, unrelated work. Pre-#565 code SENDs (the
-        # 120s subagent_active window reads the 300s-old lane as dead).
+    def test_848_saturated_supervisor_live_lanes_compacted_on_self_callback(self):
+        # #848 FLIP (was test_565_saturated_supervisor_live_lanes_not_compacted...):
+        # a per-ticket `compact-request --self` on a saturated supervisor with
+        # live worker lanes now DELIVERS — the STEP-0 experiment proved the
+        # lanes are not killed, their commits are durable, and their completion
+        # notifications survive. This is the exact incident #848 corrects: the
+        # boundary compact that was held undelivered forever, growing the main.
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
@@ -805,13 +795,11 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp, now=now)
-        self.assertEqual(word, "skip:live-tasks")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
 
-    # -- #565: a `## ✅ Work Complete` heading NO LONGER exempts condition
-    #    (b)'s live-task signals -- one ticket done never means the session
-    #    has no live sibling lanes (the exemption stays only for condition
-    #    (c)'s ⏳-marker veto) -- #
+    # -- #848: a `## ✅ Work Complete` heading + live sibling lanes NO LONGER
+    #    veto the boundary compact (the live-tasks veto is removed) -- #
 
     def test_605_stale_pane_waiting_row_with_work_complete_heading_still_sends(self):
         # #605 FLIP (was `..._no_longer_exempts_the_pane_text_live_task_signal`,
@@ -830,9 +818,10 @@ class TestDeliverCompact(unittest.TestCase):
                                        delivered_path=self.delp)
         self.assertEqual(word, "sent")
 
-    def test_heading_plus_tail_no_longer_exempts_the_subagent_transcript_live_task_signal(self):
-        # #565 (inverts the pre-#565 exemption): a fresh, genuinely-live
-        # subagent lane is no longer discarded by a Work Complete heading.
+    def test_848_heading_plus_a_fresh_live_lane_delivers(self):
+        # #848 FLIP (was test_heading_plus_tail_no_longer_exempts...): a fresh,
+        # genuinely-live subagent lane beside a Work Complete heading no longer
+        # vetoes — the boundary compact delivers.
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
@@ -841,7 +830,7 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp, now=now)
-        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(word, "sent")
 
     def test_605_stale_pane_waiting_row_at_the_raced_recheck_no_longer_blocks(self):
         # #605 FLIP (was `..._veto_at_the_raced_recheck_no_longer_exempted`): the
@@ -2009,40 +1998,27 @@ class TestCompactHoldExtend727(unittest.TestCase):
             delivered_path=self.delp)
         return logs, tmux
 
-    def test_727_live_tasks_hold_carries_claim_across_a_long_batch(self):
-        # The live incident (2026-08-26, varka 1->2 boundary): a batch ran
-        # >30 min, the live-tasks veto CORRECTLY held the boundary claim
-        # undelivered (no /compact while a sibling lane is live -- CC #29193),
-        # and the 30-min age cap expired the claim OUT FROM UNDER the still-
-        # running batch, so the boundary never got its /compact. Under
-        # hold-extend the sweep REFRESHES `ts` on every structured live-tasks
-        # veto, so the claim survives the batch and delivers once the lanes
-        # drain. `_live_bg_tasks_detail` judges lane freshness against the REAL
-        # wall clock, so the fixture uses real-time mtimes for the lane while
-        # the request/sweep timeline is synthetic (T).
+    def test_848_a_live_lane_delivers_immediately_no_hold(self):
+        # #848 FLIP (was test_727_live_tasks_hold_carries_claim_across_a_long_batch):
+        # the live-tasks veto is REMOVED, so a fresh live worker lane no longer
+        # HOLDS the boundary claim — the very first sweep DELIVERS the /compact
+        # over the live lane (the batch no longer waits to drain).
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         real_now = time.time()
         T = 1_000_000.0
         compact.record_compact_request(self.SID, self.CWD, now=T,
                                        path=self.reqp, origin="self-callback")
-        # T+29min: a FRESH live worker lane (mtime = real now) -> skip:live-tasks.
+        # A FRESH live worker lane (mtime = real now) — no longer a veto.
         _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now, agent_id="ghost727")
-        logs1, _ = self._sweep(proj, T + 29 * 60)
-        self.assertTrue(any("skip:live-tasks" in ln for ln in logs1),
-                        "sweep 1 must veto on the fresh lane: %r" % logs1)
-        # T+45min: lanes DRAINED (lane transcript backdated stale) + idle bare
-        # pane. WITHOUT hold-extend `ts` is still T -> 45min > 30min cap ->
-        # `expired`, the boundary is lost. WITH hold-extend sweep 1 refreshed
-        # `ts` to T+29min -> 16min < cap -> the held claim DELIVERS.
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now - 20 * 60, agent_id="ghost727")
-        logs2, tmux2 = self._sweep(proj, T + 45 * 60)
-        self.assertIn("/compact", tmux2.typed_texts(),
-                      "the held claim must deliver once lanes drain: %r" % logs2)
-        self.assertTrue(any("-> sent" in ln for ln in logs2),
-                        "sweep 2 must log a SEND: %r" % logs2)
+                                   mtime=real_now, agent_id="ghost848")
+        logs, tmux = self._sweep(proj, T + 29 * 60)
+        self.assertIn("/compact", tmux.typed_texts(),
+                      "a live lane must deliver immediately (#848): %r" % logs)
+        self.assertTrue(any("-> sent" in ln for ln in logs),
+                        "the sweep must log a SEND: %r" % logs)
+        self.assertFalse(any("skip:live-tasks" in ln for ln in logs),
+                         "the live-tasks veto is gone: %r" % logs)
         self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
 
     def test_727_stale_lanes_do_not_extend_the_hold(self):
@@ -2083,18 +2059,17 @@ class TestCompactHoldExtend727(unittest.TestCase):
         self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
         self.assertNotIn("/compact", tmux2.typed_texts())
 
-    def test_727_hold_preserves_cwd_origin_and_bts(self):
-        # A hold-extend refresh advances ONLY `ts`; `cwd`/`origin`/`bts` are the
-        # record's own values (bts = the ORIGINAL boundary, for the HOLD log).
+    def test_741_hold_preserves_cwd_origin_and_bts(self):
+        # A #741 hold-extend refresh (a busy pane holding the boundary) advances
+        # ONLY `ts`; `cwd`/`origin`/`bts` are the record's own values (bts = the
+        # ORIGINAL boundary, for the HOLD log). #848: the hold is now driven by a
+        # busy pane (skip:busy), not a live lane (that veto is removed).
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
-        real_now = time.time()
         T = 1_000_000.0
         compact.record_compact_request(self.SID, self.CWD, now=T,
                                        path=self.reqp, origin="self-callback")
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now, agent_id="ghost727")
-        self._sweep(proj, T + 29 * 60)
+        self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
         entry = compact.load_compact_requests(self.reqp)[self.SID]
         self.assertEqual(entry["ts"], int(T + 29 * 60), "ts refreshed to now")
         self.assertEqual(entry["bts"], int(T), "bts (original boundary) unchanged")
@@ -2176,20 +2151,18 @@ class TestCompactHoldExtend727(unittest.TestCase):
         self.assertEqual(compact.load_compact_requests(self.reqp), {},
                          "the corrupt entry is cleared, never re-skipped forever")
 
-    def test_727_hold_log_line_carries_boundary_held(self):
+    def test_741_hold_log_line_carries_boundary_held(self):
         # The HOLD decision line names the word AND how long the boundary has
         # been held (now - bts), so triage reads the hold from the journal.
+        # #848: driven by a busy pane (skip:busy), not the removed live-tasks veto.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
-        real_now = time.time()
         T = 1_000_000.0
         compact.record_compact_request(self.SID, self.CWD, now=T,
                                        path=self.reqp, origin="self-callback")
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now, agent_id="ghost727")
-        logs, _ = self._sweep(proj, T + 29 * 60)
+        logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
         self.assertTrue(
-            any("HOLD" in ln and "skip:live-tasks" in ln
+            any("HOLD" in ln and "skip:busy" in ln
                 and "boundary held %ds" % (29 * 60) in ln for ln in logs),
             "HOLD line must carry the word + boundary-held seconds: %r" % logs)
 
@@ -2215,41 +2188,37 @@ class TestCompactHoldExtend727(unittest.TestCase):
                                                            path=self.reqp))
         self.assertNotIn("no-such-sid", compact.load_compact_requests(self.reqp))
 
-    def test_727_legacy_entry_without_bts_holds_with_a_question_mark(self):
+    def test_741_legacy_entry_without_bts_holds_with_a_question_mark(self):
         # A request recorded by PRE-#727 code has no `bts`; the sweep must still
         # HOLD (refresh ts) and report "boundary held ?s" -- never crash on the
-        # missing key (`_safe_age(now, None)` -> None -> "?").
+        # missing key (`_safe_age(now, None)` -> None -> "?"). #848: the hold is
+        # driven by a busy pane, not the removed live-tasks veto.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
-        real_now = time.time()
         T = 1_000_000.0
         # Seed a legacy entry directly on disk (NO `bts` key).
         self.reqp.write_text(json.dumps({self.SID: {
             "cwd": self.CWD, "ts": int(T), "origin": "self-callback"}}))
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now, agent_id="ghost727")
-        logs, _ = self._sweep(proj, T + 29 * 60)
+        logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
         self.assertTrue(any("HOLD" in ln and "boundary held ?s" in ln
                             for ln in logs),
                         "a bts-less entry must HOLD with ?s: %r" % logs)
         self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
                          int(T + 29 * 60), "ts still refreshed for a legacy entry")
 
-    def test_727_hold_fail_leaves_the_claim_pending_without_refresh(self):
+    def test_741_hold_fail_leaves_the_claim_pending_without_refresh(self):
         # If the ts-refresh WRITE fails (or the entry vanished mid-sweep),
         # `_touch_compact_request_ts` returns False -> the sweep logs HOLD-FAIL,
         # does NOT refresh `ts`, and LEAVES the request pending for the next sweep.
+        # #848: the hold is driven by a busy pane, not the removed live-tasks veto.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
-        real_now = time.time()
         T = 1_000_000.0
         compact.record_compact_request(self.SID, self.CWD, now=T,
                                        path=self.reqp, origin="self-callback")
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now, agent_id="ghost727")
         with m.patch.object(compact, "_touch_compact_request_ts",
                             return_value=False):
-            logs, _ = self._sweep(proj, T + 29 * 60)
+            logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
         self.assertTrue(any("HOLD-FAIL" in ln for ln in logs),
                         "a failed refresh must log HOLD-FAIL: %r" % logs)
         entry = compact.load_compact_requests(self.reqp)[self.SID]
@@ -2992,32 +2961,31 @@ class TestCompactBgBashVeto599(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def test_live_bg_bash_skips(self):
-        # point 5b: a live run_in_background Bash job (no completion) vetoes,
-        # with its OWN distinct reason, so a `/compact` never orphans it.
+    def test_848_live_bg_bash_no_longer_skips(self):
+        # #848 FLIP (was test_live_bg_bash_skips): a live run_in_background Bash
+        # job no longer vetoes the boundary compact — it delivers (the residual
+        # orphaned-notification case is backed by the #844 LANE-RETURN net).
         proj = self._dir()
         _write_bg_bash_transcript(proj, self.CWD, self.SID, live=True)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:live-bg-bash")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
 
-    def test_605_live_bg_bash_log_names_the_job(self):
-        # #605 thread 3: the SKIP live-bg-bash decision log must NAME the live
-        # bgid so it is never blind-diagnosed. A live bg job → skip:live-bg-bash
-        # AND the log carries `jobs=<bgid>` (the transcript fixture's bgid "bg1").
+    def test_848_live_bg_bash_delivers_no_veto_log(self):
+        # #848 FLIP (was test_605_live_bg_bash_log_names_the_job): with the veto
+        # removed, a live bg job delivers and there is no `skip:live-bg-bash`
+        # decision line at all.
         proj = self._dir()
         _write_bg_bash_transcript(proj, self.CWD, self.SID, live=True)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:live-bg-bash")
-        log_text = self.syncp.read_text()
-        self.assertIn("jobs=", log_text)
-        self.assertIn("bg1", log_text)
+        self.assertEqual(word, "sent")
+        self.assertNotIn("skip:live-bg-bash", self.syncp.read_text())
 
     def test_completed_bg_bash_delivers(self):
         # a bg job whose completion notification arrived is NOT live → the
@@ -3030,10 +2998,10 @@ class TestCompactBgBashVeto599(unittest.TestCase):
                                        delivered_path=self.delp)
         self.assertEqual(word, "sent")
 
-    def test_live_bg_bash_beats_the_dropped_working_marker(self):
-        # combined: the last turn is `⏳` (no longer vetoes) BUT a live bg-bash
-        # job is present → skip:live-bg-bash (NOT skip:not-a-boundary). Proves
-        # the `⏳` veto is gone AND the bg-bash veto is what protects the job.
+    def test_848_working_marker_plus_live_bg_bash_delivers(self):
+        # #848 FLIP (was test_live_bg_bash_beats_the_dropped_working_marker):
+        # the last turn is `⏳` (never vetoed since #599) AND a live bg-bash job
+        # is present — NEITHER vetoes now, so the boundary compact delivers.
         proj = self._dir()
         _write_bg_bash_transcript(proj, self.CWD, self.SID,
                                   marker_text="⏳ WORKING: fleet upgrade", live=True)
@@ -3041,7 +3009,7 @@ class TestCompactBgBashVeto599(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:live-bg-bash")
+        self.assertEqual(word, "sent")
 
     def test_boundary_recorded_then_working_delivers_as_standing_claim(self):
         # point 5a: a boundary request recorded a while ago (ts within the cap)
@@ -3095,14 +3063,17 @@ class TestCompactBgBashVeto599(unittest.TestCase):
                                        delivered_path=self.delp)
         self.assertEqual(word, "sent")
 
-    def test_env_tunable_window_never_disables_the_veto(self):
-        # a malformed/disabling env value falls back to the constant, never off.
-        with m.patch.dict(os.environ,
-                          {"AIRULESET_COMPACT_BG_BASH_TAIL_BYTES": "0",
-                           "AIRULESET_COMPACT_BG_BASH_MAX_ENTRIES": "-5"}):
-            tb, me2 = compact._compact_bg_bash_window()
-        self.assertEqual(tb, compact.COMPACT_BG_BASH_TAIL_BYTES)
-        self.assertEqual(me2, compact.COMPACT_BG_BASH_MAX_ENTRIES)
+    def test_848_bg_bash_compact_veto_machinery_is_retired(self):
+        # #848 FLIP (was test_env_tunable_window_never_disables_the_veto): the
+        # compact-only bg-bash veto helper + its window constants are DELETED
+        # with the veto. The underlying `watchdog.session_live_bg_bash_ids`
+        # primitive is RETAINED (other readers still use it — this class's own
+        # primitive tests above still exercise it).
+        for name in ("_compact_live_bg_bash", "_compact_bg_bash_window",
+                     "COMPACT_BG_BASH_TAIL_BYTES", "COMPACT_BG_BASH_MAX_ENTRIES"):
+            self.assertFalse(hasattr(compact, name), "#848 removes %s" % name)
+        self.assertTrue(hasattr(wd, "session_live_bg_bash_ids"),
+                        "the underlying primitive is retained")
 
 
 # --------------------------------------------------------------------------- #

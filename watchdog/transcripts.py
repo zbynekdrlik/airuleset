@@ -1496,10 +1496,10 @@ def live_bg_bash_ids(entries):
     """PURE — the LIST of bgids in `entries` that actually LAUNCHED and have
     NEITHER a `<task-notification>` COMPLETION (via their toolu id) NOR a
     confirmed TaskStop KILL (via their bgid). The id-returning sibling of
-    `session_live_bg_bash` (which is `bool(...)` of this), so the compact
-    ``SKIP live-bg-bash`` decision log (#605) can NAME the exact live job(s)
-    instead of a blind veto. Same collection/pairing semantics as
-    `session_live_bg_bash` (single source of truth — no drift). Never raises."""
+    `session_live_bg_bash` (which is `bool(...)` of this). (#848 retired the
+    compact bg-bash veto that consumed this; the reader is retained for other
+    consumers.) Same collection/pairing semantics as `session_live_bg_bash`
+    (single source of truth — no drift). Never raises."""
     launched = {}          # bgid -> toolu (a bg job that ACTUALLY started)
     notified = set()       # toolu ids that got a completion notification
     killed = set()         # bgids terminated by a confirmed TaskStop
@@ -1562,8 +1562,10 @@ def session_has_live_bg_bash(path, tail_bytes=1_000_000, max_entries=200):
     rare, RECOVERABLE (`ci-monitoring.md`'s established re-derive-from-the-
     durable-resource path), and still a net improvement over no veto (this
     covers ~98.8% of bg-job lifetimes). Widening the window trades this against
-    MORE over-veto on abandoned jobs (the 0-SEND direction), so it stays TIGHT;
-    both bounds are env-tunable (`_compact_bg_bash_window`) if a stream needs it.
+    MORE over-veto on abandoned jobs (the 0-SEND direction), so it stays TIGHT.
+    (#848 removed the compact-delivery bg-bash veto and its `_compact_bg_bash_window`
+    env-tuner; this reader is retained for other consumers with the fixed
+    default bounds below.)
 
     Fail-safe: an unreadable transcript → [] → False (never a guessed veto).
     Never raises."""
