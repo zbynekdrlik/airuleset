@@ -124,7 +124,7 @@ def _isolate_gh_app_token_dir():
     deliberately NEVER created — `.is_dir()` on a genuinely missing path is
     exactly "not an App-token box", the correct default for every test that
     never mentions the mechanism. A test that DOES want to exercise the
-    App-token branch (`tests/test_authority_profiles.py`'s own
+    App-token branch (`tests/test_authority_slice_quals.py`'s own
     `TestSliceQualsHandlesAppTokenBoxes`) still wins with its own,
     innermost `mock.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": ...})` —
     identical composability to `_isolate_draft_rescue` above."""
