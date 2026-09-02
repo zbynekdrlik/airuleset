@@ -669,6 +669,77 @@ class TestReconcileRestartCarriesUserBusEnv(unittest.TestCase):
         self.assertIn("DBUS_SESSION_BUS_ADDRESS", env)
 
 
+# A david-shaped subdev config (subdev lane uuid, --user unit) WITHOUT the drop
+# ingress — the shape a webterm re-provision leaves behind.
+DAVID_CONFIG_NO_DROP = (
+    "tunnel: 1564fe31-a95f-4053-93d4-baff2b8a6e97\n"
+    "credentials-file: /home/david1/.cloudflared/x.json\n\n"
+    "ingress:\n"
+    "  - hostname: david.newlevel.media\n"
+    "    service: http://127.0.0.1:8081\n"
+    "  - service: http_status:404\n"
+)
+
+
+class TestReconcileSiblingAccount838(unittest.TestCase):
+    """#838: on subdev, DROP_LANES is nodename-keyed, so BOTH the gateway account
+    david1 (which OWNS the tunnel config + --user unit) AND a SIBLING account
+    david2 (marker seeded per the #786 runbook, but no own ~/.cloudflared/config.yml)
+    resolve to the SAME subdev lane. Before this fix, the sibling's absent config
+    raised OSError → reconcile returned False → cmd_install latched install_failed
+    → `DEPLOY FAILED david2@subdev: rc=1` on EVERY release push. A sibling account
+    of a shared drop tunnel has nothing to re-assert (the gateway account's own
+    install pass heals the ingress), so it must be a benign no-op — while #826's
+    loud failure STAYS on the account that actually OWNS the tunnel (david1)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+        self._orig = dg.DROP_LANES["subdev"].tunnel_config
+        dg.DROP_LANES["subdev"].tunnel_config = Path(self.cfg)
+        # The lane went LIVE (marker present) — the sibling's marker is seeded
+        # per the #786 runbook so its secret request/upload uses the public lane.
+        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+
+    def tearDown(self):
+        dg.DROP_LANES["subdev"].tunnel_config = self._orig
+
+    def _run_recorder(self):
+        calls = []
+
+        def r(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return calls, r
+
+    def test_sibling_account_missing_config_is_a_benign_noop(self):
+        # david2: marker present, own config.yml ABSENT (it lives under david1).
+        # self.cfg was never written → read_text would raise OSError. The sibling
+        # divert must return True BEFORE any read/restart is attempted.
+        from unittest import mock
+        calls, r = self._run_recorder()
+        with mock.patch.object(dg, "_current_username", return_value="david2"):
+            self.assertTrue(dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker))
+        self.assertEqual(calls, [], "a sibling account attempts no restart")
+
+    def test_sibling_account_never_touches_a_stale_config(self):
+        # Even a STALE own config.yml (a home-dir-migration leftover) is NOT the
+        # live tunnel's config — a sibling never reads/rewrites/restarts it.
+        from unittest import mock
+        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        before = Path(self.cfg).read_text(encoding="utf-8")
+        calls, r = self._run_recorder()
+        with mock.patch.object(dg, "_current_username", return_value="david2"):
+            self.assertTrue(dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker))
+        self.assertEqual(calls, [], "a sibling account attempts no restart")
+        self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before,
+                         "a sibling account never rewrites the stale config")
+
+
 class TestSecretShowLeadingFlagName(unittest.TestCase):
     """#664 review: `secret show --public NAME` (flag before name) must recover
     the NAME that argparse's REMAINDER swallowed, mirroring `secret request`."""
