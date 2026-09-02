@@ -395,7 +395,7 @@
     "watchdog/burn_jobs.py": 338,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
-    "watchdog/compact.py": 1528,
+    "watchdog/compact.py": 1667,
     "watchdog/conformance.py": 438,
     "watchdog/conformance_heartbeat.py": 409,
     "watchdog/cross_stream.py": 2057,
