@@ -1533,5 +1533,130 @@ class TestRepoArgPoison824(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestReviewFindings824(TestCase):
+    """#824 adversarial-review findings (salvaged Fable review #1). The base #824
+    implementation (`_strip_value_flags` + stripped-copy extraction/counting) opened
+    NEW wrong-ALLOW regressions the review constructed; each fixture below RED-locks
+    one. All run under a REDUCED-authority cwd with a SELF-vs-FOREIGN author fixture
+    so a wrong target read is a wrong-ALLOW today.
+
+      A-1: the unquoted value arm `[^[:space:]]+` spans shell operators, ERASING a
+           real top-level close from the stripped copy → N_CLOSE under-counts.
+      A-2: the SINGLE-residue escaped-quote poison (no real `-R`, just the residue) —
+           the ≥2-`-R` leg only fires with a SECOND real `-R`, so it escaped (the
+           code comment falsely claimed it caught it).
+      A-3: a GLUED short-flag value (`-c'…'`) is not stripped → its `-R` poisons REPO_ARG.
+      C-1: a reversed `gh SELF && \\gh FOREIGN` pair — the `\\gh` close is invisible to
+           the narrow N_CLOSE + narrow ISSUE_NUM → the self carve-out allows the pair.
+      D-1: `$(gh issue close FOREIGN)` inside a stripped comment value vanishes from
+           the stripped copy → N_CLOSE no longer counts it (the `(` used to).
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- A-1: operator-spanning unquoted value arm erases a top-level close ---
+
+    def test_blocks_operator_spanning_comment_value(self):
+        # `--comment done&&gh issue close FOREIGN`: bash runs BOTH closes. Today the
+        # unquoted value arm eats `done&&gh` as one value → the FOREIGN close is
+        # erased from the stripped copy → N_CLOSE=1 on the self close → carve-out
+        # `exit 0` allows the whole command (rc 0). GREEN: the arm is operator-bounded
+        # so `&&gh issue close 3399` stays → N_CLOSE=2 → blank ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment done&&gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_operator_spanning_via_semicolon(self):
+        # Same class via `;` instead of `&&`.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment done;gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- A-2: single-residue escaped-quote REPO_ARG poison ---
+
+    def test_blocks_single_residue_escaped_quote_repo_poison(self):
+        # `--comment 'it'\\''s -R baz/qux done'` with NO real `-R`: the strip's
+        # single-quote arm loses to leftmost-longest and eats `'it'\\''s`, leaving a
+        # ` -R baz/qux done'` residue → REPO_ARG=baz/qux (SELF in the fixture) while
+        # the close targets the cwd (FOREIGN) → wrong-ALLOW (rc 0) today. The ≥2-`-R`
+        # leg does NOT fire (only ONE `-R` residue). GREEN: the unbalanced-quote leg
+        # (odd `'` count + a residual `-R`) forces `_repo_flag_unparseable` → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 --comment 'it'\\''s -R baz/qux done'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- A-3: glued short-flag value hides a REPO_ARG poison ---
+
+    def test_blocks_glued_short_flag_repo_poison(self):
+        # `-c'evidence -R baz/qux x'` (glued short flag): today the value is NOT
+        # stripped (the pre-#824 separator required a space/`=`), so REPO_ARG=baz/qux
+        # (SELF) → wrong-ALLOW. GREEN: the short flags strip a glued value → the poison
+        # is removed → REPO_ARG empty → author read hits the cwd (FOREIGN) → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 -c'evidence -R baz/qux x'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_glued_short_flag_plain_self_close(self):
+        # Control: a legit self-close with a glued `-c'plain'` comment (no poison)
+        # still ALLOWS — the A-3 strip must not over-block a glued self-close. Passes
+        # on BOTH base (glued not stripped, but no -R so REPO_ARG empty → cwd author
+        # read is issue 3312 = SELF) and fixed (glued stripped → same).
+        r = _run_with_gh_body("gh issue close 3312 -c'client confirmed'",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- C-1: reversed self-then-backslash-foreign mixed pair ---
+
+    def test_blocks_reversed_self_then_backslash_foreign(self):
+        # `gh issue close SELF --comment ok && \\gh issue close FOREIGN`: the `\\gh`
+        # FOREIGN close is invisible to the narrow N_CLOSE (\\ not in the narrow class)
+        # and the narrow ISSUE_NUM extractor → N_CLOSE=1 on SELF → carve-out `exit 0`
+        # allows the pair (rc 0) today (is_close IS 1 via the #824 `\\`-wide _CLOSE_OPEN,
+        # but the count/extraction stay narrow). GREEN: the WIDE N_CLOSE count (2) !=
+        # narrow (1) → blank ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment ok && \\gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- D-1: $(…) nested close erased from the stripped count ---
+
+    def test_blocks_dollar_paren_nested_close(self):
+        # `--comment "$(gh issue close FOREIGN)"`: bash runs the substitution (closing
+        # FOREIGN). The #824 value-strip removes the whole `"$(…)"` comment value from
+        # the stripped copy, so N_CLOSE no longer counts the nested close (pre-#824 the
+        # `(` in the count class caught it) → carve-out `exit 0` on SELF (rc 0) today.
+        # GREEN: the `$(` HAS_INTERP guard on the ORIGINAL $CMD blanks ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(gh issue close 3399)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_unquoted_dollar_paren_nested_close(self):
+        # The unquoted `--comment $(gh issue close FOREIGN)` form blocks too (the `$(`
+        # guard reads the ORIGINAL $CMD, so quoting is irrelevant).
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment $(gh issue close 3399)",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- flag-first ISSUE_NUM extraction (#824 review Carve-out preservation, 🔵) ---
+
+    def test_flag_first_reason_self_close_extracts_number(self):
+        # PIN (passes on base AND fixed): `gh issue close --reason done <SELF>` — the
+        # value-strip removes `--reason done`, so the number after it is extracted as
+        # the (correct) close target ISSUE_NUM → the SELF carve-out fires → ALLOW. Locks
+        # the correct-target widening so a future extraction change cannot regress it.
+        r = _run_with_gh_body("gh issue close --reason done 3312 --comment ok",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     main()
