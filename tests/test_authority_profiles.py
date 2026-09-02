@@ -3566,6 +3566,56 @@ class TestCIRunnerAuth839(TestCase):
             with m.patch.dict(os.environ, self._HOSTED):
                 self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
+    # -- ci-runner CONTAINER (uid-0) arm (airuleset#839 attempt 2) --------- #
+    # The gate job runs `Pytest — hermetic subset` INSIDE a job-level
+    # `container: python:3.12`, where the process is uid 0 / pw_name "root",
+    # NEVER "runner" -- so the pw_name=="runner"-only recognition (v0.1.129)
+    # never fired and 33 FULL-authority-gated tests failed on CI. Recognise
+    # the container by os.getuid() == 0 under the SAME hosted-CI env.
+    def test_container_root_uid0_resolves_full(self):
+        # RED on v0.1.129 (pw_name=="runner" only) -> fork-no-merge.
+        with m.patch.object(airuleset, "_current_user", return_value="root"):
+            with m.patch("os.getuid", return_value=0):
+                with m.patch.dict(os.environ, self._HOSTED):
+                    self.assertEqual(airuleset.resolve_authority(), "full")
+
+    def test_container_root_uid0_explain_names_container_source(self):
+        # The uid-0 CONTAINER arm names a DISTINCT --explain source so the
+        # printed log stays consistent with the resolved profile. RED on
+        # v0.1.129.
+        import cli_quals
+        with m.patch.object(airuleset, "_current_user", return_value="root"):
+            with m.patch("os.getuid", return_value=0):
+                with m.patch.dict(os.environ, self._HOSTED):
+                    profile, source, _raw = cli_quals._authority_decision()
+        self.assertEqual(profile, "full")
+        self.assertEqual(source, "ci-runner (GitHub-hosted, container)",
+                         "the uid-0 container arm must name a DISTINCT source")
+
+    def test_container_root_uid0_without_env_is_fork_no_merge(self):
+        # The env conjuncts are load-bearing for the uid-0 arm TOO: uid 0
+        # WITHOUT the hosted-CI env (a plain root shell on a REAL box) stays
+        # fork-no-merge -- root is in NO registry -- never full, and the
+        # source is NOT the ci-runner path. Green-by-design (locks that the
+        # uid-0 arm cannot elevate a real root box).
+        import cli_quals
+        with m.patch.dict(os.environ):
+            os.environ.pop("GITHUB_ACTIONS", None)
+            os.environ.pop("RUNNER_ENVIRONMENT", None)
+            with m.patch.object(airuleset, "_current_user", return_value="root"):
+                with m.patch("os.getuid", return_value=0):
+                    prof, source, _raw = cli_quals._authority_decision()
+        self.assertEqual(prof, "fork-no-merge")
+        self.assertNotIn("ci-runner", source)
+
+    def test_root_is_in_no_authority_registry(self):
+        # Belt-and-braces mirror of test_runner_is_in_no_authority_registry:
+        # `root` is recognised ONLY by the uid-0 arm under the hosted-CI env,
+        # never a registry membership (which would grant a plain root shell
+        # full authority on ANY box).
+        self.assertNotIn("root", airuleset.FULL_AUTHORITY_USERS)
+        self.assertNotIn("root", airuleset.AUTHORITY_BY_USER)
+
     # -- _current_user() env-spoof hardening ------------------------------- #
     def test_current_user_ignores_env_spoof(self):
         # RED on getpass.getuser() (reads $USER/$LOGNAME/$USERNAME FIRST): the
