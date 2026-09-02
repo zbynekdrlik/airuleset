@@ -1808,5 +1808,103 @@ class TestReviewFindings2_824(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
 
 
+class TestReviewFindings3_824(TestCase):
+    """#824 adversarial-review #3 (Fable pass over the review-#2 fix, commit 57ed31c8).
+    The review-#2 fix closed N-1..N-5 but the N-3 `$(` narrowing + the N-4 funsub guard
+    admitted new escapes; each fixture RED-locks one:
+
+      F1 (wrong-ALLOW REGRESSION): the narrowed `$(` guard requires `gh` INSIDE the
+          substitution, so a DECOY/EMPTY substitution glued to a real close
+          (`$(:)gh issue close FOREIGN`, `$()gh …`) rides a self carve-out — the old
+          blanket `$(` guard blocked it. FIX: add `)`/`}`/`{` to the de-quoted count
+          boundary class so the glued close raises N_CLOSE_DEQUOTED > N_CLOSE.
+      F2 (wrong-ALLOW): the same empty-glue via `${x}gh issue close FOREIGN` (an unset
+          param expands empty and glues to `gh`). Same de-quoted-boundary fix.
+      F3 (weakened NEW detection): the funsub guard is line-based, so `${` at
+          end-of-line (a NEWLINE as the funsub whitespace) is missed. FIX: `grep -z`.
+      F4 (over-BLOCK): the funsub guard is not narrowed to `gh` (asymmetric with N-3),
+          so a legit close whose comment merely mentions `${ }` is refused. FIX:
+          require a `gh` command inside the funsub (`\\$\\{[[:space:]|][^}]*gh[[:space:]]`).
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- F1: empty/decoy $( substitution glued to a chained foreign close ---
+
+    def test_blocks_empty_colon_substitution_glued_chained_close(self):
+        # `SELF --comment ok && $(:)gh issue close FOREIGN`: `$(:)` expands empty and
+        # glues onto `gh`, so the FOREIGN close runs. The narrowed `$(` guard (needs
+        # `gh` inside) misses the decoy, and `)gh` is in no close-count boundary → all
+        # counts stay 1 → self carve-out `exit 0` (rc 0) today. GREEN: `)` in the
+        # de-quoted count boundary → N_CLOSE_DEQUOTED=2 != 1 → blank → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && $(:)gh issue close 999 --comment y',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_empty_paren_substitution_glued_chained_close(self):
+        # The `$()` empty-substitution variant of F1.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && $()gh issue close 999',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- F2: empty ${x} param expansion glued to a chained foreign close ---
+
+    def test_blocks_empty_param_expansion_glued_chained_close(self):
+        # `SELF --comment ok && ${x}gh issue close FOREIGN`: an unset `${x}` expands
+        # empty and glues onto `gh` → the FOREIGN close runs. No `$(`/backtick/funsub-
+        # whitespace, so no interp guard; `}gh` is in no count boundary → rc 0 today.
+        # GREEN: `}` in the de-quoted count boundary → N_CLOSE_DEQUOTED=2 → blank → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && ${x}gh issue close 999 --comment y',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- F3: funsub guard misses a newline immediately after ${ ---
+
+    def test_blocks_funsub_nested_close_with_newline_after_brace(self):
+        # `--comment "${<newline>gh issue close FOREIGN;<newline>}"`: the funsub
+        # whitespace IS the newline, so `${` sits at end-of-line and the line-based
+        # guard's char-class-after-`${` never matches → rc 0 today. GREEN: `grep -z`
+        # spans the newline → the funsub guard fires → blank → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "${\ngh issue close 999;\n}"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- F4: funsub guard over-blocks a gh-less ${ } comment ---
+
+    def test_allows_gh_less_funsub_text_in_comment(self):
+        # A LEGIT self-close whose comment merely mentions `${ }` (NO gh command inside)
+        # is over-BLOCKED (rc 2) today by the un-narrowed funsub guard. GREEN: the guard
+        # requires a `gh` command inside the funsub → this no longer fires → ALLOW (rc 0).
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "use bash ${ } funsub"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- controls (pass on BOTH review-#2 and the review-#3 fix) ---
+
+    def test_narrowed_dollar_paren_still_allows_cat_substitution(self):
+        # CONTROL: the de-quoted-boundary change must NOT reopen N-3's over-block — a
+        # legit `--comment "$(cat …)"` self-close still ALLOWS (its value is stripped,
+        # so the de-quoted count never sees a `)gh` adjacency).
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(cat /tmp/note.md)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_funsub_gh_smuggle_still_blocks_after_narrowing(self):
+        # CONTROL: the funsub narrowing must still catch a REAL `${ gh issue close; }`
+        # smuggle — the F4 fix must not let the N-4 case through.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "${ gh issue close 999; }"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     main()
