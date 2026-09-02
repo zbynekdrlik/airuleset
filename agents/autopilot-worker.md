@@ -314,6 +314,17 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   EXACT ref name you pushed — never a vague "my branch": the worktree DIRECTORY name
   (`agent-<id>`) and your BRANCH name (`worktree-agent-<id>`) can DIFFER, and naming the wrong one
   is exactly how a rescuer pushed a stale, wrong branch (#503 case 1).
+- **Your LAST act before returning is a durable `LANE-RETURN:` comment on the ticket (#844) —
+  AFTER your final commit + wip-backup push, so the head sha you cite is real.** Post
+  `gh issue comment <N> --body "LANE-RETURN: branch <worktree-branch> head <sha> worktree <path>
+  version <v> — <one-line evidence: RED sha → GREEN sha, local verify green>"` for EVERY member.
+  WHY: the #844 bounded live-hold cap can force a `/compact` on the supervisor while your lane is
+  live, and the residual case (a lane-completion notification lost to CC's own overflow
+  auto-compact) must lose NOTHING — the supervisor's post-compact reconcile rider integrates your
+  lane from this comment + the branch. This is SubagentStop-enforced
+  (`hooks/subagent-stop-check-lane-return.sh`): a worktree-mode return claiming a branch + head with
+  no LANE-RETURN comment is blocked ONCE per issue (then you still stop if it genuinely cannot post
+  — no wedge), exactly like the design-comment gate.
 - **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
   prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
   checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and
@@ -697,6 +708,7 @@ achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supe
 worktree: <your worktree's absolute path>
 branch: <your worktree branch name (the EXACT name, #503 case 1) — the supervisor merges directly from this ref; also state the refs/autopilot-wip/<branch> durability backup you pushed to origin>
 local_verify: <local test suite + lint command → result (green) — the proof the supervisor's integration cycle will re-check before merging>
+lane_return: <per issue: the LANE-RETURN comment posted as your LAST act (#844) — the durable record the supervisor's post-compact reconcile rider integrates from; SubagentStop-enforced>
 dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">
 unverified: <list | "none">
