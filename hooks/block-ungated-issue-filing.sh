@@ -197,7 +197,35 @@ case "$CMD" in
     *) exit 0 ;;
 esac
 
-# Deliberate bypass for a genuine edge.
+# #842 req 1 -- a WORKTREE WORKER (subagent) may NOT file a GitHub issue: it
+# fixes what it finds in-lane and returns a `followup_candidates:` line for
+# anything genuinely out of scope; the SUPERVISOR decides + files. Detected by
+# the `.agent_id` payload field the sibling subagent hooks
+# (block-subagent-bg-ci-poll.sh / subagent-stop-check-*.sh, #496) already use.
+# Placed ABOVE the `airuleset:scope-gate-ok` bypass below so a worker can NEVER
+# self-exempt by appending that marker (#842 design consult CRITICAL). This
+# fires on any create-SHAPED command (the pre-filter above), which also covers a
+# worker's `gh api …issues -f title=…` implicit POST -- an accepted over-block
+# for a worker (it should use `gh issue edit` for a label add, not a raw POST).
+AGENT_ID=$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
+if [ -n "$AGENT_ID" ]; then
+    cat >&2 <<'MSG'
+BLOCKED: you are a worktree WORKER (subagent) — you may NOT `gh issue create`
+(or `gh api …/issues` POST) a new GitHub issue. A worker FIXES what it finds
+in-lane, in THIS branch — a small adjacent problem, a flaky test, a review
+finding all land here, not in a new ticket.
+
+Anything you genuinely believe is out of scope (>300 LoC / schema / API-break /
+security-boundary / cross-cutting / needs-user-decision) goes in your RETURN
+block as a `followup_candidates:` line (title + which criterion it clears + est.
+LoC) — the SUPERVISOR decides and files it, never the worker (#842). A return
+containing a `filed:` line is REJECTED at integration and the lane is sent back.
+MSG
+    exit 2
+fi
+
+# Deliberate bypass for a genuine edge. (Never reached by a worker — the req-1
+# block above already returned.)
 case "$CMD" in *"airuleset:scope-gate-ok"*) exit 0 ;; esac
 
 LOG="$HOME/.claude/scope-gate.log"
@@ -214,10 +242,24 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || HOOK_DIR
 REPO_ROOT_DIR=""
 [ -n "$HOOK_DIR" ] && REPO_ROOT_DIR="$(dirname "$HOOK_DIR")"
 
+# #842 -- the UNATTENDED/away signal, from the SHARED presence helper (the same
+# 900s marker read block-main-implementation.sh uses). Only the UNATTENDED path
+# engages the new presence-gate / dismissal-word / net-drain-ratchet gates; an
+# ATTENDED (owner-present) filing keeps the pre-#842 behaviour exactly. Fail-OPEN
+# on an unmeasurable presence state (missing helper, absent marker) -> PRESENT,
+# so a /tmp cleanup or a deploy gap never manufactures an unattended BLOCK.
+UNATTENDED=0
+if [ -n "$HOOK_DIR" ] && [ -r "$HOOK_DIR/lib-presence.sh" ]; then
+    . "$HOOK_DIR/lib-presence.sh"
+    if type airuleset_presence_is_away >/dev/null 2>&1; then
+        airuleset_presence_is_away "$SID" && UNATTENDED=1
+    fi
+fi
+
 # python3 - "$CMD" <<'PYEOF' (argv, never a pipe into the heredoc's own
 # stdin — see the repo's own #96 gotcha).
 RC=0
-OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" "$REPO_ROOT_DIR" <<'PYEOF' 2>/dev/null
+OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" "$REPO_ROOT_DIR" "$UNATTENDED" <<'PYEOF' 2>/dev/null
 import json
 import os
 import re
@@ -231,6 +273,9 @@ sid = sys.argv[2]
 cwd = sys.argv[3]
 log_path = sys.argv[4]
 repo_dir = sys.argv[5] if len(sys.argv) > 5 else ""
+# #842 -- UNATTENDED ("1") vs attended (anything else). Only the unattended
+# path engages the presence-gate / dismissal-word / net-drain-ratchet gates.
+unattended = (sys.argv[6] == "1") if len(sys.argv) > 6 else False
 
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
@@ -260,6 +305,62 @@ DAILY_CAP = 8
 # (e.g. a security finding + a schema finding from the same PR review), a
 # 3rd is the storm signature -- so 2 pass, the 3rd blocks.
 CHAIN_WIDTH_CAP = 2
+
+# #842 req 4 -- dismissal words in a NEW issue body from an UNATTENDED session.
+# `test-strictness.md` + `no-dropped-work.md` already ban these as dismissals of
+# a test failure; a ticket that merely SAYS "the test is flaky" / "pre-existing
+# failure" is the same dismissal in durable form -- the loop must FIX the test,
+# not file its excuse. Word-boundary-ish, case-insensitive. `out of scope` is
+# the weakest signal (it is also a legitimate scope-gate justification), so a
+# discovery filing that uses the literal phrase in prose is OVER-blocked here --
+# an accepted false-block bias (the remedy: name the SPECIFIC criterion instead
+# of the vague phrase), consistent with this hook's documented "get it wrong
+# toward strict, a false block costs one line" stance, and bounded to the
+# unattended path only (an attended owner filing is never dismissal-blocked).
+DISMISSAL_WORD_RE = re.compile(
+    r"\bflak(?:e|es|y|iness)\b|\bpre-?existing\b|\bintermittent(?:ly)?\b|"
+    r"\bout\s+of\s+scope\b",
+    re.IGNORECASE)
+
+
+def _dismissal_word(body):
+    """The first dismissal word/phrase found in `body`, or None."""
+    if not body:
+        return None
+    m = DISMISSAL_WORD_RE.search(body)
+    return m.group(0).strip() if m else None
+
+
+def _ratchet_should_block(target_repo, cwd):
+    """#842 req 2 -- True when the per-repo net-drain ratchet must BLOCK an
+    UNATTENDED non-exempt discovery filing on `target_repo`: the repo is NOT
+    strictly draining today (`created_today >= closed_today`). Fail-SAFE: any
+    inability to compute the counts -- a gh error, or a ratchet_counts import
+    failure (a deploy gap; both files ship together, so this never bites in
+    practice) -- returns True (BLOCK), never a wrong ALLOW (#842 design (d))."""
+    try:
+        import ratchet_counts as _rc
+    except Exception:
+        return True
+    got = _rc.cached_counts(target_repo, cwd)
+    if got is None:
+        return True
+    created, closed, _day = got
+    return _rc.ratchet_blocks(created, closed)
+
+
+def _ratchet_bump(target_repo):
+    """Record a ratchet-PASS forward (increment the cached created_today), so a
+    burst of unattended filings inside one TTL window does not all pass on the
+    same stale count. Best-effort (returns False on any failure) -- a bump
+    failure never blocks a filing that already PASSED."""
+    try:
+        import ratchet_counts as _rc
+        _rc.bump_created(target_repo)
+        return True
+    except Exception:
+        return False
+
 
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1\s*$")
 CATFILE_RE = re.compile(r'^\s*cat\s*>>?\s*([^\s<>&;|]+)')
@@ -1211,6 +1312,32 @@ for seg in split_top_level(skeleton):
         results.append(("BLOCK", clean_title, reason, parents_str,
                          target_repo, ""))
     else:
+        crit_l = crit.lower()
+        # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
+        # pre-#842 flow untouched, so these never touch the owner). presence-gate
+        # (req 3): an unattended loop cannot claim the owner asked for a
+        # user-request / planned-work ticket. dismissal-word (req 4): a NEW issue
+        # body dismissing a test failure (flaky / pre-existing / intermittent /
+        # out-of-scope) is the same dismissal in durable form -- fix the test /
+        # root cause, never file its excuse. Both BLOCK BEFORE the dedup/cap/
+        # near-dup/ratchet checks (cheapest first) and `continue` this segment.
+        if unattended:
+            unattended_reason = None
+            if crit_l in EXEMPT_FROM_CAP:
+                unattended_reason = (
+                    "presence-required (an unattended loop cannot claim the "
+                    "owner asked -- %s is accepted only when the owner is "
+                    "PRESENT)" % crit_l)
+            else:
+                _dw = _dismissal_word(body)
+                if _dw:
+                    unattended_reason = (
+                        "dismissal-word:%s (fix the test / root cause -- do not "
+                        "file its excuse as a ticket)" % _clean_field(_dw))
+            if unattended_reason:
+                results.append(("BLOCK", clean_title, unattended_reason,
+                                 parents_str, target_repo, ""))
+                continue
         dedup_match = DEDUP_RE.search(body) if body else None
         if not dedup_match:
             # #329 -- structural half of the dedup gate: prove you searched.
@@ -1218,7 +1345,6 @@ for seg in split_top_level(skeleton):
                              target_repo, ""))
         else:
             dedup_claim = _clean_field(dedup_match.group(1))[:80]
-            crit_l = crit.lower()
             today = _today_str()
             batch_titles = _batch_titles_by_repo.setdefault(target_repo, [])
 
@@ -1259,10 +1385,31 @@ for seg in split_top_level(skeleton):
                         reason = "near-duplicate:#%s" % near_dup
                     results.append(("BLOCK", clean_title, reason, parents_str,
                                      target_repo, dedup_claim))
+                elif (unattended and crit_l not in EXEMPT_FROM_CAP
+                      and _ratchet_should_block(target_repo, cwd)):
+                    # #842 req 2 -- net-drain ratchet, checked LAST (the only gate
+                    # costing a gh call, so it is never paid for a filing already
+                    # blocked more cheaply). An UNATTENDED non-exempt discovery
+                    # filing is allowed ONLY while the repo is strictly draining
+                    # today (created_today < closed_today); otherwise BLOCK. A gh
+                    # error -> BLOCK (fail-safe). user-request / planned-work are
+                    # exempt (already presence-gated above).
+                    results.append((
+                        "BLOCK", clean_title,
+                        "net-drain (created_today >= closed_today on this repo "
+                        "-- fix it in-lane now, or fold it as a comment onto the "
+                        "existing ticket it belongs to; this repo must drain "
+                        "today before an unattended loop files more)",
+                        parents_str, target_repo, dedup_claim))
                 else:
                     results.append(("PASS", clean_title, crit, parents_str,
                                      target_repo, dedup_claim))
                     batch_titles.append(title or "")
+                    # #842 -- record the PASS forward in the per-repo counter
+                    # cache so a burst of unattended filings inside one TTL
+                    # window does not all pass on the same stale created count.
+                    if unattended and crit_l not in EXEMPT_FROM_CAP:
+                        _ratchet_bump(target_repo)
                     if crit_l not in EXEMPT_FROM_CAP:
                         _local_day_count[target_repo] = \
                             _local_day_count.get(target_repo, 0) + 1
@@ -1335,6 +1482,15 @@ stream-aware and this filing (from a known sub-dev stream account) carries
 no explicit `stream:<x>` label at all (#390), or (i) it carries a
 `stream:<x>` label naming a DIFFERENT stream than your own, with no
 `Stream-routing: <reason>` line justifying the hand-off (#390).
+
+#842 (UNATTENDED sessions only — an attended/owner-present filing is never
+subject to these): (j) `presence-required` — a `user-request`/`planned-work`
+criterion is accepted only when the OWNER is PRESENT; an unattended loop cannot
+claim the owner asked. (k) `dismissal-word` — the body dismisses a test failure
+(flaky / pre-existing / intermittent / out of scope); FIX the test/root cause,
+do not file its excuse as a ticket. (l) `net-drain` — this repo has created at
+least as many issues as it closed today; the loop must DRAIN it (fix in-lane, or
+fold this onto the existing ticket) before filing more.
 
 Per complete-planned-work.md's Follow-up gate: a discovered cleanup under
 ~100 LoC in a file your current work already touches gets FIXED NOW in this

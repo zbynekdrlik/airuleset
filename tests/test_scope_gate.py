@@ -1861,7 +1861,7 @@ class TestNetDrainHarness842(TestCase):
     # ---- req 2: net-drain ratchet ----
     def test_unattended_discovery_blocked_when_not_draining(self):
         # created(9) >= closed(5) -> repo is NOT draining -> BLOCK.
-        r = run(body_cmd("net drain", "genuinely out of scope",
+        r = run(body_cmd("net drain", "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=9, closed=5),
                 session_id=self._away_sid(), home=self.home)
@@ -1870,7 +1870,7 @@ class TestNetDrainHarness842(TestCase):
 
     def test_unattended_discovery_blocked_at_parity(self):
         # created == closed -> parity blocks (0/0 too, the day's first).
-        r = run(body_cmd("parity", "genuinely out of scope",
+        r = run(body_cmd("parity", "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=5, closed=5),
                 session_id=self._away_sid(), home=self.home)
@@ -1878,7 +1878,7 @@ class TestNetDrainHarness842(TestCase):
 
     def test_unattended_discovery_passes_when_draining(self):
         # created(3) < closed(9) -> repo IS draining -> the ratchet allows.
-        r = run(body_cmd("draining ok", "genuinely out of scope",
+        r = run(body_cmd("draining ok", "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=3, closed=9),
                 session_id=self._away_sid(), home=self.home)
@@ -1886,7 +1886,7 @@ class TestNetDrainHarness842(TestCase):
 
     def test_ratchet_gh_error_blocks_fail_safe(self):
         # A gh error computing the counts -> BLOCK, never a wrong ALLOW.
-        r = run(body_cmd("gh error", "genuinely out of scope",
+        r = run(body_cmd("gh error", "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=None, closed=None),
                 session_id=self._away_sid(), home=self.home)
@@ -1894,7 +1894,7 @@ class TestNetDrainHarness842(TestCase):
 
     def test_attended_discovery_never_ratchet_blocked(self):
         # PRESENT session -> the ratchet never engages, even when NOT draining.
-        r = run(body_cmd("attended ok", "genuinely out of scope",
+        r = run(body_cmd("attended ok", "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
