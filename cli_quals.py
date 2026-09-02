@@ -1530,10 +1530,49 @@ def _authority_marker(cwd=None):
     return raw if raw in airuleset.AUTHORITY_PROFILES else None
 
 
+def _more_restrictive(a, b):
+    """The MORE RESTRICTIVE (lower-authority) of two profiles on the lattice
+    full > branch-merge > fork-no-merge. `AUTHORITY_PROFILES` is ordered
+    strongest -> weakest, so a HIGHER index is more restrictive; the tuple
+    ordering IS the lattice (no separate rank table). Equal profiles return `a`
+    (== b). #828: this is how the marker CAPS the base (`more-restrictive-of`)."""
+    import airuleset
+    order = airuleset.AUTHORITY_PROFILES
+    return a if order.index(a) >= order.index(b) else b
+
+
+def _authority_base(user):
+    """The marker-FREE base authority for `user`: `(profile, source)` from the
+    reduced-stream map -> ci-runner recognition -> full allow-list -> fail-safe
+    `fork-no-merge` default. This is the base the #828 marker can only LOWER,
+    never raise, so BOTH `_authority_decision` and `cmd_authority --explain`
+    derive the base from this ONE function (no parallel re-derivation that could
+    desync — the #486/#821 SSOT discipline). `source` is one of 'per-user map' |
+    'ci-runner (GitHub-hosted)' | 'ci-runner (GitHub-hosted, container)' |
+    'full-authority account' | 'default (unmapped)'. Resolution order
+    (airuleset#827/#839): the reduced-stream map row (`AUTHORITY_BY_USER`) is
+    checked FIRST so a reduced stream can never be elevated by a (bug) dual
+    membership; then the GitHub-hosted CI runner (`_github_ci_runner_source` —
+    airuleset's OWN CI, unspoofable, #839; the source names the CONTAINER arm
+    distinctly); then the explicit full-authority allow-list
+    (`FULL_AUTHORITY_USERS`); else the fail-SAFE `fork-no-merge` default (the
+    pre-#827 fail-OPEN `full` catch-all is gone — every legitimate full account
+    is enumerated in the registries)."""
+    import airuleset
+    if user in airuleset.AUTHORITY_BY_USER:
+        return airuleset.AUTHORITY_BY_USER[user], "per-user map"
+    ci_src = airuleset._github_ci_runner_source(user)
+    if ci_src is not None:
+        return "full", ci_src
+    if user in airuleset.FULL_AUTHORITY_USERS:
+        return "full", "full-authority account"
+    return "fork-no-merge", "default (unmapped)"
+
+
 def _authority_decision(cwd=None):
     """The authority resolution WITH its provenance, from ONE decision point:
-    `(profile, source, raw_marker)`, where `source` is one of
-    'project CLAUDE.md marker' | 'per-user map' | 'ci-runner (GitHub-hosted)' |
+    `(profile, source, raw_marker)`, where `source` is one of 'marker-lowered' |
+    'per-user map' | 'ci-runner (GitHub-hosted)' |
     'ci-runner (GitHub-hosted, container)' | 'full-authority account' |
     'default (unmapped)'.
     `resolve_authority` (the hot path) and `cmd_authority --explain` (the #486
@@ -1541,51 +1580,41 @@ def _authority_decision(cwd=None):
     never desync from the resolved profile, and it distinguishes the reduced-stream
     map ROW and the explicit full-authority allow-list from the fail-safe default
     that decides a genuinely unmapped user.
-    Resolution order (airuleset#827/#839): a valid marker wins; else the reduced-
-    stream map row (`AUTHORITY_BY_USER`); else the GitHub-hosted CI runner
-    (`_is_github_ci_runner` — airuleset's OWN CI, unspoofable, #839); else the
-    explicit full-authority allow-list (`FULL_AUTHORITY_USERS`); else the fail-SAFE
-    `fork-no-merge` default. The map is checked BEFORE the ci-runner branch and the
-    full allow-list, so a reduced stream can never be elevated by a (bug) dual
-    membership — restrictive wins. The pre-#827 default was the fail-OPEN `full`:
-    an unmapped stream account (provisioned but forgotten in the map) silently got
-    full merge/deploy/close authority; it now fails SAFE to the most restrictive
-    profile, and the legitimate full accounts are enumerated in
-    `FULL_AUTHORITY_USERS` (plus the un-spoofable CI-runner recognition) rather
-    than relying on that open catch-all."""
+    Resolution (airuleset#828, owner decision A — the marker is a CAP, not an
+    override): compute the marker-FREE base (`_authority_base`), then take the
+    MORE RESTRICTIVE of `(base, marker)`. A valid `<!-- airuleset:authority=... -->`
+    marker may only LOWER the base authority, NEVER raise it — a marker that
+    would raise is IGNORED (the base source stands), closing the self-elevation
+    vector: a reduced stream editing its OWN (stream-editable) CLAUDE.md can no
+    longer grant itself `full`. `full` is granted EXCLUSIVELY via the per-user
+    map / full allow-list / ci-runner recognition, never a marker. When the
+    marker did lower, the source is 'marker-lowered'; when it equals or would
+    raise the base (or is absent/invalid), the base source stands (`raw` is still
+    surfaced so `cmd_authority --explain` can report an ignored raise)."""
     import airuleset
     raw = _authority_marker_raw(cwd)
-    if raw in airuleset.AUTHORITY_PROFILES:
-        return raw, "project CLAUDE.md marker", raw
+    marker = raw if raw in airuleset.AUTHORITY_PROFILES else None
     user = airuleset._current_user()
-    if user in airuleset.AUTHORITY_BY_USER:
-        return airuleset.AUTHORITY_BY_USER[user], "per-user map", raw
-    # airuleset#839: the GitHub-HOSTED CI runner (unspoofable pw_name `runner`
-    # OR uid 0 in a container job, AND GITHUB_ACTIONS=true AND
-    # RUNNER_ENVIRONMENT=github-hosted) is a legitimate full-authority context
-    # for THIS repo's OWN CI — it is in neither registry, so #827's fail-safe
-    # would leave it `fork-no-merge` and break ~33 FULL-authority-gated tests.
-    # Placed AFTER the map so a mapped stream can never be elevated
-    # (defense-in-depth; no stream is ever `runner`/uid-0) and BEFORE the full
-    # allow-list. `user` is the hardened `_current_user()` pw_name, so the whole
-    # conjunction is un-spoofable. The source names the CONTAINER arm distinctly.
-    ci_src = airuleset._github_ci_runner_source(user)
-    if ci_src is not None:
-        return "full", ci_src, raw
-    if user in airuleset.FULL_AUTHORITY_USERS:
-        return "full", "full-authority account", raw
-    return "fork-no-merge", "default (unmapped)", raw
+    base, base_source = _authority_base(user)
+    # #828: cap the base with the marker (more-restrictive-of). Only a marker
+    # STRICTLY below the base applies (and reports 'marker-lowered'); an equal or
+    # raising marker leaves the base and its source untouched.
+    if marker is not None and marker != base \
+            and _more_restrictive(base, marker) == marker:
+        return marker, "marker-lowered", raw
+    return base, base_source, raw
 
 
 def resolve_authority(cwd=None) -> str:
-    """The current stream's autopilot authority profile: a project CLAUDE.md
-    `airuleset:authority=<profile>` marker (cwd-relative) OVERRIDES the per-user
-    default map. This makes `airuleset.py authority` authoritative for both the
-    autopilot skill and the `block-fork-no-merge-issue-close` hook (single source
-    of truth) — cmd_authority's explain text has always PROMISED this override; it
-    is now actually honored, not just documented. Derives the profile from the
-    single `_authority_decision` so the CLI's `--explain` log can never name a
-    source that disagrees with what actually resolved."""
+    """The current stream's autopilot authority profile: the marker-free base
+    (per-user map / full allow-list / ci-runner / fail-safe default) CAPPED by a
+    project CLAUDE.md `airuleset:authority=<profile>` marker (cwd-relative) — the
+    marker may only LOWER the base authority, never raise it (airuleset#828,
+    owner decision A). This makes `airuleset.py authority` authoritative for both
+    the autopilot skill and the `block-fork-no-merge-issue-close` hook (single
+    source of truth). Derives the profile from the single `_authority_decision`
+    so the CLI's `--explain` log can never name a source that disagrees with what
+    actually resolved."""
     return _authority_decision(cwd)[0]
 
 
@@ -1680,15 +1709,26 @@ def cmd_authority(args):
         else:
             map_val = ("unmapped -> fork-no-merge (fail-safe; add to "
                        "AUTHORITY_BY_USER or FULL_AUTHORITY_USERS)")
+        # #828: annotate what the marker actually DID — lowered / ignored-as-a-
+        # raise / redundant / absent / invalid — derived from the SAME base
+        # (`_authority_base`) the decision used, so the log can never desync.
+        base_profile, _base_source = _authority_base(user)
         if raw is None:
             mark = "none"
-        elif raw in airuleset.AUTHORITY_PROFILES:
-            mark = raw
-        else:
+        elif raw not in airuleset.AUTHORITY_PROFILES:
             mark = "invalid(%r)" % raw
+        elif source == "marker-lowered":
+            mark = "%s lowered (was %s)" % (raw, base_profile)
+        elif raw != base_profile:
+            # a valid marker that would RAISE was IGNORED (the #828 cap: `full`
+            # comes only from the registries, never a stream-editable marker).
+            mark = "%s ignored (would raise %s)" % (raw, base_profile)
+        else:
+            mark = "%s (== base %s)" % (raw, base_profile)
         print(f"resolved={profile} via {source} "
               f"(marker={mark}; user={user} map={map_val}); "
-              f"an HTML-comment marker <!-- airuleset:authority=<profile> --> overrides the map.")
+              f"a marker <!-- airuleset:authority=<profile> --> can only LOWER "
+              f"authority (more-restrictive-of), never raise it (#828).")
 
 
 def _label_exists_on_repo(label, cwd=None):
