@@ -1022,7 +1022,10 @@ gap in either.
    > blind second push is not. (3) **Batch cleanup includes `refs/autopilot-wip/*` AND stray
    > `worktree-agent-*`/`lane-*` branches on origin from prior rounds** (two-branch policy = only
    > `dev`+`main`): ALWAYS `git merge-base --is-ancestor origin/<b> main` BEFORE any delete — never
-   > delete an unmerged branch (`salvage-before-discarding-work.md`).
+   > delete an unmerged branch (`salvage-before-discarding-work.md`). After a FAILED dead-lane
+   > resume attempt (#836 shapes), the fresh `isolation: "worktree"` worker's OWN stray worktree +
+   > `worktree-agent-*` branch are swept by this SAME `git merge-base --is-ancestor`-guarded cleanup
+   > — never deleted while unmerged.
 
    > **Release the integration mutex the instant THIS integration cycle's push has landed:**
    > `python3 ~/devel/airuleset/airuleset.py autopilot-lock release --repo <repo path>` — this frees
