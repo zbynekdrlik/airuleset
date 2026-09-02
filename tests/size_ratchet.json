@@ -311,7 +311,7 @@
     "tests/test_slash_surface_hygiene.py": 97,
     "tests/test_soniox_provisioning.py": 780,
     "tests/test_stale_worktree_sweep.py": 1365,
-    "tests/test_stash_delivery.py": 655,
+    "tests/test_stash_delivery.py": 665,
     "tests/test_stash_unconditional.py": 905,
     "tests/test_state_stall_suppression_704.py": 225,
     "tests/test_statusbar.py": 2953,

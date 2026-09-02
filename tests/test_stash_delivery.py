@@ -202,11 +202,18 @@ class DeliverWithStashAborts(unittest.TestCase):
         # longer proof of failure on its own -- the queue must exhaust the
         # WHOLE settle window before the undo may be declared dead, matching
         # this test's own intent ("we cannot prove our characters are gone").
+        # #852 B/E: after the undo's settle window exhausts (never bare), the
+        # recovery takes ONE more capture to re-read the box for the "our text
+        # provably gone?" check; here it shows unrelated content (not our text,
+        # not a short stray) -> we cannot prove our text is gone, so it is left
+        # but LOUDLY (`left-in-box UNRECLAIMED` + a durable park record),
+        # replacing the old silent `typed-NOT-undone, draft left parked` leak.
         run = _Recorder([STASHED_BARE, wrong_boundary] +
-                        [wrong_boundary] * wd.STASH_UNDO_SETTLE_POLLS)
+                        [wrong_boundary] * (wd.STASH_UNDO_SETTLE_POLLS + 1))
         logs = []
+        state = {}
         ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE,
-                                   logs=logs, sleep_fn=lambda s: None)
+                                   logs=logs, sleep_fn=lambda s: None, state=state)
         self.assertFalse(ok)
         cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
         self.assertEqual(cs_count, 1, "the stash toggle only — a restoring "
@@ -216,7 +223,10 @@ class DeliverWithStashAborts(unittest.TestCase):
                         "the undo must at least be attempted: %r" % run.sent)
         self.assertFalse(any("Enter" in a for a in run.sent),
                          "must never submit text that failed its own verify: %r" % run.sent)
-        self.assertTrue(any("left parked" in ln for ln in logs), logs)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "a genuine undo failure must be LOUD, never silent: %r" % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), TEXT,
+                         "the leaked text must be parked for reclaim: %r" % state)
 
     def test_the_restore_fires_once_the_box_is_confirmed_bare_again(self):
         wrong_boundary = "● x\n❯ totally unrelated text\n  ctx ░░\n"
