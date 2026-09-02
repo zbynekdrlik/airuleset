@@ -1885,6 +1885,11 @@ from watchdog.wip_ref_sweep import (  # noqa: E402
     WIP_REF_SWEEP_INTERVAL_S as WIP_REF_SWEEP_INTERVAL_S,
 )
 
+# #834 — Job 40, the per-box DISK-PRESSURE GUARD (stdlib-only, no watchdog
+# import at its top level → no cycle; reuses the per-class discovery functions
+# under pressure).
+from watchdog import disk_guard as disk_guard  # noqa: E402,F401
+
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
 # `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
@@ -2031,8 +2036,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              release_state_fetch=None, queue_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
-             u_fetch=None):
-    """Scan every `claude` pane once. 39 numbered jobs per poll — 33 LIVE and 6
+             u_fetch=None, disk_guard_enabled=False):
+    """Scan every `claude` pane once. 40 numbered jobs per poll — 34 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2659,6 +2664,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           or a finite ceiling → NOTHING; `dry_run` files nothing. Machine
           channel only, never a Discord ping (#546). See `resource_guard_verify`
           in `watchdog/resource_guard.py`.
+      (40) PER-BOX DISK-PRESSURE GUARD (#834), gated on `disk_guard_enabled`
+          (cmd_watchdog passes True → runs every real poll). Reads `statvfs`
+          every poll, writes the `disk NN%` footer cache, and at >= 80 % runs a
+          per-USER auto-drain ladder over THIS user's OWN home (scratch,
+          fork-no-merge worktree DIRECTORIES whose HEAD is reachable from an
+          origin ref, CLI versions, uploads > 14 d, transcripts > 7 d gzip,
+          shared-stream toolchain dirs), fail-LOUD (every action + skip logged
+          to `disk-guard.log`), never deleting on uncertainty, never crossing a
+          filesystem, never as root (the root/system leg is #841). >= 90 %
+          after the drain → machine-channel escalation, box-wide deduped
+          once/day. `watchdog/disk_guard.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4457,6 +4473,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
          lambda: resource_guard_verify(
              gk_request_fn=resource_guard_gk_request, dry_run=dry_run),
          "resource-guard-verify error")
+
+    # Job 40 (#834) — PER-BOX DISK-PRESSURE GUARD. Gated on `disk_guard_enabled`
+    # (cmd_watchdog passes True → it runs EVERY real poll on every box; left
+    # False in run_once unit tests so the real `statvfs`/drain never touches a
+    # developer box). It reads `statvfs` itself and acts ONLY on the calling
+    # user's OWN home: every poll it writes the footer cache; only at >= 80 %
+    # (and not as root, cadence-gated to <= once/10min, single-instance flocked)
+    # does the du-heavy drain ladder run; >= 90 % after -> machine-channel
+    # escalation. Best-effort; the never-delete-on-uncertainty + scope-fence
+    # invariants live in the job. The ROOT/system-scope legs (other users'
+    # /tmp, /var/log, system journal, apt, logrotate/fail2ban) are #841.
+    _add("disk_guard", lambda: disk_guard_enabled,
+         lambda: disk_guard.run_disk_guard(now, dry_run=dry_run),
+         "disk-guard error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

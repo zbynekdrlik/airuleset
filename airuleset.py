@@ -5011,6 +5011,11 @@ def cmd_watchdog(args):
                     # box-class + cgroup gates live INSIDE the job (off a
                     # shared-stream box it reads nothing, alarms nothing).
                     resource_guard_gk_request=_watchdog_resource_guard_gk_request,
+                    # Job 40 (#834) — PER-BOX DISK-PRESSURE GUARD. Enabled on
+                    # EVERY real poll (it reads `statvfs` itself + acts only on
+                    # this user's own home); left False in run_once unit tests so
+                    # the real statvfs/drain never touches a developer box.
+                    disk_guard_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

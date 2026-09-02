@@ -368,6 +368,38 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         _stream_split_sfx(cache), skip_sfx)
 
 
+DISK_SEGMENT_NOTICE_PCT = 75        # below this the segment is hidden
+DISK_SEGMENT_RED_PCT = 90           # red at/above this, yellow below
+DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
+
+
+def disk_segment(home=None, now=None):
+    """The `disk NN%` footer segment (#834 req 1): hidden below 75 %, yellow
+    75-89 %, red >= 90 %, and HIDDEN when the disk-guard cache is stale
+    (> DISK_SEGMENT_STALE_S) so a dead watchdog never paints a frozen % forever.
+    Reads ONLY the machine-local cache the watchdog Job 40 writes; renders as no
+    segment on any error (never blocks, never touches the network)."""
+    import time as _time
+    now = _time.time() if now is None else now
+    cache = _load(_claude_dir(home) / "disk-guard" / "status.json")
+    if not isinstance(cache, dict):
+        return ""
+    worst = cache.get("worst_pct")
+    ts = cache.get("ts")
+    if not isinstance(worst, (int, float)) or isinstance(worst, bool):
+        return ""
+    if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
+        return ""
+    # Use the guard's own LEVEL from the cache (no threshold re-derivation /
+    # drift; #834 review 🔵). Fall back to the pct thresholds only if the cache
+    # predates the level field.
+    level = cache.get("level")
+    if level == "ok" or (level is None and worst < DISK_SEGMENT_NOTICE_PCT):
+        return ""
+    colour = 196 if (level == "critical" or (level is None and worst >= DISK_SEGMENT_RED_PCT)) else 214
+    return "\033[38;5;%dmdisk %d%%\033[0m" % (colour, int(worst))
+
+
 def _fmt_tokens(n):
     """570000 -> '570K', 1500000 -> '1.5M', 999 -> '999'."""
     n = int(n)

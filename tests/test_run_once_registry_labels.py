@@ -78,6 +78,7 @@ EXPECTED_STANDALONE = [
     "shadow_ugrep_reaper",              # (37) — #776 runaway shadow-ugrep reaper
     "heavy_build_reaper",               # (38) — #778 heavy-build-toolchain reaper
     "resource_guard_verify",            # (39) — #775 shared-stream resource-guard verify
+    "disk_guard",                       # (40) — #834 per-box disk-pressure guard
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
