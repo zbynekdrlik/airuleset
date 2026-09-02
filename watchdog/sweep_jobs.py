@@ -102,6 +102,19 @@ def _bg_monitor_in_cwd(cwd, run=None):
     return False
 
 
+def _owned_by_current_uid(path):
+    """True only if `path` stats successfully AND is owned by THIS process's
+    uid. A stat error (already gone, a race, a permission wall) fails SAFE to
+    False -- treated the same as foreign, i.e. skipped/left untouched (#850).
+    Used both for the main pending-file glob and the `-cwd-` sibling read/
+    unlink, so a subdev box's ~12 stream accounts -- sharing one flat,
+    world-readable /tmp -- never act on a file a DIFFERENT account wrote."""
+    try:
+        return os.stat(path).st_uid == os.getuid()
+    except OSError:
+        return False
+
+
 def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
                          account_owner="", dry_run=False,
                          done_grace=PENDING_DONE_GRACE, max_stale=PENDING_DONE_MAX_STALE,
@@ -135,6 +148,11 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
     logs = []
     plen = len(os.path.basename(pending_prefix))
     for pf in sorted(_glob.glob(pending_prefix + "*")):
+        if not _owned_by_current_uid(pf):
+            # #850: a foreign-owned pending file (a DIFFERENT subdev stream
+            # account's /tmp marker, world-readable to us) is never opened,
+            # sent, or unlinked -- only the account that wrote it may act.
+            continue
         try:
             with open(pf) as f:
                 content = f.read().strip()
@@ -170,7 +188,7 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         if marker != "✅":
             if not dry_run:
                 _safe_unlink(pf)
-                _safe_unlink(_pending_cwd_path(sid, pending_prefix))   # #668 litter
+                _unlink_if_owned(_pending_cwd_path(sid, pending_prefix))   # #668 litter
             logs.append("cleared non-✅ sid=%s (now %r)" % (sid[:8], marker))
             continue
         if idle < done_grace:
@@ -178,14 +196,14 @@ def deliver_pending_done(now, send_fn, projects_dir, owner_by_sid=None,
         if idle > max_stale:
             if not dry_run:
                 _safe_unlink(pf)
-                _safe_unlink(_pending_cwd_path(sid, pending_prefix))   # #668 litter
+                _unlink_if_owned(_pending_cwd_path(sid, pending_prefix))   # #668 litter
             logs.append("cleared stale ✅ sid=%s idle=%dh" % (sid[:8], int(idle // 3600)))
             continue
         if cwd and bg_check(cwd):
             continue                            # bg monitor alive → ✅ likely intermediate, defer
         if not dry_run:
             _safe_unlink(pf)                    # claim first so a concurrent idle hook can't double-send
-            _safe_unlink(_pending_cwd_path(sid, pending_prefix))       # #668 consume the sibling too
+            _unlink_if_owned(_pending_cwd_path(sid, pending_prefix))       # #668 consume the sibling too
         # #668: NEVER decorate with the meaningless "unknown" — resolve the label
         # or ship none (mirrors notify-discord-send.sh's own drop-unknown rule).
         project = watchdog.project_label(cwd) if cwd else ""
@@ -223,6 +241,16 @@ def _safe_unlink(path):
         pass
 
 
+def _unlink_if_owned(path):
+    """`_safe_unlink`, but only for a file THIS process's uid actually owns
+    (#850) -- the `-cwd-` sibling is written by the SAME account that wrote
+    the main pending file, so it is normally own-uid too, but this stays a
+    belt-and-braces check: a foreign-owned sibling is never touched, exactly
+    like a foreign-owned pending file is never opened/sent/unlinked."""
+    if _owned_by_current_uid(path):
+        _safe_unlink(path)
+
+
 def _pending_cwd_path(sid, pending_prefix):
     """The cwd sibling notify-discord-pending.sh records next to a ✅ (#668)."""
     return pending_prefix + "cwd-" + sid
@@ -241,8 +269,13 @@ def _lastok_path(sid, pending_prefix):
 
 
 def _read_pending_cwd(sid, pending_prefix):
+    path = _pending_cwd_path(sid, pending_prefix)
+    if not _owned_by_current_uid(path):
+        # #850: a foreign-owned sibling is never READ -- it could leak a
+        # different account's project label into OUR ping.
+        return ""
     try:
-        with open(_pending_cwd_path(sid, pending_prefix)) as f:
+        with open(path) as f:
             return f.read().strip()
     except OSError:
         return ""
