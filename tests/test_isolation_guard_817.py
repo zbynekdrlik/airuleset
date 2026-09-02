@@ -349,6 +349,17 @@ class TestGuardUnit(TestCase):
                   "rm hooks/worktree_guard.py"):
             self.assertTrue(self.M(c), c)
 
+    def test_line_continuation_842_blocks(self):
+        # #842: a bash `\`+newline line-continuation is spliced (bash joins the
+        # lines), so `git \<newline>checkout -b evil` / `git \<newline>-C <co>
+        # commit` really run as writes to the shared checkout — before #842 the
+        # escaped newline survived `normalize_newlines` and shlex read `\n-C`/
+        # `\ncheckout` as the subcommand → not in GIT_WRITE → escaped.
+        for c in ("git \\\ncheckout -b evil",
+                  "git \\\n-C %s commit -m x" % self.co,
+                  "git checkout\\\n -b evil"):
+            self.assertTrue(self.M(c), c)
+
     def test_worktree_dir_and_siblings_block(self):
         # exempt_wt=False: an isolation-failed worker owns no worktree.
         wtp = os.path.join(self.co, ".claude", "worktrees")

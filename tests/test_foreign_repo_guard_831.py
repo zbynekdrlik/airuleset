@@ -149,5 +149,58 @@ class ForeignRuleAWidenedHook(TestCase):
                              "expected ALLOW for: %s\nstderr=%s" % (c, r.stderr))
 
 
+class LineContinuation842(TestCase):
+    """#842 — a bash line-CONTINUATION (`\\`+newline) splits a git-write across
+    lines; bash removes both chars and runs `git \\<newline>-C <path> commit` as
+    one `git -C <path> commit`, but before #842 the shared `normalize_newlines`
+    left the escaped newline in place → shlex emitted `\\n-C` as the subcommand →
+    not in GIT_WRITE → the write escaped BOTH guards (the #831-review residual,
+    now closed in `git_write_classify.normalize_newlines`). Drives BOTH guards
+    at the unit level with the `commit` AND `checkout` continuation shapes."""
+
+    # `\<newline>` embedded in the command string.
+    A_C = "git \\\n-C %s commit -m x" % AR
+    A_CO = "git \\\n-C %s checkout -b evil" % AR
+    B_BARE_CO = "git \\\ncheckout -b evil"      # bare (no -C): runs in the cwd
+    B_C = "git \\\n-C %s commit -m x" % AR
+
+    def test_ruleA_blocks_continuation_writes_to_airuleset(self):
+        for c in (self.A_C, self.A_CO):
+            self.assertTrue(
+                frg.command_writes_airuleset(c, FOREIGN_CWD),
+                "RULE A must splice the line-continuation and BLOCK: %r" % c)
+
+    def test_ruleA_bare_continuation_checkout_targets_the_foreign_cwd(self):
+        # a bare `checkout` (no -C) after the splice runs in the FOREIGN cwd, not
+        # airuleset → correctly NOT flagged (control against over-block).
+        self.assertFalse(frg.command_writes_airuleset(self.B_BARE_CO, FOREIGN_CWD))
+
+    def test_ruleB_blocks_continuation_writes_to_the_shared_checkout(self):
+        AR_CO = AR   # the shared checkout
+        for c in (self.B_BARE_CO, self.B_C):
+            self.assertTrue(
+                wg.mutates_shared_checkout(c, AR_CO, AR_CO),
+                "RULE B (B2) must splice the line-continuation and BLOCK: %r" % c)
+
+
+class LineContinuation842Hook(TestCase):
+    """The real RULE A hook, end-to-end, on the continuation shape."""
+
+    def _run(self, cmd):
+        payload = json.dumps({"tool_input": {"command": cmd},
+                              "cwd": FOREIGN_CWD, "transcript_path": FOREIGN_TR})
+        return subprocess.run(["bash", str(HOOK)], input=payload,
+                              capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin"})
+
+    def test_hook_blocks_the_continuation_write(self):
+        for c in ("git \\\n-C %s commit -m x" % AR,
+                  "git \\\n-C %s checkout -b evil" % AR):
+            r = self._run(c)
+            self.assertEqual(r.returncode, 2,
+                             "expected BLOCK for: %r\nstderr=%s" % (c, r.stderr))
+            self.assertIn("ticket", r.stderr.lower())
+
+
 if __name__ == "__main__":
     main()
