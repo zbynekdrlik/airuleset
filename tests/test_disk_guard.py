@@ -671,6 +671,24 @@ def test_execute_logs_per_rung_freed_summary(tmp_path):
     assert "97%" in text and "88%" in text and "freed=" in text
 
 
+def test_execute_summary_for_last_acting_rung_uses_after_loop_recheck(tmp_path):
+    # #854 review 🔵: the LAST acting rung's summary is emitted after the loop
+    # via one final recheck_fn() — exercise that path (acting rung is last).
+    logp = tmp_path / "disk-guard.log"
+    seq = iter([90, 84])           # rung start=90 (>=75, run) ; after-loop recheck=84
+    dg.execute_drain(
+        status={"worst_pct": 90, "dim": "bytes", "level": "critical",
+                "mounts": [{"mount": "/", "worst_pct": 90}]},
+        home=str(tmp_path),
+        planners=[("apt-cache", lambda: [{"cls": "apt-cache", "path": "apt-get clean",
+                                          "bytes": 1024, "kind": "apt-clean", "reason": None}])],
+        recheck_fn=lambda: next(seq),
+        do_action_fn=lambda a: a["bytes"],
+        geteuid_fn=lambda: 1000, log_path=str(logp), now=1.0)
+    text = logp.read_text()
+    assert "drain rung=apt-cache" in text and "84%" in text
+
+
 # --------------------------------------------------------------------------- #
 # #854 — the fence now INCLUDES the bounded cache-class reclaims
 # --------------------------------------------------------------------------- #
@@ -730,10 +748,25 @@ def test_runner_update_selects_update_and_temp(tmp_path):
     upd.mkdir(parents=True)
     tmp.mkdir(parents=True)
     (upd / "f").write_bytes(b"x" * 50)
-    rows = dg.discover_runner_update(runner_root=str(root))
+    # no live Runner.Worker → both _update and _temp reclaimable
+    rows = dg.discover_runner_update(runner_root=str(root), pgrep_fn=lambda _re: "")
     kinds = {os.path.basename(r["path"]): r["kind"] for r in rows if r.get("kind")}
     assert kinds.get("_update") == "delete" and kinds.get("_temp") == "delete"
     assert dg.discover_runner_update(runner_root=str(tmp_path / "absent")) == []
+
+
+def test_runner_update_temp_gated_on_runner_worker(tmp_path):
+    # #854 review 🟡: _temp is the LIVE job's $RUNNER_TEMP — kept while a worker
+    # runs; _update (self-update staging) stays reclaimable.
+    root = tmp_path / "gh-runner"
+    (root / "actions-runner-1" / "_work" / "_update").mkdir(parents=True)
+    (root / "actions-runner-1" / "_work" / "_temp").mkdir(parents=True)
+    rows = dg.discover_runner_update(
+        runner_root=str(root), pgrep_fn=lambda _re: "42 Runner.Worker")
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["_update"]["kind"] == "delete"
+    assert by["_temp"]["kind"] == "skip"
+    assert "live" in (by["_temp"].get("reason") or "").lower()
 
 
 def test_runner_checkouts_gated_on_runner_worker(tmp_path):
@@ -775,6 +808,26 @@ def test_docker_selects_untagged_and_old_never_inuse(tmp_path):
     assert by["bbb"]["kind"] == "skip"
     assert by["ccc"]["kind"] == "docker-rmi"
     assert by["ddd"]["kind"] == "skip"          # referenced by a container
+
+
+def test_docker_in_use_by_bare_and_sha256_id_is_kept(tmp_path):
+    # #854 review 🟡/🔵: an untagged image referenced by a container BY ID (bare
+    # 12-hex or sha256:-prefixed) must read as in-use → kept, never docker-rmi.
+    now = 1_000_000_000.0
+    images = [
+        {"id": "sha256:abcdef012345aaaa", "repo": "<none>", "tag": "<none>",
+         "size": 500_000_000, "created_ts": now - 60 * 86400},
+        {"id": "sha256:99998888ffff0000", "repo": "<none>", "tag": "<none>",
+         "size": 500_000_000, "created_ts": now - 60 * 86400},
+    ]
+    # ps shows a BARE 12-hex short id for the first and a full sha256: for the 2nd
+    rows = dg.discover_docker_images(
+        now=now, images_fn=lambda: images,
+        ps_fn=lambda: {"abcdef012345", "sha256:99998888ffff0000"},
+        pgrep_fn=lambda _re: "")
+    by = {r["path"]: r for r in rows}
+    assert by["sha256:abcdef012345aaaa"]["kind"] == "skip"
+    assert by["sha256:99998888ffff0000"]["kind"] == "skip"
     # a live Runner.Worker skips the whole rung
     rows_live = dg.discover_docker_images(
         now=now, images_fn=lambda: images, ps_fn=lambda: set(),
@@ -809,6 +862,49 @@ def test_claude_versions_keep_running_delete_rest_failsafe(tmp_path):
     rows_fs = dg.discover_stale_claude_versions(
         home=str(tmp_path), running_fn=lambda: None)
     assert rows_fs and all(r["kind"] == "skip" for r in rows_fs)
+
+
+def test_norm_action_kept_row_executes_as_skip_never_deleted(tmp_path):
+    # #854 review 🟡: the LOAD-BEARING data-loss guard — a `reason`-set (KEPT)
+    # #854 discovery row must execute as a SKIP through _norm_action → the ladder,
+    # never a delete. Drive it end-to-end and assert do_action sees only the
+    # reason=None candidate.
+    logp = tmp_path / "disk-guard.log"
+    acted = []
+
+    def planner():
+        return [
+            dg._norm_action("user-cache", {"path": "/h/.cache/pip", "bytes": 900,
+                                           "reason": None}, "delete"),
+            dg._norm_action("user-cache", {"path": "/h/.cache/fresh", "bytes": 5,
+                                           "reason": "too recent (2.0d < 30d)"}, "delete"),
+            dg._norm_action("rotated-log", {"path": "/var/log/syslog.1", "bytes": 400,
+                                            "reason": "too recent (0.5d < 1d)"}, "delete"),
+        ]
+
+    dg.execute_drain(
+        status={"worst_pct": 96, "dim": "bytes", "level": "critical",
+                "mounts": [{"mount": "/", "worst_pct": 96}]},
+        home=str(tmp_path),
+        planners=[("user-cache", planner)],
+        recheck_fn=lambda: 96,
+        do_action_fn=lambda a: acted.append(a["path"]) or a["bytes"],
+        geteuid_fn=lambda: 1000, log_path=str(logp), now=1.0)
+    # ONLY the reason=None candidate was acted on; both KEPT rows stayed SKIP.
+    assert acted == ["/h/.cache/pip"]
+    text = logp.read_text()
+    assert "SKIP /h/.cache/fresh" in text and "SKIP /var/log/syslog.1" in text
+
+
+def test_claude_versions_failsafe_when_running_matches_no_dir(tmp_path):
+    # #854 review 🔵: a non-None running version that matches NO version dir (and
+    # no symlink) must KEEP EVERYTHING, never delete the unidentifiable active one.
+    vdir = tmp_path / ".local" / "share" / "claude" / "versions"
+    for v in ("2.1.252", "2.1.257"):
+        (vdir / v).mkdir(parents=True)
+    rows = dg.discover_stale_claude_versions(
+        home=str(tmp_path), running_fn=lambda: "9.9.9")   # matches nothing
+    assert rows and all(r["kind"] == "skip" for r in rows)
 
 
 def test_oneoff_venvs_select_numbered_never_stable(tmp_path):

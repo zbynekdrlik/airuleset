@@ -39,6 +39,17 @@ one), and one-off numbered lint/ruff/mcp venvs (``~/.venvs/*-<pid>`` +
 stance is thus DELIBERATELY narrowed by #854 to these bounded cache-class cases;
 each drain logs ``disk-guard: NN% -> drain rung=<name> freed=<bytes> -> MM%``.
 
+PERMISSION NOTE (#854 review 🟡): the drain still runs per-USER (``euid==0``
+refuses the whole ladder — the root/system leg is #841). The box-level rungs are
+therefore BEST-EFFORT: ``~/.cache``/stale-Claude-versions/one-off-venvs/scratch/
+worktree are own-home and always effective; docker works when the invoking user
+is in the ``docker`` group; but the ROOT-owned paths (apt cache, ``/var/log``,
+another user's ``/home/gh-runner``) will ``PermissionError``/``CalledProcessError``
+for an unprivileged user — the executor FAIL-LOGS them (fail-safe, no data loss)
+and they reclaim ~0 where the user lacks permission. They are effective only on a
+box where the invoking user can reach those paths (e.g. via sudo / group
+membership); where it cannot, the #841 root-ssh leg is the reclaim path for them.
+
 stdlib-only at module level; every reuse of a ``cli_*`` discovery function and
 of ``watchdog.reaper`` is a DEFERRED import inside the function that needs it,
 so this module has no import cycle with the ``watchdog`` package that hosts it.
@@ -452,22 +463,40 @@ def discover_rotated_logs(varlog_dir=VARLOG_DIR, now=None,
     return out
 
 
-def discover_runner_update(runner_root=GH_RUNNER_HOME, dir_stats_fn=None):
-    """gh-runner `_work/_update` + `_work/_temp` leftovers under each
-    `actions-runner*` dir — pure cache the runner re-creates. Rows delete. No
-    runner root / no such dirs = nothing to do. Not gated on Runner.Worker
-    (these are safe to delete even mid-job — the runner re-creates them)."""
+def discover_runner_update(runner_root=GH_RUNNER_HOME, pgrep_fn=None, dir_stats_fn=None):
+    """gh-runner `_work/_update` (self-update staging) + `_work/_temp` leftovers.
+    `_update` is safe to delete anytime (the runner re-stages it). BUT `_temp` is
+    the LIVE job's `$RUNNER_TEMP` (step temp files / `_runner_file_commands`) —
+    deleting it mid-job corrupts an in-flight CI run (review 🟡), so `_temp` is
+    Runner.Worker-gated (kept while any worker is live) exactly like the checkout
+    rung. No runner root / no such dirs = nothing to do."""
     root = Path(runner_root)
     if not root.is_dir():
         return []
+    pgrep_fn = pgrep_fn or _default_pgrep_any
+    try:
+        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
+    except Exception as e:
+        _dbg("runner-update pgrep failed: %r" % e)
+        live = "PGREP-ERROR"
+    worker_live = bool(live.strip())
     out = []
     try:
         for rd in sorted(root.glob("actions-runner*")):
-            for sub in ("_work/_update", "_work/_temp"):
-                p = rd / sub
-                if p.is_dir() and not p.is_symlink():
-                    out.append({"cls": "runner-update", "path": str(p),
-                                "bytes": _safe_dir_size(str(p), dir_stats_fn),
+            p_update = rd / "_work" / "_update"
+            if p_update.is_dir() and not p_update.is_symlink():
+                out.append({"cls": "runner-update", "path": str(p_update),
+                            "bytes": _safe_dir_size(str(p_update), dir_stats_fn),
+                            "kind": "delete", "reason": None})
+            p_temp = rd / "_work" / "_temp"
+            if p_temp.is_dir() and not p_temp.is_symlink():
+                if worker_live:
+                    out.append({"cls": "runner-update", "path": str(p_temp), "bytes": 0,
+                                "kind": "skip",
+                                "reason": "Runner.Worker live — _temp is $RUNNER_TEMP, kept"})
+                else:
+                    out.append({"cls": "runner-update", "path": str(p_temp),
+                                "bytes": _safe_dir_size(str(p_temp), dir_stats_fn),
                                 "kind": "delete", "reason": None})
     except OSError as e:
         return [{"cls": "runner-update", "path": None,
@@ -594,7 +623,11 @@ def _parse_docker_created(s):
 
 
 def _image_in_use(img, in_use_refs):
-    fullid = img.get("id") or ""
+    # `docker images --no-trunc` yields `sha256:<hex>` ids; `docker ps` shows a
+    # bare 12-hex id OR a repo:tag. Strip the `sha256:` prefix on BOTH sides
+    # before comparing (review 🟡: an id-referenced in-use image was mis-read as
+    # unused — docker's own `rmi` refusal saved it, but the plan was wrong).
+    fullid = (img.get("id") or "").replace("sha256:", "")
     shortid = fullid[:12] if fullid else ""
     reftag = None
     if img.get("repo") and img.get("repo") != "<none>" and img.get("tag") and img.get("tag") != "<none>":
@@ -602,9 +635,10 @@ def _image_in_use(img, in_use_refs):
     for ref in in_use_refs:
         if not ref:
             continue
-        if ref == fullid or (shortid and ref == shortid) or (reftag and ref == reftag):
+        r = ref.replace("sha256:", "")
+        if r == fullid or (shortid and r == shortid) or (reftag and ref == reftag):
             return True
-        if shortid and (ref.startswith(shortid) or shortid.startswith(ref.replace("sha256:", ""))):
+        if shortid and (r.startswith(shortid) or shortid.startswith(r)):
             return True
     return False
 
@@ -750,19 +784,28 @@ def discover_stale_claude_versions(home=None, running_fn=None, dir_stats_fn=None
             _dbg("claude-version fail-safe walk failed: %r" % e)
         return out
     try:
-        for entry in vdir.iterdir():
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            if entry.name in protected:
-                out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
-                            "kind": "skip", "reason": "running version %s — kept" % entry.name})
-                continue
-            out.append({"cls": "claude-version", "path": str(entry),
-                        "bytes": _safe_dir_size(str(entry), dir_stats_fn),
-                        "kind": "delete", "reason": None})
+        version_dirs = [e for e in vdir.iterdir() if e.is_dir() and not e.is_symlink()]
     except OSError as e:
         return [{"cls": "claude-version", "path": None,
                  "reason": "could not walk %s: %s" % (vdir, e)}]
+    # FAIL-SAFE: if the resolved running version matches NO actual version dir
+    # (and no symlink protected one), we cannot identify the active binary →
+    # KEEP EVERYTHING rather than risk deleting the running install (review 🔵).
+    if not (protected & {e.name for e in version_dirs}):
+        for entry in version_dirs:
+            out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                        "kind": "skip",
+                        "reason": "running version %r matches no version dir — kept (fail-safe)"
+                        % running})
+        return out
+    for entry in version_dirs:
+        if entry.name in protected:
+            out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                        "kind": "skip", "reason": "running version %s — kept" % entry.name})
+            continue
+        out.append({"cls": "claude-version", "path": str(entry),
+                    "bytes": _safe_dir_size(str(entry), dir_stats_fn), "kind": "delete",
+                    "reason": None})
     return out
 
 
