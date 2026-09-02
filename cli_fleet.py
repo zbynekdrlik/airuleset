@@ -475,7 +475,7 @@ def _github_ci_runner_source(user):
     matched, `ci-runner (GitHub-hosted)` for the `runner` arm.
 
     The runner is in neither authority registry, so #827's fail-safe resolves it
-    `fork-no-merge`, which broke ~28 tests that shell out to the FULL-authority-
+    `fork-no-merge`, which broke ~33 tests that shell out to the FULL-authority-
     gated `core-quals` / `tickets-status --refresh` / run-card backlog count (all
     of which silently assumed the box was full). The hosted runner IS a
     legitimate full-authority context for THIS repo's OWN CI.

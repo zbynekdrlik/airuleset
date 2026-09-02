@@ -3467,16 +3467,20 @@ class TestQualsExcludePermanentOpsChannelTickets(TestCase):
 
 class TestCIRunnerAuth839(TestCase):
     """airuleset#839: after #827 made an unmapped unix user fail-SAFE to
-    fork-no-merge, the GitHub-hosted CI runner (unix account `runner`, in
-    neither registry) resolved fork-no-merge and broke ~28 tests that shell out
-    to the FULL-authority-gated core-quals / tickets-status / run-card. This
-    recognises the runner as a legitimate full-authority context for THIS repo's
-    OWN CI by the UNSPOOFABLE (`pw_name == "runner"` AND `GITHUB_ACTIONS=true`
-    AND `RUNNER_ENVIRONMENT=github-hosted`), hardens `_current_user()` against
-    the `$USER`/`$LOGNAME` env-spoof, and proves no stream reaches `full` through
-    the seam. The recognition + hardening tests are RED on v0.1.128; the
-    no-elevation guards (stream / non-runner / self-hosted) are green-by-design on
-    both sides — they lock that the seam does NOT widen."""
+    fork-no-merge, the GitHub-hosted CI runner (in neither registry) resolved
+    fork-no-merge and broke ~33 tests that shell out to the FULL-authority-gated
+    core-quals / tickets-status / run-card. This recognises the runner as a
+    legitimate full-authority context for THIS repo's OWN CI by the UNSPOOFABLE
+    identity — `pw_name == "runner"` (a hosted runner outside a container) OR
+    uid 0 + `pw_name == "root"` (attempt 2: the `gate` job runs its pytest step
+    INSIDE a `container: python:3.12` as root, never `runner`) — AND both
+    `GITHUB_ACTIONS=true` AND `RUNNER_ENVIRONMENT=github-hosted`. It hardens
+    `_current_user()` against the `$USER`/`$LOGNAME` env-spoof and proves no
+    stream reaches `full` through the seam. The recognition + hardening tests are
+    RED on the corresponding attempt's prior code (v0.1.128 for the runner arm,
+    v0.1.129 for the container arm); the no-elevation guards (stream / non-runner
+    / self-hosted / unmapped / registry) are green-by-design on both sides — they
+    lock that the seam does NOT widen."""
 
     # ci-runner (GitHub-HOSTED) recognition needs all three signals.
     _HOSTED = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
@@ -3591,6 +3595,28 @@ class TestCIRunnerAuth839(TestCase):
         self.assertEqual(profile, "full")
         self.assertEqual(source, "ci-runner (GitHub-hosted, container)",
                          "the uid-0 container arm must name a DISTINCT source")
+
+    def test_cmd_authority_explain_names_container_arm(self):
+        # The PRINTED --explain map= annotation names the container arm too, so
+        # it stays consistent with the (container-distinct) source line.
+        import cli_quals
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "_current_user", return_value="root"):
+            with m.patch("os.getuid", return_value=0):
+                with m.patch.dict(os.environ, self._HOSTED):
+                    with m.patch.object(cli_quals, "_authority_marker_raw",
+                                        return_value=None):
+                        with contextlib.redirect_stdout(buf):
+                            cli_quals.cmd_authority(m.Mock(
+                                maintainer_login=False, self_login=False,
+                                app_bot_login=False, stream_label=False,
+                                explain=True))
+        out = buf.getvalue()
+        self.assertIn("full", out)
+        self.assertIn("ci-runner (GitHub-hosted, container)", out)
+        self.assertIn("GitHub-hosted CI runner (container) -> full", out)
 
     def test_container_root_uid0_without_env_is_fork_no_merge(self):
         # The env conjuncts are load-bearing for the uid-0 arm TOO: uid 0

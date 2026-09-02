@@ -1668,8 +1668,13 @@ def cmd_authority(args):
         if user in airuleset.AUTHORITY_BY_USER:
             map_val = airuleset.AUTHORITY_BY_USER[user]
         elif airuleset._is_github_ci_runner(user):
-            # airuleset#839: same order as _authority_decision above.
-            map_val = "GitHub-hosted CI runner -> full"
+            # airuleset#839: same order as _authority_decision above; name the
+            # CONTAINER arm distinctly so the map= annotation matches the source
+            # line (which already distinguishes the container vs runner arm).
+            ci_src = airuleset._github_ci_runner_source(user)
+            map_val = ("GitHub-hosted CI runner (container) -> full"
+                       if ci_src and "container" in ci_src
+                       else "GitHub-hosted CI runner -> full")
         elif user in airuleset.FULL_AUTHORITY_USERS:
             map_val = "full-authority account -> full"
         else:
