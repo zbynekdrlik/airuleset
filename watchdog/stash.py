@@ -49,12 +49,20 @@ the positional facade import in ``__init__.py`` (replacing the earliest removed
 line), so all existing ``watchdog.<name>`` seams keep resolving unchanged.
 """
 
+import logging
 import os
 import re
 import time
 from pathlib import Path
 
 import watchdog
+
+# #852 -- a real WARNING channel for a leave-path that could not remove our own
+# typed text (`_park_unreclaimed`). The module's aborts are surfaced through the
+# `logs` list the caller prints; a genuine UNRECLAIMED leak is ALSO emitted at
+# WARNING here (the same shape `compact.py` uses) so it is loud in the journal
+# regardless of whether the caller collects `logs`.
+_log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -880,7 +888,24 @@ def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
     return None
 
 
-def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None):
+def _park_unreclaimed(pid, run, text, log_fn, state, prefix, now=None):
+    """#852 E -- the ONE leave-path a `deliver_with_stash` recovery may take
+    when it could not remove our own typed text: it NEVER stays silent. It (a)
+    emits `<prefix>: left-in-box UNRECLAIMED pane=<p> typed=<repr(text)[:120]>`
+    at WARNING (both the module logger and the caller's `logs`), and (b) writes
+    a durable janitor park record CARRYING the exact string, so the janitor can
+    reclaim exactly the OWN part later (#852 C), preserving any human prefix.
+    No path that leaves typed text may skip this (the #852 lock invariant)."""
+    now = time.time() if now is None else now
+    reason = ("%s: left-in-box UNRECLAIMED pane=%s typed=%s"
+              % (prefix, pid, repr(text)[:120]))
+    _log.warning(reason)
+    log_fn(reason)
+    watchdog._janitor_park_record(state, pid, now, text=text)
+
+
+def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None,
+                           state=None):
     """Backspace exactly `text` and, only once bare is CONFIRMED, pop a
     PARKED draft back with one corrective `C-s` -- the shared recovery
     THREE call sites need (`deliver_with_stash`'s original #193
@@ -888,24 +913,25 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
     swallowed-submit-not-recovered branch, plus `_send_goal_verified`'s own
     #306 swallowed-submit path, always with `parked=False`).
 
-    The precondition every caller has already proven before reaching here
-    -- the box's ENTIRE content is, by construction, exactly `text` and
-    nothing else -- holds for a DIFFERENT reason depending on the caller:
-    a settle poll verified the box BARE immediately before typing (the
-    PARKED/NOOP outcome, and `_send_goal_verified`'s own bare-box-only
-    entry gate), or `_typed_exclusively` already proved the box holds ONLY
-    `text` with nothing of a foreign draft's (the UNRESOLVED-exclusive
-    outcome -- `parked` is structurally False on that path, since only a
-    bare-box settle can ever set `STASH_PARKED`, so the dangerous `C-s`
-    pop below can never fire there; only the safe backspace half runs).
-    Either way, `_undo_typed_text` backspaces exactly `len(text)` and
-    itself re-verifies the box came back to bare before this function ever
-    considers popping anything.
+    The precondition every caller has proven before reaching here -- the box
+    was VERIFIED BARE immediately before typing (#852 A removed the only
+    UNRESOLVED caller, so every caller now enters from a bare-box settle) --
+    means every character `_undo_typed_text` backspaces is provably our own.
 
-    `log_fn(reason)` receives exactly ONE reason string, built from
-    `prefix` (e.g. `"stash-abort"` for the original call site, so the
-    result is byte-identical to the pre-#306 wording; a fuller phrase like
-    `"stash-abort: swallowed-submit-not-recovered"` for the new ones).
+    #852 B/E -- when `_undo_typed_text` cannot confirm the box came back to
+    bare, this function NEVER leaves our text silently. A stray human char that
+    raced to the FRONT after the settle is PRESERVED (our text is backspaced off
+    the END; `_typed_landed` proves it is gone) and the recovery succeeds; a box
+    it genuinely cannot clear is left with a WARNING + a durable park record
+    (`_park_unreclaimed`, `state`), so the janitor reclaims exactly the OWN part
+    later. This replaces the old silent `typed-NOT-undone` / `append-unprovable`
+    leak (the #852 incident).
+
+    `log_fn(reason)` receives ONE reason string per call, built from `prefix`
+    (e.g. `"stash-abort"`, or a fuller `"stash-abort: swallowed-submit-not-
+    recovered"`). `state` (default None) is threaded so `_park_unreclaimed` can
+    record a leak durably; a None `state` is a no-op there, exactly like
+    `_janitor_park_record`.
 
     `sleep_fn` (#354) backs `_undo_typed_text`'s own bounded settle poll --
     threaded through from the caller's existing `sleep_fn` param (never a
@@ -914,12 +940,26 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
     parked draft. Production defaults to real `time.sleep`; tests inject a
     no-op."""
     undone = watchdog._undo_typed_text(pid, run, text, sleep_fn=sleep_fn)
-    if not parked:
-        log_fn("%s: typed-undone" % prefix if undone
-               else "%s: typed-NOT-undone" % prefix)
-        return
     if not undone:
-        log_fn("%s: typed-NOT-undone, draft left parked" % prefix)
+        # #852 B -- the box did NOT come back to bare after len(text) backspaces.
+        # A stray human char may have raced to the FRONT after the settle (the
+        # incident's `s`): re-read, and if our OWN text is PROVABLY gone (the
+        # `_typed_landed` suffix contract no longer holds on the box tail), the
+        # residual is the human's -- preserved, success. We do NOT pop then: a
+        # `C-s` would park the stray over the slot. Only when our text is STILL
+        # present (a truncated type, a genuinely wedged box) do we leave it, and
+        # then NEVER silently -- `_park_unreclaimed` WARNS + writes a durable
+        # park record carrying the exact string (#852 E), replacing the old
+        # silent `typed-NOT-undone` leak.
+        itext = watchdog._input_line_text(
+            watchdog.capture_pane(pid, run, lines=30))
+        if not watchdog._typed_landed(text, itext):
+            log_fn("%s: typed-undone (stray prefix preserved)" % prefix)
+            return
+        _park_unreclaimed(pid, run, text, log_fn, state, prefix)
+        return
+    if not parked:
+        log_fn("%s: typed-undone" % prefix)
         return
     # ONLY now, with the box confirmed bare again, may the toggle pop the
     # parked draft back. Firing it while our own text was still in the box
@@ -1093,7 +1133,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                 # #372) -- the #488 park record + janitor reclaim the parked draft.
                 watchdog._undo_and_release_slot(
                     pid, run, text[:GOAL_TYPE_CHECKPOINT_CHARS], parked, _log,
-                    "stash-abort", sleep_fn=sleep_fn)
+                    "stash-abort", sleep_fn=sleep_fn, state=state)
             return False
     else:
         watchdog._type_literal(pid, run, text, sleep_fn)
@@ -1162,7 +1202,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # so every character in it is ours and backspacing exactly what we typed
         # can reach nothing of the user's.
         watchdog._undo_and_release_slot(pid, run, text, parked, _log, "stash-abort",
-                                        sleep_fn=sleep_fn)
+                                        sleep_fn=sleep_fn, state=state)
         return False
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = watchdog.capture_pane(pid, run, lines=30)
@@ -1176,18 +1216,16 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         itext3 = watchdog._input_line_text(cap)
         if watchdog._typed_landed(text, itext3):
             # #306 — delivery is genuinely dead here, but by construction the
-            # box's ENTIRE content is exactly `text` (nothing else could be
-            # in it: PARKED/NOOP means it was verified bare before we typed;
-            # UNRESOLVED-exclusive means `_typed_exclusively` already proved
-            # the box holds ONLY `text`) — the same precondition the
-            # verify-failure recovery above already relies on. Recover the
-            # SAME way: backspace our own text and, if we parked something
-            # in THIS call, pop it back — never leave the pane stuck with
-            # our own garbled text AND the single stash slot silently
+            # box's ENTIRE content is exactly `text`: PARKED/NOOP means it was
+            # verified bare before we typed (#852 A removed the UNRESOLVED
+            # caller). Recover the SAME way: backspace our own text and, if we
+            # parked something in THIS call, pop it back — and on a box we
+            # cannot clear, WARN + park it durably (#852 E) rather than leave
+            # the pane stuck with our garbled text and the single stash slot
             # occupied forever (the live david@subdev ~2h wedge).
             watchdog._undo_and_release_slot(pid, run, text, parked, _log,
                                    "stash-abort: swallowed-submit-not-recovered",
-                                   sleep_fn=sleep_fn)
+                                   sleep_fn=sleep_fn, state=state)
             return False
     # #488 -- verified success: CC now owns the async auto-restore of the
     # parked draft, so the janitor must NOT reclaim (a double-restore) -> drop

@@ -561,18 +561,23 @@ class UndoVerifyRaceIsSettledNotLeftHanging(unittest.TestCase):
     def test_a_genuinely_stuck_undo_still_ends_loud_not_silent(self):
         # The settle window is BOUNDED (`no-timeout-band-aids.md`) — when
         # the box NEVER actually clears (a real, non-transient failure, not
-        # a render race), the recovery still gives up — but LOUDLY: the
-        # reason string is never silently dropped.
+        # a render race), the recovery still gives up — but LOUDLY. #852 E
+        # replaced the old silent `typed-NOT-undone, draft left parked` leak
+        # with a `left-in-box UNRECLAIMED` WARNING (naming the pane + the exact
+        # typed string) + a durable park record, so the janitor can reclaim it.
         pane = FakePane(draft=DRAFT, swallow_enters=2,
                         bspace_lag_captures=999999)
         logs = []
-        ok = deliver(pane, logs=logs)
+        state = {}
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=logs,
+                                   sleep_fn=lambda s: None, state=state)
         self.assertFalse(ok, logs)
-        self.assertTrue(any(ln == "stash-abort: swallowed-submit-not-"
-                            "recovered: typed-NOT-undone, draft left parked"
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln and "typed=" in ln
                             for ln in logs),
                         "a genuine double failure must still be logged "
                         "LOUDLY, never silently: %r" % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), TEXT,
+                         "the leaked text must be parked for reclaim: %r" % state)
 
 
 def _box(buf):
