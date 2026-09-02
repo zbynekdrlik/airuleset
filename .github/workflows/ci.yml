@@ -78,7 +78,38 @@ jobs:
       - name: Size ratchet (growth-only cap on file/function size)
         run: python3 scripts/size_ratchet.py --check
 
+      - name: CI identity (for #839 authority resolution)
+        # airuleset#839: GitHub does NOT forward RUNNER_ENVIRONMENT into a
+        # container job (its `docker create` forwards only HOME/GITHUB_ACTIONS/
+        # CI — 0 occurrences of RUNNER_ENVIRONMENT in the run-33596134863 job
+        # log). airuleset's authority resolver recognises this repo's OWN CI
+        # (to grant the full-authority CLI behaviour the hermetic tests assume)
+        # by uid 0 + GITHUB_ACTIONS + RUNNER_ENVIRONMENT=github-hosted, so make
+        # the last one visible. `runner.environment` is a STEP-level context
+        # ("github-hosted" on a hosted runner; NOT available at job-level env)
+        # injected into this step's env, so a self-hosted runner would carry
+        # "self-hosted" and stay reduced (the design's fail-safe discriminator).
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          # PRINT the identity + hosted-CI env the authority resolver keys on,
+          # so the next investigator never has to INFER it from the container
+          # create line again (attempt 1's failure mode). This is a print, not
+          # a gate: the `|| true` keeps a non-zero probe from failing the step
+          # from inside the run script (no workflow-level failure-exemption key
+          # is used anywhere — that is banned in this repo's CI).
+          id -un; id -u
+          env | grep -E '^(GITHUB_ACTIONS|RUNNER_ENVIRONMENT|CI)=' || true
+          python3 airuleset.py authority --explain || true
+
       - name: Pytest — hermetic subset
+        # airuleset#839: the pytest step (and its `_run_quals` subprocesses that
+        # shell out to core-quals / tickets-status / run-card) resolve authority
+        # as the container's uid 0 / root, so RUNNER_ENVIRONMENT must be visible
+        # HERE too (step-level `runner.environment`, same reason as the identity
+        # step above) or the FULL-authority-gated subset stays RED.
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           # Write args to a file FIRST so a failing generator fails the step
           # (a `mapfile < <(...)` process substitution swallows the child's
