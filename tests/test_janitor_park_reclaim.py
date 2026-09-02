@@ -259,17 +259,31 @@ class OwnLeftoverToleratesAStrayPrefix(unittest.TestCase):
     STRAY = "s"
     NUDGE = OWN_LANE_NUDGE            # "lane-check: ...", 691c, wraps at 176
 
-    def test_recognition_tolerates_a_stray_leading_char(self):
-        self.assertTrue(wd._looks_like_own_stuck_content(self.STRAY + self.NUDGE))
-        # up to 3 stray chars still recognized; the own prefix past position 4
-        # (a genuine foreign draft that merely mentions the phrase deep in) is
-        # NOT the shape this admits.
-        self.assertTrue(wd._looks_like_own_stuck_content("xy" + self.NUDGE))
-        self.assertFalse(wd._looks_like_own_stuck_content(
-            "moja dlha rozpisana " + self.NUDGE))
-        # a plain foreign draft is never recognized.
-        self.assertFalse(wd._looks_like_own_stuck_content(
-            "toto je moja vlastna sprava bez prefixu"))
+    def test_recognition_is_record_verified_not_a_shape_guess(self):
+        # #852-review 🔴-1/🔴-2 -- the stray-prefix case is recognized ONLY by
+        # `_box_own_with_short_prefix` against the EXACT recorded string, NEVER
+        # by widening `_looks_like_own_stuck_content` (which feeds the
+        # provenance-weak `clear` action). So the general recognizer stays
+        # strictly position-0, and a human draft that merely starts `x/goal …`
+        # is NEVER admitted without a matching record.
+        self.assertFalse(wd._looks_like_own_stuck_content(self.STRAY + self.NUDGE),
+                         "the general recognizer must NOT widen to a stray prefix")
+        # the record-verified match: box == <short prefix> + recorded nudge
+        self.assertTrue(wd._box_own_with_short_prefix(
+            render_box(self.STRAY + self.NUDGE), self.NUDGE))
+        self.assertTrue(wd._box_own_with_short_prefix(
+            render_box("xy" + self.NUDGE), self.NUDGE))
+        # a LONGER human prefix (a real draft in front) is refused -- our
+        # len(record) backspaces would eat it.
+        self.assertFalse(wd._box_own_with_short_prefix(
+            render_box("moja dlha rozpisana " + self.NUDGE), self.NUDGE))
+        # a box NOT ending in the recorded nudge (drifted / foreign) is refused.
+        self.assertFalse(wd._box_own_with_short_prefix(
+            render_box("toto je moja vlastna sprava bez prefixu"), self.NUDGE))
+        # a DIFFERENT own-shaped draft (`/goal …`) with NO matching record is
+        # refused -- the 🔴-1 human-deletion path.
+        self.assertFalse(wd._box_own_with_short_prefix(
+            render_box("x/goal STOP keď je CI zelené"), self.NUDGE))
 
     def _recover_stray(self, state, dry_run=False):
         box = {"buf": self.STRAY + self.NUDGE}
@@ -313,6 +327,67 @@ class OwnLeftoverToleratesAStrayPrefix(unittest.TestCase):
                          "untouched without provenance: %r" % box["buf"][:40])
         self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" for a in sent),
                          "never a keystroke without provenance: %r" % sent)
+
+    def test_a_stray_shaped_human_draft_with_only_the_watch_mark_is_untouched(self):
+        # #852-review 🔴-1 -- THE human-deletion regression. A human draft of the
+        # stray shape (`x/goal …`: a stray char, then an own-looking prefix at
+        # position 1) with only the generic 6h `janitor_watch` mark (fresh on
+        # any nudge-target pane) and NO matching park record must NEVER be
+        # cleared -- the widened recognizer used to full-clear it, deleting text
+        # the watchdog could not prove it typed.
+        human = "x/goal STOP keď je CI zelené"
+        box = {"buf": human}
+        sent = []
+
+        def run(argv, timeout=8):
+            sent.append(argv)
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                return render_box(box["buf"])
+            if "display-message" in j:
+                return LOC
+            if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+                box["buf"] = box["buf"][:-argv.count("BSpace")]
+            return ""
+
+        wd._janitor_recover(run, {}, PID, CWD, render_box(human), LOC,
+                            send_fn=None, dry_run=False,
+                            sleep_fn=lambda *a, **k: None,
+                            state={"janitor_watch": {PID: NOW - 30}}, now=NOW)
+        self.assertEqual(box["buf"], human,
+                         "a stray-shaped human draft was cleared: %r" % box["buf"])
+        self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" and "BSpace" in a
+                             for a in sent), "backspaced a human draft: %r" % sent)
+
+    def test_a_drifted_box_with_a_stale_record_is_never_backspaced(self):
+        # #852-review 🔴-2 -- a park record carrying NUDGE survives, but the box
+        # has DRIFTED to a DIFFERENT draft (the human cleared the leak and typed
+        # a new one). `_box_own_with_short_prefix` no longer holds, so the
+        # reclaim declines: NO blind len(NUDGE) backspace burst into human text.
+        drifted = "moja nova rozpisana poznamka"
+        box = {"buf": drifted}
+        sent = []
+
+        def run(argv, timeout=8):
+            sent.append(argv)
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                return render_box(box["buf"])
+            if "display-message" in j:
+                return LOC
+            if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+                box["buf"] = box["buf"][:-argv.count("BSpace")]
+            return ""
+
+        state = {"stash_parks": {PID: {"ts": NOW, "typed": self.NUDGE}},
+                 "janitor_watch": {PID: NOW - 30}}
+        wd._janitor_recover(run, {}, PID, CWD, render_box(drifted), LOC,
+                            send_fn=None, dry_run=False,
+                            sleep_fn=lambda *a, **k: None, state=state, now=NOW)
+        self.assertEqual(box["buf"], drifted,
+                         "a drifted box was backspaced: %r" % box["buf"])
+        self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" and "BSpace" in a
+                             for a in sent), "backspaced a drifted box: %r" % sent)
 
 
 class PruneParksHelper(unittest.TestCase):

@@ -1256,7 +1256,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         # and re-classify. `_janitor_recover` no-ops without provenance, so a
         # genuine human draft is never touched and still `skip:draft`. This
         # closes the gk `slane-check:` livelock (the leaked text vetoed /compact
-        # forever, ctx 441K -> 628K).
+        # forever, ctx 441K -> 628K). #852-review 🔵-9: `send_fn=None` here, so a
+        # failed reclaim only re-classifies still-draft -> `skip:draft` (no ping,
+        # #546); and the CLI `_compact_sync_attempt` path threads no `state`, so
+        # the reclaim is inert there (provenance is None) and the WATCHDOG SWEEP
+        # (which threads `state`) is what actually unblocks the livelock.
         rec = {}
         watchdog._janitor_recover(run, rec, pid, cwd, captured,
                                   watchdog._pane_location(pid, run) or cwd,

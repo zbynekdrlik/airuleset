@@ -731,7 +731,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 if not dry_run and not watchdog.pane_in_mode(pid, run):
                     _record_dreply_typed(state, pid, prompt, now)
                     if watchdog.deliver_with_stash(pid, prompt, run, captured=captured,
-                                          logs=logs):
+                                          logs=logs, state=state):  # #852-review 🟡-5
                         idead = state.get("inputdead")
                         if isinstance(idead, dict):
                             idead.pop(r["session"], None)

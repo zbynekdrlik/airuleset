@@ -92,29 +92,37 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
     return False
 
 
-def _janitor_clear_own_suffix(pid, run, own_len, sleep_fn, log_fn):
-    """#852 C — reclaim a `<stray human prefix> + <our own nudge>` box by
-    backspacing EXACTLY `own_len` characters (the recorded length of our own
-    nudge, which sits at the END), preserving the human prefix at the FRONT.
+def _janitor_clear_own_suffix(pid, run, own_typed, sleep_fn, log_fn):
+    """#852 C — reclaim a `<stray human prefix> + <our recorded nudge>` box by
+    backspacing EXACTLY `len(own_typed)` characters (our own nudge, at the END),
+    preserving the short human prefix at the FRONT.
 
-    ONE precise backspace burst (never the observed-length re-backspace loop
-    `_janitor_clear_box` uses — that clears to BARE and would eat the human's
-    prefix), then a BOUNDED settle-verify against a FRESH capture: success only
-    once the box no longer holds our recognizable own content
-    (`_looks_like_own_stuck_content` False on the head), so a render lag is
-    absorbed and an over/under-clear that leaves our content is reported as a
-    FAILURE rather than a false success. An unreadable box mid-clear aborts
-    keystroke-free (the #233 discipline)."""
+    #852-review 🔴-2 — the recorded string is VERIFIED against the CURRENT box
+    on a FRESH capture BEFORE any keystroke (`_box_own_with_short_prefix`: the
+    box provably ends with the recorded nudge behind a <=short prefix). This
+    closes the TOCTOU where the box drifted after the record was written (the
+    human edited the glue, or cleared it and typed a NEW draft of the same
+    position-1 shape while a stale record survived): declining then means we
+    never fire a blind `len(record)`-char backspace burst into human text. Only
+    once the contract holds do we backspace exactly `len(own_typed)`, then a
+    BOUNDED settle-verify against a fresh capture confirms the recorded text is
+    GONE. An unreadable / drifted box aborts keystroke-free (the #233 / #372
+    'never guess a length' discipline)."""
     sleep_fn = sleep_fn or time.sleep
-    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * own_len)
+    cap = watchdog.capture_pane(pid, run, lines=30)
+    if not watchdog._box_own_with_short_prefix(cap, own_typed):
+        # the box no longer provably holds our recorded nudge (drifted / raced /
+        # already cleared) -> NEVER backspace a blind length into it.
+        log_fn("janitor: own-suffix box no longer matches record -> declined")
+        return False
+    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(own_typed))
     for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
         cap = watchdog.capture_pane(pid, run, lines=30)
-        head = watchdog._input_box_head_text(cap)
-        if head is None:
+        if watchdog._input_line_text(cap) is None:
             log_fn("janitor: box unreadable mid-own-suffix-clear")
             return False
-        if not watchdog._looks_like_own_stuck_content(head):
-            return True             # our nudge is gone; the human prefix remains
+        if not watchdog._box_own_with_short_prefix(cap, own_typed):
+            return True             # our recorded nudge is gone; the prefix remains
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
     log_fn("janitor: own-suffix clear did not converge")
     return False
@@ -391,10 +399,23 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # leaked) AND the recorded length to backspace, so the reclaim removes only
     # our own part and preserves the human prefix. `own_typed` is None (no
     # stray-reclaim) unless such a record exists.
+    # #852-review 🔴-1/🔴-2 — a stray-prefix reclaim requires the EXACT recorded
+    # typed string as provenance AND a proof the CURRENT box still holds it
+    # (`_box_own_with_short_prefix`: box == <short human prefix> + own_typed).
+    # It is NOT gated on `_own_prefix_stray_offset` (a shape guess) nor on the
+    # widened recognizer -- so a drifted / foreign / edited box is never
+    # backspaced into, and a human draft that merely starts `x/goal …` (no
+    # matching record) never qualifies.
     own_typed = _janitor_park_typed(state, pid)
     stray_own = (own_typed is not None
-                 and watchdog._own_prefix_stray_offset(itext) is not None
-                 and not watchdog._looks_like_own_payload(itext))
+                 and watchdog._box_own_with_short_prefix(captured, own_typed))
+    # A dict (leaked-text) record's LEAK is still visible when the box holds our
+    # recorded text at any position -- used to keep the marker-gone backstop from
+    # clearing the record before the leak is reclaimed (#852-review 🟡-4).
+    leak_visible = own_typed is not None and (
+        stray_own
+        or watchdog._typed_landed(own_typed, itext)
+        or watchdog._looks_like_own_stuck_content(itext))
 
     # #488 -- the DURABLE, age-unbounded park record. Written by
     # `deliver_with_stash` itself the instant it DEFINITIVELY parks a draft
@@ -404,7 +425,14 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # is reclaimable after any delay -- the exact gk gap (a goal ran `(1d)`,
     # past the 6h `_janitor_watch_seen` bound).
     park_seen = _janitor_park_seen(state, pid)
-    if park_seen and not occupied and not stray_own:
+    # #852-review 🟡-4 — a #488 FLOAT record marks a parked STASH DRAFT, so
+    # "slot no longer occupied" IS its resolution. A #852 DICT (leaked-text)
+    # record marks our text left IN THE BOX -- it is stale only when that text
+    # is no longer visible, NEVER merely because the slot is empty. So never
+    # clear a dict record while its leak is still visible (else a later
+    # sweep can no longer reclaim it -- the exact "leaked forever" gap E closes).
+    if park_seen and not occupied and not stray_own \
+            and (own_typed is None or not leak_visible):
         # Marker-gone backstop: the park was resolved (CC's own async
         # auto-restore / our pop-back / a human), so the record is stale ->
         # clear it. This is what bounds an age-unbounded record WITHOUT a
@@ -467,7 +495,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
                     and _janitor_pop_stash(pid, run, _log))
     elif action == "clear-own-suffix":       # #852 C: preserve the human prefix
         recovered = _janitor_clear_own_suffix(
-            pid, run, len(own_typed), sleep_fn, _log)
+            pid, run, own_typed, sleep_fn, _log)
     else:                                    # "clear"
         recovered = _janitor_clear_box(pid, run, sleep_fn, _log)
 

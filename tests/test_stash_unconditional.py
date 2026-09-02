@@ -619,16 +619,20 @@ class _StrayRun:
     """A recording `run` for a DIRECT `_undo_and_release_slot` call: the box
     holds `stray + text`; a BSpace batch trims exactly what it removes from the
     END (leaving the stray at the FRONT), unless `stuck` (the backspaces do
-    nothing -- a genuinely wedged box)."""
+    nothing -- a genuinely wedged box). `unreadable` renders a busy pane with no
+    input box (so `_input_line_text` reads None -- a turn started mid-recovery)."""
 
-    def __init__(self, stray, text, stuck=False):
+    def __init__(self, stray, text, stuck=False, unreadable=False):
         self.buf, self.stray, self.text = stray + text, stray, text
-        self.stuck, self.sent = stuck, []
+        self.stuck, self.unreadable, self.sent = stuck, unreadable, []
 
     def __call__(self, argv, timeout=8):
         self.sent.append(argv)
         j = " ".join(argv)
         if "capture-pane" in j:
+            if self.unreadable:
+                return ("● Validate\n  ⎿ running…\n"
+                        "✳ Baking… (2m · esc to interrupt)\n")
             return _box(self.buf)
         if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv and not self.stuck:
             n = argv.count("BSpace")
@@ -669,6 +673,35 @@ class SuffixProofUndoNeverLeaks(unittest.TestCase):
         self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE,
                          "the exact typed string must be parked for reclaim: %r"
                          % state)
+
+    def test_an_unreadable_box_after_undo_parks_never_false_success(self):
+        # #852-review 🟡-3 -- if the box is UNREADABLE after the backspaces (a
+        # turn/dialog started: `_input_line_text` None), our full text may still
+        # be there -> PARK, never a false `typed-undone` success with no record.
+        run = _StrayRun("", self.NUDGE, unreadable=True)
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "an unreadable box must park, not claim success: %r" % logs)
+        self.assertFalse(any("stray prefix preserved" in ln for ln in logs), logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE, state)
+
+    def test_a_long_foreign_residue_parks_never_false_success(self):
+        # #852-review 🟡-3 -- a foreign SUFFIX raced in and our len(text)
+        # backspaces left a LONG residue that is not a suffix of our text: it
+        # reads "our text gone" but is NOT a short stray -> PARK, never claim a
+        # stray-preserved success.
+        run = _StrayRun("moja dlha rozpisana poznamka ", self.NUDGE)
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "a long residue must park, not claim a stray success: %r"
+                        % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE, state)
 
 
 class _CollapseRun:
@@ -714,20 +747,27 @@ class NoPathLeavesTypedTextSilently(unittest.TestCase):
                          "for the janitor to reclaim: %r" % state)
 
     def test_source_never_leaves_typed_text_without_a_park(self):
-        # A structural backstop (the #852 lock): every `return False` in
-        # deliver_with_stash that follows the typing point must be preceded by a
-        # recovery that parks-or-undoes (`_undo_and_release_slot` -- which itself
-        # parks on failure -- or `_park_unreclaimed`). We assert the two HOLD/
-        # collapse leaves and the recovery call are all present, so a future
-        # edit that reintroduces a bare `_log(... ); return False` after typing
-        # is caught.
+        # A structural backstop (the #852 lock): every typed-text leave in
+        # deliver_with_stash must hand off to `_park_unreclaimed` (WARN + park)
+        # or `_undo_and_release_slot` (which itself parks on failure). #852-review
+        # 🔵-6: count ACTUAL CALLS, not comment mentions, so a mutant that deletes
+        # the calls but keeps the comments is caught. An AST walk over the
+        # function counts `_park_unreclaimed(...)` and `_undo_and_release_slot(...)`
+        # Call nodes -- immune to comment/docstring text entirely.
+        import ast
         import inspect
-        src = inspect.getsource(wd.deliver_with_stash)
-        # both HOLD/collapse aborts must hand off to _park_unreclaimed
-        self.assertIn("_park_unreclaimed", src,
-                      "a typed-text leave must never be a bare log+return")
-        # the verify-failure recovery still routes through the parking helper
-        self.assertIn("_undo_and_release_slot", src)
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(wd.deliver_with_stash)))
+        called = [n.func.attr if isinstance(n.func, ast.Attribute)
+                  else getattr(n.func, "id", None)
+                  for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        self.assertGreaterEqual(
+            called.count("_park_unreclaimed"), 3,
+            "the collapsed-paste / two_phase-HOLD / head-checkpoint-HOLD leaves "
+            "must each CALL _park_unreclaimed (not just mention it): %r"
+            % [c for c in called if c and "park" in c])
+        self.assertIn("_undo_and_release_slot", called,
+                      "the verify-failure recovery must CALL the parking helper")
 
 
 class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):

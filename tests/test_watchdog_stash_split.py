@@ -396,10 +396,13 @@ class CoMovedKeystrokeSeamsGoThroughPackageSeam(unittest.TestCase):
         self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
     def test_typed_exclusively_and_undo_appended_text_are_live_helpers(self):
-        # #852 A -- the two functions stay as standalone predicates/helpers even
-        # though deliver no longer calls them; keep a direct smoke test so they
-        # are never silently dead. (_undo_appended_text's #354 settle race is
-        # covered directly in test_stash_unconditional.)
+        # #852 A / #852-review 🔵-7 -- HONESTY: these two functions are now
+        # PRODUCTION-DEAD (A removed their sole `deliver_with_stash` caller).
+        # They are RETAINED (not deleted) only because the #433 split's
+        # MOVED_NAMES self-validation still enumerates them; this direct smoke
+        # test + `_undo_appended_text`'s #354 settle-race coverage in
+        # test_stash_unconditional keep the retained code exercised. A future
+        # cleanup may delete both + their MOVED_NAMES entries (MVP philosophy).
         self.assertTrue(watchdog._typed_exclusively("abc", "abc"))
         self.assertFalse(watchdog._typed_exclusively("abc", "xabc"))
         self.assertFalse(watchdog._typed_exclusively("abc", ""))

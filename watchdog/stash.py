@@ -888,7 +888,7 @@ def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
     return None
 
 
-def _park_unreclaimed(pid, run, text, log_fn, state, prefix, now=None):
+def _park_unreclaimed(pid, text, log_fn, state, prefix, now=None):
     """#852 E -- the ONE leave-path a `deliver_with_stash` recovery may take
     when it could not remove our own typed text: it NEVER stays silent. It (a)
     emits `<prefix>: left-in-box UNRECLAIMED pane=<p> typed=<repr(text)[:120]>`
@@ -943,20 +943,25 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
     if not undone:
         # #852 B -- the box did NOT come back to bare after len(text) backspaces.
         # A stray human char may have raced to the FRONT after the settle (the
-        # incident's `s`): re-read, and if our OWN text is PROVABLY gone (the
-        # `_typed_landed` suffix contract no longer holds on the box tail), the
-        # residual is the human's -- preserved, success. We do NOT pop then: a
-        # `C-s` would park the stray over the slot. Only when our text is STILL
-        # present (a truncated type, a genuinely wedged box) do we leave it, and
-        # then NEVER silently -- `_park_unreclaimed` WARNS + writes a durable
-        # park record carrying the exact string (#852 E), replacing the old
-        # silent `typed-NOT-undone` leak.
+        # incident's `s`): re-read, and treat it as recovered ONLY on POSITIVE
+        # evidence that our text is gone and only a SHORT human prefix remains.
+        # #852-review 🟡-3: a bare `not _typed_landed` check is TRUE for two
+        # UNSAFE shapes too -- an UNREADABLE box (`itext is None`: a turn/dialog
+        # started, our full text may still be there) and a raced-in FOREIGN
+        # SUFFIX (our backspaces ate the human's trailing chars and left OUR
+        # head residue, not a suffix of `text`). Both must PARK, never claim a
+        # false success. So require: the box is readable, our text is provably
+        # gone (`not _typed_landed`), AND the residue is SHORT (<= a stray
+        # prefix). Anything else -> `_park_unreclaimed` (WARN + durable record).
         itext = watchdog._input_line_text(
             watchdog.capture_pane(pid, run, lines=30))
-        if not watchdog._typed_landed(text, itext):
+        if (itext is not None and not watchdog._typed_landed(text, itext)
+                and len(itext) <= STRAY_PREFIX_MAX_OFFSET):
+            # only a short human prefix remains; we do NOT pop (a `C-s` would
+            # park the stray over the slot).
             log_fn("%s: typed-undone (stray prefix preserved)" % prefix)
             return
-        _park_unreclaimed(pid, run, text, log_fn, state, prefix)
+        _park_unreclaimed(pid, text, log_fn, state, prefix)
         return
     if not parked:
         log_fn("%s: typed-undone" % prefix)
@@ -1139,7 +1144,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                 # keystroke (#233/#322/#372), but our head chunk IS left in it:
                 # record it durably (WARN + park) so the janitor reclaims it.
                 _park_unreclaimed(
-                    pid, run, text[:GOAL_TYPE_CHECKPOINT_CHARS], _log, state,
+                    pid, text[:GOAL_TYPE_CHECKPOINT_CHARS], _log, state,
                     "stash-abort: head-checkpoint-%s" % hc)
             return False
     else:
@@ -1165,7 +1170,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # #852 E -- our typed text IS left in this collapsed box, so record it
         # durably (WARN + park the exact string) so the janitor reclaims it;
         # never a silent log+return.
-        _park_unreclaimed(pid, run, text, _log, state, "stash-abort: collapsed-paste")
+        _park_unreclaimed(pid, text, _log, state, "stash-abort: collapsed-paste")
         return False
     # #670 -- the BARE (PARKED/NOOP) branch verifies HEAD-INCLUSIVELY
     # (`_type_verify_landed`: head-row prefix + tail suffix, placeholder-exempt),
@@ -1207,7 +1212,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         if two_phase_hold:
             # #852 E -- a HOLD box we typed into but must not backspace still
             # holds our text; record it durably (WARN + park) for the janitor.
-            _park_unreclaimed(pid, run, text, _log, state,
+            _park_unreclaimed(pid, text, _log, state,
                               "stash-abort: type-verify-hold")
             return False
         _log("stash-abort: type-verify-failed")
@@ -1419,18 +1424,20 @@ def _looks_like_own_stuck_content(itext):
     recognizable prefix) is left completely untouched — the janitor would
     rather miss a recoverable case than risk a genuine foreign draft.
 
-    #852 C — ALSO True when a known own prefix appears within the first
-    `STRAY_PREFIX_MAX_OFFSET` characters (position 1..3), i.e. a stray HUMAN
-    char raced to the FRONT of our own swallowed nudge (the incident's
-    `slane-check:` shape). This only widens RECOGNITION; the janitor's own
-    provenance gate (`_janitor_watch_seen` / a park record) still decides
-    WHETHER to act, so a foreign draft that merely mentions the phrase is
-    recognized-but-never-touched (no provenance)."""
+    #852 C / #852-review 🔴-1 — this recognizer stays STRICTLY position-0
+    (`_looks_like_own_payload` / placeholder). The stray-leading-char case
+    (`slane-check:` — an own prefix at position 1..3) is DELIBERATELY NOT
+    admitted here, because this recognizer feeds the destructive `clear` /
+    `clear-and-pop` actions that are gated only by the generic 6h
+    `_janitor_watch_seen` mark (fresh on any nudge-target pane): widening it
+    would let the janitor FULL-clear a human draft like `a /goal x` on shape +
+    the generic mark, deleting text it cannot prove it typed. The stray case is
+    handled ONLY by the record-verified `_box_own_with_short_prefix` (below),
+    which requires the EXACT recorded typed string as provenance."""
     if not itext:
         return False
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip())) \
-        or watchdog._looks_like_own_payload(itext) \
-        or _own_prefix_stray_offset(itext) is not None
+        or watchdog._looks_like_own_payload(itext)
 
 
 # #737 -- the minimum contiguous NORMALIZED-char overlap a box-vs-payload
@@ -1479,3 +1486,29 @@ def _box_is_own_leftover(captured, payload, min_chars):
     if not box_norm or len(box_norm) < min_chars:
         return False
     return box_norm in " ".join(payload.split())
+
+
+def _box_own_with_short_prefix(captured, own_typed):
+    """#852 C / #852-review 🔴-1/🔴-2 — True when the WHOLE visible input box is
+    our EXACT RECORDED nudge `own_typed` preceded by a SHORT (1..STRAY_PREFIX_
+    MAX_OFFSET) human prefix -- the incident's `s`+nudge shape, PROVEN against
+    the recorded string rather than guessed from an own-prefix position.
+
+    The proof: the normalized visible box ENDS WITH the normalized recorded
+    string (so our own nudge is provably present, at the tail) AND the leading
+    residue is at most `STRAY_PREFIX_MAX_OFFSET` (+1 for a collapsed space) chars
+    (so what precedes it is a stray human char, not a real draft our
+    len(own_typed) backspaces would eat). A drifted / edited / foreign box (not
+    ending in the recorded nudge, or with a longer head) is REFUSED -- so the
+    reclaim never backspaces into human text it cannot prove is our own. A
+    SCROLLED long own_typed renders only its tail, so `endswith` fails ->
+    refused (fail-safe). This is BOTH the reclaim gate and the pre-keystroke
+    TOCTOU re-check `_janitor_clear_own_suffix` runs on a fresh capture."""
+    if not own_typed:
+        return False
+    box_norm = _box_norm_from_capture(captured)
+    own_norm = " ".join(own_typed.split())
+    if not box_norm or not own_norm or not box_norm.endswith(own_norm):
+        return False
+    prefix = len(box_norm) - len(own_norm)
+    return 0 < prefix <= STRAY_PREFIX_MAX_OFFSET + 1

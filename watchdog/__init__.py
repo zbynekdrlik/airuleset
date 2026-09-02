@@ -825,6 +825,7 @@ from watchdog.stash import (  # noqa: E402
     GOAL_ARM_LEFTOVER_MIN_SUBSTR as GOAL_ARM_LEFTOVER_MIN_SUBSTR,
     _box_norm_from_capture as _box_norm_from_capture,
     _box_is_own_leftover as _box_is_own_leftover,
+    _box_own_with_short_prefix as _box_own_with_short_prefix,
     _OWN_NUDGE_SUBMIT_PREFIXES as _OWN_NUDGE_SUBMIT_PREFIXES,
     _own_nudge_submit_prefix as _own_nudge_submit_prefix,
 )
@@ -3332,7 +3333,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             continue
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
-                            pid, resume_text, run, captured=fresh, logs=logs)
+                            pid, resume_text, run, captured=fresh, logs=logs,
+                            state=state)  # #852-review 🟡-5
                         if not delivered:
                             # #176 F1: the shipped fix RELOCATED the silent unbounded
                             # skip from the busy branch to HERE instead of eliminating
