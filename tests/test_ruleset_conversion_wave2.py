@@ -258,8 +258,13 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
         # here as a concise note, the mechanism detail in the
         # notification-mechanics skill — still ~14% below the 2082-word
         # original, so the "shrank meaningfully" intent holds.
+        # #850 raised the cap 1800 -> 1830 for the SAME reason: a repo-health
+        # FINDING (Job 27 net-drift) never pinging the owner is the SAME
+        # always-on POLICY family the api-error/limit/burn retirement above
+        # already carries — one concise sentence, mechanism detail in
+        # notification-mechanics — still ~12% below the 2082-word original.
         t = read(self.MOD)
-        self.assertLess(len(t.split()), 1800)
+        self.assertLess(len(t.split()), 1830)
 
 
 class TestDeliberatelyKeptInlineCandidates(TestCase):

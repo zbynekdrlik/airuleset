@@ -290,7 +290,7 @@
     "tests/test_report_reconcile.py": 525,
     "tests/test_review_dispatch_authority.py": 119,
     "tests/test_rules_ab_experiment.py": 863,
-    "tests/test_ruleset_conversion_wave2.py": 292,
+    "tests/test_ruleset_conversion_wave2.py": 297,
     "tests/test_run_card_content_validation.py": 474,
     "tests/test_run_card_enforcement.py": 2265,
     "tests/test_run_card_missing_repo_590.py": 229,
