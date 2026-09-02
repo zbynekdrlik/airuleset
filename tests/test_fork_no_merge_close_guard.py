@@ -1665,5 +1665,148 @@ class TestReviewFindings824(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestReviewFindings2_824(TestCase):
+    """#824 adversarial-review #2 findings (salvaged Fable review #2). The review-#1
+    fix round (`_strip_value_flags` operator-bounded arms, `\\`-wide _CLOSE_OPEN, the
+    `$(`/backtick HAS_INTERP guards) closed A-1/A-3/D-1 but left/opened five more:
+
+      N-1 (wrong-ALLOW): an EVEN-parity escaped-quote value (`--comment "say \\"hi\\"
+          -R x/y"` / the `'"'"'` idiom) terminates the value arm EARLY, leaving a
+          `-R x/y` residue → REPO_ARG poison. The odd-count belt (A-2) misses even
+          parity. FIX: pre-delete the three escaped-quote idioms before the value arms.
+      N-2 (over-BLOCK regression): a MULTI-LINE quoted comment + a real `-R` — the
+          per-line sed left a lone quote on line 2 → odd count → leg (c) over-blocked.
+          FIX: `sed -Ez` spans the whole buffer.
+      N-3 (over-BLOCK regression): the blanket `$(` guard blocked the legit
+          `--comment "$(cat …)"` / `$(date)` idiom. FIX: narrow to a `gh`-carrying
+          substitution.
+      N-4 (wrong-ALLOW, bash>=5.3): a funsub `${ gh issue close …; }` runs a nested
+          close with NO `$(` → the `$(` guard misses it. FIX: a `${[ |]` funsub guard.
+      N-5 (wrong-ALLOW): a QUOTED command word `"gh" issue close` chained after a self
+          close — the WIDE count misses it (`gh"` breaks `gh[[:space:]]+`). FIX: a
+          DE-QUOTED narrow count; a hidden close raises it above N_CLOSE → blank.
+
+    All run under a REDUCED-authority cwd with a SELF-vs-FOREIGN author fixture so a
+    wrong target read is a wrong-ALLOW today; the over-block regressions (N-2/N-3)
+    assert the legit close is ALLOWED (rc 0), FAILING on the review-#1 code."""
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- N-1: even-parity escaped-quote REPO_ARG poison ---
+
+    def test_blocks_even_parity_escaped_double_quote_repo_poison(self):
+        # `--comment "say \\"hi\\" -R baz/qux"`: bash's argv is ONE comment value
+        # `say "hi" -R baz/qux`, but the hook text carries the escaped `\\"`. The
+        # `"[^"]*"` arm stops at the FIRST (escaped) `"` → residue `hi\\" -R baz/qux"`
+        # → REPO_ARG=baz/qux (SELF) while the close targets the cwd (FOREIGN) →
+        # wrong-ALLOW (rc 0) today (EVEN quote count, so the odd-count belt is silent).
+        # GREEN: the escaped-quote pre-delete collapses `"say \\"hi\\" -R baz/qux"` to
+        # `"say hi -R baz/qux"` → the whole value strips → REPO_ARG empty → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 4 --comment "say \\"hi\\" -R baz/qux"',
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_even_parity_single_quote_idiom_repo_poison(self):
+        # The `'"'"'` single-quote-in-single-quote idiom, EVEN parity: the residue
+        # `-R baz/qux` survives the value arm today → REPO_ARG poison (rc 0). GREEN:
+        # the `'"'"'` pre-delete removes it → the value strips whole → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 --comment 'a'\"'\"'b -R baz/qux x'\"'\"'y'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- N-2: multi-line quoted comment + real -R over-block regression ---
+
+    def test_allows_multiline_single_quoted_comment_with_real_repo(self):
+        # A LEGIT self-close: real `-R baz/qux` (SELF) + a MULTI-LINE single-quoted
+        # comment. Review-#1's per-line sed cannot span the newline, so `'[^']*'`
+        # eats `'fixed on PROD` and leaves a lone `'` on line 2 → odd count → leg (c)
+        # over-BLOCKS (rc 2) today. GREEN: `sed -Ez` spans the newline → the whole
+        # comment strips → one real `-R` → ALLOW (rc 0).
+        r = _run_with_gh_body(
+            "gh issue close 4 -R baz/qux --comment 'fixed on PROD\nevidence: log 42'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_multiline_double_quoted_comment_with_real_repo(self):
+        # Same class, double-quoted multi-line comment.
+        r = _run_with_gh_body(
+            'gh issue close 4 -R baz/qux --comment "fixed on PROD\nevidence: log 42"',
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- N-3: blanket $( guard over-blocks a legit substitution ---
+
+    def test_allows_cat_substitution_comment(self):
+        # A LEGIT self-close whose comment is `"$(cat /tmp/note.md)"` (NO gh command).
+        # Review-#1's blanket `$(` guard blanks ISSUE_NUM → over-BLOCK (rc 2) today.
+        # GREEN: the narrowed guard (`$(` … `gh `) does not fire → self carve-out → ALLOW.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(cat /tmp/note.md)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_date_substitution_comment(self):
+        # Same class, a `$(date +%F)` comment substitution.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(date +%F)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_still_blocks_gh_substitution_after_narrowing(self):
+        # CONTROL (blocks on BOTH review-#1 and the fix): the narrowed `$(` guard must
+        # STILL catch a `$(gh issue close FOREIGN)` nested smuggle — the narrowing must
+        # not reopen D-1. Regression-guard for the N-3 fix.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(gh issue close 3399)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- N-4: bash>=5.3 funsub nested close ---
+
+    def test_blocks_funsub_nested_close(self):
+        # `--comment "${ gh issue close 3399; }"`: a bash>=5.3 command-substitution
+        # funsub runs the nested FOREIGN close with NO `$(`, so review-#1's `$(` guard
+        # misses it and the value-strip erases it → self carve-out `exit 0` (rc 0)
+        # today. GREEN: the `${[ |]` funsub guard sets HAS_INTERP → blank → BLOCK. (The
+        # static grep fires regardless of the box's bash version.)
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "${ gh issue close 3399; }"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_ordinary_param_expansion_in_comment(self):
+        # CONTROL (allows on BOTH): an ORDINARY parameter expansion `${STEP}` in a
+        # comment is NOT a funsub (no space/`|` after `${`) → the funsub guard must not
+        # over-block a legit self-close carrying it.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "progress ${STEP} done"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- N-5: de-quoted count catches a chained QUOTED command word ---
+
+    def test_blocks_dequoted_chained_double_quoted_command_word(self):
+        # `gh issue close SELF --comment ok && "gh" issue close FOREIGN`: the quoted
+        # `"gh"` breaks the WIDE count's `gh[[:space:]]+` (on the closing `"`), so
+        # N_CLOSE_WIDE == N_CLOSE == 1 → the self carve-out allows the pair (rc 0)
+        # today. GREEN: the DE-QUOTED narrow count sees `gh issue close 3399` → 2 !=
+        # N_CLOSE(1) → blank ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && "gh" issue close 3399',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_dequoted_chained_single_quoted_command_word(self):
+        # Same class, single-quoted `'gh'` command word.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment ok && 'gh' issue close 3399",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     main()
