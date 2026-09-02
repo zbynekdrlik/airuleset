@@ -228,6 +228,26 @@ def _find_boundary_line_raw(captured):
     return rows[-1] if rows else None
 
 
+def _pane_shows_queued_messages_hint(captured):
+    """True iff the pane's INPUT-BOX boundary shows CC's greyed `Press up to
+    edit [N] queued messages` hint — an INDEPENDENT proof that at least one
+    submitted message (a `/compact`, say) is sitting in CC's type-ahead queue
+    behind a running turn (#833).
+
+    Read from the boundary row RAW (via `_find_boundary_line_raw`, BEFORE
+    `_normalize_queued_hint` collapses it to a bare `❯` that reads as an idle
+    box), so unlike the queued-`❯ /compact`-row walk (`_pane_has_queued_compact`
+    → `_above_box_scan`) this needs NO walk UP past transient chrome (the
+    `✔ Update installed · Restart to update` banner combined with the goal
+    indicator, which stops that walk) and does NOT race the queued row's
+    separate, slightly-later render — the box hint appears the instant a
+    message queues. Fail-safe: no boundary line / a non-`❯` row → False."""
+    raw = _find_boundary_line_raw(captured)
+    if not raw or not raw.startswith("❯"):
+        return False
+    return bool(_QUEUED_PLACEHOLDER_RX.match(raw[1:].strip().lower()))
+
+
 def _input_box_rows_raw(captured):
     """The pane's bottom input-box candidate ROWS (stripped), HEAD FIRST.
 
