@@ -16,15 +16,19 @@ The claims under test (bidirectional, mirroring test_scope_gate.py):
     READY-FOR-REVIEW: body) is NEVER gated — untouched even with no line.
   - A FULL-authority box (maintainer / gatekeeper) is never gated.
 
-The hook resolves authority via airuleset.resolve_authority(cwd), which reads
-getpass.getuser() -> AUTHORITY_BY_USER — so a test sets LOGNAME to a real
-reduced-stream account (david2 = fork-no-merge, montalu = branch-merge) to
-engage the gate, exactly like test_scope_gate.py's #390 stream-routing tests.
+The hook resolves authority via airuleset.resolve_authority(cwd). Since #839
+`_current_user()` is uid-based (env `LOGNAME`/`USER` no longer spoof identity),
+a test engages the gate the UN-spoofable way — a `<!-- airuleset:authority=
+<profile> -->` marker written into the hook's cwd (honored FIRST by
+`resolve_authority`), the profile derived from `user` via AUTHORITY_BY_USER
+(david2 = fork-no-merge, montalu1 = branch-merge). Same seam as
+test_scope_gate.py's #390 stream-routing tests.
 """
 
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
@@ -32,22 +36,35 @@ from unittest import TestCase, main
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "hooks" / "block-gk-request-without-selfservice.sh"
 
+sys.path.insert(0, str(REPO_ROOT))
+import airuleset  # noqa: E402
+
 
 def run(cmd, user="david2", cwd=None, home=None):
-    """Invoke the hook with the PreToolUse(Bash) stdin payload. `user` sets
-    LOGNAME/USER so airuleset._current_user() -> resolve_authority() resolves
-    to that account's authority (default david2 = a reduced sub-dev stream, so
-    the gate engages). exit 0 = allowed, exit 2 = blocked."""
+    """Invoke the hook with the PreToolUse(Bash) stdin payload.
+
+    airuleset#839: `_current_user()` is now uid-based (env `LOGNAME`/`USER` no
+    longer spoof identity), so authority is simulated the UN-spoofable,
+    #828-sanctioned way — a `<!-- airuleset:authority=<profile> -->` marker
+    written into the hook's cwd, which `resolve_authority(cwd)` honors FIRST.
+    `user` maps to that profile via AUTHORITY_BY_USER (david2 -> fork-no-merge =
+    a reduced stream, the default, so the gate engages); a full account / None
+    writes no marker (the real full box, never gated). exit 0 = allowed,
+    exit 2 = blocked."""
     payload = json.dumps({"tool_input": {"command": cmd},
                           "session_id": "test-selfservice-gate"})
     env = dict(os.environ)
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-selfservice-test-")
-    if user is not None:
-        env["LOGNAME"] = user
-        env["USER"] = user
+    profile = airuleset.AUTHORITY_BY_USER.get(user) if user else None
+    run_cwd = cwd
+    if profile is not None:
+        if run_cwd is None:
+            run_cwd = tempfile.mkdtemp(prefix="airuleset-selfservice-cwd-")
+        Path(run_cwd, "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=%s -->\n" % profile, encoding="utf-8")
     return subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
-        env=env, cwd=cwd or str(REPO_ROOT),
+        env=env, cwd=run_cwd or str(REPO_ROOT),
     )
 
 
@@ -140,11 +157,11 @@ class ReviewHandoffNeverGated(TestCase):
 class AuthorityScope(TestCase):
     def test_full_authority_box_not_gated(self):
         # a full-authority account (airuleset#827: in FULL_AUTHORITY_USERS) is
-        # never gated, even for a gk-request with no line. Pre-#827 any unmapped
-        # user resolved full via the catch-all; that now fails safe to
-        # fork-no-merge, so this must name a REAL full account — `gatekeeper`,
-        # chosen distinct from the suite's own run-user so the LOGNAME/USER
-        # override is load-bearing (a run-user fixture would pass even if broken).
+        # never gated, even for a gk-request with no line. `gatekeeper` is not in
+        # AUTHORITY_BY_USER, so run() writes NO authority marker -> the hook's cwd
+        # resolves to the real full box (newlevel) -> not gated. The distinct-
+        # from-full check is now that a REDUCED marker (the default david2 path)
+        # DOES block (test_gk_request_no_line_blocks), not a LOGNAME override.
         r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
                 '--comment "prod read"', user="gatekeeper")
         self.assertEqual(r.returncode, 0, r.stderr)

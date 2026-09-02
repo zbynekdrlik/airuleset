@@ -51,10 +51,20 @@ REPO_DIR = Path(__file__).resolve().parent
 
 def skill_names_for_user(user=None):
     """The skill set THIS box's user should have installed (the resident skill
-    registries + their scoping comment stay in airuleset.py)."""
-    import getpass
+    registries + their scoping comment stay in airuleset.py).
+
+    A caller-supplied `user` must be a `pwd`-derived or literal identity, NEVER
+    an env-spoofable `getpass.getuser()` value (airuleset#839) — the default
+    below resolves the hardened `_current_user()`, and the FULL_AUTHORITY_USERS
+    gate makes this an authority surface."""
     import airuleset
-    user = user or getpass.getuser()
+    # airuleset#839: resolve identity via the HARDENED `_current_user()`
+    # (`pwd.getpwuid(os.getuid()).pw_name`), NEVER `getpass.getuser()` — the
+    # latter reads `$USER`/`$LOGNAME` first, so a stream setting `USER=newlevel`
+    # could self-elevate into `FULL_AUTHORITY_USERS` below and get the
+    # full-authority-only skills (the same env-spoof #839 closes in the resolver;
+    # this is the one authority-gated skill surface that still keyed on getpass).
+    user = user or airuleset._current_user()
     extra = airuleset.SKILLS_EXTRA_BY_USER.get(user, set())
     names = list(airuleset.SKILL_NAMES)
     if user not in airuleset.MAINTAINER_USERS:
@@ -66,6 +76,11 @@ def skill_names_for_user(user=None):
     # default and got them, the exact parallel fail-open #827 closes in the
     # resolver. Gating on `FULL_AUTHORITY_USERS` membership fails SAFE (an
     # unmapped user is treated as reduced), identical for every classified box.
+    # airuleset#839: the ci-runner recognition (`_is_github_ci_runner`) is
+    # DELIBERATELY NOT wired here — `install` never runs on the GitHub CI runner
+    # during the failing test suite, so it would be a dead branch in a
+    # security-relevant path. The identity hardening above (via `_current_user`)
+    # is the part that matters here; do not "fix" the asymmetry with the resolver.
     if user not in airuleset.FULL_AUTHORITY_USERS:
         names = [n for n in names if n not in airuleset.SKILLS_FULL_AUTHORITY_ONLY or n in extra]
     return names

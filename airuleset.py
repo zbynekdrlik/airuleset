@@ -5238,6 +5238,7 @@ from cli_fleet import (  # noqa: E402, F401
     AUTHORITY_PROFILES as AUTHORITY_PROFILES,
     AUTHORITY_BY_USER as AUTHORITY_BY_USER,
     FULL_AUTHORITY_USERS as FULL_AUTHORITY_USERS,
+    _is_github_ci_runner as _is_github_ci_runner,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
     SHARED_STREAM_GUARD_HOSTS as SHARED_STREAM_GUARD_HOSTS,
 )
@@ -5572,9 +5573,28 @@ STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"
 
 
 def _current_user() -> str:
-    import getpass
+    """The invoking box's UNIX account from the UNSPOOFABLE uid (airuleset#839).
 
-    return getpass.getuser()
+    Uses `pwd.getpwuid(os.getuid()).pw_name`, NOT `getpass.getuser()` — the
+    latter reads `$LOGNAME`/`$USER`/`$USERNAME` from the environment FIRST, so a
+    reduced-authority stream could set `USER=newlevel` to self-elevate to `full`
+    in authority resolution (this is the identity source `_authority_decision`
+    and `watchdog._box_authority` key on, and now `skill_names_for_user` too). A
+    stream controls its env and its repo files, never its uid.
+
+    On a box whose uid has no passwd entry (exotic — never a fleet box nor the
+    GitHub runner, both of which have one) return an unmapped `uid<N>` sentinel
+    that fails SAFE to `fork-no-merge` via the #827 default, NEVER a
+    `getpass.getuser()` fallback (which would re-open the env-spoof at the one
+    moment the unspoofable source failed — a passwd-less uid with attacker-set
+    `USER=newlevel` would otherwise elevate straight to `full`)."""
+    import os
+    import pwd
+
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return "uid%d" % os.getuid()
 
 
 def _gh_login(cwd=None):
