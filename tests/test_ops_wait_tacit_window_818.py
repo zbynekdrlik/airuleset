@@ -52,6 +52,11 @@ STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc).timestamp()          # Fri
 REMINDER_IN_WINDOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc).timestamp()   # Wed → 48 working h
 REMINDER_PAST_WINDOW = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc).timestamp()  # Mon → 96 working h
+# EXACTLY 3 working days (Tue noon → Fri noon = 72.00 working h). The strict `>`
+# predicate keeps this in the window (tacit-wait), so it locks BOTH the N=3
+# boundary ("at exactly 3 working days → still tacit-wait, NOT close") AND kills
+# a `TACIT_WINDOW_WORKING_S` 3→2 mutant (72h > 48h would flip it to tacit-close).
+REMINDER_EXACT_3WD = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc).timestamp()   # Tue → 72 working h
 
 
 def _acc_rows(*nums):
@@ -87,6 +92,15 @@ class WorkingDeltaFixturesAreSane(unittest.TestCase):
     def test_past_window_is_over_three_working_days(self):
         self.assertTrue(working_time.working_deadline_passed(
             REMINDER_PAST_WINDOW, NOW, 3 * 24 * 3600))
+
+    def test_exact_three_working_days_is_still_in_window(self):
+        # Tue noon → Fri noon == 72.00 working h == exactly N=3; strict `>` keeps
+        # it in the window. Also the anchor for the 3→2 mutant kill below.
+        self.assertEqual(
+            72 * 3600,
+            working_time.working_seconds_between(REMINDER_EXACT_3WD, NOW))
+        self.assertFalse(working_time.working_deadline_passed(
+            REMINDER_EXACT_3WD, NOW, 3 * 24 * 3600))
 
 
 class IssueCommentAgesExtractsFinalReminder(unittest.TestCase):
@@ -125,8 +139,41 @@ class IssueCommentAgesExtractsFinalReminder(unittest.TestCase):
             res = airuleset._issue_comment_ages(41, "me", NOW, cwd="/r")
         self.assertIsNone(res.get("own_final_reminder"))
 
+    def test_line_start_prose_without_colon_does_not_open_window(self):
+        # review 🟡 (both): the marker REQUIRES the colon. A line-starting prose
+        # mention (no colon) or a hyphenated derivative must NOT open the window
+        # (the dangerous false-OPEN direction — no reminder actually sent).
+        for body in ("Acceptance-reminder este neposlaná — čakám na schválenie",
+                     "Acceptance-reminder-draft: msg 999 (koncept, neodoslané)"):
+            comments = [{"createdAt": "2026-09-02T09:00:00Z",
+                         "author": {"login": "me"}, "body": body}]
+            with mock.patch.object(airuleset, "_gh_out",
+                                   lambda *a, **k: self._fake_gh(comments)):
+                res = airuleset._issue_comment_ages(41, "me", NOW, cwd="/r")
+            self.assertIsNone(res.get("own_final_reminder"),
+                              "false-open on %r" % body)
+
+    def test_quoted_line_does_not_open_window(self):
+        # a `> Acceptance-reminder: …` quoted client line must NOT match
+        # (`^[ \t]*` excludes the `>` quote prefix).
+        comments = [{"createdAt": "2026-09-02T09:00:00Z",
+                     "author": {"login": "me"},
+                     "body": "citujem klienta:\n> Acceptance-reminder: msg 5"}]
+        with mock.patch.object(airuleset, "_gh_out",
+                               lambda *a, **k: self._fake_gh(comments)):
+            res = airuleset._issue_comment_ages(41, "me", NOW, cwd="/r")
+        self.assertIsNone(res.get("own_final_reminder"))
+
     def test_norm_ages_legacy_tuple_has_no_final_reminder(self):
         d = cli_quals._norm_ages((123.0, 456.0))
+        self.assertIsNone(d["own_final_reminder"])
+
+    def test_norm_ages_legacy_dict_without_key_gets_none(self):
+        # a dict from an older _issue_comment_ages (no own_final_reminder key) is
+        # tolerated: the key is inserted as None (no tacit window). Gives the
+        # `setdefault` teeth (review 🔵 A) — direct-index access must not KeyError.
+        d = cli_quals._norm_ages({"own": 1.0, "any": 2.0,
+                                  "own_cited": 1.0, "own_oldest": 1.0})
         self.assertIsNone(d["own_final_reminder"])
 
 
@@ -148,6 +195,18 @@ class TacitWindowClassifier(unittest.TestCase):
             rows, now=NOW, ages_fn=lambda n: ages[n])
         self.assertEqual(set(), tw)
         self.assertEqual({42}, tc)
+
+    def test_exact_boundary_is_still_tacit_wait(self):
+        # exactly 3 working days after the reminder → STILL tacit-wait (strict
+        # `>` boundary). Kills a TACIT_WINDOW_WORKING_S 3→2 mutant: under N=2
+        # this 72h member would flip to tacit_close.
+        rows = _acc_rows(47)
+        ages = {47: _ages(cited=REMINDER_EXACT_3WD,
+                          final_reminder=REMINDER_EXACT_3WD)}
+        tw, tc = cli_quals._tacit_window_flagged(
+            rows, now=NOW, ages_fn=lambda n: ages[n])
+        self.assertEqual({47}, tw)
+        self.assertEqual(set(), tc)
 
     def test_no_marker_is_untagged(self):
         rows = _acc_rows(43)
@@ -213,6 +272,30 @@ class FlagSetsSubtractsTacitFromStale(unittest.TestCase):
         self.assertNotIn(42, stale)             # NOT double-flagged stale!
         self.assertIn(43, stale)                # no marker → stale! stands
         self.assertNotIn(43, tacit_close)
+
+    def test_tacit_member_excluded_from_recheck(self):
+        # an acceptance tacit member whose TITLE is release-shaped would be
+        # `recheck!`-eligible (_release_recheck_flagged is title-only + old own);
+        # the tacit subtraction must remove it from recheck too (kills the
+        # `recheck = recheck - tacit` mutation survivor — review 🟡, both).
+        VERY_OLD = 400 * 24 * 3600
+        import time
+        base = time.time()
+        ow = {48: {"number": 48, "title": "nasadenie SMS notifikacii pre klienta",
+                   "labels": [{"name": "ops-wait"}, {"name": "needs-acceptance"}],
+                   "createdAt": "2026-08-01T00:00:00Z"}}
+        ages = {48: _ages(cited=base - VERY_OLD, final_reminder=base - VERY_OLD)}
+        with mock.patch.object(airuleset, "_stream_self_login", lambda: "me"), \
+                mock.patch.object(airuleset, "_issue_comment_ages",
+                                  lambda n, *a, **k: ages[n]), \
+                mock.patch.object(airuleset, "resolve_authority",
+                                  lambda cwd=None: "full"), \
+                mock.patch.object(airuleset, "_watchdog_release_state_fetch",
+                                  lambda cwd: None):
+            _stale, recheck, _gkh, _unpark, _tw, tacit_close = \
+                cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
+        self.assertIn(48, tacit_close)          # tacit (acceptance + reminded)
+        self.assertNotIn(48, recheck)           # release title but tacit → no recheck!
 
 
 class PrintRowsTacitTags(unittest.TestCase):

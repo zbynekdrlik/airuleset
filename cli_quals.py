@@ -984,12 +984,20 @@ TACIT_WINDOW_WORKING_S = 3 * 24 * 3600
 # LINE-ANCHORED ticket marker `Acceptance-reminder: <msg-id>` on the
 # final-reminder W-push comment (design Prístup 2, the `Acceptance-cited:`/
 # `Acceptance-tacit:` family). Line-anchored (`^`, MULTILINE) so an INLINE or
-# quoted mention (a persisted draft, a plan comment, a quoted client body) can
-# NEVER falsely open the tacit window — a client message never carries a TICKET
-# marker at the start of a line. Matched case-insensitively; the `msg <id>` on
-# the marker line doubles as the #753 citation, so `own_cited` and the
-# window-opener are the same comment.
-_FINAL_REMINDER_RX = re.compile(r"(?im)^[ \t]*Acceptance-reminder\b")
+# quoted (`> …`) mention of the phrase does NOT match — a client message never
+# carries a TICKET marker at the start of a line. The trailing COLON is REQUIRED
+# (review 🟡, both reviewers): it matches the `Acceptance-cited:`/`Acceptance-
+# tacit:` family EXACTLY and rejects a line-starting PROSE mention
+# (`Acceptance-reminder este neposlaná…`) or a hyphenated derivative
+# (`Acceptance-reminder-draft: …`) that a bare `\b` would have falsely accepted
+# — the dangerous false-OPEN direction. Matched case-insensitively; the `msg
+# <id>` on the marker line doubles as the #753 citation, so `own_cited` and the
+# window-opener are the same comment. RESIDUAL (accepted, bounded): the marker
+# at line-start INSIDE a fenced code block still matches — but the fenced draft
+# is the CLIENT message, which never carries a ticket marker, and `tacit-close?`
+# is a session-verify CANDIDATE (the nudge mandates re-reading the msg-id to
+# confirm the reminder was SENT before any close).
+_FINAL_REMINDER_RX = re.compile(r"(?im)^[ \t]*Acceptance-reminder[ \t]*:")
 
 
 def _comment_is_final_reminder(body):
@@ -1046,18 +1054,24 @@ def _comment_has_citation(body):
 
 def _norm_ages(res):
     """Normalize `_issue_comment_ages` output (or an injected fake) to the
-    `{own, any, own_cited, own_oldest}` dict (#753). A legacy 2-tuple
-    `(own, any)` — the #699/#607 fakes — carries no body/citation info, so its
-    `own` is treated as the CITED anchor (`own_cited = own`), which reproduces
-    the PRE-#753 tuple semantics EXACTLY (own was the freshness anchor) — the
-    fail-safe direction (a legacy own counts as a valid push, never a false
-    accusation). None/malformed → None (fail-safe, no flag)."""
+    `{own, any, own_cited, own_oldest, own_final_reminder}` dict (#753; #818
+    added `own_final_reminder`). A legacy 2-tuple `(own, any)` — the #699/#607
+    fakes — carries no body/citation info, so its `own` is treated as the CITED
+    anchor (`own_cited = own`) and `own_final_reminder` is None (no tacit window
+    — the fail-safe direction), which reproduces the PRE-#753 tuple semantics
+    EXACTLY (own was the freshness anchor) — a legacy own counts as a valid push,
+    never a false accusation. None/malformed → None (fail-safe, no flag)."""
     if res is None:
         return None
     if isinstance(res, dict):
         # #818: a dict from an older `_issue_comment_ages` (no `own_final_
         # reminder` key) reads as no marker → no tacit window (the fail-safe
         # direction), so tolerate it via `.setdefault` rather than requiring it.
+        # NB this MUTATES the dict in place — deliberate: the only callers pass a
+        # throwaway result or a per-sweep `ages_cache` dict whose sibling readers
+        # (stale: own_cited/own_oldest/any; recheck: own) never read this key, so
+        # the in-place default is safe + idempotent, never a copy-on-read
+        # dependency (review 🔵 B).
         res.setdefault("own_final_reminder", None)
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
@@ -1185,7 +1199,16 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
 
     Deliberately keyed on the CITED own push, NOT "last comment at all": a
     third party's reply — or the stream's own bare "čakáme" — would otherwise
-    reset the clock and HIDE the very staleness this exists to surface."""
+    reset the clock and HIDE the very staleness this exists to surface.
+
+    #818 NB: this function does NOT know about the #799 tacit window — a
+    delivered+reminded acceptance member here still flags `stale!`. The tacit
+    EXEMPTION happens one layer UP, in `cli_quals_cmd._ops_wait_flag_sets`, which
+    subtracts `_tacit_window_flagged(...)` from this set before rendering. The
+    only production caller is that flag-sets function; the watchdog consumes the
+    already-subtracted CLI `--ops-wait` reason column. A future DIRECT caller of
+    the facade `airuleset._stale_ops_wait_flagged` would get an UN-subtracted set
+    (and must apply the tacit exemption itself)."""
     now = time.time() if now is None else now
     if self_login is None and ages_fn is None:
         self_login = _stream_self_login()
