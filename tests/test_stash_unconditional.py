@@ -251,22 +251,42 @@ class GhostTextIsIndistinguishableOnceStripped(unittest.TestCase):
 
 
 class GhostOnlyPaneStillDelivers(unittest.TestCase):
-    """THE regression. A pane whose input box is genuinely EMPTY but renders a
-    grey suggestion must still get its keystroke delivered — under either
-    possible answer to `does Ctrl+S dismiss the suggestion`, because that
-    answer is not established and the fix must not depend on it."""
+    """A pane whose input box is genuinely EMPTY but renders a grey suggestion.
+    #189 typed into it to discriminate a ghost (replaced) from a real draft
+    (appended). #852 A CHANGED that: typing is allowed only from a PROVEN-bare
+    box, so it depends on whether `C-s` dismisses the suggestion:
+      * dismissed (`ghost_survives_ctrl_s=False`) -> box is bare (NOOP) -> we
+        deliver, exactly as before;
+      * survives -> box still shows content our C-s did not park (UNRESOLVED),
+        indistinguishable from a real forgotten draft -> we abort THIS sweep
+        (`stash-unresolved`) and retry when the ghost is gone, rather than ever
+        risk appending onto what might be a human draft (the #852 incident).
+    A safe degradation: the delivery is deferred, never a leak. (Whether a
+    ghost survives C-s in real CC is not established; when it does not, this is
+    byte-identical to the pre-#852 behaviour.)"""
 
-    def test_delivers_whether_or_not_ctrl_s_dismisses_the_suggestion(self):
-        for survives in (True, False):
-            with self.subTest(ghost_survives_ctrl_s=survives):
-                pane = FakePane(draft="", ghost=GHOST,
-                                ghost_survives_ctrl_s=survives)
-                logs = []
-                ok = deliver(pane, logs=logs)
-                self.assertTrue(ok, logs)
-                self.assertEqual(pane.submitted, [TEXT], logs)
-                self.assertIsNone(pane.stash,
-                                  "nothing was ever there to park: %r" % logs)
+    def test_delivers_when_ctrl_s_dismisses_the_suggestion(self):
+        pane = FakePane(draft="", ghost=GHOST, ghost_survives_ctrl_s=False)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertTrue(ok, logs)
+        self.assertEqual(pane.submitted, [TEXT], logs)
+        self.assertIsNone(pane.stash,
+                          "nothing was ever there to park: %r" % logs)
+
+    def test_aborts_this_sweep_when_the_suggestion_survives_ctrl_s(self):
+        # #852 A -- a surviving ghost reads UNRESOLVED (indistinguishable from a
+        # real draft); we never type onto it, so nothing is submitted and the
+        # box is left byte-identical for a retry.
+        pane = FakePane(draft="", ghost=GHOST, ghost_survives_ctrl_s=True)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertEqual(pane.submitted, [], logs)
+        self.assertNotIn("-l", pane.keystrokes(),
+                         "an unresolved box is never typed into: %r" % pane.sent)
+        self.assertNotIn("Enter", pane.keystrokes(), pane.sent)
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
     def test_the_ghost_is_never_treated_as_a_draft_to_protect(self):
         pane = FakePane(draft="", ghost=GHOST)
@@ -294,13 +314,19 @@ class AlreadyBarePromptIsANoopSuccess(unittest.TestCase):
 
 
 class OccupiedSlotIsTheOnlyDecline(unittest.TestCase):
-    """The full matrix. Every free-slot cell delivers regardless of what the
-    box appears to hold; every occupied-slot cell declines with the ONE
-    distinct reason and touches the pane with ZERO keystrokes, because the
-    single slot overwrites silently and would destroy a parked draft."""
+    """The matrix. A free-slot box that our own C-s leaves PROVABLY BARE
+    delivers; an occupied-slot cell declines with the ONE distinct reason and
+    touches the pane with ZERO keystrokes (the single slot overwrites silently
+    and would destroy a parked draft). #852 A -- a free-slot box our C-s does
+    NOT leave bare (a surviving ghost) reads UNRESOLVED and is deferred, not
+    delivered, so the 'always delivers' matrix is scoped to the provably-bare
+    cells (`bare` + `draft`); the `ghost`-survives cell is covered by
+    GhostOnlyPaneStillDelivers."""
 
+    # Cells whose own C-s leaves the box PROVABLY BARE: a bare box (NOOP) and a
+    # real draft (PARKED into the slot). A surviving ghost is NOT here -- it is
+    # the UNRESOLVED-defer case (GhostOnlyPaneStillDelivers).
     CASES = (("bare", dict(draft="", ghost="")),
-             ("ghost", dict(draft="", ghost=GHOST)),
              ("draft", dict(draft=DRAFT, ghost="")))
 
     def test_free_slot_always_delivers(self):
@@ -356,18 +382,32 @@ class RealDraftIsStillProtected(unittest.TestCase):
         self.assertEqual(pane.ctrl_s_count(), 1,
                          "no blind second/third toggle: %r" % pane.sent)
 
-    def test_a_merely_lagged_ctrl_s_now_delivers_instead_of_aborting(self):
-        # #176 F4's case, one step further: the toggle DID take (the draft is
-        # really parked and the box is really bare) but the render lags for
-        # the whole settle window. The old code called that verify-bare-failed
-        # and spent two more toggles trying to undo a stash that was doing
-        # exactly its job. Typing into the genuinely-bare box lands cleanly,
-        # so the correct outcome is a delivery with the draft still parked.
-        pane = FakePane(draft=DRAFT, lag_captures=wd.STASH_VERIFY_SETTLE_POLLS)
+    def test_a_lag_within_the_settle_window_still_delivers(self):
+        # #176 F4: the toggle DID take (draft parked, box really bare) but the
+        # render lags a FEW captures -- within the settle window. The settle
+        # poll absorbs it, reads PARKED, and delivers cleanly. (A only defers
+        # when the box is STILL non-bare after the whole settle window.)
+        pane = FakePane(draft=DRAFT,
+                        lag_captures=wd.STASH_VERIFY_SETTLE_POLLS - 1)
         logs = []
         self.assertTrue(deliver(pane, logs=logs), logs)
         self.assertEqual(pane.submitted, [TEXT], logs)
         self.assertEqual(pane.stash, DRAFT, logs)
+
+    def test_a_lag_past_the_whole_settle_window_defers_this_sweep(self):
+        # #852 A -- if the render lags PAST the entire settle window, the box
+        # reads UNRESOLVED even though it is really bare server-side. We cannot
+        # PROVE it bare this sweep, so we defer (`stash-unresolved`) and deliver
+        # on a later sweep once the render catches up -- never risk typing onto
+        # what could equally be a real draft. Safe degradation: a bounded
+        # retry, never a leak.
+        pane = FakePane(draft=DRAFT, lag_captures=wd.STASH_VERIFY_SETTLE_POLLS)
+        logs = []
+        self.assertFalse(deliver(pane, logs=logs), logs)
+        self.assertEqual(pane.submitted, [], logs)
+        self.assertNotIn("-l", pane.keystrokes(),
+                         "an unprovable box is never typed into: %r" % pane.sent)
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
 
 class ChromeAndKeystrokeGatesSurvive(unittest.TestCase):

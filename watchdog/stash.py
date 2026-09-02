@@ -1037,24 +1037,20 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "C-s"])
     cap, outcome, pre_text = watchdog._await_stash_settled(pid, run, sleep_fn)
-    if outcome == STASH_NO_BOUNDARY:
-        # The input line vanished between the toggle and the settle window (a
-        # turn started, a dialog opened). We already sent one keystroke, so
-        # this is not a free pre-send refusal — but sending anything MORE into
-        # a pane we can no longer read is exactly the #233 scar. Stop here.
-        _log("stash-abort: input-line-vanished")
-        return False
-    if outcome == STASH_UNRESOLVED and watchdog._box_is_wrapped(cap):
-        # The box still shows content our toggle did not park, AND it is
-        # already multi-row. Anything we append re-flows it, so neither
-        # `_typed_exclusively` (which needs the box to hold our text and
-        # nothing else) nor `_undo_appended_text` (which needs the exact
-        # `pre + text` signature) could ever succeed afterwards — we would be
-        # typing into a box we can neither verify nor undo, on top of what may
-        # be a real draft. Refuse while it is still free to refuse (#193).
-        # This shape was unreachable before wrapped boxes became readable, so
-        # refusing restores exactly the guarantee that reading them removed.
-        _log("stash-abort: unresolved wrapped box")
+    if outcome in (STASH_NO_BOUNDARY, STASH_UNRESOLVED):
+        # #852 A -- NEVER type into a box that is not PROVABLY bare. After our
+        # own `C-s`, only PARKED (bare + marker) and NOOP (bare, nothing to
+        # park) mean the box is empty and every later keystroke is provably our
+        # own. UNRESOLVED means the box STILL shows content our toggle did not
+        # park -- a POTENTIAL foreign draft (single-row OR wrapped, deliberately
+        # not distinguished) -- and NO_BOUNDARY means the input line vanished
+        # (a turn/dialog started). Typing the nudge onto either is exactly how
+        # the owner's forgotten `s` got `slane-check:` glued onto it (the #852
+        # incident): the append can neither be cleanly verified nor undone
+        # without risking the human's text. Abort BEFORE any keystroke -- the
+        # nudge can never be appended to a human draft. Backoff is the caller's
+        # (a refused attempt is retried next sweep), exactly as today.
+        _log("stash-abort: stash-unresolved")
         return False
     parked = outcome == STASH_PARKED
     if parked:
@@ -1082,17 +1078,10 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # head-swallowed long /goal (identical own-substring tail) can never slip to a
     # junk submit (#720). DETECTION only -- unlike `_type_literal_verified`, this
     # route does NOT retype a swallow (it protects a parked draft); it aborts to
-    # the next sweep. The UNRESOLVED (`pre_text`) branch keeps `_typed_exclusively`
-    # (a swallow already fails it) and stays `two_phase=False`, byte-identical to
-    # pre-#747. HONEST RESIDUAL (#747-review 🔵): a scroll-length /goal typed INTO
-    # a single-row unresolved (ghost) box DOES scroll it AFTER the type (the
-    # branch's own recovery below handles "when our own payload wrapped the box"),
-    # so such a delivery still reads not-landed and aborts every sweep -- bounded
-    # by the #731 `dl_fails` attempt cap. Left unfixed here: the scrolling stash
-    # route the live incident hit is the BARE (PARKED/NOOP) branch (a foreign
-    # draft parked away, then the /goal typed into the now-bare box); the
-    # ghost-branch scroll is a rarer, cap-bounded lane, not this ticket's scope.
-    two_phase = (not pre_text) and len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
+    # the next sweep. #852 A -- the UNRESOLVED path aborts BEFORE reaching here,
+    # so from this point the box is always PROVABLY BARE (PARKED/NOOP) and
+    # `pre_text` is always "": every character typed below is provably our own.
+    two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     if two_phase:
         hc = watchdog._type_two_phase_head_checkpoint(pid, run, text, sleep_fn)
         if hc != _TV_LANDED:
@@ -1146,10 +1135,10 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # short (single-phase) bare branch keeps the pre-#747 single-capture
     # `_type_verify_landed(cap=cap)`, which shares the collapsed-paste guard's
     # own snapshot above (a collapse there already aborts keystroke-free).
-    if pre_text:
-        landed = watchdog._typed_exclusively(text, itext)
-        two_phase_hold = False
-    elif two_phase:
+    # #852 A -- the box is provably bare here (UNRESOLVED aborted earlier), so
+    # there is no `pre_text` verify branch left; only the two verified-bare
+    # verify shapes remain.
+    if two_phase:
         cls = watchdog._settle_type_verify(
             pid, run, text, sleep_fn, allow_scrolled=True)
         landed = cls == _TV_LANDED
@@ -1169,30 +1158,11 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
             _log("stash-abort: type-verify-hold")
             return False
         _log("stash-abort: type-verify-failed")
-        if not pre_text:
-            # PARKED or NOOP — the settle poll VERIFIED this box bare a moment
-            # ago, so every character in it is ours and backspacing exactly
-            # what we typed can reach nothing of the user's.
-            watchdog._undo_and_release_slot(pid, run, text, parked, _log, "stash-abort",
-                                   sleep_fn=sleep_fn)
-        elif itext == pre_text + text or watchdog._typed_landed(text, itext):
-            # We only ever type into a SINGLE-ROW unresolved box — the wrapped
-            # shape is refused above — so `pre_text` is that box's COMPLETE
-            # content, and either signature proves our characters sit at its
-            # END: the exact `pre + text` when nothing re-flowed, or
-            # `_typed_landed` when our own payload wrapped the box. Backspacing
-            # exactly what we typed restores it, and `_undo_appended_text`
-            # verifies that byte-for-byte before reporting success.
-            _log("stash-abort: append-undone" if
-                 watchdog._undo_appended_text(pid, run, pre_text, text, sleep_fn=sleep_fn)
-                 else "stash-abort: append-NOT-undone")
-        else:
-            # The box does not end with our text at all — a truncated type, or
-            # something else moved it. Backspacing an unproven buffer could eat
-            # a real draft, and "is there a draft I would destroy?" resolves an
-            # unknown to YES. No FURTHER keystrokes; the payload we already
-            # typed stays where it is, said plainly rather than glossed.
-            _log("stash-abort: append-unprovable, typed text left in box")
+        # PARKED or NOOP -- the settle poll VERIFIED this box bare a moment ago,
+        # so every character in it is ours and backspacing exactly what we typed
+        # can reach nothing of the user's.
+        watchdog._undo_and_release_slot(pid, run, text, parked, _log, "stash-abort",
+                                        sleep_fn=sleep_fn)
         return False
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     cap = watchdog.capture_pane(pid, run, lines=30)
