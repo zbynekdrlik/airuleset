@@ -901,5 +901,36 @@ class TestMultiBindServer(unittest.TestCase):
         self.assertEqual(r.read(), b"hi")
 
 
+class TestXdgRuntimeEnvCarriesTheBus(unittest.TestCase):
+    """#826: _xdg_runtime_env is the ONE shared systemd-user env helper (every
+    `_run_systemctl` caller — filedrop, webterm, the watchdog timer, the webterm
+    tunnel — gets it). Over a non-login ssh install it MUST set BOTH
+    XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS pointing at /run/user/<uid>, or
+    `systemctl --user` fails 'Failed to connect to bus: No medium found'."""
+
+    def test_sets_both_bus_vars_deterministically_when_unset(self):
+        import unittest.mock as m
+        import cli_filedrop_watchdog as fw
+        uid = os.getuid()
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            env = fw._xdg_runtime_env()
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/%d" % uid)
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"],
+                         "unix:path=/run/user/%d/bus" % uid)
+
+    def test_keeps_ambient_values(self):
+        import unittest.mock as m
+        import cli_filedrop_watchdog as fw
+        with m.patch.dict(os.environ,
+                          {"XDG_RUNTIME_DIR": "/run/user/9",
+                           "DBUS_SESSION_BUS_ADDRESS": "unix:path=/custom/bus"},
+                          clear=False):
+            env = fw._xdg_runtime_env()
+        self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/9")
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/custom/bus")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11987,6 +11987,29 @@ class TestCmdPushRuffGate(TestCase):
                          "must abort before git push")
 
 
+class TestCmdInstallLatchesDropGatewayReconcileFailure(TestCase):
+    """#826: cmd_install must LATCH install_failed on a drop-gateway reconcile
+    FAILURE so the remote `install` exits non-zero -> `_deploy_to_all_remotes`
+    counts the host -> `push` exits non-zero and the FAILED line is never
+    swallowed. The bug was that reconcile_drop_ingress_on_install()'s return was
+    thrown away (an overloaded False that could not be latched), so a failed
+    tunnel restart left `install` at exit 0 and push silently reported OK over a
+    stale tunnel (#135: the marker proved a claim, not delivery)."""
+
+    def test_reconcile_return_is_consumed_into_install_failed(self):
+        import inspect
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertIn("reconcile_drop_ingress_on_install", src)
+        # The reconcile return must GATE an install_failed latch, never be called
+        # with its result thrown away (the exact regression this ticket fixes).
+        self.assertRegex(
+            src,
+            r"if\s+not\s+cli_drop_gateway\.reconcile_drop_ingress_on_install"
+            r"\([^)]*\)\s*:",
+            "the reconcile return must gate a latch, not be ignored")
+        self.assertIn("install_failed = True", src)
+
+
 class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
     """Adversarial-review CRITICAL finding (plugin-marketplace fix, 2026-08-06):
     cmd_install() can now sys.exit(1) on a still-failing managed-plugin
