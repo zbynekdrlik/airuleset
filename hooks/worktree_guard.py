@@ -24,22 +24,47 @@ Claude Code's own cwd-based worktree guard.
 """
 
 import os
+import re
 import shlex
 import sys
 
 # git subcommands that WRITE the repository (mutate HEAD / branch pointers /
-# index / working tree). `switch`, `branch` and `worktree` were added by #817 —
-# RULE B's own enumeration missed `git switch <b>` / `git branch -D <b>` in the
-# shared tree (the branch-pointer moves the incident hijacked HEAD with), and a
-# confused worker could `git worktree remove` a sibling's checkout. `branch`,
-# `tag`, `stash` and `worktree` have READ subforms exempted in `_git_writes_main`.
+# index / working tree). `switch`, `branch`, `worktree`, `symbolic-ref` and
+# `update-ref` were added by #817 — RULE B's own enumeration missed `git switch
+# <b>` / `git branch -D <b>` (the branch-pointer moves the incident hijacked
+# HEAD with), a confused worker could `git worktree remove` a sibling's
+# checkout, and `symbolic-ref HEAD refs/heads/x` / `update-ref` are the LITERAL
+# HEAD hijack in plumbing form. `branch`, `tag`, `stash`, `worktree` and
+# `symbolic-ref` have READ subforms exempted in `_git_writes_main`.
 _GIT_WRITE = {
     "commit", "apply", "checkout", "switch", "restore", "add", "rm", "mv",
     "stash", "reset", "merge", "rebase", "cherry-pick", "revert", "clean",
-    "am", "tag", "branch", "worktree", "push", "pull",
+    "am", "tag", "branch", "worktree", "symbolic-ref", "update-ref",
+    "push", "pull",
 }
-# top-level command separators shlex(punctuation_chars) emits as their own tokens
-_SEPARATORS = {";", "&", "&&", "|", "||", "\n"}
+# Non-git shell commands that DELETE / OVERWRITE files (#817 review — an
+# isolation-failed worker `rm`-ing a shared-checkout file, incl. the hook's own
+# helper to self-disarm the guard, was invisible). cp/mv/dd/tee/sed/truncate are
+# handled per-command below with their own destination logic.
+_DELETE_CMDS = {"rm", "rmdir", "unlink", "shred"}
+# Command PREFIX words to skip so the REAL command word is identified (#557 /
+# #817 review — `FOO=1 git checkout`, `env git …`, `command git …`, `nohup git`,
+# `timeout 300 git`, `nice -n 19 git` all classified the wrapper/env-assignment
+# as the program and escaped). An env-assignment token (VAR=val) is matched
+# separately by regex. Accepted residual: a wrapper's NON-numeric value
+# (`sudo -u x git`, `xargs -I{} git`) still shadows the command (same #557
+# documented limitation).
+_WRAPPERS = {"env", "command", "nohup", "sudo", "time", "nice", "timeout",
+             "stdbuf", "ionice", "setsid", "doas", "eatmydata", "xargs"}
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# top-level command separators shlex(punctuation_chars) emits as their own
+# tokens. A literal newline is NOT one of them — shlex(posix=True) treats "\n"
+# as plain whitespace and silently merges a multi-line composite into one token
+# stream, so a newline-separated write went undetected (#817 review — proven
+# live, `git status\ngit checkout -b evil` allowed). `_normalize_newlines()`
+# below converts every UNQUOTED newline to ";" BEFORE tokenizing (the same fix
+# foreign_repo_guard.py already carries for RULE A).
+_SEPARATORS = {";", "&", "&&", "|", "||"}
 _REDIRECTS = {">", ">>", ">|", "&>", "&>>", "1>", "1>>", "2>", "2>>"}
 
 
@@ -49,13 +74,73 @@ def _norm(path):
     return os.path.realpath(path)
 
 
+def _normalize_newlines(cmd):
+    """Replace every UNQUOTED literal newline in `cmd` with ';' — bash treats an
+    unquoted newline exactly like a semicolon at the top level, which
+    shlex(posix=True) does not model. Quote-aware char scan (single/double quote
+    state + backslash escapes), so a newline inside a quoted span is untouched.
+    Verbatim port of foreign_repo_guard._normalize_newlines (#790/#817)."""
+    out = []
+    in_single = in_double = escaped = False
+    for ch in cmd:
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\" and not in_single:
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            out.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            out.append(ch)
+            continue
+        if ch == "\n" and not in_single and not in_double:
+            out.append(";")
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _strip_command_prefix(argv):
+    """Drop leading env-assignments (VAR=val) and wrapper commands (env/sudo/
+    timeout/…, with their flags + numeric values) so argv[0] is the REAL command
+    word (#557/#817 review)."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if os.path.basename(tok) in _WRAPPERS:
+            i += 1
+            # skip the wrapper's own flags and any NUMERIC values (nice -n 19,
+            # timeout 300) — a non-numeric value stops the scan (documented
+            # residual: `sudo -u x git` then shadows the program).
+            while i < len(argv) and (argv[i].startswith("-") or argv[i].isdigit()):
+                i += 1
+            continue
+        break
+    return argv[i:]
+
+
 class _Analyzer:
-    def __init__(self, main, wt, start_cwd=None):
+    def __init__(self, main, wt, start_cwd=None, exempt_wt=True):
         self.main = _norm(main)
         self.wt = _norm(wt)
         # RULE B starts the worker's shell in its worktree; RULE B2 (#817) has
         # no worktree (isolation failed) and passes the worker's OWN session cwd.
         self.cwd = _norm(start_cwd) if start_cwd else self.wt
+        # RULE B exempts the worker's OWN worktree (a target under it is fine).
+        # RULE B2 sets exempt_wt=False: an isolation-failed worker owns NO
+        # worktree, so ANY target under the shared checkout is forbidden —
+        # incl. the `.claude/worktrees` dir itself (git walks up to the shared
+        # HEAD) and a SIBLING's worktree (#817 review, proven HEAD-hijack replay).
+        self.exempt_wt = exempt_wt
 
     def _resolve(self, target):
         if not target:
@@ -67,12 +152,15 @@ class _Analyzer:
 
     def _mutates_main(self, path):
         """A path is a forbidden write target iff it is under the main checkout
-        but NOT under this worker's own worktree (the worktree is under main)."""
+        (RULE B additionally exempts the worker's OWN worktree, which is under
+        main; RULE B2 does not — exempt_wt=False)."""
         if path is None:
             return False
         m = self.main.rstrip("/") + "/"
-        w = self.wt.rstrip("/") + "/"
         under_main = path == self.main or path.startswith(m)
+        if not self.exempt_wt:
+            return under_main
+        w = self.wt.rstrip("/") + "/"
         under_wt = path == self.wt or path.startswith(w)
         return under_main and not under_wt
 
@@ -96,6 +184,15 @@ class _Analyzer:
                 loc = a.split("=", 1)[1]
                 i += 1
                 continue
+            # global options that CONSUME the next token as a VALUE — else that
+            # value is misread as the subcommand and the whole write escapes
+            # (#817 review: `git -c user.email=x commit` classified `user.email=x`
+            # as the sub). The `=`-glued forms (`--namespace=x`) fall through the
+            # generic `-`-skip below.
+            if a in ("-c", "--namespace", "--config-env", "--super-prefix") \
+                    and i + 1 < len(args):
+                i += 2
+                continue
             if a.startswith("-"):
                 i += 1
                 continue
@@ -104,17 +201,36 @@ class _Analyzer:
             break
         if sub not in _GIT_WRITE:
             return False
-        # read subcommands that reuse a write-verb name
-        if sub == "stash" and (not subargs or subargs[0] in ("list", "show")):
+        # read subcommands that reuse a write-verb name. A BARE `git stash` is
+        # `stash push` (mutates the working tree + refs/stash) — only list/show
+        # are reads (#817 review: the bare form was wrongly exempted).
+        if sub == "stash" and subargs and subargs[0] in ("list", "show"):
             return False
         if sub == "tag" and any(x in ("-l", "--list", "-n", "--contains",
                                       "--points-at", "--merged", "--no-merged")
                                 for x in subargs):
             return False
+        # `git symbolic-ref HEAD` / `--short HEAD` READS the ref; a 2nd
+        # positional (`symbolic-ref HEAD refs/heads/x`) or `-d` WRITES it — the
+        # literal HEAD hijack in plumbing form (#817 review). The supervisor's
+        # own `git symbolic-ref --short HEAD` assert (SKILL.md Step 4) is a read.
+        if sub == "symbolic-ref":
+            positional = [x for x in subargs if not x.startswith("-")]
+            deletes = any(x in ("-d", "--delete") for x in subargs)
+            if len(positional) < 2 and not deletes:
+                return False
         # `git worktree list` (and a bare `git worktree`) is a read; add/remove/
         # prune/move/repair/lock/unlock write. (#817)
-        if sub == "worktree" and (not subargs or subargs[0] == "list"):
-            return False
+        if sub == "worktree":
+            if not subargs or subargs[0] == "list":
+                return False
+            # remove/move/add name a worktree PATH positional that may be
+            # OUTSIDE cwd (a sibling) — resolve each so `git worktree remove
+            # ../agent-y` is caught even from the worker's own worktree cwd
+            # (#817 review A#6), not only via the cwd/loc check below.
+            for p in (x for x in subargs[1:] if not x.startswith("-")):
+                if self._mutates_main(self._resolve(p)):
+                    return True
         # `git branch` reads (list/--contains/--merged/...) vs writes (create a
         # positional name, or -d/-D/-m/-M/-c/-C/--force/-u/...). Over-block a
         # read flag's value that looks positional is fine (fail-safe). `git
@@ -186,9 +302,18 @@ class _Analyzer:
                     if self._mutates_main(self._resolve(a)):
                         return True
             return False
+        # rm/rmdir/unlink/shred a shared-checkout file — incl. the hook's own
+        # helper (`rm <checkout>/hooks/worktree_guard.py`) to self-disarm the
+        # guard (#817 review). Any non-flag positional under the checkout blocks.
+        if prog in _DELETE_CMDS:
+            for a in args:
+                if not a.startswith("-") and self._mutates_main(self._resolve(a)):
+                    return True
+            return False
         return False
 
     def _flush(self, argv, redirect_targets):
+        argv = _strip_command_prefix(argv)  # env-assignments + wrappers (#557)
         if argv and os.path.basename(argv[0]) == "cd":
             # update the effective cwd, then this command writes nothing
             if len(argv) >= 2:
@@ -200,6 +325,8 @@ class _Analyzer:
         return self._command_mutates_main(argv)
 
     def analyze(self, cmd):
+        cmd = _normalize_newlines(cmd)  # unquoted "\n" -> ";" so multi-line
+        # composites split into segments instead of merging into one argv (#817)
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         tokens = list(lex)  # may raise ValueError on unbalanced quotes
@@ -248,8 +375,12 @@ def mutates_shared_checkout(cmd, checkout, worker_cwd):
     cwd string catches a subdir cwd AND a `git -C <checkout> …` from any cwd.
     Fail-safe: any parse error returns False."""
     try:
-        wt_parent = os.path.join(checkout, ".claude", "worktrees")
-        return _Analyzer(checkout, wt_parent, start_cwd=worker_cwd).analyze(cmd)
+        # exempt_wt=False: an isolation-failed worker owns NO worktree, so ANY
+        # target under `checkout` is forbidden (incl. the `.claude/worktrees`
+        # dir itself and any sibling worktree). `wt` is unused under exempt_wt=
+        # False — pass `checkout` as a harmless placeholder.
+        return _Analyzer(checkout, checkout, start_cwd=worker_cwd,
+                         exempt_wt=False).analyze(cmd)
     except Exception:
         return False
 

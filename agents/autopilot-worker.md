@@ -216,9 +216,10 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
 
 - **FIRST STEP, UNCONDITIONAL — assert your isolation actually applied, before ANY git write (#817).**
   Your very first command is the isolation self-check: `git rev-parse --show-toplevel` MUST print a
-  `.claude/worktrees/agent-*` path AND `git symbolic-ref --short HEAD` MUST print a `worktree-agent-*`
-  branch. If instead the toplevel is the repo's bare main checkout and the branch is `main`/`dev`,
-  your `isolation: "worktree"` SILENTLY DID NOT APPLY (a Claude Code harness fallback) — STOP
+  path UNDER `.claude/worktrees/` (the canonical isolation signal — normally `.claude/worktrees/agent-*`)
+  AND `git symbolic-ref --short HEAD` MUST print a worktree branch (`worktree-agent-*`/`worktree-issue-*`),
+  NEVER `main`/`dev`. If instead the toplevel is the repo's bare main checkout and the branch is
+  `main`/`dev`, your `isolation: "worktree"` SILENTLY DID NOT APPLY (a Claude Code harness fallback) — STOP
   immediately, do NO git write of any kind, and RETURN `ISOLATION FAILED: <toplevel> <branch>` so the
   supervisor re-dispatches you into a fresh worktree. **NEVER work in the shared main checkout**: a
   worker that created/switched branches there hijacked the shared HEAD during the supervisor's `git

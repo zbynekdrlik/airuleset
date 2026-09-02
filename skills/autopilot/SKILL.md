@@ -514,7 +514,10 @@ turn overlaps a unit already claimed in this batch (nothing left to safely paral
 a worktree merge you can already see will conflict — serialize instead. A batch of size 1 (fleet
 dispatch with a single worker) and the serial fallback are behaviorally identical except for the
 `isolation:` flag; the fallback exists for the environments/situations where even THAT flag is
-unsafe to use.
+unsafe to use. **On airuleset, a serial-fallback `autopilot-worker` (cwd = the shared main checkout)
+is blocked by `block-foreign-airuleset-write.sh` RULE B2 (#817) from mutating the shared tree** —
+so a GENUINE airuleset serial-fallback dispatch must set the STANDING env `AIRULESET_ALLOW_WORKTREE_ESCAPE=1`
+on the worker (a per-command `VAR=1 …` prefix does NOT reach the hook); other repos are unaffected.
 
 **Repo-flow policy — which target a round's branches integrate into:**
 - **Local-merge repo** (pushes straight to `main`, no PR/CI — e.g. airuleset itself): the round's

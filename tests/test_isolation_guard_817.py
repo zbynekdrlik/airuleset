@@ -84,21 +84,27 @@ class HookB2Base(TestCase):
         return subprocess.run(["bash", self.hook], input=json.dumps(payload),
                               capture_output=True, text=True, env=env)
 
-    def bash(self, cmd, cwd=None, agent_id="w817", transcript=AR_TR):
+    def bash(self, cmd, cwd=None, agent_id="w817", transcript=AR_TR,
+             agent_type="autopilot-worker"):
         p = {"tool_name": "Bash", "tool_input": {"command": cmd},
              "cwd": cwd if cwd is not None else self.checkout,
              "transcript_path": transcript}
         if agent_id is not None:
             p["agent_id"] = agent_id
+        if agent_type is not None:
+            p["agent_type"] = agent_type
         return p
 
-    def write(self, tool, path, cwd=None, agent_id="w817", transcript=AR_TR):
+    def write(self, tool, path, cwd=None, agent_id="w817", transcript=AR_TR,
+              agent_type="autopilot-worker"):
         ti = {"notebook_path": path} if tool == "NotebookEdit" else {"file_path": path}
         p = {"tool_name": tool, "tool_input": ti,
              "cwd": cwd if cwd is not None else self.checkout,
              "transcript_path": transcript}
         if agent_id is not None:
             p["agent_id"] = agent_id
+        if agent_type is not None:
+            p["agent_type"] = agent_type
         return p
 
     def assertBlocked(self, payload, **kw):
@@ -175,18 +181,23 @@ class TestRuleB2Allows(HookB2Base):
     def test_read_diff(self):
         self.assertAllowed(self.bash("git diff origin/main"))
 
-    def test_cd_into_own_worktree_then_checkout(self):
-        self.assertAllowed(self.bash(
-            "cd .claude/worktrees/agent-x && git checkout -b y"))
-
     def test_supervisor_no_agent_id(self):
         # the MAIN session's own integration merge — no agent_id, never B2.
         self.assertAllowed(self.bash("git merge --no-ff worktree-agent-issue-813",
-                                     agent_id=None))
+                                     agent_id=None, agent_type=None))
+
+    def test_non_autopilot_worker_subagent_allowed(self):
+        # a general-purpose / SDD / cavecrew / fork subagent doing shared-tree
+        # git work is NOT the incident class — B2 is scoped to autopilot-worker.
+        self.assertAllowed(self.bash("git checkout -b x", agent_type="general-purpose"))
 
     def test_override_env(self):
         self.assertAllowed(self.bash("git checkout -b x"),
                            env_extra={"AIRULESET_ALLOW_WORKTREE_ESCAPE": "1"})
+
+    def test_bypass_marker(self):
+        self.assertAllowed(self.bash(
+            "git checkout -b x  # airuleset:worktree-ok serial fallback"))
 
     def test_bare_git_from_foreign_cwd(self):
         # cwd=/tmp, bare git -> targets /tmp's repo, not the shared checkout.
@@ -195,8 +206,71 @@ class TestRuleB2Allows(HookB2Base):
     def test_write_to_scratch_outside_checkout(self):
         self.assertAllowed(self.write("Write", "/tmp/iso817-scratch/body.md"))
 
-    def test_write_into_own_worktree(self):
-        self.assertAllowed(self.write("Write", os.path.join(self.wt, "y.py")))
+    def test_symbolic_ref_read_allowed(self):
+        # the worker's own self-check / the supervisor's Step-4 assert (a READ).
+        self.assertAllowed(self.bash("git symbolic-ref --short HEAD"))
+
+    def test_stash_list_allowed(self):
+        self.assertAllowed(self.bash("git stash list"))
+
+    def test_worktree_list_allowed(self):
+        self.assertAllowed(self.bash("git worktree list"))
+
+
+class TestRuleB2ReviewHardening(HookB2Base):
+    """#817 fresh-context adversarial review — proven-live bypasses, now closed."""
+
+    def test_multiline_bypass(self):
+        self.assertBlocked(self.bash("git status\ngit checkout -b evil"))
+
+    def test_env_prefix_bypass(self):
+        self.assertBlocked(self.bash("FOO=1 git checkout -b evil"))
+
+    def test_env_prefix_of_the_override_var_still_blocks(self):
+        # the per-command env prefix must NOT blind the analyzer into an
+        # unlogged allow — the override is a STANDING export only.
+        self.assertBlocked(self.bash("AIRULESET_ALLOW_WORKTREE_ESCAPE=1 git checkout -b evil"))
+
+    def test_env_wrapper_bypass(self):
+        self.assertBlocked(self.bash("env git checkout -b evil"))
+
+    def test_command_wrapper_bypass(self):
+        self.assertBlocked(self.bash("command git checkout -b evil"))
+
+    def test_dash_c_value_bypass(self):
+        self.assertBlocked(self.bash("git -c user.email=x commit -am evil"))
+
+    def test_bare_stash_blocks(self):
+        self.assertBlocked(self.bash("git stash"))
+
+    def test_symbolic_ref_write_blocks(self):
+        self.assertBlocked(self.bash("git symbolic-ref HEAD refs/heads/hijack"))
+
+    def test_update_ref_blocks(self):
+        self.assertBlocked(self.bash("git update-ref refs/heads/main HEAD~3"))
+
+    def test_rm_shared_file_blocks(self):
+        self.assertBlocked(self.bash("rm -rf watchdog"))
+
+    def test_rm_the_guard_itself_blocks(self):
+        self.assertBlocked(self.bash("rm hooks/worktree_guard.py"))
+
+    def test_worktrees_parent_dir_hijack_blocks(self):
+        # git run at CHECKOUT/.claude/worktrees walks UP to the shared HEAD.
+        self.assertBlocked(self.bash(
+            "git -C %s checkout -b hijack" % os.path.join(self.checkout, ".claude", "worktrees")))
+
+    def test_cd_worktrees_parent_then_checkout_blocks(self):
+        self.assertBlocked(self.bash("cd .claude/worktrees && git checkout -b hijack"))
+
+    def test_write_into_worktrees_dir_blocks(self):
+        # an isolation-failed worker owns no worktree; a write into any worktree
+        # (a sibling's) is corruption.
+        self.assertBlocked(self.write("Write", os.path.join(self.wt, "y.py")))
+
+    def test_cd_into_a_worktree_then_checkout_blocks(self):
+        self.assertBlocked(self.bash(
+            "cd .claude/worktrees/agent-x && git checkout -b y"))
 
 
 class TestRuleBStillCoversWorktreeEscape(HookB2Base):
@@ -247,16 +321,37 @@ class TestGuardUnit(TestCase):
     def test_reads_allowed(self):
         for c in ("git status", "git log", "git branch --list", "git branch -a",
                   "git branch --contains HEAD", "git diff", "git worktree list",
-                  "git stash list", "git tag --list"):
+                  "git stash list", "git tag --list",
+                  "git symbolic-ref --short HEAD", "git symbolic-ref HEAD"):
             self.assertFalse(self.M(c), c)
 
-    def test_cd_into_worktree_allowed(self):
-        self.assertFalse(self.M(
-            "cd .claude/worktrees/agent-x && git checkout -b y"))
+    def test_new_bypass_shapes_block(self):
+        # #817 review: newline / env-prefix / wrapper / -c value / bare stash /
+        # plumbing / rm — all proven-live bypasses, now closed.
+        for c in ("git status\ngit checkout -b evil",
+                  "FOO=1 git checkout -b evil",
+                  "AIRULESET_ALLOW_WORKTREE_ESCAPE=1 git checkout -b evil",
+                  "env git checkout -b evil",
+                  "command git checkout -b evil",
+                  "nohup git checkout -b evil",
+                  "timeout 300 git checkout -b evil",
+                  "git -c user.email=x commit -am evil",
+                  "git stash",
+                  "git symbolic-ref HEAD refs/heads/hijack",
+                  "git update-ref refs/heads/main HEAD~3",
+                  "rm -rf watchdog",
+                  "rm hooks/worktree_guard.py"):
+            self.assertTrue(self.M(c), c)
 
-    def test_dash_C_worktree_allowed(self):
-        wt = os.path.join(self.co, ".claude", "worktrees", "agent-x")
-        self.assertFalse(self.M("git -C %s checkout -b y" % wt))
+    def test_worktree_dir_and_siblings_block(self):
+        # exempt_wt=False: an isolation-failed worker owns no worktree.
+        wtp = os.path.join(self.co, ".claude", "worktrees")
+        sib = os.path.join(wtp, "agent-x")
+        self.assertTrue(self.M("git -C %s checkout -b hijack" % wtp))   # parent dir
+        self.assertTrue(self.M("cd .claude/worktrees && git checkout -b hijack"))
+        self.assertTrue(self.M("cd .claude/worktrees/agent-x && git checkout -b y"))
+        self.assertTrue(self.M("git -C %s reset --hard HEAD~5" % sib))  # sibling
+        self.assertTrue(self.M("git worktree remove .claude/worktrees/agent-x"))
 
     def test_dash_C_checkout_from_elsewhere_blocks(self):
         self.assertTrue(self.M("git -C %s checkout -b y" % self.co,
@@ -269,10 +364,9 @@ class TestGuardUnit(TestCase):
     def test_bare_git_elsewhere_allowed(self):
         self.assertFalse(self.M("git checkout -b y", worker_cwd="/tmp"))
 
-    def test_switch_and_branch_in_write_set(self):
-        self.assertIn("switch", wg._GIT_WRITE)
-        self.assertIn("branch", wg._GIT_WRITE)
-        self.assertIn("worktree", wg._GIT_WRITE)
+    def test_widened_write_set(self):
+        for v in ("switch", "branch", "worktree", "symbolic-ref", "update-ref"):
+            self.assertIn(v, wg._GIT_WRITE)
 
 
 class TestWorkerSelfCheckDoc(TestCase):
@@ -289,8 +383,11 @@ class TestWorkerSelfCheckDoc(TestCase):
         self.assertIn("git rev-parse --show-toplevel", self.md)
         self.assertIn("git symbolic-ref --short HEAD", self.md)
 
-    def test_names_the_worktree_branch_shape(self):
-        self.assertIn("worktree-agent-", self.md)
+    def test_self_check_is_an_abort_on_isolation_failure(self):
+        # tokens UNIQUE to the #817 self-check bullet (0 pre-fix occurrences),
+        # so a removal of the bullet fails these — not vacuous whole-file hits.
+        self.assertIn("SILENTLY DID NOT APPLY", self.md)
+        self.assertIn(".claude/worktrees/", self.md)
 
 
 class TestSupervisorPreMergeAssertDoc(TestCase):
