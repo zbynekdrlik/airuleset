@@ -55,39 +55,16 @@ INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
 [ -z "$CMD" ] && exit 0
 
-# #540 (was #533 review M3): a `gh api` PATCH to the ISSUE resource is a
-# close-shaped WRITE. `state=closed` may be VISIBLE in argv (bare OR value-quoted
-# — the ordinary `-f state="closed"` / `state='closed'` shell shape, #540 review
-# FINDING 1), OR HIDDEN in the request BODY — a `--input <file|->` body, or a
-# `=@file`-valued field — where the literal never appears in argv at all (the
-# escape #540 exists for). Treat all of these as a close. It never READS the body
-# (a `--input -` stdin body is fundamentally invisible to a PreToolUse argv
-# scan; the `--input` TOKEN is the fail-safe marker instead). A visible non-close
-# write (a `-f state=open`/`state="open"` reopen, a non-state field with no
-# --input/@file) stays a non-close, so a `issues/N` mention inside a field VALUE
-# on a NON-issue endpoint is NOT over-blocked. The GET/read predicate (`gh api
-# …/issues/N --jq '.state=="closed"'`, no PATCH method) is excluded by the method
-# requirement. The method separator class `[[:space:]=]` catches the GLUED
-# `--method=PATCH` (#533 review M3) as well as `-X PATCH`. This covers the argv
-# shapes a well-meaning stream uses; genuinely out-of-band close routes (a
-# GraphQL `closeIssue` mutation, obfuscation) are documented residuals on the
-# ticket, NOT claimed complete here (#540 review FINDING 1/3). Called ONLY from
-# `if`/`elif` conditions below, so `set -e` is ignored inside the body — the
-# `grep && return 0` chain never aborts the hook on a no-match.
-# #824: reads $1 via HERE-STRINGS, NOT `printf '%s' "$1" | grep -q` — the first
-# grep matches `gh api … issues/N` early on a >64KB PATCH command, so under
-# `set -o pipefail` `grep -q` short-circuits + exits while printf is still blocked
-# writing past the 64KB pipe buffer → SIGPIPE → `|| return 1` → not-a-close →
-# is_close=0 → bypass (the #772/#816 class at the front gate). A here-string feeds
-# grep with no producer process, so no SIGPIPE can arise. ERE preserved byte-for-byte.
-_is_patch_close_cmd() {
-    grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' <<< "$1" || return 1
-    grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' <<< "$1" || return 1
-    grep -qE 'state=["'\'']?closed' <<< "$1" && return 0             # visible (bare or value-quoted, #540 F1)
-    grep -qE '(^|[[:space:]])--input([[:space:]=]|$)' <<< "$1" && return 0  # hidden body (file/-/=file)
-    grep -qE '(-F|--field)[[:space:]=]+[^[:space:]]*=@' <<< "$1" && return 0  # -F state=@file
-    return 1
-}
+# #837: the front gate, the `gh api PATCH` close detection (formerly the
+# `_is_patch_close_cmd` shell helper), the interpreter/substitution detection, and
+# ALL of the EXTRACTION + COUNTING that used to live here as sed/grep now run in the
+# python quote/backslash-aware segmenter `hooks/close_guard_segment.py` (invoked once
+# below). The signals it emits — IS_CLOSE / N_CLOSE / ISSUE_NUM / REPO_ARG /
+# REPO_FLAG_PRESENT / HAS_INTERP / HAS_PATCH_CLOSE / D_REPO_ARG / D_NUMS — are what the
+# Discuss gate + carve-outs read. The remaining shell is a thin driver + the network
+# `gh` reads. See the #837 design comment for the six-round sed/grep treadmill this
+# replaced (A-4 quote-context under-count, REPO_ARG-in-quoted-arg poison, N-6 standalone
+# aliased command word, N-7 non-shell interpreter).
 
 # #756: the gatekeeper REVIEW-VERDICT artifact — the SAME signal odoo-erp's
 # `subdev-self-close-guard.yml` (#3784) keys on to prove a gk review happened
@@ -147,6 +124,13 @@ _cmd_has_comment_flag() {
       || grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)' <<< "$CMD"
 }
 
+# #837 RETAINED-FOR-SOURCE-LOCK: `_stripped_has_unbalanced_quote` and
+# `_repo_flag_unparseable` below are NO LONGER in the live flow — the segmenter's
+# REPO_FLAG_PRESENT/REPO_ARG signals drive `_repo_unparseable_signal` instead. They stay
+# DEFINED solely because the #816/#824 helper-level SIGPIPE regression tests
+# (`TestRepoFlagUnparseableHereString`, `test_cmd_has_comment_flag_helper_is_sigpipe_immune`)
+# EXTRACT and drive them from the hook source; their here-string form must not regress.
+#
 # #824 A-2: does the stripped copy have an UNBALANCED quote — an ODD number of `'`
 # or `"`? The ORIGINAL $CMD always has balanced quotes (bash accepted the command),
 # so an odd count in the value-stripped copy means the strip broke on an
@@ -268,66 +252,12 @@ _labels_contain() {
     grep -qxF "$2" <<< "$1"   # #824: here-string (SIGPIPE-immune convention)
 }
 
-# #824: strip the VALUE of gh's value-taking flags (--comment/-c, --reason/-r) from
-# $1, producing a working copy for EXTRACTION (REPO_ARG/ISSUE_NUM/N_CLOSE/_D_* and
-# the _repo_flag_unparseable presence-grep). A `-R x/y`-looking string inside a
-# comment/reason value otherwise poisons REPO_ARG (parsed as the repo) while the
-# close targets another repo — the #824 concern-4 wrong-ALLOW. The flag is anchored
-# at a token boundary `(^|[[:space:]])` (its leading char preserved via \1) so a
-# `-c`/`-r` inside a repo value is never mistaken for the flag; the value arm
-# `'[^']*'|"[^"]*"|[^[:space:];&|<>()]+` handles single/double-quoted and unquoted
-# values (the unquoted arm operator-bounded per #824 A-1 above).
-# Only for EXTRACTION — DETECTION (is_close/_is_patch_close_cmd/HAS_INTERP/
-# _cmd_has_comment_flag) always runs on the ORIGINAL $CMD, since an over-eager strip
-# on a detector flips it toward wrong-ALLOW (e.g. it would eat a real `bash -c '…'`
-# nested-close payload, or delete _cmd_has_comment_flag's own target).
-# #824 N-1: a shell escaped-quote value (`--comment 'it'\''s -R x/y'`, or the
-# EVEN-parity `--comment "say \"hi\" -R x/y"`) is now PRE-DELETED (below) before the
-# value arms, so the whole value strips and no `-R x/y` residue survives. The
-# _repo_flag_unparseable UNBALANCED-QUOTE leg (c) and the >=2-`-R` leg are now a BELT
-# (a fail-safe backstop for any residue the pre-delete misses), not the proof — the
-# pre-#824 note claimed the >=2-`-R` leg caught the escaped-quote residue, but that leg
-# only fires with a SECOND real `-R`, and the ODD-count leg missed the EVEN-parity
-# `\"…\"` shape entirely (#824 A-2 / N-1). Accepted residual (confusion guard, not
-# adversarial security): a residue built from a quoting idiom the three pre-deletes do
-# not cover survives — the belt legs remain the backstop, and the #837 python
-# segmenter is the precise fix.
-_strip_value_flags() {
-    # #824 (A-1): the UNQUOTED value arm is bounded at shell OPERATORS
-    # `;&|<>()` — the pre-#824 `[^[:space:]]+` spanned them, so
-    # `--comment done&&gh issue close 999` ate `done&&gh` as ONE "value",
-    # ERASING a real top-level close from the stripped copy → N_CLOSE
-    # under-counted it → the carve-out fired on the self close and ALLOWED the
-    # whole command (a wrong-ALLOW regression). Bounding at operators keeps the
-    # trailing `&&gh …` visible so N_CLOSE sees BOTH closes and blanks
-    # ISSUE_NUM. It stops before `$(` too (via `(`), whose nested close is
-    # separately caught by the `$(` HAS_INTERP guard on the ORIGINAL $CMD (A-4/D-1).
-    # #824 (A-3): the SHORT flags -c/-r additionally strip a GLUED value
-    # (`-c'…'`, `-cVALUE`, `-c=VALUE`) — a valid pflag shorthand form the
-    # pre-#824 `([[:space:]]+|=)` separator (a space or `=` REQUIRED) missed, so a
-    # `-R x/y`-looking string inside a glued `-c` value poisoned REPO_ARG. The
-    # LONG flags keep the space/`=`-required separator (a glued `--commentX` is
-    # not a valid long-flag form). Run LONG first, so a `-c` INSIDE a stripped
-    # `--comment`/`--reason` value is gone before the short pass sees it.
-    # #824 N-1: PRE-DELETE the three escaped-quote idioms BEFORE the value arms so
-    # an escaped quote inside a value cannot terminate `'[^']*'`/`"[^"]*"` EARLY and
-    # leave a `-R x/y` residue (the EVEN-parity poison the unbalanced-quote leg — an
-    # ODD-count belt — cannot catch). The idioms: bash's `'\''` and `'"'"'`
-    # single-quote-in-single-quote, and a backslash-escaped quote `\"`/`\'`. After
-    # deletion `"say \"hi\" -R x/y"` collapses to `"say hi -R x/y"` so the `"[^"]*"`
-    # arm strips the WHOLE value. #824 N-2: `sed -Ez` runs the whole here-string as
-    # ONE pattern space so a MULTI-LINE quoted value is spanned by the quoted arms
-    # (`[[:space:]]` covers `\n`; `^` still anchors at buffer start, and a real flag
-    # after a newline matches via the `[[:space:]]` alternative); a per-LINE sed left
-    # a lone quote on line 2 → odd count → the leg (c) over-blocked a legit `-R` close.
-    sed -Ez \
-      -e "s/'\\\\''//g" \
-      -e "s/'\"'\"'//g" \
-      -e "s/\\\\[\"']//g" \
-      -e "s/(^|[[:space:]])(--comment|--reason)([[:space:]]+|=)('[^']*'|\"[^\"]*\"|[^[:space:];&|<>()]+)/\1/g" \
-      -e "s/(^|[[:space:]])(-c|-r)([[:space:]]*=?[[:space:]]*)('[^']*'|\"[^\"]*\"|[^[:space:];&|<>()]+)/\1/g" \
-      <<< "$1"
-}
+# #837: `_strip_value_flags` (the sed value-strip that produced `_CMD_STRIPPED`) is
+# GONE — the whole EXTRACTION-on-a-stripped-copy design it fed is replaced by the
+# python segmenter, which reads each close segment's own TOKENS quote/backslash-aware
+# (a `-c`/`-R` inside a quoted argument is a single token, never a flag), so the A-4
+# under-count and the comment-value REPO_ARG poison the strip existed to fight are
+# fixed structurally, not with an ever-growing set of pre-deletes and belt legs.
 
 # Reduce a -R/--repo VALUE (or, when $1 is empty, the CWD git remote URL) to a
 # full `owner/repo`. Handles the three URL shapes — gh's `owner/repo` -R value,
@@ -368,52 +298,73 @@ _repo_owner_repo_of() {
     printf '%s' "${_owner}/${_repo}"
 }
 
-# #540 (was #533 review M3): the `gh issue close` boundary class now includes the
-# quote chars ' and " (widened SYMMETRICALLY on the opening AND closing anchor per
-# the #471 lesson) so a close opening an interpreter's quoted argument
-# (`bash -c 'gh issue close N'`, `sh -c "…"`, `eval "…"`) is a boundary match —
-# otherwise is_close stays 0 and the WHOLE guard is bypassed at the top. Once
-# is_close=1, #533's HAS_INTERP (below) blanks ISSUE_NUM so a nested close can
-# never ride a carve-out. N_CLOSE (the single-action top-level count, below)
-# DELIBERATELY keeps the narrow class — it counts TOP-LEVEL closes only, and a
-# quoted close is nested, not top-level (handled by HAS_INTERP): the two greps
-# answer different questions. The pre-existing fail-safe on a NON-executing quoted
-# mention of the phrase (e.g. inside a `--body "…"` comment) is unchanged in kind,
-# only slightly wider (the phrase at the very start of a quoted string now matches
-# too) — the worker simply rephrases, far cheaper than missing a real close.
-# #824: the opening class ALSO includes `\` — a backslash-escaped `\gh issue close`
-# (bash strips the `\`, so gh runs a real close) was not a boundary match, so is_close
-# stayed 0 and the WHOLE guard was bypassed at the top (the `_CLOSE_OPEN` twin of the
-# `\-R` blind spot #816 closed in `_repo_flag_unparseable`'s own class). This is a
-# DELIBERATE superset of the pre-#824 class; inside an ERE bracket expression `\` is a
-# literal backslash (no escaping). N_CLOSE stays NARROW (no `\`, below) so a `\gh`
-# close is not a top-level count → the single-action guard blanks ISSUE_NUM → BLOCK
-# (the #816/#540 intentional is_close/N_CLOSE decoupling); ISSUE_NUM is boundary-aligned
-# to that SAME narrow class (below) so a `\gh SELF && gh FOREIGN` pair cannot let the
-# carve-out check the wrong issue.
-_CLOSE_OPEN='(^|[\;&|[:space:]('\''"])'
-_CLOSE_END='([[:space:]]|$|['\''");&|()])'
+# #837: run the python quote/backslash-aware segmenter ONCE. It replaces the front
+# gate, the `gh api PATCH` detection, the interpreter/substitution detection, and the
+# whole EXTRACTION + COUNTING layer (ISSUE_NUM / REPO_ARG / N_CLOSE*). A cheap prefilter
+# keeps the python spawn off every non-close Bash command: only a command whose
+# de-backslashed text (so a `clo\se`/`g\h` obfuscation collapses to the keyword) carries
+# `close`, `gh api`, `patch`, `state=`, `--input` or `--method` reaches the segmenter;
+# anything else cannot be a close, so exit 0 (fast path). The de-backslash + lowercase is
+# a strict SUPERSET (it can only ADD matches), so a genuine close never slips the filter.
+_PREFILTER="${CMD//\\/}"
+_PREFILTER="${_PREFILTER,,}"
+case "$_PREFILTER" in
+    *close*|*"gh api"*|*patch*|*state=*|*--input*|*--method*) : ;;   # maybe a close → segment
+    *) exit 0 ;;                                                      # definitely not → allow
+esac
 
-# Is this an issue-CLOSE action? Match `gh issue close` at a command boundary
-# (quote-aware #540, backslash-aware #824), plus the REST-API PATCH close forms
-# (`_is_patch_close_cmd`). #824: here-string (SIGPIPE-immune, the DOMINANT front-gate
-# fix) — under `set -o pipefail` `printf '%s' "$CMD" | grep -qE …` SIGPIPEd on a >64KB
-# multi-line command whose close phrase matched early, leaving is_close=0 → `exit 0`
-# before authority was resolved. DETECTION on the ORIGINAL $CMD.
-is_close=0
-if grep -qE "${_CLOSE_OPEN}gh[[:space:]]+issue[[:space:]]+close${_CLOSE_END}" <<< "$CMD"; then
-    is_close=1
-elif _is_patch_close_cmd "$CMD"; then
-    is_close=1
+SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")
+REPO_DIR=$(dirname "$SCRIPT_DIR")
+_SEG="$REPO_DIR/hooks/close_guard_segment.py"
+
+# python3 missing / the segmenter missing → fail CLOSED (this prefilter already proved
+# the command is close-ish, and a close we cannot analyze must not slip through).
+if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$_SEG" ]; then
+    echo "BLOCKED (fail-safe): cannot analyze this close — python3 or close_guard_segment.py is unavailable." >&2
+    echo "  Refusing 'gh issue close' until the segmenter can run; hand off via a comment and let the maintainer close." >&2
+    exit 2
 fi
-[ "$is_close" -eq 0 ] && exit 0
 
-# #824: the STRIPPED working copy for EXTRACTION/COUNTING (never for detection —
-# computed AFTER the is_close gate, so detection above ran on the original). Every
-# repo/number/count read below uses this; DETECTION keeps reading $CMD.
-_CMD_STRIPPED=$(_strip_value_flags "$CMD" || true)   # #824 E-1: fail SAFE — a sed
-# failure leaves _CMD_STRIPPED empty → every extraction/count reads empty → N_CLOSE=0
-# → no carve-out fires → BLOCK (never abort the hook mid-way under `set -e`).
+# Here-string feeds the segmenter with NO producer process → SIGPIPE-immune (the
+# #772/#816/#824 convention); the segmenter reads the WHOLE payload (never a short-circuit).
+_SEG_OUT=$(python3 "$_SEG" <<< "$CMD" 2>/dev/null || true)
+
+# The first line is `OK` iff the analysis completed cleanly; anything else (a crash,
+# no output) → fail CLOSED, never a silent allow.
+IS_CLOSE=0; N_CLOSE=0; ISSUE_NUM=""; REPO_ARG=""; REPO_FLAG_PRESENT=0
+HAS_INTERP=0; HAS_PATCH_CLOSE=0; D_REPO_ARG=""; D_NUMS=""
+_SEG_OK=0
+while IFS= read -r _line; do
+    case "$_line" in
+        OK) _SEG_OK=1 ;;
+        IS_CLOSE=*)          IS_CLOSE="${_line#IS_CLOSE=}" ;;
+        N_CLOSE=*)           N_CLOSE="${_line#N_CLOSE=}" ;;
+        ISSUE_NUM=*)         ISSUE_NUM="${_line#ISSUE_NUM=}" ;;
+        REPO_ARG=*)          REPO_ARG="${_line#REPO_ARG=}" ;;
+        REPO_FLAG_PRESENT=*) REPO_FLAG_PRESENT="${_line#REPO_FLAG_PRESENT=}" ;;
+        HAS_INTERP=*)        HAS_INTERP="${_line#HAS_INTERP=}" ;;
+        HAS_PATCH_CLOSE=*)   HAS_PATCH_CLOSE="${_line#HAS_PATCH_CLOSE=}" ;;
+        D_REPO_ARG=*)        D_REPO_ARG="${_line#D_REPO_ARG=}" ;;
+        D_NUMS=*)            D_NUMS="${_line#D_NUMS=}" ;;
+    esac
+done <<< "$_SEG_OUT"
+
+if [ "$_SEG_OK" != "1" ]; then
+    echo "BLOCKED (fail-safe): the close-guard segmenter did not return a clean analysis." >&2
+    echo "  Refusing 'gh issue close' until it can; hand off via a comment and let the maintainer close." >&2
+    exit 2
+fi
+
+# Normalise the numeric signals (defensive: the segmenter always emits digits).
+case "$N_CLOSE" in ''|*[!0-9]*) N_CLOSE=0 ;; esac
+[ "$IS_CLOSE" = "1" ] || exit 0
+
+# Present-but-unparseable -R fail-safe, from the segmenter's structured signal (a
+# -R/--repo flag is present in the close segment but its value is glued/unreadable, so
+# a network read would fall back to the CWD repo). Replaces the old `_repo_flag_unparseable`
+# text-scan; that helper stays DEFINED below only for the #816/#824 helper-level SIGPIPE
+# source-lock tests that extract and drive it.
+_repo_unparseable_signal() { [ "$REPO_FLAG_PRESENT" = "1" ] && [ -z "$REPO_ARG" ]; }
 
 # ---------------------------------------------------------------------------
 # #627 Discuss closing-note gate — authority-INDEPENDENT, odoo-erp-scoped.
@@ -475,14 +426,14 @@ command -v python3 >/dev/null 2>&1 || _d_run_gate=0
 [ -f "$_DREPO/discuss_close_guard.py" ] || _d_run_gate=0
 
 if [ "$_d_run_gate" = "1" ]; then
-    # EVERY `gh issue close <N>` number in the command (not head -1) — a compound
-    # batch-close of one thread's sibling tickets must have EACH target checked.
-    # #824: here-string + read the STRIPPED copy (a `gh issue close N` inside a comment
-    # value is not a real close; a `-R x/y` inside a comment must not poison the repo).
-    _D_NUMS=$(grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?[0-9]+' <<< "$_CMD_STRIPPED" | grep -oE '[0-9]+' || echo "")
-    # Repo for the command: the first -R/--repo — separated (`-R x`), =-joined
-    # (`-R=x`) OR glued (`-Rx`, the `*` after the class) — else the cwd remote.
-    _D_REPO_ARG=$(grep -oE "(-R|--repo)[[:space:]=]*[\"']?[A-Za-z0-9._/-]+" <<< "$_CMD_STRIPPED" | head -1 | sed -E "s/^(-R|--repo)[[:space:]=]*[\"']?//" || echo "")
+    # #837: EVERY clean top-level `gh issue close <N>` number (D_NUMS) + the first
+    # close segment's -R (D_REPO_ARG, GLUED-tolerant — `-Rx` reads `x`), both from the
+    # segmenter, which reads each close segment's own tokens quote/backslash-aware (a
+    # `gh issue close N` mentioned inside a comment value is not a real close; a
+    # `-R x/y` inside a quoted argument is never the repo). A compound batch-close of
+    # one thread's sibling tickets has EACH target in D_NUMS.
+    _D_NUMS="$D_NUMS"
+    _D_REPO_ARG="$D_REPO_ARG"
     if [ -n "$_D_NUMS" ]; then
         # odoo-erp repo-scope (Odoo Discuss threads are an odoo-erp / client
         # thing): a non-odoo-erp close never engages the gate, killing the
@@ -599,142 +550,23 @@ fi
 # closes the actual regression. A genuinely separate-identity stream
 # (fork-no-merge's david, whose gh login is never the maintainer's) is
 # unaffected.
-# #824: here-string + read the STRIPPED copy + BOUNDARY-ALIGN to N_CLOSE's narrow
-# class. The pre-#824 pattern had NO leading boundary (a bare substring), so on a
-# `\gh issue close SELF && gh issue close FOREIGN` pair it grabbed the `\gh` SELF
-# number via `head -1` while N_CLOSE (narrow) counted only the top-level FOREIGN
-# close → the carve-out was checked against the WRONG issue (a wrong-ALLOW). Anchoring
-# ISSUE_NUM to the SAME `(^|[;&|[:space:](])` class N_CLOSE counts makes the extracted
-# set == the counted set: the `\gh` close (backslash, not in the narrow class) is
-# never extracted here, so ISSUE_NUM is the top-level FOREIGN number → BLOCK.
-ISSUE_NUM=$(grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?[0-9]+' <<< "$_CMD_STRIPPED" | grep -oE '[0-9]+' | head -1 || echo "")
-# REPO_ARG accepts a single- OR double-quoted value (`["']?`, #533 review m5) — an
-# unquoted `-R owner/repo` is unchanged. A GLUED `-Rowner/repo` still yields empty
-# (no separator); the #533 exemption below fails SAFE on that via the -R-present
-# guard, and the author carve-out's own use is unchanged in direction (empty
-# REPO_ARG -> author read against cwd repo, its pre-existing behaviour).
-# #824: here-string + read the STRIPPED copy — a `-R x/y`-looking string inside a
-# `--comment`/`--reason` VALUE is removed before extraction, so it can no longer be
-# parsed as REPO_ARG (the comment-value poison this ticket closes).
-REPO_ARG=$(grep -oE "(-R|--repo)[[:space:]=]+[\"']?[A-Za-z0-9._/-]+" <<< "$_CMD_STRIPPED" | head -1 | sed -E "s/^(-R|--repo)[[:space:]=]+[\"']?//" || echo "")
-
-# #533 review C1 (CRITICAL): the exemptions below `exit 0` on the FIRST close's
-# issue number and then ALLOW THE WHOLE Bash command — so a compound like
-# `gh issue close <own> --comment ok && gh issue close <foreign>` or
-# `gh issue close <own> --comment ok && gh api -X PATCH .../issues/N -f state=closed`
-# smuggled a SECOND, unguarded mutation (a foreign close, or the PATCH form the
-# hook swears it never exempts) past the guard. Fail SAFE: an exemption may fire
-# ONLY when the command is a SINGLE close action. If there is not EXACTLY one
-# top-level `gh issue close`, OR a PATCH-close segment is also present, OR the
-# command hides a nested interpreter (bash/sh -c, eval) that could carry another
-# close, BLANK ISSUE_NUM — which skips BOTH carve-outs below (each gated on
-# `[ -n "$ISSUE_NUM" ]`, so the author carve-out stays byte-untouched) and falls
-# through to the BLOCK. A benign prefix like `cd dir && gh issue close N` still
-# has exactly one close and no interpreter, so it is unaffected. (A pure PATCH
-# close already has ISSUE_NUM empty — no `gh issue close` — so this only tightens
-# the `gh issue close`-carrying forms.) The residual `bash -c '…'` / `--input`
-# whole-hook detection gaps are pre-existing (is_close untouched) and filed
-# separately; this guard closes the CHAINED smuggle, the #533-activated path.
-# #824: here-string + read the STRIPPED copy — a `gh issue close N` mentioned inside
-# a comment value is not a real top-level close, so it must not inflate the count
-# (which would false-block a legit single close whose comment names the phrase); and
-# reading the stripped copy neutralises comment-text interference with the ISSUE_NUM
-# boundary alignment above. A REAL nested `bash -c '… close'` is still caught by
-# HAS_INTERP (which runs on the ORIGINAL $CMD, below), not by this top-level count.
-CLOSE_HITS=$(grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' <<< "$_CMD_STRIPPED" 2>/dev/null || true)
-N_CLOSE=$(grep -c . <<< "$CLOSE_HITS" 2>/dev/null || true)
-# #824 C-1: also count top-level closes with the WIDE `_CLOSE_OPEN` boundary class
-# (which carries the `\`/quote chars the narrow N_CLOSE class deliberately omits). A
-# `\gh issue close FOREIGN` (OPENING-boundary `\`) chained after a self close is
-# INVISIBLE to the narrow N_CLOSE + the narrow ISSUE_NUM extractor, so the self
-# carve-out `exit 0`ed and the foreign close rode through. If the WIDE count differs
-# from the NARROW count, a close hides behind a `\`/opening-quote boundary → blank
-# ISSUE_NUM (below) → BLOCK. Runs on the SAME stripped copy as N_CLOSE, so a `\gh
-# issue close` MENTIONED inside a comment value never inflates it (it was stripped).
-CLOSE_HITS_WIDE=$(grep -oE "${_CLOSE_OPEN}gh[[:space:]]+issue[[:space:]]+close([[:space:]]|\$)" <<< "$_CMD_STRIPPED" 2>/dev/null || true)
-N_CLOSE_WIDE=$(grep -c . <<< "$CLOSE_HITS_WIDE" 2>/dev/null || true)
-case "$N_CLOSE_WIDE" in ''|*[!0-9]*) N_CLOSE_WIDE=0 ;; esac
-# #824 N-5: the WIDE count above catches only the OPENING-boundary hidden forms
-# (`\gh …`, `'gh …`, `"gh …`) — a QUOTED command word `"gh" issue close`/`'gh' issue
-# close` breaks `gh[[:space:]]+` on the CLOSING quote (`gh"`), so the WIDE count MISSES
-# it (N_CLOSE_WIDE == N_CLOSE) and a `SELF && "gh" issue close FOREIGN` chain rode a
-# self carve-out. Count once more on a DE-QUOTED copy (`\`/`"`/`'` removed) with the
-# NARROW class: `"gh" issue close 999` de-quotes to ` gh issue close 999` → a real
-# narrow boundary match, so N_CLOSE_DEQUOTED > N_CLOSE reveals the hidden close → blank
-# ISSUE_NUM (below) → BLOCK. Runs on the STRIPPED copy, so a `gh issue close` inside a
-# comment value never inflates it; de-quoting a legit single close (no quote in the
-# close phrase itself) never creates a spurious extra match → N_CLOSE_DEQUOTED ==
-# N_CLOSE for every legit shape. (Only the CHAINED quoted form is caught; a STANDALONE
-# `"gh" issue close` bypasses the is_close front gate entirely — the #837 residual.)
-# #824 review-#3 F1/F2: the de-quoted boundary class ADDS `)`/`}`/`{` (beyond the
-# narrow class's `(`), so an EMPTY expansion GLUED to a chained close — `$(:)gh …`,
-# `$()gh …`, `${x}gh …` (bash expands the sub/param empty and glues onto `gh`, so the
-# close really runs) — is a `)gh`/`}gh` boundary match here → N_CLOSE_DEQUOTED > N_CLOSE
-# → blank → BLOCK. The narrowed `$(` guard alone misses a gh-LESS decoy substitution
-# (that was the F1 regression vs the old blanket `$(` guard); this boundary catches it
-# WITHOUT reopening N-3's over-block, since the value is stripped first and a legit
-# close never carries a `)gh`/`}gh` adjacency.
-_CMD_DEQUOTED=$(tr -d '\\'\''"' <<< "$_CMD_STRIPPED" 2>/dev/null || true)
-CLOSE_HITS_DEQUOTED=$(grep -oE '(^|[;&|[:space:](){}])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' <<< "$_CMD_DEQUOTED" 2>/dev/null || true)
-N_CLOSE_DEQUOTED=$(grep -c . <<< "$CLOSE_HITS_DEQUOTED" 2>/dev/null || true)
-case "$N_CLOSE_DEQUOTED" in ''|*[!0-9]*) N_CLOSE_DEQUOTED=0 ;; esac
-# #540: uses the SAME `_is_patch_close_cmd` predicate as the front gate above —
-# one definition, so the single-action guard and the detector can never drift on
-# what a PATCH-close is (incl. the #540 hidden-body `--input`/`=@file` forms).
-HAS_PATCH_CLOSE=0
-if _is_patch_close_cmd "$CMD"; then
-    HAS_PATCH_CLOSE=1
-fi
-HAS_INTERP=0
-# #824: here-string (SIGPIPE-immune). DETECTION on the ORIGINAL $CMD (NOT the stripped
-# copy) — the value-strip would eat a real `bash -c '… gh issue close …'` payload (its
-# `-c '…'` value arm matches the interpreter's own `-c`), so running this on the stripped
-# copy could MISS a genuine nested-close smuggle → wrong-ALLOW. On $CMD it still fires.
-if grep -qE '(^|[;&|[:space:](])(bash|sh|dash|zsh)[[:space:]]+-c([[:space:]]|$)|(^|[;&|[:space:](])(eval|xargs)([[:space:]]|$)' <<< "$CMD"; then
-    HAS_INTERP=1
-fi
-# #756 review F6 (pre-existing #533/#540 residual, exposure widened): backtick command
-# substitution is a nested-interpreter smuggle both HAS_INTERP and the N_CLOSE boundary
-# class miss — `(` catches $(…) but a backtick glued to a word char is invisible, so
-# `gh issue close X --comment y`gh issue close Z`` runs a second nested close no counter
-# sees, which a carve-out `exit 0` would allow. Any backtick alongside a close blanks the
-# exemption — fail toward hand-off (a legit close rarely carries a literal backtick).
-if grep -qF '`' <<< "$CMD"; then   # #824: here-string; DETECTION on original $CMD
-    HAS_INTERP=1
-fi
-# #824 D-1 / N-3: `$(…)` command substitution is the SIBLING of the backtick
-# smuggle. Pre #824 the `(` in N_CLOSE's boundary class caught a `$(gh issue close
-# X)` nested close (the `(` sits immediately before `gh`); the #824 value-strip
-# removes the WHOLE `"$(…)"` comment value from _CMD_STRIPPED, so N_CLOSE no longer
-# sees it → a nested foreign close (`--comment "$(gh issue close 999)"`) rode a self
-# carve-out. #824 N-3 NARROWS this to a substitution that actually carries a `gh`
-# command (`\$\([^)]*gh[[:space:]]`) so a LEGIT `--comment "$(cat note.md)"` /
-# `$(date)` no longer over-blocks (the blanket `$(` guard did); the only close path
-# is `gh …`, and a `$(eval …)`/`$(bash -c …)` is separately caught by HAS_INTERP.
-# `grep -z` lets `[^)]*` span a NEWLINE inside the substitution (a per-line grep would
-# regress the blanket guard's multi-line `$(\ngh\n)` coverage). DETECTION on the
-# ORIGINAL $CMD, where the substitution is still visible.
-if grep -zqE '\$\([^)]*gh[[:space:]]' <<< "$CMD"; then
-    HAS_INTERP=1
-fi
-# #824 N-4: a bash>=5.3 command-substitution funsub `${ cmd; }` / `${| cmd; }` runs a
-# nested command with NO `$(`, so the guard above misses it; the value-strip erases a
-# `--comment "${ gh issue close 999; }"` value → wrong-ALLOW on a self carve-out. A
-# funsub opens with `${` + whitespace or `|` (an ordinary parameter expansion
-# `${VAR}`/`${#x}`/`${x:-y}` never starts with either). #824 review-#3 F3/F4: `grep -z`
-# so the funsub whitespace may be a NEWLINE (a per-line grep missed `${` at end-of-line),
-# and require a `gh` command INSIDE the funsub (`[^}]*gh[[:space:]]`, symmetric with the
-# N-3 `$(` narrowing) so a legit close whose comment merely mentions `${ }` is not
-# over-blocked while a real `${ gh issue close; }` smuggle still fires. DETECTION on the
-# ORIGINAL $CMD. (On this box bash 5.2 the funsub is inert, but the GUARD is a static
-# grep and fires regardless of the running bash version. A funsub running a NON-gh
-# interpreter — `${ eval …; }` — is caught by the eval/xargs branch above.)
-if grep -zqE '\$\{[[:space:]|][^}]*gh[[:space:]]' <<< "$CMD"; then
-    HAS_INTERP=1
-fi
-if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ] \
-   || [ "${N_CLOSE_WIDE:-0}" -ne "${N_CLOSE:-0}" ] \
-   || [ "${N_CLOSE_DEQUOTED:-0}" -ne "${N_CLOSE:-0}" ]; then   # #824 C-1/N-5: a `\`/quote-hidden close
+# #837: ISSUE_NUM (the top-level close target), REPO_ARG (its -R value, CLEAN — empty
+# for a glued form → the present-but-unparseable fail-safe), REPO_FLAG_PRESENT, N_CLOSE
+# (top-level close COUNT), HAS_INTERP and HAS_PATCH_CLOSE are ALL provided by the
+# segmenter above. The segmenter reads each close segment's own TOKENS quote/backslash-
+# aware, so the whole #824 family this block used to fight in sed/grep is gone: a
+# quoted/backslashed/aliased command word (`"gh"`/`\gh`/`/usr/bin/gh`) resolves to a
+# clean `gh` close and is COUNTED (N-6); an empty-expansion-glued/redirect/brace/ANSI-C
+# obfuscation fails CLOSED via HAS_INTERP; a nested `$(…)`/backtick/`${ }`/bash-c/eval/
+# python-c close sets HAS_INTERP (N-7); a `-R`/`gh issue close` MENTIONED inside a
+# comment value is a single token, never a flag or a counted close (A-4 + the poison).
+#
+# #533 review C1 single-action guard, UNCHANGED in intent: an exemption may fire ONLY
+# when the command is EXACTLY one clean top-level `gh issue close` — not a compound of
+# several, not a `gh api PATCH` close, and not a command hiding a nested/obfuscated
+# close. Otherwise BLANK ISSUE_NUM, which skips BOTH carve-outs below (each gated on
+# `[ -n "$ISSUE_NUM" ]`) and falls through to the BLOCK (fail toward hand-off).
+if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" = "1" ] || [ "$HAS_INTERP" = "1" ]; then
     ISSUE_NUM=""   # not a single simple close — fail toward hand-off (no exemption)
 fi
 
@@ -772,7 +604,7 @@ if [ -n "$ISSUE_NUM" ]; then
     # by tightening the carve-out's own condition; see the #807 design comment.
     if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ] \
        && [ -n "$MAINTAINER_LOGIN" ] && [ "$ME" != "$MAINTAINER_LOGIN" ] \
-       && ! _repo_flag_unparseable "$REPO_ARG"; then
+       && ! _repo_unparseable_signal; then
         exit 0   # self-authored sub-finding — the stream's own bookkeeping, allowed
     fi
     # #773: identity FALLBACK for a bot box whose own login could not be
@@ -799,7 +631,7 @@ if [ -n "$ISSUE_NUM" ]; then
     # APP_BOT_LOGIN (a static constant, no network call, no App-token-box
     # detection) is fetched lazily INSIDE this branch, so a resolved-identity
     # close never spawns the extra python3.
-    if [ -z "$ME" ] && [ -n "$AUTHOR" ] && ! _repo_flag_unparseable "$REPO_ARG"; then
+    if [ -z "$ME" ] && [ -n "$AUTHOR" ] && ! _repo_unparseable_signal; then
         APP_BOT_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
         if [ -n "$APP_BOT_LOGIN" ] && [ "$AUTHOR" = "$APP_BOT_LOGIN" ] \
            && [ -n "$MAINTAINER_LOGIN" ] && [ "$APP_BOT_LOGIN" != "$MAINTAINER_LOGIN" ]; then
@@ -846,7 +678,7 @@ if [ -n "$ISSUE_NUM" ]; then
     # such a flag is present but REPO_ARG is empty, the labels read would fall back
     # to the cwd repo → fail SAFE (shared #760 _repo_flag_unparseable helper).
     REPO_UNPARSEABLE=0
-    if _repo_flag_unparseable "$REPO_ARG"; then
+    if _repo_unparseable_signal; then
         REPO_UNPARSEABLE=1
     fi
     if [ -n "$STREAM_LABEL" ] && [ "$REPO_UNPARSEABLE" -eq 0 ]; then
@@ -940,7 +772,7 @@ if [ -n "$ISSUE_NUM" ]; then
     # `-Rowner/repo`) → the reads below would target the CWD repo → fail SAFE
     # (shared #760 _repo_flag_unparseable helper).
     VERDICT_REPO_UNPARSEABLE=0
-    if _repo_flag_unparseable "$REPO_ARG"; then
+    if _repo_unparseable_signal; then
         VERDICT_REPO_UNPARSEABLE=1
     fi
     if [ "${VERDICT_REPOFULL,,}" = "zbynekdrlik/odoo-erp" ] && [ "$VERDICT_REPO_UNPARSEABLE" -eq 0 ]; then
