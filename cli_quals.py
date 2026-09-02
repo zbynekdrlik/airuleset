@@ -970,6 +970,43 @@ OPS_WAIT_STALE_MAX_FETCHES = 25
 # at the SAME |W| (live incident: odoo-erp montalu3 grew to W 34 unchecked).
 OPS_WAIT_WDRAIN_THRESHOLD = 8
 
+# #818 — the #799 N=3 tacit-acceptance window in WORKING seconds (Sat/Sun in
+# Europe/Bratislava excluded, via `working_time.working_deadline_passed`, the
+# SAME weekend semantics `stale!` uses). A delivered+reminded client-acceptance W
+# member that is inside this window is NOT `stale!`-flagged and NOT nudged for a
+# second reminder (`tacit-wait`); once the window has ELAPSED it is a tacit-close
+# CANDIDATE (`tacit-close?`). #799 forbids a second reminder in the window — the
+# terminal action is a TACIT CLOSE — so on days 2–3 the mechanical layer must
+# stop fighting the doctrine (a red `stale!` + a "remind DNES" nudge).
+TACIT_WINDOW_WORKING_S = 3 * 24 * 3600
+
+# #818 — the falsifiable "final reminder was SENT" signal: a dedicated,
+# LINE-ANCHORED ticket marker `Acceptance-reminder: <msg-id>` on the
+# final-reminder W-push comment (design Prístup 2, the `Acceptance-cited:`/
+# `Acceptance-tacit:` family). Line-anchored (`^`, MULTILINE) so an INLINE or
+# quoted (`> …`) mention of the phrase does NOT match — a client message never
+# carries a TICKET marker at the start of a line. The trailing COLON is REQUIRED
+# (review 🟡, both reviewers): it matches the `Acceptance-cited:`/`Acceptance-
+# tacit:` family EXACTLY and rejects a line-starting PROSE mention
+# (`Acceptance-reminder este neposlaná…`) or a hyphenated derivative
+# (`Acceptance-reminder-draft: …`) that a bare `\b` would have falsely accepted
+# — the dangerous false-OPEN direction. Matched case-insensitively; the `msg
+# <id>` on the marker line doubles as the #753 citation, so `own_cited` and the
+# window-opener are the same comment. RESIDUAL (accepted, bounded): the marker
+# at line-start INSIDE a fenced code block still matches — but the fenced draft
+# is the CLIENT message, which never carries a ticket marker, and `tacit-close?`
+# is a session-verify CANDIDATE (the nudge mandates re-reading the msg-id to
+# confirm the reminder was SENT before any close).
+_FINAL_REMINDER_RX = re.compile(r"(?im)^[ \t]*Acceptance-reminder[ \t]*:")
+
+
+def _comment_is_final_reminder(body):
+    """True iff `body` carries the #818 line-anchored `Acceptance-reminder:`
+    marker (the tacit-window opener). None/empty/non-str → False."""
+    if not isinstance(body, str) or not body.strip():
+        return False
+    return bool(_FINAL_REMINDER_RX.search(body))
+
 
 def _parse_iso_ts(s):
     """Epoch seconds for an ISO-8601 `createdAt` (gh renders `...Z`), or None on
@@ -1017,19 +1054,30 @@ def _comment_has_citation(body):
 
 def _norm_ages(res):
     """Normalize `_issue_comment_ages` output (or an injected fake) to the
-    `{own, any, own_cited, own_oldest}` dict (#753). A legacy 2-tuple
-    `(own, any)` — the #699/#607 fakes — carries no body/citation info, so its
-    `own` is treated as the CITED anchor (`own_cited = own`), which reproduces
-    the PRE-#753 tuple semantics EXACTLY (own was the freshness anchor) — the
-    fail-safe direction (a legacy own counts as a valid push, never a false
-    accusation). None/malformed → None (fail-safe, no flag)."""
+    `{own, any, own_cited, own_oldest, own_final_reminder}` dict (#753; #818
+    added `own_final_reminder`). A legacy 2-tuple `(own, any)` — the #699/#607
+    fakes — carries no body/citation info, so its `own` is treated as the CITED
+    anchor (`own_cited = own`) and `own_final_reminder` is None (no tacit window
+    — the fail-safe direction), which reproduces the PRE-#753 tuple semantics
+    EXACTLY (own was the freshness anchor) — a legacy own counts as a valid push,
+    never a false accusation. None/malformed → None (fail-safe, no flag)."""
     if res is None:
         return None
     if isinstance(res, dict):
+        # #818: a dict from an older `_issue_comment_ages` (no `own_final_
+        # reminder` key) reads as no marker → no tacit window (the fail-safe
+        # direction), so tolerate it via `.setdefault` rather than requiring it.
+        # NB this MUTATES the dict in place — deliberate: the only callers pass a
+        # throwaway result or a per-sweep `ages_cache` dict whose sibling readers
+        # (stale: own_cited/own_oldest/any; recheck: own) never read this key, so
+        # the in-place default is safe + idempotent, never a copy-on-read
+        # dependency (review 🔵 B).
+        res.setdefault("own_final_reminder", None)
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
-                "own_cited": res[0], "own_oldest": None}
+                "own_cited": res[0], "own_oldest": None,
+                "own_final_reminder": None}
     return None
 
 
@@ -1048,14 +1096,17 @@ def _stream_self_login():
 
 def _issue_comment_ages(number, self_login, now, cwd=None):
     """Evidence ages for issue `number`, the #570 freshness fallback (#753
-    extends it citation-aware). Returns the DICT
-    `{own, any, own_cited, own_oldest}`:
+    extends it citation-aware; #818 adds the tacit-window opener). Returns the
+    DICT `{own, any, own_cited, own_oldest, own_final_reminder}`:
       - `own`      — createdAt of the newest comment authored by `self_login`;
       - `any`      — createdAt of the newest comment of ANY author;
       - `own_cited`— createdAt of the newest own comment that CITES a source
                      (`_comment_has_citation` — the #753 reset anchor);
       - `own_oldest`— createdAt of the OLDEST own comment (sustained-engagement
-                     proxy — the montalu3 bare-push case).
+                     proxy — the montalu3 bare-push case);
+      - `own_final_reminder` — createdAt of the newest own comment carrying the
+                     #818 line-anchored `Acceptance-reminder:` marker (the #799
+                     tacit-window opener); None when no reminder was recorded.
     Each is None when absent. Returns None (the WHOLE dict) when the gh fetch
     FAILED or was unusable → the caller does NOT flag (fail-safe, "nikdy
     falošný", #539). The DICT (over the pre-#753 2-tuple) is the extensible
@@ -1066,9 +1117,10 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     successful `gh issue view <n> --json comments` always prints a JSON object
     (`{"comments": [...]}`, non-empty even with zero comments), so "" is
     unambiguously a FAILURE here → None. The `--json comments` payload already
-    carried `body` (the gh invocation is UNCHANGED) — #753 only newly READS it to
-    detect each own comment's citation; `now` is unused for the read itself
-    (passed for signature symmetry with the injectable seam the caller uses)."""
+    carried `body` (the gh invocation is UNCHANGED) — #753 READS it to detect
+    each own comment's citation, #818 additionally for the `Acceptance-reminder:`
+    marker; `now` is unused for the read itself (passed for signature symmetry
+    with the injectable seam the caller uses)."""
     import airuleset
     raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
                             cwd=cwd, timeout=15)
@@ -1081,7 +1133,7 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     comments = obj.get("comments") if isinstance(obj, dict) else None
     if not isinstance(comments, list):
         return None
-    own_ts = any_ts = own_cited = own_oldest = None
+    own_ts = any_ts = own_cited = own_oldest = own_final_reminder = None
     for c in comments:
         if not isinstance(c, dict):
             continue
@@ -1093,15 +1145,22 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
         author = c.get("author")
         login = author.get("login") if isinstance(author, dict) else None
         if self_login and login == self_login:
+            body = c.get("body")
             if own_ts is None or ts > own_ts:
                 own_ts = ts
             if own_oldest is None or ts < own_oldest:
                 own_oldest = ts
-            if _comment_has_citation(c.get("body")) and (
+            if _comment_has_citation(body) and (
                     own_cited is None or ts > own_cited):
                 own_cited = ts
+            # #818: the newest own comment carrying the line-anchored
+            # `Acceptance-reminder:` marker is the tacit-window opener.
+            if _comment_is_final_reminder(body) and (
+                    own_final_reminder is None or ts > own_final_reminder):
+                own_final_reminder = ts
     return {"own": own_ts, "any": any_ts,
-            "own_cited": own_cited, "own_oldest": own_oldest}
+            "own_cited": own_cited, "own_oldest": own_oldest,
+            "own_final_reminder": own_final_reminder}
 
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
@@ -1140,7 +1199,16 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
 
     Deliberately keyed on the CITED own push, NOT "last comment at all": a
     third party's reply — or the stream's own bare "čakáme" — would otherwise
-    reset the clock and HIDE the very staleness this exists to surface."""
+    reset the clock and HIDE the very staleness this exists to surface.
+
+    #818 NB: this function does NOT know about the #799 tacit window — a
+    delivered+reminded acceptance member here still flags `stale!`. The tacit
+    EXEMPTION happens one layer UP, in `cli_quals_cmd._ops_wait_flag_sets`, which
+    subtracts `_tacit_window_flagged(...)` from this set before rendering. The
+    only production caller is that flag-sets function; the watchdog consumes the
+    already-subtracted CLI `--ops-wait` reason column. A future DIRECT caller of
+    the facade `airuleset._stale_ops_wait_flagged` would get an UN-subtracted set
+    (and must apply the tacit exemption itself)."""
     now = time.time() if now is None else now
     if self_login is None and ages_fn is None:
         self_login = _stream_self_login()
@@ -1170,6 +1238,64 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
             flagged.add(number)
         # zero comments (every anchor None) -> ambiguous -> never flag (safe)
     return flagged
+
+
+def _tacit_window_flagged(rows, cwd=None, now=None, self_login=None,
+                          ages_fn=None):
+    """#818 — the (`tacit_wait`, `tacit_close`) member sets for a delivered +
+    reminded client-acceptance W ticket inside / past its #799 N=3 tacit-
+    acceptance window. A member is classified iff ALL hold (else it is left in
+    NEITHER set — the fail-safe UNTAGGED direction, #539/#570 never-false-accuse):
+
+      - its REASON is `acceptance` (`_ops_wait_reason(labels)`) — a client-
+        thread-parked member. A pure `ops-wait` (release/event) member cannot
+        tacitly land by client silence — it has the #698/#699 machinery instead;
+      - the gh comment fetch SUCCEEDS and yields `own_final_reminder` (the newest
+        own comment carrying the #818 `Acceptance-reminder:` marker — the
+        window-opener); no marker → NEITHER set (stale! stands);
+      - NEWEST-CITED GUARD: no own CITED push is strictly NEWER than the final
+        reminder (`own_cited <= own_final_reminder`). A later cited push proves
+        the session re-engaged (the client replied on Discuss, invisible here) →
+        the member has left the tacit state machine → normal #570 handling.
+
+    In-window (`working_deadline_passed(own_final_reminder, now,
+    TACIT_WINDOW_WORKING_S)` FALSE) → `tacit_wait`; past-window (TRUE) →
+    `tacit_close` (a tacit-close CANDIDATE the SESSION judges + closes with
+    evidence — the watchdog NEVER auto-closes or auto-unlabels). Shares the
+    caller's per-member comment fetch via `ages_fn` (ZERO new gh); a gh failure
+    / unusable read leaves the member in NEITHER set. Reuses
+    `working_time.working_deadline_passed` (weekend-aware, #607) so the CLI and
+    the watchdog subprocess classify identically."""
+    now = time.time() if now is None else now
+    if self_login is None and ages_fn is None:
+        self_login = _stream_self_login()
+    ages = ages_fn or (lambda n: _issue_comment_ages(n, self_login, now, cwd))
+    tacit_wait = set()
+    tacit_close = set()
+    for number in sorted(rows)[:OPS_WAIT_STALE_MAX_FETCHES]:
+        row = rows[number] if isinstance(rows, dict) else None
+        labels = row.get("labels") if isinstance(row, dict) else None
+        if _ops_wait_reason(labels) != "acceptance":
+            continue                             # client-acceptance-scoped only
+        try:
+            res = ages(number)
+        except Exception:
+            res = None
+        res = _norm_ages(res)
+        if res is None:
+            continue                             # gh failed / unusable -> no flag
+        ofr = res.get("own_final_reminder")
+        if ofr is None:
+            continue                             # no reminder recorded -> stale! stands
+        own_cited = res.get("own_cited")
+        if own_cited is not None and own_cited > ofr:
+            continue                             # re-engaged after the reminder
+        if working_time.working_deadline_passed(ofr, now,
+                                                TACIT_WINDOW_WORKING_S):
+            tacit_close.add(number)              # window elapsed -> tacit-close?
+        else:
+            tacit_wait.add(number)               # in window -> tacit-wait
+    return tacit_wait, tacit_close
 
 
 # #699 — RELEASE-parked W freshness: the TIGHT hourly cadence, distinct from the
