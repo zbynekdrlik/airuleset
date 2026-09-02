@@ -1365,8 +1365,11 @@ class TestFrontGateSigpipe824(TestCase):
         # net for the shadowed sibling detectors (concern 2) the front gate ties
         # off end-to-end. `printf … | jq` (the JSON read) is untouched + allowed.
         src = HOOK.read_text()
+        # Strip the comment part (from the first `#`) so the "NOT printf|grep"
+        # explanatory comments this fix leaves behind are not read as offenders;
+        # a real reverted CODE line has its `printf … | grep` before any `#`.
         offenders = [ln.strip() for ln in src.splitlines()
-                     if re.search(r"printf\b.*\|\s*grep\b", ln)]
+                     if re.search(r"printf\b.*\|\s*grep\b", ln.split("#", 1)[0])]
         self.assertEqual(offenders, [],
                          "these `printf|grep` sites must use a here-string "
                          "(#824 SIGPIPE hardening):\n" + "\n".join(offenders))
