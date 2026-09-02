@@ -194,12 +194,19 @@ CANONICAL_SWEEP = [
     JobSpec("resource_guard_verify", "wd", "resource_guard_verify",
             "resource_guard_gk_request", _stub_fetch, "list",
             "resource-guard-verify error"),
+    # (40) — #834 per-box disk-pressure guard. Gated on the plain
+    # `disk_guard_enabled` bool (True in cmd_watchdog, left False in run_once
+    # unit tests so the real statvfs/drain never touches a developer box); the
+    # `run_disk_guard` seam lives on the `wd.disk_guard` submodule.
+    JobSpec("disk_guard", "wd.disk_guard", "run_disk_guard",
+            "disk_guard_enabled", True, "list", "disk-guard error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]
 ALWAYS_ON_ORDER = [s.label for s in CANONICAL_SWEEP if s.gate is None]
 
-_OWNERS = {"wd": wd, "wd.compact": wd.compact, "wd.goal": wd.goal}
+_OWNERS = {"wd": wd, "wd.compact": wd.compact, "wd.goal": wd.goal,
+           "wd.disk_guard": wd.disk_guard}
 
 
 def _gate_to_labels():

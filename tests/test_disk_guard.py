@@ -11,8 +11,6 @@ skip-reasons and injected seams — never on a real deletion path.
 import os
 import types
 
-import pytest
-
 import watchdog.disk_guard as dg
 import cli_worktree_sweep as wt
 import statusbar
