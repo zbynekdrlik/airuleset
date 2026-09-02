@@ -141,11 +141,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   is a genuine REQUEST for something FROM the client (an input, a decision, an
   access grant only they can give) — a normal ask phrased as a concrete request,
   never as a complaint about what is missing: "Potrebovali by sme od vás X…" —
-  never "Nemáme od vás X". The closing template's self-blame line ("chyba je na
-  našej strane…") is a HYPOTHETICAL fault-path, not a current gap, so it stays
-  mandatory. This is a JUDGMENT call on message CONTENT a phrase-matching hook
-  cannot gate without false-positive risk, so it rides the per-message
-  owner-approval gate — the owner reviewing the text is the backstop.
+  never "Nemáme od vás X". (#823: closing no longer carries a mandatory
+  self-blame line — see the closing bullet below.) This is a JUDGMENT call on
+  message CONTENT a phrase-matching hook cannot gate without false-positive
+  risk, so it rides the per-message owner-approval gate — the owner reviewing
+  the text is the backstop.
 - **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
   `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
   `partner_ids` správu DORUČÍ (inbox/e-mail + owner control ping); MENTION
@@ -187,16 +187,16 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 
   A NEW client person you have not been told how to address is VYKANIE by default
   (#626) — never guess tykanie; ask the owner, then add the line.
-- **Close the client message with named recipients + the self-blame reassurance**,
-  so a client who cannot see the feature reports it back to YOU instead of
-  assuming they did something wrong. The `Ahoj <mená>…` opening below is the
-  OPENING message of the thread; a follow-up reply drops the oslovenie and
-  starts straight at the content (greeting rule above). Slovak template (adapt
-  names/feature/URL):
+- **Close the client message with named recipients — NO mandatory self-blame
+  line (#823, owner ruling 2026-09-01: it read as spam once repeated across
+  client threads).** The `Ahoj <mená>…` opening below is the OPENING message
+  of the thread; a follow-up reply drops the oslovenie and starts straight at
+  the content (greeting rule above). Slovak template (adapt names/feature/URL)
+  — ends after the deep-link. An optional short non-blame line ("Ak niečo
+  nesedí, napíšte sem do vlákna.") may fit THIS message — never mandated:
 
   > Ahoj `<mená>`, funkcia `<čo>` je už nasadená na vašom systéme —
-  > `<deep-link URL>`. Ak ju u seba nevidíte, napíšte prosím sem do vlákna —
-  > chyba je na našej strane a hneď to opravíme.
+  > `<deep-link URL>`.
   >
   > ZbynekAI `<N>`
 
