@@ -168,12 +168,16 @@ class TestAuthorityResolution(TestCase):
         # Every provisioned box MUST be explicitly classified — reduced stream or
         # full account — so a FUTURE unclassified REMOTE_HOSTS user is a RED test
         # here, forcing an explicit decision instead of a silent grant (approach
-        # 2's anti-fail-open enforcement, folded in). Only REMOTE_HOSTS entries
-        # carry a `user`; dev1 (local `newlevel`) is covered via FULL_AUTHORITY_USERS.
+        # 2's anti-fail-open enforcement, folded in). dev1 (local `newlevel`)
+        # is covered via FULL_AUTHORITY_USERS.
+        # Every deploy target must carry a `user` — a user-less entry would be
+        # silently exempted from the classification check below.
+        self.assertTrue(all(h.get("user") for h in airuleset.REMOTE_HOSTS),
+                        "a REMOTE_HOSTS entry carries no `user`")
         classified = (set(airuleset.AUTHORITY_BY_USER)
                       | set(airuleset.FULL_AUTHORITY_USERS))
         unclassified = sorted({h["user"] for h in airuleset.REMOTE_HOSTS
-                               if h.get("user") and h["user"] not in classified})
+                               if h["user"] not in classified})
         self.assertEqual(
             unclassified, [],
             "REMOTE_HOSTS users in neither AUTHORITY_BY_USER nor "
@@ -371,6 +375,41 @@ class TestAuthorityResolution(TestCase):
             "<!-- airuleset:authority=fork-no-merge -->\n")
         with m.patch.object(airuleset, "_current_user", return_value="newlevel"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+
+class TestBoxAuthorityFailSafe(TestCase):
+    """airuleset#827 — `watchdog._box_authority()` is a PARALLEL authority path
+    (box-owner-recipient gate for job 24's delivery-stall watch). It deliberately
+    does NOT call `resolve_authority()` (a stray CLAUDE.md marker in the watchdog's
+    cwd must never re-open the cross-stream leak) but duplicated the resolver's own
+    fail-OPEN `AUTHORITY_BY_USER.get(user, "full")` default — so the #827 flip must
+    close it here too, or the security boundary is only half-fixed. These lock the
+    marker-free half of `_authority_decision`: reduced-stream map row -> the profile;
+    explicit FULL_AUTHORITY_USERS -> full; anything else -> the fail-SAFE
+    fork-no-merge (pre-#827 this returned the fail-OPEN full)."""
+
+    def test_box_authority_unmapped_user_fails_safe(self):
+        import watchdog as wd
+        # RED before the fix: the old `.get(user, "full")` returned "full" for a
+        # forgotten/unprovisioned stream account, silently granting the box-owner gate.
+        with m.patch.object(airuleset, "_current_user",
+                            return_value="miva99-forgotten-stream"):
+            self.assertEqual(wd._box_authority(), "fork-no-merge")
+
+    def test_box_authority_full_account_resolves_full(self):
+        import watchdog as wd
+        # The real full boxes (gk = gatekeeper, dev1/dev2 = newlevel) are in
+        # FULL_AUTHORITY_USERS and MUST still resolve full (zero regression).
+        for u in ("gatekeeper", "newlevel"):
+            with m.patch.object(airuleset, "_current_user", return_value=u):
+                self.assertEqual(wd._box_authority(), "full", u)
+
+    def test_box_authority_reduced_stream_uses_the_map(self):
+        import watchdog as wd
+        # A registered reduced stream keeps its own profile (proves the map ROW is
+        # read, not just the fail-safe) — a DISTINCT value, not fork-no-merge.
+        with m.patch.object(airuleset, "_current_user", return_value="marek"):
+            self.assertEqual(wd._box_authority(), "branch-merge")
 
 
 class TestForkNoMergeHandoffCard(TestCase):

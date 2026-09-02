@@ -1524,8 +1524,9 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
                                    model_type=True, transcript_path=tpath,
                                    enters_swallowed=enters_swallowed)
         # #618: authority_raises models the PRODUCTION None path (resolve_authority
-        # never returns None — it defaults "full" — so None only arises from the
-        # except branch); return_value=None models a defensive read of that None.
+        # never returns None — it defaults fork-no-merge since airuleset#827, was
+        # "full" — so None only arises from the except branch); return_value=None
+        # models a defensive read of that None.
         auth_patch = (m.patch("airuleset.resolve_authority",
                               side_effect=authority_raises)
                       if authority_raises is not None

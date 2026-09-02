@@ -139,12 +139,14 @@ class ReviewHandoffNeverGated(TestCase):
 
 class AuthorityScope(TestCase):
     def test_full_authority_box_not_gated(self):
-        # a full-authority account (airuleset#827: in FULL_AUTHORITY_USERS, e.g.
-        # newlevel/gatekeeper) is never gated, even for a gk-request with no line.
-        # Pre-#827 any unmapped user resolved full via the catch-all; that now
-        # fails safe to fork-no-merge, so this must name a REAL full account.
+        # a full-authority account (airuleset#827: in FULL_AUTHORITY_USERS) is
+        # never gated, even for a gk-request with no line. Pre-#827 any unmapped
+        # user resolved full via the catch-all; that now fails safe to
+        # fork-no-merge, so this must name a REAL full account — `gatekeeper`,
+        # chosen distinct from the suite's own run-user so the LOGNAME/USER
+        # override is load-bearing (a run-user fixture would pass even if broken).
         r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
-                '--comment "prod read"', user="newlevel")
+                '--comment "prod read"', user="gatekeeper")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_branch_merge_stream_also_gated(self):
