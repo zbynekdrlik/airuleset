@@ -3835,9 +3835,13 @@ from cli_disk_guard_root import (  # noqa: E402, F401
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
 # reads airuleset.REMOTE_HOSTS (cli_burn), and every test that patches
-# airuleset.REMOTE_HOSTS keep working unchanged.
+# airuleset.REMOTE_HOSTS keep working unchanged. `is_paused`/`paused_reason`
+# (#851) ride the same facade so every consumer of the pause flag reaches it
+# via `airuleset.` like every other cli_fleet symbol.
 from cli_fleet import (  # noqa: E402, F401
     REMOTE_HOSTS as REMOTE_HOSTS,
+    is_paused as is_paused,
+    paused_reason as paused_reason,
 )
 
 

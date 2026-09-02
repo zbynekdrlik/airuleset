@@ -297,6 +297,17 @@ def provision_shared_stream_guards(hosts=None, run=None, control_opts=None):
     """Apply the shared-stream resource guardrails on every `SHARED_STREAM_GUARD_HOSTS`
     target over `ssh root@<host>`. Called by `cmd_push` AFTER the deploy loop.
 
+    #851 NOTE (deliberate, not an oversight): this leg is HOST-scoped, not
+    per-REMOTE_HOSTS-account — `SHARED_STREAM_GUARD_HOSTS` has exactly ONE
+    entry (`subdev`, the whole shared VPS), covering every present-and-future
+    stream user on that box via a single `user-.slice` systemd template. A
+    `"paused": ...` marker on ONE REMOTE_HOSTS account sharing that host
+    (e.g. simap1@subdev) must NOT skip this leg — doing so would strip the
+    cgroup OOM protection from every OTHER, still-active stream on the same
+    box (marek/david1/montalu*/miva1/...). The #851 pause therefore protects
+    simap1 from `_deployable_hosts()`-routed ssh (deploy/soniox/burn/webterm)
+    but never reaches this genuinely host-level root connection.
+
     NON-FATAL + LOUD, exactly like `provision_owner_sudo` (#659): any failure
     (unreachable root, a not-yet-authorized operator key, a read-back mismatch)
     prints `⚠ RESOURCE-GUARDS FAILED (<name>)` and is returned in the failure
