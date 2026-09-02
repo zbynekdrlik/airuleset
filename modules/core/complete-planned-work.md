@@ -96,6 +96,8 @@ If NONE of these apply → the cleanup is small and MUST land in the CURRENT PR,
 
 The follow-up gate exists for REAL out-of-scope work (schema migrations, framework upgrades, multi-day refactors), NOT for small cleanups the agent noticed while touching the file. Filing a follow-up issue for a 20-line refactor wastes a PR cycle, a CI cycle, and a review round.
 
+**The default fate is FIX NOW; a follow-up filing is the rate-gated EXCEPTION (#842, 2026-09-02).** Because the autopilot loop was generating more issues than it closed, the scope-gate hook now BLOCKS an unattended automation follow-up filing while the repo is not net-draining today (`created_today >= closed_today`), and a worktree WORKER has NO `gh issue create` authority at all — it fixes what it finds in-lane and returns `followup_candidates:` for the SUPERVISOR to decide and file. So when in doubt between "file a follow-up" and "fix it in this PR", fix it now — filing is reserved for genuinely out-of-scope work AND is only available when the repo is actually draining (or the owner is present).
+
 **Banned phrases (intent, all rewordings):**
 
 - "Follow-up filed: #N — <small cleanup>"
