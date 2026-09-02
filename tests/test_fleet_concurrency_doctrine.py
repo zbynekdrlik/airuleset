@@ -49,46 +49,45 @@ def window(text, start, end):
 
 
 class TestBatchCapWithinBatchResourceSignal(TestCase):
-    """#723: the batch cap (up to 5 lanes, no refill while a batch runs) is now
-    the PRIMARY concurrency bound -- reversing #456's uncapped saturation FOR
-    autopilot to give the main session a clean drained boundary to compact at.
-    WITHIN a batch the account-wide resource-signal backoff (the #332 measured
-    incident) still applies. The section still cites those measurements as
-    CONTEXT and still covers workers + validators combined."""
+    """#848: the lane cap (up to 5 live lanes, refilled continuously) is the
+    PRIMARY concurrency bound -- restoring #456's continuous refill FOR autopilot,
+    retiring #723's batch mode. Across the live lanes the account-wide
+    resource-signal backoff (the #332 measured incident) still applies. The
+    section still cites those measurements as CONTEXT and still covers workers +
+    validators combined."""
 
-    def test_the_section_states_the_batch_cap_and_resource_signal(self):
-        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+    def test_the_section_states_the_lane_cap_and_resource_signal(self):
+        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
         self.assertIn("up to 5", w.lower())
-        self.assertIn("batch cap", w.lower())
+        self.assertIn("lane cap", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertNotIn("at 8.", w)
 
     def test_the_section_cites_the_real_measured_incident(self):
-        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
         self.assertIn("18 total agents", w)
         self.assertIn("3 of them", w)
         self.assertIn("rate limit", w.lower())
         self.assertIn("2026-08-08", w)
 
     def test_the_section_names_stagger_into_waves(self):
-        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
         self.assertIn("waves", w.lower())
 
     def test_the_section_covers_validators_not_just_workers(self):
-        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
         self.assertIn("validator", w.lower())
         self.assertIn("workers", w.lower())
 
 
 class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
-    def test_step_1b_points_at_the_batch_cap_backoff_doctrine(self):
-        # #723: validators are bounded by the batch's own membership + the Batch
-        # cap section's resource-signal/wave back-off (not the reversed
-        # continuous "no-fixed-cap saturate" wording).
+    def test_step_1b_points_at_the_lane_cap_backoff_doctrine(self):
+        # #848: validators are bounded by the live lane set + the Lane cap
+        # section's resource-signal/wave back-off.
         t = read(AUTOPILOT)
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
-        self.assertIn("batch cap section", w.lower())
+        self.assertIn("lane cap section", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertIn("wave", w.lower())
 
@@ -97,7 +96,7 @@ class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
         self.assertIn("NEVER re-dispatched", w)
-        self.assertIn("NEVER blocks the batch", w)
+        self.assertIn("NEVER blocks the lane set", w)
         self.assertIn("Step 0", w)
 
 
@@ -158,30 +157,29 @@ class TestAutopilotMasterPointsAtTheCanonicalHome(TestCase):
     cap section, never re-derived here)."""
 
     def test_the_collision_guards_bullet_points_at_the_autopilot_skill(self):
-        # #724: master's LANE 3 primary bound is now the BATCH cap, not #456's
-        # "no fixed concurrent-agent cap"; the collision guards still POINT at
-        # the autopilot skill's Batch cap section (never re-derive it here) and
-        # keep the account-wide within-batch resource-signal backoff.
+        # #848: master's LANE 3 primary bound is now the LANE cap (continuous
+        # refill); the collision guards still POINT at the autopilot skill's Lane
+        # cap section (never re-derive it here) and keep the account-wide
+        # resource-signal backoff.
         t = read(MASTER)
         w = window(t, "**Collision guards:**", "Single-lane commands")
-        self.assertIn("batch cap", w.lower())
+        self.assertIn("lane cap", w.lower())
         self.assertNotIn("no fixed concurrent-agent cap", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertIn("never re-derive it here", w)
 
-    def test_the_goal_master_loop_template_mandates_batch_dispatch(self):
-        """#724 reverses the #456 continuous reminder FOR the master too: the
-        `/goal MASTER LOOP` LANE 3 clause + its BATCH+COMPACT reminder must name
-        batch dispatch (up to 5, no refill while a batch is open) and the
-        drained-boundary compact, NOT continuous saturation. Both "capped 3-5"
-        and "saturating continuously" must be gone. The 4000-char cap holds."""
+    def test_the_goal_master_loop_template_mandates_continuous_dispatch(self):
+        """#848 restores the #456 continuous reminder FOR the master too: the
+        `/goal MASTER LOOP` LANE 3 clause + its per-cycle COMPACT reminder must
+        name continuous refill (up to 5 live lanes, refilled immediately) and the
+        per-cycle compact, NOT batch mode. The 4000-char cap holds."""
         t = read(MASTER)
         lines = re.findall(r"^/goal MASTER LOOP.*$", t, re.MULTILINE)
         self.assertEqual(len(lines), 1)
         self.assertNotIn("capped 3-5", lines[0])
-        self.assertNotIn("saturating continuously", lines[0].lower())
         self.assertIn("up to 5", lines[0].lower())
-        self.assertIn("no refill while a batch", lines[0].lower())
+        self.assertIn("continuous refill", lines[0].lower())
+        self.assertNotIn("no refill while a batch", lines[0].lower())
         self.assertIn("compact-request --self", lines[0])
         self.assertLessEqual(len(lines[0]), 4000)
 
@@ -196,10 +194,10 @@ class TestAccountWideCapScopeNotPerRound(TestCase):
     regime account-wide. The rule sentence itself must say the cap applies
     across everything concurrently running, not per round."""
 
-    def test_the_rule_sentence_says_account_wide_within_a_batch(self):
-        # #723: the within-batch second bound stays ACCOUNT-WIDE (never per
-        # lane / per repo); "per round" is gone with the round model itself.
-        w = window(read(AUTOPILOT), "**Batch cap",
+    def test_the_rule_sentence_says_account_wide_across_live_lanes(self):
+        # #848: the second bound stays ACCOUNT-WIDE (never per lane / per repo);
+        # "per round"/"per batch" is gone with the batch model itself.
+        w = window(read(AUTOPILOT), "**Lane cap",
                    "**Serial fallback")
         self.assertNotIn("at 8.", w)
         self.assertIn("ACCOUNT-WIDE", w)
@@ -245,12 +243,12 @@ class TestMeasurementClaimsAreAccurate(TestCase):
     combined with the failing validator burst."""
 
     def test_kolo_2_claim_does_not_overstate_zero_issues(self):
-        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
         self.assertIn("no rate-limit kills", w.lower())
         self.assertNotIn("ran clean with zero issues", w)
 
     def test_the_five_worker_band_is_not_claimed_clean(self):
-        w = window(read(AUTOPILOT), "**Batch cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
         self.assertNotIn("(4–5 workers, no validator burst)", w)
         self.assertNotIn("(4-5 workers, no validator burst)", w)
 

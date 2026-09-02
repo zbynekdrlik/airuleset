@@ -58,7 +58,7 @@ Print the `/goal` line below in a code block, then the arm question, and STOP �
 start dispatching lanes yourself; Step 3 is the loop body the armed /goal runs each turn.
 
 ```
-/goal MASTER LOOP — this repo's WHOLE pipeline is DONE only when ALL hold, provable from the transcript: (1) `gh issue list --state open --search "-label:autopilot-skip -label:ops-channel"` shows ZERO open issues repo-wide (core + every stream + prio:bounce + needs-decision), (2) every processed slice is RELEASED (integration→staging→main merged, contained in origin/main), (3) every prod deploy completed per the repo parameters — a windowed instance deployed INSIDE its airuleset:release-window (TZ=Europe/Bratislava; a window spanning midnight wraps) and an approval-gated instance only after my explicit approval — and each deploy post-deploy VERIFIED with evidence in the transcript, (4) main CI green. Until then EVERY turn runs ALL LANES CONCURRENTLY (no round-robin — review, release and core dispatched in parallel; the sub-dev review queue NEVER starves — a hand-off waits ≤1 batch-boundary compact, bounded pacing not starvation): LANE 1 REVIEW — any stream's ready-for-review/needs-gatekeeper hand-off or re-handoff gets the FULL /process-subdev pipeline (cold diff-first review, own CI/release gates, verdict posted to the tickets BEFORE any merge; FINDINGS → the prio:bounce ticket-first bounce lane), depth NEVER degrades across iterations — the 5th hand-off exactly like the 1st. LANE 2 RELEASE — merged-but-unreleased slices run release PREP anytime (preflight, integration→staging with shadow verification, staging→main); a windowed instance's PROD step is STAGED and deploys the moment a turn lands inside the window (then verify); an approval-gated instance is asked the moment its release is STAGED via ❓ ASKED (ask-and-continue; a granted approval carries into the window — no re-ask) and deploys inside the window after approval; a window that OPENS while the deploy is still blocked (gate red / release not staged) raises ONE ❓ ASKED notice naming the blockers — never a silent missed window. LANE 3 CORE — the gatekeeper's own open backlog per the autopilot loop body: validate each ticket (ticket-validator), bundle bundle-safe issues, dispatch a BATCH of up to 5 PARALLEL worktree autopilot-worker lanes, NO refill while a batch is open; INTEGRATION is serialized by the #8 integration mutex (one merge/test/push at a time across ALL sessions — dispatch never waits on it; ready branches integrate without waiting for stragglers); falls back to the serial single-worker shape when worktree isolation is unavailable. BATCH+COMPACT: when LANE 3's batch has integrated, enter a DRAIN WINDOW — no new background task in ANY lane until ZERO live background subagents/Bash remain (waiver #730), then `compact-request --self` last, next batch after. LANE 4 QUESTIONS — open tickets needing my decision (needs-decision / needs-answer / design forks) are asked ONE at a time as self-contained Slovak questions via ❓ ASKED + ⏳ WORKING (ask-and-continue, tracked on the ticket; next question after my answer; NO night/day difference (#791) — questions are asked the moment they arise 24/7, no time-of-day deferral). ONLY when EVERY lane is empty (waiting solely on sub-dev fixes, my answers, or a deploy window) hold the turn OPEN with a FOREGROUND sleep-poll — repeated short sleep+re-check tool calls that re-check ALL lanes each pass (bounce returns, new hand-offs, the window opening); NEVER a wakeup/schedule mechanism inside this armed /goal (the loop fires the next turn immediately and spins tokens); end held turns ⏳ WORKING. Waiting IS the designed state — never ask me whether to keep waiting. Never gate on prod-usage/events beyond the repo's declared window/approval parameters. Stop only on a blocking ❓ NEEDS YOU decision (after I answer, resolve it, then re-print this /goal + the arm question with empty input so auto-arm re-arms the loop) or a CI failure unfixable after two real attempts.
+/goal MASTER LOOP — this repo's WHOLE pipeline is DONE only when ALL hold, provable from the transcript: (1) `gh issue list --state open --search "-label:autopilot-skip -label:ops-channel"` shows ZERO open issues repo-wide (core + every stream + prio:bounce + needs-decision), (2) every processed slice is RELEASED (integration→staging→main merged, contained in origin/main), (3) every prod deploy completed per the repo parameters — a windowed instance deployed INSIDE its airuleset:release-window (TZ=Europe/Bratislava; a window spanning midnight wraps) and an approval-gated instance only after my explicit approval — and each deploy post-deploy VERIFIED with evidence in the transcript, (4) main CI green. Until then EVERY turn runs ALL LANES CONCURRENTLY (no round-robin — review, release and core dispatched in parallel; the sub-dev review queue NEVER starves — a hand-off waits ≤1 integration-cycle compact, bounded pacing not starvation): LANE 1 REVIEW — any stream's ready-for-review/needs-gatekeeper hand-off or re-handoff gets the FULL /process-subdev pipeline (cold diff-first review, own CI/release gates, verdict posted to the tickets BEFORE any merge; FINDINGS → the prio:bounce ticket-first bounce lane), depth NEVER degrades across iterations — the 5th hand-off exactly like the 1st. LANE 2 RELEASE — merged-but-unreleased slices run release PREP anytime (preflight, integration→staging with shadow verification, staging→main); a windowed instance's PROD step is STAGED and deploys the moment a turn lands inside the window (then verify); an approval-gated instance is asked the moment its release is STAGED via ❓ ASKED (ask-and-continue; a granted approval carries into the window — no re-ask) and deploys inside the window after approval; a window that OPENS while the deploy is still blocked (gate red / release not staged) raises ONE ❓ ASKED notice naming the blockers — never a silent missed window. LANE 3 CORE — the gatekeeper's own open backlog per the autopilot loop body: validate each ticket (ticket-validator), bundle bundle-safe issues, keep up to 5 PARALLEL worktree autopilot-worker lanes live, refilling a returned slot immediately (CONTINUOUS REFILL, #848); INTEGRATION is serialized by the #8 integration mutex (one merge/test/push at a time across ALL sessions — dispatch never waits on it; ready branches integrate without waiting for stragglers); falls back to the serial single-worker shape when worktree isolation is unavailable. COMPACT: after EVERY LANE 3 integration cycle run `compact-request --self` (live lanes or not, #848), then continue. LANE 4 QUESTIONS — open tickets needing my decision (needs-decision / needs-answer / design forks) are asked ONE at a time as self-contained Slovak questions via ❓ ASKED + ⏳ WORKING (ask-and-continue, tracked on the ticket; next question after my answer; NO night/day difference (#791) — questions are asked the moment they arise 24/7, no time-of-day deferral). ONLY when EVERY lane is empty (waiting solely on sub-dev fixes, my answers, or a deploy window) hold the turn OPEN with a FOREGROUND sleep-poll — repeated short sleep+re-check tool calls that re-check ALL lanes each pass (bounce returns, new hand-offs, the window opening); NEVER a wakeup/schedule mechanism inside this armed /goal (the loop fires the next turn immediately and spins tokens); end held turns ⏳ WORKING. Waiting IS the designed state — never ask me whether to keep waiting. Never gate on prod-usage/events beyond the repo's declared window/approval parameters. Stop only on a blocking ❓ NEEDS YOU decision (after I answer, resolve it, then re-print this /goal + the arm question with empty input so auto-arm re-arms the loop) or a CI failure unfixable after two real attempts.
 ```
 
 End the message with the arm question block (machine question — it neither pings
@@ -79,8 +79,8 @@ one-lane-per-turn**. All lanes run in parallel: a review unblocks a whole sub-de
 case, so it must NEVER starve behind core work), a release ships finished work, core
 progresses the backlog, questions keep the user's decisions flowing.
 The loop **NEVER idles while ANY lane has work**, and never lets a busy lane starve
-another — every lane dispatches in parallel, LANE 3 in BATCHES (up to 5, no refill while a
-batch is open), bounded by real resource signals (below).
+another — every lane dispatches in parallel, LANE 3 with CONTINUOUS REFILL (up to 5 live lanes,
+refilled immediately), bounded by real resource signals (below).
 
 - **LANE 1 REVIEW** — a hand-off present for any stream: `ready-for-review`, OR
   `needs-gatekeeper` carried together with a `stream:<user>` label (a carve-out stream
@@ -115,20 +115,21 @@ batch is open), bounded by real resource signals (below).
     `❓ ASKED` (ask-and-continue), plain Slovak: okno je otvorené, deploy neprebehne,
     blokuje ho #X/#Y (s témou), fix beží — nechať dobehnúť (odporúčam) / zasiahnuť?
     The user must never wake up to a silently missed window.
-  - **Durable anchors, continuously kept (#730):** LANE 2's own CI/release/deploy/lock
+  - **Durable anchors, continuously kept (#844):** LANE 2's own CI/release/deploy/lock
     watcher — the active run-id, the promotion ticket, any lock target — is noted as a
-    ticket comment / tracked state AS THE RELEASE PROGRESSES, not just at the end, so a
-    #730 waiver `TaskStop` + relaunch at a batch boundary is trivial: the anchor alone is
-    enough to resume.
-- **LANE 3 CORE** — open non-skip core-slice issues remain? Dispatch the backlog in
-  **BATCHES** (#723's batch mode, adapted for the master scheduler by #724, superseding
-  #456's continuous refill FOR this lane): validate each ticket (ticket-validator), bundle
-  bundle-safe issues, and dispatch a BATCH of up to 5 PARALLEL worktree `autopilot-worker`
-  lanes — the batch cap is the primary bound, **NO refill while that batch is open** —
+    ticket comment / tracked state AS THE RELEASE PROGRESSES, not just at the end, so if a
+    compaction drops its completion notification the anchor alone is enough to re-derive it
+    (#848 retired the #730 TaskStop-then-relaunch waiver — a live waiter now rides across the
+    per-cycle compact).
+- **LANE 3 CORE** — open non-skip core-slice issues remain? Work the backlog with
+  **CONTINUOUS REFILL** (#848, restoring #456's continuous refill FOR this lane, retiring
+  #723/#724's batch mode): validate each ticket (ticket-validator), bundle
+  bundle-safe issues, and keep up to 5 PARALLEL worktree `autopilot-worker`
+  lanes live — the lane cap is the primary bound, **refill a returned slot immediately** —
   skipping only a unit that file-overlaps a lane already in flight (a guaranteed merge
-  conflict). WITHIN a batch the account-wide resource-signal back-off still applies (the
-  batch cap + measured back-off doctrine live in the `autopilot` skill's Batch cap section
-  (#332/#456/#723); never re-derive it here). A CI-blocked lane never holds up integration
+  conflict). Across the live lanes the account-wide resource-signal back-off still applies (the
+  lane cap + measured back-off doctrine live in the `autopilot` skill's Lane cap section
+  (#332/#456/#848); never re-derive it here). A CI-blocked lane never holds up integration
   of the ready ones.
   **LANE SIZE BOUND (#844):** a master lane gets the SAME bundling ceiling as `/autopilot` (the
   per-issue / per-batch LoC caps in the `batch-issue-development` gate) — a lane that grows to
@@ -149,59 +150,29 @@ batch is open), bounded by real resource signals (below).
   ends with a FULL completion report + `✅ DONE` (never `⏳` — 2026-07-25 revision,
   `autopilot` skill Step 3 item 5); the MASTER `/goal` still re-fires the next turn
   regardless, so the scheduler simply re-evaluates all lanes fresh.
-  **COMPACT BOUNDARY (#724):** LANE 1 (review-watch) and LANE 2 (release) are long-lived
-  and rarely drain, so the master's bounded-context boundary is redefined to LANE 3's OWN
-  batch. **The moment LANE 3's batch has returned + integrated, the session ENTERS a DRAIN
-  WINDOW: it dispatches no new background task in ANY lane** — LANE 1 / 2 / 4 included; the
-  freeze STARTS at LANE-3 batch-drain, NOT once everything is already quiet (otherwise LANE
-  1's per-hand-off review dispatch could keep ≥1 subagent live forever and the zero-live
-  instant would never arrive — the exact unbounded-context root cause, on the lane the text
-  itself calls rarely-draining). Running tasks finish, never preempted; when they drain to
-  **ZERO live background subagents (any lane's workers / reviews / validators) AND ZERO live
-  background Bash (any CI waiter — a RE-DERIVABLE one is `TaskStop`ped first per the #730
-  waiver below, never left holding the boundary open)** — exactly what `watchdog/compact.py`'s
-  live-tasks veto measures (reference here — that veto is now BOUNDED by #844: if a boundary is held
-  on live-tasks past `COMPACT_LIVE_HOLD_CAP_S` the watchdog delivers the compact ANYWAY rather than
-  let the main grow to 776K, so on a saturated master a compact eventually fires even when the batch
-  never fully drains; the first turn after ANY such compaction RECONCILES lanes from durable state
-  per the autopilot skill Step 5 #844 clause — `git worktree list` + `LANE-RETURN:` comments, never
-  memory) — run `python3
-  ~/devel/airuleset/airuleset.py compact-request --self` (#402) as the last tool call; then
+  **COMPACT BOUNDARY (#848):** the master's bounded-context boundary is EVERY LANE 3
+  integration cycle. **The moment LANE 3 integrates a returned lane, run `python3
+  ~/devel/airuleset/airuleset.py compact-request --self` (#402) as the last tool call — live
+  lanes or not, in ANY lane.** #848 removed the old drain-to-idle-first gate: the
+  STEP-0 experiment (CC 2.1.258) proved a compact over live worktree lanes + a bg-bash waiter +
+  an armed `/goal` does not break the task registry, so LANE 1 reviews, LANE 2 waiters and other
+  LANE 3 lanes may all be live when the compact fires — no DRAIN WINDOW, no freeze. The first
+  turn after ANY compaction RECONCILES lanes from durable state per the autopilot skill Step 5
+  #844 clause (`git worktree list` + `LANE-RETURN:` comments, never memory), which recovers the
+  residual case of a dropped completion notification. Then
   every later goal turn is a HOLD turn until the compact runs — first action `compact-request
   --status`, and while it prints `PENDING` the turn ends `⏳ WORKING: čakám na compact hranice
-  várky` with ZERO dispatches; the next batch is dispatched only after the compact runs (#741,
+  várky` with ZERO dispatches; a new lane is refilled only after the compact runs (#741,
   the watchdog's own writers HOLD the same way). NON-blocking
   (they never hold the boundary): a FOREGROUND sleep-poll, an armed window-wait, a pending
-  `❓ ASKED`. During the DRAIN WINDOW a LANE 1 hand-off that arrives QUEUES one compact cycle
-  (dispatched only after the compact; running reviews finish + integrate, never preempted); a
-  LANE 2 near-boundary CI wait runs FOREGROUND (bounded polls), not `run_in_background`; and
-  any granted prod-approval + staged-deploy state MUST be persisted as a ticket comment
+  `❓ ASKED`. Any granted prod-approval + staged-deploy state MUST be persisted as a ticket comment
   BEFORE the boundary (a compact drops in-context-only state).
-  **#730 WAIVER — how a re-derivable LANE 2 waiter reaches genuine zero (owner incident
-  2026-08-26): gk crossed batch 1 → drain → batch 2 → drain → batch 3 with ZERO compacts,
-  because a release-lane waiter — shadow rerun → deploy → lock-retry — spanned EVERY drained
-  boundary; doctrinally correct under the old absolute "zero live tasks" text, and exactly
-  risk #1 named in the #727 design comment (an eternally-live background job holds the
-  boundary open forever).** A background task earns the waiver ONLY as a RE-DERIVABLE
-  WAITER — its ENTIRE state lives in a durable, externally-readable resource (a `gh run id`,
-  the release/promotion ticket, a lock target) such that `ci-monitoring.md`'s own
-  post-compaction recovery doctrine ALREADY mandates re-deriving it and relaunching a fresh
-  waiter. **Worker LANES get NO waiver — they are drained exactly as today, no exception.**
-  LANE 2's continuously-kept durable anchors (above) are what makes this trivial. At the
-  DRAIN WINDOW's zero-live-subagents instant, if the only remaining live background task is
-  a re-derivable waiter: (1) record its durable anchor in ONE line of the turn, (2)
-  `TaskStop` it DELIBERATELY — `watchdog/compact.py`'s live-tasks veto itself is NOT touched,
-  CC #29193 is still respected LITERALLY; the boundary becomes genuinely zero BECAUSE the
-  waiter was stopped, never because the veto was loosened, (3) run `compact-request --self`
-  on the now genuinely-drained boundary, (4) after the compact, RELAUNCH the waiter fresh
-  from its durable anchor (`gh run view <id>` / re-read the ticket / re-check the lock) —
-  precisely the recovery `ci-monitoring.md` already mandates after ANY compaction. **A
-  drained batch boundary must NEVER be crossed into the next batch uncompacted just because
-  a re-derivable watch/poll waiter spans it** — that silent drift (three full batches, zero
-  compacts) is the exact incident this waiver closes. Relaunch on your NEXT turn regardless of
-  whether the compact-request itself was actually delivered that turn (it can lapse and roll
-  to a later drained boundary, per Step 5's own note) — a TaskStopped waiter is never left
-  un-relaunched waiting on that.
+  **The #730 re-derivable-waiter waiver is RETIRED (#848).** It existed to `TaskStop`-then-relaunch
+  a live LANE 2 CI/release/deploy/lock waiter so a boundary reached the fully-idle state the OLD
+  live-tasks veto required. #848 removed that veto — the compact delivers over a live waiter — so
+  there is no drain to force and no TaskStop / relaunch dance: a live re-derivable waiter simply
+  rides across the per-cycle compact, recovered from its durable anchor (kept continuously, above)
+  only in the residual dropped-notification case.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via
@@ -220,19 +191,20 @@ batch is open), bounded by real resource signals (below).
 
 **Collision guards:** INTEGRATION is serialized by the #8 **integration mutex** — one
 merge/test/push cycle at a time per repo across ALL sessions (LANE 3); DISPATCH is NOT
-serialized by the mutex — it is paced by LANE 3's BATCH boundary (up to 5 lanes, no refill
-while a batch is open), never blocked by the mutex. One release in flight per instance
+serialized by the mutex — it is paced by LANE 3's lane cap (up to 5 live lanes, refilled
+immediately), never blocked by the mutex. One release in flight per instance
 (LANE 2); reviews (LANE 1) and running core lanes coexist — the review object is the
 pinned slice, per the parallel-run rule in `process-subdev`. **LANE 3's PRIMARY concurrency
-bound is the BATCH cap (#723, adapted for the master by #724): up to 5 parallel lanes, NO
-refill while a batch is open. WITHIN a batch a SECOND, account-wide bound applies — back
+bound is the lane cap (#848, restoring #456's continuous refill, retiring #723/#724's batch
+mode): up to 5 live lanes, refilled continuously. Across the live lanes a SECOND, account-wide
+bound applies — back
 off every lane (workers + every Step 1b `ticket-validator` + LANE 1's review/validator
 dispatches + anything a DIFFERENT concurrent lane or session under this account runs) on a
 REAL resource signal — a server-side rate-limit error, box memory pressure, or CC's
-max-subagents ceiling. This within-batch bound is ACCOUNT-WIDE (the account has ONE rate
-limit shared across every lane and session), never per lane. The canonical batch cap +
-measured back-off doctrine lives in the `autopilot` skill's own Batch cap section
-(#332/#456/#723); never re-derive it here.**
+max-subagents ceiling. This is ACCOUNT-WIDE (the account has ONE rate
+limit shared across every lane and session), never per lane. The canonical lane cap +
+measured back-off doctrine lives in the `autopilot` skill's own Lane cap section
+(#332/#456/#848); never re-derive it here.**
 
 **Single-lane commands stay:** `/process-subdev <stream>` and `/autopilot` remain valid
 for a deliberate single-lane run; on the gatekeeper the master is the default because

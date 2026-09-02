@@ -1,43 +1,24 @@
-"""Locks the #730 RE-DERIVABLE-waiter waiver on the #723/#724 batch-boundary
-compact doctrine.
+"""Locks the RETIREMENT of the #730 RE-DERIVABLE-waiter waiver (#848).
 
-Incident (owner report, 2026-08-26, verbatim): gk `/autopilot-master` crossed
-"davka 1 -> drain -> davka 2 -> drain -> davka 3 BEZ jedineho compactu" -- on
-every drained batch boundary at least one live LANE 2 release-lane waiter
-(shadow rerun -> deploy -> slovnormal lock-retry) was still running, and a
-compact with live background tasks is correctly forbidden (CC #29193,
-`watchdog/compact.py`'s live-tasks veto). The #723 batch doctrine defines the
-compact boundary as "zero live tasks", but never answered what happens when a
-background waiter is CROSS-BATCH by nature (spans every boundary) -- so the
-boundary genuinely never arrived and the loop ran a whole batch with zero
-compacts. gk behaved doctrinally CORRECTLY; the doctrine had the gap.
+The #730 waiver existed to `TaskStop`-then-relaunch a live CI/release/deploy/lock
+waiter so a batch boundary reached the fully-idle state the OLD live-tasks veto
+required before it would deliver the drained-boundary compact (owner incident
+2026-08-26: gk `/autopilot-master` crossed three batches with ZERO compacts
+because a release-lane waiter spanned every drained boundary). #848 REMOVED that
+veto outright — the STEP-0 experiment (CC 2.1.258) proved a `/compact` over live
+worktree lanes + a bg-bash waiter + an armed `/goal` does NOT break the task
+registry — so the compact delivers at EVERY integration cycle regardless of a
+live waiter, and the whole TaskStop / relaunch dance is moot.
 
-The fix (Fable design phase, ROZHODNUTE) is a WAIVER, not a veto change: a
-background task earns the waiver ONLY as a RE-DERIVABLE WAITER (its entire
-state lives in a durable, externally-readable resource -- a `gh run id`, a
-release/promotion ticket, a lock target -- exactly the shape `ci-monitoring.md`
-already tells you to re-derive from after any compaction). At a drained
-boundary where the only live background tasks are re-derivable waiters, the
-supervisor (1) records the durable anchor(s), (2) `TaskStop`s them
-DELIBERATELY, (3) runs `compact-request --self` on the now genuinely-drained
-boundary (the live-tasks veto in `watchdog/compact.py` is UNCHANGED -- CC
-#29193 is respected literally, the boundary is real zero because the waiters
-were stopped, not because the check was loosened), (4) relaunches each waiter
-fresh from its durable anchor after the compact. Worker LANES get NO waiver --
-they are drained exactly as before. A drained boundary must never be crossed
-into the next batch uncompacted just because a re-derivable waiter spans it.
+These are content-locks (flipped from the #730 positive-protocol locks,
+flip-never-delete, #723 lesson): the waiver PROTOCOL phrases must be GONE from
+both skills, and the RETIREMENT + continuous-refill compact must be stated. The
+LANE 2 durable-anchor discipline is RETAINED (a lost completion notification is
+still recovered from the anchor after a compaction) — now under #844/#848, not
+#730's TaskStop waiver.
 
-This is a docs-only ticket (no watchdog/compact.py change -- that file belongs
-to the separate #727 lane). These are content-locks (the
-`test_batch_orchestration.py` pattern) over `skills/autopilot/SKILL.md` and
-`skills/autopilot-master/SKILL.md` -- a NEW, dedicated file so it never
-collides with the parallel #723/#727 lanes that own
-`tests/test_batch_orchestration.py` / `tests/test_compact.py`.
-
-Assertions use a whitespace-NORMALIZED haystack/needle (the repo's own
-`_norm` idiom, e.g. `tests/test_no_question_flag.py`) so a future re-wrap of
-the prose (line-width changes) cannot silently break these locks the way a
-literal-newline substring match would.
+Assertions use a whitespace-NORMALIZED haystack/needle (the repo's own `_norm`
+idiom) so a re-wrap of the prose cannot silently break the locks.
 """
 
 import re
@@ -60,105 +41,42 @@ def norm(text):
     return " ".join(text.split())
 
 
-# --------------------------------------------------------------------------- #
-# skills/autopilot/SKILL.md -- the canonical waiver protocol (Step 5)
-# --------------------------------------------------------------------------- #
+class TestAutopilotSkillWaiverIsRetired(TestCase):
+    """skills/autopilot/SKILL.md Step 5 states the #730 waiver is RETIRED and
+    the compact delivers over live lanes — the TaskStop/relaunch protocol is gone."""
 
-class TestAutopilotSkillCarriesTheWaiverProtocol(TestCase):
-    """The Step-5 batch-boundary compact section states the full #730 waiver
-    protocol: durable anchors -> TaskStop -> compact-request --self -> relaunch."""
-
-    def test_waiver_is_named_and_dated(self):
+    def test_retirement_is_stated(self):
         body = norm(read(SKILL))
-        self.assertIn("#730", body)
-        self.assertIn("2026-08-26", body)
-        self.assertIn(norm(
-            "gk `/autopilot-master` crossed batch 1 → drain → batch 2 → drain → "
-            "batch 3 with ZERO compacts"), body)
+        self.assertIn(norm("The #730 RE-DERIVABLE-WAITER WAIVER is RETIRED (#848)"), body)
+        self.assertIn("#848", body)
 
-    def test_re_derivable_waiter_is_defined_by_a_durable_anchor(self):
+    def test_the_taskstop_relaunch_protocol_is_gone(self):
         body = norm(read(SKILL))
-        self.assertIn(norm("RE-DERIVABLE WAITER"), body)
-        self.assertIn(norm("durable, externally-readable resource"), body)
-        self.assertIn(norm("a `gh run id`"), body)
+        self.assertNotIn(norm("`TaskStop` those waiters DELIBERATELY"), body)
+        self.assertNotIn(norm("RELAUNCH each waiter fresh from its durable anchor"), body)
+        self.assertNotIn(norm("Run `compact-request --self` on this now genuinely-drained boundary"), body)
 
-    def test_the_taskstop_compact_relaunch_sequence_is_stated(self):
+    def test_worker_lanes_no_longer_drained_before_the_compact(self):
         body = norm(read(SKILL))
-        # step 1: record the durable anchor
-        self.assertIn(norm("Record the durable anchor(s)"), body)
-        # step 2: TaskStop deliberately
-        self.assertIn(norm("`TaskStop` those waiters DELIBERATELY"), body)
-        # step 3: compact-request --self on the now-drained boundary
-        self.assertIn(
-            norm("Run `compact-request --self` on this now genuinely-drained boundary"),
-            body)
-        # step 4: relaunch from the durable anchor
-        self.assertIn(norm("RELAUNCH each waiter fresh from its durable anchor"), body)
+        self.assertNotIn(norm(
+            "Worker LANES get NO waiver — they are drained exactly as today"), body)
+        self.assertIn(norm("Worker lanes, likewise, are no longer drained before the compact"), body)
 
-    def test_compact_py_veto_is_explicitly_not_touched(self):
+    def test_the_batch_boundary_crossing_rule_is_gone(self):
         body = norm(read(SKILL))
-        self.assertIn(norm(
-            "`watchdog/compact.py`'s live-tasks veto itself is NOT touched, "
-            "not by one line: CC #29193"), body)
+        self.assertNotIn(norm(
+            "A drained batch boundary must NEVER be crossed into the next batch"), body)
 
-    def test_worker_lanes_get_no_waiver(self):
+    def test_compact_delivers_over_live_lanes(self):
         body = norm(read(SKILL))
-        self.assertIn(norm(
-            "Worker LANES get NO waiver — they are drained exactly as today, "
-            "no exception."), body)
-
-    def test_a_boundary_must_never_be_crossed_uncompacted_for_a_spanning_waiter(self):
-        body = norm(read(SKILL))
-        self.assertIn(norm(
-            "A drained batch boundary must NEVER be crossed into the next batch "
-            "uncompacted just because a re-derivable watch/poll waiter spans it"), body)
+        self.assertIn(norm("compact over live lanes is safe"), body)
+        # the old "veto NOT touched / CC #29193 respected" framing is gone
+        self.assertNotIn(norm("live-tasks veto itself is NOT touched"), body)
 
 
-class TestAutopilotSkillOtherWaiterMentionsCarryTheWaiver(TestCase):
-    """The two OTHER spots in skills/autopilot/SKILL.md that used to read as
-    an unconditional "an in-flight CI waiter blocks the boundary forever" now
-    point at the #730 waiver instead of contradicting it (ticket item 3:
-    grep + update ALL occurrences consistently)."""
-
-    def test_batch_cap_section_names_the_waiver(self):
-        raw = read(SKILL)
-        idx = raw.index("**Batch cap — up to 5 lanes per batch")
-        window = norm(raw[idx:idx + 2200])
-        self.assertIn(norm("in-flight integration CI waiter"), window)
-        self.assertIn(norm("#730 waiver"), window)
-        self.assertIn(norm("never lets a boundary sit uncompacted indefinitely"), window)
-
-    def test_batch_dispatch_section_names_the_waiver(self):
-        raw = read(SKILL)
-        idx = raw.index("**Batch dispatch — up to 5 lanes, NO refill")
-        window = norm(raw[idx:idx + 2200])
-        self.assertIn(norm("no in-flight integration CI waiter"), window)
-        self.assertIn(norm("#730 waiver"), window)
-        self.assertIn(norm("worker lanes get NO such waiver"), window)
-
-    def test_old_unconditional_batch_dispatch_phrasing_is_gone(self):
-        # the pre-#730 phrasing asserted the waiter unconditionally blocked
-        # the boundary -- the fixed sentence must no longer read this way
-        # (a re-derivable waiter is now covered by the waiver, so "waiter"
-        # and "the main session compacts" must no longer sit immediately
-        # adjacent with nothing qualifying them in between).
-        body = norm(read(SKILL))
-        self.assertNotIn(
-            norm("no in-flight integration CI waiter — the main session compacts"),
-            body)
-
-    def test_old_unconditional_batch_cap_phrasing_is_gone(self):
-        body = norm(read(SKILL))
-        self.assertNotIn(norm("open until it lands. What a rate-limit signal"), body)
-
-
-# --------------------------------------------------------------------------- #
-# skills/autopilot-master/SKILL.md -- LANE 2 release-lane doctrine
-# --------------------------------------------------------------------------- #
-
-class TestAutopilotMasterGoalLineNamesTheWaiver(TestCase):
-    """The literal /goal MASTER LOOP condition (the text that caused the live
-    incident) points at the #730 waiver instead of an unconditional wait."""
+class TestAutopilotMasterWaiverIsRetired(TestCase):
+    """skills/autopilot-master/SKILL.md states the same retirement, and the
+    /goal line + COMPACT BOUNDARY prose carry the continuous-refill compact."""
 
     def _master_goal_line(self):
         text = read(SKILL_MASTER)
@@ -166,100 +84,44 @@ class TestAutopilotMasterGoalLineNamesTheWaiver(TestCase):
         self.assertEqual(len(lines), 1, "expected exactly one master /goal line")
         return lines[0]
 
-    def test_goal_line_names_the_waiver(self):
+    def test_goal_line_compacts_every_cycle_not_at_a_drain_window(self):
         line = self._master_goal_line()
-        self.assertIn("(waiver #730)", line)
-
-    def test_goal_line_still_carries_the_batch_compact_clause(self):
-        line = self._master_goal_line()
-        self.assertIn("BATCH+COMPACT", line)
-        self.assertIn("DRAIN WINDOW", line)
         self.assertIn("compact-request --self", line)
+        self.assertIn("#848", line)
+        self.assertNotIn("(waiver #730)", line)
+        self.assertNotIn("DRAIN WINDOW", line)
+        self.assertNotIn("BATCH+COMPACT", line)
 
     def test_goal_line_stays_within_the_4000_char_cap_with_healthy_headroom(self):
-        # mirrors tests/test_goal_backlog_proof.py's own MIN_MASTER_HEADROOM=120
-        # -- re-asserted here so THIS ticket's own edit is locked against
-        # future erosion too, not just the shared sibling lock.
         line = self._master_goal_line()
-        cap = 4000
-        headroom = cap - len(line)
+        headroom = 4000 - len(line)
         self.assertGreaterEqual(headroom, 120,
-                                 "master /goal line headroom %d < 120" % headroom)
-
-    def test_old_unwaivered_goal_line_phrasing_is_gone(self):
-        text = read(SKILL_MASTER)
-        self.assertNotIn(
-            "ZERO live background subagents/Bash remain, then `compact-request --self`",
-            text)
-
-
-class TestAutopilotMasterCompactBoundaryProseCarriesTheWaiver(TestCase):
-    """The COMPACT BOUNDARY (#724) prose paragraph -- the non-char-capped
-    Step-3 documentation the loop actually consults -- states the FULL #730
-    waiver protocol for LANE 2's release waiter."""
+                                "master /goal line headroom %d < 120" % headroom)
 
     def _compact_boundary_window(self):
         body = read(SKILL_MASTER)
-        idx = body.index("**COMPACT BOUNDARY (#724):**")
+        idx = body.index("**COMPACT BOUNDARY (#848):**")
         end = body.index("- **LANE 4 QUESTIONS**")
         self.assertGreater(end, idx)
         return body[idx:end]
 
-    def test_incident_is_cited(self):
+    def test_compact_boundary_is_every_cycle(self):
         window = norm(self._compact_boundary_window())
-        self.assertIn("#730", window)
-        self.assertIn("2026-08-26", window)
-        self.assertIn(
-            norm("crossed batch 1 → drain → batch 2 → drain → batch 3"), window)
+        self.assertIn(norm("EVERY LANE 3 integration cycle"), window)
+        self.assertIn(norm("live lanes or not"), window)
 
-    def test_re_derivable_waiter_is_defined(self):
+    def test_the_taskstop_relaunch_protocol_is_gone_from_master(self):
         window = norm(self._compact_boundary_window())
-        self.assertIn(norm("RE-DERIVABLE WAITER"), window)
-        self.assertIn(norm("durable, externally-readable resource"), window)
-
-    def test_taskstop_compact_relaunch_sequence_is_stated(self):
-        window = norm(self._compact_boundary_window())
-        self.assertIn(norm("record its durable anchor"), window)
-        self.assertIn(norm("`TaskStop` it DELIBERATELY"), window)
-        self.assertIn(norm("run `compact-request --self`"), window)
-        self.assertIn(norm("RELAUNCH the waiter fresh"), window)
-
-    def test_compact_py_veto_is_explicitly_not_touched(self):
-        window = norm(self._compact_boundary_window())
-        self.assertIn(norm(
-            "`watchdog/compact.py`'s live-tasks veto itself is NOT touched, "
-            "CC #29193 is still respected LITERALLY"), window)
-
-    def test_worker_lanes_get_no_waiver(self):
-        window = norm(self._compact_boundary_window())
-        self.assertIn(norm(
-            "Worker LANES get NO waiver — they are drained exactly as today, "
-            "no exception."), window)
-
-    def test_a_boundary_must_never_be_crossed_uncompacted_for_a_spanning_waiter(self):
-        window = norm(self._compact_boundary_window())
-        self.assertIn(norm(
-            "A drained batch boundary must NEVER be crossed into the next batch "
-            "uncompacted just because a re-derivable watch/poll waiter spans it"), window)
-
-    def test_the_any_ci_waiter_sentence_now_points_at_the_waiver(self):
-        window = norm(self._compact_boundary_window())
-        self.assertIn(norm(
-            "any CI waiter — a RE-DERIVABLE one is `TaskStop`ped first per the "
-            "#730 waiver"), window)
-
-    def test_old_unqualified_any_ci_waiter_phrasing_is_gone(self):
-        # pre-#730: "(any CI waiter)" with nothing qualifying it -- the fixed
-        # text must no longer close the parenthetical right there.
-        window = self._compact_boundary_window()
-        self.assertNotIn("(any CI waiter)**", window)
+        self.assertIn(norm("The #730 re-derivable-waiter waiver is RETIRED (#848)"), window)
+        self.assertNotIn(norm("`TaskStop` it DELIBERATELY"), window)
+        self.assertNotIn(norm("RELAUNCH the waiter fresh"), window)
+        self.assertNotIn(norm("live-tasks veto itself is NOT touched"), window)
 
 
 class TestAutopilotMasterLane2KeepsDurableAnchorsContinuously(TestCase):
-    """Ticket item 2: the release lane must continuously keep its durable
-    anchors noted (not just at hand-off) so a #730 waiver relaunch is
-    trivial -- stated inside LANE 2's own bullet, not just cross-referenced
-    from the compact-boundary paragraph."""
+    """RETAINED (now #844/#848): the release lane must continuously keep its
+    durable anchors noted (not just at hand-off) so a lost completion
+    notification is recovered from the anchor after a compaction."""
 
     def _lane2_window(self):
         body = read(SKILL_MASTER)
@@ -270,7 +132,6 @@ class TestAutopilotMasterLane2KeepsDurableAnchorsContinuously(TestCase):
 
     def test_lane2_names_durable_anchor_discipline(self):
         window = norm(self._lane2_window())
-        self.assertIn("#730", window)
         self.assertIn(norm("Durable anchors, continuously kept"), window)
         self.assertIn("run-id", window)
         self.assertIn(norm("promotion ticket"), window)

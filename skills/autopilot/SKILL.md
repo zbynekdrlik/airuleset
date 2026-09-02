@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). By DEFAULT it works the backlog in BATCHES (#723): it dispatches a BATCH of up to 5 such bundled units as PARALLEL isolation:worktree in-session BACKGROUND autopilot-worker lanes, with NO refill while that batch runs (run_in_background — your main session stays FREE + thin, every worker stays visible in the agent strip) that can still ASK YOU the important questions directly, then the supervisor integrates each returned branch SERIALLY under an integration mutex (one merge/PR/CI/deploy at a time per repo; falls back to one-worker-at-a-time when worktree isolation isn't available). Once the WHOLE batch has returned + integrated (zero live tasks) it compacts the main session at that clean boundary and dispatches the NEXT batch. Never pre-filters needs-input issues and never refuses to start. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
+description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). By DEFAULT it works the backlog with CONTINUOUS REFILL (#848, retiring #723's batch mode): it keeps up to 5 such bundled units live as PARALLEL isolation:worktree in-session BACKGROUND autopilot-worker lanes (run_in_background — your main session stays FREE + thin, every worker stays visible in the agent strip) that can still ASK YOU the important questions directly, then the supervisor integrates each returned branch SERIALLY under an integration mutex (one merge/PR/CI/deploy at a time per repo; falls back to one-worker-at-a-time when worktree isolation isn't available) AND refills the returned lane's slot immediately. After EVERY integration cycle it compacts the main session (live lanes or not — the STEP-0 experiment proved a compact over live lanes is safe). Never pre-filters needs-input issues and never refuses to start. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
 argument-hint: "[status] [manual] [dialog]"
 user-invocable: true
 disable-model-invocation: true
@@ -8,19 +8,18 @@ disable-model-invocation: true
 
 # Autopilot — Hands-off Backlog Loop
 
-> Solves the **ENTIRE** open backlog in **BATCHES** (#723, reversing #456's continuous refill FOR
-> autopilot) — by DEFAULT a BATCH of up to 5 PARALLEL `isolation: "worktree"` workers (#317/#456),
-> one per solo ticket or bundle-safe batch, dispatched together with **NO refill while that batch
-> runs** and integrated SERIALLY by the supervisor as each branch returns. Each unit is
-> handed to an **in-session background `autopilot-worker` subagent** (`run_in_background: true`)
-> — fresh context (your main session stays thin AND interactive — you can keep messaging it),
-> visible in the agent strip, and **able to ask you the genuinely-important questions directly**.
-> When the **WHOLE batch** has returned + integrated — so ZERO background tasks are live — the loop
-> **compacts the main session at that clean boundary** (the only moment `compact-request --self`'s
-> live-tasks veto can pass, and the only moment a compact cannot break task handles / the armed goal,
-> CC #29193 unfixed) and dispatches the **NEXT** batch. It **NEVER** pre-filters "needs input" issues
-> and **NEVER** refuses to start. The goal is to finish everything; your only job is to answer the
-> important per-issue questions when a worker raises one.
+> Solves the **ENTIRE** open backlog with **CONTINUOUS REFILL** (#848, restoring #456's continuous
+> refill FOR autopilot, retiring #723's batch mode) — by DEFAULT up to 5 PARALLEL
+> `isolation: "worktree"` workers (#317/#456) kept live, one per solo ticket or bundle-safe unit,
+> **each returned lane integrated SERIALLY and its slot refilled immediately** by the supervisor.
+> Each unit is handed to an **in-session background `autopilot-worker` subagent**
+> (`run_in_background: true`) — fresh context (your main session stays thin AND interactive — you
+> can keep messaging it), visible in the agent strip, and **able to ask you the genuinely-important
+> questions directly**. After EVERY integration cycle the loop **compacts the main session — live
+> lanes or not** (`compact-request --self`): the STEP-0 experiment (CC 2.1.258) proved a compact
+> over live lanes does not break the task registry, so it no longer waits for the fleet to drain.
+> It **NEVER** pre-filters "needs input" issues and **NEVER** refuses to start. The goal is to finish
+> everything; your only job is to answer the important per-issue questions when a worker raises one.
 
 > **Usage:** `/autopilot [status] [manual] [dialog]`
 > • *(no arg)* — **default: ZERO questions at start.** Preflight → banner → print the `/goal`
@@ -54,29 +53,28 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 
 ## How it works
 
-- **Engine = a `/goal` loop you paste once.** Each turn the main agent assembles a BATCH — by
-  DEFAULT up to 5 bundle-safe UNITS (each one bundle-safe issue, or several bundled into one PR
-  — see Step 3.1) — and dispatches ONE in-session BACKGROUND `autopilot-worker` PER unit,
-  `isolation: "worktree"`, running them IN PARALLEL with **NO refill while the batch is open**
-  (`run_in_background: true`, Step 3.2, #317/#456/#723); every dispatch returns IMMEDIATELY so your main
-  session stays FREE, and any worker finishing RE-INVOKES the loop. Each worker runs its cycle to a
-  green LOCAL result on its own worktree branch; the main agent then integrates each returned branch
-  SERIALLY under the integration mutex — one merge/test/push at a time — as it becomes ready and
-  verifies from GitHub. When the WHOLE batch has returned + integrated (zero live tasks) the main
-  session compacts at that clean boundary and the NEXT turn dispatches the next batch of up to 5.
-  (Worktree isolation unavailable, or a lane's candidates overlap too heavily to
-  parallelize? Dispatch falls back to the documented single-worker serial shape — same mechanics,
-  no `isolation:`, one unit at a time.)
-- **Bundling AND batched fleet dispatch both cut cost — different axes.** CI is long here, so bundling
+- **Engine = a `/goal` loop you paste once.** Each turn the main agent keeps up to 5 bundle-safe
+  UNITS live (each one bundle-safe issue, or several bundled into one PR — see Step 3.1) and
+  dispatches ONE in-session BACKGROUND `autopilot-worker` PER unit, `isolation: "worktree"`, running
+  them IN PARALLEL with **continuous refill up to the lane cap** (`run_in_background: true`, Step 3.2,
+  #317/#456/#848); every dispatch returns IMMEDIATELY so your main session stays FREE, and any worker
+  finishing RE-INVOKES the loop. Each worker runs its cycle to a green LOCAL result on its own
+  worktree branch; the main agent then integrates each returned branch SERIALLY under the integration
+  mutex — one merge/test/push at a time — as it becomes ready and verifies from GitHub, refilling the
+  returned lane's slot immediately. After EVERY integration cycle the main session compacts (live
+  lanes or not) and the loop continues. (Worktree isolation unavailable, or a lane's candidates
+  overlap too heavily to parallelize? Dispatch falls back to the documented single-worker serial
+  shape — same mechanics, no `isolation:`, one unit at a time.)
+- **Bundling AND parallel fleet dispatch both cut cost — different axes.** CI is long here, so bundling
   spends ONE CI cycle on as many bundle-safe issues as the gate allows
   (`autonomous-batch-issue-development.md`) instead of one-PR-per-issue — this cuts CI cost per
-  worker. Batched fleet dispatch (up to 5 worktree-isolated worker lanes running concurrently per
-  batch) cuts WALL-CLOCK by working 5 units at once instead of one after another. The trade-off #723
-  accepts vs #456's continuous refill: a batch waits for its SLOWEST lane before the next batch
-  starts (a small tail-lane wall-clock cost), bought in exchange for a bounded main-session context
-  and unbroken tasks/goal — the compact can fire only when the batch has fully drained. Issues that
-  fail the bundling gate (large / schema / API / security / cross-cut) still run solo — as their
-  own single-member unit within a batch, or alone in the serial fallback.
+  worker. Continuous fleet dispatch (up to 5 worktree-isolated worker lanes running concurrently)
+  cuts WALL-CLOCK by working 5 units at once instead of one after another. #848 restores #456's
+  continuous refill (retiring #723's batch mode): a returned lane's slot is refilled immediately —
+  there is NO wait for the slowest lane — and the compact fires at every integration cycle rather
+  than only at a drained boundary (the STEP-0 experiment removed the batch premise). Issues that fail
+  the bundling gate (large / schema / API / security / cross-cut) still run solo — as their own
+  single-member unit, or alone in the serial fallback.
 - **Worker = in-session BACKGROUND `autopilot-worker` subagent** (`run_in_background: true`, user-
   level, installed by airuleset). Background so your MAIN session stays FREE (you can keep messaging
   it) and THIN while the worker runs — and since Claude Code's 2026-W26 change the worker's prompts
@@ -447,12 +445,12 @@ the `/goal` line, the loop never starts.
 > You reach this section only when a turn fires under the `/goal` loop the user pasted in Step 2.
 > The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself.
 
-Each loop turn works the backlog in **BATCHES** (#723): a batch is up to 5 `isolation: "worktree"`-
-isolated `autopilot-worker` lanes — one lane per solo ticket or bundle-safe unit — dispatched
-together in PARALLEL, then **NO new lane is dispatched while that batch is open**; the supervisor
-integrates each returned branch SERIALLY, under an integration mutex, as it becomes ready. When the
-WHOLE batch has returned + integrated (so ZERO background tasks are live) the main session compacts
-at that clean boundary and the NEXT turn dispatches the next batch of up to 5.
+Each loop turn works the backlog with **CONTINUOUS REFILL** (#848, retiring #723's batch mode): keep
+up to 5 `isolation: "worktree"`-isolated `autopilot-worker` lanes live — one lane per solo ticket or
+bundle-safe unit — dispatched in PARALLEL, and **refill a returned lane's slot immediately** up to
+that lane cap; the supervisor integrates each returned branch SERIALLY, under an integration mutex,
+as it becomes ready. After EVERY integration cycle the main session compacts (live lanes or not) and
+the loop continues.
 Fleet dispatch is the default dispatch shape (2026-08-08, #317): the `Agent` tool's
 `isolation: "worktree"` gives each worker its OWN checkout sharing only `.git`, so the collision
 risk that used to force one-worker-at-a-time dispatch (two workers editing the SAME `dev` tree) no
@@ -461,41 +459,38 @@ ran #313+#315+#316 as three parallel worktree workers alongside a #311+#312 batc
 tree, four concurrent workers, zero collisions. What stays STRICTLY serial is INTEGRATION: merging
 N worktree branches, running the one CI/test cycle, and pushing — always ONE AT A TIME, always
 supervisor-owned, never by a worker itself (Step 4 below). Bundling (packing more issues into one
-worker's PR, `autonomous-batch-issue-development.md`) and batch-parallelism (running up to 5
+worker's PR, `autonomous-batch-issue-development.md`) and lane-parallelism (running up to 5
 bundled units at once) are COMPLEMENTARY levers, not substitutes: bundling cuts CI cost per
-worker, batch dispatch cuts wall-clock by running up to 5 bundled units concurrently.
+worker, parallel dispatch cuts wall-clock by running up to 5 bundled units concurrently.
 
-**Serialize-on-overlap — up to the batch cap (#456/#723).** A batch is up to 5 parallel lanes:
-dispatch a lane for each workable bundle-safe unit UP TO that batch cap, and no more (the batch
-cap, not a resource number, is the primary bound — #723 reverses #456's uncapped continuous
-saturation FOR autopilot). A worker should still prefer running a
+**Serialize-on-overlap — up to the lane cap (#456/#848).** Keep up to 5 parallel lanes live:
+dispatch a lane for each workable bundle-safe unit UP TO that lane cap, and no more (the lane cap,
+not a resource number, is the primary bound — #848 restores #456's continuous refill FOR autopilot,
+retiring #723's batch mode). A worker should still prefer running a
 SCOPED test subset first before the full suite where the project supports it, same discipline as
-any single worker. When assembling the
-batch (repeat the per-lane procedure below for each lane you dispatch, up to 5),
+any single worker. When assembling
+lanes (repeat the per-lane procedure below for each lane you dispatch, up to 5),
 SKIP — don't dispatch it — any issue whose bundling-relevant files heavily overlap a
-unit ALREADY claimed by a LIVE lane in THIS batch (today's live example: #311/#316/#317
+unit ALREADY claimed by a LIVE lane (today's live example: #311/#316/#317
 all edited `agents/autopilot-worker.md` and had to be sequenced, not parallelized). Two workers
 independently editing the same file in two separate worktrees is a guaranteed merge conflict at
 integration — worse than simply waiting until the overlapping lane has integrated. An overlapping
-issue is not lost — it seeds a LATER batch, exactly like any issue that fails the bundling gate today.
+issue is not lost — it fills a LATER free lane, exactly like any issue that fails the bundling gate today.
 
-**Batch cap — up to 5 lanes per batch; within a batch back off on a real resource signal + stagger (#723;
-the #332 numbers below are measured CONTEXT).** The batch cap (up to 5 lanes, no refill while a batch
-runs) is the primary concurrency bound — #723's reversal of #456's uncapped saturation, to give the
-main session a clean drained boundary to compact at. WITHIN that batch a SECOND, account-wide bound
+**Lane cap — up to 5 live lanes; back off on a real resource signal + stagger (#848;
+the #332 numbers below are measured CONTEXT).** The lane cap (up to 5 live lanes, refilled
+continuously) is the primary concurrency bound — #848's restoration of #456's continuous refill.
+Across all live lanes a SECOND, account-wide bound
 still applies: the up-to-5 worker lanes PLUS the read-only `ticket-validator`
-dispatches Step 1b fires for EVERY batch member PLUS anything a
+dispatches Step 1b fires for EVERY member PLUS anything a
 DIFFERENT concurrent lane or session under this account runs are all the SAME kind of Claude-API
 subagent, from the SAME account, against the SAME server-side rate limit. So that bound is
 ACCOUNT-WIDE (one rate limit shared by everything the account runs, workers and read-only helpers
-alike), never per lane, never per repo — and if even the 5-lane batch plus its validators hits it,
+alike), never per lane, never per repo — and if even the 5 live lanes plus their validators hit it,
 back off: a server-side rate-limit error, box memory pressure, or CC's own max-concurrent-subagents
 ceiling. A CI-waiting lane costs no local capacity (CI runs on dynamic autoscaled VPS runners —
-capacity is not local) — but under batch mode the BATCH BOUNDARY, not CI capacity, paces dispatch:
-an in-flight integration CI waiter keeps a live background task, so it holds the drained boundary
-(and thus the next batch) open until it lands — UNLESS it qualifies for the **#730 waiver** (a
-RE-DERIVABLE waiter, its whole state in a durable anchor: `TaskStop` it, `compact-request --self`,
-relaunch from that anchor — see Step 5), which never lets a boundary sit uncompacted indefinitely.
+capacity is not local), and under continuous refill a returned lane's slot is filled the moment it
+integrates — the lane cap and the account-wide resource signal are the only bounds on dispatch.
 What a rate-limit signal actually looks like,
 measured (2026-08-08, this repo's own dogfooding): a burst of 4 parallel worktree workers ran with
 no rate-limit kills (it did hit a benign doc-append merge conflict at integration, resolved
@@ -556,7 +551,7 @@ at all this turn. The bundling gate (`autonomous-batch-issue-development.md`) pl
 heuristic together are the whole answer to "which issues share one lane" — this ticket found no
 gap in either.
 
-**Batch dispatch — up to 5 lanes, NO refill while a batch is open (#723, deliberately reverses #456's continuous refill FOR autopilot).** DISPATCH is BATCHED, not continuous: at the START of a batch (a turn with NO batch open) — while unworked bundle-safe backlog remains — assemble up to 5 bundle-safe units (per-lane procedure below — bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane in this batch) and dispatch each into a fresh `isolation: "worktree"` lane, all in the SAME message. Then NO new lane is dispatched while the batch is open — a returned lane is integrated SERIALLY (Step 4) but NOT replaced. When the WHOLE batch has returned + integrated — ZERO live background tasks, meaning no lane still running AND no in-flight integration CI waiter that ISN'T covered by the **#730 waiver** (a RE-DERIVABLE waiter — whole state in a durable anchor — is `TaskStop`ped FIRST, then relaunched from that anchor right after the compact; never left holding the boundary open with the waiter still live; worker lanes get NO such waiver — see Step 5) — the main session compacts at that clean boundary (Step 5) and the NEXT turn dispatches the next batch of up to 5. The trade-off vs #456 (named honestly): a batch waits for its SLOWEST lane before the next batch starts (a small tail-lane wall-clock cost), accepted in exchange for a bounded main-session context and a compact that can NEVER break task handles / the armed goal (CC #29193 unfixed as of CC 2.1.246). Two research facts make this SAFE (comment on #723): a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes and dispatches the next batch; and the ONLY moment a compact is safe is with ZERO live background tasks (CC #29193 — the task-handle registry is dropped on a mid-fleet compact, notifications lost, exactly what the drained batch boundary avoids). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the batch-dispatch decision.
+**Continuous refill — up to 5 live lanes, refill a returned lane's slot immediately (#848, restores #456's continuous refill FOR autopilot, retiring #723's batch mode).** DISPATCH is CONTINUOUS, not batched: keep up to 5 bundle-safe `isolation: "worktree"` lanes live (the **lane cap** — the per-lane procedure below applies the bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane). Whenever a lane returns, integrate it SERIALLY (Step 4) AND — while unworked bundle-safe backlog remains — refill a returned lane's slot immediately in the same turn, up to the lane cap. There is NO wait for the slowest lane and NO drained boundary: a returned slot is replaced right away. And **compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not** (`compact-request --self`, Step 5): the STEP-0 live experiment (CC 2.1.258, dev1 2026-09-02, on issue #848) proved a `/compact` over live worktree lanes + a bg-bash waiter + an armed `/goal` does NOT break the task registry — lanes commit, completion notifications survive, task IDs still resolve, `◎ /goal` survives — so the compact no longer waits for the fleet to drain (the batch model's premise, CC issue 29193, is gone for the idle-boundary delivery case). Two research facts make this SAFE: a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes; and the STEP-0 experiment above proved the task registry survives a compact over live lanes (a residual lost notification is backed by the #844 LANE-RETURN comment + the post-compaction lane-reconcile rider — Step 5). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the refill decision.
 
 1. **Per lane SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
@@ -615,11 +610,11 @@ gap in either.
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
    are independent, so validate them in parallel, **but they are the SAME account-wide rate-limited
-   agents as the worker fleet (the Batch cap section above): bounded by this batch's own membership,
+   agents as the worker fleet (the Lane cap section above): bounded by the live lane set,
    they stagger into sequential WAVES only when a real resource signal — a rate-limit error, box
    memory pressure, or CC's max-subagents ceiling — hits
-   (#332/#723).** A validator KILLED by a rate limit (or any
-   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the batch — treat
+   (#332/#848).** A validator KILLED by a rate limit (or any
+   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the lane set — treat
    that ONE member exactly as if Step 1b had simply been skipped for it (the worker's own Step 0
    re-validation, `verify-issue-still-valid.md`, mechanically backstops every member regardless of
    whether Step 1b ran — #213), and dispatch its worker normally without a Step 1b verdict. Branch
@@ -1087,10 +1082,12 @@ gap in either.
    running — never claim idleness). This IS a real completion of the integrated members (merged,
    verified, carded — durable in git/GitHub), not a lie; the signal that MORE work follows is the
    **ARMED GOAL** Claude Code shows in its footer (`◎ /goal`) plus any lanes still running. **The
-   supervisor calls `airuleset.py compact-request --self` FIRST (before writing the report) ONLY at
-   the DRAINED BATCH BOUNDARY — the turn where THIS integration was the batch's LAST, so ZERO
-   background tasks are live (#723)** — the only moment the compact veto passes and a compact cannot
-   break tasks/goal (CC #29193). If lanes of this batch STILL run, do NOT call it yet.
+   supervisor calls `airuleset.py compact-request --self` FIRST (before writing the report) at
+   EVERY integration cycle's `## ✅ Work Complete` — live lanes or not (#848)**: the STEP-0
+   experiment (CC 2.1.258) proved a compact over live worktree lanes + a bg-bash waiter + an armed
+   `/goal` does not break the task registry, so the compact no longer waits for the fleet to drain
+   (the batch premise, CC issue 29193, is gone for the idle-boundary delivery case). Lanes still
+   running is NO longer a reason to withhold it.
    (#400: `notify-compact-request.sh`, the old passive Stop-hook text-sniff, is now a
    permanent no-op — `compact-request --self` is the only mechanism left for the supervisor's own
    turn boundary.) The idle Discord ping is separately guarded while
@@ -1161,11 +1158,10 @@ gap in either.
    **LIVE-VERIFY it on a real armed-goal pane after deploy: if the goal re-fires even with a live
    task and the `/compact` still does NOT drain, record the evidence and ESCALATE to the owner —
    never stack a further workaround** (the design's own hedge, #822).
-   **RECONCILE LANES FROM DURABLE STATE ON THE FIRST TURN AFTER ANY COMPACTION (#844).** A
-   compaction — the watchdog's own drained-boundary `/compact`, the #844 bounded live-hold-cap
-   forced `/compact` (delivered past a live-tasks veto once a boundary is held past
-   `COMPACT_LIVE_HOLD_CAP_S`, because a 776K main is strictly worse than re-collecting lanes), or
-   CC's own overflow auto-compact — can drop a lane-completion notification (the #29193 hazard). So
+   **RECONCILE LANES FROM DURABLE STATE ON THE FIRST TURN AFTER ANY COMPACTION (#844, #848).** A
+   compaction — the watchdog's own per-integration-cycle `/compact` (delivered over live lanes
+   since #848 removed the live-tasks veto), or CC's own overflow auto-compact — can, in the
+   residual case, drop a lane-completion notification (the CC-29193 hazard class). So
    your FIRST action on the first goal turn AFTER a compaction is to reconcile lanes from DURABLE
    STATE, never from memory: `git worktree list` for every live worktree, and read the
    `LANE-RETURN:` comment (#844 step 2) on each in-flight ticket. A worktree branch AHEAD of the
@@ -1179,38 +1175,16 @@ gap in either.
    check whether that worker is genuinely dead (re-dispatch from durable state) before assuming the
    lane is still live. Never treat "I don't remember a lane there" as "no lane there"; the branch +
    the comment are the truth.
-   **WAIVER — a RE-DERIVABLE waiter never holds a drained boundary open forever (#730, owner
-   incident 2026-08-26): gk `/autopilot-master` crossed batch 1 → drain → batch 2 → drain →
-   batch 3 with ZERO compacts, because a release-lane waiter — shadow rerun → deploy →
-   lock-retry — spanned EVERY drained boundary; doctrinally correct under the old absolute
-   "zero live tasks" text, and exactly risk #1 named in the #727 design comment (an
-   eternally-live background job holds the boundary open forever).** A background task earns
-   this waiver ONLY as a **RE-DERIVABLE WAITER** — a CI/release/deploy/lock watcher whose
-   ENTIRE state lives in a durable, externally-readable resource (a `gh run id`, a
-   release/promotion ticket, a lock target) such that `ci-monitoring.md`'s own post-compaction
-   recovery doctrine ALREADY mandates re-deriving it from that resource and relaunching a fresh
-   waiter — never a task holding state only in its own process memory. **Worker LANES get NO
-   waiver — they are drained exactly as today, no exception.** At a batch boundary where the
-   ONLY live background tasks are re-derivable waiters:
-   1. Record the durable anchor(s) — run-id / ticket / lock target — in ONE line of the turn,
-      so relaunch afterward is trivial.
-   2. `TaskStop` those waiters DELIBERATELY. This is the ONLY thing that changes —
-      `watchdog/compact.py`'s live-tasks veto itself is NOT touched, not by one line: CC #29193
-      is still respected LITERALLY. The boundary becomes genuinely ZERO live tasks BECAUSE the
-      waiters were stopped, never because the veto was loosened.
-   3. Run `compact-request --self` on this now genuinely-drained boundary, exactly as above.
-   4. After the compact, RELAUNCH each waiter fresh from its durable anchor (`gh run view <id>`
-      / re-read the release ticket / re-check the lock) — precisely the recovery
-      `ci-monitoring.md` already mandates after ANY compaction, so this triggers existing
-      doctrine, it does not add new machinery. Relaunch on your NEXT turn regardless of
-      whether the compact itself was actually delivered that turn — a `compact-request --self`
-      can lapse and roll to a later drained boundary (see above), but a TaskStopped waiter is
-      NEVER left un-relaunched waiting on that: it resumes the moment you're back, exactly like
-      any other post-compaction recovery.
-   Cost = one waiter restart per boundary; gain = the whole point of #723 — bounded supervisor
-   context. **A drained batch boundary must NEVER be crossed into the next batch uncompacted
-   just because a re-derivable watch/poll waiter spans it** — that silent drift (three full
-   batches, zero compacts) is the exact incident this waiver closes.
+   **The #730 RE-DERIVABLE-WAITER WAIVER is RETIRED (#848).** It existed to let the supervisor
+   `TaskStop`-then-relaunch a live CI/release/deploy/lock waiter so a boundary reached the "zero live
+   tasks" the OLD live-tasks veto required before it would deliver the compact. #848 REMOVED that veto
+   (the STEP-0 experiment proved a compact over live lanes is safe), so the compact delivers at every
+   integration cycle regardless of a live waiter — there is no boundary to drain and no TaskStop /
+   relaunch dance to perform. A live re-derivable waiter simply rides across the compaction like any
+   other live task; if its completion notification is the residual case the compaction drops, the
+   reconcile-from-durable-state step above (and `ci-monitoring.md`'s own post-compaction recovery)
+   already recovers it. Worker lanes, likewise, are no longer drained before the compact — they too
+   ride across it, reconciled from durable state if a notification is lost.
 
 ### Bounce nudge-ack — an injected prompt while the loop runs (ACK it; never work it inline)
 
@@ -1375,17 +1349,16 @@ thin across `--resume` — moved verbatim to `skills/autopilot/references/sessio
 
 ## Guardrails (hard — never relax)
 
-- **Serial INTEGRATION per repo, BATCHED parallel dispatch by default (#317/#456/#723, 2026-08-26).**
+- **Serial INTEGRATION per repo, CONTINUOUS-REFILL parallel dispatch by default (#317/#456/#848, 2026-09-02).**
   Only the merge→gates→push INTEGRATION cycle is serialized — the integration mutex (Step 3.2)
   allows ONE integration in flight per repo at a time across ALL sessions, supervisor-owned, never
-  simultaneous. DISPATCH, by contrast, is BATCHED (#723, reversing #456's continuous refill FOR
-  autopilot): each batch is up to 5 `isolation: "worktree"`-isolated worker lanes running IN
-  PARALLEL — one per solo ticket or bundle-safe unit — dispatched together with **NO refill while a
-  batch is open**; within a batch the account-wide resource-signal backoff (rate-limit errors, box
-  memory, CC max-subagents) still applies. When the WHOLE batch has drained (returned + integrated,
-  zero live tasks) the main session compacts at that clean boundary and the next turn dispatches the
-  next batch. This deliberately reintroduces #456's tail-lane wall-clock cost, bought for a bounded
-  main-session context and a compact that never breaks tasks/goal (CC #29193 unfixed). The collision
+  simultaneous. DISPATCH, by contrast, is CONTINUOUS (#848, restoring #456's continuous refill FOR
+  autopilot, retiring #723's batch mode): keep up to 5 `isolation: "worktree"`-isolated worker lanes
+  running IN PARALLEL — one per solo ticket or bundle-safe unit — and **refill a returned lane's slot
+  immediately** up to the lane cap; the account-wide resource-signal backoff (rate-limit errors, box
+  memory, CC max-subagents) still applies. After EVERY integration cycle the main session compacts
+  (live lanes or not — the STEP-0 experiment proved a compact over live lanes is safe), so there is
+  no tail-lane wall-clock cost and no drained boundary to wait for. The collision
   risk that used to force one-worker-at-a-time DISPATCH was two
   workers sharing the SAME `dev` tree; a worktree gives each its own checkout sharing only `.git`,
   so that risk is gone for dispatch. Falling back to the fully-serial single-worker shape (no
