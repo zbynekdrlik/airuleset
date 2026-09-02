@@ -29,19 +29,23 @@ exits 0 (FAIL-OPEN) — matches RULE A's own documented "never brick an
 unknown context" stance; the Bash-side bypass-marker + session-identity
 checks remain the primary guard around this helper.
 
+The write-verb SET, the read-op subform exemptions (`git stash list/show`,
+`git tag -l`, `symbolic-ref`/`worktree`/`branch` reads), the `-c <value>` skip
+and the env/wrapper command-prefix strip are shared VERBATIM with RULE B
+(`git_write_classify.classify_git_command`), so RULE A now blocks the same
+branch-state / wrapper / `-c` shapes RULE B blocks (#831 closed the divergence
+#817 flagged: `git -C airuleset checkout -b x` / `env git … commit` / `git -c
+user.email=x commit` used to escape RULE A while RULE B blocked them).
+
 Known accepted residuals (documented per the #319 convention — a static
 per-command analyzer is a CONFUSION guard against a well-meaning agent, not
 adversarial security, so these are named rather than silently missed):
   - `_resolve` uses `os.path.normpath`, not `os.path.realpath` — a SYMLINKED
     checkout can bypass the `devel/airuleset` path test, exactly like RULE
     A's old whole-string textual test did (no regression, same residual).
-  - No `git stash list`/`git stash show`/`git tag -l` read-op carve-out (a
-    read masquerading as one of the write-verb subcommand NAMES over-blocks)
-    — parity with the old regex, which had the same gap.
-  - `git -c key=value commit ...` (a `-c` config override before the
-    subcommand) is read as the subcommand being `-c` itself and so is
-    under-detected — shared with the old regex AND with worktree_guard.py's
-    identical parser shape; a real gap, but not new here.
+  - A wrapper's NON-numeric value (`sudo -u x git …`, `xargs -I{} git …`)
+    still shadows the command word — the documented #557 limitation shared by
+    `git_write_classify.strip_command_prefix` and RULE B.
   - A HEREDOC BODY's literal text (e.g. `cat > f <<'EOF'` ... `git push`
     ... `EOF`) is not distinguished from a real command — same blind spot
     the old whole-string regex had (it too scanned heredoc bodies for a
@@ -54,13 +58,23 @@ import os
 import shlex
 import sys
 
-# git subcommands that WRITE the repository (same set RULE A's old bash
-# regex matched — this fix changes WHERE the target check happens, not the
-# verb set it applies to).
-_GIT_WRITE = {
-    "commit", "push", "pull", "merge", "rebase", "cherry-pick", "revert",
-    "reset", "add", "rm", "mv", "stash", "tag", "am", "apply",
-}
+# #831: the git write-verb SET, the read-op subform exemptions, the env/wrapper
+# command-prefix strip and the unquoted-newline normalization are shared with
+# the sibling RULE B guard (`worktree_guard.py`) from ONE module. Before #831,
+# RULE A carried a NARROWER `_GIT_WRITE` (no checkout/switch/branch/worktree/
+# symbolic-ref/update-ref/…) and NO env/wrapper strip or `-c <value>` skip, so
+# `git -C ~/devel/airuleset checkout -b x` / `env git … commit` / `git -c
+# user.email=x commit` escaped RULE A while RULE B already blocked them (#817).
+# `_HERE` is added to sys.path so the import resolves whether this file is run
+# as a script (`python3 …/foreign_repo_guard.py`) OR loaded via importlib.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from git_write_classify import (  # noqa: E402
+    normalize_newlines as _normalize_newlines,
+    strip_command_prefix as _strip_command_prefix,
+    classify_git_command as _classify_git_command,
+)
 # interpreters through which `.../airuleset.py push|install` is commonly
 # invoked (`python3 ~/devel/airuleset/airuleset.py push`) — used ONLY to
 # anchor _airuleset_cli_write to command position, never as a general
@@ -77,44 +91,6 @@ _PY_INTERPRETERS = {"python3", "python", "python2"}
 # reaches _SEPARATORS.
 _SEPARATORS = {";", "&", "&&", "|", "||"}
 _REDIRECTS = {">", ">>", ">|", "&>", "&>>", "1>", "1>>", "2>", "2>>"}
-
-
-def _normalize_newlines(cmd):
-    """Replace every UNQUOTED literal newline in `cmd` with ';' — bash treats
-    an unquoted newline exactly like a semicolon at the top level (a command
-    terminator), which shlex(posix=True) does not model on its own. A single
-    quote-aware character scan (tracks single/double-quote state + backslash
-    escapes) so a newline INSIDE a quoted span is never touched, matching
-    real shell semantics. (A newline inside a heredoc BODY is not "quoted" in
-    this sense and DOES get converted — see the module docstring's heredoc
-    residual note; this is the same blind spot the old whole-string regex
-    had, not a new one.)"""
-    out = []
-    in_single = False
-    in_double = False
-    escaped = False
-    for ch in cmd:
-        if escaped:
-            out.append(ch)
-            escaped = False
-            continue
-        if ch == "\\" and not in_single:
-            out.append(ch)
-            escaped = True
-            continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            out.append(ch)
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            out.append(ch)
-            continue
-        if ch == "\n" and not in_single and not in_double:
-            out.append(";")
-            continue
-        out.append(ch)
-    return "".join(out)
 
 
 def _is_airuleset_path(path):
@@ -144,30 +120,19 @@ class _Analyzer:
         return os.path.normpath(target)
 
     def _git_targets_airuleset(self, args):
-        loc = None
-        sub = None
-        i = 0
-        while i < len(args):
-            a = args[i]
-            if a == "-C" and i + 1 < len(args):
-                loc = args[i + 1]
-                i += 2
-                continue
-            if a in ("--git-dir", "--work-tree") and i + 1 < len(args):
-                loc = args[i + 1]
-                i += 2
-                continue
-            if a.startswith("--git-dir=") or a.startswith("--work-tree="):
-                loc = a.split("=", 1)[1]
-                i += 1
-                continue
-            if a.startswith("-"):
-                i += 1
-                continue
-            sub = a
-            break
-        if sub not in _GIT_WRITE:
+        # #831: the write-verb set + read-op subform exemptions + `-c <value>`
+        # skip now live in `git_write_classify.classify_git_command`, shared
+        # verbatim with the sibling RULE B guard. It returns the raw (is_write,
+        # loc, extra_targets); this method applies RULE A's OWN target test.
+        is_write, loc, extra_targets = _classify_git_command(args)
+        if not is_write:
             return False
+        # `git worktree remove/move/add` names a worktree PATH positional that
+        # may be OUTSIDE cwd — a foreign session's `git worktree add
+        # ~/devel/airuleset/x` writes the airuleset tree even from a foreign cwd.
+        for p in extra_targets:
+            if _is_airuleset_path(self._resolve(p)):
+                return True
         target = self._resolve(loc) if loc is not None else self.cwd
         return _is_airuleset_path(target)
 
@@ -197,6 +162,10 @@ class _Analyzer:
         return False
 
     def _flush(self, argv):
+        # #831: strip leading env-assignments + wrappers (`FOO=1 git …`,
+        # `env/command/nohup git …`, `python3 airuleset.py push` via a wrapper)
+        # so argv[0] is the REAL command word, matching RULE B's own detector.
+        argv = _strip_command_prefix(argv)
         if not argv:
             return False
         prog = os.path.basename(argv[0])
