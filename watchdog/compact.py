@@ -1250,6 +1250,21 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
         return "skip:no-input-line"
     if draft:
+        # #852 D -- the draft veto is ownership-aware. A box holding a PROVEN
+        # own leftover (our own swallowed `/compact`/nudge, provenance-gated by
+        # `_janitor_recover`) is NOT a human draft: reclaim it FIRST, re-capture,
+        # and re-classify. `_janitor_recover` no-ops without provenance, so a
+        # genuine human draft is never touched and still `skip:draft`. This
+        # closes the gk `slane-check:` livelock (the leaked text vetoed /compact
+        # forever, ctx 441K -> 628K).
+        rec = {}
+        watchdog._janitor_recover(run, rec, pid, cwd, captured,
+                                  watchdog._pane_location(pid, run) or cwd,
+                                  send_fn=None, dry_run=False, sleep_fn=sleep_fn,
+                                  state=state, now=now)
+        captured = watchdog.capture_pane(pid, run, lines=40)
+        kind, draft = watchdog._classify_boundary(captured)
+    if draft:
         _log_compact_sync("SKIP draft sid=%s cwd=%s" % (sid, cwd))
         return "skip:draft"
     if kind == "busy":
