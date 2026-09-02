@@ -610,6 +610,62 @@ class _UndoRun:
         return ""
 
 
+class _StrayRun:
+    """A recording `run` for a DIRECT `_undo_and_release_slot` call: the box
+    holds `stray + text`; a BSpace batch trims exactly what it removes from the
+    END (leaving the stray at the FRONT), unless `stuck` (the backspaces do
+    nothing -- a genuinely wedged box)."""
+
+    def __init__(self, stray, text, stuck=False):
+        self.buf, self.stray, self.text = stray + text, stray, text
+        self.stuck, self.sent = stuck, []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            return _box(self.buf)
+        if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv and not self.stuck:
+            n = argv.count("BSpace")
+            self.buf = self.buf[:-n] if n < len(self.buf) else ""
+        return ""
+
+
+class SuffixProofUndoNeverLeaks(unittest.TestCase):
+    """#852 B/E -- the type-verify-failed recovery never SILENTLY leaves our
+    own typed text. A stray human char that raced to the FRONT after the settle
+    is preserved (our text backspaced off the END); a box we cannot clear at
+    all is left with a WARNING + a durable park record carrying the exact
+    string, never the old silent `typed-NOT-undone`/`append-unprovable` leak."""
+
+    NUDGE = "lane-check: backlog=7"     # does NOT end with the stray char
+
+    def test_a_stray_leading_char_is_preserved_our_text_removed(self):
+        run = _StrayRun("s", self.NUDGE)     # the incident shape: `s` + nudge
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertEqual(run.buf, "s",
+                         "the human's stray char must survive: %r" % run.buf)
+        self.assertTrue(any("stray prefix preserved" in ln for ln in logs), logs)
+        # our text is gone -> no UNRECLAIMED leak, no park record needed
+        self.assertFalse(any("UNRECLAIMED" in ln for ln in logs), logs)
+        self.assertNotIn("%1", state.get("stash_parks", {}))
+
+    def test_a_genuinely_stuck_box_warns_and_parks_the_typed_string(self):
+        run = _StrayRun("", self.NUDGE, stuck=True)   # backspaces do nothing
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "a box we cannot clear must WARN loudly: %r" % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE,
+                         "the exact typed string must be parked for reclaim: %r"
+                         % state)
+
+
 class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):
     """#354 — the SAME render-lag hazard hits `_undo_appended_text`
     (the box-with-residual-content sibling of `_undo_typed_text`) for the
