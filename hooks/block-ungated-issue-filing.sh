@@ -914,6 +914,13 @@ def _filer_authority_and_own_stream(cwd, repo_dir):
             sys.path.insert(0, repo_dir)
         import airuleset as _ar
         profile = _ar.resolve_authority(cwd)
+        # airuleset#839: the PROFILE half (resolve_authority -> _current_user) is
+        # uid-based/un-spoofable; the OWN-STREAM half below still uses
+        # getpass.getuser() (env-spoofable). This is a labeling-HYGIENE gate, not
+        # the merge/deploy/close authority boundary, so hardening it (which needs
+        # a subprocess test-identity seam) is deferred to issue 840. Do NOT switch
+        # to _current_user() here without reworking test_scope_gate.py's own-stream
+        # simulation at the same time.
         user = getpass.getuser()
         result = (profile, ("stream:%s" % user).lower())
     except Exception:

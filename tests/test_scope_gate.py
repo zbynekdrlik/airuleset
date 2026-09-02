@@ -37,12 +37,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-ungated-issue-filing.sh"
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO_ROOT))
+import airuleset  # noqa: E402
 
 
 _DEFAULT_EMPTY_GH_DIR = None
@@ -66,13 +70,20 @@ def _default_gh_stub():
 
 
 def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
-    """`user` (#390): overrides `getpass.getuser()` for the whole hook
-    subprocess by setting LOGNAME (checked FIRST by getpass.getuser(),
-    before USER/LNAME/USERNAME) -- lets a test simulate filing from a
-    specific sub-dev stream account's linux identity without needing a
-    real system user. `None` (the default) leaves the real invoking
-    session's identity untouched, exactly like every pre-existing test in
-    this file already assumes.
+    """`user` (#390): the simulated filer's sub-dev stream identity. Two halves,
+    since airuleset#839:
+    - The AUTHORITY PROFILE gate (`resolve_authority(cwd) != full`) is now
+      uid-based (`_current_user()`), so env `LOGNAME`/`USER` no longer control
+      it — run() writes a `<!-- airuleset:authority=<profile> -->` marker into
+      the hook's cwd (honored FIRST by `resolve_authority`), the profile derived
+      from `user` via AUTHORITY_BY_USER.
+    - The OWN-STREAM half (`stream:<x>` comparison) still derives from the hook's
+      `getpass.getuser()` (a labeling-HYGIENE read deliberately left un-hardened
+      in the #839 hotfix — the merge/deploy/close boundary is the profile gate,
+      not this; hardening it needs a test-identity seam, tracked as a follow-up),
+      so run() STILL sets LOGNAME/USER to give the own-stream identity.
+    A reduced `user` therefore both writes the reduced-profile marker AND sets
+    the own-stream; a full account / None writes no marker (the real full box).
 
     `hook_path` (#390 adversarial-review MINOR-2): run a DIFFERENT copy of
     the hook script (e.g. one deliberately isolated under a directory with
@@ -87,9 +98,16 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
     if user is not None:
         env["LOGNAME"] = user
         env["USER"] = user
+    profile = airuleset.AUTHORITY_BY_USER.get(user) if user else None
+    run_cwd = cwd
+    if profile is not None:
+        if run_cwd is None:
+            run_cwd = tempfile.mkdtemp(prefix="airuleset-scopegate-cwd-")
+        Path(run_cwd, "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=%s -->\n" % profile, encoding="utf-8")
     return subprocess.run(
         ["bash", str(hook_path or HOOK)], input=payload, capture_output=True, text=True,
-        env=env, cwd=cwd or str(REPO_ROOT),
+        env=env, cwd=run_cwd or str(REPO_ROOT),
     )
 
 
@@ -1250,11 +1268,13 @@ class TestStreamRoutingGate(TestCase):
     line is also required. A full-authority filer (airuleset#827: in
     FULL_AUTHORITY_USERS -- the maintainer/gatekeeper, e.g. newlevel) has no
     "own" stream to compare against and is NEVER gated -- ordinary core-ticket
-    filing carries no stream label by design (`_core_search_excl()`). Pre-#827
-    any unmapped user resolved full via the catch-all; that now fails safe to
-    fork-no-merge, so these fixtures must name a REAL full account — `gatekeeper`,
-    chosen distinct from the suite's own run-user so the LOGNAME/USER override is
-    load-bearing (a run-user fixture would pass even if that plumbing broke)."""
+    filing carries no stream label by design (`_core_search_excl()`). Since
+    airuleset#839 the PROFILE gate is uid-based, so a reduced fixture (`david2`)
+    writes a `fork-no-merge` marker into the hook's cwd to engage the gate (via
+    AUTHORITY_BY_USER), while LOGNAME still supplies the own-stream identity for
+    the getpass-based comparison; a `gatekeeper` fixture writes NO marker -> the
+    real full box -> not gated (the profile half is what makes the gate engage,
+    proven load-bearing by the reduced-marker tests that DO block)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-streamroute-test-")
