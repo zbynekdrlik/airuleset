@@ -10675,6 +10675,78 @@ class TestApiWatchdog(TestCase):
         self.assertIn("projx", self.pings[0][0])
         self.assertFalse(os.path.exists(pf), "pending claimed/consumed")
 
+    def test_deliver_done_skips_pending_owned_by_a_foreign_uid(self):
+        # #850: subdev runs ~12 stream accounts sharing one flat /tmp; every
+        # account's Job 5 saw every OTHER account's pending ✅ file (world-
+        # readable, no ownership check) and delivered it under its OWN
+        # identity -- 9 duplicate pings for one real event. uid-scope the
+        # sweep: only the account that WROTE a pending file may deliver it.
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        self._txn_for_sid("sidOwn", [self._DONE], 300, now, cwd="/devel/projx")
+        self._txn_for_sid("sidForeign", [self._DONE], 300, now, cwd="/devel/projy")
+        pf_own = prefix + "sidOwn"
+        pf_foreign = prefix + "sidForeign"
+        Path(pf_own).write_text("✅ moja praca hotova")
+        Path(pf_foreign).write_text("✅ cudzia praca hotova")
+
+        real_stat = os.stat
+        my_uid = os.getuid()
+
+        def fake_stat(path, *a, **kw):
+            st = real_stat(path, *a, **kw)
+            if os.fspath(path) == pf_foreign:
+                fields = (st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                          my_uid + 1, st.st_gid, st.st_size,
+                          st.st_atime, st.st_mtime, st.st_ctime)
+                return os.stat_result(fields)
+            return st
+
+        with m.patch.object(self.w.sweep_jobs.os, "stat", side_effect=fake_stat):
+            self._deliver(now, prefix)
+
+        self.assertEqual(len(self.pings), 1,
+                         "only the own-uid pending is delivered")
+        self.assertIn("moja praca", self.pings[0][0])
+        self.assertFalse(os.path.exists(pf_own), "own pending claimed/consumed")
+        self.assertTrue(os.path.exists(pf_foreign),
+                        "foreign pending is neither sent nor unlinked")
+
+    def test_deliver_done_ignores_a_foreign_owned_cwd_sibling(self):
+        # #850: the `-cwd-` sibling file (#668) gets the SAME ownership rule
+        # as the main pending file -- a foreign-owned sibling is never read
+        # (so it can't leak a wrong project label) and never unlinked (only
+        # the account that wrote it may claim it).
+        now, prefix = 1_000_000, os.path.join(self.tmp, "pend-")
+        # cwd="" -> _cwd_from_transcript resolves nothing, forcing the
+        # #668 sibling-file fallback read.
+        self._txn_for_sid("sidS", [self._DONE], 300, now, cwd="")
+        pf = prefix + "sidS"
+        cwd_pf = prefix + "cwd-sidS"
+        Path(pf).write_text("✅ hotovo")
+        Path(cwd_pf).write_text("/devel/foreign-project")
+
+        real_stat = os.stat
+        my_uid = os.getuid()
+
+        def fake_stat(path, *a, **kw):
+            st = real_stat(path, *a, **kw)
+            if os.fspath(path) == cwd_pf:
+                fields = (st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                          my_uid + 1, st.st_gid, st.st_size,
+                          st.st_atime, st.st_mtime, st.st_ctime)
+                return os.stat_result(fields)
+            return st
+
+        with m.patch.object(self.w.sweep_jobs.os, "stat", side_effect=fake_stat):
+            self._deliver(now, prefix)
+
+        self.assertEqual(len(self.pings), 1, "own pending still delivers")
+        self.assertNotIn("foreign-project", self.pings[0][0],
+                         "a foreign-owned cwd sibling must never be read")
+        self.assertFalse(os.path.exists(pf), "own pending claimed/consumed")
+        self.assertTrue(os.path.exists(cwd_pf),
+                        "foreign-owned cwd sibling is never unlinked")
+
     def test_deliver_done_cleared_when_refired(self):
         # the user's exact worry: a session that said ✅ then a bg task re-fired it
         # (now ⏳) must NOT be pinged "done" — clear the stale pending silently.
