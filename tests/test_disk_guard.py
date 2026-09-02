@@ -106,7 +106,9 @@ def test_reclaimable_classes_is_the_fence():
     fence = dg.RECLAIMABLE_CLASSES
     assert "worktree" in fence and "cli-version" in fence and "uploads" in fence
     assert "transcript" in fence and "toolchain" in fence and "scratch" in fence
-    for forbidden in ("runner", "var-log", "other-home", "gh-runner"):
+    # docker is a box-wide/root op (prunes shared images) → deferred to #841,
+    # deliberately NOT in the fence (#834 review 🔴).
+    for forbidden in ("runner", "var-log", "other-home", "gh-runner", "docker"):
         assert forbidden not in fence
 
 
@@ -211,6 +213,32 @@ def test_decision_log_records_action_and_skip(tmp_path):
     assert "500" in text
 
 
+def test_dry_run_action_lines_are_tagged_would(tmp_path):
+    # #834 review 🟡: a dry-run must NOT write an unmarked DELETE line to the
+    # audit log (it records a deletion that never happened).
+    logp = tmp_path / "disk-guard.log"
+
+    def planner():
+        return [{"cls": "uploads", "path": "/h/uploads/old.mp4", "bytes": 500,
+                 "kind": "delete", "reason": None}]
+
+    dg.execute_drain(
+        status={"worst_pct": 82, "dim": "bytes", "level": "drain",
+                "mounts": [{"mount": "/", "worst_pct": 82}]},
+        home=str(tmp_path),
+        planners=[("uploads", planner)],
+        recheck_fn=lambda: 82,
+        do_action_fn=lambda a: a["bytes"],
+        geteuid_fn=lambda: 1000,
+        log_path=str(logp),
+        now=1.0,
+        dry_run=True,
+    )
+    text = logp.read_text()
+    assert "WOULD-DELETE" in text
+    assert "\nDELETE " not in text and not text.startswith("DELETE ")
+
+
 # --------------------------------------------------------------------------- #
 # uploads age-out planner
 # --------------------------------------------------------------------------- #
@@ -291,15 +319,19 @@ def _git_run_factory(responses):
 
 
 def test_worktree_reclaimable_when_head_reachable_from_origin(tmp_path):
-    # HEAD is an ancestor of refs/autopilot-wip/<branch> (the durability backup)
+    # HEAD is preserved on origin via the refs/autopilot-wip/<branch> backup —
+    # proven ONLY through its origin SHA (ls-remote), NOT the local ref name
+    # (#834 review: a local-only wip ref whose push failed is not origin proof).
     # → the DIRECTORY is disk we can free; the branch ref is kept.
     p = tmp_path / "wt"
     p.mkdir()
     gr = _git_run_factory({
         ("rev-parse", "HEAD"): "abc123\n",
-        ("merge-base", "--is-ancestor", "abc123", "refs/autopilot-wip/david/x"): "",
         ("status", "--porcelain"): "",           # clean
         ("ls-remote", "origin", "refs/autopilot-wip/david/x"): "abc123\trefs/autopilot-wip/david/x\n",
+        # HEAD is its own ancestor → reachable from the resolved origin wip SHA
+        ("merge-base", "--is-ancestor", "abc123", "abc123"): "",
+        # origin/main and origin/david/x are NOT ancestors here (no response → None)
     })
     row = wt._worktree_reclaimable(
         root=str(tmp_path), path=str(p), branch="david/x", base="main",
@@ -311,6 +343,50 @@ def test_worktree_reclaimable_when_head_reachable_from_origin(tmp_path):
     assert row["reason"] is None                 # reclaimable
     assert row["kind"] == "worktree"
     assert "autopilot-wip" in (row.get("reachable_via") or "")
+
+
+def test_worktree_NOT_reclaimable_via_local_only_wip_ref(tmp_path):
+    # A wip backup whose push to origin FAILED leaves a LOCAL ref only; it must
+    # NOT read as reachable-from-origin (#834 review 🟡). ls-remote finds nothing
+    # on origin → not reclaimable, even though a local ref name would match.
+    p = tmp_path / "wt"
+    p.mkdir()
+    gr = _git_run_factory({
+        ("rev-parse", "HEAD"): "abc123\n",
+        ("status", "--porcelain"): "",
+        # a LOCAL-only wip ref would match this, but the code never tries it:
+        ("merge-base", "--is-ancestor", "abc123", "refs/autopilot-wip/david/x"): "",
+        ("ls-remote", "origin", "refs/autopilot-wip/david/x"): "",   # not on origin
+    })
+    row = wt._worktree_reclaimable(
+        root=str(tmp_path), path=str(p), branch="david/x", base="main",
+        git_run=gr, now=1_000_000_000.0, min_idle_s=86400,
+        in_live_use=lambda _p: False,
+        recency_fn=lambda _r, _p, _n: 5 * 86400,
+        precious_fn=lambda _p: False,
+    )
+    assert row["reason"] is not None
+    assert "origin" in row["reason"].lower() or "reachable" in row["reason"].lower()
+
+
+def test_worktree_NOT_reclaimable_when_locked(tmp_path):
+    # A locked worktree is a live session's (#348) — never removed (review 🔴).
+    p = tmp_path / "wt"
+    p.mkdir()
+    gr = _git_run_factory({
+        ("rev-parse", "HEAD"): "abc\n",
+        ("merge-base", "--is-ancestor", "abc", "origin/main"): "",
+        ("status", "--porcelain"): "",
+    })
+    row = wt._worktree_reclaimable(
+        root=str(tmp_path), path=str(p), branch="david/z", base="main",
+        git_run=gr, now=1_000_000_000.0, min_idle_s=86400, locked=True,
+        in_live_use=lambda _p: False,
+        recency_fn=lambda _r, _p, _n: 5 * 86400,
+        precious_fn=lambda _p: False,
+    )
+    assert row["reason"] is not None
+    assert "lock" in row["reason"].lower()
 
 
 def test_worktree_NOT_reclaimable_when_head_unreachable(tmp_path):
@@ -428,6 +504,41 @@ def test_worktree_orphan_gitdir_is_reclaimable(tmp_path):
     )
     assert row["reason"] is None
     assert row["kind"] == "orphan-gitdir"
+
+
+def test_worktree_orphan_gitdir_reclaimable_with_REAL_default_precious_fn(tmp_path):
+    # #834 review 🟡: the orphan branch must run BEFORE the precious check AND the
+    # real default precious-check must not fail-True on an orphan (git is
+    # unreadable → fs-walk fallback). No precious file present → reclaimed.
+    p = tmp_path / "agent-orphan"
+    p.mkdir()
+    (p / ".git").write_text("gitdir: /home/david/gone/.git/worktrees/agent-orphan\n")
+    (p / "harmless.txt").write_text("x")
+    row = wt._worktree_reclaimable(
+        root=str(tmp_path), path=str(p), branch=None, base="main",
+        git_run=None, now=1_000_000_000.0, min_idle_s=86400,   # REAL git + precious
+        in_live_use=lambda _p: False,
+        recency_fn=lambda _r, _p, _n: 30 * 86400,
+    )
+    assert row["reason"] is None
+    assert row["kind"] == "orphan-gitdir"
+
+
+def test_worktree_orphan_gitdir_kept_when_precious_file_present(tmp_path):
+    # An orphan holding a .env must be KEPT even though its git state is
+    # unreadable (the fs-walk precious fallback finds it; #834 review 🟡).
+    p = tmp_path / "agent-orphan2"
+    p.mkdir()
+    (p / ".git").write_text("gitdir: /home/david/gone/.git/worktrees/agent-orphan2\n")
+    (p / ".env").write_text("SECRET=1")
+    row = wt._worktree_reclaimable(
+        root=str(tmp_path), path=str(p), branch=None, base="main",
+        git_run=None, now=1_000_000_000.0, min_idle_s=86400,   # REAL git + precious
+        in_live_use=lambda _p: False,
+        recency_fn=lambda _r, _p, _n: 30 * 86400,
+    )
+    assert row["reason"] is not None
+    assert "precious" in row["reason"].lower()
 
 
 # --------------------------------------------------------------------------- #

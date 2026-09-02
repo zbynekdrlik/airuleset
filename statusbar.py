@@ -390,9 +390,13 @@ def disk_segment(home=None, now=None):
         return ""
     if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
         return ""
-    if worst < DISK_SEGMENT_NOTICE_PCT:
+    # Use the guard's own LEVEL from the cache (no threshold re-derivation /
+    # drift; #834 review 🔵). Fall back to the pct thresholds only if the cache
+    # predates the level field.
+    level = cache.get("level")
+    if level == "ok" or (level is None and worst < DISK_SEGMENT_NOTICE_PCT):
         return ""
-    colour = 196 if worst >= DISK_SEGMENT_RED_PCT else 214
+    colour = 196 if (level == "critical" or (level is None and worst >= DISK_SEGMENT_RED_PCT)) else 214
     return "\033[38;5;%dmdisk %d%%\033[0m" % (colour, int(worst))
 
 

@@ -47,10 +47,14 @@ MOUNTS = ("/", "/home", "/tmp")
 # The scope FENCE (#834 — "surface-not-delete for runner/docker/logs/other
 # users"). The executor NEVER acts on a class outside this literal allowlist;
 # a rogue planner emitting one is skipped+logged. Every member here is OUR own
-# per-user reclaimable class — never a root/cross-user one.
+# per-user reclaimable class — never a root/cross-user one. NOTE: `docker` is
+# deliberately ABSENT — a `docker image prune` for a docker-group user talks to
+# the ROOT daemon and prunes shared/cross-user images (CI images, other
+# streams'), which is a box-wide op, so docker stays fully in the root-leg
+# follow-up (surfaced there, never auto-pruned here) — review 🔴.
 RECLAIMABLE_CLASSES = frozenset({
     "scratch", "tmp-stray", "worktree", "cli-version",
-    "uploads", "transcript", "toolchain", "journal", "docker",
+    "uploads", "transcript", "toolchain", "journal",
 })
 
 DISK_GUARD_DIRNAME = "disk-guard"
@@ -158,12 +162,15 @@ def mount_stats(statvfs_fn=None, dev_fn=None, mounts=MOUNTS):
         try:
             dev = dev_fn(m)
         except Exception:
-            continue
+            continue          # a mount that isn't present (e.g. no separate /home) — normal
         if dev in seen:
             continue
         try:
             s = statvfs_fn(m)
-        except Exception:
+        except Exception as e:
+            # dev resolved but statvfs failed — a real anomaly (the guard goes
+            # pressure-BLIND on this mount), never silent (review 🔵).
+            _dbg("statvfs failed for %s: %r — mount not measured" % (m, e))
             continue
         seen.add(dev)
         used = s.f_blocks - s.f_bfree
@@ -402,65 +409,28 @@ def _plan_toolchain(home, now):
     return discover_toolchain_dirs(home=home)
 
 
-def _plan_journal(home, now, dry_run):
+def _plan_journal(home, now):
     """Per-user journald vacuum (#834 rung g, own-user half — the system journal
-    + apt clean are root, #841). A single self-contained action executed inline."""
-    if dry_run:
-        return [{"cls": "journal", "path": "journalctl --user --vacuum-size=100M",
-                 "bytes": 0, "kind": "skip", "reason": "dry-run"}]
-    try:
-        subprocess.run(["journalctl", "--user", "--vacuum-size=100M"],
-                       capture_output=True, text=True, timeout=60)
-    except Exception as e:
-        return [{"cls": "journal", "path": "journalctl --user", "bytes": 0,
-                 "kind": "skip", "reason": "journal vacuum unavailable: %r" % e}]
+    + apt clean are root, #841). Returns an ACTION (kind `journal-vacuum`) so the
+    subprocess runs inside `_perform_action` through the do_action seam + fence,
+    never at planner time (review 🟡); dry-run therefore never vacuums."""
     return [{"cls": "journal", "path": "journalctl --user --vacuum-size=100M",
-             "bytes": 0, "kind": "report", "reason": "user journal vacuumed to 100M"}]
+             "bytes": 0, "kind": "journal-vacuum", "reason": None}]
 
 
-def _plan_docker(home, now, dry_run):
-    """Docker image prune of dangling/unused images — ONLY where `docker` is
-    reachable by THIS user (self-gating; if the user is not in the `docker`
-    group the probe fails → skip+log, the root case is #841). Runs only at
-    ≥90 % (the caller gates the whole docker rung on the critical level)."""
-    try:
-        probe = subprocess.run(["docker", "info"], capture_output=True,
-                               text=True, timeout=15)
-    except Exception as e:
-        return [{"cls": "docker", "path": "docker", "bytes": 0, "kind": "skip",
-                 "reason": "docker not reachable by this user: %r (root case #841)" % e}]
-    if probe.returncode != 0:
-        return [{"cls": "docker", "path": "docker", "bytes": 0, "kind": "skip",
-                 "reason": "docker not reachable by this user (root case #841)"}]
-    if dry_run:
-        return [{"cls": "docker", "path": "docker image prune -af", "bytes": 0,
-                 "kind": "skip", "reason": "dry-run"}]
-    try:
-        subprocess.run(["docker", "image", "prune", "-af"],
-                       capture_output=True, text=True, timeout=120)
-    except Exception as e:
-        return [{"cls": "docker", "path": "docker image prune -af", "bytes": 0,
-                 "kind": "skip", "reason": "prune failed: %r" % e}]
-    return [{"cls": "docker", "path": "docker image prune -af", "bytes": 0,
-             "kind": "report", "reason": "unused docker images pruned"}]
-
-
-def _default_planners(home, now, dry_run, critical):
-    """The auto-drain LADDER, cheapest/safest first (#834 rung order a→h). Docker
-    (h) is included only at the critical level (its images are re-pulled by the
-    next CI run)."""
-    ladder = [
+def _default_planners(home, now):
+    """The auto-drain LADDER, cheapest/safest first (#834 rung order a→g,
+    own-home + own-user only). Docker (rung h) is a box-wide/root op and stays
+    in the root-leg follow-up — never auto-pruned here (review 🔴)."""
+    return [
         ("scratch", lambda: _plan_scratch(home, now)),
         ("worktree", lambda: _plan_worktrees(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("uploads", lambda: _plan_uploads(home, now)),
         ("transcript", lambda: _plan_transcripts(home, now)),
         ("toolchain", lambda: _plan_toolchain(home, now)),
-        ("journal", lambda: _plan_journal(home, now, dry_run)),
+        ("journal", lambda: _plan_journal(home, now)),
     ]
-    if critical:
-        ladder.append(("docker", lambda: _plan_docker(home, now, dry_run)))
-    return ladder
 
 
 # --------------------------------------------------------------------------- #
@@ -468,28 +438,54 @@ def _default_planners(home, now, dry_run, critical):
 # --------------------------------------------------------------------------- #
 def _rm_path(path):
     """Delete a file or directory, never crossing a filesystem
-    (``--one-file-system``). Raises on failure (the caller logs it)."""
-    if os.path.isdir(path) and not os.path.islink(path):
+    (``--one-file-system``). TOCTOU re-verify (review 🟡): re-lstat immediately
+    and REFUSE a path that has become a symlink since discovery (never delete
+    THROUGH a symlink). Raises on failure (the caller logs it)."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return                              # already gone between plan and act — fine
+    import stat as _stat
+    if _stat.S_ISLNK(st.st_mode):
+        raise OSError("refusing to delete %s — it is now a symlink (TOCTOU)" % path)
+    if os.path.isdir(path):
         subprocess.run(["rm", "-rf", "--one-file-system", "--", path],
-                       check=True, capture_output=True, text=True, timeout=120)
+                       check=True, capture_output=True, text=True, timeout=300)
     else:
         os.unlink(path)
 
 
 def _remove_worktree_dir(a):
-    """`git worktree remove --force` the directory (the branch REF is kept),
-    falling back to rm+prune if git refuses; the branch is never deleted."""
+    """`git worktree remove` the directory (the branch REF is kept). NO
+    `--force`: the tree was verified clean at plan time, so plain `remove`
+    succeeds; a state that raced dirty makes git REFUSE, and that refusal is a
+    SKIP (raise → logged FAIL), NEVER a raw `rm -rf` that would bulldoze it
+    (review 🔴). TOCTOU re-verify: re-check `git status` clean immediately
+    before removal (review 🟡)."""
     repo, path = a.get("repo"), a.get("path")
-    if repo:
-        r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--force",
-                            "--", path], capture_output=True, text=True, timeout=60)
-        if r.returncode == 0:
-            return
-        _rm_path(path)
-        subprocess.run(["git", "-C", repo, "worktree", "prune"],
-                       capture_output=True, text=True, timeout=30)
-    else:
-        _rm_path(path)
+    if not repo:
+        raise OSError("worktree-remove with no repo for %s" % path)
+    clean = _worktree_status_clean_recheck(path)
+    if clean is not True:
+        raise OSError("worktree %s no longer clean/measurable at remove time — SKIP" % path)
+    r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--", path],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise OSError("git worktree remove refused %s: %s" % (path, (r.stderr or "").strip()))
+
+
+def _worktree_status_clean_recheck(path):
+    """True only when `git status --porcelain` in `path` is empty NOW; False if
+    it reports changes; None if unmeasurable. A pre-delete TOCTOU guard using
+    the SAME check the planner used (review 🟡)."""
+    try:
+        r = subprocess.run(["git", "-C", path, "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() == ""
 
 
 def _perform_action(a):
@@ -498,10 +494,19 @@ def _perform_action(a):
     nbytes = a.get("bytes", 0) or 0
     if kind == "gzip":
         from cli_scratch_sweep import _compress_transcript_file
-        _compress_transcript_file(path)
+        res = _compress_transcript_file(path)
+        # _compress_transcript_file NEVER raises; removed=False is a failure it
+        # returns as data — surface it as a FAIL, not a false success (review 🟡).
+        if not (isinstance(res, dict) and res.get("removed")):
+            raise OSError("gzip did not complete for %s: %s"
+                          % (path, (res or {}).get("reason") if isinstance(res, dict) else res))
         return nbytes
     if kind == "worktree-remove":
         _remove_worktree_dir(a)
+        return nbytes
+    if kind == "journal-vacuum":
+        subprocess.run(["journalctl", "--user", "--vacuum-size=100M"],
+                       check=True, capture_output=True, text=True, timeout=60)
         return nbytes
     if kind == "delete":
         _rm_path(path)
@@ -518,12 +523,14 @@ def _make_do_action(dry_run):
 
 
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
-                  geteuid_fn=None, log_path=None, now=None):
+                  geteuid_fn=None, log_path=None, now=None, dry_run=False):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
     it is back under :data:`TARGET_PCT`. Every action AND skip is logged; a
     class outside :data:`RECLAIMABLE_CLASSES` is skip-fenced, never acted on.
-    Returns the log lines (also appended to `log_path`)."""
+    Under `dry_run` the action verbs are tagged `WOULD-…` so the audit log never
+    records a deletion that did not happen (review 🟡). Returns the log lines
+    (also appended to `log_path`)."""
     geteuid_fn = geteuid_fn or os.geteuid
     now = time.time() if now is None else now
     logs = []
@@ -575,7 +582,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 rung_lines.append(_log_line(now, "FAIL", path, planned,
                                             "action error: %r" % e))
                 continue
-            rung_lines.append(_log_line(now, kind.upper(), path, planned,
+            verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
+            rung_lines.append(_log_line(now, verb, path, planned,
                                         "freed~=%s %s" % (freed, reason or "")))
         logs.extend(rung_lines)
         _append_log(log_path, rung_lines)
@@ -667,19 +675,37 @@ def _mark_drained(home, now):
         _dbg("could not record last-drain: %r" % e)
 
 
+# Distinct from `None`: the lock file could not be CREATED (e.g. ENOSPC on a
+# 100%-full bytes/inodes mount — the exact emergency this guard exists for), so
+# we proceed LOCKLESS rather than mute the guard forever (review 🟡).
+_LOCK_UNAVAILABLE = object()
+
+
 def _acquire_lock(home):
+    """A held fd on success; `None` when ANOTHER drain holds the lock (skip this
+    poll); :data:`_LOCK_UNAVAILABLE` when the lock file itself cannot be created
+    (proceed LOCKLESS — never mute the guard on a full disk)."""
     try:
         p = _guard_dir(home) / LOCK_NAME
         p.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(p), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        _dbg("lock file uncreatable (%r) — proceeding lockless" % e)
+        return _LOCK_UNAVAILABLE
+    try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except (OSError, BlockingIOError):
-        return None
+    except BlockingIOError:
+        os.close(fd)
+        return None                         # another drain holds it — skip
+    except OSError as e:
+        os.close(fd)
+        _dbg("flock failed (%r) — proceeding lockless" % e)
+        return _LOCK_UNAVAILABLE
+    return fd
 
 
 def _release_lock(fd):
-    if fd is None:
+    if fd is None or fd is _LOCK_UNAVAILABLE:
         return
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -725,9 +751,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         logs.append("disk-guard: %d%% — another drain holds the lock, skipping"
                     % status["worst_pct"])
         return logs
+    if lock is _LOCK_UNAVAILABLE:
+        logs.append("disk-guard: %d%% — lock uncreatable (disk full?), draining LOCKLESS"
+                    % status["worst_pct"])
     try:
-        critical = status["level"] == "critical"
-        planners = _default_planners(home, now, dry_run, critical)
+        planners = _default_planners(home, now)
 
         def recheck():
             return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
@@ -735,8 +763,10 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
 
         do_action = _make_do_action(dry_run)
         logs += execute_drain(status, home, planners, recheck, do_action,
-                              geteuid_fn=geteuid_fn, log_path=_log_path(home), now=now)
-        _mark_drained(home, now)
+                              geteuid_fn=geteuid_fn, log_path=_log_path(home),
+                              now=now, dry_run=dry_run)
+        if not dry_run:
+            _mark_drained(home, now)        # never cadence-gate a REAL drain off a dry-run
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
         if post["level"] == "critical":
             logs += escalate(post, home, now, dry_run)

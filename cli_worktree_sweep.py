@@ -845,28 +845,44 @@ def discover_salvage_worktrees(home=None, git_run=None, now=None):
 # --------------------------------------------------------------------------- #
 _PRECIOUS_IGNORED_PATTERNS = (".env", ".env.*", "*.env", "*.key", "*.pem",
                               "local.settings*", "*.secret")
+# glob pathspecs matching the patterns at ANY depth — `git status --ignored`
+# (traditional) collapses a wholly-ignored DIRECTORY to one `!! dir/` entry and
+# would hide a `.env` inside an ignored `config/` (#834 review 🟡), so enumerate
+# per-file via `git ls-files` with these pathspecs (bounded: only precious names).
+_PRECIOUS_PATHSPECS = (":(glob)**/.env", ":(glob).env", ":(glob)**/.env.*",
+                       ":(glob)**/*.env", ":(glob)**/*.key", ":(glob)**/*.pem",
+                       ":(glob)**/local.settings*", ":(glob)**/*.secret")
+
+
+def _fs_walk_has_precious(path):
+    """Bounded filesystem fallback for a worktree whose git state is unreadable
+    (an orphan-gitdir): walk for a precious basename. True if one is present."""
+    import fnmatch
+    try:
+        for dirpath, _dirs, files in os.walk(path, onerror=lambda e: None):
+            for f in files:
+                for pat in _PRECIOUS_IGNORED_PATTERNS:
+                    if fnmatch.fnmatch(f, pat):
+                        return True
+    except OSError:
+        return True                         # unmeasurable → fail-safe keep
+    return False
 
 
 def _worktree_has_precious_ignored(path, git_run=None):
-    """True if a GITIGNORED file matching a precious pattern (`.env`/`*.key`/
-    `local.settings*`) sits in the worktree — `git status --porcelain` catches
-    untracked but NOT ignored files, so removing the dir would silently lose a
-    per-worktree secret/local config (#834 review-bite: the ignored-file loss).
-    Fail-safe: unmeasurable (git error) → True (treat as precious → keep)."""
-    import fnmatch
+    """True if a precious (`.env`/`*.key`/`local.settings*`/…) IGNORED file sits
+    in the worktree — `git status --porcelain` catches untracked but NOT ignored
+    files, so removing the dir would silently lose a per-worktree secret/local
+    config (#834). Enumerated per-file via `git ls-files --others --ignored`
+    (recurses into ignored dirs, unlike `status --ignored`'s dir-collapse —
+    review 🟡). When git itself cannot read the repo (an orphan-gitdir), falls
+    back to a bounded fs walk so an orphan is not falsely kept (review 🟡)."""
     git_run = git_run or _worktree_git
-    out = git_run(["status", "--porcelain", "--ignored"], path)
-    if out is None:
-        return True
-    for line in out.splitlines():
-        if not line.startswith("!!"):
-            continue
-        name = line[3:].strip().strip('"')
-        base = os.path.basename(name.rstrip("/"))
-        for pat in _PRECIOUS_IGNORED_PATTERNS:
-            if fnmatch.fnmatch(base, pat) or fnmatch.fnmatch(name, pat):
-                return True
-    return False
+    out = git_run(["ls-files", "--others", "--ignored", "--exclude-standard",
+                   "-z", "--", *_PRECIOUS_PATHSPECS], path)
+    if out is not None:
+        return bool(out.replace("\x00", "").strip())
+    return _fs_walk_has_precious(path)      # git unreadable → fs fallback
 
 
 def _is_orphan_gitdir(path):
@@ -900,9 +916,15 @@ def _worktree_head_reachable_from_origin(path, branch, base, head, git_run):
     def is_anc(ref):
         return git_run(["merge-base", "--is-ancestor", head, ref], path) is not None
 
+    # Only ORIGIN-backed refs count. The remote-tracking refs (origin/main,
+    # origin/<base>, origin/<branch>) are on origin by construction. The custom
+    # `refs/autopilot-wip/*` namespace is NOT fetched into refs/remotes, so it is
+    # proven ONLY via its origin SHA from `ls-remote` — the LOCAL ref name is
+    # deliberately NOT tried (a wip backup whose push to origin FAILED leaves a
+    # local-only ref that would be a false "preserved on origin" proof, #834
+    # review 🟡).
     candidates = []
     if branch:
-        candidates.append(("autopilot-wip-ref", "refs/autopilot-wip/%s" % branch))
         candidates.append(("origin-branch", "origin/%s" % branch))
     candidates.append(("origin-main", "origin/main"))
     if base and base not in ("main",):
@@ -925,19 +947,27 @@ def _worktree_head_reachable_from_origin(path, branch, base, head, git_run):
 
 def _worktree_reclaimable(root, path, branch, base, git_run, now,
                           min_idle_s=STALE_WORKTREE_IDLE_MIN_AGE_S,
-                          in_live_use=None, recency_fn=None, precious_fn=None):
+                          in_live_use=None, recency_fn=None, precious_fn=None,
+                          locked=False):
     """Classify ONE worktree directory for disk-guard reclaim. Returns a row
     ``{path, branch, repo, reason, kind, reachable_via}`` — ``reason`` is None
     ONLY when the DIRECTORY is safe to free (the branch ref is always kept). The
-    guards, cheapest-first: not in live use, idle > `min_idle_s`, no precious
-    ignored file, HEAD readable (else classified `orphan-gitdir` when the gitdir
-    points nowhere), clean tree, and HEAD reachable from an origin ref."""
+    guards, cheapest-first: NOT locked (a locked worktree is a live session's,
+    #348 — review 🔴), not in live use, idle > `min_idle_s`, HEAD readable (else
+    classified `orphan-gitdir` when the gitdir points nowhere), no precious
+    ignored file, clean tree, and HEAD reachable from an origin ref. The precious
+    check runs AFTER the HEAD-read so an orphan (unreadable git) is never falsely
+    kept by a git-error fail-safe (review 🟡)."""
+    git_run = git_run or _worktree_git
     in_live_use = in_live_use or _worktree_in_live_use
     recency_fn = recency_fn or _worktree_recency_age_s
     precious_fn = precious_fn or _worktree_has_precious_ignored
     row = {"path": path, "branch": branch, "repo": root, "reason": None,
            "kind": "worktree", "reachable_via": None}
 
+    if locked:
+        row["reason"] = "locked worktree (live session, #348) — never removed"
+        return row
     if in_live_use(path):
         row["reason"] = "live process cwd/fd inside — never removed"
         return row
@@ -945,15 +975,18 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
     if rec is None or rec <= min_idle_s:
         row["reason"] = "too recent / recency unmeasurable (< 24h idle) — kept"
         return row
-    if precious_fn(path):
-        row["reason"] = "precious ignored file present (.env/*.key/local.settings) — kept"
-        return row
 
     head = git_run(["rev-parse", "HEAD"], path)
     if head is None or not head.strip():
+        # git cannot resolve HEAD. A #537 orphan-gitdir (gitdir points nowhere)
+        # is reclaimable litter — but only after a precious-file fs scan (review
+        # 🟡: the orphan branch must precede + still run the precious check).
         if _is_orphan_gitdir(path):
+            if precious_fn(path):
+                row["reason"] = "orphan-gitdir but precious ignored file present — kept"
+                return row
             row["kind"] = "orphan-gitdir"
-            row["reason"] = None          # gitdir points nowhere → #537 rename litter
+            row["reason"] = None
             return row
         row["reason"] = "HEAD unresolvable and not an orphan-gitdir — kept (uncertain)"
         return row
@@ -965,6 +998,9 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
         return row
     if clean is False:
         row["reason"] = "dirty tree (uncommitted work) — never removed"
+        return row
+    if precious_fn(path):
+        row["reason"] = "precious ignored file present (.env/*.key/local.settings) — kept"
         return row
 
     via = _worktree_head_reachable_from_origin(path, branch, base, head, git_run)
@@ -994,7 +1030,9 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
     for root in airuleset._checkout_roots(home):
         if not (Path(root) / ".git").is_dir():
             continue
-        git_run(["worktree", "prune"], root)
+        # NO `git worktree prune` here — a discovery function must not mutate
+        # (it also runs under --dry-run; review 🔵). prune only cleans dangling
+        # admin entries, which this classifier does not depend on.
         entries = _worktree_porcelain_entries(root, git_run=git_run)
         base = _worktree_sweep_base_branch(root, git_run=git_run)
         known = set()
@@ -1007,8 +1045,11 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
             branch = e.get("branch")
             if branch in _STALE_WORKTREE_PROTECTED_BRANCHES or not path:
                 continue
-            out.append(_worktree_reclaimable(root, path, branch, base, git_run, now,
-                                             min_idle_s=min_idle_s, in_live_use=in_live_use))
+            if branch is None:
+                continue                   # detached HEAD — no branch ref to keep, never guessed (review 🔵)
+            out.append(_worktree_reclaimable(
+                root, path, branch, base, git_run, now, min_idle_s=min_idle_s,
+                in_live_use=in_live_use, locked=bool(e.get("locked"))))
         # #537 orphan-gitdir dirs git no longer lists: scan the worktrees dir.
         wt_root = Path(root) / ".claude" / "worktrees"
         if wt_root.is_dir():

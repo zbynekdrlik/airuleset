@@ -37,7 +37,7 @@
     "cli_webterm_profiles.py": 368,
     "cli_webterm_pwa.py": 217,
     "cli_webterm_tunnel.py": 180,
-    "cli_worktree_sweep.py": 1950,
+    "cli_worktree_sweep.py": 1991,
     "close_trigger.py": 477,
     "design_gate.py": 892,
     "discuss_close_guard.py": 180,
@@ -51,7 +51,7 @@
     "filedrop/vault_server.py": 580,
     "goal_registry.py": 287,
     "notify/__init__.py": 3279,
-    "statusbar.py": 864,
+    "statusbar.py": 868,
     "subagent_statusline.py": 300,
     "tests/_goal_arm_helpers.py": 351,
     "tests/_hook_state_cleanup.py": 164,
@@ -426,8 +426,8 @@
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
     "working_time.py": 78,
-    "watchdog/disk_guard.py": 745,
-    "tests/test_disk_guard.py": 463
+    "watchdog/disk_guard.py": 775,
+    "tests/test_disk_guard.py": 574
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
