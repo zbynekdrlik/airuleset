@@ -891,8 +891,9 @@ gap in either.
    > live 2026-09-02).** Claude Code's own worktree-isolation LAUNCH PIN refuses any command whose
    > cwd resolves outside the freshly-pinned worktree — so a fresh `isolation: "worktree"` resume
    > worker told to `git -C <dead worktree>`/`cd` into the DEAD worker's worktree returns
-   > `ISOLATION MISMATCH` (a #827 lane burned ~270k tokens hitting exactly this), `git -C` is
-   > additionally refused by `block-foreign-airuleset-write.sh`, and `EnterWorktree` moves cwd but
+   > `ISOLATION MISMATCH` (a #827 lane burned ~270k tokens hitting exactly this), a dispatched
+   > worker's `git -C` is additionally refused by `block-foreign-airuleset-write.sh` RULE B/B2 (agent
+   > context only — the SUPERVISOR's own `git -C` is NOT blocked), and `EnterWorktree` moves cwd but
    > the harness keeps enforcing the launch pin, so every command afterwards is refused. Use one of
    > the TWO shapes that work WITHIN the guards, chosen by the dead lane's tree state:
    > 1. **CLEAN dead lane (all work committed):** dispatch a fresh `isolation: "worktree"` worker
@@ -907,8 +908,11 @@ gap in either.
    >    isolation self-check IN that directory (toplevel under `.claude/worktrees/`, branch = the
    >    dead lane's branch — NOT `main`/`dev`). RULE B of `block-foreign-airuleset-write.sh` already
    >    allows a worktree-cwd write, so the resume worker commits + continues there; the supervisor
-   >    merges the dead lane's branch as usual. This is the ONLY shape that can reach a dead lane's
-   >    uncommitted edits — a `refs/autopilot-wip/<branch>` backup only exists for COMMITTED work.
+   >    merges the dead lane's branch as usual. This is the only shape a WORKER can use to reach a
+   >    dead lane's uncommitted edits directly — the SUPERVISOR can instead salvage them itself
+   >    (`git -C <worktree> status`, commit the uncommitted work as a `wip:` commit, push the backup,
+   >    then dispatch a shape-1 worker), since a `refs/autopilot-wip/<branch>` backup only ever
+   >    captures COMMITTED work.
 
    > **Multi-stage / long pipelines (e.g. a 3-branch `develop→staging→main` flow) — YOU own the CI
    > waits, not the worker.** A single worker cannot safely hold an hour-plus of successive CI waits:

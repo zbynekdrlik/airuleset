@@ -50,7 +50,7 @@
     "filedrop/vault.py": 1071,
     "filedrop/vault_server.py": 580,
     "goal_registry.py": 287,
-    "notify/__init__.py": 3305,
+    "notify/__init__.py": 3314,
     "statusbar.py": 868,
     "subagent_statusline.py": 300,
     "tests/_goal_arm_helpers.py": 351,

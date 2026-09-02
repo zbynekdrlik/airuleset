@@ -2962,7 +2962,14 @@ def content_dedup_claim(text, owner=None, project=None, now=None,
     O_NOFOLLOW (no symlink-target write) and 0o644 (all tenants read to detect
     the EEXIST claim). Accepted LOW-severity residual: a hostile same-box tenant
     could pre-create a marker to suppress another's ✅ (worst case one missed,
-    recoverable ping) — same-box tenants are the owner's own accounts."""
+    recoverable ping) — same-box tenants are the owner's own accounts. The #832
+    previous-bucket probe adds a second such surface (a fresh-mtime prev-bucket
+    marker) AND a check-then-act cross-process race: the probe read and the
+    O_EXCL create are not one atomic step, so two identical claims straddling a
+    bucket edge within microseconds of each other can both deliver — the edge is
+    closed for the common single-process / non-racing case, not made atomic
+    across processes. Both are fail-OPEN (a duplicate ping, never a lost one),
+    the acceptable direction, so no lock is taken."""
     now = time.time() if now is None else now
     window_s = window_s or CONTENT_DEDUP_WINDOW_S
     d = _content_dedup_store_dir(store_dir)
@@ -2984,7 +2991,9 @@ def content_dedup_claim(text, owner=None, project=None, now=None,
     # #832: the time bucket lives in the claim FILENAME (int(now // window_s)),
     # so two identical payloads a second apart that STRADDLE a bucket edge land
     # in ADJACENT files and BOTH claim — a hard-edged window, not a sliding one.
-    # Close the edge without giving up the mtime-race-free claim: before
+    # Close the edge (for the common single-process / non-racing case; the probe
+    # + create are NOT atomic across processes — accepted fail-open residual in
+    # the docstring) without giving up the mtime-race-free O_EXCL claim: before
     # creating THIS bucket's marker, probe the IMMEDIATELY-PREVIOUS bucket's
     # marker and treat it as a dup only if it was claimed < window_s ago (a true
     # sliding window keyed on the previous delivery's timestamp). A time in

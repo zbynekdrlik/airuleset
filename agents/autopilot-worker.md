@@ -252,8 +252,9 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   worktree, so use the ONE of TWO shapes the supervisor dispatched you as (#836, proven live
   2026-09-02).** A fresh `isolation: "worktree"` worker told to `cd`/`git -C` into a DEAD worker's
   worktree returns `ISOLATION MISMATCH` (Claude Code's launch pin refuses any cwd outside your own
-  freshly-pinned worktree; `git -C` is also refused by `block-foreign-airuleset-write.sh`), so a
-  dead lane is resumed one of two ways, chosen by the supervisor from the dead lane's tree state:
+  freshly-pinned worktree; a dispatched worker's `git -C` is also refused by
+  `block-foreign-airuleset-write.sh` RULE B/B2 — agent context only, never the supervisor's own
+  `git -C`), so a dead lane is resumed one of two ways, chosen by the supervisor from the tree state:
   (1) **CLEAN dead lane (all committed)** — you are a normal `isolation: "worktree"` worker; the
   dispatch names the dead branch and you `git merge --no-ff <dead-lane-branch>` onto YOUR OWN
   branch as your first git step (resolving the version bump to the batch version — `--ff-only` only
@@ -262,8 +263,9 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   `isolation:`; your FIRST command is `cd <dead worktree path>` (Bash cwd persists), THEN the #817
   self-check IN that directory (per its shape-2 EXCEPTION above), THEN commit + continue there
   (RULE B of `block-foreign-airuleset-write.sh` allows a worktree-cwd write). The
-  `refs/autopilot-wip/<branch>` backup only preserves COMMITTED work, so shape 2 is the only way to
-  recover a dead lane's uncommitted edits.
+  `refs/autopilot-wip/<branch>` backup only preserves COMMITTED work, so shape 2 is the only way a
+  WORKER recovers a dead lane's uncommitted edits directly (the supervisor can instead
+  salvage-commit them itself, then dispatch a shape-1 worker).
 - **Your scratchpad directory is SHARED across every sibling worker dispatched in the SAME fleet
   round — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
   conversation id, so every worker the supervisor dispatches this round inherits the identical

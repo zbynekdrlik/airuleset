@@ -406,7 +406,7 @@ class TestCoreSearchExclAliasExpansion(TestCase):
 
 def _gh_filtered(items):
     """A `_gh_out` stand-in with REAL `-label:` exclusion semantics (a mirror
-    of `test_authority_profiles._fake_gh_search_filtered`, inlined so this file
+    of `authority_testlib._fake_gh_search_filtered`, inlined so this file
     stays self-contained): `-label:X` genuinely REMOVES an item carrying X, so
     it can prove that an exclusion term added to the built query actually drops
     a ticket — a pure substring-inclusion fake cannot."""
