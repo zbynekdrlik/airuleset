@@ -1265,5 +1265,646 @@ class TestRepoFlagUnparseableHereString(TestCase):
                          % (r.stdout, r.stderr))
 
 
+# ===========================================================================
+# #824 — front-gate + sibling-detector SIGPIPE hardening (concern 1+2), the
+# `\gh issue close` boundary blind spot + its ISSUE_NUM/N_CLOSE blast radius
+# (concern 3), and comment-value REPO_ARG poisoning (concern 4). Each fix half
+# is independently mutation-verifiable (revert one → only its RED test(s) fail).
+# ===========================================================================
+
+# An EARLY grep match + a >64KB blocked-printf tail is the deterministic SIGPIPE
+# case (the pipe buffer is 64KB). Fed via stdin (run()/_run_with_gh_body pass the
+# payload as `input=`), so the ~128KB single-argv MAX_ARG_STRLEN limit never bites.
+_FILLER_64K = "filler line to pad the command payload past 64KB\n" * 3000
+
+
+def _run_with_gh_body(cmd, cwd, gh_body, hook=None):
+    """Like run(), but injects a CUSTOM fake `gh` body — for the per-repo /
+    per-issue-number author reads the fixed _FAKE_GH cannot express. ME resolves
+    via `authority --self-login` → `gh api user`, which every body below answers
+    'someoneelse'."""
+    d = tempfile.mkdtemp()
+    gh = Path(d) / "gh"
+    gh.write_text(gh_body)
+    gh.chmod(0o755)
+    payload = json.dumps({"tool_input": {"command": cmd}})
+    env = dict(os.environ)
+    env["PATH"] = d + os.pathsep + env.get("PATH", "")
+    env.pop("GH_APP_TOKEN_DIR", None)
+    return subprocess.run(["bash", str(hook or HOOK)], input=payload,
+                          capture_output=True, text=True, cwd=cwd, env=env)
+
+
+# Author read keyed on the -R VALUE: the `baz/qux` poison repo reads SELF
+# ('someoneelse' == ME), every other repo (incl. the cwd fallback) FOREIGN.
+_GH_REPO_SCOPED_AUTHOR = """#!/usr/bin/env bash
+case "$1 $2" in
+  "api user") echo "someoneelse";;
+  "issue view")
+    if printf '%s ' "$@" | grep -q -- '--json labels,comments'; then echo '{"labels":[],"comments":[]}';
+    elif printf '%s ' "$@" | grep -q -- '--json labels'; then :;
+    else
+      if printf '%s ' "$@" | grep -q 'baz/qux'; then echo "someoneelse"; else echo "zbynekdrlik"; fi
+    fi;;
+  *) exit 1;;
+esac
+"""
+
+# Author read keyed on the ISSUE NUMBER (the `view <n>` positional): issue 3312
+# is SELF, everything else FOREIGN.
+_GH_NUMBER_SCOPED_AUTHOR = """#!/usr/bin/env bash
+case "$1 $2" in
+  "api user") echo "someoneelse";;
+  "issue view")
+    if printf '%s ' "$@" | grep -q -- '--json labels,comments'; then echo '{"labels":[],"comments":[]}';
+    elif printf '%s ' "$@" | grep -q -- '--json labels'; then :;
+    else
+      if [ "$3" = "3312" ]; then echo "someoneelse"; else echo "zbynekdrlik"; fi
+    fi;;
+  *) exit 1;;
+esac
+"""
+
+
+class TestFrontGateSigpipe824(TestCase):
+    """#824 concern 1+2: the front gate `is_close` and its sibling `printf|grep`
+    detectors SIGPIPE under `set -o pipefail` on a >64KB multi-line command whose
+    close phrase matches on an early line — `grep -q` short-circuits + exits while
+    `printf` is still blocked writing past the 64KB pipe buffer → SIGPIPE (141) →
+    the detector reads FALSE → the whole hook `exit 0`s (concern 1) before
+    authority is resolved. Fix = here-string `grep … <<< "$X"` (the #772/#816
+    convention) at EVERY `printf|grep` site. Foreign author + reduced authority so
+    no carve-out can rescue the close — detection alone must reach the BLOCK."""
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    def test_blocks_over_64kb_multiline_foreign_close(self):
+        # is_close front gate: RED (rc 0, SIGPIPE bypass) on `printf|grep`, GREEN
+        # (rc 2) on the here-string.
+        r = run("gh issue close 3312 --comment 'note\n%s'" % _FILLER_64K,
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_small_multiline_foreign_close_blocks_control(self):
+        # <64KB: no SIGPIPE, blocks on BOTH old and new code — proves the >64KB
+        # test above is SIGPIPE-SIZE-triggered, not a general miss.
+        small = "x\n" * 100
+        r = run("gh issue close 3312 --comment 'note\n%s'" % small,
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_over_64kb_patch_close(self):
+        # _is_patch_close_cmd's first grep (`gh api … issues/N`) matches early on a
+        # >64KB PATCH command → SIGPIPE → `|| return 1` → not-a-close → is_close=0 →
+        # bypass. RED (rc 0) today, GREEN (rc 2) on the here-string. The PATCH form
+        # is never exempted, so detection == block for a reduced-authority stream.
+        r = run("gh api -X PATCH repos/o/n/issues/3313 --input body.json %s"
+                % _FILLER_64K, self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_no_printf_pipe_grep_remains_in_the_hook(self):
+        # Source-lock: every `printf … | grep` SIGPIPE site is converted to a
+        # here-string, so NONE remains. A revert of ANY single conversion
+        # re-introduces its `printf|grep` and fails this lock — the mutation-verify
+        # net for the shadowed sibling detectors (concern 2) the front gate ties
+        # off end-to-end. `printf … | jq` (the JSON read) is untouched + allowed.
+        src = HOOK.read_text()
+        # Strip the comment part (from the first `#`) so the "NOT printf|grep"
+        # explanatory comments this fix leaves behind are not read as offenders;
+        # a real reverted CODE line has its `printf … | grep` before any `#`.
+        offenders = [ln.strip() for ln in src.splitlines()
+                     if re.search(r"printf\b.*\|\s*grep\b", ln.split("#", 1)[0])]
+        self.assertEqual(offenders, [],
+                         "these `printf|grep` sites must use a here-string "
+                         "(#824 SIGPIPE hardening):\n" + "\n".join(offenders))
+
+    def test_cmd_has_comment_flag_helper_is_sigpipe_immune(self):
+        # Helper-level SIGPIPE proof for a SHADOWED detector (concern 2), the #816
+        # TestRepoFlagUnparseableHereString precedent. `_cmd_has_comment_flag` reads
+        # the global $CMD; on a >64KB command with `--comment` early + a huge tail,
+        # `printf|grep -q` SIGPIPEs → the helper reads "no comment" (FALSE). Extract
+        # the LIVE helper and prove the here-string form returns TRUE.
+        src = HOOK.read_text()
+        m = re.search(r"(?ms)^_cmd_has_comment_flag\(\) \{.*?^\}", src)
+        self.assertIsNotNone(m, "could not locate _cmd_has_comment_flag() in the hook")
+        func = m.group(0)
+        cmd = "gh issue close 3312 --comment 'note\n%s'" % _FILLER_64K
+        self.assertGreater(len(cmd), 64 * 1024)
+        driver = ("set -euo pipefail\nCMD=$(cat)\n" + func + "\n"
+                  "if _cmd_has_comment_flag; then echo TRUE; else echo FALSE; fi\n")
+        r = subprocess.run(["bash", "-c", driver], input=cmd,
+                           capture_output=True, text=True)
+        # RED (FALSE, SIGPIPE) on the pipe form; GREEN (TRUE) on the here-string.
+        self.assertEqual(r.stdout.strip(), "TRUE",
+                         "stdout=%r stderr=%r" % (r.stdout, r.stderr))
+
+
+class TestBackslashCloseBoundary824(TestCase):
+    """#824 concern 3: `\\gh issue close` (bash strips the `\\`, gh runs a real
+    close) is not a `_CLOSE_OPEN` boundary match → is_close=0 → bypass. Fix = widen
+    `_CLOSE_OPEN` to include `\\` (a deliberate superset of `_repo_flag_unparseable`'s
+    #816 class). Its blast radius (the ticket's own RED-matrix note, verified live
+    by the Fable design consult): the unbounded `ISSUE_NUM` substring extraction can
+    grab the `\\gh` self-number while the narrow `N_CLOSE` counts only a later
+    top-level FOREIGN close → the carve-out is checked against the WRONG issue →
+    wrong-ALLOW. Fix = boundary-align `ISSUE_NUM` with N_CLOSE's narrow class.
+    N_CLOSE stays narrow (the #816/#540 deliberate decoupling)."""
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    def test_blocks_backslash_gh_close_of_foreign_issue(self):
+        # RED (rc 0, is_close=0 bypass) today; GREEN (rc 2) once `\\` is in _CLOSE_OPEN.
+        r = run("\\gh issue close 3312 --comment done", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_backslash_gh_close_under_fork_no_merge(self):
+        r = run("\\gh issue close 3312 --comment done", self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fork-no-merge", r.stderr)
+
+    def test_blocks_backslash_self_then_foreign_two_close(self):
+        # The Q2 blast-radius hole (verified live rc 0): `\\gh issue close SELF && gh
+        # issue close FOREIGN`. Today ISSUE_NUM grabs SELF (3312, self-authored) from
+        # the `\\gh` substring while N_CLOSE=1 counts only the top-level FOREIGN 3399
+        # → the carve-out allows on SELF → the foreign 3399 rides through. GREEN once
+        # ISSUE_NUM is boundary-aligned → ISSUE_NUM=3399 (foreign) → BLOCK.
+        r = _run_with_gh_body(
+            "\\gh issue close 3312 --comment ok && gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_single_backslash_self_close(self):
+        # A single `\\gh issue close SELF`: today is_close=0 → bypass (rc 0). After
+        # fix is_close=1 but N_CLOSE=0 (narrow class misses `\\gh`) → the
+        # single-action guard blanks ISSUE_NUM → BLOCK (over-block, safe: `\\gh` is a
+        # bizarre way to type a self-close).
+        r = _run_with_gh_body("\\gh issue close 3312 --comment ok",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_ordinary_self_close_still_allowed_after_widening(self):
+        # Control (passes on BOTH old and new code): a normal `gh issue close SELF`
+        # (start boundary) is unaffected by the `\\` widening + ISSUE_NUM boundary
+        # alignment → still ALLOWED.
+        r = _run_with_gh_body("gh issue close 3312 --comment ok",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_benign_cd_prefix_self_close_still_allowed(self):
+        # Control: `cd x && gh issue close SELF` (space boundary) → ISSUE_NUM=SELF
+        # via the narrow class → ALLOWED (the boundary alignment must not break the
+        # benign-prefix case #533 already locks).
+        r = _run_with_gh_body("cd /tmp && gh issue close 3312 --comment ok",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestRepoArgPoison824(TestCase):
+    """#824 concern 4: the REPO_ARG grep scans the WHOLE command including
+    `--comment`/`-c`/`--reason`/`-r` VALUES, so a `-R x/y`-looking string inside a
+    value yields a NON-EMPTY REPO_ARG → the carve-out reads author/labels from the
+    poisoned repo while the close targets another → wrong-ALLOW. Fix = strip
+    value-flag VALUES into `_CMD_STRIPPED` and run EXTRACTION + the
+    `_repo_flag_unparseable` presence-grep on the stripped copy (DETECTION stays on
+    the original), plus a ≥2-`-R`-tokens-in-stripped fail-safe for the escaped-quote
+    residual. `_GH_REPO_SCOPED_AUTHOR` reads `baz/qux` as SELF, every other repo
+    (incl. the cwd) FOREIGN — so each poison is a wrong-ALLOW today."""
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    def test_blocks_comment_value_poison_variant_a_glued_real_repo(self):
+        # The ticket's example: glued `-Rfoo/bar` (gh's real FOREIGN target) + `-R
+        # baz/qux` (SELF) inside the comment. Today REPO_ARG=baz/qux → author read
+        # hits SELF → ALLOW (rc 0). After fix: comment stripped → `-Rfoo/bar` glued →
+        # REPO_ARG empty → `_repo_flag_unparseable` fires → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 '-Rfoo/bar' --comment 'per -R baz/qux'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_comment_value_poison_variant_b_no_real_repo(self):
+        # No real `-R` (the cwd repo is the FOREIGN target) + `-R baz/qux` (SELF) in
+        # the comment. Today REPO_ARG=baz/qux → author read hits SELF → ALLOW. After
+        # fix: comment stripped → no `-R` → REPO_ARG empty → author read hits the cwd
+        # repo (FOREIGN) → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 --comment 'per -R baz/qux'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_reason_value_poison(self):
+        # The same poison via a `--reason` value (also stripped).
+        r = _run_with_gh_body(
+            "gh issue close 4 '-Rfoo/bar' --reason 'closed per -R baz/qux'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_escaped_quote_repo_poison(self):
+        # The escaped-quote residual (Fable Q3): `--comment 'it'\\''s -R baz/qux'`.
+        # The `'[^']*'` strip eats only `'it'`, leaving a ` -R baz/qux` residue, so
+        # the strip alone does not remove it. The ≥2-`-R`-tokens-in-stripped fail-safe
+        # (a legit close carries exactly one) forces the block: the stripped copy
+        # still has BOTH the glued `'-Rfoo/bar'` and the residue `-R baz/qux` →
+        # `_repo_flag_unparseable` fires → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 '-Rfoo/bar' --comment 'it'\\''s -R baz/qux here'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_legit_self_close_whose_comment_mentions_repo_flag(self):
+        # Control (passes on BOTH old and new code): a legit SELF close (real `-R
+        # baz/qux`, self-authored) whose comment merely MENTIONS `-R` in prose must
+        # NOT be over-blocked. The comment's `-R` is stripped, leaving one real `-R`.
+        r = _run_with_gh_body(
+            "gh issue close 4 -R baz/qux --comment 'note about -R flag'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_legit_close_repo_flag_before_comment(self):
+        # The common case: real `-R baz/qux` (SELF) then a --comment. REPO_ARG still
+        # parses baz/qux from the STRIPPED copy → author read hits baz/qux (SELF) →
+        # ALLOW.
+        r = _run_with_gh_body(
+            "gh issue close 4 -R baz/qux --comment 'fixed on PROD'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestReviewFindings824(TestCase):
+    """#824 adversarial-review findings (salvaged Fable review #1). The base #824
+    implementation (`_strip_value_flags` + stripped-copy extraction/counting) opened
+    NEW wrong-ALLOW regressions the review constructed; each fixture below RED-locks
+    one. All run under a REDUCED-authority cwd with a SELF-vs-FOREIGN author fixture
+    so a wrong target read is a wrong-ALLOW today.
+
+      A-1: the unquoted value arm `[^[:space:]]+` spans shell operators, ERASING a
+           real top-level close from the stripped copy → N_CLOSE under-counts.
+      A-2: the SINGLE-residue escaped-quote poison (no real `-R`, just the residue) —
+           the ≥2-`-R` leg only fires with a SECOND real `-R`, so it escaped (the
+           code comment falsely claimed it caught it).
+      A-3: a GLUED short-flag value (`-c'…'`) is not stripped → its `-R` poisons REPO_ARG.
+      C-1: a reversed `gh SELF && \\gh FOREIGN` pair — the `\\gh` close is invisible to
+           the narrow N_CLOSE + narrow ISSUE_NUM → the self carve-out allows the pair.
+      D-1: `$(gh issue close FOREIGN)` inside a stripped comment value vanishes from
+           the stripped copy → N_CLOSE no longer counts it (the `(` used to).
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- A-1: operator-spanning unquoted value arm erases a top-level close ---
+
+    def test_blocks_operator_spanning_comment_value(self):
+        # `--comment done&&gh issue close FOREIGN`: bash runs BOTH closes. Today the
+        # unquoted value arm eats `done&&gh` as one value → the FOREIGN close is
+        # erased from the stripped copy → N_CLOSE=1 on the self close → carve-out
+        # `exit 0` allows the whole command (rc 0). GREEN: the arm is operator-bounded
+        # so `&&gh issue close 3399` stays → N_CLOSE=2 → blank ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment done&&gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_operator_spanning_via_semicolon(self):
+        # Same class via `;` instead of `&&`.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment done;gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- A-2: single-residue escaped-quote REPO_ARG poison ---
+
+    def test_blocks_single_residue_escaped_quote_repo_poison(self):
+        # `--comment 'it'\\''s -R baz/qux done'` with NO real `-R`: the strip's
+        # single-quote arm loses to leftmost-longest and eats `'it'\\''s`, leaving a
+        # ` -R baz/qux done'` residue → REPO_ARG=baz/qux (SELF in the fixture) while
+        # the close targets the cwd (FOREIGN) → wrong-ALLOW (rc 0) today. The ≥2-`-R`
+        # leg does NOT fire (only ONE `-R` residue). GREEN: the unbalanced-quote leg
+        # (odd `'` count + a residual `-R`) forces `_repo_flag_unparseable` → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 --comment 'it'\\''s -R baz/qux done'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- A-3: glued short-flag value hides a REPO_ARG poison ---
+
+    def test_blocks_glued_short_flag_repo_poison(self):
+        # `-c'evidence -R baz/qux x'` (glued short flag): today the value is NOT
+        # stripped (the pre-#824 separator required a space/`=`), so REPO_ARG=baz/qux
+        # (SELF) → wrong-ALLOW. GREEN: the short flags strip a glued value → the poison
+        # is removed → REPO_ARG empty → author read hits the cwd (FOREIGN) → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 -c'evidence -R baz/qux x'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_glued_short_flag_plain_self_close(self):
+        # Control: a legit self-close with a glued `-c'plain'` comment (no poison)
+        # still ALLOWS — the A-3 strip must not over-block a glued self-close. Passes
+        # on BOTH base (glued not stripped, but no -R so REPO_ARG empty → cwd author
+        # read is issue 3312 = SELF) and fixed (glued stripped → same).
+        r = _run_with_gh_body("gh issue close 3312 -c'client confirmed'",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- C-1: reversed self-then-backslash-foreign mixed pair ---
+
+    def test_blocks_reversed_self_then_backslash_foreign(self):
+        # `gh issue close SELF --comment ok && \\gh issue close FOREIGN`: the `\\gh`
+        # FOREIGN close is invisible to the narrow N_CLOSE (\\ not in the narrow class)
+        # and the narrow ISSUE_NUM extractor → N_CLOSE=1 on SELF → carve-out `exit 0`
+        # allows the pair (rc 0) today (is_close IS 1 via the #824 `\\`-wide _CLOSE_OPEN,
+        # but the count/extraction stay narrow). GREEN: the WIDE N_CLOSE count (2) !=
+        # narrow (1) → blank ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment ok && \\gh issue close 3399 --comment ok",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- D-1: $(…) nested close erased from the stripped count ---
+
+    def test_blocks_dollar_paren_nested_close(self):
+        # `--comment "$(gh issue close FOREIGN)"`: bash runs the substitution (closing
+        # FOREIGN). The #824 value-strip removes the whole `"$(…)"` comment value from
+        # the stripped copy, so N_CLOSE no longer counts the nested close (pre-#824 the
+        # `(` in the count class caught it) → carve-out `exit 0` on SELF (rc 0) today.
+        # GREEN: the `$(` HAS_INTERP guard on the ORIGINAL $CMD blanks ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(gh issue close 3399)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_unquoted_dollar_paren_nested_close(self):
+        # The unquoted `--comment $(gh issue close FOREIGN)` form blocks too (the `$(`
+        # guard reads the ORIGINAL $CMD, so quoting is irrelevant).
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment $(gh issue close 3399)",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- flag-first ISSUE_NUM extraction (#824 review Carve-out preservation, 🔵) ---
+
+    def test_flag_first_reason_self_close_extracts_number(self):
+        # PIN (passes on base AND fixed): `gh issue close --reason done <SELF>` — the
+        # value-strip removes `--reason done`, so the number after it is extracted as
+        # the (correct) close target ISSUE_NUM → the SELF carve-out fires → ALLOW. Locks
+        # the correct-target widening so a future extraction change cannot regress it.
+        r = _run_with_gh_body("gh issue close --reason done 3312 --comment ok",
+                              self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestReviewFindings2_824(TestCase):
+    """#824 adversarial-review #2 findings (salvaged Fable review #2). The review-#1
+    fix round (`_strip_value_flags` operator-bounded arms, `\\`-wide _CLOSE_OPEN, the
+    `$(`/backtick HAS_INTERP guards) closed A-1/A-3/D-1 but left/opened five more:
+
+      N-1 (wrong-ALLOW): an EVEN-parity escaped-quote value (`--comment "say \\"hi\\"
+          -R x/y"` / the `'"'"'` idiom) terminates the value arm EARLY, leaving a
+          `-R x/y` residue → REPO_ARG poison. The odd-count belt (A-2) misses even
+          parity. FIX: pre-delete the three escaped-quote idioms before the value arms.
+      N-2 (over-BLOCK regression): a MULTI-LINE quoted comment + a real `-R` — the
+          per-line sed left a lone quote on line 2 → odd count → leg (c) over-blocked.
+          FIX: `sed -Ez` spans the whole buffer.
+      N-3 (over-BLOCK regression): the blanket `$(` guard blocked the legit
+          `--comment "$(cat …)"` / `$(date)` idiom. FIX: narrow to a `gh`-carrying
+          substitution.
+      N-4 (wrong-ALLOW, bash>=5.3): a funsub `${ gh issue close …; }` runs a nested
+          close with NO `$(` → the `$(` guard misses it. FIX: a `${[ |]` funsub guard.
+      N-5 (wrong-ALLOW): a QUOTED command word `"gh" issue close` chained after a self
+          close — the WIDE count misses it (`gh"` breaks `gh[[:space:]]+`). FIX: a
+          DE-QUOTED narrow count; a hidden close raises it above N_CLOSE → blank.
+
+    All run under a REDUCED-authority cwd with a SELF-vs-FOREIGN author fixture so a
+    wrong target read is a wrong-ALLOW today; the over-block regressions (N-2/N-3)
+    assert the legit close is ALLOWED (rc 0), FAILING on the review-#1 code."""
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- N-1: even-parity escaped-quote REPO_ARG poison ---
+
+    def test_blocks_even_parity_escaped_double_quote_repo_poison(self):
+        # `--comment "say \\"hi\\" -R baz/qux"`: bash's argv is ONE comment value
+        # `say "hi" -R baz/qux`, but the hook text carries the escaped `\\"`. The
+        # `"[^"]*"` arm stops at the FIRST (escaped) `"` → residue `hi\\" -R baz/qux"`
+        # → REPO_ARG=baz/qux (SELF) while the close targets the cwd (FOREIGN) →
+        # wrong-ALLOW (rc 0) today (EVEN quote count, so the odd-count belt is silent).
+        # GREEN: the escaped-quote pre-delete collapses `"say \\"hi\\" -R baz/qux"` to
+        # `"say hi -R baz/qux"` → the whole value strips → REPO_ARG empty → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 4 --comment "say \\"hi\\" -R baz/qux"',
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_even_parity_single_quote_idiom_repo_poison(self):
+        # The `'"'"'` single-quote-in-single-quote idiom, EVEN parity: the residue
+        # `-R baz/qux` survives the value arm today → REPO_ARG poison (rc 0). GREEN:
+        # the `'"'"'` pre-delete removes it → the value strips whole → BLOCK.
+        r = _run_with_gh_body(
+            "gh issue close 4 --comment 'a'\"'\"'b -R baz/qux x'\"'\"'y'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- N-2: multi-line quoted comment + real -R over-block regression ---
+
+    def test_allows_multiline_single_quoted_comment_with_real_repo(self):
+        # A LEGIT self-close: real `-R baz/qux` (SELF) + a MULTI-LINE single-quoted
+        # comment. Review-#1's per-line sed cannot span the newline, so `'[^']*'`
+        # eats `'fixed on PROD` and leaves a lone `'` on line 2 → odd count → leg (c)
+        # over-BLOCKS (rc 2) today. GREEN: `sed -Ez` spans the newline → the whole
+        # comment strips → one real `-R` → ALLOW (rc 0).
+        r = _run_with_gh_body(
+            "gh issue close 4 -R baz/qux --comment 'fixed on PROD\nevidence: log 42'",
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_multiline_double_quoted_comment_with_real_repo(self):
+        # Same class, double-quoted multi-line comment.
+        r = _run_with_gh_body(
+            'gh issue close 4 -R baz/qux --comment "fixed on PROD\nevidence: log 42"',
+            self.branch, _GH_REPO_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- N-3: blanket $( guard over-blocks a legit substitution ---
+
+    def test_allows_cat_substitution_comment(self):
+        # A LEGIT self-close whose comment is `"$(cat /tmp/note.md)"` (NO gh command).
+        # Review-#1's blanket `$(` guard blanks ISSUE_NUM → over-BLOCK (rc 2) today.
+        # GREEN: the narrowed guard (`$(` … `gh `) does not fire → self carve-out → ALLOW.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(cat /tmp/note.md)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_date_substitution_comment(self):
+        # Same class, a `$(date +%F)` comment substitution.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(date +%F)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_still_blocks_gh_substitution_after_narrowing(self):
+        # CONTROL (blocks on BOTH review-#1 and the fix): the narrowed `$(` guard must
+        # STILL catch a `$(gh issue close FOREIGN)` nested smuggle — the narrowing must
+        # not reopen D-1. Regression-guard for the N-3 fix.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(gh issue close 3399)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- N-4: bash>=5.3 funsub nested close ---
+
+    def test_blocks_funsub_nested_close(self):
+        # `--comment "${ gh issue close 3399; }"`: a bash>=5.3 command-substitution
+        # funsub runs the nested FOREIGN close with NO `$(`, so review-#1's `$(` guard
+        # misses it and the value-strip erases it → self carve-out `exit 0` (rc 0)
+        # today. GREEN: the `${[ |]` funsub guard sets HAS_INTERP → blank → BLOCK. (The
+        # static grep fires regardless of the box's bash version.)
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "${ gh issue close 3399; }"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_ordinary_param_expansion_in_comment(self):
+        # CONTROL (allows on BOTH): an ORDINARY parameter expansion `${STEP}` in a
+        # comment is NOT a funsub (no space/`|` after `${`) → the funsub guard must not
+        # over-block a legit self-close carrying it.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "progress ${STEP} done"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- N-5: de-quoted count catches a chained QUOTED command word ---
+
+    def test_blocks_dequoted_chained_double_quoted_command_word(self):
+        # `gh issue close SELF --comment ok && "gh" issue close FOREIGN`: the quoted
+        # `"gh"` breaks the WIDE count's `gh[[:space:]]+` (on the closing `"`), so
+        # N_CLOSE_WIDE == N_CLOSE == 1 → the self carve-out allows the pair (rc 0)
+        # today. GREEN: the DE-QUOTED narrow count sees `gh issue close 3399` → 2 !=
+        # N_CLOSE(1) → blank ISSUE_NUM → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && "gh" issue close 3399',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_dequoted_chained_single_quoted_command_word(self):
+        # Same class, single-quoted `'gh'` command word.
+        r = _run_with_gh_body(
+            "gh issue close 3312 --comment ok && 'gh' issue close 3399",
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class TestReviewFindings3_824(TestCase):
+    """#824 adversarial-review #3 (Fable pass over the review-#2 fix, commit 57ed31c8).
+    The review-#2 fix closed N-1..N-5 but the N-3 `$(` narrowing + the N-4 funsub guard
+    admitted new escapes; each fixture RED-locks one:
+
+      F1 (wrong-ALLOW REGRESSION): the narrowed `$(` guard requires `gh` INSIDE the
+          substitution, so a DECOY/EMPTY substitution glued to a real close
+          (`$(:)gh issue close FOREIGN`, `$()gh …`) rides a self carve-out — the old
+          blanket `$(` guard blocked it. FIX: add `)`/`}`/`{` to the de-quoted count
+          boundary class so the glued close raises N_CLOSE_DEQUOTED > N_CLOSE.
+      F2 (wrong-ALLOW): the same empty-glue via `${x}gh issue close FOREIGN` (an unset
+          param expands empty and glues to `gh`). Same de-quoted-boundary fix.
+      F3 (weakened NEW detection): the funsub guard is line-based, so `${` at
+          end-of-line (a NEWLINE as the funsub whitespace) is missed. FIX: `grep -z`.
+      F4 (over-BLOCK): the funsub guard is not narrowed to `gh` (asymmetric with N-3),
+          so a legit close whose comment merely mentions `${ }` is refused. FIX:
+          require a `gh` command inside the funsub (`\\$\\{[[:space:]|][^}]*gh[[:space:]]`).
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- F1: empty/decoy $( substitution glued to a chained foreign close ---
+
+    def test_blocks_empty_colon_substitution_glued_chained_close(self):
+        # `SELF --comment ok && $(:)gh issue close FOREIGN`: `$(:)` expands empty and
+        # glues onto `gh`, so the FOREIGN close runs. The narrowed `$(` guard (needs
+        # `gh` inside) misses the decoy, and `)gh` is in no close-count boundary → all
+        # counts stay 1 → self carve-out `exit 0` (rc 0) today. GREEN: `)` in the
+        # de-quoted count boundary → N_CLOSE_DEQUOTED=2 != 1 → blank → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && $(:)gh issue close 999 --comment y',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_empty_paren_substitution_glued_chained_close(self):
+        # The `$()` empty-substitution variant of F1.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && $()gh issue close 999',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- F2: empty ${x} param expansion glued to a chained foreign close ---
+
+    def test_blocks_empty_param_expansion_glued_chained_close(self):
+        # `SELF --comment ok && ${x}gh issue close FOREIGN`: an unset `${x}` expands
+        # empty and glues onto `gh` → the FOREIGN close runs. No `$(`/backtick/funsub-
+        # whitespace, so no interp guard; `}gh` is in no count boundary → rc 0 today.
+        # GREEN: `}` in the de-quoted count boundary → N_CLOSE_DEQUOTED=2 → blank → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment ok && ${x}gh issue close 999 --comment y',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- F3: funsub guard misses a newline immediately after ${ ---
+
+    def test_blocks_funsub_nested_close_with_newline_after_brace(self):
+        # `--comment "${<newline>gh issue close FOREIGN;<newline>}"`: the funsub
+        # whitespace IS the newline, so `${` sits at end-of-line and the line-based
+        # guard's char-class-after-`${` never matches → rc 0 today. GREEN: `grep -z`
+        # spans the newline → the funsub guard fires → blank → BLOCK.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "${\ngh issue close 999;\n}"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- F4: funsub guard over-blocks a gh-less ${ } comment ---
+
+    def test_allows_gh_less_funsub_text_in_comment(self):
+        # A LEGIT self-close whose comment merely mentions `${ }` (NO gh command inside)
+        # is over-BLOCKED (rc 2) today by the un-narrowed funsub guard. GREEN: the guard
+        # requires a `gh` command inside the funsub → this no longer fires → ALLOW (rc 0).
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "use bash ${ } funsub"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- controls (pass on BOTH review-#2 and the review-#3 fix) ---
+
+    def test_narrowed_dollar_paren_still_allows_cat_substitution(self):
+        # CONTROL: the de-quoted-boundary change must NOT reopen N-3's over-block — a
+        # legit `--comment "$(cat …)"` self-close still ALLOWS (its value is stripped,
+        # so the de-quoted count never sees a `)gh` adjacency).
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "$(cat /tmp/note.md)"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_funsub_gh_smuggle_still_blocks_after_narrowing(self):
+        # CONTROL: the funsub narrowing must still catch a REAL `${ gh issue close; }`
+        # smuggle — the F4 fix must not let the N-4 case through.
+        r = _run_with_gh_body(
+            'gh issue close 3312 --comment "${ gh issue close 999; }"',
+            self.branch, _GH_NUMBER_SCOPED_AUTHOR)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     main()
