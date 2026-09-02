@@ -214,6 +214,181 @@ class ParkRecordHelpers(unittest.TestCase):
         # clear on a missing key is a no-op, not a KeyError
         wd._janitor_clear_park({}, PID)
 
+    # #852 C/E -- a park record may CARRY the exact typed string so a later
+    # janitor reclaim can backspace exactly the OWN part (recorded length),
+    # preserving a human prefix. The record is a dict {"ts","typed"}; a bare
+    # float stays a valid record (back-compat), and _janitor_park_seen accepts
+    # BOTH shapes.
+    def test_record_can_carry_the_typed_string(self):
+        state = {}
+        wd._janitor_park_record(state, PID, 123.0, text="lane-check: backlog=7")
+        self.assertTrue(wd._janitor_park_seen(state, PID))
+        self.assertEqual(wd._janitor_park_typed(state, PID),
+                         "lane-check: backlog=7")
+
+    def test_bare_float_record_has_no_typed_string(self):
+        state = {}
+        wd._janitor_park_record(state, PID, 123.0)          # no text -> bare float
+        self.assertEqual(state["stash_parks"][PID], 123.0)  # back-compat shape
+        self.assertTrue(wd._janitor_park_seen(state, PID))
+        self.assertIsNone(wd._janitor_park_typed(state, PID))
+
+    def test_park_typed_is_none_state_safe(self):
+        self.assertIsNone(wd._janitor_park_typed(None, PID))
+        self.assertIsNone(wd._janitor_park_typed({}, PID))
+
+    def test_dict_record_is_seen_and_type_checked(self):
+        # A dict record with a numeric ts is seen; a corrupt ts inside the dict
+        # (or a bool) is rejected exactly like the bare-float form.
+        self.assertTrue(wd._janitor_park_seen(
+            {"stash_parks": {PID: {"ts": NOW, "typed": "x"}}}, PID))
+        for bad in (True, "x", None, [1]):
+            self.assertFalse(wd._janitor_park_seen(
+                {"stash_parks": {PID: {"ts": bad, "typed": "x"}}}, PID), bad)
+
+
+class OwnLeftoverToleratesAStrayPrefix(unittest.TestCase):
+    """#852 C -- the incident's `slane-check: ...` shape: a stray human char
+    (the owner's forgotten `s`) sits at the FRONT of our own swallowed nudge, so
+    the own prefix is at position 1, not 0. Recognition tolerates that (own
+    prefix within the first 4 chars of the box head), PROVENANCE-gated exactly
+    as today (a park record carrying the typed string must exist), and the
+    reclaim backspaces ONLY the own part (recorded length), preserving the human
+    prefix -- verified by a fresh capture."""
+
+    STRAY = "s"
+    NUDGE = OWN_LANE_NUDGE            # "lane-check: ...", 691c, wraps at 176
+
+    def test_recognition_is_record_verified_not_a_shape_guess(self):
+        # #852-review 🔴-1/🔴-2 -- the stray-prefix case is recognized ONLY by
+        # `_box_own_with_short_prefix` against the EXACT recorded string, NEVER
+        # by widening `_looks_like_own_stuck_content` (which feeds the
+        # provenance-weak `clear` action). So the general recognizer stays
+        # strictly position-0, and a human draft that merely starts `x/goal …`
+        # is NEVER admitted without a matching record.
+        self.assertFalse(wd._looks_like_own_stuck_content(self.STRAY + self.NUDGE),
+                         "the general recognizer must NOT widen to a stray prefix")
+        # the record-verified match: box == <short prefix> + recorded nudge
+        self.assertTrue(wd._box_own_with_short_prefix(
+            render_box(self.STRAY + self.NUDGE), self.NUDGE))
+        self.assertTrue(wd._box_own_with_short_prefix(
+            render_box("xy" + self.NUDGE), self.NUDGE))
+        # a LONGER human prefix (a real draft in front) is refused -- our
+        # len(record) backspaces would eat it.
+        self.assertFalse(wd._box_own_with_short_prefix(
+            render_box("moja dlha rozpisana " + self.NUDGE), self.NUDGE))
+        # a box NOT ending in the recorded nudge (drifted / foreign) is refused.
+        self.assertFalse(wd._box_own_with_short_prefix(
+            render_box("toto je moja vlastna sprava bez prefixu"), self.NUDGE))
+        # a DIFFERENT own-shaped draft (`/goal …`) with NO matching record is
+        # refused -- the 🔴-1 human-deletion path.
+        self.assertFalse(wd._box_own_with_short_prefix(
+            render_box("x/goal STOP keď je CI zelené"), self.NUDGE))
+
+    def _recover_stray(self, state, dry_run=False):
+        box = {"buf": self.STRAY + self.NUDGE}
+        sent = []
+
+        def run(argv, timeout=8):
+            sent.append(argv)
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                return render_box(box["buf"])
+            if "display-message" in j:
+                return LOC
+            if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+                n = argv.count("BSpace")
+                box["buf"] = box["buf"][:-n] if n < len(box["buf"]) else ""
+            return ""
+
+        rec = {}
+        cap = render_box(self.STRAY + self.NUDGE)
+        logs = wd._janitor_recover(run, rec, PID, CWD, cap, LOC,
+                                   send_fn=None, dry_run=dry_run,
+                                   sleep_fn=lambda *a, **k: None,
+                                   state=state, now=NOW, own_payload=self.NUDGE)
+        return logs, box, sent
+
+    def test_reclaimed_to_the_stray_with_a_park_record(self):
+        # A park record carrying the exact typed nudge is the provenance AND the
+        # recorded length -> reclaim backspaces only the nudge, leaving `s`.
+        state = {"stash_parks": {PID: {"ts": NOW, "typed": self.NUDGE}}}
+        logs, box, _sent = self._recover_stray(state)
+        self.assertEqual(box["buf"], self.STRAY,
+                         "the human's stray char must survive; only our own "
+                         "part is backspaced: %r" % box["buf"][:40])
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+
+    def test_same_text_without_a_park_record_is_untouched(self):
+        # No park record (and no fresh janitor watch) -> content shape alone is
+        # NEVER acted on. The stray-prefix box is left byte-identical.
+        logs, box, sent = self._recover_stray({})
+        self.assertEqual(box["buf"], self.STRAY + self.NUDGE,
+                         "untouched without provenance: %r" % box["buf"][:40])
+        self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" for a in sent),
+                         "never a keystroke without provenance: %r" % sent)
+
+    def test_a_stray_shaped_human_draft_with_only_the_watch_mark_is_untouched(self):
+        # #852-review 🔴-1 -- THE human-deletion regression. A human draft of the
+        # stray shape (`x/goal …`: a stray char, then an own-looking prefix at
+        # position 1) with only the generic 6h `janitor_watch` mark (fresh on
+        # any nudge-target pane) and NO matching park record must NEVER be
+        # cleared -- the widened recognizer used to full-clear it, deleting text
+        # the watchdog could not prove it typed.
+        human = "x/goal STOP keď je CI zelené"
+        box = {"buf": human}
+        sent = []
+
+        def run(argv, timeout=8):
+            sent.append(argv)
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                return render_box(box["buf"])
+            if "display-message" in j:
+                return LOC
+            if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+                box["buf"] = box["buf"][:-argv.count("BSpace")]
+            return ""
+
+        wd._janitor_recover(run, {}, PID, CWD, render_box(human), LOC,
+                            send_fn=None, dry_run=False,
+                            sleep_fn=lambda *a, **k: None,
+                            state={"janitor_watch": {PID: NOW - 30}}, now=NOW)
+        self.assertEqual(box["buf"], human,
+                         "a stray-shaped human draft was cleared: %r" % box["buf"])
+        self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" and "BSpace" in a
+                             for a in sent), "backspaced a human draft: %r" % sent)
+
+    def test_a_drifted_box_with_a_stale_record_is_never_backspaced(self):
+        # #852-review 🔴-2 -- a park record carrying NUDGE survives, but the box
+        # has DRIFTED to a DIFFERENT draft (the human cleared the leak and typed
+        # a new one). `_box_own_with_short_prefix` no longer holds, so the
+        # reclaim declines: NO blind len(NUDGE) backspace burst into human text.
+        drifted = "moja nova rozpisana poznamka"
+        box = {"buf": drifted}
+        sent = []
+
+        def run(argv, timeout=8):
+            sent.append(argv)
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                return render_box(box["buf"])
+            if "display-message" in j:
+                return LOC
+            if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+                box["buf"] = box["buf"][:-argv.count("BSpace")]
+            return ""
+
+        state = {"stash_parks": {PID: {"ts": NOW, "typed": self.NUDGE}},
+                 "janitor_watch": {PID: NOW - 30}}
+        wd._janitor_recover(run, {}, PID, CWD, render_box(drifted), LOC,
+                            send_fn=None, dry_run=False,
+                            sleep_fn=lambda *a, **k: None, state=state, now=NOW)
+        self.assertEqual(box["buf"], drifted,
+                         "a drifted box was backspaced: %r" % box["buf"])
+        self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" and "BSpace" in a
+                             for a in sent), "backspaced a drifted box: %r" % sent)
+
 
 class PruneParksHelper(unittest.TestCase):
     """#488 review-1: the age-unbounded record must not orphan forever for a

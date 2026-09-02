@@ -243,7 +243,13 @@ class StashFinalVerifyHoldAbortsWithZeroKeystrokes(unittest.TestCase):
                                       captured=GOAL_IDLE_CAP, logs=logs,
                                       sleep_fn=lambda *_a: None)
         self.assertFalse(ok)
-        self.assertIn("stash-abort: type-verify-hold", logs, logs)
+        # #852 E -- the HOLD leave now ALSO records the leaked text durably
+        # (WARN + park), so the reason is a PREFIX of a `left-in-box UNRECLAIMED`
+        # line rather than the bare string; still ZERO keystrokes into the box.
+        self.assertTrue(any("stash-abort: type-verify-hold" in ln for ln in logs),
+                        logs)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        logs)
         self.assertNotIn("Enter", tmux.keys(),
                          "Enter was pressed into a collapsed/HOLD box")
         self.assertNotIn("BSpace", tmux.keys(),

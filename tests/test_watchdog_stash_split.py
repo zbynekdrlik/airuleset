@@ -365,10 +365,14 @@ class CoMovedKeystrokeSeamsGoThroughPackageSeam(unittest.TestCase):
         self.assertTrue(utt.called,
                         "_undo_typed_text co-moved seam never reached")
 
-    def test_deliver_unresolved_exclusive_reaches_typed_exclusively(self):
-        # UNRESOLVED settle (box held something) -> the STRICT _typed_exclusively
-        # verify is used instead of _typed_landed. Locks that seam.
+    def test_deliver_unresolved_aborts_before_typing_never_reaches_verify_seams(self):
+        # #852 A -- an UNRESOLVED settle (the box still holds content our C-s did
+        # not park) is NEVER typed into: deliver aborts `stash-unresolved` BEFORE
+        # `_type_literal`, so the UNRESOLVED-only verify seams (`_typed_exclusively`
+        # / `_undo_appended_text`) are never reached. This locks the removal of
+        # the leak path (the nudge can no longer be appended to a human draft).
         _, run = self._recorder()
+        logs = []
         with contextlib.ExitStack() as es:
             def P(name, **kw):
                 return es.enter_context(mock.patch.object(watchdog, name, **kw))
@@ -380,40 +384,28 @@ class CoMovedKeystrokeSeamsGoThroughPackageSeam(unittest.TestCase):
             P("_draft_rescue_persist", return_value=None)
             P("_await_stash_settled",
               return_value=("ghost", watchdog.STASH_UNRESOLVED, "ghost"))
-            P("_type_literal", return_value=None)
-            P("_pane_shows_collapsed_paste", return_value=False)
+            tl = P("_type_literal", return_value=None)
             texc = P("_typed_exclusively", return_value=True)
-            P("_typed_landed", side_effect=[False])
-            ok = watchdog.deliver_with_stash(
-                "%1", "/goal x", run, sleep_fn=self._noop)
-        self.assertTrue(ok)
-        self.assertTrue(texc.called,
-                        "_typed_exclusively co-moved seam never reached")
-
-    def test_deliver_unresolved_append_reaches_undo_appended_text(self):
-        # UNRESOLVED + strict verify FAILS + box ends with pre_text+text ->
-        # recovery goes through _undo_appended_text. Locks that seam.
-        _, run = self._recorder()
-        with contextlib.ExitStack() as es:
-            def P(name, **kw):
-                return es.enter_context(mock.patch.object(watchdog, name, **kw))
-            P("capture_pane", return_value="pre/goal x")
-            P("_has_free_prompt", return_value=True)
-            P("_strip_selected", return_value=False)
-            P("_input_line_text", return_value="pre/goal x")
-            P("_box_is_wrapped", return_value=False)
-            P("_draft_rescue_persist", return_value=None)
-            P("_await_stash_settled",
-              return_value=("pre/goal x", watchdog.STASH_UNRESOLVED, "pre"))
-            P("_type_literal", return_value=None)
-            P("_pane_shows_collapsed_paste", return_value=False)
-            P("_typed_exclusively", return_value=False)
             uat = P("_undo_appended_text", return_value=True)
             ok = watchdog.deliver_with_stash(
-                "%1", "/goal x", run, sleep_fn=self._noop)
+                "%1", "/goal x", run, logs=logs, sleep_fn=self._noop)
         self.assertFalse(ok)
-        self.assertTrue(uat.called,
-                        "_undo_appended_text co-moved seam never reached")
+        self.assertFalse(tl.called, "an unresolved box must NEVER be typed into")
+        self.assertFalse(texc.called, "no verify seam runs when nothing is typed")
+        self.assertFalse(uat.called, "no undo seam runs when nothing is typed")
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
+
+    def test_typed_exclusively_and_undo_appended_text_are_live_helpers(self):
+        # #852 A / #852-review 🔵-7 -- HONESTY: these two functions are now
+        # PRODUCTION-DEAD (A removed their sole `deliver_with_stash` caller).
+        # They are RETAINED (not deleted) only because the #433 split's
+        # MOVED_NAMES self-validation still enumerates them; this direct smoke
+        # test + `_undo_appended_text`'s #354 settle-race coverage in
+        # test_stash_unconditional keep the retained code exercised. A future
+        # cleanup may delete both + their MOVED_NAMES entries (MVP philosophy).
+        self.assertTrue(watchdog._typed_exclusively("abc", "abc"))
+        self.assertFalse(watchdog._typed_exclusively("abc", "xabc"))
+        self.assertFalse(watchdog._typed_exclusively("abc", ""))
 
     def test_draft_rescue_persist_reaches_prune_and_ensure_dir(self):
         # _draft_rescue_persist's own two co-moved cross-calls.

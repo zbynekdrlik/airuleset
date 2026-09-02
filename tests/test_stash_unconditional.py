@@ -251,22 +251,42 @@ class GhostTextIsIndistinguishableOnceStripped(unittest.TestCase):
 
 
 class GhostOnlyPaneStillDelivers(unittest.TestCase):
-    """THE regression. A pane whose input box is genuinely EMPTY but renders a
-    grey suggestion must still get its keystroke delivered — under either
-    possible answer to `does Ctrl+S dismiss the suggestion`, because that
-    answer is not established and the fix must not depend on it."""
+    """A pane whose input box is genuinely EMPTY but renders a grey suggestion.
+    #189 typed into it to discriminate a ghost (replaced) from a real draft
+    (appended). #852 A CHANGED that: typing is allowed only from a PROVEN-bare
+    box, so it depends on whether `C-s` dismisses the suggestion:
+      * dismissed (`ghost_survives_ctrl_s=False`) -> box is bare (NOOP) -> we
+        deliver, exactly as before;
+      * survives -> box still shows content our C-s did not park (UNRESOLVED),
+        indistinguishable from a real forgotten draft -> we abort THIS sweep
+        (`stash-unresolved`) and retry when the ghost is gone, rather than ever
+        risk appending onto what might be a human draft (the #852 incident).
+    A safe degradation: the delivery is deferred, never a leak. (Whether a
+    ghost survives C-s in real CC is not established; when it does not, this is
+    byte-identical to the pre-#852 behaviour.)"""
 
-    def test_delivers_whether_or_not_ctrl_s_dismisses_the_suggestion(self):
-        for survives in (True, False):
-            with self.subTest(ghost_survives_ctrl_s=survives):
-                pane = FakePane(draft="", ghost=GHOST,
-                                ghost_survives_ctrl_s=survives)
-                logs = []
-                ok = deliver(pane, logs=logs)
-                self.assertTrue(ok, logs)
-                self.assertEqual(pane.submitted, [TEXT], logs)
-                self.assertIsNone(pane.stash,
-                                  "nothing was ever there to park: %r" % logs)
+    def test_delivers_when_ctrl_s_dismisses_the_suggestion(self):
+        pane = FakePane(draft="", ghost=GHOST, ghost_survives_ctrl_s=False)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertTrue(ok, logs)
+        self.assertEqual(pane.submitted, [TEXT], logs)
+        self.assertIsNone(pane.stash,
+                          "nothing was ever there to park: %r" % logs)
+
+    def test_aborts_this_sweep_when_the_suggestion_survives_ctrl_s(self):
+        # #852 A -- a surviving ghost reads UNRESOLVED (indistinguishable from a
+        # real draft); we never type onto it, so nothing is submitted and the
+        # box is left byte-identical for a retry.
+        pane = FakePane(draft="", ghost=GHOST, ghost_survives_ctrl_s=True)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertEqual(pane.submitted, [], logs)
+        self.assertNotIn("-l", pane.keystrokes(),
+                         "an unresolved box is never typed into: %r" % pane.sent)
+        self.assertNotIn("Enter", pane.keystrokes(), pane.sent)
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
     def test_the_ghost_is_never_treated_as_a_draft_to_protect(self):
         pane = FakePane(draft="", ghost=GHOST)
@@ -294,13 +314,19 @@ class AlreadyBarePromptIsANoopSuccess(unittest.TestCase):
 
 
 class OccupiedSlotIsTheOnlyDecline(unittest.TestCase):
-    """The full matrix. Every free-slot cell delivers regardless of what the
-    box appears to hold; every occupied-slot cell declines with the ONE
-    distinct reason and touches the pane with ZERO keystrokes, because the
-    single slot overwrites silently and would destroy a parked draft."""
+    """The matrix. A free-slot box that our own C-s leaves PROVABLY BARE
+    delivers; an occupied-slot cell declines with the ONE distinct reason and
+    touches the pane with ZERO keystrokes (the single slot overwrites silently
+    and would destroy a parked draft). #852 A -- a free-slot box our C-s does
+    NOT leave bare (a surviving ghost) reads UNRESOLVED and is deferred, not
+    delivered, so the 'always delivers' matrix is scoped to the provably-bare
+    cells (`bare` + `draft`); the `ghost`-survives cell is covered by
+    GhostOnlyPaneStillDelivers."""
 
+    # Cells whose own C-s leaves the box PROVABLY BARE: a bare box (NOOP) and a
+    # real draft (PARKED into the slot). A surviving ghost is NOT here -- it is
+    # the UNRESOLVED-defer case (GhostOnlyPaneStillDelivers).
     CASES = (("bare", dict(draft="", ghost="")),
-             ("ghost", dict(draft="", ghost=GHOST)),
              ("draft", dict(draft=DRAFT, ghost="")))
 
     def test_free_slot_always_delivers(self):
@@ -356,18 +382,32 @@ class RealDraftIsStillProtected(unittest.TestCase):
         self.assertEqual(pane.ctrl_s_count(), 1,
                          "no blind second/third toggle: %r" % pane.sent)
 
-    def test_a_merely_lagged_ctrl_s_now_delivers_instead_of_aborting(self):
-        # #176 F4's case, one step further: the toggle DID take (the draft is
-        # really parked and the box is really bare) but the render lags for
-        # the whole settle window. The old code called that verify-bare-failed
-        # and spent two more toggles trying to undo a stash that was doing
-        # exactly its job. Typing into the genuinely-bare box lands cleanly,
-        # so the correct outcome is a delivery with the draft still parked.
-        pane = FakePane(draft=DRAFT, lag_captures=wd.STASH_VERIFY_SETTLE_POLLS)
+    def test_a_lag_within_the_settle_window_still_delivers(self):
+        # #176 F4: the toggle DID take (draft parked, box really bare) but the
+        # render lags a FEW captures -- within the settle window. The settle
+        # poll absorbs it, reads PARKED, and delivers cleanly. (A only defers
+        # when the box is STILL non-bare after the whole settle window.)
+        pane = FakePane(draft=DRAFT,
+                        lag_captures=wd.STASH_VERIFY_SETTLE_POLLS - 1)
         logs = []
         self.assertTrue(deliver(pane, logs=logs), logs)
         self.assertEqual(pane.submitted, [TEXT], logs)
         self.assertEqual(pane.stash, DRAFT, logs)
+
+    def test_a_lag_past_the_whole_settle_window_defers_this_sweep(self):
+        # #852 A -- if the render lags PAST the entire settle window, the box
+        # reads UNRESOLVED even though it is really bare server-side. We cannot
+        # PROVE it bare this sweep, so we defer (`stash-unresolved`) and deliver
+        # on a later sweep once the render catches up -- never risk typing onto
+        # what could equally be a real draft. Safe degradation: a bounded
+        # retry, never a leak.
+        pane = FakePane(draft=DRAFT, lag_captures=wd.STASH_VERIFY_SETTLE_POLLS)
+        logs = []
+        self.assertFalse(deliver(pane, logs=logs), logs)
+        self.assertEqual(pane.submitted, [], logs)
+        self.assertNotIn("-l", pane.keystrokes(),
+                         "an unprovable box is never typed into: %r" % pane.sent)
+        self.assertTrue(any("stash-unresolved" in ln for ln in logs), logs)
 
 
 class ChromeAndKeystrokeGatesSurvive(unittest.TestCase):
@@ -521,48 +561,237 @@ class UndoVerifyRaceIsSettledNotLeftHanging(unittest.TestCase):
     def test_a_genuinely_stuck_undo_still_ends_loud_not_silent(self):
         # The settle window is BOUNDED (`no-timeout-band-aids.md`) — when
         # the box NEVER actually clears (a real, non-transient failure, not
-        # a render race), the recovery still gives up — but LOUDLY: the
-        # reason string is never silently dropped.
+        # a render race), the recovery still gives up — but LOUDLY. #852 E
+        # replaced the old silent `typed-NOT-undone, draft left parked` leak
+        # with a `left-in-box UNRECLAIMED` WARNING (naming the pane + the exact
+        # typed string) + a durable park record, so the janitor can reclaim it.
         pane = FakePane(draft=DRAFT, swallow_enters=2,
                         bspace_lag_captures=999999)
         logs = []
-        ok = deliver(pane, logs=logs)
+        state = {}
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=logs,
+                                   sleep_fn=lambda s: None, state=state)
         self.assertFalse(ok, logs)
-        self.assertTrue(any(ln == "stash-abort: swallowed-submit-not-"
-                            "recovered: typed-NOT-undone, draft left parked"
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln and "typed=" in ln
                             for ln in logs),
                         "a genuine double failure must still be logged "
                         "LOUDLY, never silently: %r" % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), TEXT,
+                         "the leaked text must be parked for reclaim: %r" % state)
+
+
+def _box(buf):
+    """A single-row Claude Code input box holding `buf`, the way a stripped
+    `capture-pane -p` renders it — enough for `_input_line_text` to read the
+    tail."""
+    return "\n".join(["● turn done", "────────────",
+                      "❯\xa0" + buf if buf else "❯\xa0",
+                      "────────────", "  ctx ░░"]) + "\n"
+
+
+class _UndoRun:
+    """A minimal recording `run` for a DIRECT `_undo_appended_text` call: the
+    box holds `pre + text`; the BSpace batch trims exactly what it removes;
+    `lag` captures render the PRE-backspace state first (the #354 render-lag).
+    `never_settles` models a genuinely-stuck box (the backspaces do nothing)."""
+
+    def __init__(self, pre, text, lag=0, never_settles=False):
+        self.pre, self.buf = pre, pre + text
+        self.lag, self.never_settles = lag, never_settles
+        self.sent = []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            if self.lag > 0:
+                self.lag -= 1
+                return _box(self.pre + self.buf[len(self.pre):])
+            return _box(self.buf)
+        if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+            if not self.never_settles:
+                n = argv.count("BSpace")
+                self.buf = self.buf[:-n] if n < len(self.buf) else ""
+        return ""
+
+
+class _StrayRun:
+    """A recording `run` for a DIRECT `_undo_and_release_slot` call: the box
+    holds `stray + text`; a BSpace batch trims exactly what it removes from the
+    END (leaving the stray at the FRONT), unless `stuck` (the backspaces do
+    nothing -- a genuinely wedged box). `unreadable` renders a busy pane with no
+    input box (so `_input_line_text` reads None -- a turn started mid-recovery)."""
+
+    def __init__(self, stray, text, stuck=False, unreadable=False):
+        self.buf, self.stray, self.text = stray + text, stray, text
+        self.stuck, self.unreadable, self.sent = stuck, unreadable, []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            if self.unreadable:
+                return ("● Validate\n  ⎿ running…\n"
+                        "✳ Baking… (2m · esc to interrupt)\n")
+            return _box(self.buf)
+        if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv and not self.stuck:
+            n = argv.count("BSpace")
+            self.buf = self.buf[:-n] if n < len(self.buf) else ""
+        return ""
+
+
+class SuffixProofUndoNeverLeaks(unittest.TestCase):
+    """#852 B/E -- the type-verify-failed recovery never SILENTLY leaves our
+    own typed text. A stray human char that raced to the FRONT after the settle
+    is preserved (our text backspaced off the END); a box we cannot clear at
+    all is left with a WARNING + a durable park record carrying the exact
+    string, never the old silent `typed-NOT-undone`/`append-unprovable` leak."""
+
+    NUDGE = "lane-check: backlog=7"     # does NOT end with the stray char
+
+    def test_a_stray_leading_char_is_preserved_our_text_removed(self):
+        run = _StrayRun("s", self.NUDGE)     # the incident shape: `s` + nudge
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertEqual(run.buf, "s",
+                         "the human's stray char must survive: %r" % run.buf)
+        self.assertTrue(any("stray prefix preserved" in ln for ln in logs), logs)
+        # our text is gone -> no UNRECLAIMED leak, no park record needed
+        self.assertFalse(any("UNRECLAIMED" in ln for ln in logs), logs)
+        self.assertNotIn("%1", state.get("stash_parks", {}))
+
+    def test_a_genuinely_stuck_box_warns_and_parks_the_typed_string(self):
+        run = _StrayRun("", self.NUDGE, stuck=True)   # backspaces do nothing
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "a box we cannot clear must WARN loudly: %r" % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE,
+                         "the exact typed string must be parked for reclaim: %r"
+                         % state)
+
+    def test_an_unreadable_box_after_undo_parks_never_false_success(self):
+        # #852-review 🟡-3 -- if the box is UNREADABLE after the backspaces (a
+        # turn/dialog started: `_input_line_text` None), our full text may still
+        # be there -> PARK, never a false `typed-undone` success with no record.
+        run = _StrayRun("", self.NUDGE, unreadable=True)
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "an unreadable box must park, not claim success: %r" % logs)
+        self.assertFalse(any("stray prefix preserved" in ln for ln in logs), logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE, state)
+
+    def test_a_long_foreign_residue_parks_never_false_success(self):
+        # #852-review 🟡-3 -- a foreign SUFFIX raced in and our len(text)
+        # backspaces left a LONG residue that is not a suffix of our text: it
+        # reads "our text gone" but is NOT a short stray -> PARK, never claim a
+        # stray-preserved success.
+        run = _StrayRun("moja dlha rozpisana poznamka ", self.NUDGE)
+        logs, state = [], {}
+        wd._undo_and_release_slot("%1", run, self.NUDGE, False, logs.append,
+                                  "stash-abort", state=state,
+                                  sleep_fn=lambda *a: None)
+        self.assertTrue(any("left-in-box UNRECLAIMED" in ln for ln in logs),
+                        "a long residue must park, not claim a stray success: %r"
+                        % logs)
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE, state)
+
+
+class _CollapseRun:
+    """A NOOP-settle (bare box) whose type then renders CC's 'paste again to
+    expand' collapse hint -- the #322 shape `deliver_with_stash` must leave
+    keystroke-free. Used to prove the #852 E invariant: even a HOLD/collapsed
+    leave writes a durable park record + WARNs, never a silent leak."""
+
+    def __init__(self, hint="paste again to expand"):
+        self.typed, self.hint, self.sent = False, hint, []
+
+    def __call__(self, argv, timeout=8):
+        self.sent.append(argv)
+        j = " ".join(argv)
+        if "capture-pane" in j:
+            return _box(self.hint if self.typed else "")
+        if "display-message" in j:
+            return "0"
+        if "-l" in argv:
+            self.typed = True
+        return ""
+
+
+class NoPathLeavesTypedTextSilently(unittest.TestCase):
+    """#852 E -- the lock: no `deliver_with_stash` code path that types leaves
+    our text without a WARNING + a durable park record carrying the exact
+    string. The genuinely-stuck-undo leak is covered in SuffixProofUndoNeverLeaks;
+    this locks the OTHER typed-text leave (a HOLD / collapsed-paste box that
+    cannot be backspaced) -- it too parks + warns now."""
+
+    NUDGE = "lane-check: backlog=7"
+
+    def test_a_collapsed_paste_leave_still_parks_and_warns(self):
+        run = _CollapseRun()
+        logs, state = [], {}
+        ok = wd.deliver_with_stash("%1", self.NUDGE, run, logs=logs,
+                                   sleep_fn=lambda *a: None, state=state)
+        self.assertFalse(ok, logs)
+        self.assertTrue(any("collapsed-paste" in ln for ln in logs), logs)
+        # the #852 E invariant: the leaked text is parked for reclaim.
+        self.assertEqual(wd._janitor_park_typed(state, "%1"), self.NUDGE,
+                         "a collapsed-paste leave must park the typed string "
+                         "for the janitor to reclaim: %r" % state)
+
+    def test_source_never_leaves_typed_text_without_a_park(self):
+        # A structural backstop (the #852 lock): every typed-text leave in
+        # deliver_with_stash must hand off to `_park_unreclaimed` (WARN + park)
+        # or `_undo_and_release_slot` (which itself parks on failure). #852-review
+        # 🔵-6: count ACTUAL CALLS, not comment mentions, so a mutant that deletes
+        # the calls but keeps the comments is caught. An AST walk over the
+        # function counts `_park_unreclaimed(...)` and `_undo_and_release_slot(...)`
+        # Call nodes -- immune to comment/docstring text entirely.
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(wd.deliver_with_stash)))
+        called = [n.func.attr if isinstance(n.func, ast.Attribute)
+                  else getattr(n.func, "id", None)
+                  for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        self.assertGreaterEqual(
+            called.count("_park_unreclaimed"), 3,
+            "the collapsed-paste / two_phase-HOLD / head-checkpoint-HOLD leaves "
+            "must each CALL _park_unreclaimed (not just mention it): %r"
+            % [c for c in called if c and "park" in c])
+        self.assertIn("_undo_and_release_slot", called,
+                      "the verify-failure recovery must CALL the parking helper")
 
 
 class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):
     """#354 — the SAME render-lag hazard hits `_undo_appended_text`
-    (the UNRESOLVED-box sibling of `_undo_typed_text`, reached when the
-    `C-s` toggle is lost and our type APPENDS to a real draft rather than
-    landing on a bare box) for the identical reason: one immediate capture
-    right after the backspace batch, no settle poll."""
+    (the box-with-residual-content sibling of `_undo_typed_text`) for the
+    identical reason: one immediate capture right after the backspace batch,
+    no settle poll. #852 A stopped `deliver_with_stash` from ever typing into
+    an unresolved box, so `_undo_appended_text` is now exercised DIRECTLY as
+    the standalone suffix-proof helper it is — the #354 settle coverage is
+    preserved on the function itself."""
 
     def test_a_lagged_append_undo_still_verifies_as_recovered(self):
-        pane = FakePane(draft=DRAFT, lose_next_ctrl_s=True,
-                        bspace_lag_captures=1)
-        logs = []
-        ok = deliver(pane, logs=logs)
-        self.assertFalse(ok, logs)
-        self.assertEqual(pane.draft, DRAFT,
-                         "the user's draft must survive byte-identical, "
-                         "even when the undo's own verify races: %r" % logs)
-        self.assertIn("stash-abort: append-undone", logs, logs)
-        self.assertNotIn("stash-abort: append-NOT-undone", logs, logs)
+        run = _UndoRun(DRAFT, TEXT, lag=1)
+        ok = wd._undo_appended_text("%1", run, DRAFT, TEXT,
+                                    sleep_fn=lambda *a: None)
+        self.assertTrue(ok, "a lagged undo verify must still confirm recovery: "
+                        "%r" % run.sent)
 
-    def test_a_genuinely_stuck_append_undo_still_logs_the_reason(self):
-        pane = FakePane(draft=DRAFT, lose_next_ctrl_s=True,
-                        bspace_lag_captures=999999)
-        logs = []
-        ok = deliver(pane, logs=logs)
-        self.assertFalse(ok, logs)
-        self.assertIn("stash-abort: append-NOT-undone", logs,
-                      "a genuine double failure must still be logged "
-                      "LOUDLY, never silently: %r" % logs)
+    def test_a_genuinely_stuck_append_undo_still_reports_failure(self):
+        run = _UndoRun(DRAFT, TEXT, never_settles=True)
+        ok = wd._undo_appended_text("%1", run, DRAFT, TEXT,
+                                    sleep_fn=lambda *a: None)
+        self.assertFalse(ok, "a genuinely stuck undo must report failure, never "
+                         "a false success: %r" % run.sent)
 
 
 class UndoSettlePollHasRealTeeth(unittest.TestCase):

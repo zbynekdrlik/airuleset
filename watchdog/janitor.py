@@ -92,6 +92,42 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
     return False
 
 
+def _janitor_clear_own_suffix(pid, run, own_typed, sleep_fn, log_fn):
+    """#852 C — reclaim a `<stray human prefix> + <our recorded nudge>` box by
+    backspacing EXACTLY `len(own_typed)` characters (our own nudge, at the END),
+    preserving the short human prefix at the FRONT.
+
+    #852-review 🔴-2 — the recorded string is VERIFIED against the CURRENT box
+    on a FRESH capture BEFORE any keystroke (`_box_own_with_short_prefix`: the
+    box provably ends with the recorded nudge behind a <=short prefix). This
+    closes the TOCTOU where the box drifted after the record was written (the
+    human edited the glue, or cleared it and typed a NEW draft of the same
+    position-1 shape while a stale record survived): declining then means we
+    never fire a blind `len(record)`-char backspace burst into human text. Only
+    once the contract holds do we backspace exactly `len(own_typed)`, then a
+    BOUNDED settle-verify against a fresh capture confirms the recorded text is
+    GONE. An unreadable / drifted box aborts keystroke-free (the #233 / #372
+    'never guess a length' discipline)."""
+    sleep_fn = sleep_fn or time.sleep
+    cap = watchdog.capture_pane(pid, run, lines=30)
+    if not watchdog._box_own_with_short_prefix(cap, own_typed):
+        # the box no longer provably holds our recorded nudge (drifted / raced /
+        # already cleared) -> NEVER backspace a blind length into it.
+        log_fn("janitor: own-suffix box no longer matches record -> declined")
+        return False
+    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(own_typed))
+    for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
+        cap = watchdog.capture_pane(pid, run, lines=30)
+        if watchdog._input_line_text(cap) is None:
+            log_fn("janitor: box unreadable mid-own-suffix-clear")
+            return False
+        if not watchdog._box_own_with_short_prefix(cap, own_typed):
+            return True             # our recorded nudge is gone; the prefix remains
+        sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
+    log_fn("janitor: own-suffix clear did not converge")
+    return False
+
+
 def _janitor_pop_stash(pid, run, log_fn):
     """#372 — the box is confirmed bare and the single stash slot is
     occupied: `C-s` always safely restores a parked draft onto a bare box
@@ -168,21 +204,38 @@ def _janitor_clear_watch(state, pid):
     state.get("janitor_watch", {}).pop(pid, None)
 
 
-def _janitor_park_record(state, pid, now):
+def _janitor_park_record(state, pid, now, text=None):
     """#488 — the WRITE side of the DURABLE, park-specific provenance record.
     Called by a stash-delivery caller when `deliver_with_stash` returned
     False (an abort that may have left a park in the single slot) — records
-    `state['stash_parks'][pid] = now` in the SAME already-persisted watchdog
+    `state['stash_parks'][pid]` in the SAME already-persisted watchdog
     `state` (`~/.claude/api-watchdog-state.json`, `save_state`), so the fact
     survives a restart/deploy AND, unlike `_janitor_watch_seen`'s 6h mark,
     does NOT expire: a genuinely-ours park can sit unresolved for far longer
     than 6h (the gk goal ran `(1d)`, the exact live gap this fixes). `now`
     is stored for observability only — the reclaim gate is age-UNBOUNDED,
     never a timeout band-aid. A no-op when `state` is `None`, mirroring
-    `_janitor_mark_watch`."""
+    `_janitor_mark_watch`.
+
+    #852 — `text`, when given, is the EXACT string we typed and left in the
+    box (a leak the recovery could not remove). The record then carries it as
+    `{"ts": now, "typed": text}` so a later janitor reclaim can backspace
+    exactly `len(text)` OWN characters, preserving any stray human prefix
+    (`_janitor_park_typed` reads it). When `text` is None (the #488 case: a
+    parked FOREIGN draft whose content we do not know, reclaimed by popping the
+    stash slot) the record stays the bare float `now`, byte-identical to
+    pre-#852, so every existing consumer is unchanged."""
     if state is None:
         return
-    state.setdefault("stash_parks", {})[pid] = now
+    state.setdefault("stash_parks", {})[pid] = (
+        now if text is None else {"ts": now, "typed": text})
+
+
+def _park_record_ts(v):
+    """#852 — the timestamp of a park record in EITHER shape: the bare float
+    `now` (#488) or the `{"ts","typed"}` dict (#852). `None` for any other
+    value; the caller type-checks the result."""
+    return v.get("ts") if isinstance(v, dict) else v
 
 
 def _janitor_park_seen(state, pid):
@@ -192,9 +245,19 @@ def _janitor_park_seen(state, pid):
     human's own parked draft is never given a record, so this is the signal
     that keeps the age-unbounded reclaim from ever acting on one. Type-
     checked like `_janitor_watch_seen` so a corrupt state entry never reads
-    as provenance; no age bound (deliberately — see `_janitor_park_record`)."""
-    ts = (state or {}).get("stash_parks", {}).get(pid)
+    as provenance; no age bound (deliberately — see `_janitor_park_record`).
+    #852 — accepts BOTH the bare-float and the `{"ts","typed"}` dict shape."""
+    ts = _park_record_ts((state or {}).get("stash_parks", {}).get(pid))
     return isinstance(ts, (int, float)) and not isinstance(ts, bool)
+
+
+def _janitor_park_typed(state, pid):
+    """#852 — the exact string a park record CARRIES (the leaked own text), or
+    None (a bare-float #488 record, a missing record, or `None` state). Used by
+    the janitor reclaim to backspace exactly the OWN part, preserving a stray
+    human prefix."""
+    v = (state or {}).get("stash_parks", {}).get(pid)
+    return v.get("typed") if isinstance(v, dict) else None
 
 
 def _janitor_clear_park(state, pid):
@@ -329,6 +392,30 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # provenance gate below is UNCHANGED and stays the ownership decision.
     own_leftover = bool(own_payload) and watchdog._box_is_own_leftover(
         captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
+    # #852 C — the incident's `slane-check:` shape: a stray human char (the
+    # owner's forgotten `s`) raced to the FRONT of our own swallowed nudge, so
+    # the own prefix is at box-head position 1..3, not 0. A park record carrying
+    # the EXACT typed string is BOTH the provenance (we recorded exactly what we
+    # leaked) AND the recorded length to backspace, so the reclaim removes only
+    # our own part and preserves the human prefix. `own_typed` is None (no
+    # stray-reclaim) unless such a record exists.
+    # #852-review 🔴-1/🔴-2 — a stray-prefix reclaim requires the EXACT recorded
+    # typed string as provenance AND a proof the CURRENT box still holds it
+    # (`_box_own_with_short_prefix`: box == <short human prefix> + own_typed).
+    # It is NOT gated on `_own_prefix_stray_offset` (a shape guess) nor on the
+    # widened recognizer -- so a drifted / foreign / edited box is never
+    # backspaced into, and a human draft that merely starts `x/goal …` (no
+    # matching record) never qualifies.
+    own_typed = _janitor_park_typed(state, pid)
+    stray_own = (own_typed is not None
+                 and watchdog._box_own_with_short_prefix(captured, own_typed))
+    # A dict (leaked-text) record's LEAK is still visible when the box holds our
+    # recorded text at any position -- used to keep the marker-gone backstop from
+    # clearing the record before the leak is reclaimed (#852-review 🟡-4).
+    leak_visible = own_typed is not None and (
+        stray_own
+        or watchdog._typed_landed(own_typed, itext)
+        or watchdog._looks_like_own_stuck_content(itext))
 
     # #488 -- the DURABLE, age-unbounded park record. Written by
     # `deliver_with_stash` itself the instant it DEFINITIVELY parks a draft
@@ -338,7 +425,14 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # is reclaimable after any delay -- the exact gk gap (a goal ran `(1d)`,
     # past the 6h `_janitor_watch_seen` bound).
     park_seen = _janitor_park_seen(state, pid)
-    if park_seen and not occupied:
+    # #852-review 🟡-4 — a #488 FLOAT record marks a parked STASH DRAFT, so
+    # "slot no longer occupied" IS its resolution. A #852 DICT (leaked-text)
+    # record marks our text left IN THE BOX -- it is stale only when that text
+    # is no longer visible, NEVER merely because the slot is empty. So never
+    # clear a dict record while its leak is still visible (else a later
+    # sweep can no longer reclaim it -- the exact "leaked forever" gap E closes).
+    if park_seen and not occupied and not stray_own \
+            and (own_typed is None or not leak_visible):
         # Marker-gone backstop: the park was resolved (CC's own async
         # auto-restore / our pop-back / a human), so the record is stale ->
         # clear it. This is what bounds an age-unbounded record WITHOUT a
@@ -361,7 +455,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # age-unbounded park record ALSO satisfies provenance -- it precisely
     # proves WE left this park, so a genuinely-ours draft is reclaimable
     # after any delay while a human's own stash (never recorded) is not.
-    if not (_janitor_watch_seen(state, pid, now) or (occupied and park_seen)):
+    # #852 C — a stray-prefix leftover's park record (carrying the typed string)
+    # is age-unbounded provenance exactly like the #488 stash record, so it also
+    # licenses the non-occupied own-suffix reclaim below.
+    if not (_janitor_watch_seen(state, pid, now)
+            or (occupied and park_seen)
+            or stray_own):
         return logs         # no watchdog job is known to have touched this
                             # pane recently -- never act on content alone
     if occupied:
@@ -371,6 +470,8 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
             action = "clear-and-pop"        # #737: scrolled own /goal counts
         else:
             return logs                     # a genuine foreign occupant
+    elif stray_own:
+        action = "clear-own-suffix"         # #852 C: preserve the human prefix
     elif watchdog._looks_like_own_stuck_content(itext) or own_leftover:
         action = "clear"                    # #737: scrolled own /goal counts
     else:
@@ -392,6 +493,9 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     elif action == "clear-and-pop":
         recovered = (_janitor_clear_box(pid, run, sleep_fn, _log)
                     and _janitor_pop_stash(pid, run, _log))
+    elif action == "clear-own-suffix":       # #852 C: preserve the human prefix
+        recovered = _janitor_clear_own_suffix(
+            pid, run, own_typed, sleep_fn, _log)
     else:                                    # "clear"
         recovered = _janitor_clear_box(pid, run, sleep_fn, _log)
 

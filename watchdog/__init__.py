@@ -820,9 +820,12 @@ from watchdog.stash import (  # noqa: E402
     JANITOR_WATCH_MAX_AGE_S as JANITOR_WATCH_MAX_AGE_S,
     _looks_like_own_payload as _looks_like_own_payload,
     _looks_like_own_stuck_content as _looks_like_own_stuck_content,
+    STRAY_PREFIX_MAX_OFFSET as STRAY_PREFIX_MAX_OFFSET,
+    _own_prefix_stray_offset as _own_prefix_stray_offset,
     GOAL_ARM_LEFTOVER_MIN_SUBSTR as GOAL_ARM_LEFTOVER_MIN_SUBSTR,
     _box_norm_from_capture as _box_norm_from_capture,
     _box_is_own_leftover as _box_is_own_leftover,
+    _box_own_with_short_prefix as _box_own_with_short_prefix,
     _OWN_NUDGE_SUBMIT_PREFIXES as _OWN_NUDGE_SUBMIT_PREFIXES,
     _own_nudge_submit_prefix as _own_nudge_submit_prefix,
 )
@@ -1863,6 +1866,7 @@ from watchdog.janitor import (  # noqa: E402
     _janitor_clear_watch as _janitor_clear_watch,
     _janitor_park_record as _janitor_park_record,
     _janitor_park_seen as _janitor_park_seen,
+    _janitor_park_typed as _janitor_park_typed,
     _janitor_clear_park as _janitor_clear_park,
     _janitor_prune_parks as _janitor_prune_parks,
     _janitor_recover as _janitor_recover,
@@ -3333,7 +3337,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             continue
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
-                            pid, resume_text, run, captured=fresh, logs=logs)
+                            pid, resume_text, run, captured=fresh, logs=logs,
+                            state=state)  # #852-review 🟡-5
                         if not delivered:
                             # #176 F1: the shipped fix RELOCATED the silent unbounded
                             # skip from the busy branch to HERE instead of eliminating
