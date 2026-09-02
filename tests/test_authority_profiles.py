@@ -3692,3 +3692,117 @@ class TestCIRunnerAuth839(TestCase):
             full_only.isdisjoint(names),
             "a reduced stream must not receive full-authority-only skills even "
             "with USER=newlevel spoofed -- got %r" % (full_only & set(names)))
+
+
+class TestAuthCliRepoRoot829(TestCase):
+    """#829: `cmd_authority` (plain `authority` and `--explain`) must resolve the
+    project CLAUDE.md marker against the REPO ROOT (`airuleset._repo_root() or
+    None`), IDENTICALLY to the in-process consumers (the run-card, the
+    footer/slice gates, and the close-guard hook, which all anchor via
+    `_repo_root()` -- the #181 I-5 / run-card precedent). Pre-#829 it anchored at
+    the bare process cwd, so invoked from a SUBDIRECTORY of a marker-carrying
+    project it read `<subdir>/CLAUDE.md` (no marker), the map/allow-list won, and
+    `--explain` (the #821 stale-mapping diagnostic) mis-named the winning source
+    and printed `marker=none` while the consumers honored the repo-root marker.
+    `--explain` also now names the ACTUAL marker PATH it read (or `marker=none`).
+    Uses a marker that LOWERS a full account to fork-no-merge, so the fixture is
+    robust to #828's "marker may only LOWER authority" (lowering is always
+    honored) and never depends on the marker-precedence half."""
+
+    _FLAGS = dict(maintainer_login=False, self_login=False,
+                  stream_label=False, app_bot_login=False)
+
+    def _printed(self, explain=False):
+        with m.patch("builtins.print") as p:
+            airuleset.cmd_authority(m.Mock(explain=explain, **self._FLAGS))
+        return [str(c.args[0]) for c in p.call_args_list if c.args]
+
+    def test_cli_reads_the_marker_at_the_repo_root(self):
+        # Seam (fully deterministic, mirrors the run-card repo-root tests): the
+        # CLI reads the authority marker anchored at airuleset._repo_root(),
+        # never the bare process cwd. RED: pre-#829 the marker read cwd is None
+        # (Path.cwd()), not the repo root.
+        import cli_quals
+        seen = {}
+
+        def fake_marker(cwd=None):
+            seen["marker_cwd"] = cwd
+            return None
+
+        with m.patch.object(airuleset, "_repo_root", return_value="/repo/root"), \
+                m.patch.object(cli_quals, "_authority_marker_raw",
+                               side_effect=fake_marker), \
+                m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            self._printed(explain=False)
+        self.assertEqual(
+            seen.get("marker_cwd"), "/repo/root",
+            "the CLI must read the authority marker at the repo root, not the "
+            "process cwd -- got %r" % (seen.get("marker_cwd"),))
+
+    def test_plain_profile_honors_a_repo_root_marker_from_a_subdir(self):
+        # A repo-root marker LOWERING newlevel (full) -> fork-no-merge is honored
+        # by the CLI even when the process cwd (a subdir) carries no CLAUDE.md.
+        # RED: prints `full` (the ambient/subdir cwd has no marker).
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=fork-no-merge -->\n")
+        with m.patch.object(airuleset, "_repo_root", return_value=d), \
+                m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            printed = self._printed(explain=False)
+        self.assertIn("fork-no-merge", printed, printed)
+        self.assertNotIn("full", printed, printed)
+
+    def test_plain_profile_matches_the_in_process_consumers(self):
+        # The unification claim: the CLI's profile == what every in-process
+        # consumer resolves via resolve_authority(cwd=_repo_root() or None).
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=fork-no-merge -->\n")
+        with m.patch.object(airuleset, "_repo_root", return_value=d), \
+                m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            printed = self._printed(explain=False)
+            consumer = airuleset.resolve_authority(
+                cwd=airuleset._repo_root() or None)
+        self.assertIn(consumer, printed, (consumer, printed))
+        self.assertEqual(consumer, "fork-no-merge")
+
+    def test_explain_names_the_actual_marker_path(self):
+        # #829: --explain names the CLAUDE.md PATH the winning marker was read
+        # from (repo-root-anchored). RED: pre-#829 it says `marker=none` and
+        # `via full-authority account`, naming no path.
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=fork-no-merge -->\n")
+        with m.patch.object(airuleset, "_repo_root", return_value=d), \
+                m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            out = " ".join(self._printed(explain=True))
+        self.assertIn("resolved=fork-no-merge via project CLAUDE.md marker", out)
+        self.assertIn(str(Path(d) / "CLAUDE.md"), out)
+
+    def test_explain_marker_none_carries_no_path(self):
+        # No marker at the repo root -> `marker=none`, and NO path is claimed
+        # (nothing was read). miva1 resolves via the per-user map (branch-merge).
+        import tempfile
+        d = tempfile.mkdtemp()  # no CLAUDE.md
+        with m.patch.object(airuleset, "_repo_root", return_value=d), \
+                m.patch.object(airuleset, "_current_user", return_value="miva1"):
+            out = " ".join(self._printed(explain=True))
+        self.assertIn("marker=none", out)
+        self.assertNotIn("CLAUDE.md", out,
+                         "marker=none must not claim a marker PATH")
+        self.assertIn("resolved=branch-merge via per-user map", out)
+
+    def test_outside_any_repo_falls_back_cleanly(self):
+        # _repo_root()=="" (outside any git repo) -> `_repo_root() or None` is
+        # None, matching the consumers: no crash, resolves via the user
+        # registry, marker=none. Locks the outside-a-repo fallback.
+        with m.patch.object(airuleset, "_repo_root", return_value=""), \
+                m.patch.object(airuleset, "_current_user", return_value="newlevel"):
+            plain = self._printed(explain=False)
+            out = " ".join(self._printed(explain=True))
+        self.assertIn("full", plain, plain)
+        self.assertIn("marker=none", out)
+        self.assertIn("resolved=full via full-authority account", out)
