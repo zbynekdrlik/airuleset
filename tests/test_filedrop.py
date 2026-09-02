@@ -931,6 +931,19 @@ class TestXdgRuntimeEnvCarriesTheBus(unittest.TestCase):
         self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/9")
         self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/custom/bus")
 
+    def test_dbus_is_coherent_with_an_ambient_xdg(self):
+        # review #826: when XDG_RUNTIME_DIR is ambient (non-default) but DBUS is
+        # unset, DBUS must be derived from the EFFECTIVE XDG (never re-derived from
+        # the uid) — else sd-bus prefers a mismatched /run/user/<uid>/bus over the
+        # working /run/user/9/bus.
+        import unittest.mock as m
+        import cli_filedrop_watchdog as fw
+        with m.patch.dict(os.environ,
+                          {"XDG_RUNTIME_DIR": "/run/user/9"}, clear=False):
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            env = fw._xdg_runtime_env()
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "unix:path=/run/user/9/bus")
+
 
 if __name__ == "__main__":
     unittest.main()

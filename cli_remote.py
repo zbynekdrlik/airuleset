@@ -323,9 +323,15 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
                   f"{r.stderr.strip()[:200]}")
             time.sleep(backoff)
         if exc is not None:
+            # #826 adversarial-review: NEVER str()/repr() the exception here — a
+            # subprocess.TimeoutExpired/CalledProcessError embeds the full argv
+            # (incl. `sshpass -p <shared-password>`) in BOTH, and this `failed`
+            # entry now flows up into the deploy-phase `DEPLOY FAILED` summary.
+            # Report the exception CLASS only — a redacted, non-leaking signal.
+            exc_name = type(exc).__name__
             print("  ⚠ %s delivery to %s failed: %s"
-                  % (noun, remote["name"], exc), file=sys.stderr)
-            failed.append((remote["name"], repr(exc)))
+                  % (noun, remote["name"], exc_name), file=sys.stderr)
+            failed.append((remote["name"], exc_name))
             continue
         if r.returncode != 0:
             print("  ⚠ %s delivery to %s failed (rc=%d): %s"
@@ -1079,10 +1085,13 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # ~33 mock-"FAILED" lines the pre-push test suite prints into the SAME
             # log stream, so a bare "FAILED" token is not diagnostic and `push`
             # reported OK while a target silently ran stale config. The
-            # `DEPLOY FAILED` / `DEPLOY FAILURES:` token is emitted ONLY by this
-            # phase (which runs AFTER "Pushing to GitHub"), so a targeted digest
-            # of the deploy section finds the real failure reliably; the non-zero
-            # exit below is never swallowed.
+            # `DEPLOY FAILED` / `DEPLOY FAILURES:` token is UNIQUE within the
+            # DEPLOY SECTION (everything after "Pushing to GitHub" — this phase is
+            # the only real emitter there), so a SECTION-SCOPED digest finds the
+            # real failure reliably. (A whole-log grep still hits the token from
+            # the pre-push suite's own deploy-failure tests, which is why the
+            # digest must be section-scoped, per the internals-cli lesson; the
+            # non-zero exit below is never swallowed either way.)
             for name, reason in failed:
                 print(f"DEPLOY FAILED {name}: {reason}", file=sys.stderr)
             print(f"\n⚠ DEPLOY FAILURES: {len(distinct_failed)} of "

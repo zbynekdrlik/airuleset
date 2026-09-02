@@ -79,14 +79,21 @@ def _xdg_runtime_env():
     runs over SSH (no login session) it is often unset. We set it deterministically
     to /run/user/<uid>. #826: ALSO set DBUS_SESSION_BUS_ADDRESS — a non-login ssh
     session that has neither exported leaves `systemctl --user` unable to reach the
-    per-user bus ('Failed to connect to bus: No medium found'), so this is the ONE
-    shared helper every remote `--user` call site (filedrop, the watchdog timer,
-    webterm, the webterm tunnel, AND the drop-gateway restart) routes through. Both
-    are `setdefault` so a real logind session's own values always win."""
+    per-user bus ('Failed to connect to bus: No medium found'). This is the shared
+    systemd-user env helper the push/install `--user` call sites route through
+    (filedrop, the watchdog-timer install, webterm, the webterm tunnel, AND the
+    drop-gateway restart via `cli_drop_gateway._restart_env`).
+
+    Both vars are `setdefault` so a real logind session's own values always win —
+    and DBUS is derived from the EFFECTIVE XDG_RUNTIME_DIR (whatever wins the first
+    setdefault), never re-derived from the uid: an ambient non-default
+    XDG_RUNTIME_DIR with DBUS unset would otherwise get a `/run/user/<uid>/bus`
+    address that sd-bus PREFERS over the (now-mismatched) `$XDG_RUNTIME_DIR/bus`
+    fallback, overriding a previously-working bus (adversarial-review #826)."""
     env = dict(os.environ)
-    uid = os.getuid()
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
-    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{uid}/bus")
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS",
+                   "unix:path=%s/bus" % env["XDG_RUNTIME_DIR"])
     return env
 
 

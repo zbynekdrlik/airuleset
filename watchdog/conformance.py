@@ -101,8 +101,16 @@ def _timer_status(unit=WATCHDOG_TIMER_UNIT):
     genuinely-inactive timer identically to a spawn failure)."""
     import subprocess
     try:
+        # #826: mirror cli_filedrop_watchdog._xdg_runtime_env — a non-login ssh
+        # `watchdog --once` needs BOTH XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS
+        # or `systemctl --user` fails 'No medium found'. DBUS is derived from the
+        # EFFECTIVE XDG value (never re-derived from the uid) so an ambient
+        # non-default XDG stays coherent. (Self-contained to keep this a watchdog
+        # leaf; the push/install call sites route through the shared helper.)
         env = dict(os.environ)
         env.setdefault("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS",
+                       "unix:path=%s/bus" % env["XDG_RUNTIME_DIR"])
         r = subprocess.run(["systemctl", "--user", "is-active", unit],
                            capture_output=True, text=True, timeout=10, env=env)
     except Exception:

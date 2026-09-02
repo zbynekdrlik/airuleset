@@ -287,12 +287,18 @@ class TestRestartEnv(unittest.TestCase):
 
     def test_user_unit_env_keeps_an_ambient_value(self):
         # setdefault: a real logind session's own XDG_RUNTIME_DIR must WIN over
-        # the deterministic fallback (never clobber a correct live value).
+        # the deterministic fallback (never clobber a correct live value) — AND
+        # the DBUS address must stay COHERENT with it (derived from the EFFECTIVE
+        # XDG, never re-derived from the uid), or sd-bus would prefer a mismatched
+        # /run/user/<uid>/bus over the working /run/user/4242/bus (review #826).
         import unittest.mock as m
         with m.patch.dict(os.environ,
                           {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False):
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
             env = dg._restart_env(dg.drop_lane_for_box("subdev"))
         self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/4242")
+        self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
+                         "unix:path=/run/user/4242/bus")
 
     def test_system_unit_env_is_inherit_none(self):
         self.assertIsNone(dg._restart_env(dg.drop_lane_for_box("spinbike")))

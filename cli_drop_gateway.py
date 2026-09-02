@@ -481,9 +481,11 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None)
     a prior `drop-gateway --apply` added, while the go-live marker survives. Left
     unhealed, the CLI would then advertise a public URL that 404s. This runs
     AFTER webterm setup in `cmd_install`, re-adds the ingress if it went missing,
-    and restarts the tunnel. It NEVER raises (best-effort, LOUD on failure) and
-    is a pure no-op on any box without a live drop lane (the overwhelming
-    majority — no lane, or a lane whose marker was never written).
+    and restarts the tunnel. It NEVER raises — it catches its own errors and
+    returns False, which per the contract below FAILS the install (LOUD on
+    failure). It is a pure no-op (returns True) on any box without a live drop
+    lane (the overwhelming majority — no lane, or a lane whose marker was never
+    written).
 
     Returns True when NOTHING is wrong (the ingress is present+live after this
     call, OR this box has no live drop lane at all — a benign no-op), and False
@@ -508,13 +510,15 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None)
             return False
         cfg_uuid = _config_tunnel_uuid(config_text)
         if cfg_uuid is not None and cfg_uuid != lane.tunnel_uuid:
-            print("  drop-gateway: %s is not this lane's tunnel — skipping ingress "
-                  "re-assert" % lane.tunnel_config, file=sys.stderr)
+            print("  drop-gateway: %s is not this lane's tunnel — cannot heal a "
+                  "live drop lane, FAILING the install (#826)"
+                  % lane.tunnel_config, file=sys.stderr)
             return False
         try:
             augmented = render_drop_ingress_augmentation(config_text, lane.host)
         except ValueError:
-            print("  drop-gateway: %s has no catch-all — skipping ingress re-assert"
+            print("  drop-gateway: %s has no catch-all — cannot heal a live drop "
+                  "lane, FAILING the install (#826)"
                   % lane.tunnel_config, file=sys.stderr)
             return False
         if augmented == config_text:

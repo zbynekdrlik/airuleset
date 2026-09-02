@@ -1359,7 +1359,9 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
                 m.patch.object(cli_remote, "_soniox_key_line",
-                                return_value="SONIOX_API_KEY=fake"):
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", StringIO()):  # #826: suppress the new
+                # DEPLOY FAILED token from the pre-push suite's log stream
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         david2_calls = [c for c in calls if any("david2@" in str(a) for a in c)]
@@ -1432,7 +1434,9 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
                 m.patch.object(cli_remote, "_soniox_key_line",
-                                return_value="SONIOX_API_KEY=fake"):
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", StringIO()):  # #826: don't leak the new
+                # DEPLOY FAILED token into the pre-push suite's own log output
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         simap_calls = [c for c in calls if any("simap@" in str(a) for a in c)]
@@ -1487,7 +1491,9 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
                 m.patch.object(cli_remote, "_soniox_key_line",
-                                return_value="SONIOX_API_KEY=fake"):
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", StringIO()):  # #826: suppress the new
+                # DEPLOY FAILED token from the pre-push suite's log stream
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         miva1_calls = [c for c in calls if any("miva1@" in str(a) for a in c)]
