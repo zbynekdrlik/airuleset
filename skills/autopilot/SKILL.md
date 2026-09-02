@@ -886,6 +886,34 @@ gap in either.
    > issue's own replacement branch, while every OTHER ready branch integrates without being
    > held for it.
 
+   > **Two RESUME SHAPES that actually reach a dead lane — the naive "name the branch, dispatch
+   > a fresh `isolation: "worktree"` worker" CANNOT `cd` into the dead worktree (#836, proven
+   > live 2026-09-02).** Claude Code's own worktree-isolation LAUNCH PIN refuses any command whose
+   > cwd resolves outside the freshly-pinned worktree — so a fresh `isolation: "worktree"` resume
+   > worker told to `git -C <dead worktree>`/`cd` into the DEAD worker's worktree returns
+   > `ISOLATION MISMATCH` (a #827 lane burned ~270k tokens hitting exactly this), a dispatched
+   > worker's `git -C` is additionally refused by `block-foreign-airuleset-write.sh` RULE B/B2 (agent
+   > context only — the SUPERVISOR's own `git -C` is NOT blocked), and `EnterWorktree` moves cwd but
+   > the harness keeps enforcing the launch pin, so every command afterwards is refused. Use one of
+   > the TWO shapes that work WITHIN the guards, chosen by the dead lane's tree state:
+   > 1. **CLEAN dead lane (all work committed):** dispatch a fresh `isolation: "worktree"` worker
+   >    and tell it to `git merge --no-ff <dead-lane-branch>` onto ITS OWN branch (use `--ff-only`
+   >    only when its fresh base is not ahead of the dead lane's base; `--no-ff` is the takeover
+   >    that also RESOLVES the version bump to the batch version). It then continues the cycle from
+   >    that tip; the supervisor merges the NEW branch and deletes BOTH lane branches (the dead one
+   >    is an ancestor). NEVER `cd`/`git -C` into the dead worktree from an `isolation: "worktree"`
+   >    dispatch — the launch pin forbids it.
+   > 2. **UNCOMMITTED work in the dead lane:** dispatch WITHOUT `isolation:` and make the worker's
+   >    FIRST command `cd <dead worktree path>` (Bash cwd persists across calls), THEN run the #817
+   >    isolation self-check IN that directory (toplevel under `.claude/worktrees/`, branch = the
+   >    dead lane's branch — NOT `main`/`dev`). RULE B of `block-foreign-airuleset-write.sh` already
+   >    allows a worktree-cwd write, so the resume worker commits + continues there; the supervisor
+   >    merges the dead lane's branch as usual. This is the only shape a WORKER can use to reach a
+   >    dead lane's uncommitted edits directly — the SUPERVISOR can instead salvage them itself
+   >    (`git -C <worktree> status`, commit the uncommitted work as a `wip:` commit, push the backup,
+   >    then dispatch a shape-1 worker), since a `refs/autopilot-wip/<branch>` backup only ever
+   >    captures COMMITTED work.
+
    > **Multi-stage / long pipelines (e.g. a 3-branch `develop→staging→main` flow) — YOU own the CI
    > waits, not the worker.** A single worker cannot safely hold an hour-plus of successive CI waits:
    > a subagent that `run_in_background`-waits and ends its turn TERMINATES (the dominant worker

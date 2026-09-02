@@ -158,6 +158,28 @@ class TestContentDedupClaim(unittest.TestCase):
         self.assertEqual(self._claim(now=1_000_000.0), "claim")
         self.assertEqual(self._claim(now=1_000_000.0 + 500), "claim")
 
+    def test_boundary_straddling_claims_dedup(self):
+        # #832: two identical payloads 1 s apart that STRADDLE a 120-s bucket
+        # edge (int(now // 120) increments between them) must still dedup — the
+        # pre-fix code keyed the bucket into the claim FILENAME, so the two
+        # sends landed in ADJACENT files and BOTH delivered. Injected clock
+        # (a future bucket boundary), never a wall-clock sleep, so it is
+        # deterministic regardless of when the suite runs.
+        edge = 20_000_000 * 120        # exactly on a bucket boundary (~2046)
+        self.assertEqual(self._claim(now=edge - 0.5), "claim")
+        self.assertEqual(self._claim(now=edge + 0.5), "dup")
+
+    def test_adjacent_bucket_beyond_window_both_claim(self):
+        # #832 control: two identical payloads in ADJACENT buckets but MORE than
+        # window_s apart must BOTH claim — the sliding window is BOUNDED at
+        # window_s, not silently widened toward 2×window_s (the rejected
+        # existence-only probe would over-suppress here). This also proves the
+        # marker's mtime is stamped with the injected `now` (else the far-future
+        # claim time vs the real file-creation mtime would misjudge the age).
+        edge = 20_000_000 * 120
+        self.assertEqual(self._claim(now=edge - 0.5), "claim")
+        self.assertEqual(self._claim(now=edge + 119.9), "claim")
+
     def test_whitespace_and_case_normalized_to_same_key(self):
         self.assertEqual(self._claim(text="Bounce  4736   done"), "claim")
         self.assertEqual(self._claim(text="bounce 4736 done"), "dup")

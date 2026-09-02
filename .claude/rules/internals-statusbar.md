@@ -103,7 +103,7 @@ parking reason — an external event/evidence instead of the user's answer):
   need the parked-clause prose (`a \`gk N\`/\`U N\`/\`W N\` in it is parked`).
 - **The Mock-auto-vivify class (this file's own `getattr(args,"ops_wait",False)`
   bullet) has its fix point at the HELPER DEFAULT DICTS, not just the inline
-  Mocks.** `test_authority_profiles.py`'s `_run`/`_drive` both build
+  Mocks.** `test_authority_core_quals.py`'s `_run` + `authority_testlib.py`'s `_drive` (split out of `test_authority_profiles.py` in #830) both build
   `dict(count=True, list=False, waiting=False, extra=None)` then `.update(flags)`
   — a single `replace_all` of `waiting=False, extra=None` → `waiting=False,
   ops_wait=False, extra=None` fixes the ~29 inline `mk.Mock(...)` calls AND both

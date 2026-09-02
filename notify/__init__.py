@@ -2962,7 +2962,14 @@ def content_dedup_claim(text, owner=None, project=None, now=None,
     O_NOFOLLOW (no symlink-target write) and 0o644 (all tenants read to detect
     the EEXIST claim). Accepted LOW-severity residual: a hostile same-box tenant
     could pre-create a marker to suppress another's ✅ (worst case one missed,
-    recoverable ping) — same-box tenants are the owner's own accounts."""
+    recoverable ping) — same-box tenants are the owner's own accounts. The #832
+    previous-bucket probe adds a second such surface (a fresh-mtime prev-bucket
+    marker) AND a check-then-act cross-process race: the probe read and the
+    O_EXCL create are not one atomic step, so two identical claims straddling a
+    bucket edge within microseconds of each other can both deliver — the edge is
+    closed for the common single-process / non-racing case, not made atomic
+    across processes. Both are fail-OPEN (a duplicate ping, never a lost one),
+    the acceptable direction, so no lock is taken."""
     now = time.time() if now is None else now
     window_s = window_s or CONTENT_DEDUP_WINDOW_S
     d = _content_dedup_store_dir(store_dir)
@@ -2981,6 +2988,27 @@ def content_dedup_claim(text, owner=None, project=None, now=None,
     except OSError:
         return "claim"            # cannot stand up the store → fail OPEN
     _content_dedup_sweep(d, now, window_s)
+    # #832: the time bucket lives in the claim FILENAME (int(now // window_s)),
+    # so two identical payloads a second apart that STRADDLE a bucket edge land
+    # in ADJACENT files and BOTH claim — a hard-edged window, not a sliding one.
+    # Close the edge (for the common single-process / non-racing case; the probe
+    # + create are NOT atomic across processes — accepted fail-open residual in
+    # the docstring) without giving up the mtime-race-free O_EXCL claim: before
+    # creating THIS bucket's marker, probe the IMMEDIATELY-PREVIOUS bucket's
+    # marker and treat it as a dup only if it was claimed < window_s ago (a true
+    # sliding window keyed on the previous delivery's timestamp). A time in
+    # bucket B can only be within window_s of a claim in bucket B-1 (B-2 is
+    # always > window_s away), so one previous bucket suffices. Any read error
+    # (no marker, unreadable) → fall through to the O_EXCL claim (fail-open).
+    prev_path = os.path.join(d, _content_dedup_filename(
+        _content_dedup_key(text, owner, project, now - window_s, window_s)))
+    try:
+        if now - os.path.getmtime(prev_path) < window_s:
+            return "dup"
+    # airuleset:script-ok fail-open (#832): a missing/unreadable previous marker
+    # is the normal case — fall through to the O_EXCL claim, never a spurious dup.
+    except OSError:
+        pass
     path = os.path.join(d, _content_dedup_filename(
         _content_dedup_key(text, owner, project, now, window_s)))
     try:
@@ -2991,10 +3019,19 @@ def content_dedup_claim(text, owner=None, project=None, now=None,
     except OSError:
         return "claim"            # any other error (EACCES, ...) → fail OPEN
     # The O_EXCL create IS the claim — the marker's CONTENT is never read (dedup
-    # keys on the file's EXISTENCE), so no write is needed, and a mid-write
-    # failure can never turn a successful claim into a raised exception (this
-    # keeps the function fail-safe by construction for a direct Python caller too,
-    # not only the shell caller's `|| echo claim`; #687 review 🔵).
+    # keys on the file's EXISTENCE + mtime), so no write is needed, and a
+    # mid-write failure can never turn a successful claim into a raised exception
+    # (this keeps the function fail-safe by construction for a direct Python
+    # caller too, not only the shell caller's `|| echo claim`; #687 review 🔵).
+    # Stamp the marker's mtime with `now` (#832) so the previous-bucket probe
+    # above reads the CLAIM's timestamp, not the OS file-creation wall clock — in
+    # production `now` is real time (mtime unchanged); under an injected clock the
+    # whole sliding window stays deterministic. airuleset:script-ok best-effort:
+    # a utime failure only degrades the cross-edge probe, never the claim itself.
+    try:
+        os.utime(path, (now, now))
+    except OSError:
+        pass
     os.close(fd)
     return "claim"
 

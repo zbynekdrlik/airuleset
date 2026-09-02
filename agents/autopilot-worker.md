@@ -228,6 +228,13 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   RULE B2 (#817) hard-blocks a dispatched worker's branch-state git op / write against the shared
   checkout when its cwd is not a worktree — but the self-check + abort is YOUR obligation; the hook is
   only the last-resort net (fail-safe: a refused worker is recoverable, a hijacked HEAD is not).
+  **EXCEPTION — a NO-isolation RESUME dispatch (shape 2 of #836, below):** when your dispatch is a
+  DEAD-LANE resume with NO `isolation:` and your FIRST command is `cd <dead worktree path>`, run
+  THIS self-check IN that directory (after the `cd`, Bash cwd persists) — the toplevel then
+  correctly resolves under `.claude/worktrees/` with the dead lane's branch, so your momentary
+  main-checkout STARTING cwd is NOT an isolation failure and you do NOT return `ISOLATION FAILED`
+  for it. Every OTHER dispatch (the default `isolation: "worktree"`) still aborts on a main
+  checkout exactly as above.
 - **NEVER touch the shared main tree.** Work entirely inside your OWN worktree path — always your
   own `cwd` (`<repo>/.claude/worktrees/agent-<id>`), NEVER the bare main checkout path even if the
   dispatch prompt happens to name it as context. If any tool call refuses with "this command
@@ -241,6 +248,24 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   redo the write inside your own worktree (the deny message names your worktree path). This was a
   real incident (worker #433 step 12 edited the main checkout uncommitted and blocked the serial
   merge).
+- **RESUMING a DEAD lane — the fresh `isolation: "worktree"` launch pin CANNOT reach the dead
+  worktree, so use the ONE of TWO shapes the supervisor dispatched you as (#836, proven live
+  2026-09-02).** A fresh `isolation: "worktree"` worker told to `cd`/`git -C` into a DEAD worker's
+  worktree returns `ISOLATION MISMATCH` (Claude Code's launch pin refuses any cwd outside your own
+  freshly-pinned worktree; a dispatched worker's `git -C` is also refused by
+  `block-foreign-airuleset-write.sh` RULE B/B2 — agent context only, never the supervisor's own
+  `git -C`), so a dead lane is resumed one of two ways, chosen by the supervisor from the tree state:
+  (1) **CLEAN dead lane (all committed)** — you are a normal `isolation: "worktree"` worker; the
+  dispatch names the dead branch and you `git merge --no-ff <dead-lane-branch>` onto YOUR OWN
+  branch as your first git step (resolving the version bump to the batch version — `--ff-only` only
+  when your fresh base is not ahead), then continue the cycle from that tip. NEVER `cd`/`git -C`
+  into the dead worktree. (2) **UNCOMMITTED work in the dead lane** — you are dispatched WITHOUT
+  `isolation:`; your FIRST command is `cd <dead worktree path>` (Bash cwd persists), THEN the #817
+  self-check IN that directory (per its shape-2 EXCEPTION above), THEN commit + continue there
+  (RULE B of `block-foreign-airuleset-write.sh` allows a worktree-cwd write). The
+  `refs/autopilot-wip/<branch>` backup only preserves COMMITTED work, so shape 2 is the only way a
+  WORKER recovers a dead lane's uncommitted edits directly (the supervisor can instead
+  salvage-commit them itself, then dispatch a shape-1 worker).
 - **Your scratchpad directory is SHARED across every sibling worker dispatched in the SAME fleet
   round — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
   conversation id, so every worker the supervisor dispatches this round inherits the identical
