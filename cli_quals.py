@@ -1641,7 +1641,12 @@ def cmd_authority(args):
         # tickets carry (`_ticket_is_stream_labeled`) and the sub-dev slice uses
         # (`_slice_quals`) — the ownership signal that survives a shared gh
         # identity, unlike authorship (#463). No network call.
-        if resolve_authority() != "full":
+        # #829: anchor at the REPO ROOT too — the close-guard hook shells out to
+        # BOTH `authority` and `authority --stream-label` from the SAME session
+        # cwd, so this arm must honor a repo-root marker from a subdirectory
+        # identically to the profile print below, or the two disagree and the
+        # own-stream acceptance-close carve-out mis-fires.
+        if resolve_authority(cwd=airuleset._repo_root() or None) != "full":
             # #564: emit ALL rename equivalents (newline-separated), routed
             # through the single `_stream_rename_equivalents()` alias primitive
             # (never a parallel table). A box whose base stream was renamed
@@ -1683,8 +1688,9 @@ def cmd_authority(args):
         # the remedy ("add to AUTHORITY_BY_USER or FULL_AUTHORITY_USERS") so the
         # loud fail-safe degrade names its own fix. Lives ONLY in --explain
         # (opt-in), never on the hot resolve_authority() path the footer and
-        # close-guard call every cycle. Resolved against the invoking cwd — the
-        # same anchoring the plain `authority` output has always used.
+        # close-guard call every cycle. Resolved against the REPO ROOT (the
+        # `root` computed above) — the same anchoring the plain `authority`
+        # output now uses (#829), identical to every in-process consumer.
         user = airuleset._current_user()
         if user in airuleset.AUTHORITY_BY_USER:
             map_val = airuleset.AUTHORITY_BY_USER[user]
