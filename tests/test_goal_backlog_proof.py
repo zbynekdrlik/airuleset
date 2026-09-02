@@ -769,18 +769,18 @@ class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
         for line in goal_lines():
             self.assertIn("compact-request --self", line)
 
-    def test_every_template_compacts_only_at_the_drained_batch_boundary(self):
-        # #723 BATCH mode: the compact-request --self call is now GATED on the
-        # whole batch having returned (zero live tasks), REPLACING #621's
-        # "compact boundary paces ONE integration per turn / do NOT integrate a
-        # SECOND branch this turn" continuous framing. So "WHOLE batch has
-        # returned" must appear BEFORE the compact call on the same line, and
-        # the superseded serializing tail must be gone.
+    def test_every_template_compacts_at_every_integration_cycle(self):
+        # #848 CONTINUOUS REFILL retires #723's drained-batch gating: the
+        # compact-request --self call fires at EVERY integration cycle, live
+        # lanes or not — the "WHOLE batch has returned (ZERO live tasks)" gate is
+        # GONE (it held the boundary undelivered forever on a saturated box). The
+        # #741 HOLD-until-delivered ordering survives; the pre-#723 serializing
+        # tail stays banned.
         for line in goal_lines():
             self.assertIn("compact-request --self", line)
-            self.assertIn("WHOLE batch has returned", line)
-            self.assertLess(line.index("WHOLE batch has returned"),
-                            line.index("compact-request --self"))
+            self.assertIn("live lanes or not", line)
+            self.assertNotIn("WHOLE batch has returned", line)
+            self.assertNotIn("ZERO live tasks", line)
             self.assertNotIn("do NOT integrate a SECOND branch this turn", line)
             self.assertNotIn("do NOT hand off a SECOND branch this turn", line)
 

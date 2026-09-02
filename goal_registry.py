@@ -56,18 +56,18 @@ class Clause:
 
 
 # The reconciliation the owner asked to be VISIBLE in the registry, not buried
-# in prose (#723 BATCH mode, deliberately reversing #456's continuous refill FOR
-# autopilot): `saturation-core` dispatches a BOUNDED PARALLEL BATCH (up to 5
-# worktree lanes, NO refill while a batch runs); `saturation-delivery` integrates
-# each returned branch SERIALLY under the mutex as it returns; `compact-boundary`
-# fires the compact ONLY at the DRAINED batch boundary (whole batch returned +
-# integrated = ZERO live tasks) then dispatches the NEXT batch — NEVER mid-fleet
-# (that breaks task handles/goal, CC #29193 unfixed as of CC 2.1.246). So dispatch
-# is a BOUNDED parallel batch, integration is serial, and compact is at the clean
-# boundary; the clauses cannot contradict. Tests assert compact-boundary fires at
-# the DRAINED batch boundary (zero live tasks → next batch) and that the old
-# continuous "compact boundary paces ONE integration per turn / parallel lanes
-# keep building" framing is GONE.
+# in prose (#848, 2026-09-02, retiring the #723/#724 batch doctrine after the
+# STEP-0 live experiment proved a compact over live lanes is safe on CC 2.1.258):
+# `saturation-core` keeps up to 5 PARALLEL worktree lanes live and refills a
+# returned lane's slot IMMEDIATELY (continuous refill, reversing the #723 batch
+# mode back to #456's shape); `saturation-delivery` integrates each returned
+# branch SERIALLY under the mutex as it returns; `compact-boundary` fires the
+# compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not
+# (the lanes reconcile from durable state after the compaction, #844's LANE-RETURN
+# net). So dispatch is continuous-refill up to 5 lanes, integration is serial, and
+# compact is per cycle; the clauses cannot contradict. Tests assert compact-boundary
+# fires EVERY cycle (live lanes or not) and that the old batch "ZERO live tasks →
+# next batch / NEVER compact while lanes live" framing is GONE.
 SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
                                  "compact-boundary")
 
@@ -150,7 +150,7 @@ CLAUSES = [
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
     Clause("saturation-core", PROFILES,
-        "BATCH MODE, never one ticket per turn: dispatch a BATCH of up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes, NO refill while a batch runs;"),
+        "CONTINUOUS REFILL, never one ticket per turn: keep up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes live — refill a returned lane's slot IMMEDIATELY while backlog remains;"),
     Clause("saturation-delivery", PROFILES, {
         "full": "integrate returned branches SERIALLY under the integration mutex as they return;",
         "branch-merge": "merge returned branches into the integration branch SERIALLY under the mutex as they return;",
@@ -168,9 +168,9 @@ CLAUSES = [
     Clause("night", PROFILES,
         "No night/day difference (#791): work the backlog and ask questions 24/7 — no night-hour cutoff, no time-of-day deferral."),
     Clause("bounce", PROFILES, {
-        "full": "Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds oldest-first (never preempting a running batch); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline.",
-        "branch-merge": "Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline.",
-        "fork-no-merge": "Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline.",
+        "full": "Bounce lane: open tickets labeled prio:bounce jump the queue — the next FREE lane takes them oldest-first (never preempting a running lane); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline.",
+        "branch-merge": "Bounce lane: my prio:bounce tickets fill each FREE lane oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline.",
+        "fork-no-merge": "Bounce lane: my prio:bounce tickets fill each FREE lane oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline.",
     }),
     Clause("verify-sources", PROFILES, {
         "full": "Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first.",
@@ -178,9 +178,9 @@ CLAUSES = [
         "fork-no-merge": "Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first.",
     }),
     Clause("compact-boundary", PROFILES, {
-        "full": "After each integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + integrated (ZERO live tasks — waiver #730) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#402) as your last tool call — then HOLD each later goal turn until that compact runs — no next batch first; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).",
-        "branch-merge": "After each integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + merged (ZERO live tasks — waiver #730) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call — then HOLD each later goal turn until that compact runs — no next batch first; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).",
-        "fork-no-merge": "After each hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). ONLY when the WHOLE batch has returned + handed off (ZERO live tasks — waiver #730) run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call — then HOLD each later goal turn until that compact runs — no next batch first; NEVER compact while lanes live (breaks tasks/goal, CC #29193 unfixed).",
+        "full": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — and run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#402) as your last tool call, live lanes or not (#848: compact over live lanes is safe; lanes reconcile from durable state) — then HOLD each later goal turn until that compact runs — no new lane first.",
+        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — and run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call, live lanes or not (#848: compact over live lanes is safe; lanes reconcile from durable state) — then HOLD each later goal turn until that compact runs — no new lane first.",
+        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B) — and run `python3 ~/devel/airuleset/airuleset.py compact-request --self` (#225) as my last tool call, live lanes or not (#848: compact over live lanes is safe; lanes reconcile from durable state) — then HOLD each later goal turn until that compact runs — no new lane first.",
     }),
 ]
 
