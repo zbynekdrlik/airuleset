@@ -1129,11 +1129,18 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
             if hc == _TV_CORRUPT:
                 # the box holds `<= head_chunk` chars of OUR OWN text on a
                 # bare-verified box -> back the chunk off (over-backspace safe) +
-                # pop the parked draft. A HOLD box takes NO keystroke (#233/#322/
-                # #372) -- the #488 park record + janitor reclaim the parked draft.
+                # pop the parked draft (which parks the residue durably if even
+                # that undo cannot confirm, #852 E).
                 watchdog._undo_and_release_slot(
                     pid, run, text[:GOAL_TYPE_CHECKPOINT_CHARS], parked, _log,
                     "stash-abort", sleep_fn=sleep_fn, state=state)
+            else:
+                # #852 E -- a HOLD box after the checkpoint chunk takes NO
+                # keystroke (#233/#322/#372), but our head chunk IS left in it:
+                # record it durably (WARN + park) so the janitor reclaims it.
+                _park_unreclaimed(
+                    pid, run, text[:GOAL_TYPE_CHECKPOINT_CHARS], _log, state,
+                    "stash-abort: head-checkpoint-%s" % hc)
             return False
     else:
         watchdog._type_literal(pid, run, text, sleep_fn)
@@ -1155,7 +1162,10 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # stash slot until a LATER sweep's own "slot occupied" check
         # surfaces it — rare in practice, since `_type_literal`'s chunking
         # exists specifically to avoid ever reaching this state.
-        _log("stash-abort: collapsed-paste")
+        # #852 E -- our typed text IS left in this collapsed box, so record it
+        # durably (WARN + park the exact string) so the janitor reclaims it;
+        # never a silent log+return.
+        _park_unreclaimed(pid, run, text, _log, state, "stash-abort: collapsed-paste")
         return False
     # #670 -- the BARE (PARKED/NOOP) branch verifies HEAD-INCLUSIVELY
     # (`_type_verify_landed`: head-row prefix + tail suffix, placeholder-exempt),
@@ -1195,7 +1205,10 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         two_phase_hold = False
     if not landed:
         if two_phase_hold:
-            _log("stash-abort: type-verify-hold")
+            # #852 E -- a HOLD box we typed into but must not backspace still
+            # holds our text; record it durably (WARN + park) for the janitor.
+            _park_unreclaimed(pid, run, text, _log, state,
+                              "stash-abort: type-verify-hold")
             return False
         _log("stash-abort: type-verify-failed")
         # PARKED or NOOP -- the settle poll VERIFIED this box bare a moment ago,
