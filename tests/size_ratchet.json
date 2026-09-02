@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6954,
+    "airuleset.py": 6970,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -438,7 +438,7 @@
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
     "working_time.py": 78,
-    "tests/test_double_compact_855.py": 366
+    "tests/test_double_compact_855.py": 388
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,

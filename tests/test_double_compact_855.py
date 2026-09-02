@@ -301,6 +301,19 @@ class TestDefensiveQueued(unittest.TestCase):
             delivered_path=self.delp, now=time.time())
         self.assertNotEqual(word, "queued")
 
+    def test_defensive_path_never_marks_queued_since(self):
+        # 🔵5 absence-lock: the defensive queued->sent path treats it as a real
+        # send (compact-delivered), so it must NEVER write the queued-since store
+        # (there is nothing to drain via the boundary-hold hint). A mutant
+        # re-adding `mark_compact_queued_ts` on this path fails this.
+        proj = self._dir()
+        _marker(proj, CWD, SID)
+        run = _SubmitThenBusyRun(CWD, CB_BUSY)
+        compact.deliver_compact(
+            SID, CWD, origin="self-callback", run=run, projects_dir=proj,
+            delivered_path=self.delp, now=time.time())
+        self.assertIsNone(compact.compact_queued_since(SID))
+
 
 def _args(**kw):
     kw.setdefault("self", False)
@@ -344,6 +357,15 @@ class TestSelfPrintsHintOnTurnRunning(unittest.TestCase):
         self.assertTrue(out.startswith("skip:turn-running"), out)
         self.assertIn("sleep 45 && echo boundary-hold", out)
         self.assertIn("run_in_background", out)
+
+    def test_hint_is_conditional_on_an_armed_goal(self):
+        # 🟡3: `--self` runs mid-turn so `skip:turn-running` fires for EVERY
+        # session — the hint must tell a served, non-/goal session it may IGNORE
+        # it (it does not need the boundary hold; the sweep delivers once its
+        # turn ends and the pane goes idle).
+        out = self._self_output("skip:turn-running")
+        self.assertIn("ARMED", out)
+        self.assertIn("IGNORE", out)
 
 
 class TestDoctrine(unittest.TestCase):
