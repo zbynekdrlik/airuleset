@@ -124,7 +124,7 @@
     "tests/test_disk_hygiene_513.py": 500,
     "tests/test_dispatch_floor.py": 601,
     "tests/test_draft_rescue.py": 441,
-    "tests/test_drop_gateway.py": 803,
+    "tests/test_drop_gateway.py": 836,
     "tests/test_durable_decisions.py": 84,
     "tests/test_dynamic_application.py": 149,
     "tests/test_ensure_timezone.py": 116,

@@ -70,6 +70,29 @@ class TestDropLaneRegistry(unittest.TestCase):
         self.assertIsNone(dg.drop_lane_for_box("dev1"))
         self.assertIsNone(dg.drop_lane_for_box("some-random-box"))
 
+    def test_gateway_account_is_a_fleet_deploy_target(self):
+        # #838: a sibling account's install-time ingress re-assert diverts to a
+        # benign no-op BECAUSE the gateway account's OWN install pass heals the
+        # shared tunnel. That healing only happens if the gateway account is
+        # itself a fleet deploy target — otherwise a clobbered ingress goes
+        # unhealed and every sibling silently advertises a 404 URL. Lock it:
+        # every lane naming a gateway_account has a matching <account>@<nodename>
+        # entry in the fleet target registry (review #838 🔵).
+        import cli_fleet
+        target_names = {h.get("name") for h in cli_fleet.REMOTE_HOSTS}
+        checked = 0
+        for node, lane in dg.DROP_LANES.items():
+            if lane.gateway_account is not None:
+                expected = "%s@%s" % (lane.gateway_account, node)
+                self.assertIn(
+                    expected, target_names,
+                    "gateway account %r for lane %r must be a fleet deploy target "
+                    "(%s) so it heals the shared tunnel its siblings depend on"
+                    % (lane.gateway_account, node, expected))
+                checked += 1
+        self.assertEqual(checked, 1, "expected exactly the subdev/david1 lane to "
+                         "carry a gateway_account (non-vacuous lock)")
+
 
 class TestIngressAugmentation(unittest.TestCase):
     def test_inserts_before_catchall_and_preserves_existing(self):
@@ -767,11 +790,21 @@ class TestReconcileSiblingAccount838(unittest.TestCase):
 
     def test_injected_username_overrides_current_username(self):
         # The injectable `username=` seam (the #786 pin-the-account lesson) drives
-        # the divert directly, without resolving the real invoking account.
+        # the divert directly. TEETH: pin _current_username to the GATEWAY account
+        # (david1) — which would NOT divert and WOULD restart the clobbered config
+        # — while passing the SIBLING account david2. Only if the param is honored
+        # does the divert fire (True, no restart, config untouched); a param-
+        # ignoring impl resolves david1 → shape (b) → rewrites+restarts → fails.
+        from unittest import mock
+        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        before = Path(self.cfg).read_text(encoding="utf-8")
         calls, r = self._run_recorder()
-        self.assertTrue(dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="subdev", marker_path=self.marker, username="david2"))
+        with mock.patch.object(dg, "_current_username", return_value="david1"):
+            self.assertTrue(dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker, username="david2"))
         self.assertEqual(calls, [], "injected sibling account is a benign no-op")
+        self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before,
+                         "the injected sibling account never rewrites the config")
 
 
 class TestSecretShowLeadingFlagName(unittest.TestCase):
