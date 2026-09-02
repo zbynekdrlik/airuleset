@@ -9594,7 +9594,10 @@ class TestApiWatchdog(TestCase):
                          default_capture=self._DRAFT_PANE)
         calls = []
 
-        def _fake_stash(pid, text, run, captured=None, logs=None):
+        def _fake_stash(pid, text, run, captured=None, logs=None, state=None):
+            # #852-review 🟡-5: the api-error resume path now threads `state`
+            # into deliver_with_stash (so a leaked resume-text gets a durable
+            # park record); the fake must mirror the production signature.
             calls.append((pid, text))
             return True
         with m.patch.object(self.w, "deliver_with_stash", side_effect=_fake_stash):
