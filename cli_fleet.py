@@ -10,9 +10,11 @@ reading ``airuleset.REMOTE_HOSTS`` / ``airuleset.AUTHORITY_BY_USER`` (both stay
 test-patchable on airuleset via that facade re-export); a genuinely NEW leaf may
 import ``cli_fleet`` directly.
 
-ZERO imports and ZERO logic by design — this is pure data (a list of host dicts,
-a profiles tuple, a user->profile map). No ``import airuleset`` anywhere: this
-leaf has no outbound couplings, it is a pure leaf of the dependency DAG.
+ZERO imports by design — this is pure data (a list of host dicts, a profiles
+tuple, a user->profile map) plus a couple of trivial dict-accessor helpers
+(``is_paused``/``paused_reason``, #851) kept next to the table they read. No
+``import airuleset`` anywhere: this leaf has no outbound couplings, it is a
+pure leaf of the dependency DAG.
 """
 
 # Remote machines that should receive airuleset updates.
@@ -351,8 +353,32 @@ REMOTE_HOSTS = [
         "user": "simap1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # #851 owner directive 2026-09-02: simap is a PAUSED stream until the
+        # customer decides — never re-heal, never deploy, never contact it.
+        # Resume = delete this key (the ONLY resume mechanism, #851 design
+        # point 5) — no separate flag, no `--skip` invocation option.
+        "paused": ("owner 2026-09-02: simap pozastavený, kým sa zákazník "
+                    "nevyjadrí (odoo-erp stream simap1); gk mu obmedzil "
+                    "prístup — NEliečiť, NEdeployovať"),
     },
 ]
+
+
+def is_paused(remote):
+    """True if a REMOTE_HOSTS entry carries a `"paused": "<why + date>"`
+    marker (#851) -- an account the owner has frozen (a customer/access
+    dispute) that must NEVER be auto-contacted (no deploy, no re-heal, no
+    ssh of any kind) until the owner deletes the flag. Zero imports, zero
+    outbound coupling -- a one-line accessor kept next to the table it
+    reads, consistent with this leaf's own "pure data, no logic" design."""
+    return bool(remote.get("paused"))
+
+
+def paused_reason(remote):
+    """The `paused` string itself (why + date), or `""` when the entry is
+    not paused -- never `None`, so a caller can always format it safely
+    (e.g. an f-string SKIPPED line) without an extra None-check."""
+    return remote.get("paused") or ""
 
 
 # Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a

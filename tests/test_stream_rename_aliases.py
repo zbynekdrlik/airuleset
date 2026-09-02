@@ -194,7 +194,11 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
       ssh'd), <old>@subdev live/deployable.
     - POST-rename: <new>@subdev live/deployable (no `pending`), <old>@subdev
       GONE entirely (the OS account no longer exists).
-    Never both live, never both gone, and a pending entry is never ssh'd."""
+    - POST-rename + PAUSED (#851): <new>@subdev registered, <old>@subdev
+      gone, but `paused: "<why>"` excludes it from every ssh path anyway
+      (e.g. simap1@subdev, owner directive 2026-09-02).
+    Never both live, never both gone, and a pending OR paused entry is
+    never ssh'd."""
 
     def _by_user(self):
         return {h["user"]: h for h in airuleset.REMOTE_HOSTS}
@@ -211,6 +215,15 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
                 self.assertIn(old, deployable, old)
                 self.assertNotIn(new, deployable,
                                  "a pending account must never be ssh'd")
+            elif hosts[new].get("paused"):
+                # POST-rename, but PAUSED (#851, e.g. simap1@subdev): old
+                # entry is gone (the live rename landed), but the new entry
+                # is deliberately excluded from every automatic ssh path
+                # until the owner deletes the `paused` flag.
+                self.assertNotIn(old, hosts,
+                                 "%s renamed away — stale target" % old)
+                self.assertNotIn(new, deployable,
+                                 "a paused account must never be ssh'd")
             else:
                 # POST-rename: numbered entry live, old entry gone.
                 self.assertNotIn(old, hosts,

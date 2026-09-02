@@ -127,24 +127,35 @@ def _soniox_key_line(source: Path = None):
 
 def _deployable_hosts(hosts=None):
     """`REMOTE_HOSTS` entries that are LIVE ssh/deploy targets — i.e. NOT
-    flagged `"pending": True` (#537). A pending entry names a base-stream
-    rename target whose LIVE unix rename has not landed yet, so the account
-    does NOT exist on the box (all three #537 renames — montalu1/simap1/david1
-    — are now live, so no host is currently pending; the flag stays for any
-    FUTURE rename). BOTH ssh paths —
-    `_deploy_to_all_remotes()` AND `provision_subdev_soniox_key()` — filter
-    through here so a pending target is NEVER contacted: a password/pubkey
-    attempt against a non-existent account is a fail2ban strike
-    (#341/#300/#326), and the montalu family uses the shared default-key
-    sshpass path. The live-op rename ticket removes the `"pending"` flag (and
-    the old entry) once each account is created + verified.
+    flagged `"pending": True` (#537) and NOT flagged `"paused": "<why>"`
+    (#851). A pending entry names a base-stream rename target whose LIVE
+    unix rename has not landed yet, so the account does NOT exist on the box
+    (all three #537 renames — montalu1/simap1/david1 — are now live, so no
+    host is currently pending; the flag stays for any FUTURE rename). A
+    paused entry (e.g. simap1@subdev, #851) names an account the owner has
+    deliberately frozen — a customer/access dispute — that must NEVER be
+    auto-contacted (no deploy, no re-heal, no ssh of any kind) until the
+    owner deletes the flag; resume is that one-line deletion, never a
+    per-run `--skip` invocation option. EVERY ssh path that iterates
+    REMOTE_HOSTS — `_deploy_to_all_remotes()`, `provision_subdev_soniox_key()`,
+    the hourly fleet-burn collector (`_watchdog_fleet_fetch`, watchdog job
+    16), `cmd_burn --host`, and `webterm_inventory()` (cli_webterm.py) —
+    filters through here, so a pending OR paused target is NEVER contacted:
+    a password/pubkey attempt against a non-existent (pending) or
+    deliberately-off-limits (paused) account is exactly the fail2ban/
+    unwanted-heal risk both flags exist to prevent, and the montalu family
+    uses the shared default-key sshpass path. The live-op rename ticket
+    removes the `"pending"` flag (and the old entry) once each account is
+    created + verified; the owner removes the `"paused"` flag when the
+    stream resumes.
 
     Reads `airuleset.REMOTE_HOSTS` (the facade re-export) so a
     `patch.object(airuleset, "REMOTE_HOSTS", ...)` in a test is honoured (the
     L-E rule); `hosts` defaults to it, a caller with its own list passes it."""
     import airuleset  # #433 L-E: REMOTE_HOSTS in cli_fleet, read via facade
+    import cli_fleet  # #851: is_paused -- deferred, module-level import banned (L-E)
     src = hosts if hosts is not None else airuleset.REMOTE_HOSTS
-    return [h for h in src if not h.get("pending")]
+    return [h for h in src if not h.get("pending") and not cli_fleet.is_paused(h)]
 
 
 def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
@@ -827,6 +838,40 @@ def unregistered_home_accounts(host, home_listing):
     return sorted(names - registered - {"lost+found"})
 
 
+def _report_paused_hosts(all_hosts):
+    """#851: print one `SKIPPED (paused): <name> — <reason>` line per paused
+    REMOTE_HOSTS entry (before any ssh in the run) and return the paused
+    list, for `_deploy_to_all_remotes()`'s own "N deployed, M paused, K
+    failed" summary. Extracted so that summary/report logic stays a small,
+    separately-readable unit rather than growing the deploy loop further."""
+    import cli_fleet  # #851: is_paused/paused_reason -- deferred (L-E)
+    paused_entries = [h for h in all_hosts if cli_fleet.is_paused(h)]
+    for h in paused_entries:
+        print(f"\n{'=' * 50}")
+        print(f"SKIPPED (paused): {h['name']} — {cli_fleet.paused_reason(h)}")
+    return paused_entries
+
+
+def _print_deploy_summary(deployable_list, paused_entries, distinct_failed):
+    """#851: the deploy loop's own `<N> deployed, <M> paused, <K> failed`
+    line -- paused is its own bucket (never subtracted from "deployed" as a
+    failure; `deployable_list` already excludes pending+paused, so this is
+    exactly "how many of the hosts actually attempted succeeded").
+
+    Review W1 fix: `distinct_failed` is `cmd_push`'s shared failure-NAME set,
+    which can carry entries that are NOT `deployable_list` members at all --
+    `cmd_push` seeds it with `("local(dev1)", "install rc=...")` BEFORE this
+    function is ever reached. A plain `len(deployable_list) -
+    len(distinct_failed)` therefore double-subtracts a local-install failure
+    (or any other non-deployable-host failure name) and can under-count or
+    even go negative. Count only deployable-host NAMES that are actually IN
+    `distinct_failed`, so a failure that isn't one of these hosts never
+    touches this number."""
+    n_deployed = sum(1 for h in deployable_list if h["name"] not in distinct_failed)
+    print(f"\n{n_deployed} deployed, {len(paused_entries)} paused, "
+          f"{len(distinct_failed)} failed")
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -865,10 +910,20 @@ def _deploy_to_all_remotes(failed, auth_failed):
         # purpose — that is exactly what compounded the fail2ban risk there).
         shared_hosts = _shared_remote_host_ips()
         audited_hosts = set()
+        # #851: report every PAUSED entry up front, BEFORE any ssh in this
+        # run (deploy loop, soniox leg — both route through
+        # `_deployable_hosts()` below, which already excludes them) — a
+        # paused account is skipped, never re-healed, never counted as a
+        # FAILED deploy target.
+        paused_entries = _report_paused_hosts(airuleset.REMOTE_HOSTS)
+
         # #537: iterate only LIVE targets — a `"pending": True` entry (a
         # not-yet-created base-stream rename account) is never ssh'd until the
         # live-op rename ticket clears the flag (fail2ban safety, _deployable_hosts).
-        for remote in _deployable_hosts():
+        # #851: a `"paused": "<why>"` entry is excluded the SAME way -- see
+        # the SKIPPED report above.
+        deployable_list = _deployable_hosts()
+        for remote in deployable_list:
             print(f"\n{'=' * 50}")
             print(f"Deploying to {remote['name']} ({remote['host']})...")
             # #659: signal an owner VPS-class target so its remote install
@@ -1080,13 +1135,15 @@ def _deploy_to_all_remotes(failed, auth_failed):
         # inside the deploy loop's own `install` connection (native claude
         # install + NOPASSWD sudo), so there is no owner-secret ssh phase here.
 
+        # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
+        # subdev host yields TWO `failed` entries by design (its own deploy
+        # `rc=...` PLUS the soniox-phase `skipped-known-auth-failure`), so
+        # len(failed) double-counts -- report the DISTINCT host count; the
+        # full list still shows each reason.
+        distinct_failed = {name for name, _reason in failed}
+        _print_deploy_summary(deployable_list, paused_entries, distinct_failed)
+
         if failed:
-            # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
-            # subdev host yields TWO `failed` entries by design (its own deploy
-            # `rc=...` PLUS the soniox-phase `skipped-known-auth-failure`), so
-            # len(failed) double-counts -- report the DISTINCT host count; the
-            # full list still shows each reason.
-            distinct_failed = {name for name, _reason in failed}
             # #826: emit an UNMISTAKABLE deploy-failure summary at the END of the
             # deploy phase. The real per-target FAILED line was hidden among the
             # ~33 mock-"FAILED" lines the pre-push test suite prints into the SAME
