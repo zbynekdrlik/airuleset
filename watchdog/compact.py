@@ -286,8 +286,11 @@ def has_pending_request(sid, path=None):
     longer consult THIS unbounded latch — they consult `pending_compact_hold`
     (the same check bounded to a few sweeps), so a compact that never delivers
     (wedged on recent-human / busy) no longer freezes them for hours. This raw
-    predicate is still used by `--status` and internal store checks. When it (or
-    its bounded sibling) returns True a rider HOLDS (logs `hold:compact-pending`,
+    predicate has NO production caller after #848 (the riders moved to
+    `pending_compact_hold`; `--status` reads the store directly via
+    `load_compact_requests`); it is retained as the unbounded store-presence check
+    for tests + any future consumer. When `pending_compact_hold` (its bounded
+    sibling) returns True a rider HOLDS (logs `hold:compact-pending`,
     types nothing) so a boundary compact is delivered in a quiet pane before more
     work is pushed in — the owner's "callback v pokojovom stave, pokračovanie až
     po compacte" model. Job 7 (a human's Discord answer,
@@ -326,8 +329,10 @@ def pending_compact_hold(sid, now=None, sweeps=None, path=None):
     still prevents a same-sweep keystroke collision, independent of this bound.
 
     Fail-OPEN (never a hold) on: a blank sid, no pending request, a corrupt/non-dict
-    entry, or an unreadable/malformed age anchor — the pre-#741 behaviour, so a
-    read that cannot see the store never wedges a writer."""
+    entry, an unreadable/malformed age anchor, OR a FUTURE-skewed anchor
+    (`age < 0` — a corrupt anchor timestamped after `now`; the retired `hbts` path
+    guarded the same case with `min(prior, now)`). All of these are the pre-#741
+    behaviour, so a read that cannot trust the store never wedges a writer."""
     sid = str(sid or "").strip()
     if not sid:
         return False
@@ -337,8 +342,8 @@ def pending_compact_hold(sid, now=None, sweeps=None, path=None):
     anchor = entry.get("bts", entry.get("ts"))
     now = time.time() if now is None else now
     age = _safe_age(now, anchor)
-    if age is None:
-        return False   # unmeasurable anchor -> fail-open (no hold)
+    if age is None or age < 0:
+        return False   # unmeasurable / future-skewed anchor -> fail-open (no hold)
     if sweeps is None:
         sweeps = COMPACT_PENDING_HOLD_SWEEPS
     return age < sweeps * COMPACT_SWEEP_INTERVAL_S
@@ -1275,8 +1280,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # DRAINED-BOUNDARY PRIORITY exemption. A drained-boundary request
     # (`self-callback` — the SOLE production origin) that
     # reached here has already cleared EVERY gate above: at-boundary (c), no
-    # recent human, no draft, not busy, zero live worker lanes / bg-bash (b),
-    # aged past too-young. That is a genuine DRAINED boundary, and the boundary
+    # recent human, no draft, not busy, aged past too-young (#848 removed the old
+    # condition (b) live-tasks/bg-bash veto, so a live lane no longer gates here).
+    # That is a genuine integration boundary, and the boundary
     # is the authoritative "compact NOW" signal — it SUPERSEDES an in-window
     # cooldown left by a PRIOR delivery, so the next batch never starts on an
     # uncompacted, growing context (the owner's report). ROOT (why the direct-

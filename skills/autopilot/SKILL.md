@@ -781,12 +781,12 @@ gap in either.
      repo is draining — otherwise fix in-lane or fold the finding onto the existing ticket.
    - **Every dispatch RETURNS IMMEDIATELY** (background) — do NOT block waiting on any of them. End
      the turn `⏳ WORKING`; ANY worker returning RE-INVOKES this loop, and on each re-invocation you
-     integrate any ready branches (Step 4) under the integration mutex as they return — but you do
-     NOT refill: no new lane is dispatched while this batch is still open (#723). Only when the WHOLE
-     batch has drained (Step 5's compact boundary) does the NEXT turn dispatch the next batch.
+     integrate any ready branches (Step 4) under the integration mutex as they return AND refill the
+     returned lane's slot immediately (#848, continuous refill) — while unworked bundle-safe backlog
+     remains, up to the lane cap of 5.
    - **Integration mutex (hard) — the #8 cross-session lock guards INTEGRATION ONLY, never the
-     batch-dispatch decision (#456/#723; narrowed from the old round-level lock).** The mutex never
-     gates dispatch: batch dispatch (above) is paced by the batch-open state, not by the mutex, and
+     refill decision (#456/#848; narrowed from the old round-level lock).** The mutex never
+     gates dispatch: refill (above) is paced by the lane cap, not by the mutex, and
      the up-to-5 lanes running concurrently in THIS session is exactly the point. The ONE thing the
      mutex serializes is the merge→gates→push INTEGRATION cycle: acquire it
      immediately BEFORE each integration cycle (Step 4) — `python3
@@ -1107,17 +1107,17 @@ gap in either.
    This closes the exact gap #2129 hit: Step 5 previously read as merge-shaped only, so a fork-no-merge
    stream might not have recognized it applies to its hand-off turns too.
    **The `/goal` loop's NEXT fire is a HOLD turn until the compact is delivered (#741) — it does NOT
-   dispatch the next batch yet.** Do NOT chain into Step 1 within this same turn, and do NOT re-run
-   `/issue-planner`. After `compact-request --self` at a drained boundary, EVERY subsequent goal-fired
+   refill a new lane yet.** Do NOT chain into Step 1 within this same turn, and do NOT re-run
+   `/issue-planner`. After `compact-request --self` at an integration boundary, EVERY subsequent goal-fired
    turn WHILE the request is still pending is a HOLD turn: its FIRST action is
    `python3 ~/devel/airuleset/airuleset.py compact-request --status`; if it prints `PENDING` or
    `QUEUED`, the turn LAUNCHES the boundary-hold task (the #822 mechanism below) and ENDS with
    `⏳ WORKING: boundary hold — čakám na compact hranice várky` and ZERO dispatches. A BARE `⏳` turn
    does NOT drain the compact under an armed goal (no accepted Stop, so CC's `/goal` continuation just
    keeps the queued `/compact` waiting); the live `run_in_background` hold task is what makes the pane
-   genuinely idle so the sweep-typed `/compact` drains. Re-enter Step 1 for the NEXT batch ONLY once
+   genuinely idle so the sweep-typed `/compact` drains. Re-enter Step 1 to refill a lane ONLY once
    `--status` prints `NONE` after delivery / the transcript shows the compact happened — NEVER before,
-   so a next batch can never be loaded into the prompt before the compact executes (the owner's binding
+   so a new lane can never be loaded into the prompt before the compact executes (the owner's binding
    model: "callback v pokojovom stave, pokračovanie až po compacte"). Do NOT hand-type `/compact`
    yourself (job 14 / `compact-request --self` types it — under an armed goal it QUEUES a single row,
    which the boundary-hold turn drains). While the request is pending, the watchdog's OWN work-pushing writers also HOLD (the
@@ -1125,9 +1125,9 @@ gap in either.
    all skip with `hold:compact-pending`; ONLY a human's Discord answer — job 7 — still lands), so
    nothing races work into the prompt ahead of the compact. **Compact delivery is NOT
    instantaneous / per-boundary deterministic:** `compact-request --self` RECORDS a request the
-   watchdog types in the drained boundary's idle window (~60s tick); a request that misses the window
-   on a long (>30 min) batch lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
-   every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT drained
+   watchdog types in the integration boundary's idle window (~60s tick); a request that misses the window
+   lapses (`COMPACT_REQUEST_MAX_AGE_S`), but #411 re-records a fresh one at
+   every `## ✅ Work Complete` report, so a given boundary's compact simply rolls to the NEXT integration
    boundary — never lost, just not strictly deterministic per boundary.
    **THE BOUNDARY-HOLD TURN — how the drained-boundary `/compact` ACTUALLY drains under an armed
    `/goal` (#822).** Under an armed `/goal` the goal Stop hook blocks EVERY `✅` boundary
@@ -1149,7 +1149,7 @@ gap in either.
    has THREE verdicts: `--status` prints `PENDING` (recorded, not yet delivered → hold),
    `QUEUED sid=… since=…` (typed but still sitting unexecuted in the pane → the boundary-hold turn
    must drain it, do NOT dispatch), or `NONE` (drained AFTER delivery / the transcript shows the
-   compact happened → re-enter Step 1 for the next batch — but a `NONE` on a request that simply
+   compact happened → re-enter Step 1 to refill a lane — but a `NONE` on a request that simply
    LAPSED at the 30-min cap without ever delivering is NOT a real drain: #411 re-records a fresh one at
    the next `## ✅ Work Complete`, so keep holding, never read a lapsed `NONE` as done). This is
    the one lever we have while CC's `/goal` continuation does not itself drain queued messages — the
@@ -1197,11 +1197,11 @@ wake-up, never the carrier of the work. Handle it in ONE short turn:
    "Reviewer-injected priority ticket — jumps the autopilot queue" 2>/dev/null || true`, then
    `gh issue edit <N> --add-label prio:bounce` (best-effort — a read-role stream silently accepts
    a 403; the reviewer normally labeled it already).
-3. **End the turn `⏳ WORKING`** and let Step 3.1's PRIORITY LANE seed the ticket into the very
-   NEXT batch.
+3. **End the turn `⏳ WORKING`** and let Step 3.1's PRIORITY LANE seed the ticket into the next
+   FREE lane.
 
 **NEVER start working the finding inline in the main session, and NEVER derail/abort the
-currently-running batch** — the batch finishes, the bounce goes next through the normal
+currently-running lanes** — they finish, the bounce goes next through the normal
 worker/validator machinery. This is what lets a sub-dev autopilot run 24/7 CONCURRENTLY with a
 gatekeeper review stream instead of serializing them.
 
@@ -1364,7 +1364,7 @@ thin across `--resume` — moved verbatim to `skills/autopilot/references/sessio
   `isolation:`) is still correct whenever worktree isolation is unavailable or a lane's candidates
   overlap too heavily to safely parallelize (Step 3). Two INDEPENDENT levers cut cost, and neither
   replaces the other: BUNDLING many issues into ONE worker's single PR/CI cycle (Step 3.1) cuts CI
-  cost per worker; BATCHED FLEET DISPATCH (Step 3.2) cuts wall-clock by running up to 5 units at once.
+  cost per worker; CONTINUOUS FLEET DISPATCH (Step 3.2) cuts wall-clock by running up to 5 units at once.
   (Different repos can each run their own `/autopilot`
   independently, exactly as before.)
 - **Independent verification is mandatory** — a worker's "merged and deployed" counts only after

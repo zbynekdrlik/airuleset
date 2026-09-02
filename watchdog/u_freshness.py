@@ -242,7 +242,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     module helpers.
 
     Keystroke coordination reuses the sibling machinery verbatim: the compact latch
-    (#741, `compact.has_pending_request`), `send_verified` (transcript-proof
+    (#741/#848, `compact.pending_compact_hold`), `send_verified` (transcript-proof
     submit), `_janitor_mark_watch`/`_janitor_clear_watch`, the per-sweep `handled`
     set (this rider runs LAST in the loop, after queue-arrival, so a pane an earlier
     keystroke job typed is deferred), `_pane_busy_waiting` (#714 busy-pane gate),

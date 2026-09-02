@@ -160,8 +160,11 @@ class TestNoBatchReversion(TestCase):
         "no refill while a batch",
         "drained batch boundary",
         "whole batch has returned",
+        "whole batch has drained",
         "zero live tasks",
         "no new lane is dispatched while the batch is open",
+        "no new lane is dispatched while this batch",
+        "batch-open state",
         "never compact while lanes live",
         "batch cap",
     )

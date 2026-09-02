@@ -3662,10 +3662,10 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
     "sam sa vypne a uz nezapne" report). Only a genuinely CHANGED state -- or a
     give-up-backoff re-arm -- re-nudges (still under the 1h floor).
 
-    #729: the under-saturated effectiveness backoff branch is gone -- only the
-    empty-lane (batch-CLOSED) nudge reaches delivery under batch mode, so
-    live_workers is the (0-valued) dedup signature, never a fill-effectiveness
-    input."""
+    #729: the under-saturated effectiveness backoff branch is gone. #848: the
+    refill nudge reaches delivery for ANY live_workers < floor (0..4), so
+    live_workers is part of the #670 dedup signature `(live_workers, backlog)`
+    -- it VARIES as lanes come and go -- never a fill-effectiveness input."""
     last = rec.get("llast")
     if last is None:
         return False, None
@@ -3700,7 +3700,8 @@ def _lane_record_nudge(rec, live_workers, backlog_n, n, now):
     stamps the nudge counter + cooldown clock, and records the #670 dedup
     signature (live_workers/backlog for the next sweep to compare against).
     #729: the #509 under-saturated effectiveness baseline (lnw/lnb + the ineffective
-    streak) is gone -- only the empty-lane nudge reaches delivery under batch mode."""
+    streak) is gone. #848: the refill nudge reaches delivery for ANY live_workers
+    < floor (0..4), stamped as part of the #670 dedup signature."""
     rec.pop("lna", None)
     rec.pop("lnpark", None)
     # #511 -- a LANDED nudge means the delivery-mechanics failure that drove the
@@ -3877,18 +3878,19 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
             # cleared on a lane appearance), never reset to 0 here.
             rec["lgts"] = now
             from notify import stream_redirect
-            # #726: the count give-up is reachable ONLY from the empty-lane
-            # (0-worker) branch now (a running batch skips at skip:batch-
-            # running, never counting toward the give-up), so live_workers is
-            # 0 here -- the box has a workable backlog but never started a
-            # NEW batch despite repeated nudges.
+            # #848: the count give-up accumulates only for a fully-DEAD box
+            # (live_workers == 0) -- `_lane_count_giveup_reset` clears `ln`
+            # whenever live_workers > 0, so a partially-full box never reaches
+            # this give-up (its storm is bounded by the #670 dedup instead). So
+            # live_workers is 0 here -- the box has a workable backlog but never
+            # dispatched a lane despite repeated nudges.
             # #693: send() SUPPRESSES this ping (`lanestall:` is in
             # SUPPRESSED_ALERT_PREFIXES) -- the composed body survives only
             # as the `suppressed` delivery-log trace; the owner-facing
             # channel is gone, the journal verdict below is the signal.
             send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
                     "rozpracovateľné), "
-                    "`/goal` armovaný, ale %d min sa NEZAČALA nová várka na "
+                    "`/goal` armovaný, ale %d min sa NEDISPATCHLA žiadna lána na "
                     "workable backlog (beží %d workerov, waiterov: %d) a %s "
                     "(%s). Pozri sa na reláciu, prosím."
                     % (watchdog.project_label(cwd), backlog_n,
@@ -4064,10 +4066,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         _lane_skip(logs, loc, "skip:awaiting-user (❓ marker -- session blocked "
                               "on a question, never nudge)")
         return logs, False
-    # #442 re-fix 2 (REOPEN č.2) / #726: worker PRESENCE is a COUNT decision made
-    # below (`live_workers`), so it can distinguish a CLOSED batch (0 workers ->
-    # start a NEW batch nudge) from a RUNNING one (any workers -> skip:batch-
-    # running; #726 retired the "fill to floor" under-saturated nudge). The old
+    # #442 re-fix 2 (REOPEN č.2) / #848: worker PRESENCE is a COUNT decision made
+    # below (`live_workers`), so it can distinguish a SATURATED box (>= floor
+    # lanes -> skip) from one with ROOM (< floor lanes -> refill nudge). The old
     # early-skip on
     # `_pane_has_bg_agent(captured)` made that impossible: with ANY visible worker
     # in the agent strip it returned True and skipped the entire path BEFORE
@@ -4157,32 +4158,24 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "no measurable open backlog, skip"
                     % (loc, live_workers, waiters, backlog_n))
         return logs, False
-    # #726 BATCH MODE (#723/#724 reverse #442/#481/#456's fill-the-cap
-    # continuous saturation) -- on the PURE COUNTS the guard reads (live worker
-    # count + open backlog), no transcript-content heuristic. There is now exactly
-    # ONE nudge-worthy state:
-    #   * EMPTY lanes (live_workers == 0) = the batch is CLOSED -- fires on ANY
-    #     open backlog ("start a NEW batch"); memory-exempt (a fully stalled box
-    #     must always be nudged).
-    # A RUNNING batch (0 < live_workers, saturated OR draining) is NEVER nudged to
-    # refill -- it logs skip:batch-running above (the retired "fill lanes to floor"
-    # under-saturated nudge). DO NOT re-add a fill branch here: any mid-batch fire
-    # violates the NO-refill doctrine regardless of wording (the #726 root cause).
-    # #481: floor = min(GOAL_LANE_SATURATION_WORKERS, backlog); backlog_n is >= 1
-    # (the `<= 0` guard above returned), so floor >= 1 and workers==0 is always <
-    # floor (the empty-lane branch stays reachable). It still separates the
-    # "saturated" (>= floor) skip from the "batch-running" (< floor) skip above --
-    # both skip, both are a running batch. live_workers (dispatched SUBAGENT
-    # transcripts) EXCLUDES `waiters`
+    # #848 CONTINUOUS REFILL (retiring #726/#723/#724's batch mode) -- on the PURE
+    # COUNTS the guard reads (live worker count + open backlog), no
+    # transcript-content heuristic. The nudge-worthy state is: ROOM to refill,
+    # i.e. `live_workers < min(5, backlog)` -- whether the box is EMPTY
+    # (live_workers == 0) OR partially-full (0 < live_workers < floor); both fall
+    # through to the refill nudge below. Only a SATURATED box (>= floor lanes)
+    # skips. #481: floor = min(GOAL_LANE_SATURATION_WORKERS, backlog); backlog_n
+    # is >= 1 (the `<= 0` guard above returned), so floor >= 1 and workers==0 is
+    # always < floor (an empty box always reaches the refill nudge).
+    # live_workers (dispatched SUBAGENT transcripts) EXCLUDES `waiters`
     # (CC's bg-shell/monitor badge). #587 changed the finished direction: a
     # CI-waiting subagent is still counted (tool_use tail = mid-work), but a
     # cleanly-FINISHED one DROPS from live_workers immediately (terminal
-    # stop_reason) / after FINISH_SETTLE_S -- a TIGHTER estimate, so a fully
-    # DRAINED batch (all workers finished) reads live_workers==0 and reaches the
-    # empty-lane "start a NEW batch" nudge promptly. The old completion-recency
+    # stop_reason) / after FINISH_SETTLE_S -- a TIGHTER estimate, so a returned
+    # lane frees its slot promptly. The old completion-recency
     # anti-flap (a just-merged worker counted through its integration window) is
     # gone (it WAS the #587 ghost); now = 1-hour cooldown + 3-min recent-human +
-    # ~30s FINISH_SETTLE_S debounce. Any live_workers>0 = a running batch = skip.
+    # ~30s FINISH_SETTLE_S debounce.
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
     if live_workers >= floor:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
@@ -4224,17 +4217,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # redundant "wait for quiet" gate that a busy under-saturated session defeats.
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
-    # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies to
-    # the 0-worker empty-lane branch, the ONLY nudge branch that reaches here now
-    # (#726: a running batch skips at skip:batch-running above): a truly stalled
-    # box gets bounded pokes then ONE per-episode record (#693: classified
-    # machine-channel verdict; the owner ping is send()-suppressed). #804 mode-1:
-    # the give-up is a WIDENING BACKOFF, not a forever-latch -- after the window
-    # elapses it re-arms one bounded nudge (a retry chain forever, never silent).
-    # #620: the count give-up is REACHABLE -- `ln` advances
-    # monotonically per landed nudge and resets only on lane appearance
-    # (`_lane_count_giveup_reset`), never on a backlog change, so consecutive
-    # ineffective empty-lane nudges reach it. The stash-abort give-up stays -- a
+    # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES): a truly
+    # stalled (0-worker) box gets bounded pokes then ONE per-episode record (#693:
+    # classified machine-channel verdict; the owner ping is send()-suppressed).
+    # #804 mode-1: the give-up is a WIDENING BACKOFF, not a forever-latch -- after
+    # the window elapses it re-arms one bounded nudge (a retry chain forever,
+    # never silent). #848: the refill nudge now reaches here for ANY live_workers
+    # < floor (0..4). The count give-up accumulates only for a fully-DEAD box
+    # (live_workers == 0) -- `_lane_count_giveup_reset` fires above whenever
+    # live_workers > 0 (a live lane = the box is making progress), so a
+    # partially-full box's storm is bounded by the #670 dedup + #530 hourly cap
+    # below, not by the give-up. The stash-abort give-up stays -- a
     # delivery-mechanics bound, not a "stop nudging" one.
     count_gaveup = n >= GOAL_LANE_MAX_NUDGES
     stash_gaveup = aborts >= GOAL_LANE_MAX_STASH_ABORTS
@@ -4263,11 +4256,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, live_workers, waiters, backlog_n,
                        int(park - now), aborts, int(park)))
         return logs, True
-    # #530/#670 -- hourly cap + dedup-on-unchanged cadence gate. #729: the #509
-    # effectiveness backoff branch is gone (it was reachable only from the retired
-    # under-saturated fill nudge; only the empty-lane nudge reaches delivery here,
-    # so live_workers is 0 and is the dedup signature, never a fill-effectiveness
-    # input).
+    # #530/#670 -- hourly cap + dedup-on-unchanged cadence gate. #848: the refill
+    # nudge reaches here for ANY live_workers < floor (0..4), so live_workers is
+    # part of the #670 dedup signature `(live_workers, backlog_n)` -- which VARIES
+    # as lanes come and go, so an identical signature (same lane count + backlog)
+    # correctly dedups a repeat, and a state MOVE (a lane returned) re-nudges.
     cd_skip, cd_log = _lane_cooldown_decision(
         rec, now, backlog_n, loc, live_workers, waiters)
     if cd_log:
@@ -4319,8 +4312,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> draft changed "
                     "between captures -- human composing right now" % loc)
         return logs, True
-    # #726: only the empty-lane (batch CLOSED) nudge reaches here -- a running
-    # batch (live_workers>0) already returned at skip:batch-running above.
+    # #848: the refill nudge reaches here for ANY live_workers < floor (0..4) --
+    # only a SATURATED box (>= floor lanes) returned at the saturated skip above.
     text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
     if fresh_draft:
         # #442 -- deliver INTO the held draft via the stash protocol (the
@@ -4428,8 +4421,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
         mode = "typed"
-    # #479/#670 -- commit the LANDED nudge; see _lane_record_nudge. Only the
-    # empty-lane branch reaches delivery (#726/#729), so live_workers is 0 here.
+    # #479/#670 -- commit the LANDED nudge; see _lane_record_nudge. #848: the
+    # refill nudge delivers for ANY live_workers < floor, so live_workers (0..4)
+    # is stamped as part of the #670 dedup signature (not always 0).
     _lane_record_nudge(rec, live_workers, backlog_n, n, now)
     # #797 -- stamp the shared cadence clock on a DELIVERED lane nudge so a
     # sibling family category defers within NUDGE_FAMILY_GAP_S (the burst fix).

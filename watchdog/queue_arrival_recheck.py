@@ -363,7 +363,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     later sweep. None (unwired / older caller) skips the gate.
 
     Before any keystroke the nudge branch consults the #741 compact latch
-    (`compact.has_pending_request(sid)`, #780) — the FIRST defer-gate: a pending
+    (`compact.pending_compact_hold(sid, now)`, #780/#848 bounded) — the FIRST defer-gate: a pending
     /compact HOLDS the nudge (`hold:compact-pending`, no keystroke, base/last_nudge
     unadvanced) so a drained-boundary compact delivers in a quiet pane before any
     new hand-off is pushed in. Keystroke coordination then reuses the sibling
