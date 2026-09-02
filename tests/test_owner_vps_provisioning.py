@@ -380,6 +380,38 @@ class TestWiring(unittest.TestCase):
         self.assertFalse(any("AIRULESET_OWNER_VPS=1" in str(a)
                              for a in plain_cmds[0]))
 
+    def test_deploy_self_heals_gh_credential_helper_before_pull(self):
+        """simap1@subdev push v0.1.134: `git pull --ff-only` on the remote
+        failed with "could not read Username for 'https://github.com'"
+        because that account's global `credential.helper` had drifted to
+        `store` while `gh` itself was still logged in. The remote deploy
+        command must run `gh auth setup-git` (idempotent, best-effort — never
+        fatal on a box with no gh) BEFORE `git pull --ff-only` so a drifted
+        helper self-heals on every push instead of wedging the target."""
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+        plain = {"name": "dev2", "host": "5.6.7.8", "user": "newlevel",
+                 "repo_path": "~/devel/airuleset"}
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", [plain]), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
+            airuleset.cmd_push(args)
+        deploy = [c for c in calls
+                  if any("python3 airuleset.py install" in str(a) for a in c)]
+        self.assertEqual(len(deploy), 1)
+        remote_cmd = next(str(a) for a in deploy[0]
+                           if "python3 airuleset.py install" in str(a))
+        self.assertIn("gh auth setup-git >/dev/null 2>&1 || true", remote_cmd)
+        self.assertIn("git pull --ff-only", remote_cmd)
+        self.assertLess(remote_cmd.index("gh auth setup-git"),
+                         remote_cmd.index("git pull --ff-only"),
+                         "gh auth setup-git must run BEFORE git pull --ff-only")
+
 
 class TestNoAuthTokenStep(unittest.TestCase):
     """#669 — the owner_vps flow contains NO auth/token step. Login/auth ON a

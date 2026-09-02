@@ -877,7 +877,14 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # directly (not through this loop) so it never carries the env, and
             # a sub-dev/other host never carries it either.
             owner_vps_env = "AIRULESET_OWNER_VPS=1 " if remote.get("owner_vps") else ""
-            remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && {owner_vps_env}python3 airuleset.py install"
+            # Self-heal the https credential helper BEFORE the pull: an account whose
+            # global credential.helper drifted to `store` fails `git pull` with
+            # "could not read Username for 'https://github.com'" while gh is still
+            # logged in (live: simap1@subdev, push v0.1.134). setup-git is idempotent.
+            remote_cmd = (
+                f"cd {remote['repo_path']} && (gh auth setup-git >/dev/null 2>&1 || true) "
+                f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install"
+            )
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first
             # entry that fails (timeout/auth) before the remote shell ever
