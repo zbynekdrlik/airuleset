@@ -3805,6 +3805,17 @@ from cli_resource_guards import (  # noqa: E402, F401
     render_sysctl_vm as render_sysctl_vm,
 )
 
+# --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed
+# by cmd_push (via `airuleset.provision_disk_guard_root`, the facade name, so it
+# stays test-patchable) as one non-fatal LOUD step after the resource-guards
+# step. The SESSION-facing finding reader lives in watchdog/disk_guard_root.py.
+from cli_disk_guard_root import (  # noqa: E402, F401
+    provision_disk_guard_root as provision_disk_guard_root,
+    build_apply_script as build_disk_guard_root_apply_script,
+    guard_files as disk_guard_root_files,
+    cmd_disk_guard_root as cmd_disk_guard_root,
+)
+
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
@@ -5247,6 +5258,7 @@ from cli_fleet import (  # noqa: E402, F401
     _github_ci_runner_source as _github_ci_runner_source,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
     SHARED_STREAM_GUARD_HOSTS as SHARED_STREAM_GUARD_HOSTS,
+    DISK_GUARD_ROOT_HOSTS as DISK_GUARD_ROOT_HOSTS,
 )
 
 
@@ -6376,6 +6388,17 @@ def main():
                       help="explicit no-op flag (dry-run is already the default "
                            "without --apply); accepted for clarity")
 
+    p_dgr = sub.add_parser(
+        "disk-guard-root",
+        help="#841: read the owner-daily root-level disk finding (the root-owned "
+             "reclaimable candidates the per-user guard cannot reach) so a "
+             "SESSION can raise ONE ❓; --mark-asked stamps the once/day dedup")
+    p_dgr.add_argument("--mark-asked", action="store_true",
+                       help="record that the owner-daily ❓ was raised (#795 "
+                            "once-per-episode dedup, no re-ask) — call after asking")
+    p_dgr.add_argument("--json", action="store_true",
+                       help="print the finding as JSON (null when none)")
+
     p_burn = sub.add_parser(
         "burn",
         help="Token-spend report from local Claude Code transcripts — "
@@ -6773,6 +6796,7 @@ SUBCOMMANDS = {
     "fable-gate": cmd_fable_gate,
     "webterm-access": cmd_webterm_access,
     "drop-gateway": cmd_drop_gateway,
+    "disk-guard-root": cmd_disk_guard_root,
     "burn": cmd_burn,
     "delegation": cmd_delegation,
     "authority": cmd_authority,
