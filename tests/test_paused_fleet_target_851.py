@@ -162,6 +162,39 @@ class TestDeployLoopSkipsPaused(TestCase):
         self.assertNotIn("9.9.9.9", joined,
                          "a paused account must never be ssh'd")
 
+    def test_deploy_summary_not_skewed_by_a_non_deployable_failure_name(self):
+        # Review W1: `cmd_push` seeds `failed` with `("local(dev1)", ...)`
+        # BEFORE `_deploy_to_all_remotes` ever runs -- that name is NOT a
+        # REMOTE_HOSTS/deployable-host entry, so it must never be subtracted
+        # from the "deployed" count. A local-install failure alongside a
+        # cleanly-deployed remote + a paused entry must still report the
+        # remote as deployed (1 deployed), not 0 or negative.
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)])
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        def failing_install(args):
+            raise SystemExit(1)
+
+        args = m.Mock()
+        buf = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install", side_effect=failing_install), \
+                m.patch.object(airuleset, "REMOTE_HOSTS",
+                               [self._plain_host(), self._paused_host()]), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}), \
+                contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        out = buf.getvalue()
+        self.assertIn("1 deployed, 1 paused, 1 failed", out,
+                      "the local(dev1) install failure must not decrement "
+                      "the remote deployed count")
+        self.assertNotIn("0 deployed", out)
+        self.assertNotIn("-1 deployed", out)
+
 
 class TestResourceGuardsLegStaysHostScoped(TestCase):
     """(#851 deliberate, documented in the design comment and in

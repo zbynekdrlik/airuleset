@@ -856,8 +856,18 @@ def _print_deploy_summary(deployable_list, paused_entries, distinct_failed):
     """#851: the deploy loop's own `<N> deployed, <M> paused, <K> failed`
     line -- paused is its own bucket (never subtracted from "deployed" as a
     failure; `deployable_list` already excludes pending+paused, so this is
-    exactly "how many of the hosts actually attempted succeeded")."""
-    n_deployed = len(deployable_list) - len(distinct_failed)
+    exactly "how many of the hosts actually attempted succeeded").
+
+    Review W1 fix: `distinct_failed` is `cmd_push`'s shared failure-NAME set,
+    which can carry entries that are NOT `deployable_list` members at all --
+    `cmd_push` seeds it with `("local(dev1)", "install rc=...")` BEFORE this
+    function is ever reached. A plain `len(deployable_list) -
+    len(distinct_failed)` therefore double-subtracts a local-install failure
+    (or any other non-deployable-host failure name) and can under-count or
+    even go negative. Count only deployable-host NAMES that are actually IN
+    `distinct_failed`, so a failure that isn't one of these hosts never
+    touches this number."""
+    n_deployed = sum(1 for h in deployable_list if h["name"] not in distinct_failed)
     print(f"\n{n_deployed} deployed, {len(paused_entries)} paused, "
           f"{len(distinct_failed)} failed")
 
