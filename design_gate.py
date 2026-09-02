@@ -65,10 +65,20 @@ _DESIGN_DIRNAME = "design-posted"
 # kind, same sanitized-key convention as design. See `_dir_for_kind`.
 _VALIDATED_DIRNAME = "validated-posted"
 _REVIEWED_DIRNAME = "reviewed-posted"
+# #844 -- the LANE-RETURN kind: a worktree worker's durable return artifact
+# (branch + head sha + worktree + evidence) posted as its LAST act, so a lost
+# lane-completion notification loses nothing. DELIBERATELY NOT in `ALL_KINDS` --
+# the design/validated/reviewed gates (block-commit-without-design.sh,
+# subagent-stop-check-design.sh) key on ALL_KINDS for the MERGE flow and must not
+# demand a LANE-RETURN of a merging worker; the LANE-RETURN gate is its OWN
+# SubagentStop hook (subagent-stop-check-lane-return.sh), keyed on the worktree-
+# mode return shape.
+_LANE_RETURN_DIRNAME = "lane-return-posted"
 _KIND_DIRNAMES = {
     "design": _DESIGN_DIRNAME,
     "validated": _VALIDATED_DIRNAME,
     "reviewed": _REVIEWED_DIRNAME,
+    "lane-return": _LANE_RETURN_DIRNAME,
 }
 ALL_KINDS = ("design", "validated", "reviewed")
 
@@ -312,6 +322,44 @@ def classify_review_comment(body):
         missing.append("review action")
     if not (_REVIEW_RESULT_RE.search(text) or _REVIEW_SHA_RE.search(text)):
         missing.append("findings/fix evidence")
+    if missing:
+        return False, "missing: " + ", ".join(missing)
+    return True, "ok"
+
+
+# --------------------------------------------------------------------------- #
+# #844 -- LANE-RETURN classifier: does `body` carry a worktree worker's durable
+# return artifact -- a `LANE-RETURN:` marker plus a branch name and a head sha?
+# Same shape-not-content contract as the classifiers above.
+# --------------------------------------------------------------------------- #
+
+MIN_LEN_LANE_RETURN = 40
+
+_LANE_RETURN_MARKER_RE = re.compile(r"\bLANE-RETURN\b\s*:", re.IGNORECASE)
+_LANE_RETURN_BRANCH_RE = re.compile(
+    r"worktree-(?:agent|issue)-\w+|branch\s*:|vetva\s*:", re.IGNORECASE)
+_LANE_RETURN_HEAD_RE = re.compile(
+    r"\bhead\b|\bsha\b|\bcommit\b|\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+
+
+def classify_lane_return_comment(body):
+    """Heuristic verdict for #844: does `body` carry a `LANE-RETURN:` block plus
+    a branch reference AND a head/sha reference? Returns `(ok: bool, reason:
+    str)`, same contract. A SHAPE check (this module's documented limit) -- it
+    proves the durable-return artifact was posted, never that its head sha is
+    correct (that is the SubagentStop gate's cross-check against the returned
+    branch)."""
+    text = (body or "").strip()
+    if len(text) < MIN_LEN_LANE_RETURN:
+        return False, "too short (%d chars, need >= %d)" % (
+            len(text), MIN_LEN_LANE_RETURN)
+    if not _LANE_RETURN_MARKER_RE.search(text):
+        return False, "missing: LANE-RETURN: marker"
+    missing = []
+    if not _LANE_RETURN_BRANCH_RE.search(text):
+        missing.append("branch")
+    if not _LANE_RETURN_HEAD_RE.search(text):
+        missing.append("head sha")
     if missing:
         return False, "missing: " + ", ".join(missing)
     return True, "ok"

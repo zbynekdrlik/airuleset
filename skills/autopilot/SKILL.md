@@ -1120,6 +1120,24 @@ gap in either.
    **LIVE-VERIFY it on a real armed-goal pane after deploy: if the goal re-fires even with a live
    task and the `/compact` still does NOT drain, record the evidence and ESCALATE to the owner —
    never stack a further workaround** (the design's own hedge, #822).
+   **RECONCILE LANES FROM DURABLE STATE ON THE FIRST TURN AFTER ANY COMPACTION (#844).** A
+   compaction — the watchdog's own drained-boundary `/compact`, the #844 bounded live-hold-cap
+   forced `/compact` (delivered past a live-tasks veto once a boundary is held past
+   `COMPACT_LIVE_HOLD_CAP_S`, because a 776K main is strictly worse than re-collecting lanes), or
+   CC's own overflow auto-compact — can drop a lane-completion notification (the #29193 hazard). So
+   your FIRST action on the first goal turn AFTER a compaction is to reconcile lanes from DURABLE
+   STATE, never from memory: `git worktree list` for every live worktree, and read the
+   `LANE-RETURN:` comment (#844 step 2) on each in-flight ticket. A worktree branch AHEAD of the
+   integration branch WITH a `LANE-RETURN:` comment → CHECK + integrate it (the notification may
+   just have been lost) — the watchdog's post-compact reconcile rider also keystrokes this reminder.
+   A LANE-RETURN comment is a POINTER ("this branch returned"), NOT an integration authorization:
+   your normal integration cycle still RE-VERIFIES the branch (its local test suite green, `/review`
+   clean) before merging, so a lane that returned early / partial is caught there, never merged on
+   the comment's say-so. A worktree branch ahead WITH NO `LANE-RETURN:` comment is an explicit
+   INVESTIGATE state (a possibly-crashed lane whose SubagentStop never fired, so it never posted) —
+   check whether that worker is genuinely dead (re-dispatch from durable state) before assuming the
+   lane is still live. Never treat "I don't remember a lane there" as "no lane there"; the branch +
+   the comment are the truth.
    **WAIVER — a RE-DERIVABLE waiter never holds a drained boundary open forever (#730, owner
    incident 2026-08-26): gk `/autopilot-master` crossed batch 1 → drain → batch 2 → drain →
    batch 3 with ZERO compacts, because a release-lane waiter — shadow rerun → deploy →

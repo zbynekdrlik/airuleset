@@ -948,7 +948,10 @@ class TestSkipsTheNetworkWhenAlreadyRecorded(_Base):
 
     def test_existing_marker_skips_the_gh_call_entirely(self):
         os.environ["HOME"] = str(self.home)
-        for kind in dg.ALL_KINDS:
+        # #844 -- "fully settled" now includes the lane-return kind (the hook's
+        # CHECK_KINDS = ALL_KINDS + lane-return); the network is skipped only when
+        # EVERY one is marked.
+        for kind in tuple(dg.ALL_KINDS) + ("lane-return",):
             dg.write_marker("airuleset", 41,
                             "https://x/issues/41#issuecomment-old", kind=kind)
         log = self.home / "gh.log"

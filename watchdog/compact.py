@@ -46,7 +46,17 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
                 dispatched worker lane (`count_live_workers`) NOR a live
                 `run_in_background` Bash job (#599: a START with no completion
                 notification in the transcript tail; a `/compact` would orphan
-                its completion notification, the #29193 class);
+                its completion notification, the #29193 class). #844 makes this
+                veto BOUNDED: once the boundary has been held on live-tasks/
+                bg-bash past `COMPACT_LIVE_HOLD_CAP_S` (measured `now - hbts`, the
+                inheritable held-boundary anchor), the veto becomes a DELIVERY
+                (`sent:live-hold-cap`/`queued:live-hold-cap`) — a 776K main is
+                strictly worse than re-collecting lanes from durable state, and
+                the step-0 experiment proved forcing at an idle prompt while a
+                lane is live is safe (lane not killed, commit durable,
+                notification survives; the residual loss is backed by the #844
+                durable LANE-RETURN comment + the post-compact reconcile rider).
+                ONLY this veto is bounded; every other veto below is unchanged;
             (c) the session's last real turn is not a `❓` marker (blocked on
                 the user — #333/#228; the `⏳` marker NO LONGER blocks, #599),
                 AND is not stuck on an unread API error (#188 — a proven
@@ -248,8 +258,25 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
         return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
+    # #844: `hbts` = the INHERITABLE held-boundary anchor for the live-hold cap
+    # (`deliver_compact`'s `boundary_ts`). A prior PENDING entry means the
+    # previous boundary was HELD, never delivered/expired (both CLEAR the
+    # request), so the un-drained chain CONTINUES: inherit its `hbts` so a
+    # frequent `## ✅ Work Complete` re-record cadence can never reset the cap
+    # clock below the cap (the Fable-consult hole in a raw-`bts` anchor — a busy
+    # master re-records every ~15min and #844 silently recurs). No prior entry =
+    # a fresh chain (the last compact was delivered/cleared) -> `hbts = now`.
+    # `bts` stays the PER-RECORD boundary anchor (HOLD-log observability), `ts`
+    # the refreshable age-cap anchor; only `hbts` is inheritable. `min()` is the
+    # #519 future-skew guard (a corrupt future prior_hbts never delays the cap).
+    prior = d.get(session)
+    hbts = int(now)
+    if isinstance(prior, dict):
+        prior_hbts = prior.get("hbts", prior.get("bts"))
+        if isinstance(prior_hbts, (int, float)) and not isinstance(prior_hbts, bool):
+            hbts = min(int(prior_hbts), int(now))
     d[session] = {"cwd": str(cwd or ""), "ts": int(now), "bts": int(now),
-                  "origin": str(origin or "").strip()}
+                  "hbts": hbts, "origin": str(origin or "").strip()}
     return _save_compact_requests(d, path)
 
 
@@ -390,6 +417,69 @@ def _compact_min_delivery_interval(interval=None):
     if raw > COMPACT_MIN_DELIVERY_INTERVAL_MAX_S:
         return COMPACT_MIN_DELIVERY_INTERVAL_MAX_S
     return raw
+
+
+# #844 -- the BOUNDED live-hold cap. Once the UN-DRAINED boundary chain has been
+# held for this long (measured `now - hbts`, the INHERITABLE held-boundary anchor
+# = time since the last actual compact/clear, NOT time on the live-tasks veto
+# alone -- see `_compact_live_hold_reached`), a live-tasks/bg-bash veto becomes a
+# DELIVERY instead of an indefinite hold: a 776K main is strictly worse than
+# re-collecting lanes from durable state (the step-0 experiment proved forcing
+# the compact at an IDLE prompt while a lane is live does NOT kill the lane, its
+# commit is durable, and its completion notification survives). The force
+# bypasses ONLY the two live-tasks/bg-bash vetoes -- never idle-reverify
+# (`fresh_kind == "input"`), recent-human, busy, draft, dialog, in-mode,
+# not-a-boundary, or `❓` (all load-bearing, per the Fable consult; those veto
+# EARLIER so an actively-watched pane never force-compacts).
+COMPACT_LIVE_HOLD_CAP_S = 1800   # 30 min; env AIRULESET_COMPACT_LIVE_HOLD_CAP_S
+COMPACT_LIVE_HOLD_CAP_MIN_S = 10 * 60    # floor: a units-error must never force every sweep
+COMPACT_LIVE_HOLD_CAP_MAX_S = 6 * 3600   # ceiling: nor make the cap effectively never fire
+
+
+def _compact_live_hold_cap(cap=None):
+    """The effective live-hold cap: an explicit `cap=` (test/caller override) is
+    returned verbatim; the CONSTANT/ENV value is clamped to
+    `[COMPACT_LIVE_HOLD_CAP_MIN_S, COMPACT_LIVE_HOLD_CAP_MAX_S]` so a misconfigured
+    env var can neither force on every sweep (too small) nor make the cap never
+    fire (too large). Mirrors `_compact_min_delivery_interval`."""
+    if cap is not None:
+        return cap
+    try:
+        raw = int(os.environ.get("AIRULESET_COMPACT_LIVE_HOLD_CAP_S",
+                                 COMPACT_LIVE_HOLD_CAP_S))
+    except ValueError:
+        raw = COMPACT_LIVE_HOLD_CAP_S
+    if raw < COMPACT_LIVE_HOLD_CAP_MIN_S:
+        return COMPACT_LIVE_HOLD_CAP_MIN_S
+    if raw > COMPACT_LIVE_HOLD_CAP_MAX_S:
+        return COMPACT_LIVE_HOLD_CAP_MAX_S
+    return raw
+
+
+def _compact_live_hold_reached(boundary_ts, now, cap=None):
+    """True iff the UN-DRAINED-BOUNDARY chain has been held (`now - boundary_ts`)
+    for at least the live-hold cap. `boundary_ts` is the request's `hbts`
+    (inheritable held-boundary anchor) — it measures "time since the last actual
+    compact/clear", NOT "time on the live-tasks veto specifically": a boundary
+    held on recent-human/busy (#741) also inherits `hbts`, so the chain age
+    reflects total context growth regardless of WHY the boundary was held. That
+    is deliberate — context growth is the harm variable — and it is SAFE because
+    `deliver_compact` consults this ONLY at the two live-tasks/bg-bash veto
+    branches: recent-human / busy / draft / dialog / not-a-boundary / `❓` all
+    veto EARLIER and are NEVER bypassed, so an actively-watched pane never
+    force-compacts; the force fires only once those clear AND a live-tasks veto
+    is the sole thing left blocking (the step-0 idle-prompt experiment's exact
+    case). None (a legacy pre-#844 entry with no `hbts`) or a bool / non-numeric
+    / corrupt anchor -> False (fail-safe: hold as before, never force blind — the
+    bool guard mirrors `record_compact_request`, since a bool read from a corrupt
+    store would otherwise `float(True)==1.0` and force)."""
+    if boundary_ts is None or isinstance(boundary_ts, bool):
+        return False
+    try:
+        held = now - float(boundary_ts)
+    except (TypeError, ValueError):
+        return False
+    return held >= _compact_live_hold_cap(cap)
 
 
 def compact_delivery_in_cooldown(session, now, path=None, interval=None):
@@ -784,7 +874,12 @@ COMPACT_BOUNDARY_HOLD_CMD = "sleep 45 && echo boundary-hold"
 # (#822: there is deliberately NO `skip:goal-continuing` pre-type gate — see
 # `deliver_compact`; a `/compact` under an armed goal is typed and QUEUES, so
 # `queued` is the word that fires the hint, never a refuse-to-type skip.)
-_COMPACT_HOLD_HINT_WORDS = frozenset(("queued", "already-queued"))
+# #844: `queued:live-hold-cap` -- a FORCED delivery that queued behind an armed-
+# goal continuation -- is the likeliest queued path on a saturated master, so it
+# ALSO needs the boundary-hold hint (a plain `queued` and the forced one drain the
+# same way, at an accepted Stop).
+_COMPACT_HOLD_HINT_WORDS = frozenset(
+    ("queued", "already-queued", "queued:live-hold-cap"))
 
 # A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
 # SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
@@ -1090,7 +1185,7 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
 
 def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                     delivered_path=None, now=None, state=None,
-                    request_ts=None, sleep_fn=None):
+                    request_ts=None, sleep_fn=None, boundary_ts=None):
     """Evaluate every delivery condition for `sid` ONCE and act. Called
     from BOTH entry points' own immediate synchronous attempt (`--record`/
     `--self`) AND from the periodic sweep (`compact_sweep`) — both thread
@@ -1102,6 +1197,13 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     Returns:
       "sent"            — `/compact` was typed AND observed executing / not
                            queued (`_compact_post_send_classify`, #822).
+      "sent:live-hold-cap" — #844: the same, but delivered by FORCING past a
+                           live-tasks/bg-bash veto because the boundary was held
+                           past `COMPACT_LIVE_HOLD_CAP_S` (`boundary_ts`=`hbts`).
+                           Terminal; journal-mapped distinctly by the sweep.
+      "queued:live-hold-cap" — #844: a forced delivery that CC appended to the
+                           type-ahead queue behind an armed-goal continuation
+                           (drained by the boundary-hold turn). Terminal.
       "queued"          — `/compact` was typed but CC appended it to the
                            type-ahead queue behind a running turn (#822); it did
                            NOT execute, so `compact-delivered` is NOT written (no
@@ -1133,6 +1235,14 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     site, immediately after any real send and BEFORE any other state
     write, so a later exception can never leave a genuine send unlogged."""
     now = now if now is not None else time.time()
+    # #844 -- the BOUNDED live-hold cap. `force` becomes True once the boundary
+    # has been held on the live-tasks/bg-bash veto past the cap; it authorises
+    # bypassing ONLY those two vetoes (condition (b) + its raced re-check), never
+    # any other gate. `did_force` records whether a veto was ACTUALLY bypassed
+    # (there WAS a live lane at the veto), so a boundary that DRAINED before the
+    # cap fired still returns the plain "sent"/"queued".
+    force = _compact_live_hold_reached(boundary_ts, now)
+    did_force = False
     if watchdog._owner_disabled("compact"):
         _log_compact_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
         return "skip:disabled"
@@ -1204,18 +1314,31 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # veto is never blind-diagnosed again (thread 3).
     lanes = _live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir)
     if lanes:
-        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s lanes=%s"
-                          % (sid, cwd, lanes))
-        return "skip:live-tasks"
+        if not force:
+            _log_compact_sync("SKIP live-tasks sid=%s cwd=%s lanes=%s"
+                              % (sid, cwd, lanes))
+            return "skip:live-tasks"
+        # #844 -- the boundary has been held on live-tasks past the cap: DELIVER
+        # anyway (the experiment proved this is safe at an idle prompt). Only
+        # this veto is bypassed; everything below still runs.
+        did_force = True
+        _log_compact_sync("LIVE-HOLD-CAP forcing sid=%s cwd=%s held>=%ds "
+                          "lanes=%s (delivering past live-tasks veto)"
+                          % (sid, cwd, _compact_live_hold_cap(), lanes))
     # Condition (b), SECOND signal (#599) — a live `run_in_background` Bash job
     # (invisible to `count_live_workers`) whose completion `/compact` would
     # orphan (#29193). Distinct reason + bgid so the forensic log keeps the two
     # apart AND names the job (#605 thread 3).
     bgjobs = _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir)
     if bgjobs:
-        _log_compact_sync("SKIP live-bg-bash sid=%s cwd=%s jobs=%s"
-                          % (sid, cwd, bgjobs))
-        return "skip:live-bg-bash"
+        if not force:
+            _log_compact_sync("SKIP live-bg-bash sid=%s cwd=%s jobs=%s"
+                              % (sid, cwd, bgjobs))
+            return "skip:live-bg-bash"
+        did_force = True
+        _log_compact_sync("LIVE-HOLD-CAP forcing sid=%s cwd=%s held>=%ds "
+                          "jobs=%s (delivering past live-bg-bash veto)"
+                          % (sid, cwd, _compact_live_hold_cap(), bgjobs))
     if _compact_request_too_young(request_ts, now):
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return "skip:too-young"
@@ -1259,14 +1382,19 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         return "skip:raced"
     lanes = _live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir)
     if lanes:
-        _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s lanes=%s"
-                          % (sid, cwd, lanes))
-        return "skip:live-tasks-raced"
+        if not force:
+            _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s lanes=%s"
+                              % (sid, cwd, lanes))
+            return "skip:live-tasks-raced"
+        did_force = True   # #844 -- bypass the raced veto too, else the force
+        #                     would be undone by the racing re-check.
     bgjobs = _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir)
     if bgjobs:
-        _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s jobs=%s"
-                          % (sid, cwd, bgjobs))
-        return "skip:live-bg-bash-raced"
+        if not force:
+            _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s jobs=%s"
+                              % (sid, cwd, bgjobs))
+            return "skip:live-bg-bash-raced"
+        did_force = True
 
     # #822 — NO pre-type gate under an armed `/goal`, DELIBERATELY. An earlier
     # cut added a `skip:goal-continuing` gate here (refuse to type when armed goal
@@ -1310,7 +1438,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         # is cleared here (`queued` is terminal), so this durable anchor is the
         # only `since` the read-only /goal HOLD probe can report.
         mark_compact_queued_ts(sid, now=now)
-        return "queued"
+        # #844 -- name the forced-queued case distinctly so triage can see the
+        # cap fired even when the armed-goal continuation queued the row.
+        return "queued:live-hold-cap" if did_force else "queued"
     if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed
         # the Enter, #36) or a draft raced into the box pre-send — either way the
@@ -1325,9 +1455,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         return "skip:submit-%s" % outcome
     # Log the send IMMEDIATELY, before any other write — an exception in
     # mark_compact_delivery_ts below must never leave a real send unlogged.
-    _log_compact_sync("SEND sid=%s cwd=%s origin=%s" % (sid, cwd, origin or "-"))
+    _log_compact_sync("SEND%s sid=%s cwd=%s origin=%s"
+                      % (" live-hold-cap" if did_force else "", sid, cwd,
+                         origin or "-"))
     mark_compact_delivery_ts(sid, now=now, path=delivered_path)
-    return "sent"
+    return "sent:live-hold-cap" if did_force else "sent"
 
 
 # The dispositions that fully HANDLE a request — the caller clears it
@@ -1336,7 +1468,10 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 # accepted Stop, and the queued row is now in the pane — re-typing would only
 # stack a duplicate (the owner's 3x accumulation), so the request is done.
 _COMPACT_TERMINAL_WORDS = frozenset(
-    ("sent", "queued", "expired", "already-queued", "cooldown"))
+    ("sent", "queued", "expired", "already-queued", "cooldown",
+     # #844 -- a FORCED delivery (past the live-tasks cap) is delivered exactly
+     # like "sent"/"queued": terminal, request cleared, never re-typed.
+     "sent:live-hold-cap", "queued:live-hold-cap"))
 
 # #727/#741 hold-extend: the STRUCTURED live-own-task veto words PLUS the #741
 # ACTIVELY-HELD-BOUNDARY words. While one is the SWEEP's verdict, `compact_sweep`
@@ -1425,7 +1560,8 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     word = deliver_compact(sid, cwd, origin=origin, run=run,
                            projects_dir=projects_dir,
                            delivered_path=delivered_path, now=now_fn(),
-                           state=state, request_ts=req_ts, sleep_fn=sleep_fn)
+                           state=state, request_ts=req_ts, sleep_fn=sleep_fn,
+                           boundary_ts=entry.get("hbts"))
     if word in _COMPACT_TERMINAL_WORDS:
         clear_compact_request(sid, path=requests_path)
     return word
@@ -1469,7 +1605,16 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
         cwd = entry.get("cwd", "")
         origin = entry.get("origin") or None
         if dry_run:
-            logs.append("DRY-RUN compact-sweep would evaluate sid=%s" % sid)
+            # #844 -- surface the canonical live-hold cap + how long THIS
+            # boundary has been held, so `--dry-run --verbose` shows whether a
+            # force would fire (the constant is otherwise invisible).
+            held = _safe_age(now, entry.get("hbts"))
+            held_s = "?" if held is None else "%d" % int(held)
+            cap = _compact_live_hold_cap()
+            would = "yes" if (held is not None and held >= cap) else "no"
+            logs.append("DRY-RUN compact-sweep would evaluate sid=%s "
+                        "(live-hold cap=%ds, held=%ss, would-force=%s)"
+                        % (sid, cap, held_s, would))
             continue
         # `request_ts` is the entry's own `ts` anchor -- REQUIRED here so
         # condition (e), the hard age cap, is actually enforced by the sweep
@@ -1481,11 +1626,24 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
         word = deliver_compact(sid, cwd, origin=origin, run=run,
                                projects_dir=projects_dir,
                                delivered_path=delivered_path, now=now,
-                               state=state, request_ts=entry.get("ts"))
+                               state=state, request_ts=entry.get("ts"),
+                               boundary_ts=entry.get("hbts"))
         if word in _COMPACT_TERMINAL_WORDS:
             clear_compact_request(sid, path=requests_path)
-        if word == "sent":
-            logs.append("OK (compact-sweep) sid=%s -> sent" % sid)
+        if word == "sent" or word == "sent:live-hold-cap":
+            # #844 -- a forced delivery is journalled distinctly (the string the
+            # supervisor greps for after deploy) but handled exactly like a
+            # normal send.
+            logs.append("OK (compact-sweep) sid=%s -> %s" % (sid, word))
+            if handled is not None:
+                handled.add(sid)
+        elif word == "queued:live-hold-cap":
+            # #844 -- a forced /compact that queued behind an armed-goal
+            # continuation (drained by the boundary-hold turn); a real keystroke
+            # landed, so job 20 must avoid typing a burst into it (handled).
+            logs.append("OK (compact-sweep) sid=%s -> queued:live-hold-cap "
+                        "(forced past live-tasks cap, queued behind a running "
+                        "turn)" % sid)
             if handled is not None:
                 handled.add(sid)
         elif word == "queued":

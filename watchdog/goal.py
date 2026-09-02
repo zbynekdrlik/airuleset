@@ -177,6 +177,7 @@ from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
 from watchdog import release_gap as _release_gap             # #616 (release gap)
 from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival)
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
+from watchdog import lane_reconcile as _lane_reconcile       # #844 (post-compact lane reconcile)
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
@@ -4582,7 +4583,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
                     release_state_fetch=None, queue_fetch=None,
-                    u_fetch=None):
+                    u_fetch=None, reconcile_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -4620,6 +4621,10 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # so unlike the gh-subprocess riders it is gated only on its seam being wired
     # (`u_fetch`, default the statusbar-backed reader in run_once).
     urecs = state.setdefault("u_freshness", {}) if u_fetch is not None else {}
+    # #844 -- post-compact lane reconcile: keyed on the transcript's observed
+    # compaction (ZERO gh unless a compaction is actually observed), gated only on
+    # its `reconcile_fetch` seam being wired (default the git/gh reader in run_once).
+    lrecs = state.setdefault("lane_reconcile", {}) if reconcile_fetch is not None else {}
     # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
@@ -4790,6 +4795,16 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 now, run, urecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 u_fetch=u_fetch, state=state, sleep_fn=sleep_fn,
                 captured=captured)
+        # #844 -- post-compact lane reconcile for this armed pane; runs LAST (a
+        # pane an earlier keystroke job already typed is deferred via `handled`),
+        # owns its own observed-compaction trigger + full-authority + compact-latch
+        # + busy-gate + shared cadence-gate + verified send + dry-run-safe writes.
+        # Keystroke-only into the session, NEVER an owner ping (imports no notify).
+        if reconcile_fetch is not None:
+            logs += _lane_reconcile.goal_lane_reconcile_recheck(
+                now, run, lrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
+                reconcile_fetch=reconcile_fetch, state=state, sleep_fn=sleep_fn,
+                captured=captured)
     # #804 -- DEAD-SESSION census: a rostered EXPECTED-armed stream with NO live
     # claude candidate pane this sweep is a mode-5 death (the session died and
     # fell off the radar). Surface ONE verdict line per dead stream, cadenced at
@@ -4845,5 +4860,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797
+        if reconcile_fetch is not None:
+            _lane_reconcile._prune_lane_reconcile_orphans(lrecs, visited_sids, now)  # #844
         _nudge_gate.prune(state, visited_sids, now)   # #797 shared cadence gate
     return logs

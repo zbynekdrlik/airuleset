@@ -130,6 +130,12 @@ batch is open), bounded by real resource signals (below).
   batch cap + measured back-off doctrine live in the `autopilot` skill's Batch cap section
   (#332/#456/#723); never re-derive it here). A CI-blocked lane never holds up integration
   of the ready ones.
+  **LANE SIZE BOUND (#844):** a master lane gets the SAME bundling ceiling as `/autopilot` (the
+  per-issue / per-batch LoC caps in the `batch-issue-development` gate) — a lane that grows to
+  ~800k tokens is itself degraded (slow, memory-heavy, and it is the lane most likely to keep
+  `live-tasks` true and hold the boundary compact). Applies to EVERY lane: a LANE 1 REVIEW lane
+  reviews ONE hand-off, never bundles two hand-offs into one review; a LANE 3 CORE lane bundles only
+  bundle-safe issues within the gate. Keep lanes small so the batch drains and the compact fires.
   INTEGRATION is the ONLY thing serialized: the supervisor merges each returned branch
   under the #8 **integration mutex** (one merge/test/push cycle at a time across ALL
   sessions — per the `autopilot` skill's repo-flow policy, a direct `push` to `main`
@@ -154,7 +160,12 @@ batch is open), bounded by real resource signals (below).
   **ZERO live background subagents (any lane's workers / reviews / validators) AND ZERO live
   background Bash (any CI waiter — a RE-DERIVABLE one is `TaskStop`ped first per the #730
   waiver below, never left holding the boundary open)** — exactly what `watchdog/compact.py`'s
-  live-tasks veto measures (READ-ONLY reference here — the veto is NOT changed) — run `python3
+  live-tasks veto measures (reference here — that veto is now BOUNDED by #844: if a boundary is held
+  on live-tasks past `COMPACT_LIVE_HOLD_CAP_S` the watchdog delivers the compact ANYWAY rather than
+  let the main grow to 776K, so on a saturated master a compact eventually fires even when the batch
+  never fully drains; the first turn after ANY such compaction RECONCILES lanes from durable state
+  per the autopilot skill Step 5 #844 clause — `git worktree list` + `LANE-RETURN:` comments, never
+  memory) — run `python3
   ~/devel/airuleset/airuleset.py compact-request --self` (#402) as the last tool call; then
   every later goal turn is a HOLD turn until the compact runs — first action `compact-request
   --status`, and while it prints `PENDING` the turn ends `⏳ WORKING: čakám na compact hranice

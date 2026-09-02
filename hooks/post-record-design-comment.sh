@@ -392,7 +392,16 @@ try:
         "design": dg.classify_design_comment,
         "validated": dg.classify_validation_comment,
         "reviewed": dg.classify_review_comment,
+        # #844 -- the LANE-RETURN durable-return artifact (a worktree worker's
+        # last act). NOT in dg.ALL_KINDS (the merge-flow gates), so it has its
+        # own CHECK_KINDS below and its own SubagentStop gate.
+        "lane-return": dg.classify_lane_return_comment,
     }
+    # #844 -- the full set this hook re-reads for (the three merge-flow kinds
+    # PLUS lane-return); keep re-reading until ALL are marked, so a fresh
+    # LANE-RETURN comment posted after the design/validated/reviewed ones is not
+    # skipped by the settled-gate below.
+    CHECK_KINDS = tuple(dg.ALL_KINDS) + ("lane-return",)
 
     # Dedup issue numbers, first-seen order (mirrors design_gate.issue_refs's
     # own dedup shape) -- a repeated mention of the same issue in one
@@ -418,7 +427,7 @@ try:
         # supply it, so we must keep re-reading until all are in. `continue`
         # (never sys.exit(0)) so one issue's outcome never short-circuits
         # the rest of the command's issues.
-        if all(dg.marker_exists(repo_key, issue, k) for k in dg.ALL_KINDS):
+        if all(dg.marker_exists(repo_key, issue, k) for k in CHECK_KINDS):
             continue
 
         try:
@@ -465,7 +474,7 @@ try:
         if url and url in dg.claimed_urls(repo_key, issue):
             continue
 
-        for kind in dg.ALL_KINDS:
+        for kind in CHECK_KINDS:
             if dg.marker_exists(repo_key, issue, kind):
                 continue
             ok, reason = classifiers[kind](body)
