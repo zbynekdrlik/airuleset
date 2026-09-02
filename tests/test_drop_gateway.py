@@ -263,6 +263,47 @@ class TestRestartArgv(unittest.TestCase):
         self.assertEqual(argv[:2], ["systemctl", "--user"])
 
 
+class TestRestartEnv(unittest.TestCase):
+    """#826: a `--user` tunnel restart runs over a NON-LOGIN ssh install session,
+    where XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are unset, so `systemctl
+    --user` cannot find the per-user bus and fails 'Failed to connect to bus: No
+    medium found'. The restart env MUST carry both, pointing at /run/user/<uid>.
+    A SYSTEM unit runs via `sudo -n systemctl` (which resets env itself) and
+    needs no such env → inherit (None)."""
+
+    def test_user_unit_env_carries_the_user_bus(self):
+        import unittest.mock as m
+        uid = os.getuid()
+        # Clear any ambient values so we exercise the deterministic fallback a
+        # non-login ssh install session actually gets (both genuinely unset there).
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            env = dg._restart_env(dg.drop_lane_for_box("subdev"))
+        self.assertIsNotNone(env, "a --user restart MUST carry an explicit env")
+        self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/%d" % uid)
+        self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
+                         "unix:path=/run/user/%d/bus" % uid)
+
+    def test_user_unit_env_keeps_an_ambient_value(self):
+        # setdefault: a real logind session's own XDG_RUNTIME_DIR must WIN over
+        # the deterministic fallback (never clobber a correct live value) — AND
+        # the DBUS address must stay COHERENT with it (derived from the EFFECTIVE
+        # XDG, never re-derived from the uid), or sd-bus would prefer a mismatched
+        # /run/user/<uid>/bus over the working /run/user/4242/bus (review #826).
+        import unittest.mock as m
+        with m.patch.dict(os.environ,
+                          {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False):
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            env = dg._restart_env(dg.drop_lane_for_box("subdev"))
+        self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/4242")
+        self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
+                         "unix:path=/run/user/4242/bus")
+
+    def test_system_unit_env_is_inherit_none(self):
+        self.assertIsNone(dg._restart_env(dg.drop_lane_for_box("spinbike")))
+
+
 def _args(**kw):
     return types.SimpleNamespace(**kw)
 
@@ -520,18 +561,45 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         return calls, r
 
-    def test_no_lane_box_is_noop(self):
+    def test_no_lane_box_is_ok_noop(self):
+        # #826: a box with NO drop lane (dev1, and the overwhelming majority of
+        # the fleet) is a benign no-op — reconcile must report OK (True), NOT the
+        # same False a genuine failure returns, or `cmd_install`'s
+        # `if not reconcile(): install_failed = True` would fail EVERY box.
         calls, r = self._run_noop()
-        self.assertFalse(dg.reconcile_drop_ingress_on_install(
+        self.assertTrue(dg.reconcile_drop_ingress_on_install(
             run=r, nodename="dev1", marker_path=self.marker))
         self.assertEqual(calls, [])
 
-    def test_lane_without_marker_is_noop(self):
+    def test_lane_without_marker_is_ok_noop(self):
+        # #826: a lane that never went live (no marker) is also a benign no-op → OK.
         Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
         calls, r = self._run_noop()
-        self.assertFalse(dg.reconcile_drop_ingress_on_install(
+        self.assertTrue(dg.reconcile_drop_ingress_on_install(
             run=r, nodename="spinbike", marker_path=self.marker))  # no marker
         self.assertEqual(calls, [])
+
+    def test_restart_failure_is_not_ok(self):
+        # #826: a GENUINE failure (marker present, ingress clobbered, restart
+        # rc!=0) must report NOT-ok (False) so cmd_install latches install_failed
+        # and `push` exits non-zero instead of reporting OK over a stale tunnel.
+        Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
+        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
+
+        def failing(argv, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="down")
+        self.assertFalse(dg.reconcile_drop_ingress_on_install(
+            run=failing, nodename="spinbike", marker_path=self.marker))
+
+    def test_unreadable_config_is_not_ok(self):
+        # #826: marker present but the tunnel config is unreadable/missing is a
+        # genuine failure (a live drop lane whose config we cannot heal) → NOT-ok.
+        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
+        # self.cfg was never written → read_text raises OSError inside reconcile.
+        calls, r = self._run_noop()
+        self.assertFalse(dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="spinbike", marker_path=self.marker))
+        self.assertEqual(calls, [], "no restart attempted when the config is unreadable")
 
     def test_clobbered_ingress_is_re_added_and_restarted(self):
         # Simulate the webterm re-provision: config WITHOUT the drop ingress, but
@@ -554,6 +622,51 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
         self.assertTrue(dg.reconcile_drop_ingress_on_install(
             run=r, nodename="spinbike", marker_path=self.marker))
         self.assertEqual(calls, [], "no restart when the ingress is already present")
+
+
+class TestReconcileRestartCarriesUserBusEnv(unittest.TestCase):
+    """#826: the restart INSIDE reconcile_drop_ingress_on_install must pass the
+    user-bus env to `run` for a --user lane — the exact call that failed 'No
+    medium found' on david1@subdev over a non-login ssh install (bare
+    subprocess.run with no env)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+        # A david-shaped config (subdev lane uuid, --user unit) WITHOUT the drop
+        # ingress, but the marker says the lane already went live → reconcile
+        # re-adds the ingress and restarts.
+        Path(self.cfg).write_text(
+            "tunnel: 1564fe31-a95f-4053-93d4-baff2b8a6e97\n"
+            "credentials-file: /home/david1/.cloudflared/x.json\n\n"
+            "ingress:\n"
+            "  - hostname: david.newlevel.media\n"
+            "    service: http://127.0.0.1:8081\n"
+            "  - service: http_status:404\n", encoding="utf-8")
+        self._orig = dg.DROP_LANES["subdev"].tunnel_config
+        dg.DROP_LANES["subdev"].tunnel_config = Path(self.cfg)
+        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+
+    def tearDown(self):
+        dg.DROP_LANES["subdev"].tunnel_config = self._orig
+
+    def test_user_lane_restart_receives_env_with_the_bus(self):
+        captured = {}
+
+        def r(argv, **kw):
+            captured["argv"] = argv
+            captured["kw"] = kw
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="subdev", marker_path=self.marker)
+        self.assertEqual(captured["argv"][:2], ["systemctl", "--user"])
+        env = captured["kw"].get("env")
+        self.assertIsNotNone(env, "the --user restart MUST carry an env (#826)")
+        self.assertIn("XDG_RUNTIME_DIR", env)
+        self.assertIn("DBUS_SESSION_BUS_ADDRESS", env)
 
 
 class TestSecretShowLeadingFlagName(unittest.TestCase):

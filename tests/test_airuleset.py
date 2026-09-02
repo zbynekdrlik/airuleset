@@ -11987,6 +11987,31 @@ class TestCmdPushRuffGate(TestCase):
                          "must abort before git push")
 
 
+class TestCmdInstallLatchesDropGatewayReconcileFailure(TestCase):
+    """#826: cmd_install must LATCH install_failed on a drop-gateway reconcile
+    FAILURE so the remote `install` exits non-zero -> `_deploy_to_all_remotes`
+    counts the host -> `push` exits non-zero and the FAILED line is never
+    swallowed. The bug was that reconcile_drop_ingress_on_install()'s return was
+    thrown away (an overloaded False that could not be latched), so a failed
+    tunnel restart left `install` at exit 0 and push silently reported OK over a
+    stale tunnel (#135: the marker proved a claim, not delivery)."""
+
+    def test_reconcile_return_is_consumed_into_install_failed(self):
+        import inspect
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertIn("reconcile_drop_ingress_on_install", src)
+        # ONE regex spanning the guard AND its latch body: `assertIn(
+        # "install_failed = True", src)` alone has no teeth (the pre-existing
+        # plugin steps already contain it), and a log-only if-body would pass a
+        # bare guard regex. Tying the latch to THIS if-body is the real teeth
+        # against re-introducing the "return thrown away" regression (review #826).
+        self.assertRegex(
+            src,
+            r"if\s+not\s+cli_drop_gateway\.reconcile_drop_ingress_on_install"
+            r"\([^)]*\)\s*:\s*\n\s+install_failed = True",
+            "the reconcile return must gate an install_failed latch in THIS body")
+
+
 class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
     """Adversarial-review CRITICAL finding (plugin-marketplace fix, 2026-08-06):
     cmd_install() can now sys.exit(1) on a still-failing managed-plugin
@@ -12010,6 +12035,7 @@ class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
         return fake_run
 
     def test_a_failed_local_install_does_not_abort_the_remote_loop(self):
+        import io
         import unittest.mock as m
         calls = []
         args = m.Mock()
@@ -12021,7 +12047,9 @@ class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
         with m.patch("subprocess.run", side_effect=self._fake_run(calls)), \
                 m.patch.object(airuleset, "cmd_install",
                                 side_effect=SystemExit(1)) as fake_install, \
-                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts):
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch("sys.stderr", io.StringIO()):  # #826: keep the new
+                # DEPLOY FAILED token out of the pre-push suite's log stream
             with self.assertRaises(SystemExit) as cm:
                 airuleset.cmd_push(args)
         fake_install.assert_called_once()

@@ -1359,7 +1359,9 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
                 m.patch.object(cli_remote, "_soniox_key_line",
-                                return_value="SONIOX_API_KEY=fake"):
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", StringIO()):  # #826: suppress the new
+                # DEPLOY FAILED token from the pre-push suite's log stream
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         david2_calls = [c for c in calls if any("david2@" in str(a) for a in c)]
@@ -1432,7 +1434,9 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
                 m.patch.object(cli_remote, "_soniox_key_line",
-                                return_value="SONIOX_API_KEY=fake"):
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", StringIO()):  # #826: don't leak the new
+                # DEPLOY FAILED token into the pre-push suite's own log output
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         simap_calls = [c for c in calls if any("simap@" in str(a) for a in c)]
@@ -1487,7 +1491,9 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
                 m.patch.object(cli_remote, "_soniox_key_line",
-                                return_value="SONIOX_API_KEY=fake"):
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", StringIO()):  # #826: suppress the new
+                # DEPLOY FAILED token from the pre-push suite's log stream
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         miva1_calls = [c for c in calls if any("miva1@" in str(a) for a in c)]
@@ -1526,6 +1532,39 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
         self.assertIn("1 of 1 remote(s) FAILED", out.getvalue(),
                       "must count the ONE distinct host, not the two "
                       "failed() entries it produced: %r" % out.getvalue())
+
+    def test_deploy_failure_prints_an_unmistakable_deploy_token(self):
+        # #826: the real per-target FAILED line was hidden among the ~33
+        # mock-"FAILED" lines the pre-push test suite prints into the SAME log
+        # stream, so `grep -c FAILED` is meaningless and push reported OK over a
+        # stale tunnel. A distinct `DEPLOY FAILED`/`DEPLOY FAILURES:` token (only
+        # this phase emits it) lets a targeted digest of the deploy section find
+        # the real failure, and the non-zero exit is never swallowed.
+        import unittest.mock as m
+        out = StringIO()
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "david1@subdev", "host": "9.9.9.9", "user": "david1",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        fake_authority = {"david1": "fork-no-merge"}
+        with m.patch("subprocess.run",
+                     side_effect=self._fake_run(calls, {"david1": 1})), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
+                m.patch.object(cli_remote, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", out):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        text = out.getvalue()
+        self.assertIn("DEPLOY FAILURES:", text,
+                      "aggregate summary must carry the distinct token: %r" % text)
+        self.assertIn("DEPLOY FAILED david1@subdev", text,
+                      "a per-target failure line must be emitted: %r" % text)
 
 
 class TestApplyStreamTmuxWindowName(TestCase):
