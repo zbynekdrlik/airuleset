@@ -1317,3 +1317,20 @@ def cmd_push(args):
     except Exception as e:  # noqa: BLE001 — best-effort, never break the push
         print("  ⚠ RESOURCE-GUARDS step error (non-fatal): %r" % e,
               file=sys.stderr)
+
+    # 5. Disk-guard ROOT/system-level legs (#841) — install the standard log
+    # ROTATION config (btmp/wtmp logrotate, journald cap, fail2ban hardening) +
+    # the report-only root reporter timer on the public multi-user boxes
+    # (subdev + gk) over `ssh root@<host>`, so the root-owned classes no
+    # per-USER watchdog can reach are ROTATED + SURFACED (never deleted). SAME
+    # non-fatal + LOUD discipline as the resource-guards step above: a
+    # not-yet-authorized root key / read-back mismatch prints
+    # `⚠ DISK-GUARD-ROOT FAILED (<name>)` and never fails the push; the daily
+    # report timer + the per-user watchdog's ≥90 % escalation are the backstops.
+    print(f"\n{'=' * 50}")
+    print("Applying disk-guard root/system legs (#841)...")
+    try:
+        airuleset.provision_disk_guard_root()
+    except Exception as e:  # noqa: BLE001 — best-effort, never break the push
+        print("  ⚠ DISK-GUARD-ROOT step error (non-fatal): %r" % e,
+              file=sys.stderr)

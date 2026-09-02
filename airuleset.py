@@ -3805,6 +3805,16 @@ from cli_resource_guards import (  # noqa: E402, F401
     render_sysctl_vm as render_sysctl_vm,
 )
 
+# --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed
+# by cmd_push (via `airuleset.provision_disk_guard_root`, the facade name, so it
+# stays test-patchable) as one non-fatal LOUD step after the resource-guards
+# step. The SESSION-facing finding reader lives in watchdog/disk_guard_root.py.
+from cli_disk_guard_root import (  # noqa: E402, F401
+    provision_disk_guard_root as provision_disk_guard_root,
+    build_apply_script as build_disk_guard_root_apply_script,
+    guard_files as disk_guard_root_files,
+)
+
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
@@ -5247,6 +5257,7 @@ from cli_fleet import (  # noqa: E402, F401
     _github_ci_runner_source as _github_ci_runner_source,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
     SHARED_STREAM_GUARD_HOSTS as SHARED_STREAM_GUARD_HOSTS,
+    DISK_GUARD_ROOT_HOSTS as DISK_GUARD_ROOT_HOSTS,
 )
 
 

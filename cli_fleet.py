@@ -598,3 +598,35 @@ SHARED_STREAM_GUARD_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
 ]
+
+
+# --- #841: disk-guard ROOT/system-level apply targets ----------------------
+# The public multi-user VPS boxes whose root-owned classes (btmp/wtmp/auth.log,
+# system journal, apt cache, docker images, gh-runner _work, other users'
+# /tmp) no per-USER watchdog can reach (#834 root cause) — subdev (sudo-less
+# streams) AND gk (the box that hit 91 %). A DELIBERATELY SEPARATE list from
+# SHARED_STREAM_GUARD_HOSTS above: reusing that list would silently apply the
+# #775 cgroup drop-ins to gk (scope creep on a shipped guard) and still omit
+# the box that actually filled. Same `{name,host,admin_user,identity}` schema.
+#
+# `admin_user:root` = the uniform root-ssh apply path (mirroring #775): stream
+# accounts are sudo-less, so the drop-ins in /etc + the system timer can only
+# be installed over `ssh root@<host>`. gk's dev1→root operator key is a
+# one-time GATEKEEPER-ACTION bootstrap; until it lands `provision_disk_guard_
+# root` is a fail-loud no-op for gk (exactly how #775 shipped), and the daily
+# report timer + the machine-channel escalation are the standing backstops.
+# `host` is each box's TAILSCALE IP (stable across LAN switches, #1).
+DISK_GUARD_ROOT_HOSTS = [
+    {
+        "name": "subdev",
+        "host": "100.118.174.27",
+        "admin_user": "root",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+    {
+        "name": "gatekeeper",
+        "host": "100.90.94.41",
+        "admin_user": "root",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+]
