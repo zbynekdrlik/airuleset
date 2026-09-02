@@ -247,6 +247,74 @@ class ParkRecordHelpers(unittest.TestCase):
                 {"stash_parks": {PID: {"ts": bad, "typed": "x"}}}, PID), bad)
 
 
+class OwnLeftoverToleratesAStrayPrefix(unittest.TestCase):
+    """#852 C -- the incident's `slane-check: ...` shape: a stray human char
+    (the owner's forgotten `s`) sits at the FRONT of our own swallowed nudge, so
+    the own prefix is at position 1, not 0. Recognition tolerates that (own
+    prefix within the first 4 chars of the box head), PROVENANCE-gated exactly
+    as today (a park record carrying the typed string must exist), and the
+    reclaim backspaces ONLY the own part (recorded length), preserving the human
+    prefix -- verified by a fresh capture."""
+
+    STRAY = "s"
+    NUDGE = OWN_LANE_NUDGE            # "lane-check: ...", 691c, wraps at 176
+
+    def test_recognition_tolerates_a_stray_leading_char(self):
+        self.assertTrue(wd._looks_like_own_stuck_content(self.STRAY + self.NUDGE))
+        # up to 3 stray chars still recognized; the own prefix past position 4
+        # (a genuine foreign draft that merely mentions the phrase deep in) is
+        # NOT the shape this admits.
+        self.assertTrue(wd._looks_like_own_stuck_content("xy" + self.NUDGE))
+        self.assertFalse(wd._looks_like_own_stuck_content(
+            "moja dlha rozpisana " + self.NUDGE))
+        # a plain foreign draft is never recognized.
+        self.assertFalse(wd._looks_like_own_stuck_content(
+            "toto je moja vlastna sprava bez prefixu"))
+
+    def _recover_stray(self, state, dry_run=False):
+        box = {"buf": self.STRAY + self.NUDGE}
+        sent = []
+
+        def run(argv, timeout=8):
+            sent.append(argv)
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                return render_box(box["buf"])
+            if "display-message" in j:
+                return LOC
+            if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
+                n = argv.count("BSpace")
+                box["buf"] = box["buf"][:-n] if n < len(box["buf"]) else ""
+            return ""
+
+        rec = {}
+        cap = render_box(self.STRAY + self.NUDGE)
+        logs = wd._janitor_recover(run, rec, PID, CWD, cap, LOC,
+                                   send_fn=None, dry_run=dry_run,
+                                   sleep_fn=lambda *a, **k: None,
+                                   state=state, now=NOW, own_payload=self.NUDGE)
+        return logs, box, sent
+
+    def test_reclaimed_to_the_stray_with_a_park_record(self):
+        # A park record carrying the exact typed nudge is the provenance AND the
+        # recorded length -> reclaim backspaces only the nudge, leaving `s`.
+        state = {"stash_parks": {PID: {"ts": NOW, "typed": self.NUDGE}}}
+        logs, box, _sent = self._recover_stray(state)
+        self.assertEqual(box["buf"], self.STRAY,
+                         "the human's stray char must survive; only our own "
+                         "part is backspaced: %r" % box["buf"][:40])
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+
+    def test_same_text_without_a_park_record_is_untouched(self):
+        # No park record (and no fresh janitor watch) -> content shape alone is
+        # NEVER acted on. The stray-prefix box is left byte-identical.
+        logs, box, sent = self._recover_stray({})
+        self.assertEqual(box["buf"], self.STRAY + self.NUDGE,
+                         "untouched without provenance: %r" % box["buf"][:40])
+        self.assertFalse(any(len(a) > 1 and a[1] == "send-keys" for a in sent),
+                         "never a keystroke without provenance: %r" % sent)
+
+
 class PruneParksHelper(unittest.TestCase):
     """#488 review-1: the age-unbounded record must not orphan forever for a
     pane that no longer exists (restores #372's 'no stale provenance forever'
