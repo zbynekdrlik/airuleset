@@ -30,8 +30,10 @@ session to run its release pipeline. The FULL-authority gate is the INVERSE of #
 narrowed the lane-occupancy nudge's SKIP to `authority is None` (widening THAT
 nudge to reduced-authority stream boxes too), whereas a release train is run ONLY
 by the gatekeeper, so THIS nudge fires ONLY where `resolve_authority(cwd) ==
-"full"`. `resolve_authority` DEFAULTS to "full" for any unmapped user, so the
-honest gk-narrowing is the release-train SHAPE, not the authority word: the fetch
+"full"`. Since airuleset#827 `resolve_authority` fails SAFE to `fork-no-merge`
+for an unmapped user (only the explicit full accounts resolve "full"), so the
+authority gate now excludes an unmapped box too; the primary gk-narrowing is
+still the release-train SHAPE, not the authority word alone: the fetch
 requires BOTH an integration branch ahead of prod AND a `staging` branch to
 exist, so a full-authority box that is not a 3-branch release repo is never
 nudged. A release IN FLIGHT (an open develop->staging / staging->main PR, or a

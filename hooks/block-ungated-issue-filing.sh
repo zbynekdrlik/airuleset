@@ -100,8 +100,9 @@ set -euo pipefail
 #     imported directly from the sibling airuleset.py — single source of
 #     truth for AUTHORITY_BY_USER, never a duplicated user list, matching
 #     the issue's own "rovnako, ako to už robí airuleset.py authority"). A
-#     full-authority filer (the maintainer/gatekeeper doing triage, or any
-#     box not in AUTHORITY_BY_USER) has NO "own" stream to compare against
+#     full-authority filer (the maintainer/gatekeeper doing triage — airuleset
+#     #827: an explicit FULL_AUTHORITY_USERS account; an unmapped box now fails
+#     safe to fork-no-merge and IS gated) has NO "own" stream to compare against
 #     and is trusted to route deliberately — ordinary core-ticket filing
 #     carries NO stream label by design (`_core_search_excl()`'s whole
 #     mechanism is "absence of a stream label = core"), so gating every

@@ -454,6 +454,10 @@ AUTHORITY_BY_USER = {
 # user must appear in one registry or the other
 # (`test_every_remote_hosts_user_is_classified`) — a new provisioned box that is
 # neither is a RED test, forcing an explicit decision, never a silent grant.
+# Residual: a project CLAUDE.md `<!-- airuleset:authority=full -->` marker still
+# ELEVATES an unmapped user to `full` (the marker is checked FIRST in
+# `_authority_decision`) — the one surviving unmapped->full path, pre-existing
+# owner-sanctioned trusted-file design, tracked for an owner decision as #828.
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 
 
