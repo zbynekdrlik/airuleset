@@ -909,19 +909,36 @@ def _filer_authority_and_own_stream(cwd, repo_dir):
         return _authority_cache[key]
     result = (None, None)
     try:
-        import getpass
         if repo_dir and repo_dir not in sys.path:
             sys.path.insert(0, repo_dir)
         import airuleset as _ar
         profile = _ar.resolve_authority(cwd)
-        # airuleset#839: the PROFILE half (resolve_authority -> _current_user) is
-        # uid-based/un-spoofable; the OWN-STREAM half below still uses
-        # getpass.getuser() (env-spoofable). This is a labeling-HYGIENE gate, not
-        # the merge/deploy/close authority boundary, so hardening it (which needs
-        # a subprocess test-identity seam) is deferred to issue 840. Do NOT switch
-        # to _current_user() here without reworking test_scope_gate.py's own-stream
-        # simulation at the same time.
-        user = getpass.getuser()
+        # airuleset#840: derive the filer's OWN stream from the un-spoofable
+        # uid-based identity (`_current_user()` = pwd.getpwuid(os.getuid()), the
+        # #839 single source), NOT `getpass.getuser()` -- the latter reads
+        # $LOGNAME/$USER FIRST, so a reduced stream could set USER=<other-stream>
+        # to make its own-stream appear FOREIGN and file under that stream's
+        # `stream:<other>` label with no `Stream-routing:` justification,
+        # bypassing this whole #390 labeling-HYGIENE gate. `_current_user()`
+        # reads the real uid; a stream controls its env and its repo files, never
+        # its uid.
+        #
+        # TEST-IDENTITY SEAM (airuleset#840): because `_current_user()` reads the
+        # real uid, a subprocess test cannot change it in-process, so the own-
+        # stream identity is taken from `AIRULESET_SCOPE_GATE_TEST_STREAM_USER`
+        # -- but ONLY when the REAL invoking account is NOT itself a reduced
+        # stream (`_current_user() not in AUTHORITY_BY_USER` -- a
+        # full/maintainer/test-runner box, e.g. newlevel/runner/root). A real
+        # reduced stream's uid IS in AUTHORITY_BY_USER, so it can never activate
+        # the seam -- the only accounts that can are the ones that already
+        # resolve `full` and have no stream to spoof under. The seam is on THIS
+        # own-stream read alone, NEVER on `_current_user()` itself, which would
+        # re-open the env-spoof on the merge/deploy/close authority path #839
+        # hardened.
+        user = _ar._current_user()
+        _seam = os.environ.get("AIRULESET_SCOPE_GATE_TEST_STREAM_USER")
+        if _seam and user not in _ar.AUTHORITY_BY_USER:
+            user = _seam
         result = (profile, ("stream:%s" % user).lower())
     except Exception:
         result = (None, None)
