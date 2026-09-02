@@ -33,7 +33,8 @@ import statusbar
 
 
 def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None,
-                skipped=None, user_waiting=None):
+                skipped=None, user_waiting=None, created_today=None,
+                closed_today=None):
     d = statusbar.cache_dir(home)
     d.mkdir(parents=True, exist_ok=True)
     entry = {"open": open_n, "name": name, "root": str(cwd),
@@ -46,6 +47,10 @@ def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None,
         entry["skipped"] = skipped
     if user_waiting is not None:
         entry["user_waiting"] = user_waiting
+    if created_today is not None:
+        entry["created_today"] = created_today
+    if closed_today is not None:
+        entry["closed_today"] = closed_today
     (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(entry))
 
 
@@ -72,6 +77,31 @@ class TicketsSegment(unittest.TestCase):
     def test_open_issue_count_when_no_autopilot(self):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         self.assertIn("I 14", self._seg())
+
+    def test_drift_marker_when_net_inflating(self):
+        # #842: created(9) > closed(5) today -> `I N▲`.
+        _seed_cache(self.home, self.cwd, open_n=14, name="demo",
+                    created_today=9, closed_today=5)
+        self.assertIn("I 14▲", self._seg())
+
+    def test_no_drift_marker_at_parity(self):
+        # #842: created == closed is NOT strictly inflating -> no ▲ (deliberately
+        # a stricter threshold than the ratchet, which blocks at parity).
+        _seed_cache(self.home, self.cwd, open_n=14, name="demo",
+                    created_today=5, closed_today=5)
+        self.assertNotIn("▲", self._seg())
+
+    def test_no_drift_marker_when_draining(self):
+        _seed_cache(self.home, self.cwd, open_n=14, name="demo",
+                    created_today=3, closed_today=9)
+        self.assertNotIn("▲", self._seg())
+
+    def test_legacy_cache_without_counts_renders_no_drift(self):
+        # A cache written before #842 carries no created/closed -> no crash, no ▲.
+        _seed_cache(self.home, self.cwd, open_n=14, name="demo")
+        seg = self._seg()
+        self.assertIn("I 14", seg)
+        self.assertNotIn("▲", seg)
 
     def test_progress_cache_presence_never_affects_render(self):
         # #367 dropped the whole 'run D/T' branch that used to read
@@ -170,6 +200,38 @@ class RefreshCLI(unittest.TestCase):
             # and the segment composes from that cache
             self.assertIn("I 7", statusbar.tickets_segment(repo, home=home,
                                                                spawn=False))
+
+    def test_refresh_records_net_drain_counters_and_renders_drift(self):
+        # #842: --refresh records created_today/closed_today into the cwd cache;
+        # created(9) > closed(5) -> the segment renders `I N▲`.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            SEVEN = '[{"number":1},{"number":2},{"number":3},{"number":4},' \
+                    '{"number":5},{"number":6},{"number":7}]'
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*) echo "zbynekdrlik/demo";;\n'
+                '  *created:*) echo 9;;\n'   # created_today count query
+                '  *closed:*)  echo 5;;\n'   # closed_today count query
+                "  *) echo '%s';;\n"
+                'esac\n' % SEVEN)
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache.get("created_today"), 9)
+            self.assertEqual(cache.get("closed_today"), 5)
+            self.assertIn("I 7▲", statusbar.tickets_segment(
+                repo, home=home, spawn=False))
 
     def test_refresh_scopes_count_to_own_slice_for_reduced_authority(self):
         # Gatekeeper goal (2026-07-11): a sub-dev stream's statusline must show ITS
