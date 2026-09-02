@@ -407,6 +407,61 @@ class TestServerEndToEnd(unittest.TestCase):
                 httpd.shutdown()
                 httpd.server_close()
 
+    def test_text_content_type_gets_utf8_charset(self):
+        # #825: a served text/* file must carry an explicit charset, or a
+        # browser with no BOM defaults to Windows-1252 and Slovak diacritics
+        # (žčšťýáíéúäô) render as mojibake even though the file IS UTF-8.
+        from filedrop.server import make_server
+        from filedrop.share import share
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "drop"
+            src = Path(td) / "sumar.md"
+            src.write_text("# Kolko a komu\n\nŽčšťýáíéúäô skoly.\n",
+                            encoding="utf-8")
+            url, dest = share(str(src), base_dir=root)
+            token = dest.parent.name
+
+            httpd = make_server(host="127.0.0.1", port=0, base_dir=root)
+            port = httpd.server_address[1]
+            t = threading.Thread(target=httpd.serve_forever, daemon=True)
+            t.start()
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/{token}/sumar.md", timeout=5) as r:
+                    self.assertEqual(r.status, 200)
+                    ctype = r.headers.get("Content-Type")
+                    self.assertIn("charset=utf-8", ctype)
+                    self.assertTrue(ctype.startswith("text/markdown"))
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_binary_content_type_has_no_charset(self):
+        # A binary type must NOT gain a nonsensical text charset — only
+        # text/* (and the JSON/JS special-cased non-text/ MIME types) do.
+        from filedrop.server import make_server
+        from filedrop.share import share
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "drop"
+            src = Path(td) / "rec.wav"
+            src.write_bytes(b"HELLOAUDIO")
+            url, dest = share(str(src), base_dir=root)
+            token = dest.parent.name
+
+            httpd = make_server(host="127.0.0.1", port=0, base_dir=root)
+            port = httpd.server_address[1]
+            t = threading.Thread(target=httpd.serve_forever, daemon=True)
+            t.start()
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/{token}/rec.wav", timeout=5) as r:
+                    self.assertEqual(r.status, 200)
+                    ctype = r.headers.get("Content-Type")
+                    self.assertNotIn("charset", ctype)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
     def test_favicon_no_content(self):
         from filedrop.server import make_server
         with tempfile.TemporaryDirectory() as td:
