@@ -59,7 +59,14 @@ def skill_names_for_user(user=None):
     names = list(airuleset.SKILL_NAMES)
     if user not in airuleset.MAINTAINER_USERS:
         names = [n for n in names if n not in airuleset.SKILLS_MAINTAINER_ONLY or n in extra]
-    if airuleset.AUTHORITY_BY_USER.get(user, "full") != "full":
+    # airuleset#827: the full-authority-only skills (deploy-ssh/process-subdev/
+    # autopilot-master) go ONLY to an EXPLICIT full account. The prior
+    # `AUTHORITY_BY_USER.get(user, "full") != "full"` shape was fail-OPEN — an
+    # unmapped/forgotten stream account (in neither registry) fell to the "full"
+    # default and got them, the exact parallel fail-open #827 closes in the
+    # resolver. Gating on `FULL_AUTHORITY_USERS` membership fails SAFE (an
+    # unmapped user is treated as reduced), identical for every classified box.
+    if user not in airuleset.FULL_AUTHORITY_USERS:
         names = [n for n in names if n not in airuleset.SKILLS_FULL_AUTHORITY_ONLY or n in extra]
     return names
 

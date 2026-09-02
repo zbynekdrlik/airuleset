@@ -1247,10 +1247,14 @@ class TestStreamRoutingGate(TestCase):
     `airuleset.resolve_authority()`) to carry an explicit `stream:<x>`
     label; when the applied stream differs from the filer's OWN
     (`stream:<their-linux-username>`), a `Stream-routing: <reason>` body
-    line is also required. A full-authority filer (not in
-    AUTHORITY_BY_USER -- the maintainer/gatekeeper) has no "own" stream to
-    compare against and is NEVER gated -- ordinary core-ticket filing
-    carries no stream label by design (`_core_search_excl()`)."""
+    line is also required. A full-authority filer (airuleset#827: in
+    FULL_AUTHORITY_USERS -- the maintainer/gatekeeper, e.g. newlevel) has no
+    "own" stream to compare against and is NEVER gated -- ordinary core-ticket
+    filing carries no stream label by design (`_core_search_excl()`). Pre-#827
+    any unmapped user resolved full via the catch-all; that now fails safe to
+    fork-no-merge, so these fixtures must name a REAL full account — `gatekeeper`,
+    chosen distinct from the suite's own run-user so the LOGNAME/USER override is
+    load-bearing (a run-user fixture would pass even if that plumbing broke)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-streamroute-test-")
@@ -1298,7 +1302,7 @@ class TestStreamRoutingGate(TestCase):
         gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
         r = run(body_cmd("core ticket", "ordinary core work, no stream label",
                           scope_gate="cross-cutting"),
-                gh_bin=gh_bin, user="not-a-known-stream-account")
+                gh_bin=gh_bin, user="gatekeeper")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_label_list_lookup_failure_degrades_never_blocks_on_its_own(self):
@@ -1341,7 +1345,7 @@ class TestStreamRoutingGateReviewFixes(TestCase):
                                   call_log=call_log)
         r = run(body_cmd("core ticket", "ordinary core work, no stream label",
                           scope_gate="cross-cutting"),
-                gh_bin=gh_bin, user="not-a-known-stream-account")
+                gh_bin=gh_bin, user="gatekeeper")
         self.assertEqual(r.returncode, 0, r.stderr)
         log_text = Path(call_log).read_text() if Path(call_log).exists() else ""
         self.assertNotIn(
@@ -1360,7 +1364,7 @@ class TestStreamRoutingGateReviewFixes(TestCase):
         gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"],
                                   call_log=call_log)
         r = run(body_cmd("no scope gate", "missing the scope-gate line entirely"),
-                gh_bin=gh_bin, user="not-a-known-stream-account")
+                gh_bin=gh_bin, user="gatekeeper")
         self.assertEqual(r.returncode, 2, r.stderr)  # blocks on missing Scope-gate
         log_text = Path(call_log).read_text() if Path(call_log).exists() else ""
         self.assertNotIn("label list", log_text)

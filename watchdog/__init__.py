@@ -748,14 +748,26 @@ def _box_authority():
     box identity, never by whatever cwd the watchdog happens to run from.
     Deliberately NOT `resolve_authority()`: that honours a per-repo
     `airuleset:authority=full` CLAUDE.md marker, and a stray such marker in the
-    watchdog's cwd must NEVER re-open the cross-stream leak this gate closes. This
-    is the SAME `AUTHORITY_BY_USER` map `resolve_authority` itself falls back to
-    (never a parallel derivation). Deferred `import airuleset` (the idiom already
-    used in this package's `goal.py` + `cli_quals.py`) avoids the module-load
-    cycle. An unmapped user (gk = gatekeeper, dev1/dev2 = newlevel) defaults to
-    "full", exactly as the map's own `.get(user, "full")` does everywhere else."""
+    watchdog's cwd must NEVER re-open the cross-stream leak this gate closes. It
+    uses the SAME two registries `_authority_decision` does — the reduced-stream
+    `AUTHORITY_BY_USER` map, then the explicit full-authority allow-list — never a
+    parallel derivation, just the marker-free half. Deferred `import airuleset`
+    (the idiom already used in this package's `goal.py` + `cli_quals.py`) avoids
+    the module-load cycle. airuleset#827: an unmapped user now fails SAFE to
+    `fork-no-merge` (the prior `.get(user, "full")` fail-OPEN default is removed);
+    the real full boxes (gk = gatekeeper, dev1/dev2 = newlevel) resolve `full`
+    from `FULL_AUTHORITY_USERS`."""
     import airuleset
-    return airuleset.AUTHORITY_BY_USER.get(airuleset._current_user(), "full")
+    user = airuleset._current_user()
+    # airuleset#827 (review): EXPLICIT membership, mirroring _authority_decision's
+    # marker-free half — no `.get(user) or ...` truthiness dependency (a falsy
+    # profile value would otherwise silently degrade to fork-no-merge). Map row
+    # wins first (restrictive), then the explicit full allow-list, then fail-SAFE.
+    if user in airuleset.AUTHORITY_BY_USER:
+        return airuleset.AUTHORITY_BY_USER[user]
+    if user in airuleset.FULL_AUTHORITY_USERS:
+        return "full"
+    return "fork-no-merge"
 
 
 from watchdog.stash import (  # noqa: E402

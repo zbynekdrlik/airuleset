@@ -137,16 +137,22 @@ class TestDeferredBackRefsAreLive(unittest.TestCase):
 
     def test_skill_names_for_user_honours_resident_authority_map(self):
         # A non-full-authority user drops the full-authority-only skill; a
-        # full-authority (maintainer) user keeps it — driven entirely by the
-        # RESIDENT AUTHORITY_BY_USER / MAINTAINER_USERS the function reads.
+        # full-authority user keeps it — driven entirely by the RESIDENT
+        # FULL_AUTHORITY_USERS / MAINTAINER_USERS the function reads. airuleset
+        # #827: full-authority-only skills gate on FULL_AUTHORITY_USERS
+        # membership (fail-SAFE), so "boss" must be listed there; "sub" (a
+        # reduced stream) and any unmapped user get the skill stripped.
         with m.patch.object(airuleset, "SKILL_NAMES", ["common", "priv"]), \
                 m.patch.object(airuleset, "SKILLS_MAINTAINER_ONLY", set()), \
                 m.patch.object(airuleset, "SKILLS_FULL_AUTHORITY_ONLY", {"priv"}), \
                 m.patch.object(airuleset, "SKILLS_EXTRA_BY_USER", {}), \
                 m.patch.object(airuleset, "MAINTAINER_USERS", {"boss"}), \
+                m.patch.object(airuleset, "FULL_AUTHORITY_USERS", frozenset({"boss"})), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", {"sub": "fork-no-merge"}):
             self.assertEqual(airuleset.skill_names_for_user("sub"), ["common"])
             self.assertEqual(airuleset.skill_names_for_user("boss"), ["common", "priv"])
+            # an UNMAPPED user (neither registry) now fails SAFE — no priv skill.
+            self.assertEqual(airuleset.skill_names_for_user("nobody"), ["common"])
 
 
 if __name__ == "__main__":

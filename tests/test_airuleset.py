@@ -11725,16 +11725,18 @@ class TestRemoteHosts(TestCase):
     def test_forestshop_dev_full_authority_by_default(self):
         # The ticket's own explicit ask: both accounts get FULL autopilot
         # authority (this is the owner's own trusted box, not an external
-        # sub-dev contractor stream) — achieved by NOT registering them in
-        # AUTHORITY_BY_USER at all, since resolve_authority()/
-        # AUTHORITY_BY_USER.get(user, "full") already defaults an
-        # unregistered user to "full".
-        self.assertNotIn("admin", airuleset.AUTHORITY_BY_USER)
-        self.assertNotIn("stepan", airuleset.AUTHORITY_BY_USER)
-        self.assertEqual(airuleset.AUTHORITY_BY_USER.get("admin", "full"),
-                         "full")
-        self.assertEqual(airuleset.AUTHORITY_BY_USER.get("stepan", "full"),
-                         "full")
+        # sub-dev contractor stream). airuleset#827: an unregistered user now
+        # fails SAFE to fork-no-merge, so full is granted by the EXPLICIT
+        # FULL_AUTHORITY_USERS allow-list (NOT the removed fail-open catch-all);
+        # they stay OUT of the reduced-stream AUTHORITY_BY_USER. (The old
+        # `.get(user, "full") == "full"` assertion was vacuous dict semantics
+        # and no longer proved they resolve full — this drives resolve_authority.)
+        d = tempfile.mkdtemp()  # no CLAUDE.md -> no marker; registries decide
+        for u in ("admin", "stepan"):
+            self.assertNotIn(u, airuleset.AUTHORITY_BY_USER)
+            self.assertIn(u, airuleset.FULL_AUTHORITY_USERS)
+            with m.patch.object(airuleset, "_current_user", return_value=u):
+                self.assertEqual(airuleset.resolve_authority(cwd=d), "full", u)
 
     def test_spinbike_vps_target_shape(self):
         # airuleset#408 (2026-08-12): the SpinBike Hetzner VPS — the first
@@ -11766,10 +11768,13 @@ class TestRemoteHosts(TestCase):
                             "documented public IP")
 
     def test_spinbike_vps_full_authority_by_default(self):
-        # Same default-full-authority shape as forestshop-dev — spinbike-vps
-        # is not a reduced-authority sub-dev stream, so it must NOT appear
-        # in AUTHORITY_BY_USER either.
+        # Same full-authority intent as forestshop-dev — spinbike-vps runs as
+        # `newlevel`, a full account granted via the EXPLICIT FULL_AUTHORITY_USERS
+        # allow-list (airuleset#827: an unmapped user now fails safe to
+        # fork-no-merge), so it must NOT appear in the reduced-stream
+        # AUTHORITY_BY_USER.
         self.assertNotIn("newlevel", airuleset.AUTHORITY_BY_USER)
+        self.assertIn("newlevel", airuleset.FULL_AUTHORITY_USERS)
 
     def test_montalu_subdev_target_shape(self):
         # montalu1 (was montalu; #537 live rename 2026-08-19, in-place usermod
