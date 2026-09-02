@@ -229,17 +229,21 @@ class TestNetDriftAlarm(_RepoHealthStoreIsolated):
         self.assertEqual(logs, [])
         self.assertEqual(self.sent, [])
 
-    def test_positive_control_high_net_drift_pings(self):
+    def test_positive_control_high_net_drift_logs_no_ping(self):
         """camera-box's own shape: 40 opened, 5 closed in a week -> net +35,
-        well past the threshold. This is the case the job MUST catch."""
+        well past the threshold. The job MUST still catch/log this -- but
+        #850 (repo-health findings never ping the owner) means the CATCH is
+        now machine-channel-only: no send, a decision line in the journal."""
         def fetch(label, window_s):
             return (40, 5)
         logs = wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
                                   repo_roots=["/repos/camera-box"],
                                   issue_counts_fetch=fetch)
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn("+35", self.sent[0]["msg"])
-        self.assertTrue(any("PING" in line for line in logs))
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
+        self.assertTrue(
+            any("net-drift" in line and "camera-box" in line and "open" in line
+                for line in logs),
+            "the onset is still visible in the journal (machine channel)")
 
     def test_below_threshold_does_not_ping(self):
         def fetch(label, window_s):
@@ -271,18 +275,23 @@ class TestNetDriftAlarm(_RepoHealthStoreIsolated):
 
     def test_second_consecutive_unhealthy_sweep_holds_no_resend(self):
         # #560 (was test_reping_dedup_within_window): a second DUE sweep while
-        # the condition persists must NOT re-send -- the gate returns "hold"
-        # after the onset. Same observable (1 send), the mechanism is now
-        # episode_gate hysteresis, not a per-reping-window dedup.
+        # the condition persists must NOT re-open -- the gate returns "hold"
+        # after the onset. #850: neither sweep ever sends (owner ping
+        # removed) -- the observable is now the machine-channel decision
+        # line, which fires once on "open" and never again on "hold".
         def fetch(label, window_s):
             return (40, 5)
-        wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
-                           repo_roots=["/repos/x"], issue_counts_fetch=fetch,
-                           interval=1)
-        wd.net_drift_alarm(NOW + 2, self.state, send_fn=self.send,
-                           repo_roots=["/repos/x"], issue_counts_fetch=fetch,
-                           interval=1)
-        self.assertEqual(len(self.sent), 1)   # onset only; 2nd sweep -> hold
+        logs1 = wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
+                                   repo_roots=["/repos/x"], issue_counts_fetch=fetch,
+                                   interval=1)
+        logs2 = wd.net_drift_alarm(NOW + 2, self.state, send_fn=self.send,
+                                   repo_roots=["/repos/x"], issue_counts_fetch=fetch,
+                                   interval=1)
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
+        self.assertTrue(any("net-drift x -> open" in ln for ln in logs1),
+                        "onset is logged")
+        self.assertFalse(any("net-drift x -> open" in ln for ln in logs2),
+                         "2nd sweep -> hold, no re-open line")
 
 
 class TestStuckMainSweep(_RepoHealthStoreIsolated):
@@ -459,10 +468,12 @@ class TestRunOnceWiring(_RepoHealthStoreIsolated):
         self.assertFalse(any(line.startswith("stuck-main") for line in logs))
 
     def test_job_27_fires_through_run_once(self):
+        # #850: job 27 still fires (still measures + logs) through run_once,
+        # but never sends -- a repo-health finding is machine-channel only.
         logs = self._run(repo_roots=["/repos/x"],
                          issue_counts_fetch=lambda label, w: (40, 5))
         self.assertTrue(any(line.startswith("net-drift") for line in logs))
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
 
     def test_job_28_fires_through_run_once(self):
         r = _make_repo(self.tmp, "camera-box", base_ts=NOW - 6 * DAY,
@@ -635,8 +646,10 @@ class TestDedupPersistedBeforeThePing_172(_RepoHealthStoreIsolated):
                        state_path=self.state_path,
                        repo_roots=["/repos/a", "/repos/b"],
                        issue_counts_fetch=fetch)
-        self.assertEqual(len(self.sent), 1,
-                         "repo a must have alerted (open) before repo b's kill")
+        # #850: repo a's onset is never a SEND any more -- the crash-safety
+        # claim under test is the episode STORE persistence (below), which
+        # is unaffected; assert the send stays permanently empty instead.
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
         ep = self.episodes()
         self.assertTrue(
             ep.get("net-drift:a", {}).get("active"),
@@ -883,8 +896,9 @@ class _EpisodeStoreIsolated(_RepoHealthStoreIsolated):
 
 class TestNetDriftEpisodeHysteresis(_EpisodeStoreIsolated):
     """#560 behavioral RED: a persistent backlog alerts ONCE, and its
-    recovery sends exactly ONE message — never a per-reping-window re-page
-    and never a silent clear."""
+    recovery alerts exactly ONCE — never a per-reping-window re-page and
+    never a silent clear. #850: neither alert is ever an owner SEND any
+    more (the gate + its journal decision line are the machine channel)."""
 
     @staticmethod
     def _fetch(opened, closed):
@@ -892,31 +906,33 @@ class TestNetDriftEpisodeHysteresis(_EpisodeStoreIsolated):
 
     def test_persistent_condition_alerts_once_not_per_reping_window(self):
         fetch = self._fetch(40, 5)                       # net +35, persistent
+        all_logs = []
         for i in range(5):                                # five daily sweeps
-            wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
-                               repo_roots=["/repos/x"],
-                               issue_counts_fetch=fetch,
-                               interval=1)
+            all_logs += wd.net_drift_alarm(
+                NOW + i * DAY, self.state, send_fn=self.send,
+                repo_roots=["/repos/x"], issue_counts_fetch=fetch, interval=1)
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
         self.assertEqual(
-            len(self.sent), 1,
+            sum(1 for ln in all_logs if "net-drift x -> open" in ln), 1,
             "a persistent chronic condition must alert ONCE at onset, not "
             "re-page every reping window (the #546 burn-alert:<hour> disease)")
 
     def test_recovery_sends_exactly_one_message_after_clearing(self):
-        wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
-                           repo_roots=["/repos/x"],
-                           issue_counts_fetch=self._fetch(40, 5),
-                           interval=1)                       # onset
+        all_logs = wd.net_drift_alarm(
+            NOW, self.state, send_fn=self.send, repo_roots=["/repos/x"],
+            issue_counts_fetch=self._fetch(40, 5), interval=1)   # onset
         for i in range(1, 4):                             # three healthy passes
-            wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
-                               repo_roots=["/repos/x"],
-                               issue_counts_fetch=self._fetch(5, 5),
-                               interval=1)
+            all_logs += wd.net_drift_alarm(
+                NOW + i * DAY, self.state, send_fn=self.send,
+                repo_roots=["/repos/x"], issue_counts_fetch=self._fetch(5, 5),
+                interval=1)
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
         self.assertEqual(
-            len(self.sent), 2,
+            sum(1 for ln in all_logs if "net-drift x -> open" in ln), 1)
+        self.assertEqual(
+            sum(1 for ln in all_logs if "net-drift x -> recover" in ln), 1,
             "onset + exactly ONE recovery after the hysteresis window; the "
-            "pre-#560 code drops the dedup silently with no recovery ping")
-        self.assertIn("backlog", self.sent[1]["msg"].lower())
+            "pre-#560 code drops the dedup silently with no recovery signal")
 
 
 class TestStuckMainEpisodeHysteresis(_EpisodeStoreIsolated):
@@ -976,23 +992,29 @@ class TestEpisodeGateRouting(_RepoHealthStoreIsolated):
             issue_counts_fetch=lambda lbl, w: (opened, closed),
             episode_gate=gate, **kw)
 
-    def test_net_drift_open_sends_onset_with_fresh_key(self):
+    def test_net_drift_open_logs_onset_never_sends(self):
+        # #850: the gate is still consulted (it feeds the footer `I N▲`
+        # signal + the journal) but the onset is NEVER an owner send any
+        # more -- only a machine-channel decision line.
         g = _RecordingGate("open")
-        self._net(g)
+        logs = self._net(g)
         self.assertEqual(g.calls, [("net-drift:proj", False, NOW)],
                          "gate consulted with a stable key + healthy=False")
-        self.assertEqual(len(self.sent), 1)
-        self.assertTrue(self.sent[0]["dedup"].startswith("net-drift-open:proj:"),
-                        "onset key is fresh-per-instant, not a reping bucket")
-
-    def test_net_drift_recover_sends_recovery(self):
-        g = _RecordingGate("recover")
-        self._net(g, opened=5, closed=5)          # net 0 -> healthy=True
-        self.assertEqual(g.calls, [("net-drift:proj", True, NOW)])
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn("backlog", self.sent[0]["msg"].lower())
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
         self.assertTrue(
-            self.sent[0]["dedup"].startswith("net-drift-recover:proj:"))
+            any("net-drift proj -> open" in ln and "never an owner ping" in ln
+                for ln in logs),
+            logs)
+
+    def test_net_drift_recover_logs_recovery_never_sends(self):
+        g = _RecordingGate("recover")
+        logs = self._net(g, opened=5, closed=5)   # net 0 -> healthy=True
+        self.assertEqual(g.calls, [("net-drift:proj", True, NOW)])
+        self.assertEqual(self.sent, [], "#850: never an owner ping")
+        self.assertTrue(
+            any("net-drift proj -> recover" in ln and "never an owner ping" in ln
+                for ln in logs),
+            logs)
 
     def test_net_drift_hold_clearing_quiet_send_nothing(self):
         for d in ("hold", "clearing", "quiet"):

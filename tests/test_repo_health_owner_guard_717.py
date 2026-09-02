@@ -122,48 +122,59 @@ class TestNetDriftOwnerGuard(_RepoHealthStoreIsolated):
         # a multi-owner box with no repo pane SKIPs without consuming the
         # onset, so once the box becomes deliverable the alert fires FRESH
         # (no permanent silence). A skip-AFTER-gate would mark the episode
-        # "open" on sweep 1 -> "hold" on sweep 2 -> zero sends (test RED).
-        wd.net_drift_alarm(
+        # "open" on sweep 1 -> "hold" on sweep 2 -> zero opens (test RED).
+        # #850: neither sweep is ever an owner SEND any more -- the still-
+        # relevant observable is the machine-channel "-> open" decision line,
+        # which must appear only on the SECOND (deliverable) sweep.
+        logs1 = wd.net_drift_alarm(
             NOW, self.state, send_fn=self.send,
             repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
             owners_seen={"zbynek", "david"}, account_owner="david",
             owner_by_cwd={}, interval=1)
         self.assertEqual(self.send.sent, [])
         self.assertEqual(self.episodes(), {})
-        wd.net_drift_alarm(
+        self.assertFalse(any("zbynek-proj -> open" in ln for ln in logs1))
+        logs2 = wd.net_drift_alarm(
             NOW + 2, self.state, send_fn=self.send,
             repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
             owners_seen={"zbynek", "david"}, account_owner="david",
             owner_by_cwd={"/repos/zbynek-proj": "zbynek"}, interval=1)
-        self.assertEqual(len(self.send.sent), 1)
-        self.assertEqual(self.send.sent[0]["owner"], "zbynek")
+        self.assertEqual(self.send.sent, [], "#850: never an owner ping")
+        self.assertTrue(any("zbynek-proj -> open" in ln for ln in logs2),
+                        "the freed-up episode opens on the deliverable sweep")
 
-    def test_single_owner_box_delivers_to_the_sole_owner(self):
-        # single-owner box: still DELIVERED (to the sole owner's own thread) --
-        # an improvement over the pre-#717 shared-channel path, not suppressed.
-        wd.net_drift_alarm(
+    def test_single_owner_box_never_sends_only_logs(self):
+        # single-owner box: the OLD behaviour was still DELIVERED (to the
+        # sole owner's own thread); #850 removes the send entirely -- a
+        # repo-health finding never pings ANY owner, single or not.
+        logs = wd.net_drift_alarm(
             NOW, self.state, send_fn=self.send,
             repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
             owners_seen={"zbynek"}, account_owner="zbynek", owner_by_cwd={})
-        self.assertEqual(len(self.send.sent), 1)
-        self.assertEqual(self.send.sent[0]["owner"], "zbynek")
+        self.assertEqual(self.send.sent, [], "#850: never an owner ping")
+        self.assertTrue(any("zbynek-proj -> open" in ln for ln in logs))
 
-    def test_repo_derived_owner_delivers_to_pane_owner_not_coinflip(self):
-        wd.net_drift_alarm(
+    def test_repo_derived_owner_resolution_never_sends_only_logs(self):
+        # the #717 owner-resolution machinery (repo-derived pane owner beats
+        # a first-owner-seen coin flip) still RUNS -- it still gates whether
+        # the gate is consulted at all (ambiguous+no-pane -> skip) -- but
+        # #850 means the resolved owner is never actually mailed anything.
+        logs = wd.net_drift_alarm(
             NOW, self.state, send_fn=self.send,
             repo_roots=["/repos/zbynek-proj"], issue_counts_fetch=self._fetch,
             owners_seen={"zbynek", "david"}, account_owner="david",
             owner_by_cwd={"/repos/zbynek-proj": "zbynek"})
-        self.assertEqual(len(self.send.sent), 1)
-        self.assertEqual(self.send.sent[0]["owner"], "zbynek")      # NOT david
+        self.assertEqual(self.send.sent, [], "#850: never an owner ping")
+        self.assertTrue(any("zbynek-proj -> open" in ln for ln in logs))
 
-    def test_pre_717_callers_unchanged_deliver_with_no_owner(self):
-        # every existing caller passes none of the new params -> owner None
-        wd.net_drift_alarm(
+    def test_pre_717_callers_unchanged_never_send_only_log(self):
+        # every existing caller passes none of the new params -> owner None,
+        # deliverable (unambiguous zero-owner box) -- #850: still no send.
+        logs = wd.net_drift_alarm(
             NOW, self.state, send_fn=self.send,
             repo_roots=["/repos/x"], issue_counts_fetch=self._fetch)
-        self.assertEqual(len(self.send.sent), 1)
-        self.assertIsNone(self.send.sent[0]["owner"])
+        self.assertEqual(self.send.sent, [], "#850: never an owner ping")
+        self.assertTrue(any("x -> open" in ln for ln in logs))
 
 
 # ------------------------------------------------------------ stuck-main (28)
