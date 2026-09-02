@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6959,
+    "airuleset.py": 6970,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -133,6 +133,7 @@
     "tests/test_disk_guard.py": 574,
     "tests/test_disk_hygiene_513.py": 500,
     "tests/test_dispatch_floor.py": 601,
+    "tests/test_double_compact_855.py": 388,
     "tests/test_draft_rescue.py": 441,
     "tests/test_drop_gateway.py": 836,
     "tests/test_durable_decisions.py": 84,
@@ -400,7 +401,7 @@
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_worktree_write_guard.py": 416,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 4518,
+    "watchdog/__init__.py": 4522,
     "watchdog/burn_jobs.py": 338,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
@@ -455,7 +456,7 @@
     "cli_vault.py::cmd_secret": 228,
     "cli_worktree_sweep.py::purge_merged_lane_targets": 219,
     "cli_worktree_sweep.py::sweep_stale_worktrees": 203,
-    "watchdog/__init__.py::run_once": 2504,
+    "watchdog/__init__.py::run_once": 2508,
     "watchdog/cards.py::card_reconcile": 326,
     "watchdog/cards.py::report_reconcile": 225,
     "watchdog/cross_stream.py::gk_request_backstop": 240,

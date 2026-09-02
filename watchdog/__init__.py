@@ -2204,12 +2204,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           return) — no context-size/idle-duration guess, no text-sniffed
           message shape. Each sweep re-checks the SAME small set of hard
           conditions (`watchdog/compact.py`'s own module docstring has the
-          full list: pane idle with no draft/dialog, no live background
-          tasks of the session's own, not on a `⏳`/`❓` marker or an
-          unresumed API error, a 30-min per-session cooldown, and a hard
-          non-refreshable age cap) — ALL unconditional, no time-boxed
-          override on any of them. All pass → `/compact` is typed, logged,
-          and the request cleared. Any fails → left pending for the next
+          full list: pane idle with no draft/dialog, NOT a running turn
+          (#855: a `/compact` is typed ONLY into an idle pane — never
+          queued behind a running turn, whose CC queue drain is not
+          idempotent; a running turn → `skip:turn-running`, re-polled),
+          not on a `⏳`/`❓` marker or an unresumed API error, a 120-s
+          recently-compacted anti-double veto, a 30-min per-session
+          cooldown, and a hard non-refreshable age cap) — ALL
+          unconditional, no time-boxed override on any of them. All pass →
+          `/compact` is typed into the idle prompt (executing immediately,
+          exactly once), logged, and the request cleared. Any fails → left pending for the next
           sweep, discarded outright only once the age cap is exceeded (or
           once already otherwise handled) — "no infinite waiting" is the
           age cap's job, never a refusal to re-evaluate. THE ONLY
