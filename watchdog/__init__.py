@@ -820,6 +820,8 @@ from watchdog.stash import (  # noqa: E402
     JANITOR_WATCH_MAX_AGE_S as JANITOR_WATCH_MAX_AGE_S,
     _looks_like_own_payload as _looks_like_own_payload,
     _looks_like_own_stuck_content as _looks_like_own_stuck_content,
+    STRAY_PREFIX_MAX_OFFSET as STRAY_PREFIX_MAX_OFFSET,
+    _own_prefix_stray_offset as _own_prefix_stray_offset,
     GOAL_ARM_LEFTOVER_MIN_SUBSTR as GOAL_ARM_LEFTOVER_MIN_SUBSTR,
     _box_norm_from_capture as _box_norm_from_capture,
     _box_is_own_leftover as _box_is_own_leftover,

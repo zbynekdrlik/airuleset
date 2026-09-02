@@ -1330,6 +1330,35 @@ def _looks_like_own_payload(text):
     return bool(text) and text.startswith(_JANITOR_OWN_PREFIXES)
 
 
+# #852 C — the max stray-prefix offset: a known own prefix appearing at box-head
+# position 1..STRAY_PREFIX_MAX_OFFSET means a stray HUMAN char (the owner's
+# forgotten `s`) raced to the FRONT of our own swallowed nudge (the incident's
+# `slane-check:` shape). Bounded at 3 on purpose: a genuine foreign draft that
+# merely MENTIONS an own phrase deep in its text never has the prefix in its
+# first few chars, so this admits only the corrupted-prefix leftover, never a
+# real draft. Recognition here NEVER acts on its own — the janitor's
+# `_janitor_watch_seen` / park-record provenance still decides WHETHER to act.
+STRAY_PREFIX_MAX_OFFSET = 3
+
+
+def _own_prefix_stray_offset(itext):
+    """#852 C — the position (1..STRAY_PREFIX_MAX_OFFSET) at which a known own
+    prefix appears in `itext`, or None. A match at position 0 is
+    `_looks_like_own_payload`'s job (a clean own leftover); this catches ONLY
+    the shifted case (a stray human char at the very front). Shortest-prefix,
+    earliest-position wins."""
+    if not itext:
+        return None
+    window = itext[:STRAY_PREFIX_MAX_OFFSET + max(len(p)
+                   for p in _JANITOR_OWN_PREFIXES)]
+    best = None
+    for p in _JANITOR_OWN_PREFIXES:
+        i = window.find(p)
+        if 0 < i <= STRAY_PREFIX_MAX_OFFSET and (best is None or i < best):
+            best = i
+    return best
+
+
 # #501 — the STRICT SUBSET of `_JANITOR_OWN_PREFIXES` a human PROVABLY never
 # types, so a box whose content starts with one is UNAMBIGUOUSLY our own
 # swallowed nudge and may be SUBMITTED IN PLACE on content alone (no janitor
@@ -1375,11 +1404,20 @@ def _looks_like_own_stuck_content(itext):
     Ownership is never guessed from resemblance alone; anything else
     (including a genuinely truncated/partial own payload with no
     recognizable prefix) is left completely untouched — the janitor would
-    rather miss a recoverable case than risk a genuine foreign draft."""
+    rather miss a recoverable case than risk a genuine foreign draft.
+
+    #852 C — ALSO True when a known own prefix appears within the first
+    `STRAY_PREFIX_MAX_OFFSET` characters (position 1..3), i.e. a stray HUMAN
+    char raced to the FRONT of our own swallowed nudge (the incident's
+    `slane-check:` shape). This only widens RECOGNITION; the janitor's own
+    provenance gate (`_janitor_watch_seen` / a park record) still decides
+    WHETHER to act, so a foreign draft that merely mentions the phrase is
+    recognized-but-never-touched (no provenance)."""
     if not itext:
         return False
     return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip())) \
-        or watchdog._looks_like_own_payload(itext)
+        or watchdog._looks_like_own_payload(itext) \
+        or _own_prefix_stray_offset(itext) is not None
 
 
 # #737 -- the minimum contiguous NORMALIZED-char overlap a box-vs-payload
