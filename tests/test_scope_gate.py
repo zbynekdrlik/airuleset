@@ -39,6 +39,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -70,7 +72,7 @@ def _default_gh_stub():
 
 
 def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None,
-        spoof_login=None):
+        spoof_login=None, session_id=None, agent_id=None):
     """`user` (#390): the simulated filer's sub-dev stream identity. Two halves,
     since airuleset#839:
     - The AUTHORITY PROFILE gate (`resolve_authority(cwd) != full`) is now
@@ -103,7 +105,14 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None,
     genuinely skips the gate rather than blocking). `None` (the default)
     runs the real `HOOK` in this checkout, exactly like every pre-existing
     test."""
-    payload = json.dumps({"tool_input": {"command": cmd}, "session_id": "test-scope-gate"})
+    # #842: session_id drives the shared presence marker
+    # (/tmp/claude-user-active-<sid>); agent_id makes the payload look like a
+    # SUBAGENT (a worktree autopilot-worker) for the req-1 hard-block.
+    _payload = {"tool_input": {"command": cmd},
+                "session_id": session_id or "test-scope-gate"}
+    if agent_id is not None:
+        _payload["agent_id"] = agent_id
+    payload = json.dumps(_payload)
     env = dict(os.environ)
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-scopegate-test-")
     env["PATH"] = (gh_bin or _default_gh_stub()) + os.pathsep + env.get("PATH", "")
@@ -1719,6 +1728,177 @@ class TestBlockReasonHardening(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertNotIn("\x1b", r.stderr)
         self.assertNotIn("\x1b", self._block_line(home))
+
+
+def _fake_gh_netdrain(tmpdir, created, closed, open_issues=(), labels=None):
+    """#842 fake `gh` for the net-drain ratchet tests. Answers:
+      - `issue list --search "created:>=…" … -q length` -> `created`
+      - `issue list --search "closed:>=…"  … -q length` -> `closed`
+      - `issue list --state open … --json number,title` (near-dup) -> open_issues JSON
+      - `label list …` -> labels rows (None -> exit 1, so not stream-aware)
+    `created`/`closed` = None makes the matching count query exit 1 (a gh error,
+    so the ratchet BLOCKS fail-safe)."""
+    bin_dir = Path(tmpdir) / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    label_rows = None if labels is None else [{"name": n} for n in labels]
+    (bin_dir / "gh").write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "argv = sys.argv[1:]\n"
+        "joined = ' '.join(argv)\n"
+        "created = %r\n"
+        "closed = %r\n"
+        "open_issues = %r\n"
+        "label_rows = %r\n"
+        "if len(argv) >= 2 and argv[0] == 'label' and argv[1] == 'list':\n"
+        "    if label_rows is None:\n"
+        "        sys.exit(1)\n"
+        "    print(json.dumps(label_rows)); sys.exit(0)\n"
+        "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
+        "    if 'created:' in joined:\n"
+        "        if created is None: sys.exit(1)\n"
+        "        print(created); sys.exit(0)\n"
+        "    if 'closed:' in joined:\n"
+        "        if closed is None: sys.exit(1)\n"
+        "        print(closed); sys.exit(0)\n"
+        "    print(json.dumps(list(open_issues))); sys.exit(0)\n"
+        "sys.exit(1)\n" % (created, closed, list(open_issues), label_rows))
+    (bin_dir / "gh").chmod(0o755)
+    return str(bin_dir)
+
+
+class TestNetDrainHarness842(TestCase):
+    """#842 — the worker hard-block, presence-gated user-request/planned-work,
+    dismissal-word block, and the per-repo net-drain ratchet. All the new gates
+    engage ONLY on the UNATTENDED path (a stale presence marker) or the SUBAGENT
+    path (agent_id); the ATTENDED path is unchanged."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-netdrain-test-")
+        self.home = tempfile.mkdtemp(prefix="airuleset-netdrain-home-")
+
+    def _away_sid(self):
+        """A unique session id whose presence marker is stale (> 900s) -> the
+        hook reads the session as UNATTENDED."""
+        sid = "t-nd-" + uuid.uuid4().hex[:10]
+        mark = Path("/tmp/claude-user-active-%s" % sid)
+        mark.write_text("")
+        old = time.time() - 1000
+        os.utime(mark, (old, old))
+        self.addCleanup(lambda: mark.unlink(missing_ok=True))
+        return sid
+
+    # ---- req 1: worker (subagent) cannot file ----
+    def test_worker_subagent_cannot_file_even_a_valid_issue(self):
+        r = run(body_cmd("worker finding", "genuinely out of scope work",
+                          scope_gate="security-boundary"),
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-1")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("followup_candidates", r.stderr)
+
+    def test_worker_block_ignores_the_scope_gate_ok_bypass(self):
+        # The worker block sits ABOVE the bypass, so a worker cannot self-exempt.
+        r = run(body_cmd("worker finding", "out of scope\n# airuleset:scope-gate-ok worker",
+                          scope_gate="security-boundary"),
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_worker_api_issues_post_also_blocked(self):
+        r = run("gh api repos/o/r/issues -X POST -f title=x -f body=y",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-3")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_main_session_non_filing_command_untouched_for_worker(self):
+        # A worker running a NON-filing command is not gated by this hook.
+        r = run("echo hello", gh_bin=_default_gh_stub(), agent_id="sub-worker-4")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- req 3: presence-gated user-request / planned-work ----
+    def test_unattended_user_request_is_blocked(self):
+        r = run(body_cmd("loop wants this", "an unattended loop cannot claim the owner asked",
+                          scope_gate="user-request"),
+                gh_bin=_default_gh_stub(), session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("presence", r.stderr.lower())
+
+    def test_unattended_planned_work_is_blocked(self):
+        r = run(body_cmd("plan step", "converged-plan decomposition",
+                          scope_gate="planned-work"),
+                gh_bin=_default_gh_stub(), session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_attended_user_request_still_passes(self):
+        # PRESENT (no stale marker) -> user-request is accepted, unchanged.
+        r = run(body_cmd("owner asked", "the owner asked for this ticket",
+                          scope_gate="user-request"),
+                gh_bin=_default_gh_stub(), session_id="t-nd-present-" + uuid.uuid4().hex[:6])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- req 4: dismissal-word block for an unattended filing ----
+    def test_unattended_flaky_body_word_is_blocked(self):
+        r = run(body_cmd("flaky test", "this test is flaky, skip it for now",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=0, closed=9),
+                session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("dismissal", r.stderr.lower())
+
+    def test_unattended_pre_existing_body_word_is_blocked(self):
+        r = run(body_cmd("known break", "this is a pre-existing failure",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=0, closed=9),
+                session_id=self._away_sid())
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_attended_flaky_body_word_is_not_blocked_by_this_gate(self):
+        # The dismissal-word gate engages only on the UNATTENDED path.
+        r = run(body_cmd("flaky note", "mentions the word flaky in prose",
+                          scope_gate="security-boundary"),
+                gh_bin=_default_gh_stub(),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6])
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # ---- req 2: net-drain ratchet ----
+    def test_unattended_discovery_blocked_when_not_draining(self):
+        # created(9) >= closed(5) -> repo is NOT draining -> BLOCK.
+        r = run(body_cmd("net drain", "genuinely out of scope",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=9, closed=5),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("drain", r.stderr.lower())
+
+    def test_unattended_discovery_blocked_at_parity(self):
+        # created == closed -> parity blocks (0/0 too, the day's first).
+        r = run(body_cmd("parity", "genuinely out of scope",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=5, closed=5),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_unattended_discovery_passes_when_draining(self):
+        # created(3) < closed(9) -> repo IS draining -> the ratchet allows.
+        r = run(body_cmd("draining ok", "genuinely out of scope",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=3, closed=9),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_ratchet_gh_error_blocks_fail_safe(self):
+        # A gh error computing the counts -> BLOCK, never a wrong ALLOW.
+        r = run(body_cmd("gh error", "genuinely out of scope",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=None, closed=None),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_attended_discovery_never_ratchet_blocked(self):
+        # PRESENT session -> the ratchet never engages, even when NOT draining.
+        r = run(body_cmd("attended ok", "genuinely out of scope",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":
