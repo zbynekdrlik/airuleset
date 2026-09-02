@@ -1364,31 +1364,64 @@ def _gk_handoff_ops_wait_flagged(rows):
     return flagged
 
 
-def _authority_marker(cwd=None):
-    """Read an `<!-- airuleset:authority=<profile> -->` override from the project
-    CLAUDE.md (cwd-relative), or None. Lets a project raise/lower a stream's default
-    authority (e.g. grant `full` to a montalu repo). The single place the marker is
-    parsed, so the CLI, the autopilot skill, and the issue-close guard hook agree.
+def _authority_marker_raw(cwd=None):
+    """The RAW last `<!-- airuleset:authority=<tok> -->` HTML-comment token from
+    the project CLAUDE.md (cwd-relative), whether or not it names a VALID profile,
+    or None. The ONE file read that both resolution and the decision log share —
+    surfacing the raw token lets `authority --explain` tell 'no marker' apart from
+    'marker present but invalid' (a typo'd `branch_merge`), the exact misconfig
+    class the decision log exists to diagnose (#821).
 
-    The marker MUST be the HTML-COMMENT form (exactly like `<!-- airuleset:merge=manual
-    -->`) — a bare/prose mention of `airuleset:authority=…` is deliberately NOT honored:
-    an unanchored match could let a documentation sentence naming a profile silently
-    ELEVATE a fork-no-merge stream to `full` and disable the issue-close guard (the
-    UNSAFE direction). If several comment markers exist (a misconfig) the LAST one wins,
-    so an operative marker placed after any example cannot be shadowed."""
-    import airuleset
+    Only the HTML-COMMENT form is read (exactly like `<!-- airuleset:merge=manual
+    -->`) — a bare/prose mention of `airuleset:authority=…` is deliberately NOT
+    read: an unanchored match could let a documentation sentence naming a profile
+    silently ELEVATE a fork-no-merge stream (the UNSAFE direction). If several
+    comment markers exist (a misconfig) the LAST one wins, so an operative marker
+    placed after any example cannot be shadowed."""
     import re
     try:
         p = (Path(cwd) if cwd else Path.cwd()) / "CLAUDE.md"
         if p.is_file():
             hits = re.findall(r"<!--\s*airuleset:authority=([a-z-]+)\s*-->",
                               p.read_text(errors="ignore"))
-            for tok in reversed(hits):
-                if tok in airuleset.AUTHORITY_PROFILES:
-                    return tok
+            if hits:
+                return hits[-1]
     except OSError:
         return None
     return None
+
+
+def _authority_marker(cwd=None):
+    """The project CLAUDE.md `<!-- airuleset:authority=<profile> -->` override for
+    `cwd` — a VALID profile string or None. Lets a project raise/lower a stream's
+    default authority (e.g. grant `full` to a montalu repo). The single place the
+    marker is VALIDATED, so the CLI, the autopilot skill, and the issue-close guard
+    hook agree; reads the raw token via `_authority_marker_raw` and keeps only a
+    value in `AUTHORITY_PROFILES` (a bogus/typo'd token resolves to None → the
+    per-user table stands, the fail-safe direction)."""
+    import airuleset
+    raw = _authority_marker_raw(cwd)
+    return raw if raw in airuleset.AUTHORITY_PROFILES else None
+
+
+def _authority_decision(cwd=None):
+    """The authority resolution WITH its provenance, from ONE decision point:
+    `(profile, source, raw_marker)`, where `source` is one of
+    'project CLAUDE.md marker' | 'per-user map' | 'default (unmapped)'.
+    `resolve_authority` (the hot path) and `cmd_authority --explain` (the #486
+    decision log) both derive from this single function, so the printed log can
+    never desync from the resolved profile, and it distinguishes the map ROW from
+    the hardcoded `full` default that actually decides an unmapped user.
+    Behaviour-IDENTICAL to the prior `marker or table.get(user, "full")`: a valid
+    marker wins; else the map row; else `full`."""
+    import airuleset
+    raw = _authority_marker_raw(cwd)
+    if raw in airuleset.AUTHORITY_PROFILES:
+        return raw, "project CLAUDE.md marker", raw
+    user = airuleset._current_user()
+    if user in airuleset.AUTHORITY_BY_USER:
+        return airuleset.AUTHORITY_BY_USER[user], "per-user map", raw
+    return "full", "default (unmapped)", raw
 
 
 def resolve_authority(cwd=None) -> str:
@@ -1397,9 +1430,10 @@ def resolve_authority(cwd=None) -> str:
     default map. This makes `airuleset.py authority` authoritative for both the
     autopilot skill and the `block-fork-no-merge-issue-close` hook (single source
     of truth) — cmd_authority's explain text has always PROMISED this override; it
-    is now actually honored, not just documented."""
-    import airuleset
-    return _authority_marker(cwd) or airuleset.AUTHORITY_BY_USER.get(airuleset._current_user(), "full")
+    is now actually honored, not just documented. Derives the profile from the
+    single `_authority_decision` so the CLI's `--explain` log can never name a
+    source that disagrees with what actually resolved."""
+    return _authority_decision(cwd)[0]
 
 
 def cmd_authority(args):
@@ -1457,12 +1491,33 @@ def cmd_authority(args):
             for n in _stream_rename_equivalents(airuleset._current_user()):
                 print("stream:%s" % n)
         return
-    profile = resolve_authority()
+    # #486 / #821: compute the decision ONCE (ONE CLAUDE.md read, ONE resolution)
+    # and use it for BOTH the plain profile line and the --explain log, so the
+    # printed source can never disagree with the resolved profile (no shadow
+    # re-derivation, no second file read that could differ mid-command).
+    profile, source, raw = _authority_decision()
     print(profile)
     if getattr(args, "explain", False):
+        # An explicit decision LOG (not a silent `marker or map`). Diagnoses the
+        # stale-mapping class (miva1 armed the wrong /goal template because
+        # odoo-erp's PROSE was not the HTML-comment marker, so the map won) AND
+        # its sibling (a typo'd `branch_merge` marker), by naming which source
+        # decided, the raw marker (distinguishing 'none' from 'invalid'), and the
+        # unmapped-`full` default vs a real map row. Lives ONLY in --explain
+        # (opt-in), never on the hot resolve_authority() path the footer and
+        # close-guard call every cycle. Resolved against the invoking cwd — the
+        # same anchoring the plain `authority` output has always used.
         user = airuleset._current_user()
-        print(f"user={user} (map: {airuleset.AUTHORITY_BY_USER.get(user, 'unmapped -> full')}); "
-              f"a project CLAUDE.md marker airuleset:authority=<profile> overrides this.")
+        map_val = airuleset.AUTHORITY_BY_USER.get(user, "unmapped -> full")
+        if raw is None:
+            mark = "none"
+        elif raw in airuleset.AUTHORITY_PROFILES:
+            mark = raw
+        else:
+            mark = "invalid(%r)" % raw
+        print(f"resolved={profile} via {source} "
+              f"(marker={mark}; user={user} map={map_val}); "
+              f"an HTML-comment marker <!-- airuleset:authority=<profile> --> overrides the map.")
 
 
 def _label_exists_on_repo(label, cwd=None):

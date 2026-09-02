@@ -49,9 +49,10 @@ class TestAuthorityResolution(TestCase):
         # left the map with the OS account (runbook-537 step 8).
         self.assertEqual(airuleset.AUTHORITY_BY_USER["simap1"], "fork-no-merge")
         self.assertNotIn("simap", airuleset.AUTHORITY_BY_USER)
-        # miva1 (airuleset#300): phase-1 isolated stream, same shape as
-        # simap — merges nowhere, fork-no-merge already correct.
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "fork-no-merge")
+        # miva1 (airuleset#300): PROMOTED to branch-merge (airuleset#821):
+        # odoo-erp phase-2 (#3244, 2026-08-14) made it a full write stream "in
+        # the montalu mould" — own branch → own PR into develop → hand-off.
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "branch-merge")
 
     def test_montalu_family_streams_map_to_branch_merge(self):
         # airuleset#251: montalu2/3/4 are full parallel montalu streams
@@ -85,7 +86,34 @@ class TestAuthorityResolution(TestCase):
 
     def test_resolve_uses_the_map_for_miva1(self):
         with m.patch.object(airuleset, "_current_user", return_value="miva1"):
-            self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+            self.assertEqual(airuleset.resolve_authority(), "branch-merge")
+
+    def test_miva1_marker_lowers_the_branch_merge_table(self):
+        # airuleset#821: the table flip is the DEFAULT; an explicit HTML-comment
+        # marker must still win for miva1 (single source of truth = marker over
+        # table). A fork-no-merge marker LOWERS the branch-merge table value —
+        # the genuinely-new direction (a marker lowering a mapped branch-merge
+        # user; the bogus-marker case is covered by test_bogus_marker_value_ignored).
+        import tempfile
+        from pathlib import Path
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "<!-- airuleset:authority=fork-no-merge -->\n")
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
+
+    def test_resolve_miva1_no_marker_is_branch_merge(self):
+        # airuleset#821 REGRESSION: miva1 was PROMOTED 2026-08-14 (#3244 phase 2)
+        # to a full write stream "in the montalu mould" — branch-merge authority
+        # (push miva1/<topic>, open+merge own PR into develop, then hand-off).
+        # odoo-erp states this in PROSE (no HTML-comment marker), so with no
+        # marker the per-user table is the effective source and MUST resolve
+        # branch-merge — NOT the stale phase-1 fork-no-merge that armed the
+        # wrong /goal template on 2026-09-01.
+        import tempfile
+        d = tempfile.mkdtemp()  # no CLAUDE.md -> table is the effective source
+        with m.patch.object(airuleset, "_current_user", return_value="miva1"):
+            self.assertEqual(airuleset.resolve_authority(cwd=d), "branch-merge")
 
     def test_resolve_uses_the_map_for_david_family(self):
         for u in ("david2", "david3", "david4"):
@@ -112,6 +140,45 @@ class TestAuthorityResolution(TestCase):
                     m.Mock(explain=False, maintainer_login=False,
                            self_login=False, stream_label=False, app_bot_login=False))
         p.assert_any_call("branch-merge")
+
+    def test_cli_explain_logs_the_resolution_source(self):
+        # airuleset#821 / #486: --explain is a decision LOG naming which source
+        # won (marker / per-user map / unmapped default), distinguishing a 'none'
+        # from an INVALID marker (the typo'd-marker misconfig class). It derives
+        # from the SAME _authority_decision the resolver uses, so the printed
+        # source can never disagree with the resolved profile. Assert all four
+        # branches; the seam is _authority_marker_raw (the one shared file read).
+        import cli_quals
+
+        def _explain(user, raw_marker):
+            with m.patch.object(airuleset, "_current_user", return_value=user):
+                with m.patch.object(cli_quals, "_authority_marker_raw",
+                                    return_value=raw_marker):
+                    with m.patch("builtins.print") as p:
+                        airuleset.cmd_authority(
+                            m.Mock(explain=True, maintainer_login=False,
+                                   self_login=False, stream_label=False,
+                                   app_bot_login=False))
+            return " ".join(str(c.args[0]) for c in p.call_args_list if c.args)
+
+        # miva1, no marker → per-user map wins and reports branch-merge.
+        out = _explain("miva1", None)
+        self.assertIn("resolved=branch-merge via per-user map", out)
+        self.assertIn("marker=none", out)
+        # a VALID marker present → the marker source wins AND is the resolved
+        # profile (locks that the named source is never a lie about a map value).
+        out = _explain("miva1", "fork-no-merge")
+        self.assertIn("resolved=fork-no-merge via project CLAUDE.md marker", out)
+        self.assertIn("marker=fork-no-merge", out)
+        # an INVALID marker → ignored for resolution (table stands) but surfaced
+        # as invalid, the exact 'typo'd marker' class the log exists to diagnose.
+        out = _explain("miva1", "branch_merge")
+        self.assertIn("resolved=branch-merge via per-user map", out)
+        self.assertIn("marker=invalid('branch_merge')", out)
+        # an UNMAPPED user → the hardcoded `full` default decided, NOT a map row,
+        # and the log says so instead of the misleading "via per-user map".
+        out = _explain("nobody-here", None)
+        self.assertIn("resolved=full via default (unmapped)", out)
 
     def test_cli_prints_maintainer_login(self):
         # #349: the close-guard hook's shared-identity fix needs this to tell
