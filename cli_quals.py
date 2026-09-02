@@ -1533,13 +1533,22 @@ def _authority_marker(cwd=None):
 def _authority_decision(cwd=None):
     """The authority resolution WITH its provenance, from ONE decision point:
     `(profile, source, raw_marker)`, where `source` is one of
-    'project CLAUDE.md marker' | 'per-user map' | 'default (unmapped)'.
+    'project CLAUDE.md marker' | 'per-user map' | 'full-authority account' |
+    'default (unmapped)'.
     `resolve_authority` (the hot path) and `cmd_authority --explain` (the #486
     decision log) both derive from this single function, so the printed log can
-    never desync from the resolved profile, and it distinguishes the map ROW from
-    the hardcoded `full` default that actually decides an unmapped user.
-    Behaviour-IDENTICAL to the prior `marker or table.get(user, "full")`: a valid
-    marker wins; else the map row; else `full`."""
+    never desync from the resolved profile, and it distinguishes the reduced-stream
+    map ROW and the explicit full-authority allow-list from the fail-safe default
+    that decides a genuinely unmapped user.
+    Resolution order (airuleset#827): a valid marker wins; else the reduced-stream
+    map row (`AUTHORITY_BY_USER`); else the explicit full-authority allow-list
+    (`FULL_AUTHORITY_USERS`); else the fail-SAFE `fork-no-merge` default. The map is
+    checked BEFORE the full allow-list, so a reduced stream can never be elevated by
+    a (bug) dual membership — restrictive wins. The pre-#827 default was the
+    fail-OPEN `full`: an unmapped stream account (provisioned but forgotten in the
+    map) silently got full merge/deploy/close authority; it now fails SAFE to the
+    most restrictive profile, and the legitimate full accounts are enumerated in
+    `FULL_AUTHORITY_USERS` rather than relying on that open catch-all."""
     import airuleset
     raw = _authority_marker_raw(cwd)
     if raw in airuleset.AUTHORITY_PROFILES:
@@ -1547,7 +1556,9 @@ def _authority_decision(cwd=None):
     user = airuleset._current_user()
     if user in airuleset.AUTHORITY_BY_USER:
         return airuleset.AUTHORITY_BY_USER[user], "per-user map", raw
-    return "full", "default (unmapped)", raw
+    if user in airuleset.FULL_AUTHORITY_USERS:
+        return "full", "full-authority account", raw
+    return "fork-no-merge", "default (unmapped)", raw
 
 
 def resolve_authority(cwd=None) -> str:
@@ -1628,13 +1639,23 @@ def cmd_authority(args):
         # stale-mapping class (miva1 armed the wrong /goal template because
         # odoo-erp's PROSE was not the HTML-comment marker, so the map won) AND
         # its sibling (a typo'd `branch_merge` marker), by naming which source
-        # decided, the raw marker (distinguishing 'none' from 'invalid'), and the
-        # unmapped-`full` default vs a real map row. Lives ONLY in --explain
+        # decided, the raw marker (distinguishing 'none' from 'invalid'), and — for
+        # a user in neither registry — the fail-SAFE `fork-no-merge` default vs a
+        # reduced-stream map row vs the full-authority allow-list (airuleset#827).
+        # The map= annotation is self-documenting: an unmapped user's line carries
+        # the remedy ("add to AUTHORITY_BY_USER or FULL_AUTHORITY_USERS") so the
+        # loud fail-safe degrade names its own fix. Lives ONLY in --explain
         # (opt-in), never on the hot resolve_authority() path the footer and
         # close-guard call every cycle. Resolved against the invoking cwd — the
         # same anchoring the plain `authority` output has always used.
         user = airuleset._current_user()
-        map_val = airuleset.AUTHORITY_BY_USER.get(user, "unmapped -> full")
+        if user in airuleset.AUTHORITY_BY_USER:
+            map_val = airuleset.AUTHORITY_BY_USER[user]
+        elif user in airuleset.FULL_AUTHORITY_USERS:
+            map_val = "full-authority account -> full"
+        else:
+            map_val = ("unmapped -> fork-no-merge (fail-safe; add to "
+                       "AUTHORITY_BY_USER or FULL_AUTHORITY_USERS)")
         if raw is None:
             mark = "none"
         elif raw in airuleset.AUTHORITY_PROFILES:

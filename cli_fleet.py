@@ -429,6 +429,34 @@ AUTHORITY_BY_USER = {
 }
 
 
+# Explicit FULL-authority account allow-list (airuleset#827, 2026-09-02). The
+# unix accounts that legitimately resolve `full` (merge to main + deploy + close
+# issues) and are DELIBERATELY NOT in AUTHORITY_BY_USER above — that table is the
+# REDUCED-authority sub-dev stream registry, and two consumers key on membership
+# as "is a sub-dev stream" WITHOUT a profile filter (`_own_handoff_label`,
+# `_ticket_is_stream_labeled`), so a `full` account there would misclassify the
+# maintainer/gatekeeper boxes as streams everywhere downstream. This mirrors the
+# `SSH_ATTACH_EXTRA_USERS` idiom (#562/#563) for exactly that non-stream-account
+# class. Members (every REMOTE_HOSTS `user` not in AUTHORITY_BY_USER, all
+# documented/intended full): `newlevel` = dev1/dev2 maintainer + spinbike-vps;
+# `gatekeeper` = gk box; `admin` + `stepan` = the owner's own trusted forestshop-dev
+# box (cli_fleet REMOTE_HOSTS: "the owner's own trusted box, not an external
+# sub-dev stream"). Before #827 these relied on the fail-OPEN `full` default in
+# `_authority_decision`; that default now fails SAFE to `fork-no-merge`, so the
+# legitimate full accounts MUST be enumerated here or they regress.
+#
+# HAND-MAINTAINED, never derived (e.g. "REMOTE_HOSTS users minus
+# AUTHORITY_BY_USER") — a derived full-set would re-open the fail-open bug: a
+# future REDUCED stream added to REMOTE_HOSTS but forgotten in AUTHORITY_BY_USER
+# would auto-classify `full`. Kept DISJOINT from AUTHORITY_BY_USER
+# (`test_full_authority_users_disjoint_from_stream_table`); a genuinely-unknown
+# user (in neither registry) fails SAFE to `fork-no-merge`. Every REMOTE_HOSTS
+# user must appear in one registry or the other
+# (`test_every_remote_hosts_user_is_classified`) — a new provisioned box that is
+# neither is a RED test, forcing an explicit decision, never a silent grant.
+FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
+
+
 # Base-stream rename map (#537): old base name -> new numbered name. The SINGLE
 # explicit source of truth for the in-progress rename, so `cli_quals`'
 # `_stream_rename_equivalents()` (the alias primitive that `_slice_quals` and
