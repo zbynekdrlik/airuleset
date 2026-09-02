@@ -101,6 +101,12 @@ _CLEAN_LITERAL_CLOSE_RE = re.compile(
 # RAW (de-backslashed) command — mirrors the current bash `$(`/`${ }`/backtick guards
 # (a `$(` or `${[ |]` carrying `gh<ws>`, or ANY backtick carrying `gh<ws>`). `[^)]*`/
 # `[^}]*` span newlines (no `.`), matching the bash `grep -z` behaviour.
+# ACCEPTED RESIDUAL (Fable review #837, IDENTICAL to the pre-#837 `\$\([^)]*gh` guard —
+# NOT a regression): a `)` before `gh` INSIDE a nested substitution
+# (`--comment "$( ( : ) && gh issue close 999 )"`) ends `[^)]*` early → the nested
+# close is missed. Modelling nested parens is the exact "regex can't parse bash" trap
+# this module bounds elsewhere via fail-closed; a confusion guard (not adversarial-
+# complete) accepts it, as the old hook did.
 _SUBST_CLOSE_RE = re.compile(r"\$\([^)]*gh\s", re.I)
 _FUNSUB_CLOSE_RE = re.compile(r"\$\{[\s|][^}]*gh\s", re.I)
 _BACKTICK_CLOSE_RE = re.compile(r"`[^`]*gh\s", re.I)

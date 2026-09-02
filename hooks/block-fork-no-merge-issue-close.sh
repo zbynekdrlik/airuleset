@@ -306,6 +306,13 @@ _repo_owner_repo_of() {
 # `close`, `gh api`, `patch`, `state=`, `--input` or `--method` reaches the segmenter;
 # anything else cannot be a close, so exit 0 (fast path). The de-backslash + lowercase is
 # a strict SUPERSET (it can only ADD matches), so a genuine close never slips the filter.
+# ACCEPTED RESIDUAL (Fable review #837, NOT a regression — IDENTICAL `$VAR`-expansion
+# blindness to the pre-#837 front-gate grep): a keyword hidden behind a param expansion
+# (`gh issue clo${x}se N`, bash expands `${x}`→empty→`close`) is not seen by this
+# de-backslash-only prefilter, so python never runs. The SEGMENTER itself WOULD block
+# it (IS_CLOSE=1, HAS_INTERP=1) — only this cheap prefilter misses it; expanding params
+# here would reintroduce the very machinery this ticket removed, so a confusion guard
+# accepts it, as the old hook did.
 _PREFILTER="${CMD//\\/}"
 _PREFILTER="${_PREFILTER,,}"
 case "$_PREFILTER" in
