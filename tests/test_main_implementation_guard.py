@@ -1093,13 +1093,16 @@ class DeferredConsume819(unittest.TestCase):
         return helper._run(tool="Bash", command=command, sid=sid,
                            transcript_text=goal_armed_transcript(), **kw)
 
-    def _post(self, sid, tool="Bash", agent_id=None):
+    def _post(self, sid, tool="Bash", agent_id=None, extra_env=None):
         payload = {"session_id": sid, "hook_event_name": "PostToolUse",
                    "tool_name": tool, "tool_input": {"command": "x"}}
         if agent_id:
             payload["agent_id"] = agent_id
+        env = dict(os.environ)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(["bash", str(self.CONSUMER)],
-                              input=json.dumps(payload), env=dict(os.environ),
+                              input=json.dumps(payload), env=env,
                               capture_output=True, text=True)
 
     def test_sibling_block_preserves_the_marker(self):
@@ -1172,6 +1175,72 @@ class DeferredConsume819(unittest.TestCase):
         self.assertTrue(self._pending(sid).exists())
         self._post(sid, tool="Write")
         self.assertFalse(m.exists(), "Write's PostToolUse must consume the marker")
+
+    def test_pending_write_failure_consumes_in_pretooluse(self):
+        # #819 review CRITICAL: if the pending WRITE fails (ENOSPC / inode
+        # exhaustion / unwritable path), the guard must fall back to consuming
+        # the marker HERE (PreToolUse) — otherwise the call is allowed with no
+        # pending, the consumer no-ops, and the marker survives every executed
+        # call (the pre-#80 kill switch under disk pressure). Model the write
+        # failure by making the pending PATH a directory (printf > dir fails).
+        sid = "t-mg-819-wf-" + uuid.uuid4().hex[:8]
+        m = self._marker(sid)
+        p = self._pending(sid)
+        m.write_text(BYPASS_REASON)
+        p.mkdir()                            # -> `printf > "$p"` fails
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: p.rmdir() if p.is_dir() else p.unlink(missing_ok=True))
+        out = self._pre(sid)
+        self.assertEqual(out.returncode, 0, out.stderr)   # still allowed
+        self.assertFalse(m.exists(),
+                         "a failed pending write must CONSUME the marker in PreToolUse")
+
+    def test_stranded_pending_consumed_by_any_later_post(self):
+        # #819 review: after a sibling-block strands pending+marker, the NEXT
+        # ran tool call's PostToolUse consumes the marker even if that call
+        # never itself drew on it (keyed on pending PRESENCE). This is the
+        # chosen fail-safe (over-consume, never wrong-allow) behavior — lock it
+        # so a future edit cannot silently flip it.
+        sid = "t-mg-819-strand-" + uuid.uuid4().hex[:8]
+        m = self._arm(sid)
+        self.assertEqual(self._pre(sid).returncode, 0)   # impl allowed, pending set
+        # sibling blocks the impl call (no Post for it). Now an UNRELATED tool
+        # call runs and its PostToolUse fires:
+        self._post(sid, tool="Edit")
+        self.assertFalse(m.exists(),
+                         "a stranded pending is consumed by the next ran call")
+
+    def test_consumer_logs_consumed_line_to_isolated_dir(self):
+        # #819 review: the consumer replicates the #732 log seam; lock that it
+        # actually writes an auditable "(consumed, post-exec)" line there.
+        sid = "t-mg-819-log-" + uuid.uuid4().hex[:8]
+        self._arm(sid)
+        logdir, _block, byp = _isolated_exec_logs(self)   # #732
+        env = {"AIRULESET_MAIN_EXEC_LOG_DIR": str(logdir)}
+        self._pre(sid, extra_env=env)
+        self._post(sid, extra_env=env)
+        self.assertTrue(byp.exists())
+        lines = [ln for ln in byp.read_text().splitlines()
+                 if sid in ln and "consumed, post-exec" in ln]
+        self.assertTrue(lines, "consumer must log a (consumed, post-exec) line")
+
+    def test_consumer_sanitizes_the_sid_like_the_guard(self):
+        # #819 review (wrong-allow direction): the guard sanitizes the sid with
+        # `tr -cd 'A-Za-z0-9_-'`, so it writes the pending flag + markers under
+        # the SANITIZED sid. The consumer must sanitize identically or it would
+        # miss the pending for an exotic sid and never consume the marker.
+        clean = "819san" + uuid.uuid4().hex[:8]
+        raw = clean + "!@ /"                   # a suffix the guard strips WHOLE
+        m = self._marker(clean)               # armed under the SANITIZED name
+        p = self._pending(clean)
+        m.write_text(BYPASS_REASON)
+        p.write_text(BYPASS_REASON)
+        self.addCleanup(lambda: m.unlink(missing_ok=True))
+        self.addCleanup(lambda: p.unlink(missing_ok=True))
+        self._post(raw)                       # consumer gets the RAW sid
+        self.assertFalse(m.exists(),
+                         "consumer must sanitize the sid to find the marker")
+        self.assertFalse(p.exists())
 
 
 class DispatchRatioNudge80(unittest.TestCase):
@@ -2394,6 +2463,31 @@ class TestWiringAndSkill(unittest.TestCase):
                              if mm.get("matcher") == tool])
             self.assertIn("block-main-implementation.sh", ms,
                           "counter reset missing for PreToolUse(%s)" % tool)
+
+    def test_post_consume_hook_exists_and_wired_for_bash_write_edit(self):
+        # #819: the deferred-consume PostToolUse consumer must be wired, or the
+        # whole fix dies silently (PreToolUse defers, nothing ever consumes ->
+        # the one-shot never gets spent). Every #819 unit test invokes the
+        # consumer directly, so ONLY this test locks the settings entry.
+        consumer = REPO / "hooks" / "post-consume-main-exec-marker.sh"
+        self.assertTrue(consumer.exists(),
+                        "post-consume-main-exec-marker.sh must exist")
+        # NOTE: do NOT assert os.access(X_OK) — the repo invokes hooks via
+        # `bash <hook>` and Write leaves the file 644 (#610).
+        cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
+        wired = [mm for mm in cfg["hooks"].get("PostToolUse", [])
+                 if "post-consume-main-exec-marker.sh"
+                 in json.dumps(mm.get("hooks", []))]
+        self.assertEqual(len(wired), 1,
+                         "consumer must be wired in exactly one PostToolUse block")
+        matcher = wired[0].get("matcher", "")
+        toks = set(matcher.split("|"))
+        # the consumer must cover EXACTLY the tool set that can reach the
+        # marker block in block-main-implementation.sh (Bash / oversized
+        # Write / Edit); Agent|Task|Workflow exit early and never defer.
+        for tool in ("Bash", "Write", "Edit"):
+            self.assertIn(tool, toks,
+                          "consumer matcher %r must cover %s" % (matcher, tool))
 
     def test_fable_advisor_skill_exists_and_registered(self):
         sk = REPO / "skills" / "fable-advisor" / "SKILL.md"

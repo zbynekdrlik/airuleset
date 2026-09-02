@@ -3699,15 +3699,17 @@ class RunOnceBurnAlertWiring(unittest.TestCase):
 
 class TestStaleExecMarkerCleanup(unittest.TestCase):
     """Job 22 (#97): block-main-implementation.sh's one-shot bypass markers
-    (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) are consumed
-    on use, but a session that ends without another guarded call never
-    consumes its own marker -- it just sits in /tmp forever (a real one
-    found on gk: 0 bytes, ~21h old, no matching session anywhere). Cleanup
-    must require BOTH: old enough, AND no live pane's transcript stem still
-    matches the session id -- a live session's marker must survive no
-    matter how old the file looks (it may be a long-running deliberate
-    exception), and a dead session's marker must go once past the age
-    threshold."""
+    (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) plus, since
+    #819, their deferred-consume pending flag
+    (/tmp/airuleset-main-exec-pending-<sid>) are consumed when the exempted
+    command actually RUNS (a PostToolUse consumer), but a session that ends
+    without another guarded call never consumes its own marker/pending -- it
+    just sits in /tmp forever (a real one found on gk: 0 bytes, ~21h old, no
+    matching session anywhere). Cleanup must require BOTH: old enough, AND no
+    live pane's transcript stem still matches the session id -- a live
+    session's marker/pending must survive no matter how old the file looks (it
+    may be a long-running deliberate exception), and a dead session's must go
+    once past the age threshold."""
 
     def setUp(self):
         tmp = TemporaryDirectory()
@@ -3778,6 +3780,45 @@ class TestStaleExecMarkerCleanup(unittest.TestCase):
             time.time(), run=RestartFakeTmux([], "n/a"),
             projects_dir=self.projects_dir, tmp_dir=self.tmp_dir)
         self.assertTrue(other.exists())
+
+    def _pending(self, sid, age_s, tmp_dir=None):
+        # #819: the deferred-consume pending flag joins the reap set.
+        p = Path(tmp_dir or self.tmp_dir, "airuleset-main-exec-pending-%s" % sid)
+        p.write_text("some reason\n")
+        mtime = time.time() - age_s
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_old_pending_flag_with_no_live_session_is_removed(self):
+        # #819: a sibling-blocked call strands a pending flag; if the session
+        # then ends, the orphan must be reaped like any stale exec marker.
+        sid = "deadp-" + os.urandom(4).hex()
+        pending = self._pending(sid, age_s=7 * 3600)
+        logs = wd.cleanup_stale_exec_markers(
+            time.time(), run=RestartFakeTmux([], "n/a"),
+            projects_dir=self.projects_dir, tmp_dir=self.tmp_dir)
+        self.assertFalse(pending.exists(),
+                         "an orphaned pending flag must be removed")
+        self.assertTrue(any("exec-marker-cleanup" in ln for ln in logs), logs)
+
+    def test_old_pending_flag_of_a_still_live_session_is_never_removed(self):
+        # The harmful direction: reaping a LIVE session's pending would make
+        # its marker survive an executed call (the consumer keys on pending).
+        sid = "livep-" + os.urandom(4).hex()
+        cwd = str(Path(self.tmp_dir) / "devel" / "projp")
+        Path(cwd).mkdir(parents=True)
+        proj = Path(self.projects_dir) / wd.encode_project_dir(cwd)
+        proj.mkdir(parents=True)
+        (proj / (sid + ".jsonl")).write_text(
+            json.dumps({"type": "assistant", "message": {"content": "hi"}}) + "\n")
+        pending = self._pending(sid, age_s=7 * 3600)     # old, but session LIVE
+        tmux = RestartFakeTmux([("%1", "claude", cwd)], "n/a")
+        logs = wd.cleanup_stale_exec_markers(
+            time.time(), run=tmux, projects_dir=self.projects_dir,
+            tmp_dir=self.tmp_dir)
+        self.assertTrue(pending.exists(),
+                        "a live session's pending flag must never be reaped")
+        self.assertFalse(logs, logs)
 
 
 if __name__ == "__main__":

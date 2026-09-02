@@ -266,14 +266,15 @@ def _write_ok_lastok(sid, content, pending_prefix):
 # --------------------------------------------------------------------------- #
 # Job 22 — STALE EXEC-MARKER CLEANUP (#97, 2026-07-27). block-main-
 # implementation.sh's bypass markers (/tmp/airuleset-main-exec-ok-<sid>, and
-# the legacy /tmp/airuleset-fable-exec-ok-<sid>) are ONE-SHOT since #80. Since
+# the legacy /tmp/airuleset-fable-exec-ok-<sid>) are ONE-SHOT since #80; since
 # #819 the consumption is DEFERRED to a PostToolUse consumer (post-consume-
 # main-exec-marker.sh) that deletes the marker + its pending flag once the
-# exempted command actually RAN — so a marker touched for a session that then
-# just ENDS without ever making another main-agent Bash/Edit/Write call never
-# gets consumed, and sits in /tmp forever (a real one found on gk: 0 bytes,
-# ~21h old, for a session id that no longer ran anywhere). This is HYGIENE, not a security hole — the hook pairs a marker
-# to its session id, so a marker for a dead session is already inert; the
+# exempted command actually RAN. Either way, a marker touched for a session
+# that then just ENDS without ever making another main-agent Bash/Edit/Write
+# call is never consumed, and sits in /tmp forever (a real one found on gk:
+# 0 bytes, ~21h old, for a session id that no longer ran anywhere). This is
+# HYGIENE, not a security hole — the hook pairs a marker to its session id, so
+# a marker for a dead session is already inert; the
 # ONLY hazard is deleting a marker that belongs to a session STILL RUNNING
 # (that would silently revoke a deliberately granted exception mid-work).
 # So cleanup requires BOTH: the marker is older than `max_age_s`, AND no

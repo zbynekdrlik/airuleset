@@ -82,10 +82,19 @@ set -euo pipefail
 # the reason a running loop on one of 6 managed boxes stalls on a routine
 # gh/git call.
 #
-# Bypass (rare, logged, ONE-SHOT since #80 — honoring the marker DELETES it,
-# so one marker exempts exactly one call; and since #128 the marker must
-# CARRY the reason, which is logged, an empty one being refused and cleared):
+# Bypass (rare, logged, ONE-SHOT since #80; since #819 consumed when the
+# command actually RUNS — a PostToolUse consumer, post-consume-main-exec-
+# marker.sh — not the moment this guard allows it, so a sibling-hook block
+# never strands the one-shot; and since #128 the marker must CARRY the
+# reason, which is logged, an empty one being refused and cleared):
 #   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-<session_id>
+# Accepted residuals of the deferred consume (all bounded, fail-safe toward
+# CONSUME): (a) N PARALLEL guarded calls in one turn all see the marker before
+# the first one's PostToolUse fires, so one marker exempts that whole parallel
+# batch (bounded to one turn, all of them RUN); (b) a user Ctrl+C mid-Bash may
+# skip PostToolUse, leaving the marker one call longer; (c) a benign non-arming
+# call between a sibling-blocked impl call and its retry consumes the marker
+# early (one extra re-echo).
 # (generalized name). The original Fable-only marker
 # /tmp/airuleset-fable-exec-ok-<session_id> is STILL honored for backward
 # compatibility (nothing outside this hook + its own tests referenced the
@@ -470,14 +479,18 @@ SESSION_ID="${RAW_SID:-unknown}"
 # now DEFERS: it leaves the marker and writes a session-scoped pending flag
 # (/tmp/airuleset-main-exec-pending-<sid>); the PostToolUse consumer
 # (post-consume-main-exec-marker.sh) deletes marker + pending ONLY after the
-# tool actually RAN (PostToolUse fires for a ran-and-errored tool too, and
-# NOT for a call a PreToolUse hook denied — exactly the wanted behaviour).
-# The REFUSE paths (bad reason / jq failure) still delete the marker here in
-# PreToolUse, since the tool is then blocked and no PostToolUse fires.
+# tool actually RAN (PostToolUse fires after a tool that ran — including a
+# Bash command that exited non-zero — and NOT for a call a PreToolUse hook
+# denied, exactly the wanted behaviour). The REFUSE paths (bad reason / jq
+# failure) still delete the marker here in PreToolUse, since the tool is then
+# blocked and no PostToolUse fires.
 # Fail-safe: if in doubt whether the command ran, CONSUME — a marker that
 # survives too long is the security regression; an extra re-echo is the mild
-# cost. Residual (bounded to ONE extra call): a user Ctrl+C mid-Bash may skip
-# PostToolUse, so a command that ran leaves the marker one call longer.
+# cost. Residuals, all bounded to ONE extra call in the SAFE (over-survive-
+# briefly) direction: a user Ctrl+C mid-Bash may skip PostToolUse; and whether
+# PostToolUse fires for a tool CC treats as a hard ERROR (e.g. a failed Edit)
+# is not independently verified here — if it does not, that edit's marker
+# survives one call. Both self-heal on the next executed guarded call.
 BYPASS_MARK=""
 BYPASS_FILE=""
 if [ -e "/tmp/airuleset-main-exec-ok-${SESSION_ID:-unknown}" ]; then
@@ -539,19 +552,36 @@ if [ -n "$BYPASS_MARK" ]; then
     # marker); only the two REFUSE paths clear the bad marker in PreToolUse.
     BYPASS_PENDING="/tmp/airuleset-main-exec-pending-${SESSION_ID:-unknown}"
     if [ "$BYPASS_JQ_RC" -ne 0 ]; then
-        rm -f "$BYPASS_FILE" 2>/dev/null || true      # refuse: clear the bad marker now
+        # refuse: clear the bad marker AND any stranded pending (a stale
+        # pending must never phantom-consume the NEXT armed marker).
+        rm -f "$BYPASS_FILE" "$BYPASS_PENDING" 2>/dev/null || true
         { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (reason extraction FAILED jq_rc=$BYPASS_JQ_RC, cleared)" \
             >> "$BYPASS_LOG"; } 2>/dev/null || true
     elif [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
         # DEFER consumption to PostToolUse: leave the marker, drop a pending
         # flag so post-consume-main-exec-marker.sh consumes it once the tool
         # RAN. The reason rides in the pending file for the consumer's log.
-        { printf '%s\n' "$BYPASS_REASON" > "$BYPASS_PENDING"; } 2>/dev/null || true
-        { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (allowed, deferred consume pending post-exec) reason=$BYPASS_REASON" \
-            >> "$BYPASS_LOG"; } 2>/dev/null || true
+        #
+        # #819 review (CRITICAL): if the pending WRITE fails (ENOSPC / inode
+        # exhaustion — a real fleet condition, dev1 hit 714k inodes — or an
+        # unwritable path), fall back to consuming the marker HERE, in
+        # PreToolUse. Otherwise the call would be allowed with no pending, the
+        # consumer would no-op, and the marker would survive EVERY subsequent
+        # executed call — the pre-#80 session-wide kill switch resurrected
+        # under disk pressure. `rm` needs no free space, so the fail-safe
+        # direction (consume when in doubt) always holds.
+        if { printf '%s\n' "$BYPASS_REASON" > "$BYPASS_PENDING"; } 2>/dev/null; then
+            { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (allowed, deferred consume pending post-exec) reason=$BYPASS_REASON" \
+                >> "$BYPASS_LOG"; } 2>/dev/null || true
+        else
+            rm -f "$BYPASS_FILE" 2>/dev/null || true      # write failed → consume now (fail-safe)
+            { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (allowed, pending-write FAILED, consumed in PreToolUse) reason=$BYPASS_REASON" \
+                >> "$BYPASS_LOG"; } 2>/dev/null || true
+        fi
         exit 0
     else
-        rm -f "$BYPASS_FILE" 2>/dev/null || true      # refuse: clear the bad marker now
+        # refuse: clear the bad marker AND any stranded pending.
+        rm -f "$BYPASS_FILE" "$BYPASS_PENDING" 2>/dev/null || true
         { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
             >> "$BYPASS_LOG"; } 2>/dev/null || true
     fi
