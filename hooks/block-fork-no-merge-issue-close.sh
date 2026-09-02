@@ -281,13 +281,17 @@ _labels_contain() {
 # _cmd_has_comment_flag) always runs on the ORIGINAL $CMD, since an over-eager strip
 # on a detector flips it toward wrong-ALLOW (e.g. it would eat a real `bash -c '…'`
 # nested-close payload, or delete _cmd_has_comment_flag's own target).
-# Accepted residual (confusion guard, not adversarial security): a shell escaped-quote
-# value (`--comment 'it'\''s -R x/y'`) leaves a `-R x/y` residue the single-quote arm
-# cannot span. It is caught by _repo_flag_unparseable's UNBALANCED-QUOTE leg (#824
-# A-2): the value-strip leaves an ODD quote count in the stripped copy, and with a
-# residual `-R` present the flag is treated as unparseable → fail SAFE. (The pre-#824
-# note claimed the >=2-`-R` leg caught it; that leg only fires when a SECOND real `-R`
-# is present, so the single-residue case escaped — the honesty fix behind #824 A-2.)
+# #824 N-1: a shell escaped-quote value (`--comment 'it'\''s -R x/y'`, or the
+# EVEN-parity `--comment "say \"hi\" -R x/y"`) is now PRE-DELETED (below) before the
+# value arms, so the whole value strips and no `-R x/y` residue survives. The
+# _repo_flag_unparseable UNBALANCED-QUOTE leg (c) and the >=2-`-R` leg are now a BELT
+# (a fail-safe backstop for any residue the pre-delete misses), not the proof — the
+# pre-#824 note claimed the >=2-`-R` leg caught the escaped-quote residue, but that leg
+# only fires with a SECOND real `-R`, and the ODD-count leg missed the EVEN-parity
+# `\"…\"` shape entirely (#824 A-2 / N-1). Accepted residual (confusion guard, not
+# adversarial security): a residue built from a quoting idiom the three pre-deletes do
+# not cover survives — the belt legs remain the backstop, and the #837 python
+# segmenter is the precise fix.
 _strip_value_flags() {
     # #824 (A-1): the UNQUOTED value arm is bounded at shell OPERATORS
     # `;&|<>()` — the pre-#824 `[^[:space:]]+` spanned them, so
@@ -305,7 +309,21 @@ _strip_value_flags() {
     # LONG flags keep the space/`=`-required separator (a glued `--commentX` is
     # not a valid long-flag form). Run LONG first, so a `-c` INSIDE a stripped
     # `--comment`/`--reason` value is gone before the short pass sees it.
-    sed -E \
+    # #824 N-1: PRE-DELETE the three escaped-quote idioms BEFORE the value arms so
+    # an escaped quote inside a value cannot terminate `'[^']*'`/`"[^"]*"` EARLY and
+    # leave a `-R x/y` residue (the EVEN-parity poison the unbalanced-quote leg — an
+    # ODD-count belt — cannot catch). The idioms: bash's `'\''` and `'"'"'`
+    # single-quote-in-single-quote, and a backslash-escaped quote `\"`/`\'`. After
+    # deletion `"say \"hi\" -R x/y"` collapses to `"say hi -R x/y"` so the `"[^"]*"`
+    # arm strips the WHOLE value. #824 N-2: `sed -Ez` runs the whole here-string as
+    # ONE pattern space so a MULTI-LINE quoted value is spanned by the quoted arms
+    # (`[[:space:]]` covers `\n`; `^` still anchors at buffer start, and a real flag
+    # after a newline matches via the `[[:space:]]` alternative); a per-LINE sed left
+    # a lone quote on line 2 → odd count → the leg (c) over-blocked a legit `-R` close.
+    sed -Ez \
+      -e "s/'\\\\''//g" \
+      -e "s/'\"'\"'//g" \
+      -e "s/\\\\[\"']//g" \
       -e "s/(^|[[:space:]])(--comment|--reason)([[:space:]]+|=)('[^']*'|\"[^\"]*\"|[^[:space:];&|<>()]+)/\1/g" \
       -e "s/(^|[[:space:]])(-c|-r)([[:space:]]*=?[[:space:]]*)('[^']*'|\"[^\"]*\"|[^[:space:];&|<>()]+)/\1/g" \
       <<< "$1"
@@ -626,15 +644,31 @@ CLOSE_HITS=$(grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([
 N_CLOSE=$(grep -c . <<< "$CLOSE_HITS" 2>/dev/null || true)
 # #824 C-1: also count top-level closes with the WIDE `_CLOSE_OPEN` boundary class
 # (which carries the `\`/quote chars the narrow N_CLOSE class deliberately omits). A
-# `\gh issue close FOREIGN` (or a `''gh …`/`"gh" …` boundary form) chained after a
-# self close is INVISIBLE to the narrow N_CLOSE + the narrow ISSUE_NUM extractor, so
-# the self carve-out `exit 0`ed and the foreign close rode through. If the WIDE count
-# differs from the NARROW count, a close hides behind a `\`/quote boundary → blank
+# `\gh issue close FOREIGN` (OPENING-boundary `\`) chained after a self close is
+# INVISIBLE to the narrow N_CLOSE + the narrow ISSUE_NUM extractor, so the self
+# carve-out `exit 0`ed and the foreign close rode through. If the WIDE count differs
+# from the NARROW count, a close hides behind a `\`/opening-quote boundary → blank
 # ISSUE_NUM (below) → BLOCK. Runs on the SAME stripped copy as N_CLOSE, so a `\gh
 # issue close` MENTIONED inside a comment value never inflates it (it was stripped).
 CLOSE_HITS_WIDE=$(grep -oE "${_CLOSE_OPEN}gh[[:space:]]+issue[[:space:]]+close([[:space:]]|\$)" <<< "$_CMD_STRIPPED" 2>/dev/null || true)
 N_CLOSE_WIDE=$(grep -c . <<< "$CLOSE_HITS_WIDE" 2>/dev/null || true)
 case "$N_CLOSE_WIDE" in ''|*[!0-9]*) N_CLOSE_WIDE=0 ;; esac
+# #824 N-5: the WIDE count above catches only the OPENING-boundary hidden forms
+# (`\gh …`, `'gh …`, `"gh …`) — a QUOTED command word `"gh" issue close`/`'gh' issue
+# close` breaks `gh[[:space:]]+` on the CLOSING quote (`gh"`), so the WIDE count MISSES
+# it (N_CLOSE_WIDE == N_CLOSE) and a `SELF && "gh" issue close FOREIGN` chain rode a
+# self carve-out. Count once more on a DE-QUOTED copy (`\`/`"`/`'` removed) with the
+# NARROW class: `"gh" issue close 999` de-quotes to ` gh issue close 999` → a real
+# narrow boundary match, so N_CLOSE_DEQUOTED > N_CLOSE reveals the hidden close → blank
+# ISSUE_NUM (below) → BLOCK. Runs on the STRIPPED copy, so a `gh issue close` inside a
+# comment value never inflates it; de-quoting a legit single close (no quote in the
+# close phrase itself) never creates a spurious extra match → N_CLOSE_DEQUOTED ==
+# N_CLOSE for every legit shape. (Only the CHAINED quoted form is caught; a STANDALONE
+# `"gh" issue close` bypasses the is_close front gate entirely — the #837 residual.)
+_CMD_DEQUOTED=$(tr -d '\\'\''"' <<< "$_CMD_STRIPPED" 2>/dev/null || true)
+CLOSE_HITS_DEQUOTED=$(grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' <<< "$_CMD_DEQUOTED" 2>/dev/null || true)
+N_CLOSE_DEQUOTED=$(grep -c . <<< "$CLOSE_HITS_DEQUOTED" 2>/dev/null || true)
+case "$N_CLOSE_DEQUOTED" in ''|*[!0-9]*) N_CLOSE_DEQUOTED=0 ;; esac
 # #540: uses the SAME `_is_patch_close_cmd` predicate as the front gate above —
 # one definition, so the single-action guard and the detector can never drift on
 # what a PATCH-close is (incl. the #540 hidden-body `--input`/`=@file` forms).
@@ -659,19 +693,35 @@ fi
 if grep -qF '`' <<< "$CMD"; then   # #824: here-string; DETECTION on original $CMD
     HAS_INTERP=1
 fi
-# #824 D-1: `$(…)` command substitution is the SIBLING of the backtick smuggle. Pre
-# #824 the `(` in N_CLOSE's boundary class caught a `$(gh issue close X)` nested
-# close (the `(` sits immediately before `gh`); the #824 value-strip removes the
-# WHOLE `"$(…)"` comment value from _CMD_STRIPPED, so N_CLOSE no longer sees it → a
-# nested foreign close (`--comment "$(gh issue close 999)"`) rode a self carve-out.
-# Mirror the backtick guard: ANY `$(` alongside a close blanks the exemption (fail
-# toward hand-off; a legit close rarely carries a `$(` substitution). DETECTION on
-# the ORIGINAL $CMD, where the substitution is still visible.
-if grep -qF '$(' <<< "$CMD"; then
+# #824 D-1 / N-3: `$(…)` command substitution is the SIBLING of the backtick
+# smuggle. Pre #824 the `(` in N_CLOSE's boundary class caught a `$(gh issue close
+# X)` nested close (the `(` sits immediately before `gh`); the #824 value-strip
+# removes the WHOLE `"$(…)"` comment value from _CMD_STRIPPED, so N_CLOSE no longer
+# sees it → a nested foreign close (`--comment "$(gh issue close 999)"`) rode a self
+# carve-out. #824 N-3 NARROWS this to a substitution that actually carries a `gh`
+# command (`\$\([^)]*gh[[:space:]]`) so a LEGIT `--comment "$(cat note.md)"` /
+# `$(date)` no longer over-blocks (the blanket `$(` guard did); the only close path
+# is `gh …`, and a `$(eval …)`/`$(bash -c …)` is separately caught by HAS_INTERP.
+# `grep -z` lets `[^)]*` span a NEWLINE inside the substitution (a per-line grep would
+# regress the blanket guard's multi-line `$(\ngh\n)` coverage). DETECTION on the
+# ORIGINAL $CMD, where the substitution is still visible.
+if grep -zqE '\$\([^)]*gh[[:space:]]' <<< "$CMD"; then
+    HAS_INTERP=1
+fi
+# #824 N-4: a bash>=5.3 command-substitution funsub `${ cmd; }` / `${| cmd; }` runs a
+# nested command with NO `$(`, so the guard above misses it; the value-strip erases a
+# `--comment "${ gh issue close 999; }"` value → wrong-ALLOW on a self carve-out. Any
+# `${` immediately followed by whitespace or `|` is a funsub (an ordinary parameter
+# expansion `${VAR}`/`${#x}`/`${x:-y}` never starts with a space or `|`), so blank the
+# exemption (fail toward hand-off; a legit close rarely carries `${ `). DETECTION on
+# the ORIGINAL $CMD. (On this box bash 5.2 the funsub is inert, but the GUARD is a
+# static grep and fires regardless of the running bash version.)
+if grep -qE '\$\{[[:space:]|]' <<< "$CMD"; then
     HAS_INTERP=1
 fi
 if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ] \
-   || [ "${N_CLOSE_WIDE:-0}" -ne "${N_CLOSE:-0}" ]; then   # #824 C-1: a `\`/quote-hidden close
+   || [ "${N_CLOSE_WIDE:-0}" -ne "${N_CLOSE:-0}" ] \
+   || [ "${N_CLOSE_DEQUOTED:-0}" -ne "${N_CLOSE:-0}" ]; then   # #824 C-1/N-5: a `\`/quote-hidden close
     ISSUE_NUM=""   # not a single simple close — fail toward hand-off (no exemption)
 fi
 
