@@ -3463,3 +3463,102 @@ class TestQualsExcludePermanentOpsChannelTickets(TestCase):
             buf.getvalue().strip(), "1",
             "a permanent ops-channel ticket is still in this stream's own "
             "slice -- searches issued: %r" % searches)
+
+
+class TestCIRunnerAuth839(TestCase):
+    """airuleset#839: after #827 made an unmapped unix user fail-SAFE to
+    fork-no-merge, the GitHub-hosted CI runner (unix account `runner`, in
+    neither registry) resolved fork-no-merge and broke ~28 tests that shell out
+    to the FULL-authority-gated core-quals / tickets-status / run-card. This
+    recognises the runner as a legitimate full-authority context for THIS repo's
+    OWN CI by the UNSPOOFABLE (`pw_name == "runner"` AND `GITHUB_ACTIONS=true`),
+    hardens `_current_user()` against the `$USER`/`$LOGNAME` env-spoof, and
+    proves no stream can reach `full` through the new seam. RED on v0.1.128."""
+
+    # -- ci-runner recognition in the resolver ----------------------------- #
+    def test_ci_runner_with_github_actions_resolves_full(self):
+        with m.patch.object(airuleset, "_current_user", return_value="runner"):
+            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                self.assertEqual(airuleset.resolve_authority(), "full")
+
+    def test_ci_runner_explain_source_is_named_ci_runner(self):
+        import cli_quals
+        with m.patch.object(airuleset, "_current_user", return_value="runner"):
+            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                profile, source, _raw = cli_quals._authority_decision()
+        self.assertEqual(profile, "full")
+        self.assertIn("ci-runner", source,
+                      "the --explain source must NAME the ci-runner path (#839)")
+
+    def test_runner_without_github_actions_stays_fork_no_merge(self):
+        # #827 preserved (constraint 4): an unmapped `runner` on a REAL box
+        # (no GITHUB_ACTIONS) is NOT full -- the AND is load-bearing.
+        with m.patch.dict(os.environ):
+            os.environ.pop("GITHUB_ACTIONS", None)
+            with m.patch.object(airuleset, "_current_user", return_value="runner"):
+                self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+
+    def test_stream_with_github_actions_cannot_reach_full(self):
+        # constraint 5: a stream pw_name + GITHUB_ACTIONS still resolves its
+        # reduced profile -- the ci-runner branch requires pw_name == "runner".
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
+            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                self.assertEqual(airuleset.resolve_authority(), "branch-merge")
+
+    def test_unmapped_non_runner_with_github_actions_is_fork_no_merge(self):
+        # proves the branch REQUIRES pw_name == "runner", not just the env var:
+        # an unmapped non-runner identity with GITHUB_ACTIONS stays fork-no-merge.
+        with m.patch.object(airuleset, "_current_user", return_value="ci-bot"):
+            with m.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+
+    # -- _current_user() env-spoof hardening ------------------------------- #
+    def test_current_user_ignores_env_spoof(self):
+        # RED on getpass.getuser() (reads $USER/$LOGNAME/$USERNAME FIRST): the
+        # real uid's pw_name must win over an attacker-set USER/LOGNAME, or a
+        # stream could set USER=newlevel to self-elevate to `full`. The spoof
+        # value MUST differ from the real pw_name or the test has no teeth on
+        # the box literally named `newlevel` (#786) -- so we spoof to a value
+        # that is provably not this uid's account.
+        import pwd
+        real = pwd.getpwuid(os.getuid()).pw_name
+        spoof = "spoofed-not-a-real-account"
+        self.assertNotEqual(real, spoof)
+        with m.patch.dict(os.environ, {"USER": spoof,
+                                       "LOGNAME": spoof,
+                                       "USERNAME": spoof}):
+            self.assertEqual(airuleset._current_user(), real)
+
+    def test_current_user_passwdless_uid_returns_safe_sentinel(self):
+        # Exotic: a uid with no passwd entry -> a uid<N> sentinel that is in
+        # NEITHER registry (never "runner") -> fork-no-merge, NEVER a getpass
+        # fallback (which would re-open the env-spoof at the one moment the
+        # unspoofable source failed).
+        with m.patch("pwd.getpwuid", side_effect=KeyError("no passwd entry")):
+            with m.patch.dict(os.environ, {"USER": "newlevel",
+                                           "LOGNAME": "newlevel"}):
+                u = airuleset._current_user()
+        self.assertNotEqual(u, "newlevel",
+                            "must NOT fall back to the env-spoofable getpass")
+        self.assertEqual(u, "uid%d" % os.getuid())
+        self.assertNotIn(u, airuleset.FULL_AUTHORITY_USERS)
+        self.assertNotIn(u, airuleset.AUTHORITY_BY_USER)
+        with m.patch.object(airuleset, "_current_user", return_value=u):
+            self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
+
+    # -- skill_names_for_user() uses the hardened identity ----------------- #
+    def test_skill_names_for_user_ignores_env_spoof(self):
+        # #839 Q4: skill_names_for_user must resolve identity via the hardened
+        # _current_user() (uid-based), NOT raw getpass.getuser(). A stream
+        # (montalu1) setting USER=newlevel must NOT get the full-authority-only
+        # skills. RED on the direct getpass.getuser() call.
+        import cli_deployer_glue
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
+            with m.patch.dict(os.environ, {"USER": "newlevel",
+                                           "LOGNAME": "newlevel"}):
+                names = cli_deployer_glue.skill_names_for_user()
+        full_only = set(airuleset.SKILLS_FULL_AUTHORITY_ONLY)
+        self.assertTrue(
+            full_only.isdisjoint(names),
+            "a reduced stream must not receive full-authority-only skills even "
+            "with USER=newlevel spoofed -- got %r" % (full_only & set(names)))
