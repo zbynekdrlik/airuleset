@@ -1490,6 +1490,15 @@ def _gk_handoff_ops_wait_flagged(rows):
     return flagged
 
 
+def _authority_marker_path(cwd=None):
+    """The absolute path of the CLAUDE.md that `_authority_marker_raw` reads for
+    `cwd` — the SINGLE source of the marker-file LOCATION, so `authority
+    --explain` can name the EXACT file a marker was (or was not) read from
+    without re-deriving the formula and desyncing from what was actually read
+    (#829). Mirrors `_authority_marker_raw`'s own read target verbatim."""
+    return str((Path(cwd) if cwd else Path.cwd()) / "CLAUDE.md")
+
+
 def _authority_marker_raw(cwd=None):
     """The RAW last `<!-- airuleset:authority=<tok> -->` HTML-comment token from
     the project CLAUDE.md (cwd-relative), whether or not it names a VALID profile,
@@ -1506,7 +1515,7 @@ def _authority_marker_raw(cwd=None):
     placed after any example cannot be shadowed."""
     import re
     try:
-        p = (Path(cwd) if cwd else Path.cwd()) / "CLAUDE.md"
+        p = Path(_authority_marker_path(cwd))
         if p.is_file():
             hits = re.findall(r"<!--\s*airuleset:authority=([a-z-]+)\s*-->",
                               p.read_text(errors="ignore"))
@@ -1632,7 +1641,12 @@ def cmd_authority(args):
         # tickets carry (`_ticket_is_stream_labeled`) and the sub-dev slice uses
         # (`_slice_quals`) — the ownership signal that survives a shared gh
         # identity, unlike authorship (#463). No network call.
-        if resolve_authority() != "full":
+        # #829: anchor at the REPO ROOT too — the close-guard hook shells out to
+        # BOTH `authority` and `authority --stream-label` from the SAME session
+        # cwd, so this arm must honor a repo-root marker from a subdirectory
+        # identically to the profile print below, or the two disagree and the
+        # own-stream acceptance-close carve-out mis-fires.
+        if resolve_authority(cwd=airuleset._repo_root() or None) != "full":
             # #564: emit ALL rename equivalents (newline-separated), routed
             # through the single `_stream_rename_equivalents()` alias primitive
             # (never a parallel table). A box whose base stream was renamed
@@ -1648,7 +1662,19 @@ def cmd_authority(args):
     # and use it for BOTH the plain profile line and the --explain log, so the
     # printed source can never disagree with the resolved profile (no shadow
     # re-derivation, no second file read that could differ mid-command).
-    profile, source, raw = _authority_decision()
+    # #829: anchor the marker read at the REPO ROOT (`airuleset._repo_root() or
+    # None`), IDENTICALLY to every in-process consumer — the run-card
+    # (`airuleset.py` card_root), the footer/slice gates (`cli_quals_cmd.py`),
+    # and the close-guard hook (which shells out to this plain `authority`) — the
+    # established #181 I-5 / run-card precedent. The pre-#829 bare-cwd form read
+    # `<cwd>/CLAUDE.md` with NO walk-up, so invoked from a SUBDIRECTORY of a
+    # marker-carrying project it missed the repo-root marker (no marker in a
+    # subdir), the map/allow-list won, and `--explain` mis-named the winning
+    # source while the consumers honored the marker. `_repo_root() or None`
+    # walks up to the git toplevel and falls back to None (→ read cwd,
+    # marker=none when absent) outside any repo, exactly as the consumers do.
+    root = airuleset._repo_root() or None
+    profile, source, raw = _authority_decision(root)
     print(profile)
     if getattr(args, "explain", False):
         # An explicit decision LOG (not a silent `marker or map`). Diagnoses the
@@ -1662,8 +1688,9 @@ def cmd_authority(args):
         # the remedy ("add to AUTHORITY_BY_USER or FULL_AUTHORITY_USERS") so the
         # loud fail-safe degrade names its own fix. Lives ONLY in --explain
         # (opt-in), never on the hot resolve_authority() path the footer and
-        # close-guard call every cycle. Resolved against the invoking cwd — the
-        # same anchoring the plain `authority` output has always used.
+        # close-guard call every cycle. Resolved against the REPO ROOT (the
+        # `root` computed above) — the same anchoring the plain `authority`
+        # output now uses (#829), identical to every in-process consumer.
         user = airuleset._current_user()
         if user in airuleset.AUTHORITY_BY_USER:
             map_val = airuleset.AUTHORITY_BY_USER[user]
@@ -1681,11 +1708,18 @@ def cmd_authority(args):
             map_val = ("unmapped -> fork-no-merge (fail-safe; add to "
                        "AUTHORITY_BY_USER or FULL_AUTHORITY_USERS)")
         if raw is None:
+            # #829: no marker was read -> name NO path (there is nothing to name).
             mark = "none"
-        elif raw in airuleset.AUTHORITY_PROFILES:
-            mark = raw
         else:
-            mark = "invalid(%r)" % raw
+            # #829: a marker (valid OR invalid) WAS read -> name the ACTUAL
+            # CLAUDE.md PATH it came from, so the diagnostic can be trusted about
+            # WHERE the winning/invalid marker lives (the run-card/footer/consumer
+            # divergence this ticket closes was exactly a marker read from a
+            # DIFFERENT anchor than --explain claimed). The path is the repo-root
+            # anchor resolved above, routed through the single _authority_marker_path.
+            mpath = _authority_marker_path(root)
+            base = raw if raw in airuleset.AUTHORITY_PROFILES else "invalid(%r)" % raw
+            mark = f"{base} (read from {mpath})"
         print(f"resolved={profile} via {source} "
               f"(marker={mark}; user={user} map={map_val}); "
               f"an HTML-comment marker <!-- airuleset:authority=<profile> --> overrides the map.")

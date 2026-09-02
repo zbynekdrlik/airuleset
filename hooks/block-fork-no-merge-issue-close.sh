@@ -397,9 +397,10 @@ MSG
 fi
 # ---- end #627 Discuss gate; fall through to the authority logic below ----
 
-# Resolve THIS stream's authority (marker-aware; the python reads the cwd project
-# CLAUDE.md override, else the per-user map). The hook's cwd IS the session's cwd,
-# i.e. the project dir — so the project's authority marker (if any) is honored.
+# Resolve THIS stream's authority (marker-aware; the python reads the project
+# CLAUDE.md override at the REPO ROOT — #829 anchors `authority` at
+# `_repo_root()`, so the marker is honored even when the hook's cwd is a
+# SUBDIRECTORY of the project — else the per-user map).
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(dirname "$SCRIPT_DIR")
 AUTH=$(python3 "$REPO_DIR/airuleset.py" authority 2>/dev/null || echo "")
