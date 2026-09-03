@@ -2215,7 +2215,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           not on a `⏳`/`❓` marker or an unresumed API error, a 120-s
           recently-compacted anti-double veto, a 30-min per-session
           cooldown, and a hard non-refreshable age cap) — ALL
-          unconditional, no time-boxed override on any of them. All pass →
+          unconditional, no time-boxed override on any of them.
+          #855-recurrence: a delivered `/compact` also CONSUMES every
+          pending record for the SAME already-compacted boundary — a
+          DUPLICATE `self-callback` record (the #411 Stop-hook backstop of
+          the same `## ✅ Work Complete` the proactive `--self` already got
+          compacted) is discarded `already-compacted`, never re-delivered,
+          when a compaction is observed newer than the newest report OR the
+          record's `bts` is not newer than the last delivered ts. All pass →
           `/compact` is typed into the idle prompt (executing immediately,
           exactly once), logged, and the request cleared. Any fails → left pending for the next
           sweep, discarded outright only once the age cap is exceeded (or
