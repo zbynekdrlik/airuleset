@@ -313,10 +313,21 @@ clean_q() {
 # DIFFERENT questions be told apart (the per-project `❓:<project>` send key
 # never could, #466). sha1sum where present, cksum as a portable fallback;
 # both yield a stable short token used ONLY for log identity, never a decision.
-_qhash() {
-    printf '%s' "${1:-}" | { sha1sum 2>/dev/null || cksum; } \
-        | tr -cd '0-9a-fA-F' | cut -c1-8
-}
+# _qhash — canonical definition lives in hooks/lib-qhash.sh, SHARED with
+# stop-check-question-quality.sh so both hooks fingerprint the SAME delivered
+# question identically (#740; single source, never two drifting copies). The
+# guarded inline fallback below runs ONLY on a partial install where the sibling
+# lib is absent — an undefined _qhash would abort this hook under
+# `set -euo pipefail` and silently drop the ping, so the delivery path must
+# never depend on the lib being present.
+_LIB_QHASH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-qhash.sh"
+[ -r "$_LIB_QHASH" ] && . "$_LIB_QHASH"
+if ! type _qhash >/dev/null 2>&1; then
+    _qhash() {
+        printf '%s' "${1:-}" | { sha1sum 2>/dev/null || cksum; } \
+            | tr -cd '0-9a-fA-F' | cut -c1-8
+    }
+fi
 
 _pending_log() {
     # $1 = status, $2 = reason, $3 = per-question hash (which question — #466).

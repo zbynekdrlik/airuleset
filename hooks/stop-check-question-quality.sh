@@ -77,6 +77,29 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 [ -z "$MSG" ] && exit 0
 
+# _qhash for the delivery-log fingerprint, shared with notify-discord-pending.sh
+# via hooks/lib-qhash.sh (#740) — a repeat-asked-question BLOCK below logs the
+# SAME qhash the pending hook logs for that question's suppressed ping, so the
+# two lines up. Diagnostic-only: every use is guarded with `type _qhash`, so a
+# missing lib degrades the log's qhash to empty, never the Stop decision.
+_LIB_QHASH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-qhash.sh"
+[ -r "$_LIB_QHASH" ] && . "$_LIB_QHASH"
+
+# Durable trace of a BLOCKED repeat-asked-question (#740) into the SAME
+# notify-delivery.log the pending hook writes — a suppressed ping and a blocked
+# repeat for the SAME question then share a qhash and line up. Guarded so a
+# read-only $HOME can never turn logging into a failed Stop decision.
+_delivery_log_blocked_repeat() {
+    local log stamp qh
+    qh="${1:-}"
+    log="$HOME/.claude/notify-delivery.log"
+    mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    stamp=$(date -Iseconds 2>/dev/null || echo '?')
+    { printf '%s blocked kind=question-quality reason=repeat-asked-question key=%s qhash=%s\n' \
+        "$stamp" "$SID" "$qh" >>"$log"; } 2>/dev/null || true
+    return 0
+}
+
 # The /goal ARM question is a MACHINE question — the api-watchdog auto-arm
 # types the printed /goal itself and the Discord ping is suppressed for it, so
 # the away-user Slovak template has no audience here. Enforcing it looped the
@@ -128,6 +151,44 @@ if [ -n "$MARKER_RAW" ]; then
             | sed -E 's/^[[:space:]]+//' \
             | jq -Rrs 'rtrimstr("\n") | .[0:1500]')
         if [ -n "$KEYLINE" ] && [ "$(cat "$LASTQF" 2>/dev/null)" = "$KEYLINE" ]; then
+            # KEYLINE matches the already-delivered, still-unanswered question.
+            # #740 recidíva (miva1 re-emitted ONE question 27x in 8 h): a
+            # delivered question is carried by the footer U N + the needs-answer
+            # label — it is NOT re-typed into the chat every wake. Split the
+            # match by SHAPE:
+            #   * BARE BLOCKED re-poke — the ONLY ❓ marker is a trailing
+            #     `❓ NEEDS YOU:` line (no `❓ ASKED:`, no `**Otázka — projekt`
+            #     block, no `⏳`/`✅` marker): the ONE re-emission still allowed,
+            #     because /goal stop-condition (A) needs the marker as the turn's
+            #     last line to hold a genuinely BLOCKED loop -> exit 0 (#740).
+            #   * ANY OTHER shape (a `❓ ASKED:` line, the full block, or the
+            #     matching marker alongside `⏳`/`✅`) -> BLOCK (exit 2): re-emitting
+            #     an already-delivered question is pure noise the owner already
+            #     has. This runs BEFORE the present-user bypass below, so the
+            #     repeat-block applies REGARDLESS of presence (the owner sees the
+            #     chat spam in the webterm even when present); only the shape
+            #     checks below stay presence-aware.
+            IS_BARE_REPOKE=1
+            if grep -qiE "$ASKED_RX" <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            if LC_ALL=C.UTF-8 grep -qiE 'Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            if grep -qF '⏳' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            if grep -qF '✅' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            if [ "$IS_BARE_REPOKE" = 1 ]; then
+                rm -f "$RETRY_FILE" 2>/dev/null || true
+                exit 0
+            fi
+            # Non-bare repeat of an already-delivered question -> BLOCK. Capped by
+            # the SAME retry mechanism as the shape checks so a Stop hook can
+            # never wedge the session forever (after MAX_RETRIES it lets through).
+            if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+                echo "$((RETRIES+1))" > "$RETRY_FILE"
+                QH=""
+                if type _qhash >/dev/null 2>&1; then QH=$(_qhash "$KEYLINE"); fi
+                _delivery_log_blocked_repeat "$QH"
+                printf '%s\n' "Otázka už bola doručená a je nezodpovedaná (qhash ${QH:-?}) — nesie ju footer U N + label needs-answer, takže ju NEOPAKUJ. Zmaž riadok \`❓ ASKED:\` / celý \`**Otázka — projekt …**\` blok a ukonči ťah len \`⏳ WORKING\` / \`✅ DONE\` podľa reálneho stavu ostatnej práce. Ak si NAOZAJ blokovaný (nič iné nie je workable), napíš IBA holý riadok \`❓ NEEDS YOU: <ten istý text>\` a nič iné (#740)." >&2
+                exit 2
+            fi
+            # retry cap reached — let it through so the Stop hook can never loop
             rm -f "$RETRY_FILE" 2>/dev/null || true
             exit 0
         fi

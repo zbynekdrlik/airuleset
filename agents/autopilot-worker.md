@@ -125,7 +125,10 @@ hours pick the honest form: if nothing else is workable without the answer, BLOC
 wait); if there is other answer-independent work, ASK-AND-CONTINUE — raise it (`❓ ASKED`, it pings),
 track it durably on the issue (`gh issue comment <N>` + `gh issue edit <N> --add-label needs-answer`),
 set this issue aside, and keep working other tickets, ending `⏳ WORKING` (resume this issue from its
-durable state when the user answers). Do NOT grind on WITHOUT asking (burying the question), and do
+durable state when the user answers). That `❓ ASKED` question is raised ONCE — later turns NEVER
+repeat the `❓ ASKED` line or its block while it is unanswered and no user message arrived (the footer
+`U N` + `needs-answer` carry it; re-emitting it is hook-blocked, `stop-check-question-quality.sh` exit
+2). Do NOT grind on WITHOUT asking (burying the question), and do
 NOT guess on an important decision. Only routine, unambiguous steps proceed without asking.
 **There is NO night/day difference — ASK THE MOMENT a question arises, 24/7 (#791, owner directive
 2026-09-01: "Nech nie je rozdiel medzi nocou a dnom. Claude ma robit 24/7").** There is no sleep

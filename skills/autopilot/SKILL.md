@@ -1243,7 +1243,12 @@ knows two projects are related.** The SHAPE is hook-enforced (`stop-check-questi
     the user answers (any time), resume the paused issue from its DURABLE state (the open branch / PR /
     the `needs-answer` comment) per `subagent-continuation.md`. Give the user a genuine chance (~10
     min) before bulldozing a ticket that hinges on their taste — but do NOT block the whole loop for
-    an answer you don't yet need.
+    an answer you don't yet need. **That `❓ ASKED` question is emitted ONCE** — every LATER turn of
+    this session, while it stays unanswered and no user message has arrived, NEVER re-emits it (not the
+    `❓ ASKED` line, not the block, not a paraphrase); the footer `U N` + the `needs-answer` label carry
+    it, and re-typing it every wake is hook-blocked (`stop-check-question-quality.sh` exit 2 — the
+    miva1 recidíva, one question re-emitted 27× in 8 h). That later turn just ends `⏳ WORKING` /
+    `✅ DONE` per your OTHER work.
   - **Nothing else is workable without the answer → BLOCK.** End the turn `❓ NEEDS YOU` (Slovak, the
     real decision) — it pings, and the `/goal` loop STOPS per its stop-condition (A) (waiting on the
     user is the terminal state; endless re-pokes of a blocked session were the camera-box chat
@@ -1260,7 +1265,10 @@ knows two projects are related.** The SHAPE is hook-enforced (`stop-check-questi
     byte-identical.** NOTHING else: no apology, no "stojím a čakám" preamble, and **no re-printed
     question block** — every re-printed wall lands in the user's chat AGAIN (the camera-box chat
     spam, 2026-07-05). The device path dedups the identical line (no re-ping) and the shape gate
-    recognizes the repeat (LASTQ match), so the one-liner passes untouched. A REWORDED repeat still
+    recognizes the repeat (LASTQ match), so the one-liner passes untouched. This bare `❓ NEEDS YOU:`
+    line is the ONLY re-emission the gate lets through; a repeat that carries the `❓ ASKED` line, the
+    full `**Otázka — projekt …:**` block, or the marker alongside `⏳`/`✅` now returns exit 2 (#740
+    recidíva 2026-09-03). A REWORDED repeat still
     counts as a new/edited question and is banned. A re-poke is never license to bulldoze the
     pending decision. (Stop-condition (A) in the /goal line means the evaluator should STOP instead
     of re-poking at all — the one-line reply is the damage bound if it misfires anyway.)
