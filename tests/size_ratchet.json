@@ -130,7 +130,7 @@
     "tests/test_discuss_mention_anchor_702.py": 288,
     "tests/test_discuss_template_grant_799.py": 129,
     "tests/test_discuss_thread_reference_657.py": 333,
-    "tests/test_disk_guard.py": 994,
+    "tests/test_disk_guard.py": 1107,
     "tests/test_disk_hygiene_513.py": 500,
     "tests/test_dispatch_floor.py": 601,
     "tests/test_double_compact_855.py": 388,
