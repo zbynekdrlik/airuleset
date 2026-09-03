@@ -4,12 +4,13 @@ david.
 
 The SECURITY-CRITICAL boundary this pins (#661 rework, owner ruling 2026-08-25 —
 the old "single local attach" set was owner-REJECTED as incomplete; #787 added
-montalu2-subdev to the set, mirroring montalu4-subdev exactly):
-  * marek's connect allowlist is PHYSICALLY his SIX-member set {marek-subdev,
-    montalu2-subdev, montalu4-subdev, dev1, dev2, forestshop} — his ttyd cannot
-    resolve any OTHER fleet id (gk/montalu1,3,5-8/miva/simap/stepan/
-    admin-forestshop-dev) NOR any DAVID id (david1..4/codex-bridge) → refused,
-    never execed;
+montalu2-subdev; a later owner request 2026-09-03 added miva1-subdev + gatekeeper
+so marek can SEE the miva subdev stream and the gk box):
+  * marek's connect allowlist is PHYSICALLY his EIGHT-member set {marek-subdev,
+    montalu2-subdev, miva1-subdev, montalu4-subdev, dev1, dev2, gatekeeper,
+    forestshop} — his ttyd cannot resolve any OTHER fleet id (a bare gk/
+    montalu1,3,5-8/simap/stepan/admin-forestshop-dev) NOR any DAVID id
+    (david1..4/codex-bridge) → refused, never execed;
   * every ssh member uses the DEDICATED WEBTERM_MAREK_IDENTITY key (never the
     fleet gatekeeper key, never the sshpass shared-password branch) — the
     WEBTERM_DAVID_IDENTITY precedent; marek-subdev itself stays a keyless
@@ -88,12 +89,15 @@ class TestMarekInventory(unittest.TestCase):
     # (`test_exactly_one_local_member`) asserted the set the owner REJECTED as
     # incomplete — a requirement change, not a weakening: the new locks pin the
     # owner-defined set instead. #787 (2026-08-31) grew it to SIX members by
-    # adding montalu2-subdev, mirroring the existing montalu4-subdev entry.
-    def test_six_member_set_in_owner_order(self):
+    # adding montalu2-subdev; an owner request 2026-09-03 grew it to EIGHT by
+    # adding miva1-subdev (loopback, like montalu2) and gatekeeper (tailscale,
+    # like dev1/dev2) so marek can SEE the miva subdev stream and the gk box.
+    def test_eight_member_set_in_owner_order(self):
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
-                         ["marek-subdev", "montalu2-subdev", "montalu4-subdev",
-                          "dev1", "dev2", "forestshop"])
+                         ["marek-subdev", "montalu2-subdev", "miva1-subdev",
+                          "montalu4-subdev", "dev1", "dev2", "gatekeeper",
+                          "forestshop"])
 
     def test_montalu2_entry_is_loopback_ssh_with_dedicated_key(self):
         # #787: mirrors montalu4-subdev exactly except for the account name.
@@ -104,6 +108,54 @@ class TestMarekInventory(unittest.TestCase):
         self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
         self.assertEqual(e["preferred"], "montalu2")
         self.assertIs(e.get("u_tenant"), True)
+
+    def test_miva1_entry_is_loopback_ssh_with_dedicated_key(self):
+        # Owner request 2026-09-03: mirrors montalu2/montalu4-subdev (loopback
+        # ssh, dedicated key) EXCEPT it is CROSS-TENANT — miva1 is a SEPARATE
+        # external sub-dev stream (cli_fleet: "5th sub-dev stream", peer to
+        # david/simap, NOT a montalu-family account marek operates) and notify
+        # routes it to the OWNER `zbynek`, not marek's realm — so NO u_tenant
+        # (marek merely OBSERVES miva1; reading its tickets-status would be a
+        # cross-tenant read, the same reason dev1/dev2 omit the field).
+        e = next(x for x in p.marek_inventory() if x["id"] == "miva1-subdev")
+        self.assertFalse(e["local"])
+        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["user"], "miva1")
+        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
+        self.assertEqual(e["preferred"], "miva1")
+        self.assertIsNot(e.get("u_tenant"), True)
+
+    def test_gatekeeper_entry_is_tailscale_ssh_with_dedicated_key_no_u_tenant(self):
+        # Owner request 2026-09-03: mirrors the dev1/dev2 shape (remote ssh over
+        # the box's tailscale IP, dedicated key, NO u_tenant — an OWNER-realm
+        # account). `preferred` is the OWNER fleet inventory's gatekeeper group
+        # (OWNER_GROUP == "zbynek", since gatekeeper is not a stream in
+        # AUTHORITY_BY_USER) so marek sees the gk session group, never a new
+        # `marek` group on gk. No #680 host-key pin (tailscale IP, like
+        # dev1/dev2), so host_keys is absent.
+        e = next(x for x in p.marek_inventory() if x["id"] == "gatekeeper")
+        self.assertFalse(e["local"])
+        self.assertEqual(e["host"], p.MAREK_GK_HOST)
+        self.assertEqual(e["user"], "gatekeeper")
+        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
+        self.assertEqual(e["preferred"], "zbynek")
+        self.assertIsNot(e.get("u_tenant"), True)
+        self.assertIsNone(e.get("host_keys"))
+
+    def test_gatekeeper_host_matches_the_fleet_host(self):
+        # Drift-lock (the test_forestshop_host_keys_match_the_fleet_pin
+        # pattern): the profiles leaf duplicates the gk tailscale IP (leaf
+        # discipline — no airuleset/cli_fleet import on the connect path), so
+        # tie MAREK_GK_HOST to the ONE fleet source. gk carries NO host_keys
+        # pin there either (tailscale, like dev1/dev2).
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "gatekeeper")
+        self.assertEqual(p.MAREK_GK_HOST, fleet_e["host"])
+        e = next(x for x in p.marek_inventory() if x["id"] == "gatekeeper")
+        self.assertEqual(e["host"], fleet_e["host"])
+        self.assertEqual(e["user"], fleet_e["user"])
+        self.assertIsNone(fleet_e.get("host_keys"))
 
     def test_marek_entry_is_a_local_attach_with_no_ssh(self):
         # marek's own primary session stays what it was: the gateway runs AS
@@ -187,11 +239,12 @@ class TestMarekInventory(unittest.TestCase):
 
 class TestMarekConnectAllowlistScoped(unittest.TestCase):
     """The heart of the boundary: marek's ttyd child reads marek's inventory,
-    so connect_main can ONLY resolve his own six-member set (#787 added
-    montalu2-subdev) — never another stream's, another person's, or a david
-    id. (#661 rework 2026-08-25: dev1/dev2 moved OUT of the foreign list —
-    the owner explicitly granted marek his own dev1/dev2 session tabs, so
-    those ids are now HIS lane entries.)"""
+    so connect_main can ONLY resolve his own eight-member set (#787 added
+    montalu2-subdev; owner request 2026-09-03 added miva1-subdev + gatekeeper)
+    — never another stream's, another person's, or a david id. (#661 rework
+    2026-08-25: dev1/dev2 moved OUT of the foreign list — the owner explicitly
+    granted marek his own dev1/dev2 session tabs, so those ids are now HIS lane
+    entries; the same applies to miva1-subdev + gatekeeper now.)"""
 
     def _marek_inv_file(self):
         d = tempfile.mkdtemp()
@@ -201,8 +254,11 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
 
     def test_foreign_ids_are_refused_against_marek_inventory(self):
         f = self._marek_inv_file()
-        for foreign in ("gatekeeper", "gk", "montalu-subdev", "montalu3-subdev",
-                        "montalu5-subdev", "miva1-subdev", "simap1-subdev",
+        # #787 + owner-req 2026-09-03: `gatekeeper` and `miva1-subdev` moved OUT
+        # of the foreign list (now HIS lane entries). A BARE `gk` (no matching
+        # inventory id) stays refused, as do the other streams/persons.
+        for foreign in ("gk", "montalu-subdev", "montalu3-subdev",
+                        "montalu5-subdev", "miva-subdev", "simap1-subdev",
                         "spinbike-vps", "stepan-forestshop-dev",
                         "admin-forestshop-dev",
                         "david1", "david2", "david3", "david4", "codex-bridge"):
@@ -256,14 +312,33 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
         self.assertNotIn("sshpass", argv)
 
-    def test_marek_allowed_ids_are_exactly_his_six(self):
-        # #787: montalu2-subdev joined the set.
+    def test_gatekeeper_id_execs_ssh_with_dedicated_key_to_gk_group(self):
+        # Owner request 2026-09-03: the gk tab is a remote ssh as `gatekeeper`
+        # over the gk tailscale IP with the dedicated marek key, attaching the
+        # OWNER's `zbynek` gk session group (never a `marek` group, never the
+        # shared password / gatekeeper fleet key).
+        f = self._marek_inv_file()
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                m.patch.object(w.os, "execvp") as ex:
+            w.connect_main(["gatekeeper"])
+        ex.assert_called_once()
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("-i", argv)
+        self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
+        self.assertIn("gatekeeper@" + p.MAREK_GK_HOST, argv)
+        self.assertNotIn("sshpass", argv)
+        self.assertIn("P=zbynek; ", " ".join(argv))  # the gk group, not marek
+
+    def test_marek_allowed_ids_are_exactly_his_eight(self):
+        # #787 + owner-req 2026-09-03: montalu2-subdev, miva1-subdev and
+        # gatekeeper joined the set.
         fleet = _fleet_inventory()
         marek_ids = p.allowed_ids(p.MAREK, fleet)
         self.assertEqual(marek_ids, {"marek-subdev", "montalu2-subdev",
-                                     "montalu4-subdev", "dev1",
-                                     "dev2", "forestshop"})
-        for foreign in ("gatekeeper", "montalu-subdev", "david1",
+                                     "miva1-subdev", "montalu4-subdev", "dev1",
+                                     "dev2", "gatekeeper", "forestshop"})
+        for foreign in ("gk", "montalu-subdev", "david1",
                         "codex-bridge", "stepan-forestshop-dev",
                         "admin-forestshop-dev"):
             self.assertNotIn(foreign, marek_ids)
@@ -408,11 +483,13 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             mk._write_marek_artifacts()
             inv = json.loads((claude / "webterm-marek-inventory.json")
                              .read_text(encoding="utf-8"))
-            # #661 rework + #787: the written connect allowlist is the
-            # six-member set (montalu2-subdev added).
+            # #661 rework + #787 + owner-req 2026-09-03: the written connect
+            # allowlist is the eight-member set (montalu2-subdev, miva1-subdev
+            # and gatekeeper added).
             self.assertEqual([e["id"] for e in inv],
-                             ["marek-subdev", "montalu2-subdev", "montalu4-subdev",
-                              "dev1", "dev2", "forestshop"])
+                             ["marek-subdev", "montalu2-subdev", "miva1-subdev",
+                              "montalu4-subdev", "dev1", "dev2", "gatekeeper",
+                              "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")
             self.assertIn("export WEBTERM_INVENTORY=", launcher)

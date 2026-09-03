@@ -96,15 +96,18 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
     def test_marek_domain_resolves_his_lane_inventory_to_exact_order(self):
         # #661 rework (owner ruling 2026-08-25): marek's set grew from the
         # rejected single member to marek + montalu4 + his dev1/dev2 sessions +
-        # his forestshop VPS. #787 (2026-08-31) added montalu2, mirroring
-        # montalu4. The policy ids are the MAREK LANE inventory ids
-        # (cli_webterm_profiles.marek_inventory — the inventory his gateway
-        # actually renders with human="marek"), NOT the fleet ids: his `dev1`/
-        # `dev2` entries attach HIS `marek` tmux group, never the owner's.
+        # his forestshop VPS. #787 (2026-08-31) added montalu2; an owner
+        # request 2026-09-03 added miva1-subdev + gatekeeper (so marek can SEE
+        # the miva subdev stream and the gk box). The policy ids are the MAREK
+        # LANE inventory ids (cli_webterm_profiles.marek_inventory — the
+        # inventory his gateway actually renders with human="marek"), NOT the
+        # fleet ids: his `dev1`/`dev2` entries attach HIS `marek` tmux group,
+        # never the owner's; his `gatekeeper` entry attaches the OWNER's gk group.
         got = [e["id"] for e in w.entries_for_tab_list(
             profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
-        self.assertEqual(got, ["marek-subdev", "montalu2-subdev",
-                               "montalu4-subdev", "dev1", "dev2", "forestshop"])
+        self.assertEqual(got, ["marek-subdev", "montalu2-subdev", "miva1-subdev",
+                               "montalu4-subdev", "dev1", "dev2", "gatekeeper",
+                               "forestshop"])
         self.assertEqual(w.WEBTERM_DASHBOARD_TABS["marek"], got)
 
     def test_marek_lane_render_alias_order_and_exclusions(self):
@@ -113,7 +116,10 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
             term_grid=(176, 51))
         aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
-        self.assertEqual(aliases, ["marek", "m2", "m4", "dev1", "dev2", "fs"])
+        # owner-req 2026-09-03: miva1-subdev -> "miva" (after m2), gatekeeper ->
+        # "gk" (after dev2), from the SINGLE #592 cli_aliases source.
+        self.assertEqual(aliases,
+                         ["marek", "m2", "miva", "m4", "dev1", "dev2", "gk", "fs"])
         # No third person's personal account on Marek's dashboard (the original
         # #661 sin): stepan@forestshop-dev must never render here.
         self.assertNotIn("stepan", html)
