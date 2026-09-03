@@ -13,9 +13,10 @@ profily. Doména sa mapuje na (session set + auth realm):
     session set = david1..4 (subdev) + codex-bridge (dev2), login ``david``.
   * ``marek`` — subdev (marek účet), VEREJNÝ HTTPS front (marek.newlevel.media,
     Cloudflare). Session set (#661 rework, owner ruling 2026-08-25; #787
-    doplnenie 2026-08-31) = marek lokálny attach + montalu2 + montalu4
-    (loopback ssh) + jeho `marek` tmux sessions na dev1/dev2 + jeho forestshop
-    VPS (admin@forestshop-dev) — ssh entries VŽDY cez dedikovaný
+    doplnenie 2026-08-31; owner request 2026-09-03) = marek lokálny attach +
+    montalu2 + miva1 + montalu4 (loopback ssh) + jeho `marek` tmux sessions na
+    dev1/dev2 + gatekeeper (gk, OBSERVE tab) + jeho forestshop VPS
+    (admin@forestshop-dev) — ssh entries VŽDY cez dedikovaný
     ``WEBTERM_MAREK_IDENTITY`` kľúč, nikdy gatekeeper kľúč, nikdy sshpass vetva.
 
 Bezpečnostné invarianty (celé v tomto leaf + connect allowliste v cli_webterm):
@@ -159,9 +160,10 @@ def david_inventory():
 # marek's gateway runs AS this account on subdev; his own primary session is a
 # LOCAL tmux attach (no ssh, no key). #661 rework: the owner explicitly granted
 # marek FOUR MORE tabs (montalu4, his dev1/dev2 tmux sessions, his forestshop
-# VPS); #787 added a FIFTH (montalu2, mirroring montalu4) — so the lane is no
-# longer "zero ssh capability", its ssh reach is exactly the five entries
-# below, always via the DEDICATED marek key.
+# VPS); #787 added a FIFTH (montalu2, mirroring montalu4); the owner request
+# 2026-09-03 added two OBSERVE tabs (miva1 loopback + gatekeeper tailscale) — so
+# the lane is no longer "zero ssh capability", its ssh reach is exactly the
+# SEVEN ssh entries below, always via the DEDICATED marek key.
 MAREK_GATEWAY_USER = "marek"
 
 # marek's own scoped session id — first member of the owner-defined #661 tab
@@ -170,9 +172,10 @@ MAREK_GATEWAY_USER = "marek"
 MAREK_ID = "marek-subdev"
 
 # Dedicated key for the marek lane's ssh tabs — the WEBTERM_DAVID_IDENTITY
-# shape: authorized ONLY on the targets below (montalu2@subdev + montalu4@subdev
-# over loopback, newlevel@dev1, newlevel@dev2, admin@forestshop-dev — #787 added
-# montalu2 to the original #661 four), NEVER the fleet gatekeeper key
+# shape: authorized ONLY on the targets below (montalu2@subdev + miva1@subdev +
+# montalu4@subdev over loopback, newlevel@dev1, newlevel@dev2, gatekeeper@gk over
+# tailscale, admin@forestshop-dev — #787 added montalu2, the owner request
+# 2026-09-03 added miva1 + gatekeeper), NEVER the fleet gatekeeper key
 # (`~/.secrets/gatekeeper_access_ed25519`, which reaches every stream — a
 # cross-stream escalation). A live #661 probe showed marek@subdev holds NO key
 # for any of these targets, so a codex-bridge-style "mirror existing access" is
@@ -189,6 +192,17 @@ WEBTERM_MAREK_IDENTITY = "~/.secrets/webterm_marek_ed25519"
 # owner's own tabs use with `zbynek`, never a hardcoded session list.
 MAREK_DEV1_HOST = "100.104.8.125"   # dev1 tailscale IP
 MAREK_DEV2_HOST = CODEX_HOST        # dev2 tailscale IP — same box as codex-bridge
+
+# marek's gk OBSERVE tab (owner request 2026-09-03 — "aby videl ... gk"). The
+# gatekeeper box's tailscale IP, DUPLICATED verbatim from cli_fleet.py's
+# `gatekeeper` REMOTE_HOSTS entry (this leaf imports no airuleset module — the
+# CODEX_HOST/MAREK_DEV1_HOST precedent); a drift-lock test
+# (test_webterm_marek.test_gatekeeper_host_matches_the_fleet_host) ties the copy
+# to the ONE fleet source. Like dev1/dev2 it is a tailscale IP with NO #680
+# host-key pin (subdev/tailnet hosts stay =no). The tab attaches the OWNER's gk
+# session group (preferred=OWNER_GROUP "zbynek"), so marek OBSERVES the gk work,
+# never a `marek` group on gk (gatekeeper is an owner-realm, non-stream account).
+MAREK_GK_HOST = "100.90.94.41"      # gatekeeper (gk.newlevel.media) tailscale IP
 
 # marek's forestshop VPS tab (#661 DOPLNENIE — handled like the owner's
 # spinbike `sb` tab). The fleet's ONE forestshop box (cli_fleet.py): the tab
@@ -214,20 +228,31 @@ MAREK_FORESTSHOP_HOST_KEYS = [
 
 def marek_inventory():
     """marek's SCOPED session set (#661 rework, owner ruling 2026-08-25; #787
-    doplnenie 2026-08-31 added montalu2) — SIX entries, in the owner-defined
-    tab order (WEBTERM_DASHBOARD_TABS["marek"]):
+    doplnenie 2026-08-31 added montalu2; owner request 2026-09-03 added
+    miva1 + gatekeeper) — EIGHT entries, in the owner-defined tab order
+    (WEBTERM_DASHBOARD_TABS["marek"]):
 
       1. marek-subdev — his own tmux group, a LOCAL attach (the gateway runs as
          marek; no ssh, no key — unchanged from #612);
       2. montalu2-subdev — his second montalu stream (#787), ssh over loopback
          with the dedicated key — mirrors montalu4-subdev exactly except for
          the account name;
-      3. montalu4-subdev — his montalu stream, ssh over loopback with the
+      3. miva1-subdev — an OBSERVE tab (owner request 2026-09-03): the miva1
+         subdev stream, ssh over loopback with the dedicated key. Mirrors the
+         montalu2/4 loopback shape but is CROSS-TENANT (NO u_tenant): miva1 is
+         a SEPARATE external sub-dev stream (notify routes it to the OWNER,
+         not marek's realm), so marek observes it, never a within-tenant read;
+      4. montalu4-subdev — his montalu stream, ssh over loopback with the
          dedicated key (the david1..4 shape);
-      4./5. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
+      5./6. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
          ssh newlevel@<tailscale IP> with the dedicated key (codex-bridge is
          the cross-box precedent);
-      6. forestshop — his VPS's principal account admin@forestshop-dev with the
+      7. gatekeeper — an OBSERVE tab (owner request 2026-09-03): the gk box,
+         ssh gatekeeper@<gk tailscale IP> with the dedicated key, attaching the
+         OWNER's gk session group (preferred="zbynek"). NO u_tenant (owner-realm
+         account, same as dev1/dev2, #703); no #680 host-key pin (tailscale,
+         like dev1/dev2);
+      8. forestshop — his VPS's principal account admin@forestshop-dev with the
          dedicated key + the #679 strict host-key pin (the owner `sb` shape).
 
     This — and ONLY this — is what marek's ttyd is launched against, so it is
@@ -260,6 +285,22 @@ def marek_inventory():
             # #787: mirrors montalu4-subdev — marek's own montalu stream
             # account, within-tenant.
             "u_tenant": True,
+        },
+        {
+            "id": "miva1-subdev",
+            "label": "miva1@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "miva1",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": "miva1",
+            # owner request 2026-09-03 ("aby videl subdev miva"): an OBSERVE tab.
+            # NO u_tenant — miva1 is a SEPARATE external sub-dev stream (cli_fleet
+            # "5th sub-dev stream", peer to david/simap), notify-routed to the
+            # OWNER `zbynek` (notify/__init__.py "miva1": "zbynek"), NOT marek's
+            # realm; reading its tickets-status would be a CROSS-TENANT read, the
+            # same boundary dev1/dev2 keep by omitting the field.
         },
         {
             "id": "montalu4-subdev",
@@ -297,6 +338,24 @@ def marek_inventory():
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": MAREK_GATEWAY_USER,   # his session group on dev2
             # #703: NO u_tenant — owner account, same as dev1 above.
+        },
+        {
+            "id": "gatekeeper",
+            "label": "gk (gatekeeper@gk)",
+            "kind": "stream",
+            "local": False,
+            "host": MAREK_GK_HOST,
+            "user": "gatekeeper",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            # owner request 2026-09-03 ("aby videl ... gk"): an OBSERVE tab.
+            # preferred = the OWNER fleet inventory's gatekeeper group
+            # (cli_webterm.OWNER_GROUP == "zbynek"; gatekeeper is NOT a stream in
+            # AUTHORITY_BY_USER, so the owner inventory renders it with
+            # OWNER_GROUP) — so marek attaches the OWNER's gk session group, not
+            # a new `marek` group on gk. NO u_tenant — the gatekeeper account is
+            # owner-realm (same cross-tenant reasoning as dev1/dev2, #703); no
+            # #680 host-key pin (tailscale IP, like dev1/dev2).
+            "preferred": "zbynek",
         },
         {
             "id": MAREK_FORESTSHOP_ID,

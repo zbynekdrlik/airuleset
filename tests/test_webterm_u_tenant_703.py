@@ -65,12 +65,20 @@ class TestUTenantSets703(unittest.TestCase):
 
     def test_marek_set_excludes_owner_account_boxes(self):
         # #787: montalu2-subdev joined marek's u_tenant set alongside montalu4.
+        # owner-req 2026-09-03: miva1-subdev + gatekeeper were ADDED as TABS but
+        # are CROSS-TENANT (miva1 = a separate developer's stream, notify-routed
+        # to the OWNER; gatekeeper = an owner-realm account), so NEITHER carries
+        # u_tenant — the set is UNCHANGED at the four within-tenant accounts.
         ids = {e["id"] for e in profiles.u_tenant_entries(profiles.MAREK)}
         self.assertEqual(ids, {profiles.MAREK_ID, "montalu2-subdev",
                                "montalu4-subdev", profiles.MAREK_FORESTSHOP_ID})
         # dev1/dev2 = newlevel@ (the OWNER's account) — cross-tenant.
         self.assertNotIn("dev1", ids)
         self.assertNotIn("dev2", ids)
+        # miva1-subdev = a DIFFERENT developer's stream; gatekeeper = the
+        # owner-realm gk account — both observe-only tabs, never u_tenant.
+        self.assertNotIn("miva1-subdev", ids)
+        self.assertNotIn("gatekeeper", ids)
 
     def test_no_owner_account_entry_is_ever_u_tenant(self):
         # CROSS-TENANT REFUSAL: an inventory entry whose TARGET account is the
