@@ -5212,9 +5212,12 @@ def cmd_compact_request(args):
     boundary compact is still pending (hold) or done (dispatch the next batch).
 
     Prints the disposition word verbatim (`sent` / `expired` / `already-queued` /
-    `cooldown` / `skip:<reason>` — the #855 words are `skip:turn-running` (a
-    running turn refused, never queued) and `skip:recently-compacted` (the 120s
-    anti-double veto); `skip:no-session` covers BOTH a blank session id and a
+    `cooldown` / `already-compacted` / `skip:<reason>` — the #855 words are
+    `skip:turn-running` (a running turn refused, never queued),
+    `skip:recently-compacted` (the 120s anti-double veto), and the #855-recurrence
+    `already-compacted` (a DUPLICATE self-callback record for a boundary already
+    compacted — CONSUMED with no keystroke; via the record's own sync attempt only
+    on the timestamp belt `bts<=delivered`, the transcript signal being sweep-only); `skip:no-session` covers BOTH a blank session id and a
     genuine record-time disk-write failure, since neither can be told apart from
     the caller's side. #855: `deliver_compact` no longer returns `queued` — a
     residual-race queued outcome is treated as a real send → `sent`) so the

@@ -118,11 +118,12 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
             except an EXPIRED request (condition e) or one that is already
-            otherwise handled (already-queued, or in cooldown for a
-            non-drained-boundary origin — a `self-callback` drained boundary
-            supersedes the 30-min cooldown and delivers, #805, but NEVER the
-            #855 120s recently-compacted anti-double veto), which is DISCARDED
-            outright. #855: under an armed `/goal` the boundary-hold turn's
+            otherwise handled (already-queued; `already-compacted` — a #855
+            DUPLICATE `self-callback` record for a boundary already compacted,
+            CONSUMED with NO keystroke; or in cooldown for a non-drained-boundary
+            origin — a `self-callback` drained boundary supersedes the 30-min
+            cooldown and delivers, #805, but NEVER the #855 120s recently-compacted
+            anti-double veto), which is DISCARDED outright. #855: under an armed `/goal` the boundary-hold turn's
             accepted Stop leaves the pane idle for the sweep to type into — the
             `/compact` is typed at that idle poll, never queued (item d).
             "No infinite waiting" is the hard age cap's
@@ -545,13 +546,13 @@ def mark_compact_queued_ts(session, now=None, path=None):
 
 
 def clear_compact_queued_ts(session, path=None):
-    """#855-recurrence: drop `session`'s `compact-queued.json` marker. The
-    QUEUED-DEFENSIVE (treat-as-sent) branch never WRITES this store, so a marker
-    present there is STALE (the recurrence found one left at `18:26:26Z` from the
-    original #855 incident, never cleaned) — clear it on the defensive-sent path so
-    a stale queued marker can never linger and mislead `--status`. Fail-safe; a
-    blank session or a missing entry is a no-op. Returns True iff an entry existed
-    and the pruned map was written."""
+    """#855-recurrence: drop `session`'s `compact-queued.json` marker. Neither the
+    QUEUED-DEFENSIVE (treat-as-sent) branch NOR the ordinary `sent` path WRITES this
+    store, so a marker present at delivery is STALE (the recurrence found one left at
+    `18:26:26Z` from the original #855 incident, never cleaned). Called on EVERY real
+    delivery (both the `sent` path and the defensive branch) so a stale marker does
+    not linger and mislead `--status`. Fail-safe; a blank session or a missing entry
+    is a no-op. Returns True iff an entry existed and the pruned map was written."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -835,7 +836,7 @@ def _compact_boundary_already_compacted(cwd, sid, projects_dir=None):
 
 
 def _compact_duplicate_consume_reason(sid, cwd, delivered_path, request_bts,
-                                      projects_dir=None):
+                                      projects_dir=None, from_sweep=False):
     """#855-recurrence: the reason a delivered boundary CONSUMES this pending
     record as a DUPLICATE, or "" (not a duplicate → deliver normally). A
     `## ✅ Work Complete` boundary produces TWO `self-callback` records (the
@@ -850,11 +851,26 @@ def _compact_duplicate_consume_reason(sid, cwd, delivered_path, request_bts,
       * "bts<=delivered" — the record's ORIGINAL boundary anchor `bts` (un-refreshed
         by the #741 hold-extend, unlike `ts`) is not newer than the last delivered
         ts. The timestamp belt — the lock invariant "after a `sent`, no pending
-        record with recorded_ts <= delivered_ts survives".
+        record with recorded_ts <= delivered_ts survives". Checked on EVERY path
+        (sync attempt + periodic sweep): a duplicate whose boundary predates the
+        delivery is safe to discard regardless of the transcript. (Sub-second note:
+        `bts` is `int(now)` (floor) vs the float `dts`, so a record created up to
+        ~0.999 s AFTER a delivery still reads `bts <= dts` — harmless, since a real
+        NEW boundary cannot produce a `## ✅ Work Complete` sub-second after a typed
+        `/compact`; the belt is only ~1 s wider than "strictly predates".)
       * "compaction-observed" — a compaction is OBSERVED in the transcript newer than
         the newest report (`_compact_boundary_already_compacted`); the LAST-recorded
         request is a duplicate of an already-compacted boundary. Catches the 215 s
-        case where `bts` post-dates the delivery.
+        case where `bts` post-dates the delivery. **Checked ONLY on the periodic
+        SWEEP path (`from_sweep=True`)** — the proactive `compact-request --self`
+        records its request as its LAST tool call BEFORE the report message is
+        written (skills/autopilot/SKILL.md), so on `--self`'s own immediate sync
+        attempt the transcript's newest report is the PREVIOUS cycle's (older than
+        the previous compaction), and this signal would wrongly consume the FRESH
+        record. The periodic sweep runs AFTER the report is written, so by then a
+        genuinely-new boundary's own report is in the transcript (newer than any
+        compaction) → not consumed. The recurrence's spurious 2nd send was itself a
+        sweep, so sweep-only coverage still catches it.
     A genuinely-new boundary (a report NEWER than the last compaction AND `bts` newer
     than the last delivery) matches NEITHER → "" → the ordinary ladder delivers it.
     Fail-safe "" (deliver, never wrongly consume) on any unmeasurable input."""
@@ -865,7 +881,8 @@ def _compact_duplicate_consume_reason(sid, cwd, delivered_path, request_bts,
             and isinstance(dts, (int, float)) and not isinstance(dts, bool)
             and float(request_bts) <= float(dts)):
         return "bts<=delivered"
-    if _compact_boundary_already_compacted(cwd, sid, projects_dir=projects_dir):
+    if from_sweep and _compact_boundary_already_compacted(
+            cwd, sid, projects_dir=projects_dir):
         return "compaction-observed"
     return ""
 
@@ -1303,7 +1320,8 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
 
 def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                     delivered_path=None, now=None, state=None,
-                    request_ts=None, sleep_fn=None, request_bts=None):
+                    request_ts=None, sleep_fn=None, request_bts=None,
+                    from_sweep=False):
     """Evaluate every delivery condition for `sid` ONCE and act. Called
     from BOTH entry points' own immediate synchronous attempt (`--record`/
     `--self`) AND from the periodic sweep (`compact_sweep`) — both thread
@@ -1383,16 +1401,16 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                               % (sid, cwd, origin or "-"))
             return "expired"
 
-    # #855-recurrence — the EARLY duplicate-CONSUME gate (see
-    # `_compact_duplicate_consume_reason` for the full root cause). A delivered
-    # `/compact` CONSUMES every pending record for the SAME already-compacted
-    # boundary: scoped to the sole production origin (`self-callback`), run BEFORE
-    # pane resolution / recent-human so the #411 backstop's duplicate is cleared the
-    # FIRST sweep after CC's compaction is observed — clearing types NOTHING, so it
-    # is safe regardless of recent-human, and it is never held for the 120 s window.
+    # #855-recurrence — the EARLY duplicate-CONSUME gate (full root cause +
+    # sync-vs-sweep split in `_compact_duplicate_consume_reason`). Scoped to the sole
+    # production origin (`self-callback`), run BEFORE pane resolution / recent-human
+    # so the #411 backstop's duplicate is cleared the first sweep after CC's
+    # compaction is observed — clearing types NOTHING, so it is safe regardless of
+    # recent-human and is never held for the 120 s window.
     if origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS:
         _reason = _compact_duplicate_consume_reason(
-            sid, cwd, delivered_path, request_bts, projects_dir)
+            sid, cwd, delivered_path, request_bts, projects_dir,
+            from_sweep=from_sweep)
         if _reason:
             _log_compact_sync("CONSUMED already-compacted sid=%s cwd=%s origin=%s "
                               "(%s)" % (sid, cwd, origin or "-", _reason))
@@ -1597,6 +1615,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # mark_compact_delivery_ts below must never leave a real send unlogged.
     _log_compact_sync("SEND sid=%s cwd=%s origin=%s" % (sid, cwd, origin or "-"))
     mark_compact_delivery_ts(sid, now=now, path=delivered_path)
+    clear_compact_queued_ts(sid)   # #855-recurrence: drop any stale queued marker
     return "sent"
 
 
@@ -1766,7 +1785,7 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
                                projects_dir=projects_dir,
                                delivered_path=delivered_path, now=now,
                                state=state, request_ts=entry.get("ts"),
-                               request_bts=entry.get("bts"))
+                               request_bts=entry.get("bts"), from_sweep=True)
         if word in _COMPACT_TERMINAL_WORDS:
             clear_compact_request(sid, path=requests_path)
         if word == "sent":

@@ -235,6 +235,78 @@ class TestRecurrenceConsumesDuplicate(unittest.TestCase):
         self.assertIn(SID, compact.load_compact_requests(self.reqp),
                       "a genuine new boundary must stay pending (defer), not clear")
 
+    def test_genuine_boundary_past_veto_delivers(self):
+        # Past the 120 s veto, a genuine new boundary (report NEWER than the last
+        # compaction) with an older compaction present must DELIVER — the transcript
+        # gate must not over-consume a real boundary once the floor lifts.
+        proj = self._dir()
+        now = 3_000_000.0
+        _transcript(proj, CWD, SID,
+                    [_compaction(now - 400), _report(now - 40)])
+        compact.mark_compact_delivery_ts(SID, now=now - 200, path=self.delp)
+        compact.record_compact_request(SID, CWD, now=now - 20, path=self.reqp,
+                                       origin="self-callback")
+        run = _StaticRun(CWD, CB_IDLE)
+        logs = compact.compact_sweep(now, run=run, projects_dir=proj,
+                                     requests_path=self.reqp,
+                                     delivered_path=self.delp)
+        self.assertEqual(run.typed(), ["/compact"],
+                         "a genuine boundary past the veto must be delivered")
+        self.assertTrue(any("-> sent" in ln for ln in logs), logs)
+
+
+class TestSelfSyncAttemptSafety(unittest.TestCase):
+    """The transcript "compaction-observed" signal must NOT consume a FRESH record
+    on `--self`'s own mid-turn sync attempt (`from_sweep=False`): production runs
+    `compact-request --self` as the LAST tool call BEFORE the report is written, so
+    at that moment the transcript's newest report is the PREVIOUS cycle's (older than
+    the previous compaction) — consuming it would wrongly clear the genuine record.
+    The timestamp belt (`bts<=delivered`) still runs on the sync path."""
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp, self.queuedp = _isolate(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_sync_attempt_does_not_consume_a_fresh_record(self):
+        proj = self._dir()
+        now = 5_000_000.0
+        # the PREVIOUS cycle's report + its compaction; the CURRENT report is not
+        # written yet (the --self ordering). The prior compact is the last delivery.
+        _transcript(proj, CWD, SID,
+                    [_report(now - 300), _compaction(now - 290)])
+        compact.mark_compact_delivery_ts(SID, now=now - 290, path=self.delp)
+        run = _StaticRun(CWD, CB_BUSY)   # mid-turn — the --self attempt runs busy
+        word = compact.deliver_compact(
+            SID, CWD, origin="self-callback", run=run, projects_dir=proj,
+            delivered_path=self.delp, now=now, request_bts=int(now),
+            from_sweep=False)
+        self.assertNotEqual(word, "already-compacted",
+                            "the fresh --self record must not be consumed mid-turn")
+        self.assertEqual(word, "skip:turn-running")
+
+    def test_sweep_consumes_the_same_state_once_the_report_lands(self):
+        # The COMPLEMENT: on the periodic sweep (from_sweep=True), the boundary's own
+        # report IS in the transcript (newer than any compaction) -> not consumed;
+        # only a genuinely-already-compacted state (report older than compaction) is.
+        proj = self._dir()
+        now = 5_000_000.0
+        _transcript(proj, CWD, SID,
+                    [_report(now - 300), _compaction(now - 290)])
+        self.assertTrue(compact._compact_duplicate_consume_reason(
+            SID, CWD, self.delp, int(now - 250), projects_dir=proj,
+            from_sweep=True) == "compaction-observed")
+        self.assertEqual(compact._compact_duplicate_consume_reason(
+            SID, CWD, self.delp, int(now - 250), projects_dir=proj,
+            from_sweep=False), "",
+            "the same state is NOT consumed on the sync path")
+
 
 class TestLockNoStaleDuplicateSurvives(unittest.TestCase):
     """After a delivery, no pending record whose ORIGINAL boundary `bts` is not
