@@ -10,16 +10,18 @@ marek's per-user constants (the source of truth tests patch) + a `_spec()` facto
 public-API wrappers delegating to that engine.
 
 Session set (#661 rework, owner ruling 2026-08-25 — the original single-local-attach
-set was owner-REJECTED as incomplete; #787 doplnenie 2026-08-31 added montalu2):
-marek's LOCAL tmux group (the gateway runs AS marek on subdev — no ssh, no key,
-unchanged) PLUS five ssh tabs — montalu2@subdev + montalu4@subdev (loopback), his
-`marek` tmux sessions on dev1 + dev2 (newlevel@<tailscale IP>), and his forestshop
-VPS (admin@forestshop-dev, #679 strict host-key pin) — every ssh tab via the
-DEDICATED `profiles.WEBTERM_MAREK_IDENTITY` key (never the fleet gatekeeper key,
-never the sshpass shared-password branch). The connect allowlist is physically this
-six-member set: it can never resolve another stream's id, a david id, or another
-person's account (stepan). The lane dash renders through the owner-defined #661 tab
-policy (`LaneSpec.dashboard_human="marek"` → WEBTERM_DASHBOARD_TABS).
+set was owner-REJECTED as incomplete; #787 doplnenie 2026-08-31 added montalu2; owner
+request 2026-09-03 added miva1 + gatekeeper as OBSERVE tabs): marek's LOCAL tmux group
+(the gateway runs AS marek on subdev — no ssh, no key, unchanged) PLUS seven ssh tabs
+— montalu2@subdev + miva1@subdev + montalu4@subdev (loopback), his `marek` tmux
+sessions on dev1 + dev2 (newlevel@<tailscale IP>), gatekeeper@gk (over the gk tailscale
+IP, attaching the OWNER's gk group), and his forestshop VPS (admin@forestshop-dev, #679
+strict host-key pin) — every ssh tab via the DEDICATED `profiles.WEBTERM_MAREK_IDENTITY`
+key (never the fleet gatekeeper key, never the sshpass shared-password branch). The
+connect allowlist is physically this eight-member set: it can never resolve another
+stream's id, a david id, or another person's account (stepan). The lane dash renders
+through the owner-defined #661 tab policy (`LaneSpec.dashboard_human="marek"` →
+WEBTERM_DASHBOARD_TABS).
 
 PREREQUISITE-GATED so a normal subdev install (as any other account) is a safe
 NO-OP. #663: the gateway + ttyd bind mode-0700 UNIX sockets in marek's
@@ -29,19 +31,24 @@ one-time-PIN) at the edge; the gateway runs `--trust-access-header` (no
 password/credential), exactly like the david lane.
 
 SECURITY NOTE — the boundary this lane DOES and does NOT provide (honest, #612 R1
-review; reachability widened by the #661 rework and #787). The PUBLIC Access-gated
-path reaches ONLY marek's scoped six-member set — the connect allowlist is physically
-`{marek-subdev, montalu2-subdev, montalu4-subdev, dev1, dev2, forestshop}` (his own
-owner-granted targets, ssh only via the dedicated marek key), so a marek WEB LOGIN
-can never drive another stream's, david's, or stepan's id, and
+review; reachability widened by the #661 rework, #787, and the 2026-09-03 OBSERVE
+tabs). The PUBLIC Access-gated path reaches ONLY marek's scoped eight-member set — the
+connect allowlist is physically `{marek-subdev, montalu2-subdev, miva1-subdev,
+montalu4-subdev, dev1, dev2, gatekeeper, forestshop}` (his own owner-granted targets,
+ssh only via the dedicated marek key), so a marek WEB LOGIN can never drive another
+stream's, david's, or stepan's id, and
 marek's Access realm/tunnel are separate from every other developer's. HONEST
-TRANSITIVE-REACH consequence (#661 review 🟡): the dev1/dev2 entries ssh as
-`newlevel` — the OWNER's maintainer account, whose home holds the fleet keys — so
-once the marek pubkey is authorized there, an interactive dev1/dev2 tab is an
-owner-account shell from which every stream is transitively reachable. That grant
-is the owner's explicit ruling ("marek-ové tmux sessions na dev1/dev2"), NEW trust
-(unlike codex-bridge's mirror-of-existing), and the reason _MAREK_GO_LIVE step 5
-RECOMMENDS a forced-command `restrict` authorized_keys entry as the default shape. The
+TRANSITIVE-REACH consequence (#661 review 🟡; extended by the 2026-09-03 gatekeeper
+OBSERVE tab): the dev1/dev2 entries ssh as `newlevel` — the OWNER's maintainer
+account, whose home holds the fleet keys — and the gatekeeper entry ssh as
+`gatekeeper`, the prod merge/deploy account whose home holds the fleet
+`gatekeeper_access` operator key — so once the marek pubkey is authorized there, an
+interactive dev1/dev2/gatekeeper tab is an owner-realm shell from which every stream
+is transitively reachable. Those grants are the owner's explicit rulings ("marek-ové
+tmux sessions na dev1/dev2", "aby videl ... gk"), NEW trust (unlike codex-bridge's
+mirror-of-existing), and the reason _MAREK_GO_LIVE step 5 RECOMMENDS a forced-command
+`restrict,pty,command="tmux ..."` authorized_keys entry as the default shape on
+dev1/dev2 AND gatekeeper (`restrict` alone kills the PTY — keep `pty`). The
 multi-tenant LOOPBACK floor is CLOSED (#663): the gateway + ttyd bind mode-0700 UNIX
 sockets in marek's runtime dir, so a peer subdev account can no longer reach marek's
 gateway/ttyd (or, from marek, another lane's). The only remaining stdlib residual
@@ -120,15 +127,17 @@ _MAREK_GO_LIVE = (
     "       OTP app fronts marek.newlevel.media — set WEBTERM_ACCESS_APPS['marek']\n"
     "       allow-list and run `airuleset.py webterm-access --apply`. No credential\n"
     "       is delivered.\n"
-    "    5. #661/#787 ssh tabs: deploy the dedicated key %s\n"
+    "    5. #661/#787/2026-09-03 ssh tabs: deploy the dedicated key %s\n"
     "       (private key on subdev as marek; pubkey in authorized_keys of\n"
-    "       montalu2@subdev, montalu4@subdev, newlevel@dev1, newlevel@dev2,\n"
-    "       admin@forestshop-dev). RECOMMENDED DEFAULT (#661 review): a\n"
-    "       forced-command entry — restrict,command=\"tmux ...\" — especially\n"
-    "       on newlevel@dev1/dev2 (the OWNER account: an unrestricted key\n"
-    "       there is a full owner shell with transitive fleet reach). Until\n"
-    "       the key lands the montalu2/montalu4/dev1/dev2/forestshop tabs\n"
-    "       fail visibly; marek@subdev keeps working.\n"
+    "       montalu2@subdev, miva1@subdev, montalu4@subdev, newlevel@dev1,\n"
+    "       newlevel@dev2, gatekeeper@gk, admin@forestshop-dev). RECOMMENDED\n"
+    "       DEFAULT (#661 review): a forced-command entry —\n"
+    "       restrict,pty,command=\"tmux ...\" (keep `pty`; `restrict` alone\n"
+    "       kills the PTY) — especially on newlevel@dev1/dev2 AND gatekeeper@gk\n"
+    "       (OWNER-REALM accounts: an unrestricted key there is a full shell\n"
+    "       with transitive fleet reach). Until the key lands the montalu2/\n"
+    "       miva1/montalu4/dev1/dev2/gatekeeper/forestshop tabs fail visibly;\n"
+    "       marek@subdev keeps working.\n"
     % (WEBTERM_MAREK_TUNNEL_UUID, WEBTERM_MAREK_TUNNEL_UUID,
        profiles.WEBTERM_MAREK_IDENTITY))
 
@@ -178,12 +187,14 @@ def _spec():
             name_upper="MAREK", name_lower="marek", account_suffix=" (marek account)",
             runtime_owner="marek's", tunnel_adjective="a SEPARATE",
             hostname=WEBTERM_MAREK_TUNNEL_HOSTNAME,
-            scoped_inventory="Scoped inventory (#661 rework, #787 added montalu2): the\n"
+            scoped_inventory="Scoped inventory (#661 rework, #787 added montalu2,\n"
+                             "# 2026-09-03 added miva1 + gatekeeper OBSERVE tabs): the\n"
                              "# LOCAL marek tmux session + montalu2@subdev +\n"
-                             "# montalu4@subdev + marek's dev1/dev2 sessions +\n"
-                             "# admin@forestshop-dev — ssh ONLY via the dedicated\n"
-                             "# webterm_marek key (never the fleet gatekeeper key,\n"
-                             "# never a david account, never stepan's)."),
+                             "# miva1@subdev + montalu4@subdev + marek's dev1/dev2\n"
+                             "# sessions + gatekeeper@gk + admin@forestshop-dev — ssh\n"
+                             "# ONLY via the dedicated webterm_marek key (never the\n"
+                             "# fleet gatekeeper key, never a david account, never\n"
+                             "# stepan's)."),
         go_live=_MAREK_GO_LIVE,
         label="(subdev marek)",
         log_prefix="webterm(marek)",
@@ -191,8 +202,8 @@ def _spec():
         # tab is a keyless LOCAL attach, and gating provisioning on the NEW
         # WEBTERM_MAREK_IDENTITY would no-op re-renders of the LIVE lane until
         # the key is provisioned (a #684 parity regression). The ssh tabs
-        # (montalu2/montalu4/dev1/dev2/forestshop) degrade to a VISIBLE ssh
-        # failure until the key + authorized_keys land (owner-action,
+        # (montalu2/miva1/montalu4/dev1/dev2/gatekeeper/forestshop) degrade to a
+        # VISIBLE ssh failure until the key + authorized_keys land (owner-action,
         # _MAREK_GO_LIVE step 5).
         identity_key=None,
         retire_credential_path=None,
