@@ -1005,8 +1005,9 @@ def _mk_runner_root(root, cur="2.337.0", old="2.336.0"):
     plus a superseded `old` version dir for each. Returns the root Path."""
     rd = root / "actions-runner"
     rd.mkdir(parents=True)
+    vers = [cur] + ([old] if old else [])
     for name in ("bin", "externals"):
-        for ver in (cur, old):
+        for ver in vers:
             d = rd / ("%s.%s" % (name, ver))
             d.mkdir()
             (d / "f").write_bytes(b"x" * 100)
@@ -1037,16 +1038,26 @@ def test_runner_superseded_selects_old_versions_never_symlink_target(tmp_path):
         runner_root=str(tmp_path / "absent"), proc_exes_fn=lambda: []) == []
 
 
-def test_runner_superseded_keeps_version_a_live_listener_still_holds(tmp_path):
-    # transition window: symlink already points to 2.337.0 but the running
-    # Listener still executes the OLD 2.336.0 inode -> keep BOTH (never delete
-    # the version the live process is executing).
+def test_runner_superseded_keeps_staged_newer_version(tmp_path):
+    # 🔴1 the REAL self-update window (the "symlink-new / listener-old" window the
+    # old test modelled never actually occurs — update.sh swaps the symlink only
+    # AFTER the Listener exits, then relaunches on the new symlink). What DOES
+    # happen: the SelfUpdater unpacks bin.2.338.0 / externals.2.338.0 while
+    # bin/externals still point at 2.337.0 and no Worker runs. Those STAGED newer
+    # dirs (>= current) are what update.sh is about to switch to → keep them.
     root = tmp_path / "gh-runner"
-    rd = _mk_runner_root(root)
-    listener = str(rd / "bin.2.336.0" / "Runner.Listener")
+    rd = _mk_runner_root(root, cur="2.337.0", old=None)      # only the current pair
+    for name in ("bin", "externals"):
+        d = rd / ("%s.2.338.0" % name)
+        d.mkdir()
+        (d / "f").write_bytes(b"x" * 100)
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
     rows = dg.discover_superseded_runner_versions(
         runner_root=str(root), proc_exes_fn=lambda: [listener])
     assert rows and all(r["kind"] == "skip" for r in rows)
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["bin.2.338.0"]["kind"] == "skip"
+    assert "staged" in (by["bin.2.338.0"]["reason"] or "").lower()
 
 
 def test_runner_superseded_failsafe_keep_when_unresolved(tmp_path):
@@ -1105,3 +1116,165 @@ def test_runner_superseded_scopes_worker_to_its_own_root(tmp_path):
 def test_runner_superseded_in_the_fence_and_sudo_class():
     assert "runner-superseded" in dg.RECLAIMABLE_CLASSES
     assert "runner-superseded" in dg.SUDO_CLASSES     # gh-runner home is a foreign user
+
+
+def test_runner_superseded_skips_root_during_self_update(tmp_path):
+    # 🔴1 a `_work/_update` staging dir (or a live update.sh scoped to this root)
+    # means a self-update is mid-flight → skip the WHOLE root, never race the swap.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)                               # cur 2.337.0 + old 2.336.0
+    (rd / "_work" / "_update").mkdir()
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+    assert any("self-update" in (r.get("reason") or "").lower() for r in rows)
+    # 🔵10 the whole-root skip carries the summed candidate bytes (not a bare 0)
+    assert any(r["bytes"] > 0 for r in rows)
+
+    # a live update.sh scoped under a DIFFERENT root (no _work/_update marker) also skips
+    rootb = _mk_runner_root(tmp_path / "b")
+    line = "12345 /bin/bash %s/bin.2.337.0/update.sh" % str(rootb)
+    rows_b = dg.discover_superseded_runner_versions(
+        runner_root=str(tmp_path / "b"),
+        proc_exes_fn=lambda: [str(rootb / "bin.2.337.0" / "Runner.Listener")],
+        update_argv_fn=lambda: [line])
+    assert rows_b and all(r["kind"] == "skip" for r in rows_b)
+
+
+def test_default_runner_proc_exes_failsafe_on_unresolvable_exe(monkeypatch):
+    # 🔴2 a pgrep'd runner pid whose exe can't be resolved (no NOPASSWD sudo /
+    # hidepid / a `(deleted)` exe) makes the WHOLE scan fail safe to the sentinel,
+    # never silently drops the pid to an empty list (which would let the rung
+    # delete a live version).
+    monkeypatch.setattr(dg.os, "readlink",
+                        lambda p: (_ for _ in ()).throw(OSError("EACCES")))
+
+    def _pg(pat):
+        return "424242" if pat == dg.RUNNER_LISTENER_BASENAME else ""
+
+    class _R:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    # sudo readlink fails (rc != 0) → sentinel
+    exes = dg._default_runner_proc_exes(pgrep_fn=_pg, run_fn=lambda *a, **k: _R(1, ""))
+    assert exes == [dg.PROC_ERROR_SENTINEL]
+
+    # exe resolves to a NON-runner basename (a `... (deleted)` exe) → sentinel
+    exes2 = dg._default_runner_proc_exes(
+        pgrep_fn=_pg,
+        run_fn=lambda *a, **k: _R(0, "/x/bin.2.337.0/Runner.Listener (deleted)\n"))
+    assert exes2 == [dg.PROC_ERROR_SENTINEL]
+
+    # pgrep error → sentinel
+    assert dg._default_runner_proc_exes(pgrep_fn=lambda pat: "PGREP-ERROR") == [dg.PROC_ERROR_SENTINEL]
+
+    # happy path: a resolvable Runner.Listener exe is returned
+    exes4 = dg._default_runner_proc_exes(
+        pgrep_fn=_pg, run_fn=lambda *a, **k: _R(0, "/x/bin.2.337.0/Runner.Listener\n"))
+    assert exes4 == ["/x/bin.2.337.0/Runner.Listener"]
+
+
+def test_runner_superseded_ignores_non_version_suffixes(tmp_path):
+    # 🟡3 bin.bak / externals.old / bin.2.336.0.bak are NOT version dirs → never
+    # delete candidates; the real superseded 2.336.0 still is.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    for junk in ("bin.bak", "externals.old", "bin.2.336.0.bak"):
+        (rd / junk).mkdir()
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener])
+    names = {os.path.basename(r["path"]) for r in rows if r.get("path")}
+    assert not (names & {"bin.bak", "externals.old", "bin.2.336.0.bak"})
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["bin.2.336.0"]["kind"] == "delete"
+
+
+def test_runner_superseded_realpath_scopes_symlinked_root(tmp_path):
+    # 🟡4 /proc exe paths are realpath-resolved; the root-scope prefix must accept
+    # the realpath too, or a live Runner.Worker under a SYMLINKED root is never
+    # matched → the self-update gate is bypassed and superseded dirs deleted while
+    # a job runs.
+    real = tmp_path / "real"
+    rd = _mk_runner_root(real)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    worker_real = os.path.realpath(str(rd / "bin.2.337.0" / "Runner.Worker"))
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(link), proc_exes_fn=lambda: [worker_real])
+    assert rows and all(r["kind"] == "skip" for r in rows)   # worker gates the root
+
+
+def test_runner_superseded_dangling_symlink_keeps_all(tmp_path):
+    # 🟡5 a bin/externals symlink pointing at a non-existent target (mid-swap)
+    # cannot prove the current version → KEEP the whole root.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    (rd / "bin").unlink()
+    (rd / "bin").symlink_to(rd / "bin.9.9.9")               # dangling
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+
+
+def test_runner_superseded_real_bin_dir_keeps_all(tmp_path):
+    # 🟡7 a fresh tarball extracted `bin` as a REAL directory (not a symlink) →
+    # cannot resolve the current version → KEEP the whole root (fail-safe).
+    root = tmp_path / "gh-runner"
+    rd = root / "actions-runner"
+    rd.mkdir(parents=True)
+    (rd / "bin").mkdir()                                    # real dir, NOT a symlink
+    (rd / "externals.2.337.0").mkdir()
+    (rd / "externals.2.336.0").mkdir()
+    (rd / "externals").symlink_to(rd / "externals.2.337.0")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+
+
+def test_plan_superseded_maps_delete_and_skip_via_norm_action(tmp_path, monkeypatch):
+    # 🟡7 the ladder wrapper _plan_superseded_runner_versions must map discovery
+    # rows through _norm_action end-to-end (a candidate → delete with bytes > 0;
+    # a kept row → skip).
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    real = dg.discover_superseded_runner_versions
+    monkeypatch.setattr(dg, "discover_superseded_runner_versions",
+                        lambda **k: real(runner_root=str(root), proc_exes_fn=lambda: [listener]))
+    actions = dg._plan_superseded_runner_versions(str(tmp_path), 0)
+    by = {os.path.basename(a["path"]): a for a in actions if a.get("path") not in (None, "-")}
+    assert by["bin.2.336.0"]["kind"] == "delete"
+    assert by["bin.2.336.0"]["bytes"] > 0                   # 🟡7 delete row carries real bytes
+    assert by["bin.2.336.0"]["cls"] == "runner-superseded"
+    assert by["bin.2.337.0"]["kind"] == "skip"
+
+
+def test_runner_superseded_reverify_refuses_now_current_version(tmp_path):
+    # 🟡6 between plan and act a self-update may move the symlink onto the dir we
+    # planned to reclaim — _perform_action re-resolves and REFUSES, never reaching
+    # the rm seam; a genuinely superseded dir still proceeds (non-tautology).
+    rd = _mk_runner_root(tmp_path / "r")                    # bin -> bin.2.337.0
+    calls = []
+
+    def rec(*a, **k):
+        calls.append(a[0])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    act_cur = {"cls": "runner-superseded", "kind": "delete",
+               "path": str(rd / "bin.2.337.0"), "bytes": 100}
+    raised = False
+    try:
+        dg._perform_action(act_cur, sudo_ok=False, run_fn=rec)
+    except OSError:
+        raised = True
+    assert raised and calls == []                           # rm seam never reached
+
+    act_old = {"cls": "runner-superseded", "kind": "delete",
+               "path": str(rd / "bin.2.336.0"), "bytes": 100}
+    dg._perform_action(act_old, sudo_ok=False, run_fn=rec)
+    assert any("bin.2.336.0" in " ".join(c) for c in calls)
