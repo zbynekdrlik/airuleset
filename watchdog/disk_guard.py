@@ -93,13 +93,18 @@ RECLAIMABLE_CLASSES = frozenset({
     # #854 cache-class additions:
     "apt-cache", "rotated-log", "runner-update", "docker-image",
     "runner-checkout", "user-cache", "claude-version", "oneoff-venv",
+    # #862 — superseded gh-runner bin.<ver>/externals.<ver> version dirs:
+    "runner-superseded",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
 # NOPASSWD sudo is available (gk `gatekeeper`, dev1/dev2 `newlevel` all have it),
 # else the unprivileged attempt (fail-safe, no retry). docker (docker-group) and
 # own-home classes never need sudo, so are deliberately ABSENT here.
-SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-checkout"})
+SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-checkout",
+                          # #862 — gh-runner home is a FOREIGN user; the delete of a
+                          # superseded version dir goes through `sudo -n rm`.
+                          "runner-superseded"})
 
 DISK_GUARD_DIRNAME = "disk-guard"
 STATUS_CACHE_NAME = "status.json"
@@ -123,6 +128,13 @@ RUNNER_WORK_RESERVED = frozenset({          # `_work/*` entries that are NOT rep
 })
 RUNNER_CHECKOUT_MIN_AGE_DAYS = 7
 RUNNER_WORKER_PROC_RE = "Runner.Worker"     # a live CI job — gates docker + checkout rungs
+# #862 — the superseded-version rung: exe basenames of the two runner processes,
+# and the `bin.<ver>`/`externals.<ver>` version segment parsed from an exe path.
+RUNNER_LISTENER_BASENAME = "Runner.Listener"
+RUNNER_WORKER_BASENAME = "Runner.Worker"
+RUNNER_VERSION_PREFIXES = ("bin", "externals")
+_RUNNER_VER_SEG_RE = _re.compile(r"/(?:bin|externals)\.([0-9][^/]*)/")
+PROC_ERROR_SENTINEL = "PROC-ERROR"          # fail-safe: unknown proc state → treat as live
 DOCKER_UNUSED_MIN_AGE_DAYS = 14
 USER_CACHE_MIN_AGE_DAYS = 30
 CLAUDE_VERSIONS_DIR = ".local/share/claude/versions"   # under $HOME; self-update binaries
@@ -560,6 +572,187 @@ def discover_stale_runner_checkouts(runner_root=GH_RUNNER_HOME, now=None,
     except OSError as e:
         return [{"cls": "runner-checkout", "path": None,
                  "reason": "could not walk %s: %s" % (runner_root, e)}]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# #862 — runner-superseded: `bin.<ver>`/`externals.<ver>` version dirs a gh-runner
+# self-update left behind. Each install keeps the CURRENT version (the `bin`/
+# `externals` symlink target) beside the superseded one (~600 MB each); no rung
+# reclaimed them, so a 95 % gk drain freed 0 B. Delete the superseded dirs, NEVER
+# the symlink target nor the version a live `Runner.Listener` is executing (it may
+# still hold the OLD inode mid-transition), and skip the whole root while a
+# `Runner.Worker` of that root is live (a self-update runs through `_work/_update`).
+# --------------------------------------------------------------------------- #
+def _runner_version_from_basename(basename, prefix):
+    """`bin.2.337.0` with prefix `bin` → `2.337.0`; None when `basename` is the
+    bare `prefix` (the symlink) or does not carry a `<prefix>.<ver>` shape."""
+    marker = prefix + "."
+    if basename == prefix or not basename.startswith(marker):
+        return None
+    return basename[len(marker):]
+
+
+def _resolve_symlink_version(link, prefix):
+    """The `<ver>` a `<root>/bin` or `<root>/externals` SYMLINK resolves to (its
+    real target's basename), or None when the path is not a symlink or is
+    unreadable — the None caller treats as a fail-safe KEEP-everything signal."""
+    try:
+        if not link.is_symlink():
+            return None
+        target = os.path.basename(os.path.realpath(str(link)))
+    except OSError as e:
+        _dbg("runner-superseded symlink realpath failed: %r" % e)
+        return None
+    return _runner_version_from_basename(target, prefix)
+
+
+def _runner_version_from_exe_path(exe_path):
+    """The runner `<ver>` embedded in a resolved exe path (`.../bin.2.336.0/
+    Runner.Listener` → `2.336.0`), or None when the path carries no versioned
+    segment (e.g. launched through the bare `bin` symlink)."""
+    m = _RUNNER_VER_SEG_RE.search(exe_path or "")
+    return m.group(1) if m else None
+
+
+def _readlink_proc_exe(pid, run_fn=None):
+    """Resolve `/proc/<pid>/exe` (which resolves the `bin` symlink to the REAL
+    versioned dir the process is executing). Owner/root-only, so a same-user
+    readlink is tried first, then `sudo -n readlink` (gk `gatekeeper` / dev
+    `newlevel` have NOPASSWD sudo) for a cross-user gh-runner process. None on
+    total failure."""
+    try:
+        return os.readlink("/proc/%s/exe" % pid)
+    except OSError as e:
+        # EXPECTED for a foreign-user process (readlink of another user's
+        # /proc/<pid>/exe is owner/root-only) — fall through to `sudo readlink`.
+        _dbg("runner-superseded readlink /proc/%s/exe unprivileged failed: %r" % (pid, e))
+    run_fn = run_fn or subprocess.run
+    try:
+        r = run_fn(["sudo", "-n", "readlink", "-f", "/proc/%s/exe" % pid],
+                   capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "").strip()
+        return out or None
+    except Exception as e:
+        _dbg("runner-superseded sudo readlink failed for pid %s: %r" % (pid, e))
+        return None
+
+
+def _default_runner_proc_exes(pgrep_fn=None, run_fn=None):
+    """Resolved exe paths of every live `Runner.Listener`/`Runner.Worker`
+    process. `pgrep -f` finds the PIDs cross-user (cmdline is world-readable at
+    hidepid=0); `/proc/<pid>/exe` gives the real versioned dir the process runs.
+    Any pgrep error → the sentinel list `[PROC_ERROR_SENTINEL]` so an unknown
+    state fails safe (treated as live → KEEP)."""
+    pgrep_fn = pgrep_fn or _default_pgrep_any
+    pids = set()
+    for pat in (RUNNER_LISTENER_BASENAME, RUNNER_WORKER_BASENAME):
+        try:
+            txt = pgrep_fn(pat)
+        except Exception as e:
+            _dbg("runner-superseded pgrep failed: %r" % e)
+            return [PROC_ERROR_SENTINEL]
+        if txt == "PGREP-ERROR":
+            return [PROC_ERROR_SENTINEL]
+        for tok in (txt or "").split():
+            if tok.strip().isdigit():
+                pids.add(tok.strip())
+    exes = []
+    for pid in pids:
+        exe = _readlink_proc_exe(pid, run_fn)
+        if exe:
+            exes.append(exe)
+    return exes
+
+
+def _plan_superseded_for_root(rd, exes, dir_stats_fn=None):
+    """Rows for ONE `actions-runner*` root. KEEP = the two symlink target
+    versions + any live-Listener running version of this root; everything else
+    (`bin.<ver>`/`externals.<ver>` real dirs) is a delete candidate. Fail-safe
+    KEEP-everything (a single skip row) on any uncertainty."""
+    root_str = str(rd)
+    prefix = root_str.rstrip("/") + "/"     # trailing slash → no actions-runner vs -2 collision
+
+    def _under_root(exe, basename):
+        return exe.startswith(prefix) and os.path.basename(exe) == basename
+
+    # (1) a live Runner.Worker of this root (or a failed proc scan) → skip whole root
+    if PROC_ERROR_SENTINEL in exes or any(_under_root(e, RUNNER_WORKER_BASENAME) for e in exes):
+        return [{"cls": "runner-superseded", "path": root_str, "bytes": 0, "kind": "skip",
+                 "reason": "Runner.Worker live (or proc scan failed) for this root — "
+                           "self-update may be in flight, kept (fail-safe)"}]
+
+    # (2) resolve the current versions from the bin/externals symlinks
+    keep = set()
+    for prefix_name in RUNNER_VERSION_PREFIXES:
+        ver = _resolve_symlink_version(rd / prefix_name, prefix_name)
+        if ver is None:
+            return [{"cls": "runner-superseded", "path": root_str, "bytes": 0, "kind": "skip",
+                     "reason": "%s symlink missing/unreadable — kept (fail-safe)" % prefix_name}]
+        keep.add(ver)
+
+    # (3) protect the version a live Listener of this root is actually executing
+    for e in exes:
+        if not _under_root(e, RUNNER_LISTENER_BASENAME):
+            continue
+        lver = _runner_version_from_exe_path(e)
+        if lver is None:
+            return [{"cls": "runner-superseded", "path": root_str, "bytes": 0, "kind": "skip",
+                     "reason": "Runner.Listener live but its version is unresolvable — "
+                               "kept (fail-safe)"}]
+        keep.add(lver)
+
+    # (4) select superseded version dirs (real dirs only; never the bare symlink)
+    out = []
+    for prefix_name in RUNNER_VERSION_PREFIXES:
+        try:
+            entries = sorted(rd.glob(prefix_name + ".*"))
+        except OSError as e:
+            out.append({"cls": "runner-superseded", "path": None,
+                        "reason": "could not glob %s.* in %s: %s" % (prefix_name, root_str, e)})
+            continue
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            ver = _runner_version_from_basename(entry.name, prefix_name)
+            if ver is None:
+                continue
+            if ver in keep:
+                out.append({"cls": "runner-superseded", "path": str(entry), "bytes": 0,
+                            "kind": "skip", "reason": "current/live version %s — kept" % ver})
+            else:
+                out.append({"cls": "runner-superseded", "path": str(entry),
+                            "bytes": _safe_dir_size(str(entry), dir_stats_fn),
+                            "kind": "delete", "reason": None})
+    return out
+
+
+def discover_superseded_runner_versions(runner_root=GH_RUNNER_HOME,
+                                        proc_exes_fn=None, dir_stats_fn=None):
+    """Superseded `bin.<ver>`/`externals.<ver>` dirs under each
+    `<runner_root>/actions-runner*` install (same discovery as `runner-update`,
+    no hardcoded names). `proc_exes_fn` returns the resolved exe paths of live
+    Runner.Listener/Runner.Worker processes (default: `_default_runner_proc_exes`;
+    the sentinel `PROC_ERROR_SENTINEL` in its list means the scan failed → every
+    root fail-safe KEEPs). Rows delete/skip; see `_plan_superseded_for_root`."""
+    root = Path(runner_root)
+    if not root.is_dir():
+        return []
+    proc_exes_fn = proc_exes_fn or _default_runner_proc_exes
+    try:
+        exes = list(proc_exes_fn() or [])
+    except Exception as e:
+        _dbg("runner-superseded proc_exes_fn failed: %r" % e)
+        exes = [PROC_ERROR_SENTINEL]
+    try:
+        runner_dirs = sorted(root.glob("actions-runner*"))
+    except OSError as e:
+        return [{"cls": "runner-superseded", "path": None,
+                 "reason": "could not walk %s: %s" % (runner_root, e)}]
+    out = []
+    for rd in runner_dirs:
+        if rd.is_dir():
+            out.extend(_plan_superseded_for_root(rd, exes, dir_stats_fn))
     return out
 
 
@@ -1001,6 +1194,11 @@ def _plan_runner_checkouts(home, now):
             for r in discover_stale_runner_checkouts(now=now)]
 
 
+def _plan_superseded_runner_versions(home, now):
+    return [_norm_action("runner-superseded", r, "delete")
+            for r in discover_superseded_runner_versions()]
+
+
 def _plan_docker(home, now):
     return [_norm_action("docker-image", r, "docker-rmi")
             for r in discover_docker_images(now=now)]
@@ -1032,6 +1230,7 @@ def _default_planners(home, now):
         ("apt-cache", lambda: _plan_apt_cache(home, now)),
         ("rotated-log", lambda: _plan_rotated_logs(home, now)),
         ("runner-update", lambda: _plan_runner_update(home, now)),
+        ("runner-superseded", lambda: _plan_superseded_runner_versions(home, now)),
         ("claude-version", lambda: _plan_claude_versions(home, now)),
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now)),
