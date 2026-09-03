@@ -21,6 +21,7 @@ Two independent causes:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -227,9 +228,15 @@ class TestHistoryAllusionBlocked(TestCase):
     # testcase, so a killed prior run's leftover can never collide with a fresh
     # run's and skew the gate's retry-budget dedup.
     def _run_gate(self, msg, sid):
+        # #740 review 🟡1: ISOLATE $HOME so the gate's new exit-2 repeat-block
+        # path writes its `repeat-asked-question` line into a throwaway
+        # ~/.claude/notify-delivery.log, never the developer's real one.
+        home = tempfile.mkdtemp(prefix="airuleset-qqhome-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(GATE)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True,
+                              env={**os.environ, "HOME": home})
 
     def test_allusion_to_an_old_question_is_hard_blocked(self):
         sid = new_hook_sid(self, "test-qq-reference", ["*test-qq-reference-*"])
@@ -244,37 +251,45 @@ class TestHistoryAllusionBlocked(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('"block"', r.stdout, r.stdout)
 
-    def test_verbatim_repeat_of_the_same_blocked_question_still_passes(self):
-        # REFERENCE_MSG normally HARD-BLOCKS (the Check-5 allusion detector,
-        # proven by test_allusion_to_an_old_question_is_hard_blocked). When it
-        # is a byte-identical VERBATIM repeat of the already-delivered
-        # question, the bypass must short-circuit BEFORE Check 5 and let it
-        # pass. Running the gate on a would-BLOCK message is what makes this
-        # test non-tautological: it can pass ONLY via the bypass, so a
-        # deleted/broken bypass makes it FAIL (sabotage-verified, #758).
+    def test_bare_marker_verbatim_repoke_still_passes(self):
+        # The ONE allowed re-emission of an already-delivered, still-unanswered
+        # question (#740): a BARE `❓ NEEDS YOU: <keyline>` line — no briefing,
+        # no `**Otázka — projekt` block, no `⏳`/`✅` marker — matching LASTQF
+        # short-circuits BEFORE Check 5 and passes (exit 0), because /goal
+        # stop-condition (A) needs the marker as the turn's last line to hold a
+        # genuinely blocked loop. Non-tautological: a bare marker line has NO
+        # other way to clear the shape checks, so a deleted/broken bypass makes
+        # it FAIL (sabotage-verified, #758).
         #
-        # The dedup key notify-discord-pending.sh writes, and the gate's
-        # KEYLINE re-derives (strip_md), is the marker line with its label
-        # prefix STRIPPED — NEEDS YOU:/Question:/DONE: at the KEYLINE step
-        # (hook line 127), while an ❓ ASKED: body-marker is stripped one step
-        # earlier when MARKER_RAW is extracted (hook line 105). For this
-        # NEEDS YOU fixture the key is the decision text alone. Seeding the RAW
-        # label-prefixed line ("NEEDS YOU: …") never equals KEYLINE, so the
-        # bypass never fires and the "pass" was a tautology — the exact defect
-        # this test had (#758: it stayed green even with the bypass deleted,
-        # because FULL_REASK_MSG independently cleared the ordinary shape
-        # checks). Derive the seed FROM REFERENCE_MSG's marker line by dropping
-        # the NEEDS YOU: prefix, so it always equals the KEYLINE the gate
-        # computes and stays in sync with the fixture text (the split is safe
-        # only while the fixture keeps a plain, unbolded NEEDS YOU: marker).
+        # The dedup key notify-discord-pending.sh writes and the gate's KEYLINE
+        # re-derives (strip_md) is the marker line with its label prefix
+        # STRIPPED, so seed LASTQF with the decision text alone (deriving it
+        # from REFERENCE_MSG keeps it in sync with the fixture).
         sid = new_hook_sid(self, "test-qq-verbatim", ["*test-qq-verbatim-*"])
         marker = REFERENCE_MSG.strip().splitlines()[-1]      # "❓ NEEDS YOU: …?"
         keyline = marker.split("NEEDS YOU:", 1)[1].strip()   # strip_md dedup key
         with open("/tmp/claude-discord-lastq-" + sid, "w") as f:
             f.write(keyline)
-        r = self._run_gate(REFERENCE_MSG, sid)
+        r = self._run_gate("❓ NEEDS YOU: " + keyline, sid)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('"block"', r.stdout, r.stdout)
+
+    def test_full_block_verbatim_repeat_is_now_blocked(self):
+        # #740 RECIDÍVA (miva1, 2026-09-03): re-emitting the FULL question
+        # BLOCK (or the `❓ ASKED` line, or the marker alongside `⏳`/`✅`) of an
+        # already-delivered question — even byte-identical — is now BLOCKED
+        # (exit 2), because the footer `U N` + `needs-answer` carry it and
+        # re-typing it every wake is pure noise. Only the bare marker line
+        # above is allowed. REFERENCE_MSG carries the `**Otázka — projekt`
+        # briefing head, so it is a full-block repeat -> exit 2 + stderr.
+        sid = new_hook_sid(self, "test-qq-verbatim", ["*test-qq-verbatim-*"])
+        marker = REFERENCE_MSG.strip().splitlines()[-1]
+        keyline = marker.split("NEEDS YOU:", 1)[1].strip()
+        with open("/tmp/claude-discord-lastq-" + sid, "w") as f:
+            f.write(keyline)
+        r = self._run_gate(REFERENCE_MSG, sid)
+        self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
+        self.assertIn("NEOPAKUJ", r.stderr, r.stderr)
 
 
 class TestCrossRunRetryBudgetIsIsolated(TestCase):
@@ -298,9 +313,15 @@ class TestCrossRunRetryBudgetIsIsolated(TestCase):
                                 ["*test-qq-reference-*"])
 
     def _run_gate(self, msg, sid):
+        # #740 review 🟡1: ISOLATE $HOME so the gate's new exit-2 repeat-block
+        # path writes its `repeat-asked-question` line into a throwaway
+        # ~/.claude/notify-delivery.log, never the developer's real one.
+        home = tempfile.mkdtemp(prefix="airuleset-qqhome-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(GATE)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True,
+                              env={**os.environ, "HOME": home})
 
     def test_a_stale_pid_keyed_retry_file_does_not_suppress_the_block(self):
         # A leftover from a "prior killed run" at the OLD predictable pid-keyed

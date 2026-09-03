@@ -25,9 +25,13 @@ all — end to end:
      Discord POST, no second `discord-questions.json` entry) on an identical
      terse repeat, exactly like a full-block repeat already was.
 
-No hook code changed for #740 — this is a doctrine-lock test proving the
-existing mechanism already supports (and safely handles) the terser form the
-doctrine now mandates for a genuine re-poke.
+These tests prove the ORIGINAL #740 (2026-08-30) property still holds after
+the RECIDÍVA fix (2026-09-03): the terser BARE `❓ NEEDS YOU:` re-poke still
+passes the quality gate and is deduped at delivery. The recidíva fix (which
+DID change the hook — the verbatim-repeat bypass now returns exit 2 for a
+NON-bare repeat, e.g. a `❓ ASKED` line or the full block) is covered by
+tests/test_repeat_question_block_740.py; the BARE forms exercised here are the
+one shape that stays exit 0.
 """
 
 import json
