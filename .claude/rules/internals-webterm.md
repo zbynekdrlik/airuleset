@@ -215,9 +215,25 @@ which auto-load when you read `cli_webterm.py`):
   SimpleNamespace spec — setup_service only reads a handful of spec attrs on the ready
   path); (c) owner + lane render both drop `.ord` (parity, non-vacuous); (d) the
   `u_status` boundary above.
-### #661 rework — extending a per-human LANE SET (Marek: montalu4 + dev1/dev2 sessions + forestshop)
+### #661 rework — extending a per-human LANE SET (Marek: montalu2/miva1/montalu4 + dev1/dev2 + gatekeeper + forestshop)
 
 Reusable shape for growing ANY lane's session set (the next "add X to <human>'s dashboard"):
+
+- **Current Marek set = EIGHT members, in owner tab order:** `marek-subdev,
+  montalu2-subdev, miva1-subdev, montalu4-subdev, dev1, dev2, gatekeeper, forestshop`. #661
+  seeded five; **#787** (2026-08-31) added `montalu2-subdev` (loopback, mirroring montalu4);
+  the **2026-09-03 owner request** ("aby videl subdev miva a gk") added two OBSERVE tabs —
+  `miva1-subdev` (loopback, like montalu2) and `gatekeeper` (tailscale `MAREK_GK_HOST`, like
+  dev1/dev2). Add the entry in `marek_inventory()` AND the same-order id in
+  `WEBTERM_DASHBOARD_TABS["marek"]`; both are asserted equal, and the render alias comes from
+  the SINGLE #592 `cli_aliases` source (`miva1`→`miva`, `gatekeeper`→`gk`). **u_tenant is
+  decided by TENANT, not by "it's a tab":** an entry marked `u_tenant:True` only when the
+  target ACCOUNT is within the lane's tenant (marek's own montalu streams — montalu2/4);
+  `miva1` (a SEPARATE developer's stream, notify-routed to the OWNER) and `gatekeeper`/`dev1`/
+  `dev2` (owner-realm accounts) are OBSERVE-only → OMIT the field (cross-tenant, #703). An
+  owner-realm ssh tab (dev1/dev2/gatekeeper) carries TRANSITIVE fleet reach, so the go-live
+  forced-command default is `restrict,pty,command="tmux ..."` — keep `pty`, `restrict` ALONE
+  kills the PTY.
 
 - **The set lives in `cli_webterm_profiles.<human>_inventory()` — a zero-import leaf.** A
   public-DNS target's #679 host-key pin is DUPLICATED verbatim into the leaf (CODEX_HOST
