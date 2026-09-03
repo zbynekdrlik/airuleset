@@ -1090,6 +1090,8 @@ def test_scratch_unresolvable_uuid_kept(tmp_path):
         proc_dir=str(tmp_path / "no-such-proc"), home=str(tmp_path))
     by = {r["uuid"]: r for r in rows if r.get("uuid")}
     assert by[_DEAD_UUID]["reason"] is not None, "unresolvable liveness must fail-safe to KEEP"
+    assert by[_DEAD_UUID]["live"] is False, "undeterminable liveness is NOT a real live session"
+    assert "undeterminable" in by[_DEAD_UUID]["reason"]
 
 
 def test_scratch_empty_cwd_key_removed_after_sweep(tmp_path):
@@ -1138,3 +1140,94 @@ def test_status_records_largest_live_scratch(tmp_path):
     assert lls is not None, "status.json must record the largest live scratch"
     assert _LIVE_UUID in lls["path"], "the LIVE session must be the one recorded, not the dead one"
     assert lls["bytes"] == 9000
+
+
+def test_session_uuid_live_registry_resumed_session(tmp_path):
+    """#863 : a resumed (`claude -c`) session's process holds an fd on a NEW
+    uuid dir, not its sessionId, so the /proc-fd scan misses the real scratchpad
+    session. The AUTHORITATIVE signal is the sessions registry
+    (`~/.claude/sessions/*.json` -> {"pid","sessionId"}): a record for this uuid
+    whose /proc/<pid> exists => live, even with an OLD transcript and no fd."""
+    home = tmp_path / "home"
+    sdir = home / ".claude" / "sessions"
+    sdir.mkdir(parents=True)
+    (sdir / ("%d.json" % os.getpid())).write_text(
+        json.dumps({"pid": os.getpid(), "sessionId": _LIVE_UUID}))
+    proc = _mkfakeproc(tmp_path, [{"pid": str(os.getpid()), "cwd": str(tmp_path)}])
+    _mkfile(home / ".claude" / "projects" / "-home-x" / ("%s.jsonl" % _LIVE_UUID),
+            age_days=30)
+    assert cs._session_uuid_live("-home-x", _LIVE_UUID, str(home), _NOW, proc) is True
+    (sdir / "deadrec.json").write_text(
+        json.dumps({"pid": 999999999, "sessionId": _DEAD_UUID}))
+    _mkfile(home / ".claude" / "projects" / "-home-x" / ("%s.jsonl" % _DEAD_UUID),
+            age_days=30)
+    assert cs._session_uuid_live("-home-x", _DEAD_UUID, str(home), _NOW, proc) is False
+
+
+def test_scratch_unrelated_empty_cwd_key_survives_sweep(tmp_path):
+    """#863 : the empty-cwd-key rmdir removes ONLY the cwd-key dir a session was
+    actually swept from THIS run -- never an unrelated empty cwd-key dir (the
+    #355 'created seconds ago must stay protected' principle)."""
+    uid = os.getuid()
+    root = Path(tmp_path) / ("claude-%d" % uid)
+    ck_swept = root / "-home-x-proj"
+    _mkfile(ck_swept / _DEAD_UUID / "tasks" / "old.bin", age_days=30)
+    ck_unrelated = root / "-home-y-other"
+    ck_unrelated.mkdir(parents=True)
+    proc = _mkfakeproc(tmp_path, [])
+    cs.sweep_claude_scratch(
+        tmp_dir=str(tmp_path), uid=uid, dry_run=False, force=True, now=_NOW,
+        min_age_days=7, proc_dir=proc, home=str(tmp_path),
+        log_path=tmp_path / "l.log", state_path=tmp_path / "s.json")
+    assert not (ck_swept / _DEAD_UUID).exists(), "dead session swept"
+    assert not ck_swept.exists(), "the emptied cwd-key of the swept session removed"
+    assert ck_unrelated.exists(), "an unrelated empty cwd-key dir must survive"
+
+
+def test_drain_refuses_scratch_delete_when_recheck_says_live(tmp_path):
+    """#863 : the disk-guard drain executor re-checks per-session liveness
+    immediately before rmtree -- a session that raced live between plan and act
+    is refused (the sweep path already does this; the drain path did not)."""
+    sess = tmp_path / "claude-x" / "-home-x" / _DEAD_UUID
+    (sess / "tasks").mkdir(parents=True)
+    (sess / "tasks" / "f.bin").write_bytes(b"x" * 100)
+    a = {"cls": "scratch", "path": str(sess), "bytes": 100, "kind": "delete"}
+    raised = False
+    try:
+        dg._perform_action(a, scratch_live_fn=lambda p, n: True, now=_NOW)
+    except OSError:
+        raised = True
+    assert raised, "a session that raced live must be REFUSED"
+    assert sess.exists(), "a refused session must NOT be deleted"
+    dg._perform_action(a, scratch_live_fn=lambda p, n: False, now=_NOW)
+    assert not sess.exists(), "a genuinely dead session is deleted normally"
+
+
+def test_largest_live_scratch_single_discovery_and_change_only_log(tmp_path, monkeypatch):
+    """#863 : at >=80% the largest-live-scratch visibility must NOT run a SECOND
+    full scratch discovery every poll -- the drain SHARES the one it already did
+    -- and the LIVE-SCRATCH log line is written only when the value CHANGES."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    _mkfile(ck / _LIVE_UUID / "scratchpad" / "big.bin", age_days=30, nbytes=5000)
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "42", "cwd": str((ck / _LIVE_UUID).resolve())}])
+    calls = {"n": 0}
+    real = cs.discover_claude_scratch_candidates
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(tmp_dir=str(tmp_path), uid=uid, now=k.get("now"),
+                    min_age_days=7, proc_dir=proc, home=str(tmp_path))
+
+    monkeypatch.setattr(cs, "discover_claude_scratch_candidates", _counting)
+    log = tmp_path / ".claude" / "disk-guard" / "disk-guard.log"
+    kw = dict(now=_NOW, home=str(tmp_path), dry_run=True,
+              statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
+              geteuid_fn=lambda: uid or 1000, mounts=("/",))
+    dg.run_disk_guard(**kw)
+    assert calls["n"] == 1, "exactly ONE scratch discovery per drain poll"
+    assert log.exists() and log.read_text().count("LIVE-SCRATCH") == 1
+    dg.run_disk_guard(**kw)
+    assert log.read_text().count("LIVE-SCRATCH") == 1, \
+        "an unchanged largest_live_scratch must not log a second LIVE-SCRATCH line"
