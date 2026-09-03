@@ -1407,9 +1407,35 @@ def _release_lock(fd):
 # --------------------------------------------------------------------------- #
 # Job 40 entry
 # --------------------------------------------------------------------------- #
+def _default_scratch_discover(now, home):
+    """The real #355/#863 scratch discovery, used by `run_disk_guard` to find
+    the largest LIVE session scratchpad (visibility only). Best-effort — a
+    discovery error surfaces as an empty list, never an exception."""
+    from cli_scratch_sweep import discover_claude_scratch_candidates
+    return discover_claude_scratch_candidates(now=now, home=home) or []
+
+
+def _largest_live_scratch(rows):
+    """The largest LIVE-marked (`row["live"]`) scratch session among discovery
+    rows — `{"path", "bytes"}` or None. This is the #863 visibility signal: a
+    live session is NEVER deleted, only NAMED, so the owner's `disk NN%` footer
+    finding has an addressee (the session cleans its own scratch)."""
+    best = None
+    for r in rows or []:
+        if not r.get("live"):
+            continue
+        path = r.get("path")
+        if path is None:
+            continue
+        size = r.get("size") or 0
+        if best is None or size > best["bytes"]:
+            best = {"path": path, "bytes": size}
+    return best
+
+
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
-                   planners_fn=None, sudo_probe_fn=None):
+                   planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -1425,6 +1451,22 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         status = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
     except Exception as e:
         return ["disk-guard: status error: %r" % e]
+    # #863: at >=80% pressure record the largest LIVE session scratchpad the
+    # guard would keep — visibility only, NEVER deleted, no ping (the session
+    # cleans its own scratch). Computed BEFORE write_status_cache so the footer
+    # cache carries it, and even when the du-heavy drain below is cadence-gated.
+    if status["level"] in ("drain", "critical"):
+        try:
+            rows = (scratch_discover_fn or _default_scratch_discover)(now, home)
+            lls = _largest_live_scratch(rows)
+            if lls:
+                status["largest_live_scratch"] = lls
+                line = _log_line(now, "LIVE-SCRATCH", lls["path"], lls["bytes"],
+                                 "kept (visibility only, #863)")
+                logs.append(line)
+                _append_log(_log_path(home), [line])
+        except Exception as e:
+            logs.append("disk-guard: largest-live-scratch error: %r" % e)
     try:
         write_status_cache(status, home=home)
     except Exception as e:
