@@ -321,6 +321,7 @@ clean_q() {
 # `set -euo pipefail` and silently drop the ping, so the delivery path must
 # never depend on the lib being present.
 _LIB_QHASH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-qhash.sh"
+# shellcheck source=hooks/lib-qhash.sh
 [ -r "$_LIB_QHASH" ] && . "$_LIB_QHASH"
 if ! type _qhash >/dev/null 2>&1; then
     _qhash() {

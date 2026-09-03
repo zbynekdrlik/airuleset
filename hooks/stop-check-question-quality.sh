@@ -83,6 +83,7 @@ SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 # two lines up. Diagnostic-only: every use is guarded with `type _qhash`, so a
 # missing lib degrades the log's qhash to empty, never the Stop decision.
 _LIB_QHASH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-qhash.sh"
+# shellcheck source=hooks/lib-qhash.sh
 [ -r "$_LIB_QHASH" ] && . "$_LIB_QHASH"
 
 # Durable trace of a BLOCKED repeat-asked-question (#740) into the SAME
@@ -90,10 +91,15 @@ _LIB_QHASH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-qhash.
 # repeat for the SAME question then share a qhash and line up. Guarded so a
 # read-only $HOME can never turn logging into a failed Stop decision.
 _delivery_log_blocked_repeat() {
-    local log stamp qh
+    local log stamp qh size
     qh="${1:-}"
     log="$HOME/.claude/notify-delivery.log"
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    # #740 review 🔵c — mirror _pending_log's 512000-byte rotation on the SAME
+    # file so a blocked-repeat storm can never grow it unbounded.
+    size=$(stat -c %s "$log" 2>/dev/null || echo 0)
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    [ "$size" -gt 512000 ] && mv -f "$log" "$log.1" 2>/dev/null || true
     stamp=$(date -Iseconds 2>/dev/null || echo '?')
     { printf '%s blocked kind=question-quality reason=repeat-asked-question key=%s qhash=%s\n' \
         "$stamp" "$SID" "$qh" >>"$log"; } 2>/dev/null || true
@@ -158,37 +164,79 @@ if [ -n "$MARKER_RAW" ]; then
             # match by SHAPE:
             #   * BARE BLOCKED re-poke — the ONLY ❓ marker is a trailing
             #     `❓ NEEDS YOU:` line (no `❓ ASKED:`, no `**Otázka — projekt`
-            #     block, no `⏳`/`✅` marker): the ONE re-emission still allowed,
-            #     because /goal stop-condition (A) needs the marker as the turn's
-            #     last line to hold a genuinely BLOCKED loop -> exit 0 (#740).
+            #     block, no `⏳`/`✅` STATUS marker): the ONE re-emission still
+            #     allowed, because /goal stop-condition (A) needs the marker as
+            #     the turn's last line to hold a genuinely BLOCKED loop -> exit 0
+            #     (#740). ACCEPTED RESIDUAL (#740 review 🟡6/🔵a): the design's
+            #     ABSENCE-based marker-only test also lets a PARAPHRASED prose
+            #     preamble + a bare `❓ NEEDS YOU: K` line through (exit 0), and an
+            #     incidental ✅/⏳ in PROSE (a status word mid-sentence) is NOT a
+            #     status marker — only a ✅/⏳ that STARTS a line is. The
+            #     `**Otázka` block and the `⏳ WORKING`/`✅ DONE` status-marker shapes are
+            #     the ones caught; a chatty prose bare-repoke is not (doctrine
+            #     says "the bare line and NOTHING else" — that residual is prose,
+            #     enforced by prose, not this gate).
             #   * ANY OTHER shape (a `❓ ASKED:` line, the full block, or the
-            #     matching marker alongside `⏳`/`✅`) -> BLOCK (exit 2): re-emitting
-            #     an already-delivered question is pure noise the owner already
-            #     has. This runs BEFORE the present-user bypass below, so the
-            #     repeat-block applies REGARDLESS of presence (the owner sees the
-            #     chat spam in the webterm even when present); only the shape
-            #     checks below stay presence-aware.
+            #     matching marker alongside a `⏳ WORKING`/`✅ DONE` status marker) -> BLOCK (exit
+            #     2): re-emitting an already-delivered question is pure noise the
+            #     owner already has. This runs BEFORE the present-user bypass
+            #     below, so the repeat-block applies REGARDLESS of presence (the
+            #     owner sees the chat spam in the webterm even when present); only
+            #     the shape checks below stay presence-aware.
+            # PRECEDENCE RESIDUAL (#740 review 🔵f): a malformed two-marker turn
+            # `❓ ASKED: <new>` + trailing `❓ NEEDS YOU: K` resolves MARKER_RAW to
+            # the ASKED line (a NEW question), so a K repeat can slip past this
+            # match — accepted: the two-marker shape is already banned by
+            # message-status-marker.md, and MARKER_RAW taking the ASKED line means
+            # the NEW ASKED question is shape-checked normally below.
+            # EMPTY-MARKER PARITY (#740 review 🔵g): the pending hook falls back
+            # key=$payload for an empty marker; this gate requires a NON-empty
+            # KEYLINE (the `[ -n "$KEYLINE" ]` guard above), so an empty marker is
+            # simply NOT detected as a repeat here — a non-detection (fall through
+            # to shape checks), never a false block.
             IS_BARE_REPOKE=1
+            # #740 review 🔵b — alternation, NOT bracket classes: under LC_ALL=C
+            # a `[áa]`/`[—–-]` class splits the multibyte char into raw bytes and
+            # silently stops matching (this file's line ~107 convention + the awk
+            # at ~215 already use `(á|a)`/`(—|–|-)`); LC_ALL=C.UTF-8 forced.
             if grep -qiE "$ASKED_RX" <<<"$MSG"; then IS_BARE_REPOKE=0; fi
-            if LC_ALL=C.UTF-8 grep -qiE 'Ot[áa]zka[[:space:]]*[—–-][[:space:]]*projekt' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
-            if grep -qF '⏳' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
-            if grep -qF '✅' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            if LC_ALL=C.UTF-8 grep -qiE 'Ot(á|a)zka[[:space:]]*(—|–|-)[[:space:]]*projekt' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            # #740 review 🔵a — match the STATUS-MARKER KEYWORD (`⏳ WORKING`,
+            # `✅ DONE` / `✅ Work Complete`), NOT a bare ✅/⏳ char: a bare
+            # `grep -qF '✅'` blocked on an incidental prose ✅ ("✅ merged #5"
+            # above a bare re-poke), and even a line-start ✅ anchor would still
+            # trip that exact line (it starts with ✅) — keying on the DONE /
+            # WORKING keyword is what lets a prose checkmark line pass as bare
+            # while a real terminal status marker still counts as non-bare.
+            if grep -qiE '⏳[[:space:]]*WORKING' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
+            if grep -qiE '✅[[:space:]]*(DONE|Work[[:space:]]+Complete)' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
             if [ "$IS_BARE_REPOKE" = 1 ]; then
                 rm -f "$RETRY_FILE" 2>/dev/null || true
                 exit 0
             fi
-            # Non-bare repeat of an already-delivered question -> BLOCK. Capped by
-            # the SAME retry mechanism as the shape checks so a Stop hook can
-            # never wedge the session forever (after MAX_RETRIES it lets through).
+            # Non-bare repeat of an already-delivered question -> BLOCK. #740
+            # review 🟡2: this reuses the shape-check RETRY_FILE/MAX_RETRIES, but
+            # its cap behaviour DELIBERATELY DIFFERS. The shape path leaves the
+            # counter AT the cap (so it blocks 3x then passes FOREVER until a
+            # clean turn clears it); the repeat path CLEARS the counter at the cap
+            # and lets that one through -> the NEXT repeat re-blocks. That is
+            # intentional ROLLING pushback ([2,2,2,0,2,2,…]): the owner priority
+            # is "no repeats", so a stubborn re-emitting session must KEEP getting
+            # pushed back until it stops, not be waved through after 3 tries. The
+            # per-cap single pass-through is only the anti-wedge safety valve so a
+            # Stop hook can never loop forever within one cap window.
             if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
                 echo "$((RETRIES+1))" > "$RETRY_FILE"
                 QH=""
                 if type _qhash >/dev/null 2>&1; then QH=$(_qhash "$KEYLINE"); fi
                 _delivery_log_blocked_repeat "$QH"
-                printf '%s\n' "Otázka už bola doručená a je nezodpovedaná (qhash ${QH:-?}) — nesie ju footer U N + label needs-answer, takže ju NEOPAKUJ. Zmaž riadok \`❓ ASKED:\` / celý \`**Otázka — projekt …**\` blok a ukonči ťah len \`⏳ WORKING\` / \`✅ DONE\` podľa reálneho stavu ostatnej práce. Ak si NAOZAJ blokovaný (nič iné nie je workable), napíš IBA holý riadok \`❓ NEEDS YOU: <ten istý text>\` a nič iné (#740)." >&2
+                printf '%s\n' "Otázka už bola doručená a je nezodpovedaná (qhash ${QH:-?}) — nesie ju footer U N + label needs-answer, takže ju NEOPAKUJ. Zmaž riadok \`❓ ASKED:\` / celý \`**Otázka — projekt …**\` blok a ukonči ťah len \`⏳ WORKING\` / \`✅ DONE\` podľa reálneho stavu ostatnej práce. Ak je to NOVÁ otázka k INÉMU ticketu, marker riadok musí byť ODLIŠNÝ — uveď #N v texte otázky, inak byte-match s predošlou otázkou vyzerá ako opakovanie. Ak si NAOZAJ blokovaný (nič iné nie je workable), napíš IBA holý riadok \`❓ NEEDS YOU: <ten istý text>\` a nič iné (#740)." >&2
                 exit 2
             fi
-            # retry cap reached — let it through so the Stop hook can never loop
+            # Retry cap reached — CLEAR the counter and let this one through, but
+            # the reset means the NEXT repeat re-blocks (deliberate rolling
+            # pushback, above), unlike the shape path which leaves the counter at
+            # the cap and passes forever.
             rm -f "$RETRY_FILE" 2>/dev/null || true
             exit 0
         fi

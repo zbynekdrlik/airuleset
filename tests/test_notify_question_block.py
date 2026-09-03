@@ -21,6 +21,7 @@ Two independent causes:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -227,9 +228,15 @@ class TestHistoryAllusionBlocked(TestCase):
     # testcase, so a killed prior run's leftover can never collide with a fresh
     # run's and skew the gate's retry-budget dedup.
     def _run_gate(self, msg, sid):
+        # #740 review 🟡1: ISOLATE $HOME so the gate's new exit-2 repeat-block
+        # path writes its `repeat-asked-question` line into a throwaway
+        # ~/.claude/notify-delivery.log, never the developer's real one.
+        home = tempfile.mkdtemp(prefix="airuleset-qqhome-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(GATE)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True,
+                              env={**os.environ, "HOME": home})
 
     def test_allusion_to_an_old_question_is_hard_blocked(self):
         sid = new_hook_sid(self, "test-qq-reference", ["*test-qq-reference-*"])
@@ -306,9 +313,15 @@ class TestCrossRunRetryBudgetIsIsolated(TestCase):
                                 ["*test-qq-reference-*"])
 
     def _run_gate(self, msg, sid):
+        # #740 review 🟡1: ISOLATE $HOME so the gate's new exit-2 repeat-block
+        # path writes its `repeat-asked-question` line into a throwaway
+        # ~/.claude/notify-delivery.log, never the developer's real one.
+        home = tempfile.mkdtemp(prefix="airuleset-qqhome-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(GATE)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True,
+                              env={**os.environ, "HOME": home})
 
     def test_a_stale_pid_keyed_retry_file_does_not_suppress_the_block(self):
         # A leftover from a "prior killed run" at the OLD predictable pid-keyed

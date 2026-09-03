@@ -263,8 +263,14 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
         # always-on POLICY family the api-error/limit/burn retirement above
         # already carries — one concise sentence, mechanism detail in
         # notification-mechanics — still ~12% below the 2082-word original.
+        # #740 raised the cap 1830 -> 1850 for the SAME reason: the recidíva
+        # ask-once rule (a `❓ ASKED` question is emitted ONCE, never re-emitted
+        # on a later turn; a non-bare re-emission is now hook exit 2) is a
+        # genuine always-on POLICY every session must know — carried here as a
+        # concise clause on the existing re-poke sentence, mechanism detail in
+        # notification-mechanics — still ~11% below the 2082-word original.
         t = read(self.MOD)
-        self.assertLess(len(t.split()), 1830)
+        self.assertLess(len(t.split()), 1850)
 
 
 class TestDeliberatelyKeptInlineCandidates(TestCase):

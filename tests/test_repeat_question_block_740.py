@@ -112,6 +112,29 @@ class RepeatOfDeliveredQuestionIsBlocked(_GateBase):
         self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
         self.assertIn("NEOPAKUJ", r.stderr, r.stderr)
 
+    def test_stderr_guides_a_different_ticket_to_a_distinct_marker(self):
+        # #740 review 🟡3: an unattended /goal loop whose LASTQF persists across
+        # tickets can byte-match a genuinely NEW question for ticket B against
+        # ticket A's key — the stderr must tell the session to make the marker
+        # line DISTINCT (name #N) rather than silently treat it as a repeat.
+        sid = self._sid()
+        self._seed_lastq(sid, K)
+        r = self._run(ASKED_PLUS_WORKING, sid)
+        self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
+        self.assertIn("INÉMU", r.stderr, r.stderr)
+        self.assertIn("#N", r.stderr, r.stderr)
+
+    def test_rolling_pushback_sequence_2_2_2_0_2(self):
+        # #740 review 🟡2: the repeat path reuses the shape-check RETRY_FILE but
+        # CLEARS it at the cap (unlike the shape path, which leaves it at the cap
+        # and passes forever) — deliberate rolling pushback so a stubborn session
+        # keeps getting pushed back. Firing the SAME non-bare repeat 5x on one
+        # sid must yield exit codes [2,2,2,0,2].
+        sid = self._sid()
+        self._seed_lastq(sid, K)
+        codes = [self._run(ASKED_PLUS_WORKING, sid).returncode for _ in range(5)]
+        self.assertEqual(codes, [2, 2, 2, 0, 2], codes)
+
 
 class BareBlockedRepokeStillPasses(_GateBase):
     def test_iii_bare_needs_you_repoke_passes(self):
@@ -122,6 +145,30 @@ class BareBlockedRepokeStillPasses(_GateBase):
         self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
         self.assertNotIn('"block"', r.stdout, r.stdout)
         self.assertNotIn("repeat-asked-question", self._delivery_log())
+
+
+class ProseStatusCharsDoNotBlockABareRepoke(_GateBase):
+    def test_prose_checkmark_line_above_a_bare_repoke_still_passes(self):
+        # #740 review 🔵a: an INCIDENTAL ✅ in prose ("✅ merged #5") must NOT
+        # count as a status marker — only the `✅ DONE` / `⏳ WORKING` KEYWORD
+        # does. A bare `❓ NEEDS YOU: K` re-poke with such a line stays exit 0.
+        sid = self._sid()
+        self._seed_lastq(sid, K)
+        msg = "✅ merged #5 do main.\n\n❓ NEEDS YOU: " + K
+        r = self._run(msg, sid)
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
+        self.assertNotIn("repeat-asked-question", self._delivery_log())
+
+    def test_a_real_working_status_keyword_alongside_needs_you_is_blocked(self):
+        # The genuine "marker alongside status" shape (the ❓ NEEDS YOU stays the
+        # LAST line so it is detected as a question turn, with a `⏳ WORKING`
+        # status keyword above it): non-bare -> exit 2. Proves the keyword check
+        # still fires while an incidental prose ✅ (above) does not.
+        sid = self._sid()
+        self._seed_lastq(sid, K)
+        msg = "⏳ WORKING: robím iné tickety\n\n❓ NEEDS YOU: " + K
+        r = self._run(msg, sid)
+        self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
 
 
 class NonRepeatsTakeTheOrdinaryPath(_GateBase):

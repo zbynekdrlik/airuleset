@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # SOURCED, never executed — airuleset #740. (No shebang: this is a library for
 # the two hooks that fingerprint a delivered question into
 # ~/.claude/notify-delivery.log; they already run under `set -euo pipefail`, so
