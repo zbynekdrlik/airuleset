@@ -224,6 +224,92 @@ class TestReaperFailSafe(unittest.TestCase):
         self.assertIn("FAILED", logs[0])
 
 
+# --------------------------------------------------------------------------- #
+# #865 — claude-home grep reaper (raw grep/ugrep with ~/.claude root)
+# --------------------------------------------------------------------------- #
+
+CLAUDE_HOME_GREP_CMD = "grep -o 'Otázka' /home/montalu1/.claude/"
+CLAUDE_HOME_UGREP_CMD = "ugrep -rn pattern /home/user/.claude/projects"
+
+
+class TestClaudeHomeGrepMatcher(unittest.TestCase):
+    """Tests for _is_claude_home_grep — the classifier for raw grep/ugrep
+    commands whose search root is under ~/.claude."""
+
+    def test_matches_raw_grep_over_claude_home(self):
+        from watchdog.reaper import _is_claude_home_grep
+        self.assertTrue(_is_claude_home_grep(CLAUDE_HOME_GREP_CMD))
+
+    def test_matches_ugrep_over_claude_home_projects(self):
+        from watchdog.reaper import _is_claude_home_grep
+        self.assertTrue(_is_claude_home_grep(CLAUDE_HOME_UGREP_CMD))
+
+    def test_does_not_match_scoped_repo_grep(self):
+        from watchdog.reaper import _is_claude_home_grep
+        self.assertFalse(_is_claude_home_grep(
+            "grep -rn foo /home/user/devel/airuleset"))
+
+    def test_does_not_match_non_grep_command(self):
+        from watchdog.reaper import _is_claude_home_grep
+        self.assertFalse(_is_claude_home_grep(
+            "python3 /home/user/.claude/script.py"))
+
+    def test_anchored_argv0_not_substring(self):
+        from watchdog.reaper import _is_claude_home_grep
+        # a process merely QUOTING grep in its argv (argv0 != grep)
+        self.assertFalse(_is_claude_home_grep(
+            "watch grep -rn foo /home/user/.claude/"))
+
+
+class TestClaudeHomeGrepRunaway(unittest.TestCase):
+    """Tests for _is_claude_home_grep_runaway — age+CPU gate wrapper."""
+
+    def test_old_busy_matches(self):
+        from watchdog.reaper import _is_claude_home_grep_runaway
+        self.assertTrue(_is_claude_home_grep_runaway(
+            CLAUDE_HOME_GREP_CMD, OLD, BUSY))
+
+    def test_young_does_not_match(self):
+        from watchdog.reaper import _is_claude_home_grep_runaway
+        self.assertFalse(_is_claude_home_grep_runaway(
+            CLAUDE_HOME_GREP_CMD, YOUNG, YOUNG))
+
+    def test_old_low_cpu_does_not_match(self):
+        from watchdog.reaper import _is_claude_home_grep_runaway
+        self.assertFalse(_is_claude_home_grep_runaway(
+            CLAUDE_HOME_GREP_CMD, OLD, IDLE_CPU))
+
+
+class TestClaudeHomeGrepReaperKills(unittest.TestCase):
+    """End-to-end: the reaper function kills a claude-home grep runaway."""
+
+    def test_kills_claude_home_grep_runaway(self):
+        kill = _Recorder()
+        logs = shadow_ugrep_reaper(
+            ps_fetch=_procs([(77777, OLD, BUSY, CLAUDE_HOME_GREP_CMD)]),
+            kill_fn=kill, verify_fn=lambda pid: CLAUDE_HOME_GREP_CMD)
+        self.assertEqual(kill.killed, [77777])
+        self.assertEqual(len(logs), 1)
+        self.assertIn("SIGKILL", logs[0])
+        self.assertIn(".claude", logs[0])
+
+    def test_leaves_normal_grep_untouched(self):
+        kill = _Recorder()
+        logs = shadow_ugrep_reaper(
+            ps_fetch=_procs([
+                (100, OLD, BUSY, "grep -rn foo /home/user/devel/repo"),
+            ]),
+            kill_fn=kill, verify_fn=lambda pid: "grep -rn foo /home/user/devel/repo")
+        self.assertEqual(kill.killed, [])
+
+    def test_toctou_rejects_changed_claude_home_grep(self):
+        kill = _Recorder()
+        logs = shadow_ugrep_reaper(
+            ps_fetch=_procs([(88888, OLD, BUSY, CLAUDE_HOME_GREP_CMD)]),
+            kill_fn=kill, verify_fn=lambda pid: "python3 innocent.py")
+        self.assertEqual(kill.killed, [])
+
+
 class TestJob37Wiring(unittest.TestCase):
     """End-to-end: run_once with the reaper seams wired reaps within ONE cycle."""
 
