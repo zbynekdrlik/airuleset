@@ -68,6 +68,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-handoff-without-composer.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-deploy-clean-tree.sh",
             "timeout": 10
           },
