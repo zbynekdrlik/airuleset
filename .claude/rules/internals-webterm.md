@@ -306,10 +306,24 @@ Non-obvious decisions #867 settled, reusable for the next lane:
   An observer must NEVER be `full` (merge/deploy/close), so she goes in `AUTHORITY_BY_USER` at the
   LEAST-privilege `fork-no-merge` (the safe fail-direction; `AUTHORITY_BY_USER` may hold no `full`
   value — `test_authority_profiles`). She is not a real hand-off stream, so the
-  `_own_handoff_label`/`_ticket_is_stream_labeled` "membership == is-a-stream" consumers may see her
-  as one — HARMLESS, because she authors/works no ticket, so those paths never fire; and
-  `skill_names_for_user` gives her NO full-authority/maintainer skills (not in
-  FULL_AUTHORITY_USERS/MAINTAINER_USERS) and NO dev-stream extras (not in SKILLS_EXTRA_BY_USER).
+  `_own_handoff_label`/`_ticket_is_stream_labeled` "membership == is-a-stream" TICKET-path consumers
+  may see her as one — harmless, because she authors/works no ticket. `skill_names_for_user` gives
+  her NO full-authority/maintainer skills (not in FULL_AUTHORITY_USERS/MAINTAINER_USERS) and NO
+  dev-stream extras (not in SKILLS_EXTRA_BY_USER).
+- **BUT `AUTHORITY_BY_USER` membership ALSO triggers INSTALL/PUSH-time STREAM provisioning — NOT just
+  the ticket-path — so an observer needs a dedicated exclusion set (#867 review 🟡, the gap the first
+  cut MISSED).** Five consumers key on `user in AUTHORITY_BY_USER` at every install/push, regardless
+  of tickets: `ensure_stream_tmux_session` (auto-creates a tmux session and TYPES `claude` into it —
+  a live Claude session burning tokens on a viewer account), `report_stream_dev_env` (dev-env/
+  TODO-PROVISIONING gap noise), `provision_subdev_soniox_key` (writes `~/.soniox.env` — a needless
+  credential footprint), `is_single_session_box_user` (ssh-auto-attach + per-window naming), and
+  watchdog `_REDUCED_STREAM_USERS` (bounce/gkreq sweeps). An observer wants NONE of these. FIX = a
+  HAND-MAINTAINED `cli_fleet.WEBTERM_OBSERVER_USERS` frozenset (+ `is_webterm_observer`, facade
+  re-exported), a strict SUBSET of `AUTHORITY_BY_USER` (test-locked), that each consumer excludes.
+  So "check that install does not deploy dev-stream extras" (the ticket's own phrasing) means the
+  FULL consumer list, not only `skill_names_for_user` — grep `AUTHORITY_BY_USER` across airuleset.py
+  / cli_remote.py / cli_bashrc_appliers.py / watchdog for every membership test before claiming an
+  observer is inert.
 - **`u_tenant` is decided by TENANT, never by "it's a tab" (#703).** Both dominika tabs are
   CROSS-TENANT OBSERVE (montalu5 is marek's montalu-family stream; miva1 is a separate stream
   notify-routed to the OWNER), so NEITHER carries `u_tenant` → `u_tenant_entries("dominika") == []`
