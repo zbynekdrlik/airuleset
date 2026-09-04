@@ -115,7 +115,6 @@ def classify_release_lane(lstate):
         # (3) shadow run failed (only when cut PR is open)
         if isinstance(shadow_run, dict):
             conc = shadow_run.get("conclusion")
-            st = shadow_run.get("status")
             rid = _run_id(shadow_run)
             if conc in ("failure", "timed_out"):
                 ev = "run #%d" % rid if rid else "shadow run"

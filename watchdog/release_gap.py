@@ -360,7 +360,7 @@ def _parse_iso_ts(s):
     if not isinstance(s, str) or not s:
         return None
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
         s = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
         return dt.timestamp()
