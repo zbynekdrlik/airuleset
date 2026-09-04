@@ -156,8 +156,10 @@ set -euo pipefail
 # so a transient inherited non-zero nice (from a niced watchdog/timer parent)
 # cannot persist for the session's lifetime. Best-effort: if the user lacks
 # CAP_SYS_NICE and inherited nice >0, renice fails silently and the session
-# continues at the inherited level (the watchdog self-check will journal it).
-renice -n 0 -p $$ >/dev/null 2>&1 || true
+# continues at the inherited level. Uses the absolute form (positional priority
+# before -p) which is unambiguous across util-linux versions (the -n flag
+# changed to relative-increment semantics in util-linux >= 2.40).
+renice 0 -p $$ >/dev/null 2>&1 || true
 
 mode="${1:-default}"
 if [ "$#" -gt 0 ]; then shift; fi

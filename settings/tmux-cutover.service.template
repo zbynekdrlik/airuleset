@@ -24,9 +24,9 @@ Requires=local-fs.target
 
 [Service]
 Type=oneshot
-# #866: Pin the service to nice 0 — the system-level anchor so the tmux
-# server (and every shell + claude process it spawns) never inherits a
-# non-zero nice from a transient parent.
+# #866: Pin this boot-time oneshot to nice 0 — ensures the symlink-flip
+# script itself runs at normal priority. The interactive session's nice is
+# pinned separately by the managed launch script's `renice 0 -p $$`.
 Nice=0
 # Type=oneshot defaults TimeoutStartSec to infinity; this unit is ordered
 # Before=sysinit.target ssh.service, so an unbounded hang here would block

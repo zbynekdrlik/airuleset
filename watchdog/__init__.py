@@ -2750,10 +2750,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           class) — never pings the owner; the remedy is `/model` or a
           relaunch. `watchdog/model_audit_job.py`'s docstring is the SSOT.
       (42) NICE-CHECK SELF-CHECK (#866), gated on `nice_check_enabled` (True in
-          cmd_watchdog, left False in unit tests). Reads `/proc/<pid>/stat`
-          field 19 for interactive claude main sessions and the tmux server;
-          journals any non-zero nice (machine-channel only — never an owner
-          ping). Read-only: never calls renice or mutates scheduling.
+          cmd_watchdog, left False in unit tests). Reads the tmux server PID
+          (via `tmux display-message -p '#{pid}'`) and checks `/proc/<pid>/stat`
+          field 19; journals any non-zero nice (machine-channel only — never
+          an owner ping). Read-only: never calls renice or mutates scheduling.
           `watchdog/nice_check.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —

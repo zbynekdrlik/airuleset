@@ -3,9 +3,10 @@
 Component (1): launch script pins nice 0 via `renice -n 0 -p $$`.
 Component (2): tmux cutover service template carries `Nice=0`.
 Component (3): watchdog nice_check module reads /proc/<pid>/stat field 19.
-Component (4): hook child scheduling — not covered here (stdin/exit contract
-               analysis showed it is NOT safe to add `nice -n 10` to hook
-               children without risking stdin piping issues; documented below).
+Component (4): hook child scheduling — not covered here. While `nice(1)` does
+               not affect stdin/exit contracts, Stop/PreToolUse hooks sit on the
+               interactive critical path and down-nicing them would worsen the
+               very latency #866 targets. Deferred as a separate concern.
 """
 import os
 import unittest
@@ -43,14 +44,15 @@ class TestLaunchScriptNicePin(unittest.TestCase):
     def test_renice_targets_self(self):
         """The renice call must target $$ (current shell PID) at nice 0."""
         from cli_claude_scripts import CLAUDE_LAUNCH_SCRIPT_CONTENT
-        # Look for a line that renices the current process to nice 0
+        # Look for a line that renices the current process to nice 0.
+        # Accepts both absolute form `renice 0 -p $$` and `-n 0` form.
         found = False
         for ln in CLAUDE_LAUNCH_SCRIPT_CONTENT.splitlines():
-            if "renice" in ln and "$$" in ln and "-n 0" in ln:
+            if "renice" in ln and "$$" in ln and (" 0 " in ln or "-n 0" in ln):
                 found = True
                 break
         self.assertTrue(found,
-                        "launch script must renice -n 0 -p $$ (pin self to nice 0)")
+                        "launch script must renice to nice 0 targeting $$ (pin self)")
 
     def test_renice_is_best_effort(self):
         """renice must not abort the script on failure (|| true or 2>/dev/null)."""
@@ -161,6 +163,26 @@ class TestNiceCheckModule(unittest.TestCase):
         from watchdog.nice_check import check_pids_nice
         def fake_stat(pid):
             raise FileNotFoundError("no such process")
+        results = check_pids_nice([42], stat_reader=fake_stat)
+        self.assertEqual(len(results), 0)
+
+    def test_parse_nice_malformed_no_paren(self):
+        """A stat line with no closing paren must raise ValueError."""
+        from watchdog.nice_check import nice_from_proc_stat
+        with self.assertRaises(ValueError):
+            nice_from_proc_stat("12345 claude S 1 12345")
+
+    def test_parse_nice_too_few_fields(self):
+        """A stat line with too few fields after comm must raise ValueError."""
+        from watchdog.nice_check import nice_from_proc_stat
+        with self.assertRaises(ValueError):
+            nice_from_proc_stat("12345 (bash) S 1 2")
+
+    def test_check_nice_malformed_stat_skipped(self):
+        """A malformed stat line should be silently skipped."""
+        from watchdog.nice_check import check_pids_nice
+        def fake_stat(pid):
+            return "garbage no parens"
         results = check_pids_nice([42], stat_reader=fake_stat)
         self.assertEqual(len(results), 0)
 

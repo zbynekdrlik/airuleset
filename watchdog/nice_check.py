@@ -67,14 +67,38 @@ def check_pids_nice(pids, stat_reader=None):
     return results
 
 
-def nice_check_job(dry_run=False, log_fn=None):
-    """The run_once entry point (Job 42). Placeholder — the full pane-to-PID
-    resolution is deferred to the supervisor's integration; this function
-    currently returns an empty list (no findings) and is wired purely so the
-    job slot exists and the registry/docstring pins hold.
+def _tmux_server_pid():
+    """Return the tmux server PID, or None if tmux is not running."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-p", "#{pid}"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip().isdigit():
+            return int(r.stdout.strip())
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # tmux not installed or not running — expected on boxes without tmux;
+        # fail-safe toward silence (no false alarm).  # airuleset:script-ok expected-no-tmux
+        pass
+    return None
 
-    A full implementation would enumerate interactive claude main PIDs from
-    tmux pane inspection + the tmux server PID, call check_pids_nice, and
-    journal any non-zero findings.
+
+def nice_check_job(dry_run=False, log_fn=None):
+    """The run_once entry point (Job 42). Reads the tmux server PID and
+    checks its nice value. Returns a list of log lines for non-zero nice
+    findings (machine-channel only — never an owner ping, per #546).
+
+    Read-only: never calls renice or mutates scheduling.
     """
-    return []
+    logs = []
+    pids = []
+    server_pid = _tmux_server_pid()
+    if server_pid is not None:
+        pids.append(server_pid)
+    if not pids:
+        return logs
+    findings = check_pids_nice(pids)
+    for f in findings:
+        line = "nice-check: pid %d has nice %d (expected 0)" % (f["pid"], f["nice"])
+        logs.append(line)
+    return logs
