@@ -295,7 +295,7 @@ class TestClaudeHomeGrepReaperKills(unittest.TestCase):
 
     def test_leaves_normal_grep_untouched(self):
         kill = _Recorder()
-        logs = shadow_ugrep_reaper(
+        shadow_ugrep_reaper(
             ps_fetch=_procs([
                 (100, OLD, BUSY, "grep -rn foo /home/user/devel/repo"),
             ]),
@@ -304,7 +304,7 @@ class TestClaudeHomeGrepReaperKills(unittest.TestCase):
 
     def test_toctou_rejects_changed_claude_home_grep(self):
         kill = _Recorder()
-        logs = shadow_ugrep_reaper(
+        shadow_ugrep_reaper(
             ps_fetch=_procs([(88888, OLD, BUSY, CLAUDE_HOME_GREP_CMD)]),
             kill_fn=kill, verify_fn=lambda pid: "python3 innocent.py")
         self.assertEqual(kill.killed, [])

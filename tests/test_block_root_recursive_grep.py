@@ -206,8 +206,8 @@ class TestBlockRootRecursiveGrep(TestCase):
     def test_blocks_grep_rn_tilde_claude_glob(self):
         self.assertBlocked("grep -rn foo ~/.claude/*")
 
-    def test_allows_scoped_repo_path_under_home(self):
-        # 2+ components under /home is a repo checkout — STILL allowed
+    def test_allows_scoped_repo_path_still_passes_865(self):
+        # 2+ components under /home is a repo checkout — STILL allowed (#865)
         self.assertAllowed("grep -rn foo /home/newlevel/devel/airuleset")
 
     def test_allows_specific_claude_session_file(self):
