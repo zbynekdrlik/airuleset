@@ -32,8 +32,8 @@ class TestModelFloatAuditJob(TestCase):
         out = model_float_audit_job(0.0, state, panes, "/proj", read, find,
                                     newest_sub, due_fn=lambda *a, **k: True)
         self.assertEqual(len(out), 2, out)
-        self.assertTrue(any("claude-fable-5-1" in l and "main" in l for l in out))
-        self.assertTrue(any("claude-opus-4-8" in l and "sub" in l for l in out))
+        self.assertTrue(any("claude-fable-5-1" in ln and "main" in ln for ln in out))
+        self.assertTrue(any("claude-opus-4-8" in ln and "sub" in ln for ln in out))
         self.assertIn("model_audit_last_ts", state)
 
     def test_allowlisted_models_silent(self):
