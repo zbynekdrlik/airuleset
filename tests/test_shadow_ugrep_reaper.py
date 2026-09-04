@@ -260,6 +260,14 @@ class TestClaudeHomeGrepMatcher(unittest.TestCase):
         self.assertFalse(_is_claude_home_grep(
             "watch grep -rn foo /home/user/.claude/"))
 
+    def test_pattern_only_token_not_misidentified_as_path(self):
+        from watchdog.reaper import _is_claude_home_grep
+        # The FIRST non-flag positional is the PATTERN, not a path.
+        # A grep whose PATTERN is a .claude path but reads stdin (no
+        # tree root) is NOT a runaway (#865 review 🔵).
+        self.assertFalse(_is_claude_home_grep(
+            "grep /home/user/.claude/projects/foo"))
+
 
 class TestClaudeHomeGrepRunaway(unittest.TestCase):
     """Tests for _is_claude_home_grep_runaway — age+CPU gate wrapper."""

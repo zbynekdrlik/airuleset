@@ -114,19 +114,47 @@ _CLAUDE_HOME_RE = re.compile(r"^/home/[^/]+/\.claude(/|$)")
 
 def _is_claude_home_grep(args):
     """True iff `args` is a grep/ugrep/egrep/fgrep/rgrep command with an argv
-    token that is a path under /home/<user>/.claude. argv[0]-ANCHORED: a process
-    merely mentioning grep in its arguments (argv0 = watch/pgrep/python) never
-    matches."""
+    PATH positional (not the pattern) under /home/<user>/.claude.
+    argv[0]-ANCHORED: a process merely mentioning grep in its arguments
+    (argv0 = watch/pgrep/python) never matches.
+
+    The first non-flag positional is the search PATTERN (not a path), UNLESS
+    `-e`/`-f`/`--regexp`/`--file` is present in argv (then every non-flag
+    positional is a path). This mirrors the hook's own positional logic and
+    avoids killing a `grep '/home/u/.claude/...'` pattern search (#865
+    review finding)."""
     toks = (args or "").split()
     if not toks:
         return False
     base = os.path.basename(toks[0])
     if base not in _GREP_NAMES:
         return False
+    # Detect whether the pattern was provided by a flag (-e/-f/--regexp/--file)
+    pattern_from_flag = False
     for tok in toks[1:]:
-        if tok.startswith("-"):
+        if tok in ("-e", "-f", "--regexp", "--file"):
+            pattern_from_flag = True
+            break
+        if tok.startswith("--regexp=") or tok.startswith("--file="):
+            pattern_from_flag = True
+            break
+        # A short-flag group containing e or f (like -rne, -rf)
+        if tok.startswith("-") and tok != "-" and not tok.startswith("--"):
+            for ch in tok[1:]:
+                if ch in ("e", "f"):
+                    pattern_from_flag = True
+                    break
+            if pattern_from_flag:
+                break
+    # Collect non-flag positionals, then check PATHS (skip the pattern)
+    positionals = []
+    for tok in toks[1:]:
+        if tok.startswith("-") and tok != "-":
             continue
-        if _CLAUDE_HOME_RE.match(tok):
+        positionals.append(tok)
+    paths = positionals if pattern_from_flag else positionals[1:]
+    for p in paths:
+        if _CLAUDE_HOME_RE.match(p):
             return True
     return False
 

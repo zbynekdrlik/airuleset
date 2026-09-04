@@ -219,7 +219,7 @@ class TestBlockRootRecursiveGrep(TestCase):
         # A grep over a normal project dir under ~/devel STILL passes
         self.assertAllowed("grep -rn foo ~/devel/airuleset")
 
-    def test_blocks_bypass_marker_still_works_for_claude(self):
+    def test_bypass_marker_allows_claude_root(self):
         # The bypass mechanism must work for the new blocked roots too
         self.assertAllowed(
             "grep -rn foo ~/.claude  # airuleset:root-grep-ok debugging")
