@@ -545,6 +545,24 @@ FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 WEBTERM_OBSERVER_USERS = frozenset({"dominika"})
 
 
+# Webterm-ONLY accounts (#869, owner directive 2026-09-04): these users access
+# their streams EXCLUSIVELY via the webterm gateway (david.newlevel.media,
+# dominika.newlevel.media) — no personal SSH key, no password login.  Direct
+# SSH is a fallback for the owner (zbynek) and marek ONLY.
+#
+# DISTINCT from WEBTERM_OBSERVER_USERS: observer = provisioning PROFILE
+# (gateway-only, no Claude stream — dominika); webterm-only = SSH ACCESS POLICY
+# (no personal key / password — david1-4 are full streams yet webterm-only;
+# dominika is in both).
+#
+# Managed by cli_webterm_only.py: authorized_keys rendered exactly (foreign
+# keys quarantined), sshd Match drop-in disables password auth.
+# Test-locked: subset of subdev REMOTE_HOSTS users.
+WEBTERM_ONLY_USERS = frozenset({
+    "david1", "david2", "david3", "david4", "dominika",
+})
+
+
 def is_webterm_observer(user):
     """True iff `user` is a webterm OBSERVER account (#867) — provisioned with a
     webterm gateway only, excluded from every stream-provisioning side effect of
