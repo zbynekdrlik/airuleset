@@ -428,6 +428,7 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_last_marker_line as transcript_last_marker_line,
     transcript_last_marker_bounded as transcript_last_marker_bounded,   # #599 bounded ❓-veto read
     transcript_last_assistant_text as transcript_last_assistant_text,
+    transcript_last_assistant_model as transcript_last_assistant_model,   # #871 model-float audit
     transcript_last_backlog_empty_ts as transcript_last_backlog_empty_ts,   # #764 fulfilled-rearm 🏁 proof
     session_live_bg_bash as session_live_bg_bash,             # #599 pure bg-bash pairing
     session_has_live_bg_bash as session_has_live_bg_bash,     # #599 bg-bash liveness (#848 retired the compact veto)
@@ -4531,6 +4532,28 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     _add("disk_guard", lambda: disk_guard_enabled,
          lambda: disk_guard.run_disk_guard(now, dry_run=dry_run),
          "disk-guard error")
+
+    # Job 41 — MODEL-FLOAT AUDIT (#871). ALWAYS wired (reads local transcripts
+    # + the pane list, no external fetch), self-gated to hourly via the GATE
+    # (`_sweep_due` — so `list_claude_panes` only runs when due). MACHINE-CHANNEL
+    # ONLY (the #850 repo-health class): journals a `model-float …` line per
+    # live pane/subagent on a model outside the exact-id allowlist
+    # (airuleset.MODEL_TIERS) — a session that floated off the launch pin — and
+    # NEVER pings the owner. Read-only; the remedy is the owner's `/model` or a
+    # relaunch. `due_fn=lambda: True` inside the job because the GATE already
+    # proved it is due (the job then advances `state["model_audit_last_ts"]`).
+    from watchdog.model_audit_job import (MODEL_AUDIT_INTERVAL_S,
+                                          model_float_audit_job)
+    from watchdog.repo_health import _sweep_due as _model_audit_sweep_due
+    _add("model_float_audit",
+         lambda: _model_audit_sweep_due(state, "model_audit_last_ts", now,
+                                        MODEL_AUDIT_INTERVAL_S),
+         lambda: model_float_audit_job(
+             now, state, list_claude_panes(run, dry_run=dry_run),
+             projects_dir, transcript_last_assistant_model,
+             find_active_transcript, newest_subagent_transcript,
+             due_fn=lambda *a, **k: True),
+         "model-float-audit error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
