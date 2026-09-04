@@ -331,11 +331,13 @@ def _nudge_text(ahead, integration, prod, lane=None, deploy_age_h=None):
     if isinstance(deploy_age_h, (int, float)) and deploy_age_h > 0:
         age_sfx = ", posledný PROD deploy ~%dh" % int(deploy_age_h)
     if lane is not None and hasattr(lane, "action") and lane.action:
-        head = ("%s — develop je %d commitov pred main%s. %s (%s)."
-                % (prefix, ahead, age_sfx, lane.action, lane.evidence)
+        head = ("%s — `%s` je %d commitov pred `%s`%s. %s (%s)."
+                % (prefix, integration, ahead, prod, age_sfx,
+                   lane.action, lane.evidence)
                 if lane.evidence
-                else "%s — develop je %d commitov pred main%s. %s."
-                % (prefix, ahead, age_sfx, lane.action))
+                else "%s — `%s` je %d commitov pred `%s`%s. %s."
+                % (prefix, integration, ahead, prod, age_sfx,
+                   lane.action))
         doctrine = (" Doktrína: in-flight vetva = FROZEN (len release-blocking "
                     "fix), NIKDY re-cut — každý restart stojí celý chvost.")
         text = head + doctrine

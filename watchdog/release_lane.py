@@ -41,7 +41,9 @@ class LaneResult:
 
 
 def _pr_ci_red(pr):
-    """True when a PR's statusCheckRollup contains at least one FAILURE/ERROR."""
+    """True when a PR's statusCheckRollup contains at least one FAILURE/ERROR.
+    Handles both CheckRun items (status/conclusion) and StatusContext items
+    (state, no conclusion field) — a state=="FAILURE"/"ERROR" context is red."""
     if not isinstance(pr, dict):
         return False
     checks = pr.get("statusCheckRollup")
@@ -50,11 +52,15 @@ def _pr_ci_red(pr):
     for c in checks:
         if not isinstance(c, dict):
             continue
-        st = c.get("status", "")
         conc = c.get("conclusion", "")
         if conc in ("FAILURE", "ERROR", "TIMED_OUT"):
             return True
-        if st == "COMPLETED" and conc not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+        st = c.get("status", "")
+        if st == "COMPLETED" and conc not in ("SUCCESS", "NEUTRAL", "SKIPPED", ""):
+            return True
+        # StatusContext items have `state` instead of status/conclusion.
+        state = c.get("state", "")
+        if state in ("FAILURE", "ERROR"):
             return True
     return False
 
@@ -120,7 +126,7 @@ def classify_release_lane(lstate):
                 ev = "run #%d" % rid if rid else "shadow run"
                 return LaneResult(
                     "shadow-failed",
-                    "shadow gate FAILED (%s): oprav spec chybou → "
+                    "shadow gate FAILED (%s): oprav spec chybu → "
                     "release-fix cherry-pick na staging, NIKDY re-cut" % ev,
                     ev,
                 )

@@ -4916,10 +4916,9 @@ def _watchdog_release_state_fetch(cwd):
         if isinstance(prs, list) and prs:
             in_flight = True
             if base == staging:
-                cut_pr = prs[0] if prs else None
+                cut_pr = prs[0]
             elif base == prod:
-                promote_pr = prs[0] if prs else None
-            break
+                promote_pr = prs[0]
     # (4) a genuine deploy/release workflow running/queued (only if no release PR),
     # server-side status-filtered + event-filtered (review F1 both directions).
     if not in_flight:
