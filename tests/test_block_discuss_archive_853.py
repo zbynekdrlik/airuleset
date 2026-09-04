@@ -139,29 +139,11 @@ class TestPassForReads(unittest.TestCase):
 class TestFailOpen(unittest.TestCase):
     """A python crash must fail-open (exit 0), not exit 1."""
 
-    def test_python_crash_fails_open(self):
-        # Force a python crash by setting a broken PYTHONPATH
-        cmd = "python3 -c \"proxy.execute_kw('db','2','pw','discuss.channel','action_archive',[[262]])\""
-        payload = json.dumps({"tool_input": {"command": cmd}})
-        with tempfile.TemporaryDirectory() as td:
-            marker_dir = os.path.join(td, ".claude")
-            os.makedirs(marker_dir, exist_ok=True)
-            with open(os.path.join(marker_dir, "airuleset-box-class"), "w") as f:
-                f.write("shared-stream\n")
-            # Break python by pointing to a nonexistent python3
-            env = {**os.environ, "HOME": td, "PATH": "/nonexistent:" + os.environ.get("PATH", "")}
-            # Instead of breaking python, let's test that the [ "$RC" -eq 2 ] || exit 0 works
-            # by checking a command that doesn't mention discuss.channel at all
-            # (the python exits 0, then [ 0 -eq 2 ] is false, so exit 0)
-            safe_cmd = "echo hello"
-            safe_payload = json.dumps({"tool_input": {"command": safe_cmd}})
-            r = subprocess.run(
-                ["bash", HOOK],
-                input=safe_payload.encode(),
-                capture_output=True,
-                timeout=10,
-                env=env,
-            )
+    def test_non_discuss_command_passes(self):
+        """A command not mentioning discuss.channel passes through the classifier
+        and hits the [ "$RC" -eq 2 ] || exit 0 fail-open tail."""
+        cmd = "echo hello world"
+        r = _run_hook(cmd)
         self.assertEqual(r.returncode, 0)
 
 
