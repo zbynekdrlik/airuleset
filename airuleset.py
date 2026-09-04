@@ -3142,7 +3142,7 @@ def _validate_self_review_table(table_text, lenses):
     Returns (ok, reason_or_None)."""
     if not table_text or not table_text.strip():
         return False, "empty Self-review table"
-    lines = [l.strip() for l in table_text.strip().splitlines() if l.strip()]
+    lines = [ln.strip() for ln in table_text.strip().splitlines() if ln.strip()]
     # Skip markdown table header rows.
     data_lines = []
     for line in lines:
@@ -3190,6 +3190,7 @@ def cmd_handoff(args):
     import hashlib
     import subprocess
     import datetime
+    import time as _time
 
     repo = getattr(args, "repo", None)
     issue = getattr(args, "issue", None)
@@ -3224,7 +3225,7 @@ def cmd_handoff(args):
 
     # Get bounce round.
     self_login = _gh_login()
-    rnd = cli_quals._bounce_round(int(issue), self_login, cwd=None)
+    rnd = _bounce_round(int(issue), self_login, cwd=None)
 
     # Round >= 2 requires extra fields.
     if rnd >= 2:
@@ -3309,7 +3310,7 @@ def cmd_handoff(args):
     receipt_path = os.path.join(gate_dir,
                                 "%s-%s.json" % (owner_repo, issue))
     receipt = json.dumps({"sha256": body_hash,
-                          "ts": time.time(),
+                          "ts": _time.time(),
                           "issue": int(issue),
                           "branch": branch,
                           "round": rnd})
@@ -6210,6 +6211,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_user_waiting as _row_is_user_waiting,
     _user_waiting_reason as _user_waiting_reason,
     _partition_user_waiting as _partition_user_waiting,
+    _bounce_round as _bounce_round,
     OPS_WAIT_LABELS as OPS_WAIT_LABELS,
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
