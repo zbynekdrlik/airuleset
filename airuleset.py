@@ -389,7 +389,7 @@ from cli_deployer_glue import (  # noqa: E402
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
-AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
+AGENT_NAMES = ["autopilot-worker", "ticket-validator", "fable-advisor"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"
 
