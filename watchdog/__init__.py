@@ -1907,6 +1907,13 @@ from watchdog import model_audit_job as model_audit_job  # noqa: E402,F401
 # import at its top level → no cycle; reuses the per-class discovery functions
 # under pressure).
 from watchdog import disk_guard as disk_guard  # noqa: E402,F401
+
+# #871 — Job 41's subagent enumeration reuses `cli_model_audit`'s own
+# recency-windowed helper (MODEL_AUDIT_SUBAGENT_RECENCY_S) rather than a
+# second definition of "recent enough" — `cli_model_audit.py` imports only
+# stdlib at its top level (no `watchdog`/`airuleset` import there), so this
+# is cycle-free.
+from cli_model_audit import _subagent_transcripts as _model_audit_subagent_transcripts  # noqa: E402
 # #841 leg C — the owner-daily root-level finding surface Job 40 records at
 # CRITICAL pressure (stdlib-only, no top-level watchdog/notify import → no
 # cycle, never pings; a SESSION reads the finding cache and raises the ❓).
@@ -4563,18 +4570,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # due; it reuses the SAME `panes` list the pane loop above already
     # materialized — no second `list_claude_panes` tmux call). MACHINE-CHANNEL
     # ONLY (the #850 repo-health class): journals a `model-float …` line per
-    # live pane/subagent on a model outside the exact-id allowlist
-    # (airuleset.MODEL_TIERS) — a session that floated off the launch pin — and
-    # NEVER pings the owner. Read-only; the remedy is the owner's `/model` or a
-    # relaunch. `due_fn=lambda: True` inside the job because the GATE already
-    # proved it is due (the job then advances `state["model_audit_last_ts"]`).
+    # live pane/RECENT subagent (recency-windowed, #871 fix — a subagent
+    # transcript is considered only within `_model_audit_subagent_transcripts`'s
+    # shared window, never the whole multi-week dispatch history) on a model
+    # outside the exact-id allowlist (airuleset.MODEL_TIERS) — a session that
+    # floated off the launch pin — and NEVER pings the owner. Read-only; the
+    # remedy is the owner's `/model` or a relaunch. `due_fn=lambda: True`
+    # inside the job because the GATE already proved it is due (the job then
+    # advances `state["model_audit_last_ts"]`).
     _add("model_float_audit",
          lambda: _sweep_due(state, "model_audit_last_ts", now,
                             model_audit_job.MODEL_AUDIT_INTERVAL_S),
          lambda: model_audit_job.model_float_audit_job(
              now, state, panes,
              projects_dir, transcript_last_assistant_model,
-             find_active_transcript, newest_subagent_transcript,
+             find_active_transcript, _model_audit_subagent_transcripts,
              dry_run=dry_run, due_fn=lambda *a, **k: True),
          "model-float-audit error")
 

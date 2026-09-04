@@ -16,24 +16,49 @@ launch pin automatically).
 """
 import glob
 import os
+import time
 
 # airuleset is imported LAZILY inside the functions below — a top-level
 # `import airuleset` would be a circular import (airuleset imports this leaf
 # mid-module to bind cmd_model_audit into SUBCOMMANDS).
 
+# #871 — a live pane's `subagents/` dir accumulates EVERY subagent this
+# session has EVER dispatched, over its whole multi-week lifetime. Walking
+# the WHOLE history (the pre-fix behaviour) reported ~1200 long-dead
+# subagents on a single audit run -- weeks-old, already-terminated
+# `claude-opus-5` transcripts from before the ban even existed are not a
+# live FLOAT risk. The audit is about sessions that CAN STILL FLOAT, i.e.
+# LIVE state only, so a subagent transcript is considered ONLY when its
+# mtime is within this window of "now". Reused by watchdog/model_audit_job.py
+# (Job 41) so both the manual `airuleset.py model-audit` CLI and the hourly
+# watchdog sweep share ONE definition of "recent enough to matter".
+MODEL_AUDIT_SUBAGENT_RECENCY_S = 7200  # 2h
 
-def _subagent_transcripts(main_path):
-    """Every subagent transcript under a main transcript's session dir —
-    `<main.parent>/<main.stem>/subagents/**/*.jsonl` (the #6 layout), or []
-    on any error / no subagents dir. Read-only."""
+
+def _subagent_transcripts(main_path, now=None,
+                          recency=MODEL_AUDIT_SUBAGENT_RECENCY_S):
+    """Every subagent transcript under a main transcript's session dir --
+    `<main.parent>/<main.stem>/subagents/**/*.jsonl` (the #6 layout) -- whose
+    mtime is within `recency` seconds of `now` (default: time.time() at call
+    time). A transcript older than the window is a dead historical subagent,
+    not a live float risk, and is excluded (#871). [] on any error / no
+    subagents dir / an unreadable file. Read-only."""
     try:
         base = os.path.join(os.path.dirname(main_path),
                             os.path.splitext(os.path.basename(main_path))[0],
                             "subagents")
         if not os.path.isdir(base):
             return []
-        return sorted(glob.glob(os.path.join(base, "**", "*.jsonl"),
-                                recursive=True))
+        when = time.time() if now is None else now
+        out = []
+        for p in sorted(glob.glob(os.path.join(base, "**", "*.jsonl"),
+                                  recursive=True)):
+            try:
+                if (when - os.path.getmtime(p)) <= recency:
+                    out.append(p)
+            except OSError:
+                continue
+        return out
     except OSError:
         return []
 
@@ -46,9 +71,15 @@ def audit_model_floats(panes, projects_dir, find_transcript, read_model,
     `panes` = [(pane_id, cwd)] (watchdog.tmux_io.list_claude_panes shape);
     `find_transcript(projects_dir, cwd)` = watchdog.transcripts.find_active_transcript
     ((path, mtime) or None); `read_model(path)` =
-    watchdog.transcripts.transcript_last_assistant_model (str or '')."""
+    watchdog.transcripts.transcript_last_assistant_model (str or '').
+
+    `subagent_iter` (default `_subagent_transcripts`, recency-windowed —
+    #871) is called ONCE per pane's main transcript; a subagent path
+    already reported for an earlier pane in THIS call (e.g. two panes
+    resolving to the same main transcript) is reported at most once."""
     import airuleset
     records = []
+    seen_sub = set()
     for pane_id, cwd in panes:
         tr = find_transcript(projects_dir, cwd)
         if not tr:
@@ -67,6 +98,9 @@ def audit_model_floats(panes, projects_dir, find_transcript, read_model,
                 "banned": airuleset.is_banned_model_for_audit(main_model),
             })
         for sub in subagent_iter(main_path):
+            if str(sub) in seen_sub:
+                continue
+            seen_sub.add(str(sub))
             m = read_model(sub)
             if not m:
                 continue
