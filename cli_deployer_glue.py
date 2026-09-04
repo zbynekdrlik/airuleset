@@ -294,6 +294,9 @@ try:
     dsk = statusbar.disk_segment()
     if dsk:
         segs.append(dsk)
+    rel = statusbar.release_idle_segment(cwd=cwd)
+    if rel:
+        segs.append(rel)
     # --- session context/cost: 'ctx 570K ~$0.57' (2026-07-25, #37; shortened #223) ---
     cc_full = statusbar.context_cost_segment(d)
     cc_short = statusbar.context_cost_segment(d, show_cost=False) if cc_full else ""
