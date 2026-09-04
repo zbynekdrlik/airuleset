@@ -39,28 +39,16 @@ from unittest import TestCase
 import airuleset
 
 
-def _is_banned_opus5(value):
-    """True iff `value` is a BANNED Opus 5 model: any `opus-5` model id (the
-    bare `claude-opus-5*` ids AND provider-prefixed / dated variants like
-    `us.anthropic.claude-opus-5-20260514-v1:0`), OR the bare `opus`/`opusplan`
-    aliases (both route to Opus 5 on the Anthropic API). The `opus-5` substring
-    check is false-positive-safe: no ALLOWED model contains it -- `claude-fable-
-    5[1m]` (managed default), `claude-opus-4-8[1m]` (gate-CLOSED fallback tier,
-    which shares only the `opus-4` fragment), `claude-sonnet-4-5`, etc. The bare
-    alias is checked by exact set membership, never substring, so `opus` inside
-    `claude-opus-4-8` is NOT flagged (adversarial-review F1, #495)."""
-    v = (value or "").strip().strip("'\"").strip().lower()
-    v = re.sub(r"\s*\[\d+m\]$", "", v).strip()   # drop a trailing [Nm] context tag
-    if v in ("opus", "opusplan"):                # bare Opus-5-routing aliases
-        return True
-    if "opus-5" in v:                            # any opus-5 id (incl. prefixed/dated)
-        return True
-    return False
+# #871: the ban predicate is now the SHARED airuleset.is_banned_model (Opus 5
+# AND Fable 5.1), reused by cli_config.apply_managed_settings_defaults's
+# self-heal — no duplicated predicate (the #495 one-source lesson). This
+# module's tests exercise that single function directly.
+_is_banned_opus5 = airuleset.is_banned_model
 
 
 class TestBannedPredicateItself(TestCase):
-    """The predicate must catch every Opus-5 form AND clear every allowed
-    model -- otherwise the launch-arg guards below are vacuous."""
+    """The predicate must catch every Opus-5 AND Fable-5.1 form AND clear
+    every allowed model -- otherwise the launch-arg guards below are vacuous."""
 
     def test_catches_every_opus5_form(self):
         for banned in ("claude-opus-5[1m]", "claude-opus-5",
@@ -70,14 +58,24 @@ class TestBannedPredicateItself(TestCase):
                        # provider-prefixed / dated forms (Bedrock / Vertex):
                        "us.anthropic.claude-opus-5-20260514-v1:0",
                        "anthropic.claude-opus-5-v1:0"):
-            self.assertTrue(_is_banned_opus5(banned),
+            self.assertTrue(airuleset.is_banned_model(banned),
                             "%r should be BANNED" % banned)
+
+    def test_catches_every_fable_5_1_form(self):
+        # #871 — Fable 5.1 joins the ban: any fable-5-1 id AND the bare
+        # `fable` alias (the Agent `model` param floats it to LATEST = 5.1).
+        for banned in ("claude-fable-5-1", "claude-fable-5-1[1m]",
+                       "CLAUDE-FABLE-5-1", "'claude-fable-5-1'",
+                       " claude-fable-5-1 ", "claude-fable-5-1-20260901",
+                       "fable", "fable[1m]", "FABLE", "'fable'", " fable "):
+            self.assertTrue(airuleset.is_banned_model(banned),
+                            "%r should be BANNED (Fable 5.1 / bare alias)" % banned)
 
     def test_clears_every_allowed_model(self):
         for ok in ("claude-fable-5[1m]", "claude-fable-5",
                    "claude-opus-4-8[1m]", "claude-opus-4-8",
                    "claude-sonnet-4-5", "claude-haiku-4-5"):
-            self.assertFalse(_is_banned_opus5(ok),
+            self.assertFalse(airuleset.is_banned_model(ok),
                              "%r must be ALLOWED" % ok)
 
 
@@ -131,6 +129,33 @@ class TestSettingsDefaultModelNeverBanned(TestCase):
         self.assertFalse(
             _is_banned_opus5(model),
             "settings.json model=%r is a BANNED Opus 5 value" % model)
+
+
+class TestSettingsSelfHealsBannedModel(TestCase):
+    """#871 -- apply_managed_settings_defaults' UNCONDITIONAL `model =
+    MANAGED_MODEL` overwrite is the self-heal: a settings.json carrying a
+    banned id (an owner `/model → Fable 5.1` Enter, a persisted
+    `model_changed` float, a stale Opus 5) is rewritten to the allowed
+    managed default on the next install/push. This LOCKS that heal (the
+    behavior is unconditional, so this documents/guards it rather than
+    introducing it)."""
+
+    def _healed(self, incoming):
+        import cli_config
+        return cli_config.apply_managed_settings_defaults(
+            {"model": incoming}).get("model")
+
+    def test_heals_banned_fable_5_1(self):
+        for bad in ("claude-fable-5-1[1m]", "claude-fable-5-1", "fable"):
+            healed = self._healed(bad)
+            self.assertEqual(healed, airuleset.MANAGED_MODEL)
+            self.assertFalse(airuleset.is_banned_model(healed))
+
+    def test_heals_banned_opus_5(self):
+        for bad in ("claude-opus-5[1m]", "opus"):
+            healed = self._healed(bad)
+            self.assertEqual(healed, airuleset.MANAGED_MODEL)
+            self.assertFalse(airuleset.is_banned_model(healed))
 
 
 if __name__ == "__main__":

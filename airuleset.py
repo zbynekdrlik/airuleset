@@ -75,6 +75,41 @@ MANAGED_EFFORT_LEVEL = "high"
 # "fable", so the statusline highlight keeps working unchanged.
 MANAGED_MODEL = "claude-fable-5[1m]"
 
+
+def is_banned_model(value):
+    """True iff `value` names a BANNED model — the single shared predicate
+    reused by `cli_config.apply_managed_settings_defaults` (settings.json
+    self-heal) and `tests/test_launch_model_ban.py`, so the two can never
+    drift on what "banned" means (#495 lesson: one source, never a
+    duplicated predicate).
+
+    The ban set (model-awareness.md):
+      * **Opus 5** — any `opus-5` id (bare `claude-opus-5*` AND provider-
+        prefixed/dated `us.anthropic.claude-opus-5-...`), plus the bare
+        `opus`/`opusplan` aliases that route to it (2026-08-13 directive).
+      * **Fable 5.1** — any `fable-5-1` id (`claude-fable-5-1`, the `[1m]`
+        form), plus the bare `fable` alias, which the Agent `model` param
+        floats to LATEST = 5.1 (owner directive 2026-09-04, #871). Fable
+        5.0 (`claude-fable-5`) is the ONLY allowed Fable and is the managed
+        default (`MANAGED_MODEL`).
+
+    False-positive-safe by construction: the allowed ids never contain the
+    banned substrings — `claude-fable-5[1m]` (managed default) strips to
+    `claude-fable-5` which contains neither `opus-5` nor `fable-5-1`;
+    `claude-opus-4-8` shares only the `opus-4` fragment; `claude-sonnet-4-5`
+    / `claude-haiku-4-5` match nothing. Bare aliases are checked by EXACT
+    set membership, never substring, so `opus` inside `claude-opus-4-8` and
+    `fable` inside `claude-fable-5` are never flagged."""
+    v = (value or "").strip().strip("'\"").strip().lower()
+    v = re.sub(r"\s*\[\d+m\]$", "", v).strip()   # drop a trailing [Nm] context tag
+    if v in ("opus", "opusplan", "fable"):        # bare aliases that float to a banned model
+        return True
+    if "opus-5" in v:                             # any Opus 5 id (incl. prefixed/dated)
+        return True
+    if "fable-5-1" in v:                          # any Fable 5.1 id (incl. [1m] form)
+        return True
+    return False
+
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC
 # builds up to 2.1.223 it is a CUMULATIVE per-session spawn cap, not a
