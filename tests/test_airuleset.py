@@ -13410,6 +13410,238 @@ class TestBlockTestSkipsThreeBranchBase(TestCase):
         self.assertIn("#[" + "ignore]", r.stdout + r.stderr)
 
 
+class TestBlockTestSkipsForkAware(TestCase):
+    """#847: block-test-skips.sh false-blocked fork-no-merge pushes because
+    the diff base was origin/develop (the personal fork, lagging upstream)
+    instead of upstream/develop (the canonical integration branch). After a
+    `git merge upstream/develop`, upstream-merged, already-sanctioned
+    test.skip() calls appeared as NEW additions in the origin/develop diff
+    and blocked every push.
+
+    The fix: when an `upstream` remote exists and carries the integration
+    branch (develop/dev), use `upstream/<branch>` as BASE_REF. Fall back to
+    origin when upstream is absent (same-repo stream, unchanged)."""
+
+    HOOK = "block-test-skips.sh"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True,
+            cwd=cwd, timeout=60, env=env)
+
+    def _mk_fork_repo(self):
+        """Simulate a fork-no-merge stream layout:
+        - origin/develop = personal fork, STALE (behind upstream)
+        - upstream/develop = canonical repo, carries a sanctioned test.skip()
+        - feature branch merges upstream/develop then adds clean work."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+
+        # origin/main and origin/develop both at the stale base
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+        g("update-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        g("checkout", "-qb", "develop")
+        g("update-ref", "refs/remotes/origin/develop", base_sha)
+
+        # upstream/develop is AHEAD: carries a sanctioned test.skip()
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_old.py"), "w").write(
+            "import pytest\n\n@pytest.mark.skip(reason='sanctioned, e2e#5820')\n"
+            "def test_old():\n    assert 1 == 1\n"
+        )
+        g("add", "tests/test_old.py")
+        g("commit", "-qm", "test: sanctioned skip merged into upstream develop")
+        upstream_dev_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/upstream/develop", upstream_dev_sha)
+
+        # Create feature branch (simulating post-merge-upstream state)
+        g("checkout", "-qb", "feature-fix-5966")
+        return root, g
+
+    def test_upstream_base_prevents_fork_lag_false_block(self):
+        """A clean push on a fork stream must NOT be false-blocked by a
+        sanctioned test.skip() that came from upstream/develop. With
+        upstream-aware base resolution, the diff is upstream/develop...HEAD
+        which contains only THIS branch's own additions."""
+        root, g = self._mk_fork_repo()
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "def test_new():\n    assert 2 + 2 == 4\n"
+        )
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add real coverage")
+        r = self._run("git push origin feature-fix-5966", root)
+        self.assertEqual(r.returncode, 0,
+                         "fork-lag false-block on upstream skip: " + r.stderr)
+
+    def test_real_skip_on_fork_branch_still_blocks(self):
+        """Regression guard: a GENUINELY new skip added by THIS branch
+        must still block even when upstream is present."""
+        root, g = self._mk_fork_repo()
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "#[ignore]\nfn test_x() { assert!(1 == 1); }\n"
+        )
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add coverage")
+        r = self._run("git push origin feature-fix-5966", root)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("#[" + "ignore]", r.stdout + r.stderr)
+
+    def test_no_upstream_falls_back_to_origin(self):
+        """When upstream remote does not exist (same-repo stream),
+        the hook falls back to origin/develop — unchanged behavior."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("x = 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "develop")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_ok.py"), "w").write(
+            "def test_ok():\n    assert 1\n")
+        g("add", "tests/test_ok.py")
+        g("commit", "-qm", "test: ok")
+        g("update-ref", "refs/remotes/origin/develop",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "feat-x")
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: coverage")
+        r = self._run("git push origin feat-x", root)
+        # No upstream remote, origin/develop exists: still blocks on the skip
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_foreign_upstream_without_origin_develop_ignored(self):
+        """YELLOW-1: a repo cloned from an OSS project may have an upstream
+        remote with upstream/develop, but NO origin/develop (the repo itself
+        works two-branch dev->main). The hook must NOT pick the foreign
+        upstream/develop as base — fall through to origin/main instead."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_ok.py"), "w").write(
+            "def test_ok():\n    assert 1\n")
+        g("add", "tests/test_ok.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+        # Foreign upstream/develop exists but NO origin/develop
+        g("update-ref", "refs/remotes/upstream/develop", base_sha)
+        g("checkout", "-qb", "feat-y")
+        # Add a real test — should pass since no skip is in the diff
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "def test_new():\n    assert 2 + 2 == 4\n")
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add coverage")
+        r = self._run("git push origin feat-y", root)
+        # Must NOT false-block via the foreign upstream/develop base
+        self.assertEqual(r.returncode, 0,
+                         "foreign upstream/develop false-blocked: " + r.stderr)
+
+
+class TestPrePushTestCheckForkAware(TestCase):
+    """#847: pre-push-test-check.sh has the same fork-lag false-positive
+    as block-test-skips.sh — diff base resolves only against origin, never
+    upstream. On a fork stream after merging upstream/develop, already-merged
+    fix commits surface in the origin/develop diff and block the push."""
+
+    HOOK = "pre-push-test-check.sh"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True,
+            cwd=cwd, timeout=60, env=env)
+
+    def _mk_fork_repo(self):
+        """Fork layout: origin/develop stale, upstream/develop has a merged
+        fix commit (fix: without preceding test — the Gate 2 trigger), feature
+        branch has merged upstream/develop and adds clean docs."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+        g("update-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        g("checkout", "-qb", "develop")
+        g("update-ref", "refs/remotes/origin/develop", base_sha)
+
+        # upstream/develop has a merged fix (no preceding test)
+        open(os.path.join(root, "app.py"), "a").write("# fixed\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser")
+        upstream_dev_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/upstream/develop", upstream_dev_sha)
+
+        g("checkout", "-qb", "feature-docs")
+        return root, g
+
+    def test_upstream_base_prevents_fork_lag_false_block(self):
+        """A docs-only push on a fork stream must not be false-blocked by
+        a fix commit that came from upstream/develop."""
+        root, g = self._mk_fork_repo()
+        open(os.path.join(root, "README.md"), "w").write("# docs\n")
+        g("add", "README.md")
+        g("commit", "-qm", "docs: tweak readme")
+        r = self._run("git push origin feature-docs", root)
+        self.assertEqual(r.returncode, 0,
+                         "fork-lag false-block on upstream fix: " + r.stderr)
+
+    def test_real_fix_on_fork_branch_still_blocks(self):
+        """Regression guard: a real untested fix on the fork branch still
+        blocks even with upstream present."""
+        root, g = self._mk_fork_repo()
+        open(os.path.join(root, "app.py"), "a").write("# my own fix\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: my own bug")
+        r = self._run("git push origin feature-docs", root)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+
 class TestBlockHistoryRewriteHook(TestCase):
     """hooks/block-history-rewrite.sh (issue #11) — two absolute bans that
     previously existed only as prose: git history rewrite (commit-conventions.md)
