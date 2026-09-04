@@ -286,8 +286,14 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "             release_state_fetch=None, queue_fetch=None,\n"
                "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
                "             resource_guard_gk_request=None,\n"
+               # #866 re-pin: nice_check_enabled=False (job 42's nice-check
+               # self-check gate) was appended on a NEW trailing line after
+               # disk_guard_enabled=False, so the closing `):` moved off
+               # that line onto the new one; the anchor grew a last line,
+               # the mutation target vault_purge=None is untouched.
                "             u_fetch=None, reconcile_fetch=None, "
-               "disk_guard_enabled=False):")
+               "disk_guard_enabled=False,\n"
+               "             nice_check_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

@@ -80,6 +80,7 @@ EXPECTED_STANDALONE = [
     "resource_guard_verify",            # (39) — #775 shared-stream resource-guard verify
     "disk_guard",                       # (40) — #834 per-box disk-pressure guard
     "model_float_audit",                # (41) — #871 model-float audit
+    "nice_check",                       # (42) — #866 nice-0 self-check
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

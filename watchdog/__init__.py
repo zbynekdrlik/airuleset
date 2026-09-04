@@ -1919,6 +1919,10 @@ from cli_model_audit import _subagent_transcripts as _model_audit_subagent_trans
 # cycle, never pings; a SESSION reads the finding cache and raises the ❓).
 from watchdog import disk_guard_root as disk_guard_root  # noqa: E402,F401
 
+# #866 — Job 42, the nice-check self-check (stdlib-only /proc reader, no
+# watchdog import at its top level → no cycle; read-only, never renice).
+from watchdog import nice_check as nice_check  # noqa: E402,F401
+
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
 # `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
@@ -2066,8 +2070,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              release_state_fetch=None, queue_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
-             u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False):
-    """Scan every `claude` pane once. 41 numbered jobs per poll — 35 LIVE and 6
+             u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
+             nice_check_enabled=False):
+    """Scan every `claude` pane once. 42 numbered jobs per poll — 36 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2744,6 +2749,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the banned Fable 5.1). MACHINE-CHANNEL ONLY (the #850 repo-health
           class) — never pings the owner; the remedy is `/model` or a
           relaunch. `watchdog/model_audit_job.py`'s docstring is the SSOT.
+      (42) NICE-CHECK SELF-CHECK (#866), gated on `nice_check_enabled` (True in
+          cmd_watchdog, left False in unit tests). Reads `/proc/<pid>/stat`
+          field 19 for interactive claude main sessions and the tmux server;
+          journals any non-zero nice (machine-channel only — never an owner
+          ping). Read-only: never calls renice or mutates scheduling.
+          `watchdog/nice_check.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4587,6 +4598,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              find_active_transcript, _model_audit_subagent_transcripts,
              dry_run=dry_run, due_fn=lambda *a, **k: True),
          "model-float-audit error")
+
+    # Job 42 (#866) — NICE-CHECK SELF-CHECK. Gated on `nice_check_enabled`
+    # (True in cmd_watchdog, left False in unit tests so no real /proc is
+    # read). Read-only: detects non-zero nice on interactive claude mains /
+    # tmux server and journals it (machine channel only, never an owner ping).
+    _add("nice_check", lambda: nice_check_enabled,
+         lambda: nice_check.nice_check_job(dry_run=dry_run),
+         "nice-check error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
