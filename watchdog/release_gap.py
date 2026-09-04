@@ -309,30 +309,22 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
         return ("skip", rec, "undetermined")
     if ahead < min_ahead:
         return ("clear", None, "no-gap")
-    # #846 continuation: time-based thresholds gate whether the gap is ripe.
-    # When oldest_ahead_ts is measurable, the oldest commit ahead must be at
-    # least OLDEST_AHEAD_THRESHOLD_S old. When unmeasurable → conjunct ignored
-    # (fail-safe toward today's gap-only behaviour).
-    if isinstance(oldest_ahead_ts, (int, float)):
-        oldest_age = now - oldest_ahead_ts
-        if oldest_age < OLDEST_AHEAD_THRESHOLD_S:
-            return ("wait", rec, "gap-fresh")
-    # When deploy_age is measurable, it must be at least DEPLOY_AGE_THRESHOLD_S.
-    # Unmeasurable → conjunct ignored.
-    if isinstance(deploy_age, (int, float)):
-        if deploy_age < DEPLOY_AGE_THRESHOLD_S:
-            return ("wait", rec, "deploy-recent")
+    # #846: stalled-lane nudges (in_flight + cut-ci-red/shadow-failed) are
+    # EXEMPT from the time thresholds below — a red-CI stalled train is urgent
+    # regardless of commit age. Track exemption with a flag.
+    threshold_exempt = False
     if in_flight:
-        # #846: in_flight + STALLED lane (cut-ci-red, shadow-failed) → nudge
-        # instead of suppressing. The train is "in flight" but stuck on a RED
-        # gate — the exact shape the 5h gk incident produced.
         from watchdog.release_lane import STALLED_STAGES
         if (lane is not None and hasattr(lane, "stage")
                 and lane.stage in STALLED_STAGES):
-            pass  # fall through to the stalled-train cadence logic below
+            threshold_exempt = True  # fall through to cadence, skip thresholds
         else:
             return ("inflight", {"first_seen": now, "last_nudge": None,
                                  "sig": _sig(rstate)}, "release-in-flight")
+    # Seed the rec BEFORE the threshold gates so a "wait" from a fresh gap
+    # returns a caller-safe rec with sig/first_seen/last_nudge (Fable review
+    # RED 1: returning the raw incoming rec={} crashes the caller on
+    # new_rec["sig"]).
     first_seen = rec.get("first_seen") if isinstance(rec, dict) else None
     if not isinstance(first_seen, (int, float)):
         first_seen = now
@@ -341,6 +333,23 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
         last_nudge = None
     new_rec = {"first_seen": first_seen, "last_nudge": last_nudge,
                "sig": _sig(rstate)}
+    # #846 continuation: time-based thresholds gate whether the gap is ripe.
+    # Skipped when the in_flight+stalled exemption applies.
+    # When oldest_ahead_ts is measurable, the oldest commit ahead must be at
+    # least OLDEST_AHEAD_THRESHOLD_S old. Unmeasurable → conjunct ignored
+    # (fail-safe toward gap-only behaviour).
+    if not threshold_exempt:
+        if (isinstance(oldest_ahead_ts, (int, float))
+                and not isinstance(oldest_ahead_ts, bool)):
+            oldest_age = now - oldest_ahead_ts
+            if oldest_age < OLDEST_AHEAD_THRESHOLD_S:
+                return ("wait", new_rec, "gap-fresh")
+        # When deploy_age is measurable, it must be >= DEPLOY_AGE_THRESHOLD_S.
+        # Unmeasurable → conjunct ignored.
+        if (isinstance(deploy_age, (int, float))
+                and not isinstance(deploy_age, bool)):
+            if deploy_age < DEPLOY_AGE_THRESHOLD_S:
+                return ("wait", new_rec, "deploy-recent")
     anchor = last_nudge if last_nudge is not None else first_seen
     if now - anchor >= cadence:
         return ("nudge", new_rec, "due")

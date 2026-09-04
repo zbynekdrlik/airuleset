@@ -351,6 +351,34 @@ class TestOldestAheadThreshold(unittest.TestCase):
             min_ahead=1, oldest_ahead_ts=None, deploy_age=None)
         self.assertEqual(action, "nudge")
 
+    def test_fresh_rec_wait_returns_caller_safe_rec(self):
+        """A fresh session (rec={}) with gap-fresh wait returns a rec with
+        sig/first_seen/last_nudge — the caller reads new_rec['sig']."""
+        now = 10000
+        oldest_ts = now - 1800  # 30min
+        action, new_rec, reason = _release_decision(
+            {}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=oldest_ts, deploy_age=4 * 3600)
+        self.assertEqual(action, "wait")
+        self.assertIn("fresh", reason)
+        # The caller reads these keys — KeyError here = the RED 1 crash
+        self.assertIn("sig", new_rec)
+        self.assertIn("first_seen", new_rec)
+        self.assertIn("last_nudge", new_rec)
+
+    def test_stalled_lane_not_suppressed_by_fresh_gap(self):
+        """A stalled lane (cut-ci-red) with oldest < 2h still nudges — the
+        thresholds do NOT gate the stalled-lane path."""
+        now = 10000
+        oldest_ts = now - 1800  # 30min — would be gap-fresh for non-stalled
+        lane = LaneResult("cut-ci-red", "fix it", "PR #10")
+        action, _, reason = _release_decision(
+            {"first_seen": 0},
+            {"ahead": 10, "in_flight": True, "train": True},
+            now=now, cadence=3600, min_ahead=1, lane=lane,
+            oldest_ahead_ts=oldest_ts, deploy_age=4 * 3600)
+        self.assertEqual(action, "nudge")
+
 
 # ---------------------------------------------------------------------------
 # Legacy backward compat — _release_decision without lane
