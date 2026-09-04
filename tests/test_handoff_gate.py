@@ -264,23 +264,16 @@ class TestDoctrineContentLock843(unittest.TestCase):
 
 
 class TestNudgeRound3Clause(unittest.TestCase):
-    """#843: _nudge_text carries a ROUND3 clause when round3_n > 0."""
+    """#843: the I trigger text names bounce/round3! and points the session
+    at `slice-quals --bounces` — the session determines which members are
+    round >= 3, the nudge just names the command."""
 
-    def test_no_clause_at_zero(self):
+    def test_i_trigger_names_round3_and_bounces(self):
         from watchdog.ops_wait_recheck import _nudge_text
-        text = _nudge_text(5, [], round3_n=0)
-        self.assertNotIn("ROUND3", text)
-
-    def test_clause_at_positive(self):
-        from watchdog.ops_wait_recheck import _nudge_text
-        text = _nudge_text(5, [], round3_n=2)
-        self.assertIn("ROUND3 2", text)
+        text = _nudge_text(5, [])
+        self.assertIn("round3!", text)
+        self.assertIn("slice-quals --bounces", text)
         self.assertIn("#843", text)
-
-    def test_clause_not_on_bool(self):
-        from watchdog.ops_wait_recheck import _nudge_text
-        text = _nudge_text(5, [], round3_n=True)
-        self.assertNotIn("ROUND3", text)
 
 
 if __name__ == "__main__":

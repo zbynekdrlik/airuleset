@@ -620,7 +620,8 @@ _NUDGE_TAIL = " Label mení supervisor s dôkazom, nikdy automaticky."
 _I_TRIGGER = (
     "I=%d: spusti `slice-quals --audit`, re-audituj tvary (gated → ops-wait W; "
     "owner-otázka/krok → needs-owner-action U #601/#607; gk-close → "
-    "needs-gatekeeper #636; acceptance → U #622); len dispatchovateľná ostáva I.")
+    "needs-gatekeeper #636; acceptance → U #622; bounce round3! → "
+    "`slice-quals --bounces` #843); len dispatchovateľná ostáva I.")
 
 # The W→I trigger (#547/#588/#607): re-check the parked external events. COUNT
 # only -- the members + their stale!/recheck!/gk-handoff! tags are in the
@@ -629,14 +630,6 @@ _W_TRIGGER = (
     "W=%d parknutých: spusti `slice-quals --ops-wait`, Discuss 1×/hod (#607), "
     "over blockery (release = #588 deployed-state, nie run-terminal), zlož "
     "`ops-wait` s dôkazom; mis-shape → owner needs-owner-action U #601 / gk #636.")
-
-
-# #843: the BOUNCE-ROUND3 clause — names `round3!` members (bounce round >= 3)
-# so the armed loop escalates their review tier. Fires only on a positive count;
-# the session reads the tagged members from `slice-quals --bounces`.
-_ROUND3_TRIGGER = (
-    "ROUND3 %d (#843 -- bounce round >=3: gated fable-advisor DESIGN consult "
-    "PRED re-implementáciou; CYCLE step 6 review tier eskalovaný).")
 
 
 def _flag_items(w_members, release_landed):
@@ -737,8 +730,7 @@ _UNPARK_AUDIT_TRIGGER = (
 
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
-                release_landed=None, discuss_audit=False, unpark_audit_n=0,
-                round3_n=0):
+                release_landed=None, discuss_audit=False, unpark_audit_n=0):
     """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
     per-member enumeration + full-doctrine wall that parked orphaned in the
     incident). Carries the `stuck-check: ` prefix (janitor own-payload
@@ -786,10 +778,6 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     if isinstance(unpark_audit_n, int) and not isinstance(unpark_audit_n, bool) \
             and unpark_audit_n > 0:
         optional.append(_UNPARK_AUDIT_TRIGGER % unpark_audit_n)
-    # #843: bounce-round3 clause — fires only on a positive count.
-    if isinstance(round3_n, int) and not isinstance(round3_n, bool) \
-            and round3_n > 0:
-        optional.append(_ROUND3_TRIGGER % round3_n)
     detail = []
     for item in optional:
         cand = (_NUDGE_HEAD + core_body + " "

@@ -15,12 +15,6 @@ INPUT=$(cat 2>/dev/null || echo "")
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
 [ -z "$CMD" ] && exit 0
 
-case "$CMD" in
-    *"READY-FOR-REVIEW"*) ;;
-    *"Ready for gatekeeper cross-fork review"*) ;;
-    *) exit 0 ;;
-esac
-
 # Allow the CLI composer itself — anchored on the SUBCOMMAND position
 # (airuleset.py handoff or airuleset handoff as the invoked program),
 # not a loose substring pair that body content can satisfy.
@@ -29,11 +23,42 @@ case "$CMD" in
 esac
 case "$CMD" in *"airuleset:handoff-ok"*) exit 0 ;; esac
 
+# Gate only on comment-posting commands (gh issue comment / gh api comments).
 case "$CMD" in
     *"gh issue comment"*) ;;
     *"gh api"*"comments"*) ;;
     *) exit 0 ;;
 esac
+
+# Pre-filter: check if the body carries READY-FOR-REVIEW — either inline
+# (--body "...READY-FOR-REVIEW...") OR in a body file (-F / --body-file).
+# The mandated flow uses -F body.md, so ONLY checking the command text
+# misses the canonical posting shape (#843 review RED-1).
+_HAS_MARKER=0
+case "$CMD" in
+    *"READY-FOR-REVIEW"*|*"Ready for gatekeeper cross-fork review"*)
+        _HAS_MARKER=1 ;;
+esac
+if [ "$_HAS_MARKER" -eq 0 ]; then
+    # Check if a -F / --body-file argument points to a file with the marker.
+    _BODY_FILE=""
+    for _tok in $CMD; do
+        case "$_tok" in
+            -F|--body-file) _BODY_FILE="NEXT" ;;
+            *)
+                if [ "$_BODY_FILE" = "NEXT" ]; then
+                    _BODY_FILE="$_tok"
+                    break
+                fi ;;
+        esac
+    done
+    if [ -n "$_BODY_FILE" ] && [ "$_BODY_FILE" != "NEXT" ] && [ -r "$_BODY_FILE" ]; then
+        if grep -q "READY-FOR-REVIEW\|Ready for gatekeeper cross-fork review" "$_BODY_FILE" 2>/dev/null; then
+            _HAS_MARKER=1
+        fi
+    fi
+fi
+[ "$_HAS_MARKER" -eq 0 ] && exit 0
 
 LOG="$HOME/.claude/handoff-gate.log"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
