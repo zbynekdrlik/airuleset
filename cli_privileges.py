@@ -254,13 +254,14 @@ PRIVILEGES: List[Privilege] = [
     Privilege(
         name="fleet_shared_password",
         kind=KIND_PASSWORD,
-        local_path="",
-        reach="fleet shared ssh password (sshpass -p) — dev2, montalu1-8, "
-              "forestshop admin/stepan (the no-identity hosts that also "
-              "accept the default key)",
-        rotation="pin identities per issue 659/679; phase out shared password",
+        local_path="",  # HARDCODED literal in cli_remote.py source, not a file
+        reach="fleet shared ssh password (sshpass -p, hardcoded in "
+              "cli_remote.py source + git history) — dev2, montalu1-8, "
+              "forestshop admin/stepan (the no-identity hosts)",
+        rotation="pin identities per issue 659/679; phase out shared password; "
+                 "the literal is in git-tracked source AND git history",
         must_move=True,
-        used_by=("cli_remote.py:306 (sshpass -p)",
+        used_by=("cli_remote.py:306 (sshpass -p, hardcoded literal)",
                  "cli_remote.py:983"),
     ),
     Privilege(
@@ -275,7 +276,7 @@ PRIVILEGES: List[Privilege] = [
     ),
     Privilege(
         name="cloudflared_config",
-        kind=KIND_API_TOKEN,
+        kind=KIND_OAUTH,  # a config YAML, not a token — mode 0644 is normal
         local_path="~/.cloudflared/webterm-owner.yml",
         reach="airuleset's DEDICATED webterm tunnel config (never the default "
               "config.yml — that belongs to spinbike on dev1, see "
@@ -544,20 +545,20 @@ def probe_entry(priv: Privilege, home: Path,
 
     path = _expand(priv.local_path, home)
     try:
+        # Check symlink FIRST — path.exists() follows symlinks, so a broken
+        # symlink reads "absent" and silently hides the finding (#870 review-2).
+        if path.is_symlink():
+            rec["detail"] = "SYMLINK (-> %s)" % str(path.resolve())
+            rec["present"] = True
+            rec["wrong_mode"] = True  # a symlink credential is a finding
+            return rec
         if not path.exists():
             rec["detail"] = "absent"
             return rec
-        # Use lstat to detect symlinks (#870 review: symlink-aware)
         st = path.lstat()
     except OSError as exc:
         rec["detail"] = "error: %s" % type(exc).__name__
         rec["wrong_mode"] = True  # cannot verify → finding
-        return rec
-
-    if path.is_symlink():
-        rec["detail"] = "SYMLINK (-> %s)" % str(path.resolve())
-        rec["present"] = True
-        rec["wrong_mode"] = True  # a symlink credential is a finding
         return rec
 
     is_dir = path.is_dir()
@@ -665,11 +666,14 @@ def scan_undeclared(home: Path, declared_paths: set) -> List[dict]:
     declared_pubs = {p + ".pub" for p in declared}
     findings: List[dict] = []
 
+    # The vault store (~/.claude/secrets/) is a DECLARED dir entry — its
+    # CONTENTS are legitimate transient vault values, NOT undeclared foreign
+    # credentials. Scanning its contents would false-positive every normal
+    # `secret request`. Only its dir MODE is probed (via probe_entry on the
+    # vault_store entry). (#870 review-2 🟡3)
     for dirname, prefix, where, key_only in [
         (".secrets", "~/.secrets/", ".secrets", False),
         (".ssh", "~/.ssh/", ".ssh", True),
-        (str(Path(".claude") / "secrets"), "~/.claude/secrets/",
-         ".claude/secrets", False),
     ]:
         d = home / dirname
         if d.is_dir():
@@ -684,6 +688,7 @@ def scan_undeclared(home: Path, declared_paths: set) -> List[dict]:
 # avoid false-positives on ordinary prose (e.g. "sk-" matching "task-", "ask-").
 _MEMORY_TOKEN_PATTERNS = [
     (re.compile(r"(?<![A-Za-z0-9])tskey-api-[A-Za-z0-9]{10,}"), "tailscale-api-key"),
+    (re.compile(r"(?<![A-Za-z0-9])tskey-auth-[A-Za-z0-9-]{10,}"), "tailscale-auth-key"),
     (re.compile(r"(?<![A-Za-z0-9])tskey-[A-Za-z0-9]{10,}"), "tailscale-key"),
     (re.compile(r"(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{20,}"), "github-pat"),
     (re.compile(r"(?<![A-Za-z0-9])gho_[A-Za-z0-9]{20,}"), "github-oauth"),

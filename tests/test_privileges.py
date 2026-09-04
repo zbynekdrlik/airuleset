@@ -243,13 +243,15 @@ class TestProbeHardening(unittest.TestCase):
         rep = p.build_report(home=self.home)
         self.assertIn(rep["exit_code"], (0, 1))
 
-    def test_vault_dir_scanned(self):
+    def test_vault_dir_contents_not_flagged(self):
+        """Vault contents are legitimate transient values, NOT undeclared
+        credentials (#870 review-2 🟡3). Only the dir's MODE is probed."""
         vault = self.home / ".claude" / "secrets"
         vault.mkdir(parents=True)
         _mk(vault / "some-vault-secret", "vaultval", 0o600)
         rep = p.build_report(home=self.home)
         paths = [u["path"] for u in rep["undeclared"]]
-        self.assertTrue(any("some-vault-secret" in item for item in paths))
+        self.assertFalse(any("some-vault-secret" in item for item in paths))
 
     def test_secrets_subdir_recursed(self):
         sub = self.home / ".secrets" / "subdir"
