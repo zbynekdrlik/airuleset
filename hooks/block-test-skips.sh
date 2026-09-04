@@ -92,9 +92,13 @@ case "$CUR_BRANCH" in
             if [ "$CAND" != "$CUR_BRANCH" ]; then
                 # #847: on a fork-no-merge stream origin/<CAND> is the
                 # personal fork (stale); upstream/<CAND> is the canonical
-                # integration branch. Prefer upstream when it exists — fall
-                # back to origin for same-repo streams (no upstream remote).
-                if git rev-parse -q --verify "upstream/${CAND}" >/dev/null 2>&1; then
+                # integration branch. Prefer upstream when BOTH exist (the
+                # fork mirrors the integration branch) — a foreign upstream
+                # without a matching origin/<CAND> is ignored (YELLOW-1).
+                # Accepted residual: develop→staging arm has the same latent
+                # fork-lag class (BLUE-1, low-likelihood for fork streams).
+                if git rev-parse -q --verify "upstream/${CAND}" >/dev/null && \
+                   git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
                     BASE_REF="upstream/${CAND}"
                     break
                 elif git rev-parse -q --verify "origin/${CAND}" >/dev/null; then

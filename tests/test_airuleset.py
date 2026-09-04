@@ -13535,6 +13535,40 @@ class TestBlockTestSkipsForkAware(TestCase):
         # No upstream remote, origin/develop exists: still blocks on the skip
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_foreign_upstream_without_origin_develop_ignored(self):
+        """YELLOW-1: a repo cloned from an OSS project may have an upstream
+        remote with upstream/develop, but NO origin/develop (the repo itself
+        works two-branch dev->main). The hook must NOT pick the foreign
+        upstream/develop as base — fall through to origin/main instead."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_ok.py"), "w").write(
+            "def test_ok():\n    assert 1\n")
+        g("add", "tests/test_ok.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+        # Foreign upstream/develop exists but NO origin/develop
+        g("update-ref", "refs/remotes/upstream/develop", base_sha)
+        g("checkout", "-qb", "feat-y")
+        # Add a real test — should pass since no skip is in the diff
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "def test_new():\n    assert 2 + 2 == 4\n")
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add coverage")
+        r = self._run("git push origin feat-y", root)
+        # Must NOT false-block via the foreign upstream/develop base
+        self.assertEqual(r.returncode, 0,
+                         "foreign upstream/develop false-blocked: " + r.stderr)
+
 
 class TestPrePushTestCheckForkAware(TestCase):
     """#847: pre-push-test-check.sh has the same fork-lag false-positive
