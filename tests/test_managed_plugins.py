@@ -821,7 +821,8 @@ class TestStaleInstallPathHealing(TestCase):
 
     def test_valid_installpath_is_not_healed(self):
         """A registry entry whose installPath EXISTS on disk must NOT be
-        touched — only genuinely stale entries are healed."""
+        touched — only genuinely stale entries are healed.  Also asserts
+        the registry file is NOT rewritten (#845 review finding 6)."""
         d = Path(tempfile.mkdtemp())
         # Create a real installPath dir so the entry is NOT stale.
         valid_path = d / "plugins" / "cache" / "valid"
@@ -838,6 +839,7 @@ class TestStaleInstallPathHealing(TestCase):
                 data["plugins"][k] = [{"scope": "user",
                                        "installPath": str(kdir)}]
         reg_path.write_text(json.dumps(data))
+        reg_bytes_before = reg_path.read_bytes()
         settings_path = d / "settings.json"
         playwright_cache = Path(tempfile.mkdtemp())
         (playwright_cache / "chromium-1234").mkdir()
@@ -849,13 +851,19 @@ class TestStaleInstallPathHealing(TestCase):
             ok = airuleset.setup_managed_plugins()
         self.assertTrue(ok)
         run.assert_not_called()
+        self.assertEqual(reg_path.read_bytes(), reg_bytes_before,
+                         "registry must NOT be rewritten when all "
+                         "installPaths are valid")
 
     def test_registry_without_installpath_is_unchanged(self):
         """Entries that lack installPath entirely (the shape the test
         helper _write_plugin_registry writes) must be treated as built —
-        backwards-compatible with the pre-#845 behaviour."""
+        backwards-compatible with the pre-#845 behaviour.  Registry file
+        must NOT be rewritten (#845 review finding 6)."""
         d = Path(tempfile.mkdtemp())
         _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
+        reg_path = d / "plugins" / "installed_plugins.json"
+        reg_bytes_before = reg_path.read_bytes()
         settings_path = d / "settings.json"
         playwright_cache = Path(tempfile.mkdtemp())
         (playwright_cache / "chromium-1234").mkdir()
@@ -867,6 +875,9 @@ class TestStaleInstallPathHealing(TestCase):
             ok = airuleset.setup_managed_plugins()
         self.assertTrue(ok)
         run.assert_not_called()
+        self.assertEqual(reg_path.read_bytes(), reg_bytes_before,
+                         "registry must NOT be rewritten when nothing "
+                         "is stale")
 
 
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):

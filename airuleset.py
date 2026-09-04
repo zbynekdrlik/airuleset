@@ -419,6 +419,7 @@ from cli_caveman_plugins import (  # noqa: E402, F401
     maybe_setup_caveman,
     reconcile_managed_plugins,
     _plugin_registry_keys,
+    _load_plugin_registry,
     _heal_stale_plugin_registry,
     _managed_plugin_built,
     _playwright_browsers_installed,
