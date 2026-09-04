@@ -72,6 +72,14 @@ def _key_comment(line):
     return parts[2] if len(parts) >= 3 else ""
 
 
+def _write_0600(path, content):
+    """Write ``content`` to ``path`` with mode 0600 from the start — no umask
+    window (os.open with O_CREAT|O_TRUNC at 0600, not open() then chmod)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+
 def _fingerprint(line, run=None):
     """ssh-keygen fingerprint of a key line (comment + fingerprint ONLY —
     never the raw blob).  Returns the fingerprint string or '(unavailable)'."""
@@ -233,26 +241,15 @@ def manage_webterm_only_keys(
         removed_path = os.path.join(
             ssh_dir, "authorized_keys.airuleset-removed-%s" % ts
         )
-        with open(removed_path, "w", encoding="utf-8") as fh:
-            fh.write("".join(line + "\n" for line in foreign_lines))
-        try:
-            os.chmod(removed_path, 0o600)
-        except OSError as e:
-            print("  webterm-only keys: chmod 600 on %s failed (non-fatal): "
-                  "%s" % (removed_path, e), file=sys.stderr)
+        _write_0600(removed_path,
+                     "".join(line + "\n" for line in foreign_lines))
 
     # Save previous whole file
     if current_content:
         prev_path = os.path.join(
             ssh_dir, "authorized_keys.airuleset-prev-%s" % ts
         )
-        with open(prev_path, "w", encoding="utf-8") as fh:
-            fh.write(current_content)
-        try:
-            os.chmod(prev_path, 0o600)
-        except OSError as e:
-            print("  webterm-only keys: chmod 600 on %s failed (non-fatal): "
-                  "%s" % (prev_path, e), file=sys.stderr)
+        _write_0600(prev_path, current_content)
 
     # 6. Write new file atomically via os.replace
     new_path = os.path.join(
@@ -265,7 +262,12 @@ def manage_webterm_only_keys(
             fh.flush()
             os.fsync(fh.fileno())
     except Exception:
-        # fd is closed by fdopen
+        # fd is closed by fdopen; clean up the temp file
+        try:
+            os.unlink(new_path)
+        except OSError as cleanup_err:
+            print("  webterm-only keys: temp file cleanup failed: %s"
+                  % cleanup_err, file=sys.stderr)
         raise
 
     os.replace(new_path, ak_path)
@@ -400,8 +402,12 @@ def audit_webterm_only_keys(user, ssh_dir=None, run=None):
         result["findings"].append("authorized_keys MISSING")
         return result
 
-    with open(ak_path, "r", encoding="utf-8", errors="replace") as fh:
-        content = fh.read()
+    try:
+        with open(ak_path, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except OSError as e:
+        result["findings"].append("cannot read authorized_keys: %s" % e)
+        return result
 
     try:
         desired_lines = desired_keys_for_user(user)
