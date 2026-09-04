@@ -72,11 +72,25 @@ class TestBannedPredicateItself(TestCase):
                             "%r should be BANNED (Fable 5.1 / bare alias)" % banned)
 
     def test_clears_every_allowed_model(self):
+        # #871: exact-id allowlist semantics -- only the CURRENT MODEL_TIERS
+        # ids (+ the Fable main [1m] form) clear the predicate. claude-opus-4-8
+        # is the SUPERSEDED predecessor (renamed to claude-opus-4-6) and is
+        # correctly BANNED now -- see test_superseded_opus_4_8_is_now_banned.
         for ok in ("claude-fable-5[1m]", "claude-fable-5",
-                   "claude-opus-4-8[1m]", "claude-opus-4-8",
-                   "claude-sonnet-4-5", "claude-haiku-4-5"):
+                   "claude-opus-4-6[1m]", "claude-opus-4-6",
+                   "claude-sonnet-5", "claude-haiku-4-5"):
             self.assertFalse(airuleset.is_banned_model(ok),
                              "%r must be ALLOWED" % ok)
+
+    def test_superseded_opus_4_8_is_now_banned(self):
+        # #871: the exact-id allowlist means a PREVIOUSLY-allowed id becomes
+        # banned the moment MODEL_TIERS moves on -- claude-opus-4-8 (the
+        # pre-#871 opus tier) is superseded by claude-opus-4-6 and must be
+        # BANNED now, not silently still-allowed.
+        for superseded in ("claude-opus-4-8", "claude-opus-4-8[1m]",
+                            "claude-opus-4-7"):
+            self.assertTrue(airuleset.is_banned_model(superseded),
+                            "%r (superseded id) should be BANNED" % superseded)
 
 
 class TestManagedModelNeverBanned(TestCase):
