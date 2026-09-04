@@ -7177,6 +7177,10 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "member (the --list set + a labels column) — the job-20 named "
              "partition-audit nudge reads this to name each I member (#578)")
+    p_slice.add_argument(
+        "--bounces", action="store_true",
+        help="Print bounce rounds for open prio:bounce/ready-for-review "
+             "tickets in this slice (#843) — tags round >= 3 as round3!")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")

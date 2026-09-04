@@ -631,6 +631,14 @@ _W_TRIGGER = (
     "`ops-wait` s dôkazom; mis-shape → owner needs-owner-action U #601 / gk #636.")
 
 
+# #843: the BOUNCE-ROUND3 clause — names `round3!` members (bounce round >= 3)
+# so the armed loop escalates their review tier. Fires only on a positive count;
+# the session reads the tagged members from `slice-quals --bounces`.
+_ROUND3_TRIGGER = (
+    "ROUND3 %d (#843 -- bounce round >=3: gated fable-advisor DESIGN consult "
+    "PRED re-implementáciou; CYCLE step 6 review tier eskalovaný).")
+
+
 def _flag_items(w_members, release_landed):
     """Self-contained compact flag sentences for the fired W sub-categories
     (#714) -- each carries its identifying token + doctrine ticket # + a COUNT,
@@ -729,7 +737,8 @@ _UNPARK_AUDIT_TRIGGER = (
 
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
-                release_landed=None, discuss_audit=False, unpark_audit_n=0):
+                release_landed=None, discuss_audit=False, unpark_audit_n=0,
+                round3_n=0):
     """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
     per-member enumeration + full-doctrine wall that parked orphaned in the
     incident). Carries the `stuck-check: ` prefix (janitor own-payload
@@ -777,6 +786,10 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     if isinstance(unpark_audit_n, int) and not isinstance(unpark_audit_n, bool) \
             and unpark_audit_n > 0:
         optional.append(_UNPARK_AUDIT_TRIGGER % unpark_audit_n)
+    # #843: bounce-round3 clause — fires only on a positive count.
+    if isinstance(round3_n, int) and not isinstance(round3_n, bool) \
+            and round3_n > 0:
+        optional.append(_ROUND3_TRIGGER % round3_n)
     detail = []
     for item in optional:
         cand = (_NUDGE_HEAD + core_body + " "

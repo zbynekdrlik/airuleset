@@ -210,5 +210,78 @@ class TestHookRoute(unittest.TestCase):
         self.assertEqual(0, self._run("echo READY-FOR-REVIEW").returncode)
 
 
+class TestDoctrineContentLock843(unittest.TestCase):
+    """#843 content lock: autopilot-worker.md must name `airuleset.py handoff`
+    + the `Self-review:` table, and SKILL.md must name `round3!`. Locks the
+    doctrine the same way test_batch_orchestration.py locks issue 848."""
+
+    _WORKER = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "agents", "autopilot-worker.md")
+    _SKILL = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "skills", "autopilot", "SKILL.md")
+
+    def _read(self, path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_worker_names_handoff_cli(self):
+        t = self._read(self._WORKER)
+        self.assertIn("airuleset.py handoff", t)
+
+    def test_worker_names_self_review_table(self):
+        t = self._read(self._WORKER)
+        self.assertIn("Self-review:", t)
+
+    def test_worker_names_handoff_flags(self):
+        t = self._read(self._WORKER)
+        self.assertIn("--self-review-file", t)
+        self.assertIn("--reviewed-by-tier", t)
+        self.assertIn("--root-cause", t)
+        self.assertIn("--prevencia-read", t)
+
+    def test_worker_names_lens_list(self):
+        t = self._read(self._WORKER)
+        self.assertIn("gk-review-lenses.md", t)
+
+    def test_worker_names_bounce_round_escalation(self):
+        t = self._read(self._WORKER)
+        self.assertIn("slice-quals --bounces", t)
+
+    def test_skill_names_round3(self):
+        t = self._read(self._SKILL)
+        self.assertIn("round3!", t)
+
+    def test_skill_names_fable_advisor_design_consult(self):
+        t = self._read(self._SKILL)
+        self.assertIn("fable-advisor", t)
+        # The round3! clause must mention the design consult
+        idx = t.find("round3!")
+        self.assertGreater(idx, -1)
+        window = t[idx:idx + 500]
+        self.assertIn("DESIGN", window)
+
+
+class TestNudgeRound3Clause(unittest.TestCase):
+    """#843: _nudge_text carries a ROUND3 clause when round3_n > 0."""
+
+    def test_no_clause_at_zero(self):
+        from watchdog.ops_wait_recheck import _nudge_text
+        text = _nudge_text(5, [], round3_n=0)
+        self.assertNotIn("ROUND3", text)
+
+    def test_clause_at_positive(self):
+        from watchdog.ops_wait_recheck import _nudge_text
+        text = _nudge_text(5, [], round3_n=2)
+        self.assertIn("ROUND3 2", text)
+        self.assertIn("#843", text)
+
+    def test_clause_not_on_bool(self):
+        from watchdog.ops_wait_recheck import _nudge_text
+        text = _nudge_text(5, [], round3_n=True)
+        self.assertNotIn("ROUND3", text)
+
+
 if __name__ == "__main__":
     unittest.main()
