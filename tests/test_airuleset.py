@@ -1715,6 +1715,142 @@ class TestPrePushTestCheckItParenFalsePositive(TestCase):
                          "genuine it(...) test no longer recognized: " + r.stdout)
 
 
+class TestPrePushTestCheckSubjectRecognition(TestCase):
+    """#856 (camera-box .615, 2026-09-03): Gate 2 misses a genuine RED commit
+    whose diff only flips the POLARITY of an existing inline assert — the
+    `assert!` keyword sits on an UNCHANGED line, and the `#[test]` attribute
+    is unchanged too, so neither the PATH nor the INLINE-test regex fires.
+    The commit SUBJECT (`test(`: `test:`, `[red]`) is the reliable signal the
+    hook must recognise."""
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / "pre-push-test-check.sh")],
+            input=payload, text=True, capture_output=True, cwd=cwd, timeout=60,
+            env=env)
+
+    def _mkrepo(self):
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        # A Rust source file with an existing inline test and assert
+        open(os.path.join(root, "src_mod.rs"), "w").write(
+            "pub fn overall_pass() -> bool { true }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn check_overall_pass() {\n"
+            "        assert!(\n"
+            "            super::overall_pass(),\n"
+            '            "should pass",\n'
+            "        );\n"
+            "    }\n"
+            "}\n"
+        )
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "base: initial module with inline test")
+        g("update-ref", "refs/remotes/origin/main", g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "dev")
+        return root, g
+
+    def test_polarity_flip_red_commit_with_test_subject_allows_push(self):
+        """The camera-box .615 shape: a RED commit that ONLY flips an existing
+        assert's operand (adds `!` prefix) and renames the test fn. The
+        `assert!(` and `#[test]` keywords are on UNCHANGED lines, so only the
+        SUBJECT (`test(#905): [red] ...`) signals it is a test commit. A
+        following fix commit must NOT be blocked."""
+        root, g = self._mkrepo()
+        # RED commit: flip polarity — only the operand line and fn name change
+        open(os.path.join(root, "src_mod.rs"), "w").write(
+            "pub fn overall_pass() -> bool { true }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn frozen_window_now_fails_overall_pass() {\n"
+            "        assert!(\n"
+            "            !super::overall_pass(),\n"
+            '            "should now fail because gate was restored",\n'
+            "        );\n"
+            "    }\n"
+            "}\n"
+        )
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "test(#905): [red] item 2 -- restore assertions")
+        # GREEN commit: fix the implementation to match
+        open(os.path.join(root, "src_mod.rs"), "w").write(
+            "pub fn overall_pass() -> bool { false }\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    #[test]\n"
+            "    fn frozen_window_now_fails_overall_pass() {\n"
+            "        assert!(\n"
+            "            !super::overall_pass(),\n"
+            '            "should now fail because gate was restored",\n'
+            "        );\n"
+            "    }\n"
+            "}\n"
+        )
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "fix(#905): [green] item 2 -- restore overall_pass")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0,
+                         "polarity-flip RED commit not recognised via subject: "
+                         + (r.stdout + r.stderr))
+
+    def test_test_colon_subject_recognised_as_test_commit(self):
+        """A commit with subject `test: ...` (no parenthesised scope) must
+        also count as a test commit for ordering purposes."""
+        root, g = self._mkrepo()
+        open(os.path.join(root, "src_mod.rs"), "a").write("// red change\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "test: add assertion for edge case")
+        open(os.path.join(root, "src_mod.rs"), "a").write("// fix\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "fix: edge case in overall_pass")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0,
+                         "test: subject not recognised: " + (r.stdout + r.stderr))
+
+    def test_red_tag_subject_recognised_as_test_commit(self):
+        """A commit with `[red]` tag in the subject must count as a test
+        commit even when there is no `test(` / `test:` prefix."""
+        root, g = self._mkrepo()
+        open(os.path.join(root, "src_mod.rs"), "a").write("// red assertion\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "chore: [red] repro the #905 regression")
+        open(os.path.join(root, "src_mod.rs"), "a").write("// fix\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "fix: the #905 regression")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0,
+                         "[red] tag not recognised: " + (r.stdout + r.stderr))
+
+    def test_non_test_subject_still_blocks_without_inline_test(self):
+        """Regression guard: a non-test, non-[red] subject with no inline
+        test content must still be blocked by Gate 2 — the subject check
+        must not accidentally widen to non-test commits."""
+        root, g = self._mkrepo()
+        open(os.path.join(root, "src_mod.rs"), "a").write("// some refactor\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "refactor: clean up overall_pass")
+        open(os.path.join(root, "src_mod.rs"), "a").write("// fix\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "fix: edge case in overall_pass")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2,
+                         "non-test subject wrongly counted: " + (r.stdout + r.stderr))
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+
 class TestPrePushBaseSyncHook(TestCase):
     """pre-push-base-sync.sh — GLOBAL conflict-churn guard. Blocks a push ONLY when
     a trial merge of the base into HEAD has a REAL CONFLICT (git merge-tree). It
