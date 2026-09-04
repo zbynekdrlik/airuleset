@@ -59,6 +59,31 @@ class TestLastAssistantModel(TestCase):
             p.write_text("", encoding="utf-8")
             self.assertEqual(transcript_last_assistant_model(p), "")
 
+    def test_skips_a_trailing_synthetic_entry(self):
+        # #871 adversarial review 🔴3b: a trailing synthetic/bookkeeping
+        # assistant record (sentinel/empty text) carrying a placeholder
+        # model must be SKIPPED — the walk continues back to the last REAL
+        # served model, same as transcript_last_assistant_text's own
+        # sentinel-skip semantics.
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "t.jsonl"
+            lines = [
+                {"type": "user", "message": {"role": "user", "content": "hi"}},
+                {"type": "assistant",
+                 "message": {"role": "assistant", "model": "claude-fable-5",
+                             "content": [{"type": "text", "text": "ok"}]}},
+                # trailing synthetic entry: sentinel (empty) text, a
+                # placeholder model id that is NOT a real served model.
+                {"type": "assistant",
+                 "message": {"role": "assistant", "model": "<synthetic>",
+                             "content": [{"type": "text", "text": ""}]}},
+            ]
+            p.write_text("\n".join(json.dumps(x) for x in lines) + "\n",
+                        encoding="utf-8")
+            self.assertEqual(transcript_last_assistant_model(p), "claude-fable-5")
+
 
 class TestAuditModelFloats(TestCase):
     def _fake_find(self, model_by_cwd):
@@ -104,6 +129,57 @@ class TestAuditModelFloats(TestCase):
             panes, "/proj", lambda pd, cwd: None, lambda p: "x",
             subagent_iter=lambda m: [])
         self.assertEqual(recs, [])
+
+    def test_dated_served_id_for_allowlisted_tier_not_flagged(self):
+        # #871 adversarial review 🔴3a: Anthropic sometimes serves a DATED
+        # snapshot id for an allowlisted tier (claude-haiku-4-5-20251001) —
+        # the audit must not flag it BANNED.
+        panes = [("%p", "/d")]
+        find = self._fake_find({"/d": "claude-haiku-4-5-20251001"})
+        read = lambda p: "claude-haiku-4-5-20251001"  # noqa: E731
+        recs = cli_model_audit.audit_model_floats(panes, "/proj", find, read,
+                                                  subagent_iter=lambda m: [])
+        self.assertEqual(len(recs), 1)
+        self.assertFalse(recs[0]["banned"], recs[0])
+
+    def test_fable_5_1_still_flagged_despite_date_suffix_tolerance(self):
+        # the date-suffix tolerance must NOT accidentally allow the banned
+        # claude-fable-5-1 -- "-1" is not an 8-digit date suffix.
+        panes = [("%p", "/e")]
+        find = self._fake_find({"/e": "claude-fable-5-1"})
+        read = lambda p: "claude-fable-5-1"  # noqa: E731
+        recs = cli_model_audit.audit_model_floats(panes, "/proj", find, read,
+                                                  subagent_iter=lambda m: [])
+        self.assertEqual(len(recs), 1)
+        self.assertTrue(recs[0]["banned"], recs[0])
+
+
+class TestAuditTolerantPredicate(TestCase):
+    """#871 adversarial review 🔴3a: airuleset.is_banned_model_for_audit
+    tolerates a served dated-snapshot id for an allowlisted tier -- the
+    dispatch-surface airuleset.is_banned_model stays exact and unaffected."""
+
+    def test_dated_haiku_allowed_by_audit_predicate(self):
+        self.assertFalse(
+            airuleset.is_banned_model_for_audit("claude-haiku-4-5-20251001"))
+
+    def test_dated_haiku_still_banned_by_exact_dispatch_predicate(self):
+        # the DISPATCH-surface predicate is unaffected -- still exact.
+        self.assertTrue(
+            airuleset.is_banned_model("claude-haiku-4-5-20251001"))
+
+    def test_fable_5_1_still_banned_by_audit_predicate(self):
+        self.assertTrue(airuleset.is_banned_model_for_audit("claude-fable-5-1"))
+
+    def test_bare_alias_still_banned_by_audit_predicate(self):
+        self.assertTrue(airuleset.is_banned_model_for_audit("fable"))
+
+    def test_every_allowlisted_id_clears_audit_predicate(self):
+        for ok in airuleset.MODEL_TIERS.values():
+            self.assertFalse(airuleset.is_banned_model_for_audit(ok), ok)
+
+    def test_empty_value_not_banned_by_audit_predicate(self):
+        self.assertFalse(airuleset.is_banned_model_for_audit(""))
 
 
 if __name__ == "__main__":

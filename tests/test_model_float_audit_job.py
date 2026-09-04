@@ -47,6 +47,17 @@ class TestModelFloatAuditJob(TestCase):
                                     due_fn=lambda *a, **k: True)
         self.assertEqual(out, [])
 
+    def test_dated_served_id_for_allowlisted_tier_not_flagged(self):
+        # #871 adversarial review 🔴3a: same audit-tolerance requirement as
+        # cli_model_audit.py -- Job 41 must not journal a false model-float
+        # violation for a served dated-snapshot id of an allowlisted tier.
+        panes = [("%p", "/d")]
+        find = _find({"/d": 1})
+        read = lambda p: "claude-haiku-4-5-20251001"  # noqa: E731
+        out = model_float_audit_job(0.0, {}, panes, "/proj", read, find,
+                                    lambda m: None, due_fn=lambda *a, **k: True)
+        self.assertEqual(out, [])
+
     def test_hourly_gate_skips_when_not_due(self):
         panes = [("%p", "/repo")]
         find = _find({"/repo": 1})
