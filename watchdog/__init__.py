@@ -2724,7 +2724,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           cache-class ladder (each rung a pure dry-run-able selector logging
           `disk-guard: NN% → drain rung=<name> freed=<b> → MM%`): apt cache,
           rotated `/var/log/*.1|*.gz`, gh-runner `_work/_update|_temp` + stale
-          `_work/<repo>` checkouts, docker images (0-containers AND untagged OR
+          `_work/<repo>` checkouts + superseded `bin.<ver>`/`externals.<ver>`
+          version dirs (#862 — never the symlink target nor the version a live
+          `Runner.Listener` runs; skipped under a live `Runner.Worker`), docker
+          images (0-containers AND untagged OR
           > 14 d — Runner.Worker-gated, never a tagged in-use image, never
           `docker system prune`), stale Claude self-update binaries (except the
           running one), one-off numbered venvs > 2 d, per-user `~/.cache` > 30 d,
