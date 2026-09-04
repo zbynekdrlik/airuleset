@@ -257,7 +257,7 @@ def _human_reset(iso):
 # fires only while its weekly window (and the shared weekly) has headroom.
 # Reads the same usage cache the watchdog writes every ~15 min (never hits
 # the 429-prone endpoint). FAIL-SAFE: missing/stale/empty cache → CLOSED
-# (the work runs on Opus 4.8, claude-opus-4-8), never a blind Fable burn.
+# (the work runs on Opus 4.6, claude-opus-4-6), never a blind Fable burn.
 # --------------------------------------------------------------------------- #
 
 FABLE_GATE_PCT = 90            # default: dispatch Fable only below 90% used.
@@ -304,7 +304,7 @@ def fable_gate(now=None, path=None, threshold=None):
         # Any age outside [0, MAX] is unknown → stale.
         age = now - float(cache.get("ts") or 0)
         if not (0 <= age <= FABLE_GATE_MAX_AGE):
-            return False, "usage cache stale (ts %dh off) — fail-safe CLOSED, use claude-opus-4-8" % (
+            return False, "usage cache stale (ts %dh off) — fail-safe CLOSED, use claude-opus-4-6" % (
                 abs(age) // 3600)
         # Window selection (F2): gate ONLY on WEEKLY windows (a per-model session/
         # surface window must neither gate nor mask), and across MULTIPLE matching
@@ -322,20 +322,20 @@ def fable_gate(now=None, path=None, threshold=None):
             elif not model:
                 shared_pct = pct if shared_pct is None else max(shared_pct, pct)
         if fable_pct is None and shared_pct is None:
-            return False, "no weekly window in cache — fail-safe CLOSED, use claude-opus-4-8"
+            return False, "no weekly window in cache — fail-safe CLOSED, use claude-opus-4-6"
         parts = []
         for label, pct in (("fable", fable_pct), ("weekly", shared_pct)):
             if pct is None:
                 continue
             parts.append("%s=%d%%" % (label, pct))
             if pct >= threshold:
-                return False, ("%s window at %d%% (>= %d%% gate) — CLOSED, use claude-opus-4-8"
+                return False, ("%s window at %d%% (>= %d%% gate) — CLOSED, use claude-opus-4-6"
                                % (label, pct, threshold))
         return True, " ".join(parts) + " (< %d%% gate)" % threshold
     except FileNotFoundError:
-        return False, "no usage cache (%s) — fail-safe CLOSED, use claude-opus-4-8" % path
+        return False, "no usage cache (%s) — fail-safe CLOSED, use claude-opus-4-6" % path
     except Exception as e:
-        return False, "unreadable/corrupt usage cache (%s: %s) — fail-safe CLOSED, use claude-opus-4-8" % (
+        return False, "unreadable/corrupt usage cache (%s: %s) — fail-safe CLOSED, use claude-opus-4-6" % (
             type(e).__name__, e)
 
 

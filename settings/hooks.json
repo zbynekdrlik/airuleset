@@ -215,6 +215,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-unpinned-model-dispatch.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
           },
@@ -308,6 +313,11 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-unpinned-model-dispatch.sh",
             "timeout": 5
           }
         ]

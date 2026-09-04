@@ -3,7 +3,7 @@
 History: 2026-07-03 middle tier (Opus 5 + Sonnet 5 default) -> 2026-08-13
 (Opus 5 banned outright, gated Fable the default judgment layer) ->
 2026-08-14 refinement #455 (Fable narrowed to HARD-only after the
-inherited-Fable burn; Opus 4.8 default) -> 2026-08-25 revision #690 (the
+inherited-Fable burn; Opus 4.6 default) -> 2026-08-25 revision #690 (the
 HARD-only boundary produced ZERO Fable subagent dispatches, so it moved to
 "Fable for every judgment-content task + airuleset Fable-MAJORITY + ~50%
 fleet target") -> **2026-08-26 revision #715**: that whole-worker Fable +
@@ -18,7 +18,7 @@ assertions lock:
                                  DESIGN phase + a Fable REVIEW phase; tie-break
                                  unsure -> it DOES -> gets those phases)
   implementation (the work)    = Sonnet 5 default for a SETTLED-DESIGN ticket
-                                 (dispatched model:"sonnet"); Opus 4.8 pinned
+                                 (dispatched model:"sonnet"); Opus 4.6 pinned
                                  worker on complexity (multi-component /
                                  concurrency / security-boundary / hard-debug /
                                  prior-Sonnet-failure), the frontmatter pin
@@ -26,7 +26,7 @@ assertions lock:
                                  the implementing worker NEVER carries a
                                  model:"fable" override, on ANY repo (#721
                                  refined the default; #715 the per-phase split)
-  routine fallback / CLOSED    = Opus 4.8 via agent-definition frontmatter /
+  routine fallback / CLOSED    = Opus 4.6 via agent-definition frontmatter /
                                  Workflow opts.model full id / inheritance
   mechanical / read-only       = sonnet low (haiku most-trivial) -- unchanged
   airuleset-majority exception = ABOLISHED (2026-08-26): the per-phase split
@@ -38,7 +38,7 @@ The budget gate (airuleset.py fable-gate) guards EVERY automatic Fable
 dispatch; its default threshold is 90 (raised from 80 by #690 so the new
 usage level actually passes -- an 80% gate would dead-letter the policy
 mid-week); fail-safe CLOSED on missing/stale cache is UNCHANGED. CLOSED
-falls back to Opus 4.8, never lower and never the banned Opus 5. The
+falls back to Opus 4.6, never lower and never the banned Opus 5. The
 2026-07-01/02/03 history and the 2026-07-25 Opus-5-era records stay
 preserved VERBATIM in the fable-advisor skill -- locked below too.
 """
@@ -81,11 +81,11 @@ class TestOpus5BanLineup(TestCase):
         t = read(MODULE)
         # #715 revision (2026-08-26): PER-PHASE tiering, FLEET-WIDE — the
         # design + review PHASES run gated Fable, the implementation worker
-        # runs Opus 4.8 / Sonnet 5 and NEVER Fable. Header asserted as
+        # runs Opus 4.6 / Sonnet 5 and NEVER Fable. Header asserted as
         # single-line fragments (the wrap-trap this file documents).
         self.assertIn(
             "Model tiering — PER-PHASE (fleet-wide): design + review = Fable "
-            "(gated); implementation = Sonnet 5 default / Opus 4.8 on complexity", t)
+            "(gated); implementation = Sonnet 5 default / Opus 4.6 on complexity", t)
         self.assertIn(
             "Opus 5 BANNED (ACTIVE policy, 2026-08-26 — revises 2026-08-25 "
             "Fable-majority)", t)
@@ -93,14 +93,14 @@ class TestOpus5BanLineup(TestCase):
         # is retired as the LIVE header:
         self.assertNotIn(
             "Model tiering — Fable 5 for judgment-content work; "
-            "airuleset subagents Fable-MAJORITY; Opus 4.8 routine fallback", t)
+            "airuleset subagents Fable-MAJORITY; Opus 4.6 routine fallback", t)
         # the 2026-08-14 header (Fable HARD-only) stays retired:
         self.assertNotIn(
-            "Model tiering — Opus 4.8 default; Fable 5 for HARD work only; "
+            "Model tiering — Opus 4.6 default; Fable 5 for HARD work only; "
             "Sonnet 5 for light work", t)
         # the 2026-08-13 header (Fable as the default judgment tier) stays retired:
         self.assertNotIn(
-            "Model tiering — Fable 5 judgment + Opus 4.8 execution; "
+            "Model tiering — Fable 5 judgment + Opus 4.6 execution; "
             "Opus 5 BANNED (ACTIVE policy, 2026-08-13 — replaces 2026-07-03)", t)
         self.assertNotIn("Opus 5 + Sonnet 5 default; Fable 5 AUTO-escalates", t)
 
@@ -193,62 +193,62 @@ class TestOpus5BanLineup(TestCase):
 
     def test_implementation_tier_default_sonnet_escalate_opus_4_8(self):
         # #721 (burn phase 2 after #715): the IMPLEMENTATION phase defaults to
-        # Sonnet 5 for a SETTLED-DESIGN ticket; it escalates to Opus 4.8 only
+        # Sonnet 5 for a SETTLED-DESIGN ticket; it escalates to Opus 4.6 only
         # when the implementation itself carries complexity (named, testable
         # criteria). It STILL never runs Fable -- the implementing worker never
         # carries a model:"fable" override, on any repo. #715's flat
-        # "implementation = Opus 4.8" default is retired.
+        # "implementation = Opus 4.6" default is retired.
         t = read(MODULE)
         self.assertIn(
             "IMPLEMENTATION (the actual work) = Sonnet 5 by DEFAULT for a "
             "settled-design ticket", t)
-        # the no-Fable-on-worker invariant (from #715) STAYS:
+        # the no-Fable-on-worker invariant (from #715, #871 rephrasing) STAYS:
         self.assertIn(
-            'implementing worker NEVER carries a `model: "fable"` override', t)
+            "implementing worker NEVER dispatches as `fable-advisor`", t)
         # #498/#500 TEETH: the five escalation criteria + the sonnet default
         # must all co-occur ON the IMPLEMENTATION bullet's OWN physical line
         # (it is a single unwrapped markdown bullet), so a partial revert of
-        # that clause -- leaving "concurrency"/'model: "sonnet"' present
+        # that clause -- leaving "concurrency"/the sonnet-implementer mention
         # elsewhere in the module -- is caught, not just a full deletion.
         impl_line = self._impl_bullet_line(t)
         for tok in ("multi-component change", "concurrency", "security boundary",
                     "hard-debug lane",
                     "prior Sonnet worker already failed on this ticket",
-                    '`model: "sonnet"`', "when in doubt, Opus 4.8"):
+                    "`sonnet-implementer`", "when in doubt, Opus 4.6"):
             self.assertIn(
                 tok, impl_line,
                 "escalation/default token missing from the IMPLEMENTATION "
                 "bullet line: %r" % tok)
-        # #715's flat "implementation = Opus 4.8" default is retired as the
+        # #715's flat "implementation = Opus 4.6" default is retired as the
         # LIVE default (the whole point of #721):
         self.assertNotIn(
-            "IMPLEMENTATION (the actual work) = Opus 4.8 (`claude-opus-4-8`)", t)
+            "IMPLEMENTATION (the actual work) = Opus 4.6 (`claude-opus-4-6`)", t)
         # the old banned Sonnet-execution phrasing stays banned:
         self.assertNotIn("EXECUTION of settled, scoped code = Sonnet 5", t)
 
     def test_implementation_tier_mechanism_frontmatter_pin_is_escalation(self):
         # #721 mechanism (the design decision this ticket owns): the
-        # autopilot-worker frontmatter STAYS pinned claude-opus-4-8 = the
+        # autopilot-worker frontmatter STAYS pinned claude-opus-4-6 = the
         # escalation tier AND the fail-safe default. The supervisor downtiers
         # to Sonnet 5 with an explicit model:"sonnet" for a settled-design
-        # ticket; it OMITS the param (pin stands -> Opus 4.8) to escalate.
+        # ticket; it OMITS the param (pin stands -> Opus 4.6) to escalate.
         # This is the only mechanically-enforceable shape: the opus alias is
-        # banned and 4.8 has NO param alias, so 4.8 can ONLY be reached by the
+        # banned and 4.6 has NO param alias, so 4.6 can ONLY be reached by the
         # pin (dispatch AS-IS), never by a param -- which also makes the
-        # fail-safe direction UP (forget-to-classify -> Opus 4.8, never lower).
+        # fail-safe direction UP (forget-to-classify -> Opus 4.6, never lower).
         t = read(MODULE)
         # anchored to the IMPLEMENTATION bullet's own line for teeth (#498):
         impl_line = self._impl_bullet_line(t)
-        self.assertIn('`model: "sonnet"`', impl_line)
+        self.assertIn("dispatching the pinned `sonnet-implementer` agent", impl_line)
         self.assertIn("escalation tier", impl_line)
         self.assertIn("fail-safe default", impl_line)
         self.assertIn(
-            "frontmatter stays pinned `model: claude-opus-4-8`", impl_line)
+            "frontmatter stays pinned `model: claude-opus-4-6`", impl_line)
 
     def test_sonnet_never_complex(self):
         t = read(MODULE)
         self.assertIn("Sonnet 5 is never used for anything complex", t)
-        self.assertIn("when in doubt, Opus 4.8", t)
+        self.assertIn("when in doubt, Opus 4.6", t)
 
     def test_gate_guards_every_automatic_fable_dispatch(self):
         # #715 (2026-08-26): the gate guards EVERY automatic Fable dispatch --
@@ -262,8 +262,8 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn("ONCE per qualifying Fable phase-dispatch", t)
         self.assertIn("missing/stale cache = CLOSED", t)
         self.assertIn("Never skip the gate", t)
-        # CLOSED falls back to Opus 4.8, never the banned alias:
-        self.assertRegex(t, r"CLOSED[^\n]*claude-opus-4-8")
+        # CLOSED falls back to Opus 4.6, never the banned alias:
+        self.assertRegex(t, r"CLOSED[^\n]*claude-opus-4-6")
 
     def test_opus_4_8_reach_mechanics_documented(self):
         # The per-dispatch `model` param takes only aliases (live-verified,
@@ -271,8 +271,8 @@ class TestOpus5BanLineup(TestCase):
         # REAL mechanisms: agent-definition frontmatter full id, Workflow
         # opts.model full name, or inheritance -- never the `opus` alias.
         t = read(MODULE)
-        self.assertIn("model: claude-opus-4-8", t)
-        self.assertIn("opts.model: 'claude-opus-4-8'", t)
+        self.assertIn("model: claude-opus-4-6", t)
+        self.assertIn("opts.model: 'claude-opus-4-6'", t)
         self.assertIn("never the `opus` alias", t)
 
     def test_design_heavy_taxonomy_survives(self):
@@ -308,7 +308,7 @@ class TestOpus5BanLineup(TestCase):
 
     def test_behavior_header_is_fable_and_opus_4_8(self):
         t = read(MODULE)
-        self.assertIn("Fable 5 / Opus 4.8 behavior", t)
+        self.assertIn("Fable 5 / Opus 4.6 behavior", t)
         self.assertNotIn("Opus 5 / Fable 5 behavior (primary + escalation)", t)
 
     def test_main_session_clauses_survive(self):
@@ -320,10 +320,10 @@ class TestOpus5BanLineup(TestCase):
     def test_sonnet_5_rehabilitated_for_light_work(self):
         # #455 (2026-08-14): Sonnet 5 is now the LIGHT / mechanical tier
         # ("moze byt aj sonnet 5 vyuzivany") -- an explicit dispatch target,
-        # not merely a fallback for when 4.8 is unreachable.
+        # not merely a fallback for when 4.6 is unreachable.
         t = read(MODULE)
         self.assertIn("2026-08-14 refinement explicitly REHABILITATED", t)
-        self.assertIn('`model: "sonnet"` + `low`', t)
+        self.assertIn("dispatch the pinned **`sonnet-mechanical`** agent at `low`", t)
         self.assertIn("moze byt aj sonnet 5 vyuzivany", t)
         # still never for anything complex:
         self.assertIn("Sonnet 5 is never used for anything complex", t)
@@ -333,7 +333,7 @@ class TestOpus5BanLineup(TestCase):
         # subagent dispatch inherits the Fable main, which is the burn.
         t = read(MODULE)
         self.assertIn(
-            "NEVER dispatch a subagent without an EXPLICIT model choice", t)
+            "NEVER dispatch a subagent without an EXPLICIT PINNED AGENT TYPE", t)
         self.assertIn("INHERITS the caller's model", t)
         self.assertIn("silently runs the SUBAGENT on Fable", t)
         self.assertIn("inherited Fable", t)
@@ -346,7 +346,7 @@ class TestWorkflowStageTiering(TestCase):
 
     def test_judgment_stages_gate_fable_closed_opus_4_8(self):
         t = read(TOOLING)
-        self.assertIn("`opts.model: 'fable'`", t)
+        self.assertIn("`opts.model: 'claude-fable-5'`", t)
         self.assertIn("ONLY when the budget gate is OPEN", t)
         # #715 (2026-08-26): the Fable stages are the DESIGN + REVIEW (+
         # synthesis / adversarial-verify) PHASES -- an IMPLEMENTATION/EXECUTION
@@ -355,21 +355,22 @@ class TestWorkflowStageTiering(TestCase):
         self.assertNotIn("ONLY for the HARD subset", t)
         self.assertIn("BEFORE authoring the script", t)
         self.assertIn("never bake in an ungated Fable stage", t)
-        self.assertRegex(t, r"CLOSED[^\n]*claude-opus-4-8")
+        self.assertRegex(t, r"CLOSED[^\n]*claude-opus-4-6")
 
     def test_execution_stages_default_sonnet_escalate_opus_4_8(self):
         # #721: a Workflow ROUTINE EXECUTION stage (a settled plan / the actual
-        # work) defaults to Sonnet 5 and escalates to Opus 4.8 on complexity --
+        # work) defaults to Sonnet 5 and escalates to Opus 4.6 on complexity --
         # the same settled-vs-complex split as the autopilot worker. It still
         # NEVER runs Fable (the per-phase invariant from #715 stays). #715's
-        # flat "execution stage = claude-opus-4-8" default is retired.
+        # flat "execution stage = claude-opus-4-6" default is retired.
         t = read(TOOLING)
         self.assertIn("EXECUTION stages", t)
-        self.assertIn("code transforms/migrations → `opts.model: 'sonnet'`", t)
-        self.assertIn("ESCALATE the stage to `opts.model: 'claude-opus-4-8'`", t)
-        # the flat opus-4.8 execution default is retired:
+        self.assertIn(
+            "code transforms/migrations → `opts.model: 'claude-sonnet-5'`", t)
+        self.assertIn("ESCALATE the stage to `opts.model: 'claude-opus-4-6'`", t)
+        # the flat opus-4.6 execution default is retired:
         self.assertNotIn(
-            "code transforms/migrations → `opts.model: 'claude-opus-4-8'`", t)
+            "code transforms/migrations → `opts.model: 'claude-opus-4-6'`", t)
         # the per-phase Fable invariant survives (execution never runs Fable):
         self.assertIn("NEVER runs Fable", t)
 
@@ -386,25 +387,32 @@ class TestDispatchSurfacesRewritten(TestCase):
     """Every dispatch-instructing surface names the new lineup."""
 
     def test_autopilot_worker_frontmatter_pin_and_default_sonnet(self):
-        # #721: the frontmatter pin STAYS claude-opus-4-8 (the escalation tier
-        # + fail-safe default -- the only way to reach 4.8 on a dispatch, since
-        # the opus alias is banned and 4.8 has no param alias). The worker RUNS
-        # on Sonnet 5 by default: the supervisor downtiers it with an explicit
-        # model:"sonnet" for a settled-design ticket, and dispatches it AS-IS
-        # (frontmatter pin -> Opus 4.8) to escalate for complexity.
+        # #871: a `model` param is now BLOCKED outright on every dispatch, so
+        # the old "supervisor downtiers autopilot-worker to Sonnet via a model
+        # override" mechanism is impossible -- the frontmatter pin STAYS
+        # claude-opus-4-6 and the worker ALWAYS runs at that tier now; for an
+        # ordinary settled-design ticket the supervisor instead dispatches the
+        # SEPARATE `sonnet-implementer` agent type (a different pinned
+        # definition, claude-sonnet-5).
         w = read("agents/autopilot-worker.md")
         fm = w.split("---")[1]
-        self.assertIn("model: claude-opus-4-8", fm)   # pin stays 4.8
+        self.assertIn("model: claude-opus-4-6", fm)   # pin stays 4.6
         self.assertNotIn("model: sonnet", fm)          # never in frontmatter
-        self.assertIn("You run on Sonnet 5 by DEFAULT", w)
-        self.assertIn('the supervisor passes `model: "sonnet"`', w)
-        # #715's flat "You run on Opus 4.8" body claim is retired:
-        self.assertNotIn("You run on Opus 4.8", w)
+        self.assertIn("You run on the pinned `claude-opus-4-6`", w)
+        norm = " ".join(w.split())
+        self.assertIn("ALWAYS", norm)
+        self.assertIn(
+            "the supervisor dispatches the pinned `sonnet-implementer` agent "
+            "instead of you", norm)
+        # the old, now-impossible "downtier via model param" body claim is retired:
+        self.assertNotIn("You run on Sonnet 5 by DEFAULT", w)
+        self.assertNotIn('the supervisor passes `model: "sonnet"`', w)
+        self.assertNotIn("You run on Opus 4.6", w)
 
     def test_ticket_validator_pinned_to_opus_4_8(self):
         v = read("agents/ticket-validator.md")
         fm = v.split("---")[1]
-        self.assertIn("model: claude-opus-4-8", fm)
+        self.assertIn("model: claude-opus-4-6", fm)
         self.assertNotIn("model: sonnet", fm)
 
     def test_worker_hard_wall_ladder_is_gated_fable(self):
@@ -423,86 +431,95 @@ class TestDispatchSurfacesRewritten(TestCase):
                     % ln[:80])
 
     def test_autopilot_supervisor_dispatch_model_rule(self):
-        # #715: fleet-wide per-phase dispatch. The supervisor dispatches the
-        # implementation WORKER on Opus 4.8 (frontmatter pin, AS-IS, NEVER a
-        # model:fable override); the DESIGN consult (Step 1c) and the REVIEW
-        # pass are the gated-Fable PHASES. No airuleset-majority exception.
+        # #871: fleet-wide per-phase dispatch, now on an EXACT-ID ALLOWLIST --
+        # no dispatch ever carries a `model` param at all. The supervisor
+        # dispatches the implementation WORKER by AGENT TYPE
+        # (`sonnet-implementer` settled-design / `autopilot-worker` complex);
+        # the DESIGN consult (Step 1c) and the REVIEW pass dispatch the
+        # pinned `fable-advisor` agent. No airuleset-majority exception.
         s = read("skills/autopilot/SKILL.md")
         self.assertIn("PER-PHASE", s)
-        self.assertIn("gate OPEN (exit 0) → dispatch `model: fable`", s)
-        self.assertIn("gate CLOSED (exit 1)", s)
         self.assertIn(
-            "Never dispatch an automatic `model: fable` without the gate check", s)
-        # the implementation worker is dispatched AS-IS on claude-opus-4-8,
-        # never Fable:
-        self.assertIn("implementation worker", s)
-        self.assertIn("never a `model: fable` override", s)
-        self.assertNotIn("Model = Opus 4.8 by default", s)
+            "gate OPEN (exit 0) → dispatch the pinned `fable-advisor` agent "
+            "for that PHASE", s)
+        self.assertIn("gate CLOSED", s)
+        self.assertIn(
+            "Never dispatch the `fable-advisor` agent without the gate check", s)
+        # the implementation worker is dispatched by AGENT TYPE, never Fable:
+        self.assertIn("IMPLEMENTATION worker", s)
+        self.assertIn(
+            "the implementation worker NEVER dispatches as `fable-advisor`", s)
+        self.assertNotIn("Model = Opus 4.6 by default", s)
         self.assertNotIn("Model = Sonnet 5 by default", s)
         self.assertNotIn('`model: "opus"`', s)
         self.assertNotIn("`model: opus`", s)
-        # #721: the implementation worker defaults to Sonnet 5 for a
-        # settled-design ticket (explicit model:"sonnet"), escalating to
-        # Opus 4.8 (dispatched AS-IS, frontmatter pin) for complexity. The
-        # supervisor never names a param for 4.8 (opus alias banned).
-        self.assertIn('`model: "sonnet"`', s)
+        self.assertNotIn("`model: fable`", s)
+        self.assertNotIn('`model: "sonnet"`', s)
+        # #721/#871: the implementation worker defaults to `sonnet-implementer`
+        # (Sonnet 5) for a settled-design ticket, escalating to `autopilot-
+        # worker` (Opus 4.6, frontmatter pin) for complexity -- chosen by
+        # WHICH AGENT TYPE is dispatched, never a param.
+        self.assertIn('`subagent_type: "sonnet-implementer"`', s)
         self.assertIn("Sonnet 5 by default", s)
         self.assertIn("settled-design", s)
         self.assertIn("prior Sonnet worker already failed on this ticket", s)
 
     def test_fable_advisor_gate_closed_falls_back_to_opus_4_8(self):
         a = read(ADVISOR)
-        self.assertRegex(a, r"CLOSED[^\n]*(Opus 4\.8|claude-opus-4-8)")
+        self.assertRegex(a, r"CLOSED[^\n]*(Opus 4\.6|claude-opus-4-6)")
         self.assertNotIn("runs on `opus` instead", a)
         self.assertNotIn("(or `opus`", a)
-        # execution hand-off is Opus 4.8 now, not sonnet:
+        # execution hand-off is Opus 4.6 now, not sonnet:
         self.assertNotIn("dispatches execution to `model: sonnet`", a)
 
     def test_process_subdev_review_closed_tier_is_opus_4_8(self):
         txt = read("skills/process-subdev/SKILL.md")
         self.assertIn("fable-gate", txt)
-        self.assertIn("model: fable", txt)
+        self.assertIn("`fable-advisor` agent", txt)
         self.assertIn("xhigh", txt)
         self.assertIn("never degrades", txt)
-        self.assertRegex(txt, r"CLOSED[^\n]*claude-opus-4-8")
+        self.assertRegex(txt, r"CLOSED[^\n]*claude-opus-4-6")
 
     def test_cross_stream_protocol_closed_tier_is_opus_4_8(self):
         txt = read("skills/autopilot/references/cross-stream-protocol.md")
-        self.assertRegex(txt, r"CLOSED[^\n]*claude-opus-4-8")
+        self.assertRegex(txt, r"CLOSED[^\n]*claude-opus-4-6")
 
     def test_autopilot_worker_review_stage_explicit_model_mandate(self):
-        # #690 (2026-08-25): CYCLE step 6 review of a NON-TRIVIAL change is
-        # judgment-content work -> gated `model: "fable"`; only a genuinely
-        # TRIVIAL diff's review (or gate CLOSED) runs with NO override on the
-        # worker's pinned claude-opus-4-8. Mechanical sub-dispatches still
-        # carry an explicit sonnet/haiku, never model-less.
+        # #871: since the worker ALWAYS runs on its pinned claude-opus-4-6 now
+        # (a model param can no longer downtier it), CYCLE step 6's review
+        # dispatch simplifies -- a model-LESS review sub-dispatch always
+        # inherits claude-opus-4-6 (the fallback tier already), so there is no
+        # more "your own running tier" branching to document.
         w = read("agents/autopilot-worker.md")
         norm = " ".join(w.split())
         self.assertIn("MODEL for the review dispatch", norm)
         self.assertIn(
             "review of a NON-TRIVIAL change is judgment-content work", norm)
-        self.assertIn("inherits YOUR pinned `claude-opus-4-8`", norm)
+        self.assertIn(
+            "a model-LESS review sub-dispatch simply inherits your own "
+            "`claude-opus-4-6`", norm)
+        self.assertIn("which IS the fallback tier", norm)
         # the 2026-08-14 HARD-only review rule is retired:
         self.assertNotIn("the DEFAULT is NO `model` override", norm)
         self.assertNotIn(
             "Escalate the review to Fable ONLY when the TICKET itself "
             "genuinely meets the design-heavy taxonomy", norm)
-        # #721: the worker's OWN model-less dispatch is safe ONLY when it RUNS
-        # on claude-opus-4-8 (an escalated ticket, dispatched AS-IS). A
-        # model:"sonnet"-dispatched settled-design worker running on Sonnet
-        # would inherit SONNET model-less, so the claim is now SCOPED, and the
-        # gate-CLOSED non-trivial review leans on the supervisor's re-verify.
-        self.assertIn(
+        # the old dual-tier "Sonnet-dispatched worker" branch is retired --
+        # the worker no longer has a Sonnet-dispatch shape at all:
+        self.assertNotIn(
             "Your OWN model-less dispatch is SAFE ONLY when you RUN on "
-            "`claude-opus-4-8`", norm)
-        self.assertIn(
+            "`claude-opus-4-6`", norm)
+        self.assertNotIn(
             '`model: "sonnet"`-dispatched worker\'s model-less dispatch inherits '
             "SONNET", norm)
-        self.assertIn('carries an explicit `model: "sonnet"`/`"haiku"`', norm)
+        # mechanical sub-dispatches carry the pinned sonnet-mechanical agent,
+        # never model-less, and never a model param:
+        self.assertIn("dispatches the pinned `sonnet-mechanical` agent", norm)
+        self.assertIn("never model-less, and never a `model` param", norm)
 
     def test_opus_alias_trap_warning_present(self):
         # #455 addendum -- LIVE gk incident 2026-08-14: a naive "explicit
-        # model" reading pushed `model: "opus"` (the alias for the 4.8 tier),
+        # model" reading pushed `model: "opus"` (the alias for the 4.6 tier),
         # which resolves to BANNED Opus 5 AND overrode the frontmatter pin. The
         # trap-warning must sit next to the explicit-model mandate on EVERY
         # surface that carries it.
@@ -513,10 +530,13 @@ class TestDispatchSurfacesRewritten(TestCase):
             self.assertIn('model: "opus"', norm, "%s: missing the opus trap" % path)
             self.assertIn("BANNED Opus 5", norm,
                           "%s: missing banned-Opus-5 warning" % path)
-        # model-awareness spells out the exact resolution: no param for 4.8.
+        # model-awareness spells out the exact resolution: no param at all,
+        # for ANY tier, since #871:
         m = " ".join(read(MODULE).split())
-        self.assertIn('Passing `model: "opus"` is NEVER correct', m)
-        self.assertIn("the Opus 4.8 tier is reached WITHOUT a param", m)
+        self.assertIn('Passing `model: "opus"` was NEVER correct', m)
+        self.assertIn(
+            "the ONLY way to reach ANY tier is dispatching the named PINNED "
+            "AGENT TYPE", m)
 
 
 class TestAdvisorHistoryPreserved(TestCase):
@@ -542,8 +562,8 @@ class TestAdvisorHistoryPreserved(TestCase):
         self.assertIn("Sonnet 5 could not reliably carry the coordinator role", a)
         self.assertIn("within 0.5% of Fable 5 on CursorBench 3.2", a)
         self.assertIn("https://www.anthropic.com/news/claude-opus-5", a)
-        self.assertIn("community reports of Opus 4.8 degradation", a)
-        self.assertIn("no 4.8 model regression so far", a)
+        self.assertIn("community reports of Opus 4.6 degradation", a)
+        self.assertIn("no 4.6 model regression so far", a)
 
     def test_opus_5_era_section_is_marked_superseded(self):
         a = read(ADVISOR)
@@ -567,7 +587,7 @@ class TestAdvisorHistoryPreserved(TestCase):
 
     def test_2026_08_26_revision_recorded(self):
         # #715: the advisor history records the per-phase revision (design +
-        # review = Fable, implementation = Opus 4.8/Sonnet, fleet-wide, the
+        # review = Fable, implementation = Opus 4.6/Sonnet, fleet-wide, the
         # airuleset-majority exception abolished).
         a = read(ADVISOR)
         self.assertIn("2026-08-26", a)
@@ -636,13 +656,13 @@ class TestOpus5GrepGate(TestCase):
         # `opts.model: 'opus'` all resolve to the banned Opus 5 on the
         # Anthropic API. A gate-CLOSED fallback naming the bare alias
         # (`CLOSED ... opus`) is the other real shape the ban must catch;
-        # `claude-opus-4-8` never matches either pattern (the `-` fails
+        # `claude-opus-4-6` never matches either pattern (the `-` fails
         # the boundary), and ban prose avoids the literal shapes.
         alias = re.compile(r"""model:\s*["']?opus["']?(?![\w-])""")
         closed_fallback = re.compile(r"CLOSED[^\n]{0,60}(?<![\w-])`?opus`?(?![\w-])")
         # capitalized bare-"Opus" fallback ("CLOSED → Opus") — the exact OLD
-        # model-awareness wording; "Opus 4.8"/"Opus 4" stays legal via the
-        # negative lookahead, and `claude-opus-4-8` never matches \bOpus\b.
+        # model-awareness wording; "Opus 4.6"/"Opus 4" stays legal via the
+        # negative lookahead, and `claude-opus-4-6` never matches \bOpus\b.
         closed_capital = re.compile(r"CLOSED[^\n]{0,60}\bOpus\b(?!\s*4)")
         violations = []
         for f in self._files():
@@ -657,6 +677,63 @@ class TestOpus5GrepGate(TestCase):
                         continue
                     violations.append(
                         "%s:%d: %s" % (f.relative_to(ROOT), i, line.strip()[:100]))
+        self.assertEqual(violations, [])
+
+    def _grep(self, needle):
+        """Every non-ban-prose line across the scanned surface containing
+        `needle` -- shared helper for the #871 exact-id-allowlist extensions
+        below (superseded ids + bare alias `model:` params must never appear
+        as a LIVE dispatch value, only inside ban-prose naming them)."""
+        violations = []
+        for f in self._files():
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                if needle not in line:
+                    continue
+                if self._line_is_ban_prose(line):
+                    continue
+                violations.append(
+                    "%s:%d: %s" % (f.relative_to(ROOT), i, line.strip()[:100]))
+        return violations
+
+    def test_claude_opus_4_8_absent_from_dispatch_surfaces(self):
+        # #871: claude-opus-4-8 is the SUPERSEDED predecessor id (renamed to
+        # claude-opus-4-6, the current MODEL_TIERS entry) -- it must never
+        # reappear as a live pin/dispatch value.
+        self.assertEqual(self._grep("claude-opus-4-8"), [])
+
+    def test_claude_fable_5_1_absent_from_dispatch_surfaces(self):
+        # #871: Fable 5.1 (claude-fable-5-1) is BANNED, same class as Opus 5
+        # -- it must never appear as a live pin/dispatch value either.
+        self.assertEqual(self._grep("claude-fable-5-1"), [])
+
+    def test_no_bare_alias_model_param_any_family(self):
+        # #871: a dispatch NEVER carries a `model` param at all now -- the
+        # opus-alias-only check above predates the exact-id allowlist; this
+        # extends the SAME shape to the other three families (fable/sonnet/
+        # haiku), since a bare alias floats to whatever ships next in its
+        # family exactly like `opus` floated to Opus 5 (the live #871 finding:
+        # `fable` silently became the banned claude-fable-5-1).
+        bare_alias = re.compile(
+            r"""model:\s*["']?(fable|sonnet|haiku)["']?(?![\w-])""")
+        opts_alias = re.compile(
+            r"""opts\.model:\s*['"](fable|sonnet|haiku|opus)['"]""")
+        violations = []
+        for f in self._files():
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                if not (bare_alias.search(line) or opts_alias.search(line)):
+                    continue
+                if self._line_is_ban_prose(line):
+                    continue
+                violations.append(
+                    "%s:%d: %s" % (f.relative_to(ROOT), i, line.strip()[:100]))
         self.assertEqual(violations, [])
 
 

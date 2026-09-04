@@ -71,6 +71,7 @@ sys.path.insert(0, str(REPO))
 import watchdog as wd            # noqa: E402
 import watchdog.compact          # noqa: E402  (binds the wd.compact attribute)
 import watchdog.goal             # noqa: E402  (binds the wd.goal attribute)
+import watchdog.model_audit_job  # noqa: E402  (binds the wd.model_audit_job attribute)
 
 
 # --------------------------------------------------------------------------- #
@@ -200,13 +201,24 @@ CANONICAL_SWEEP = [
     # `run_disk_guard` seam lives on the `wd.disk_guard` submodule.
     JobSpec("disk_guard", "wd.disk_guard", "run_disk_guard",
             "disk_guard_enabled", True, "list", "disk-guard error"),
+
+    # (41) — #871 model-float audit. ALWAYS-ON (gate is a time-based
+    # `_sweep_due` cadence, not a run_once kwarg — always True the first time
+    # a test's fresh temp state has no `model_audit_last_ts` key yet, exactly
+    # like the other gate=None always-on rows above). Reuses the SAME `panes`
+    # list the pane-loop entry already fetched — no second `list_claude_panes`
+    # call — so it does not perturb `test_pane_loop_runs_before_every_
+    # standalone_job`'s "list_claude_panes never fires twice" assertion.
+    JobSpec("model_float_audit", "wd.model_audit_job", "model_float_audit_job",
+            None, None, "list", "model-float-audit error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]
 ALWAYS_ON_ORDER = [s.label for s in CANONICAL_SWEEP if s.gate is None]
 
 _OWNERS = {"wd": wd, "wd.compact": wd.compact, "wd.goal": wd.goal,
-           "wd.disk_guard": wd.disk_guard}
+           "wd.disk_guard": wd.disk_guard,
+           "wd.model_audit_job": wd.model_audit_job}
 
 
 def _gate_to_labels():

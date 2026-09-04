@@ -484,6 +484,41 @@ def transcript_last_marker_bounded(path, tail_bytes=2_000_000, max_entries=200):
         _read_jsonl_byte_tail(path, tail_bytes, max_entries))[0]
 
 
+def transcript_last_assistant_model(path):
+    """The `message.model` id of the session's last REAL assistant message
+    (same walk/skip semantics as `transcript_last_assistant_text` — synthetic/
+    tool-only sentinels and an `isApiErrorMessage` entry are skipped), or `''`
+    if none / unreadable. #871: `airuleset.py model-audit` reads this per live
+    pane + subagent transcript to flag a session that FLOATED onto a model
+    outside the exact-id allowlist (`model_changed` mid-lifetime — the launch
+    pin fixes only LAUNCH, never the running session).
+
+    #871 adversarial review 🔴3b: this used to claim the shared skip semantics
+    but never actually applied the `text in _SENTINELS` check — it accepted
+    ANY entry carrying a non-empty `message.model`, including a trailing
+    SYNTHETIC/bookkeeping assistant record (observed in live transcripts
+    carrying `"model":"<synthetic>"` with sentinel/empty text), which is not
+    a real served model and produced a false model-float violation. Fixed by
+    applying the SAME sentinel-text skip `transcript_last_assistant_text`
+    uses, so the walk keeps scanning backward past a synthetic entry to the
+    last REAL served model."""
+    for entry in reversed(_iter_jsonl_tail(path)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            return ""
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+        model = msg.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    return ""
+
+
 def transcript_last_assistant_text(path):
     """FULL text of the session's last REAL assistant message (same
     walk/skip semantics as `transcript_last_marker_line` — synthetic/

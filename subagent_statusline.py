@@ -4,7 +4,7 @@ MODEL (+ effort) in the Claude Code agent strip (#538).
 THE PROBLEM. The owner asked (2026-08-18): "bolo by mozne aby kazdy inline
 subagent pisal aj aky model a verziu pouziva dole v peticke?" — the agent
 strip below the prompt shows rows like `autopilot-worker  Reading … · 46m ·
-↓ 541k tokens`, but never WHICH model (opus-4.8 / sonnet-5 / fable-5 /
+↓ 541k tokens`, but never WHICH model (opus-4.6 / sonnet-5 / fable-5 /
 haiku) the subagent actually runs on. CC's default row is a fixed
 `name · description · token count`, no model.
 
@@ -68,7 +68,7 @@ def _clean(s):
 def short_model(model_id):
     """A resolved model id → a compact human badge: family + dotted version.
 
-    `claude-opus-4-8` → `opus-4.8`, `claude-sonnet-5` → `sonnet-5`,
+    `claude-opus-4-6` → `opus-4.6`, `claude-sonnet-5` → `sonnet-5`,
     `claude-haiku-4-5` → `haiku-4.5`, `claude-fable-5[1m]` → `fable-5`. An
     unknown id degrades to a best-effort shortening (never blank, never a
     crash); a missing/blank/non-string id → "" (the caller then skips the
@@ -114,7 +114,7 @@ def _activity(task):
 
 
 def _badge_text(task):
-    """Plain badge text: `opus-4.8` or `opus-4.8·xhigh` (effort appended only
+    """Plain badge text: `opus-4.6` or `opus-4.6·xhigh` (effort appended only
     when present). "" when the model is unresolved."""
     model = short_model(task.get("model"))
     if not model:

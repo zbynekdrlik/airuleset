@@ -295,9 +295,18 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       function's own `promptSuggestionEnabled` bullet documents for a different
       key.
 
-    - `model = MANAGED_MODEL` (Fable 5[1m] — user directive 2026-08-13, Opus 5
-      is banned) is the default MAIN-session model on every managed box — see
-      MANAGED_MODEL's own comment for the history. Same unconditional-managed-
+    - `model = MANAGED_MODEL` (Fable 5.0 = `claude-fable-5[1m]` — user
+      directive 2026-08-13, Opus 5 banned; Fable 5.1 ALSO banned per the
+      owner directive 2026-09-04, #871) is the default MAIN-session model on
+      every managed box — see MANAGED_MODEL's own comment for the history.
+      The UNCONDITIONAL overwrite is exactly what SELF-HEALS a banned
+      `model` back to `MANAGED_MODEL`: a stale banned id a prior session
+      left in settings.json (an owner's `/model → Fable (5.1)` Enter, or a
+      `model_changed` float that some client persisted) is rewritten on the
+      next install/push. `airuleset.is_banned_model()` is the single shared
+      predicate defining "banned" (reused by tests/test_launch_model_ban.py);
+      MANAGED_MODEL is itself asserted never-banned by that test, so this
+      overwrite can only ever land an ALLOWED id. Same unconditional-managed-
       default treatment as effortLevel/disableAgentView/tui; the user can
       still switch per session with `/model`.
 
@@ -358,6 +367,9 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     # mode is redundant-but-harmless post-#376, not removed (see
     # CLAUDE_LAUNCH_SCRIPT_CONTENT's own comment).
     result["tui"] = airuleset.MANAGED_TUI
+    # Unconditional overwrite = self-heal of any banned `model`
+    # (airuleset.is_banned_model — Opus 5 / Fable 5.1, #871) back to the
+    # allowed managed default. See the docstring's `model` bullet.
     result["model"] = airuleset.MANAGED_MODEL
     result["promptSuggestionEnabled"] = False
     result.pop("autoCompactWindow", None)

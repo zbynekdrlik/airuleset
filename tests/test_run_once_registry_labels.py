@@ -79,6 +79,7 @@ EXPECTED_STANDALONE = [
     "heavy_build_reaper",               # (38) — #778 heavy-build-toolchain reaper
     "resource_guard_verify",            # (39) — #775 shared-stream resource-guard verify
     "disk_guard",                       # (40) — #834 per-box disk-pressure guard
+    "model_float_audit",                # (41) — #871 model-float audit
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

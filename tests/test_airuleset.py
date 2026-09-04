@@ -9243,6 +9243,18 @@ class TestApiWatchdog(TestCase):
         self.pings.append((body, dedup_key, owner))
         return "sent"
 
+    def _state_sans_model_audit(self):
+        """#871 job 41 (model_float_audit) is ALWAYS wired — genuinely fires
+        on the very first `run_once` call in these fixtures (fresh state, no
+        `model_audit_last_ts` key yet -> its `_sweep_due` cadence gate is
+        due) and unconditionally stamps that key, independent of session
+        recovery/copy-mode. It is machine-channel-only and orthogonal to the
+        session-tracking state these tests actually assert on, so strip it
+        before comparing against the session-only expectation."""
+        state = dict(self.w.load_state(self.state))
+        state.pop("model_audit_last_ts", None)
+        return state
+
     # real CC session ids are UUIDs (transcript stems) — the state cleanup
     # keys on that shape, so the fixture must match the real contract
     _SID = "5e55abc0-51d0-4a5e-9f1e-00000000abcd"
@@ -10903,7 +10915,7 @@ class TestApiWatchdog(TestCase):
         # session recovered: transcript now fresh + last msg normal
         self._transcript(cwd, [self._ERR, self._OK], 5, now + 60)
         self.w.run_once(now=now + 60, **kw)
-        self.assertEqual(self.w.load_state(self.state), {}, "recovered key dropped")
+        self.assertEqual(self._state_sans_model_audit(), {}, "recovered key dropped")
 
     def test_run_once_dry_run_sends_nothing(self):
         now = 1_000_000
@@ -10975,7 +10987,7 @@ class TestApiWatchdog(TestCase):
         self.w.run_once(now=now, run=fake, send_fn=self._send,
                         projects_dir=self.projects, state_path=self.state, grace=300)
         self.assertEqual(fake.continues_sent(), 0, "copy-mode pane must NOT be nudged")
-        self.assertEqual(self.w.load_state(self.state), {}, "no retry burned while in-mode")
+        self.assertEqual(self._state_sans_model_audit(), {}, "no retry burned while in-mode")
 
     def test_run_once_usage_cap_pings_no_continue(self):
         now = 1_000_000
