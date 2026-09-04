@@ -73,7 +73,7 @@ Like `/goal`, only the USER can type `/loop` — a skill prints the line to past
 
 #### Verification tools
 
-4.8 benefits from explicit verification paths:
+The implementation tiers benefit from explicit verification paths:
 - **Frontend**: Chromium extension or Playwright MCP
 - **Backend**: test runners, DB inspectors
 - **Desktop**: Computer Use

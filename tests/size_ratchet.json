@@ -197,7 +197,7 @@
     "tests/test_lane_occupancy_571.py": 226,
     "tests/test_lane_target_reclaim.py": 637,
     "tests/test_lanestall_suppression_693.py": 326,
-    "tests/test_launch_model_ban.py": 162,
+    "tests/test_launch_model_ban.py": 176,
     "tests/test_local_poll_repeat_block.py": 605,
     "tests/test_long_turn.py": 408,
     "tests/test_long_wait_background_waiter.py": 236,

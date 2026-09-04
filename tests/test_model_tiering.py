@@ -111,7 +111,7 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn("hlavne nie ze pouzijes sonnet na zlozite veci", t)
         # #455 -- the two 2026-08-14 refinement directives, verbatim:
         self.assertIn(
-            "len tazke ulohy isli na fable ostatok na opus4.6 a moze byt "
+            "len tazke ulohy isli na fable ostatok na opus4.8 a moze byt "
             "aj sonnet 5 vyuzivany", t)
         self.assertIn(
             "len ja dlhodobo pouzivam hlavny agent fable lebo potrebujem "
@@ -124,7 +124,7 @@ class TestOpus5BanLineup(TestCase):
         # #715 -- the 2026-08-26 per-phase directive, verbatim:
         self.assertIn(
             "Najviacej by sa mi pacilo keby sa tickety nejak tak robili ze "
-            "brainstorming, specs a plan fable, implementacia opus4.6/sonnet 5, "
+            "brainstorming, specs a plan fable, implementacia opus4.8/sonnet 5, "
             "review fable", t)
         self.assertIn(
             "len tie dolezite fazy ktore vyzaduju veci dobre vymysliet a "
