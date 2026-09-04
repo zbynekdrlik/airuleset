@@ -225,18 +225,46 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   per-message; nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
-  (airuleset #788, owner 2026-08-31 „radsej davat vlakno schovat … na napr. 10h").**
+  (airuleset #788, owner 2026-08-31 „radsej davat vlakno schovat … na napr. 10h";
+  #853 compliance, owner 2026-09-02).**
   Keď #627 closing nóta landne, NEARCHIVUJ — ARMuj vláknu TTL self-hide (po čase
-  samo zmizne členom, HISTÓRIA ostáva dohľadateľná). Mechanizmus HOTOVÝ + RELEASED
-  (odoo-erp issue 5630, release 19.0.2.230.0, `company_base` — presné API tam):
+  samo zmizne členom, HISTÓRIA ostáva dohľadateľná). Hide arming je **POVINNÝ**
+  krok uzavretia — closing nóta bez arm-u = nedokončený close.
+  **Archivácia (`active=False`) klientskeho vlákna = disposition MIS-SHAPE**
+  (rovnaká trieda ako owner-blocked ops-wait, airuleset #601) — NIKDY default,
+  NIKDY fallback. História sa stáva nedostupnou (`RPC_ERROR: 404` pri načítaní
+  správ), odovzdávky do archivovaného vlákna pristanú ako nedosiahnuteľné
+  (živý incident montalu PROD, discuss.channel 364 — owner: „Po novom by sa mali
+  len schovavat a nedavat archivovat lebo potom su tie vlakna nedostupne!").
+  **Oprava archivovaného vlákna** = `active=True` + hide arm (GATEKEEPER-ACTION).
+  HOOK-ENFORCED na stream boxoch (`hooks/block-discuss-archive.sh`, airuleset
+  #853): `discuss.channel` `action_archive` / `toggle_active` / write s
+  `active=False` je BLOKOVANÝ na `shared-stream` boxoch. Bypass (gk cleanup):
+  `# airuleset:discuss-archive-ok <reason>`.
+  **Self-service arm (odoo-erp issue 5946, release 19.0.2.238.0):** stream si hide
+  armne SÁM cez `/json/2` bez gk — handover účet (internal user, member/creator
+  vlákna) zavolá:
+  ```
+  POST https://<instance>/json/2/discuss.channel/schedule_close_hide_guarded
+  {"args": [<channel_id>]}
+  ```
+  Voliteľný `hours` parameter (default = ICP `mail.closed_thread_hide_hours`,
+  10h): `{"args": [<channel_id>], "kwargs": {"hours": 24}}`. Vráti naplánovaný
+  čas (UTC string). Guard: internal user + member/creator + sub-thread only; inak
+  `AccessError` / `ValidationError`. **Kým release s touto metódou nie je živý
+  na danom PROD, `GATEKEEPER-ACTION:` ostáva arm path.**
+  Mechanizmus v pozadí (RELEASED odoo-erp issue 5630, 19.0.2.230.0, `company_base`):
   helper `_company_base_schedule_close_hide()` + ICP `mail.closed_thread_hide_hours`
-  (default 10) poháňa natívny `unpin_dt`, NIKDY `active=False`. Archivácia
-  (`active=False`) ostáva LEN ako fallback / gk cleanup, nikdy default.
+  poháňa natívny `unpin_dt`, NIKDY `active=False`.
   **Disarm-on-reply (odoo-erp#5630 delegoval SEM):** klientska odpoveď v ARMnutom
   okne DISARMuje hide — zlož / nere-armuj marker EXPLICITNE (nikdy sa nespoliehaj
   na `last_interest_dt` race). Odpoveď zachytí jej vlastná notifikácia + #625
   react-first duty, takže vlákno s čerstvou aktivitou nikdy ticho nezmizne; re-arm
   až po skutočnom uzavretí. Model dáva len primitív; policy je #788.
+  **Per-stream own-thread sweep:** každý stream pravidelne (napr. pri W-drain
+  passe alebo po každom close) auditne SVOJE „… N" vlákna pod parent kanálom —
+  hotová téma s closing nótou ako poslednou správou → hide arm (self-service alebo
+  gk); hotová bez nóty → nóta (standing template grant) + arm; živá → nechať.
 
 - **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
   closing note lands in that thread — the LAST message in the thread is ALWAYS
