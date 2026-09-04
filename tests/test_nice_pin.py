@@ -8,7 +8,6 @@ Component (4): hook child scheduling — not covered here (stdin/exit contract
                children without risking stdin piping issues; documented below).
 """
 import os
-import textwrap
 import unittest
 
 # The repo root is the worktree dir itself; add it to sys.path so we can
