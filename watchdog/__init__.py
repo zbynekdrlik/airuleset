@@ -2708,7 +2708,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `docker system prune`), stale Claude self-update binaries (except the
           running one), one-off numbered venvs > 2 d, per-user `~/.cache` > 30 d,
           own-home scratch/uploads/CLI-versions/worktrees/toolchain, transcripts
-          > 7 d gzip (LAST). Fail-LOUD (every action + skip logged to
+          > 7 d gzip (LAST). The scratch rung classifies at
+          `<cwd-key>/<session-uuid>` granularity so a DEAD session is reclaimed
+          even beside a LIVE sibling (#863; liveness = the `~/.claude/sessions`
+          registry mapping the uuid to a live pid — surviving a `claude -c`
+          resume — a subtree fd, or a fresh transcript; a LIVE session is only
+          NAMED into `largest_live_scratch`, never deleted). Fail-LOUD (every action + skip logged to
           `disk-guard.log`), never deleting on uncertainty, never crossing a
           filesystem, never as root (the root/system leg is #841). >= 90 % after
           the drain → machine-channel escalation, box-wide deduped once/day.

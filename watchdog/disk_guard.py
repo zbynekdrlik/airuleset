@@ -270,6 +270,26 @@ def write_status_cache(status, home=None, path=None):
     os.replace(tmp, p)
 
 
+def _read_status_cache(home=None, path=None):
+    """The previously-written footer cache dict, or {} if absent/unreadable --
+    read to log the #863 LIVE-SCRATCH line only when the value CHANGES."""
+    p = Path(path) if path else (_guard_dir(home) / STATUS_CACHE_NAME)
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _largest_live_scratch_changed(home, lls):
+    """True when `lls` (path, bytes) differs from the previously-cached
+    largest_live_scratch -- so the LIVE-SCRATCH log line is written only on a
+    change, not ~1440x/day (#863 review 2)."""
+    prior = _read_status_cache(home).get("largest_live_scratch")
+    if not isinstance(prior, dict):
+        return True
+    return (prior.get("path"), prior.get("bytes")) != (lls.get("path"), lls.get("bytes"))
+
+
 # --------------------------------------------------------------------------- #
 # NEW planners (uploads, toolchain)
 # --------------------------------------------------------------------------- #
@@ -883,12 +903,16 @@ def _row_to_action(cls, row, kind):
     return {"cls": cls, "path": path, "bytes": size, "kind": kind, "reason": None}
 
 
-def _plan_scratch(home, now):
+def _plan_scratch(home, now, scratch_rows=None):
     from cli_scratch_sweep import (discover_claude_scratch_candidates,
                                    discover_stray_tmp_candidates)
     actions = []
     try:
-        for r in discover_claude_scratch_candidates(now=now) or []:
+        # #863 review 2: reuse the rows run_disk_guard already discovered for
+        # largest_live_scratch (no 2nd du-walk); else discover here.
+        rows = (scratch_rows if scratch_rows is not None
+                else (discover_claude_scratch_candidates(now=now, home=home) or []))
+        for r in rows:
             actions.append(_row_to_action("scratch", r, "delete"))
     except Exception as e:
         actions.append({"cls": "scratch", "path": "-", "bytes": 0, "kind": "skip",
@@ -1021,7 +1045,7 @@ def _plan_oneoff_venvs(home, now):
             for r in discover_oneoff_venvs(home=home, now=now)]
 
 
-def _default_planners(home, now):
+def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
     (apt / rotated logs / runner cache / docker / user-cache / stale Claude
@@ -1034,7 +1058,7 @@ def _default_planners(home, now):
         ("runner-update", lambda: _plan_runner_update(home, now)),
         ("claude-version", lambda: _plan_claude_versions(home, now)),
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
-        ("scratch", lambda: _plan_scratch(home, now)),
+        ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
@@ -1125,7 +1149,14 @@ def _sudo_available(probe_fn=None):
         return False
 
 
-def _perform_action(a, sudo_ok=False, run_fn=None):
+def _default_scratch_live(path, now):
+    """The real #863 per-session TOCTOU liveness re-check for the drain executor
+    (real ~/.claude sessions registry + real /proc)."""
+    from cli_scratch_sweep import scratch_session_live_recheck
+    return scratch_session_live_recheck(path, now=now)
+
+
+def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=None):
     run_fn = run_fn or subprocess.run
     kind = a.get("kind")
     path = a.get("path")
@@ -1158,16 +1189,26 @@ def _perform_action(a, sudo_ok=False, run_fn=None):
                check=True, capture_output=True, text=True, timeout=120)
         return nbytes
     if kind == "delete":
+        # #863 review 4: a scratch session can become live (a `claude --resume
+        # <uuid>`) between plan and act -- re-check per-session liveness right
+        # before rmtree and REFUSE if it is now live/undeterminable (the sweep
+        # path already does this; the disk-guard drain path did not).
+        if a.get("cls") == "scratch":
+            live_fn = scratch_live_fn or _default_scratch_live
+            if live_fn(path, now):
+                raise OSError("scratch session %s became live/undeterminable since "
+                              "plan -- refused (TOCTOU #863)" % path)
         _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes
     return 0
 
 
-def _make_do_action(dry_run, sudo_ok=False, run_fn=None):
+def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=None):
     def _do(a):
         if dry_run:
             return a.get("bytes", 0) or 0
-        return _perform_action(a, sudo_ok=sudo_ok, run_fn=run_fn)
+        return _perform_action(a, sudo_ok=sudo_ok, run_fn=run_fn,
+                               scratch_live_fn=scratch_live_fn, now=now)
     return _do
 
 
@@ -1442,7 +1483,12 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     CRITICAL (≥90 %), also record the root-level finding surfaced from the root
     reporter's world-readable report (#841 leg C, `disk_guard_root`) — a cheap
     read that runs even when the du-heavy drain is cadence-gated, and NEVER
-    pings. Best-effort; returns log lines for the sweep's own log."""
+    pings. #863: when a drain runs (same cadence), a SINGLE scratch discovery
+    both records the largest LIVE session scratchpad into the footer cache
+    (`largest_live_scratch` — visibility only, never deleted, the `disk NN%`
+    finding's addressee) and feeds the scratch drain planner; the LIVE-SCRATCH
+    log line is written only when that value CHANGES. Best-effort; returns log
+    lines for the sweep's own log."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     mounts = mounts or MOUNTS
@@ -1451,20 +1497,31 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         status = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
     except Exception as e:
         return ["disk-guard: status error: %r" % e]
-    # #863: at >=80% pressure record the largest LIVE session scratchpad the
-    # guard would keep — visibility only, NEVER deleted, no ping (the session
-    # cleans its own scratch). Computed BEFORE write_status_cache so the footer
-    # cache carries it, and even when the du-heavy drain below is cadence-gated.
-    if status["level"] in ("drain", "critical"):
+    geteuid_fn = geteuid_fn or os.geteuid
+    is_root = geteuid_fn() == 0
+    # #863 review 2: whether a per-user drain runs THIS poll. The
+    # largest_live_scratch visibility discovery (a du-heavy walk) runs at most
+    # ONCE per drain and ONLY when a drain runs (gated on the SAME cadence as
+    # the drain -- not a second full discovery every poll in the 80-95 % band),
+    # and its rows are SHARED with the scratch drain planner below.
+    will_drain = (not is_root) and _cadence_allows_drain(
+        status["worst_pct"], _drain_due(home, now, min_drain_interval_s), dry_run=dry_run)
+    scratch_rows = None
+    if will_drain:
+        # visibility only, NEVER deleted, no ping (the session cleans its own
+        # scratch). Computed BEFORE write_status_cache so the footer cache
+        # carries it.
         try:
-            rows = (scratch_discover_fn or _default_scratch_discover)(now, home)
-            lls = _largest_live_scratch(rows)
+            scratch_rows = (scratch_discover_fn or _default_scratch_discover)(now, home)
+            lls = _largest_live_scratch(scratch_rows)
             if lls:
                 status["largest_live_scratch"] = lls
-                line = _log_line(now, "LIVE-SCRATCH", lls["path"], lls["bytes"],
-                                 "kept (visibility only, #863)")
-                logs.append(line)
-                _append_log(_log_path(home), [line])
+                # review 2: log the LIVE-SCRATCH line only when the value CHANGES.
+                if _largest_live_scratch_changed(home, lls):
+                    line = _log_line(now, "LIVE-SCRATCH", lls["path"], lls["bytes"],
+                                     "kept (visibility only, #863)")
+                    logs.append(line)
+                    _append_log(_log_path(home), [line])
         except Exception as e:
             logs.append("disk-guard: largest-live-scratch error: %r" % e)
     try:
@@ -1473,8 +1530,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         logs.append("disk-guard: cache write failed: %r" % e)
     if status["level"] in ("ok", "notice"):
         return logs
-    geteuid_fn = geteuid_fn or os.geteuid
-    if geteuid_fn() == 0:
+    if is_root:
         logs.append("disk-guard: %d%% but euid==0 — per-user drain refused (root leg #841)"
                     % status["worst_pct"])
         return logs
@@ -1491,13 +1547,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         except Exception as e:
             logs.append("disk-guard: root-finding error: %r" % e)
     # #854: severity beats cadence — at CRITICAL pressure the drain runs EVERY
-    # poll; only the 80-95 % band is cadence-gated.
-    if not dry_run:
-        due = _drain_due(home, now, min_drain_interval_s)
-        if not _cadence_allows_drain(status["worst_pct"], due, dry_run=False):
-            logs.append("disk-guard: %d%% (%s) — drain cadence-gated this poll (< %d%% critical)"
-                        % (status["worst_pct"], status["dim"], DISK_CRITICAL_PCT))
-            return logs
+    # poll; only the 80-95 % band is cadence-gated (`will_drain`, above).
+    if not will_drain:
+        logs.append("disk-guard: %d%% (%s) — drain cadence-gated this poll (< %d%% critical)"
+                    % (status["worst_pct"], status["dim"], DISK_CRITICAL_PCT))
+        return logs
     lock = _acquire_lock(home)
     if lock is None:
         logs.append("disk-guard: %d%% — another drain holds the lock, skipping"
@@ -1507,7 +1561,13 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         logs.append("disk-guard: %d%% — lock uncreatable (disk full?), draining LOCKLESS"
                     % status["worst_pct"])
     try:
-        planners = (planners_fn or _default_planners)(home, now)
+        # review 2: reuse the ONE scratch discovery above for the scratch drain
+        # planner (only the default ladder — an injected planners_fn keeps its
+        # own (home, now) signature).
+        if planners_fn is not None:
+            planners = planners_fn(home, now)
+        else:
+            planners = _default_planners(home, now, scratch_rows=scratch_rows)
 
         def recheck():
             return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
@@ -1517,12 +1577,27 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         # (apt/rotated-log/runner-*) delete via `sudo -n` where it exists, else
         # the unprivileged attempt. Never probed in a dry-run (deletes nothing).
         sudo_ok = _sudo_available(sudo_probe_fn) if not dry_run else False
-        do_action = _make_do_action(dry_run, sudo_ok=sudo_ok, run_fn=None)
+        do_action = _make_do_action(dry_run, sudo_ok=sudo_ok, run_fn=None, now=now)
         logs += execute_drain(status, home, planners, recheck, do_action,
                               geteuid_fn=geteuid_fn, log_path=_log_path(home),
                               now=now, dry_run=dry_run)
         if not dry_run:
             _mark_drained(home, now)        # never cadence-gate a REAL drain off a dry-run
+        # #863 review 6: after the drain, rmdir a cwd-key dir emptied by removing
+        # its LAST dead session (derived from the ACTUAL removed session paths,
+        # empty-only -- a live sibling keeps the dir non-empty and safe).
+        if not dry_run and scratch_rows:
+            try:
+                from cli_scratch_sweep import _remove_empty_cwd_key_dirs as _rm_ck
+                ck_dirs = {str(Path(r["path"]).parent) for r in scratch_rows
+                           if r.get("reason") is None and r.get("uuid") and r.get("path")}
+                for row in _rm_ck(ck_dirs):
+                    verb = "RMDIR" if row.get("removed") else "SKIP-RMDIR"
+                    ln = _log_line(now, verb, row["path"], 0, row.get("reason", ""))
+                    logs.append(ln)
+                    _append_log(_log_path(home), [ln])
+            except Exception as e:
+                logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
         if post["level"] == "critical":
             logs += escalate(post, home, now, dry_run)
