@@ -114,6 +114,18 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["drlik.marek@gmail.com"],
         "session_duration": "24h",
     },
+    # dominika.newlevel.media — the FOURTH webterm gateway (#867 scope-add
+    # 2026-09-04, owner request: "pridat noveho webterm uzivatela dominika, email
+    # nika.sarikova@gmail.com"). The e-mail is owner-PROVIDED verbatim in the
+    # ticket; deny-by-default: this list IS the whole authorization, so a wrong
+    # address only locks dominika out (the safe direction). Adding another person
+    # is one more e-mail + `webterm-access --apply`.
+    "dominika": {
+        "hostname": "dominika.newlevel.media",
+        "name": "webterm — dominika",
+        "allowed_emails": ["nika.sarikova@gmail.com"],   # owner-provided, #867
+        "session_duration": "24h",
+    },
 }
 
 POLICY_NAME = "webterm allowed developers"

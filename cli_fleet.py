@@ -97,6 +97,23 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
+        # dominika -- webterm OBSERVER account (airuleset#867, 2026-09-04, owner
+        # request). NOT a dev stream: she runs ONLY the dominika webterm gateway
+        # (cli_webterm_dominika) and watches two OTHER streams (montalu5 + miva1)
+        # over loopback ssh; she works no tickets, has no Discord persona, no
+        # notify routing. Registered here so `push` reaches her account and runs
+        # `maybe_setup_webterm` (the marek entry's shape: same subdev VPS, same
+        # operator gatekeeper_access identity — byte-copied authorized_keys is the
+        # go-live owner step). Classified reduced `fork-no-merge` (the
+        # LEAST-privilege profile) in AUTHORITY_BY_USER below, NEVER full: an
+        # observe-only account must never merge/deploy/close (see that row).
+        "name": "dominika@subdev",
+        "host": "100.118.174.27",
+        "user": "dominika",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+    {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
         # VPS as marek/david/simap (airuleset#300; tracking ticket for the
         # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
@@ -453,6 +470,21 @@ AUTHORITY_BY_USER = {
     "montalu1": "branch-merge",
     "david1": "fork-no-merge",
     "simap1": "fork-no-merge",
+    # dominika (airuleset#867, 2026-09-04): a webterm OBSERVER, NOT a dev stream —
+    # she works no tickets, merges/deploys/closes nothing. But
+    # `test_every_remote_hosts_user_is_classified` requires every REMOTE_HOSTS user
+    # to sit in EXACTLY ONE registry: FULL_AUTHORITY_USERS (merge-to-main + deploy +
+    # close) is WRONG for an observer, so she goes here with the LEAST-privilege
+    # reduced profile `fork-no-merge` (the safe fail-direction — never full). She is
+    # not a real hand-off stream, so the `_own_handoff_label`/`_ticket_is_stream_
+    # labeled` "AUTHORITY_BY_USER == is-a-stream" consumers may see her as a stream
+    # — harmless, because she never authors/works a ticket, so those paths never
+    # fire for her; and `fork-no-merge` (not `full`) keeps this row consistent with
+    # the "no `full` value in AUTHORITY_BY_USER" invariant
+    # (test_authority_profiles.py). She gets NO full-authority/maintainer skills
+    # (not in FULL_AUTHORITY_USERS/MAINTAINER_USERS) and NO dev-stream extras (not
+    # in SKILLS_EXTRA_BY_USER) — skill_names_for_user gates all of those.
+    "dominika": "fork-no-merge",
 }
 
 

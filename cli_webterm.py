@@ -229,6 +229,8 @@ def webterm_inventory(profile=profiles.OWNER):
         return profiles.david_inventory()
     if profile == profiles.MAREK:
         return profiles.marek_inventory()
+    if profile == profiles.DOMINIKA:
+        return profiles.dominika_inventory()
     import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
     from cli_remote import _deployable_hosts
     stream_users = set(airuleset.AUTHORITY_BY_USER)
@@ -687,6 +689,14 @@ WEBTERM_DASHBOARD_TABS = {
     # the same per-domain policy declaratively (and is what a full-fleet render
     # for "david" would filter to -- exercised by the tests).
     "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"],
+    # dominika.newlevel.media -- dominika's OBSERVE set (owner request 2026-09-04,
+    # #867): TWO tabs only, the two subdev streams she watches — montalu5 (m5) then
+    # miva1 (miva). The ids are the DOMINIKA LANE inventory ids
+    # (cli_webterm_profiles.dominika_inventory), which her lane render consumes via
+    # LaneSpec.dashboard_human="dominika" (order + exclusivity). Both are OBSERVE
+    # tabs (loopback ssh into montalu5/miva1's own tmux group via the dedicated
+    # dominika key) — no local attach, no other stream, no owner-realm box.
+    "dominika": ["montalu5-subdev", "miva1-subdev"],
 }
 
 
@@ -1648,9 +1658,11 @@ def setup_webterm_service(run=None):
 def maybe_setup_webterm():
     """Install-time entry point (cmd_install). Dispatches by box profile AND the
     install account: dev1 -> owner gateway (unchanged); subdev + the `marek`
-    account -> the marek developer gateway; subdev (its own account david1, or the
+    account -> the marek developer gateway; subdev + the `dominika` account ->
+    the dominika observer gateway (#867); subdev (its own account david1, or the
     default) -> the david developer gateway. subdev is a MULTI-developer box (#612
-    marek scope-add) — david and marek each run their OWN gateway as their OWN
+    marek scope-add, #867 dominika) — david, marek and dominika each run their OWN
+    gateway as their OWN
     account, so the install-as-account selects which one this run provisions. Each
     provisioner is ALSO prerequisite-gated on its own account (a safe no-op
     otherwise), so a non-matching account never touches systemd. Any other box ->
@@ -1666,6 +1678,9 @@ def maybe_setup_webterm():
     if prof == profiles.MAREK:
         import cli_webterm_marek
         return cli_webterm_marek.setup_webterm_marek_service()
+    if prof == profiles.DOMINIKA:
+        import cli_webterm_dominika
+        return cli_webterm_dominika.setup_webterm_dominika_service()
     return False
 
 
