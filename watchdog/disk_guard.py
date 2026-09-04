@@ -629,6 +629,18 @@ def _runner_version_tuple(ver):
         return None
 
 
+def _runner_version_tuple_ge(vt, ct):
+    """`vt >= ct` with BOTH tuples zero-padded to equal length first -- `bin.2.337`
+    (segment count 2) vs a current `2.337.0` (segment count 3) must compare EQUAL,
+    never as an ordering artifact of differing segment counts (#862 fix 4).
+    Plain Python tuple comparison treats a shorter tuple as LESS than a longer one
+    that shares its leading segments even when the missing segments are all `0`
+    (`(2, 337) < (2, 337, 0)`), which would wrongly let a same-version staged dir
+    fall through as a delete candidate instead of a KEEP."""
+    n = max(len(vt), len(ct))
+    return (vt + (0,) * (n - len(vt))) >= (ct + (0,) * (n - len(ct)))
+
+
 def _runner_version_from_scoped_exe(exe, prefixes):
     """The runner `<ver>` from the FIRST path segment BELOW the root — anchored to
     a `prefixes` boundary so a version-shaped segment ELSEWHERE in the path (e.g. a
@@ -724,7 +736,15 @@ def _default_update_sh_argv():
 def _runner_update_in_flight(rd, prefixes, update_argv):
     """True while a gh-runner self-update is mid-flight for THIS root: the
     `<root>/_work/_update` staging dir exists, or a live `update.sh` process is
-    scoped under this root. Fail-safe True on any uncertainty (🔴1)."""
+    scoped under this root. Fail-safe True on any uncertainty (🔴 1).
+
+    `prefixes` are the caller's ROOT boundaries (realpath + raw root, each with
+    a TRAILING slash, mirroring `_plan_superseded_for_root`'s own `_under_root`
+    scoping) -- matched AS-IS, never with the trailing slash stripped. Stripping
+    it turned the match into an unanchored substring test, so a live
+    `update.sh` under `actions-runner-2` also matched the shorter
+    `actions-runner` root; keeping the trailing slash anchors the match to only
+    that root and its own children (#862 fix 1)."""
     try:
         if (rd / "_work" / "_update").exists():
             return True
@@ -733,9 +753,8 @@ def _runner_update_in_flight(rd, prefixes, update_argv):
         return True
     if PROC_ERROR_SENTINEL in (update_argv or []):
         return True
-    roots = tuple(p.rstrip("/") for p in (prefixes or ()))
     for line in (update_argv or []):
-        if any(r and r in (line or "") for r in roots):
+        if any(p and p in (line or "") for p in (prefixes or ())):
             return True
     return False
 
@@ -787,7 +806,7 @@ def _runner_superseded_safe_to_delete(path):
     ct = _runner_version_tuple(cur) if cur else None
     if ct is None:
         return False
-    if vt >= ct:                             # now the current target, or staged newer
+    if _runner_version_tuple_ge(vt, ct):     # now the current target, or staged newer
         return False
     return True
 
@@ -809,9 +828,19 @@ def _plan_superseded_for_root(rd, exes, dir_stats_fn=None, update_argv=None):
     def _under_root(exe, basename):
         return any(exe.startswith(p) for p in prefixes) and os.path.basename(exe) == basename
 
+    # Memoized single-slot cache: `_sum_superseded_candidate_bytes` walks every
+    # `bin.<ver>`/`externals.<ver>` dir with `du` (#862 fix 3) -- at CRITICAL
+    # pressure the drain ladder can re-plan this root every 60s poll while a
+    # self-update/live-Worker skip persists, so compute the candidate bytes
+    # ONCE per discovery call and reuse them for the skip row instead of
+    # re-walking the same directories on every `_skip_root` invocation.
+    _candidate_bytes_cache = []
+
     def _skip_root(reason):
+        if not _candidate_bytes_cache:
+            _candidate_bytes_cache.append(_sum_superseded_candidate_bytes(rd, dir_stats_fn))
         return [{"cls": "runner-superseded", "path": root_str,
-                 "bytes": _sum_superseded_candidate_bytes(rd, dir_stats_fn),
+                 "bytes": _candidate_bytes_cache[0],
                  "kind": "skip", "reason": reason}]
 
     # (1) a live Runner.Worker of this root (or a failed proc scan) → skip whole root
@@ -875,7 +904,7 @@ def _plan_superseded_for_root(rd, exes, dir_stats_fn=None, update_argv=None):
             elif ver in keep:
                 out.append({"cls": "runner-superseded", "path": str(entry), "bytes": size,
                             "kind": "skip", "reason": "current/live version %s — kept" % ver})
-            elif vt >= cur_tuple:
+            elif _runner_version_tuple_ge(vt, cur_tuple):
                 out.append({"cls": "runner-superseded", "path": str(entry), "bytes": size,
                             "kind": "skip",
                             "reason": "staged version %s >= current — self-update pending, kept" % ver})
