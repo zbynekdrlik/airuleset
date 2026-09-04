@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -48,7 +49,7 @@ def _gen_ed25519(path: Path) -> None:
 
 class TestRegistry(unittest.TestCase):
     def test_registry_non_empty(self):
-        self.assertTrue(len(p.PRIVILEGES) >= 5)
+        self.assertTrue(len(p.PRIVILEGES) >= 17)
 
     def test_every_entry_has_citations(self):
         for e in p.PRIVILEGES:
@@ -57,9 +58,27 @@ class TestRegistry(unittest.TestCase):
 
     def test_kinds_are_known(self):
         known = {p.KIND_SSH_KEY, p.KIND_API_TOKEN, p.KIND_OAUTH,
-                 p.KIND_HOP, p.KIND_SUDO}
+                 p.KIND_HOP, p.KIND_SUDO, p.KIND_PASSWORD, p.KIND_STORE}
         for e in p.PRIVILEGES:
             self.assertIn(e.kind, known, "entry %r has unknown kind" % e.name)
+
+    def test_new_entries_exist(self):
+        names = {e.name for e in p.PRIVILEGES}
+        for expected in ("vault_store", "fleet_shared_password",
+                         "sudo_nopasswd", "gh_cli_token", "gh_app_token",
+                         "soniox_source", "soniox_fanout",
+                         "hetzner_airuleset", "tailscale_api_key",
+                         "cloudflared_tunnel_creds", "cloudflared_config"):
+            self.assertIn(expected, names,
+                          "missing registry entry: %s" % expected)
+
+    def test_vault_store_is_directory_kind(self):
+        by = {e.name: e for e in p.PRIVILEGES}
+        self.assertEqual(by["vault_store"].kind, p.KIND_STORE)
+
+    def test_fleet_shared_password_kind(self):
+        by = {e.name: e for e in p.PRIVILEGES}
+        self.assertEqual(by["fleet_shared_password"].kind, p.KIND_PASSWORD)
 
     def test_facade_reexport(self):
         # airuleset.py re-exports the leaf so SUBCOMMANDS + tests resolve it.
@@ -260,6 +279,159 @@ class TestJsonSchema(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             p.cmd_privileges(args)
         self.assertIn(cm.exception.code, (0, 1))
+
+
+class TestSymlinkDetection(unittest.TestCase):
+    """Symlinks in credential dirs must be reported as findings (#870 review)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_symlink_in_secrets_is_finding(self):
+        target = self.home / ".secrets" / "real-token"
+        _mk(target, "TOKEN123", 0o600)
+        link = self.home / ".secrets" / "symlinked-token"
+        link.symlink_to(target)
+        rep = p.build_report(home=self.home)
+        # The symlink must be flagged — either as undeclared or with a symlink
+        # annotation. At minimum it must not silently pass as a regular file.
+        all_items = rep["undeclared"]
+        paths = [u["path"] for u in all_items]
+        # Both the real file and the symlink are undeclared foreign creds.
+        self.assertIn("~/.secrets/real-token", paths)
+        self.assertIn("~/.secrets/symlinked-token", paths)
+
+
+class TestOSErrorHandling(unittest.TestCase):
+    """Unreadable dirs must not crash the probe (#870 review)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_unreadable_secrets_dir_does_not_crash(self):
+        os.chmod(self.home / ".secrets", 0o000)
+        self.addCleanup(os.chmod, self.home / ".secrets", 0o700)
+        # Must not raise — should report an error finding or silently skip.
+        rep = p.build_report(home=self.home)
+        self.assertIn("exit_code", rep)
+
+
+class TestMemoryCredScan(unittest.TestCase):
+    """Read-only scan of project memory for well-known token patterns (#870)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+
+    def test_scan_finds_planted_tskey(self):
+        mem_dir = self.home / ".claude" / "projects" / "wireguard" / "memory"
+        mem_dir.mkdir(parents=True)
+        _mk(mem_dir / "ref.md",
+            "The key is tskey-api-FAKE1234567890abcdef\n", 0o600)
+        findings = p.scan_memory_credentials(self.home)
+        self.assertTrue(len(findings) > 0, "should find the planted tskey")
+        paths = [f["path"] for f in findings]
+        self.assertTrue(any("ref.md" in pa for pa in paths))
+
+    def test_scan_never_emits_value(self):
+        mem_dir = self.home / ".claude" / "projects" / "test" / "memory"
+        mem_dir.mkdir(parents=True)
+        secret = "tskey-api-TOTALLYSECRET9876543210"
+        _mk(mem_dir / "tok.md", "key = %s\n" % secret, 0o600)
+        findings = p.scan_memory_credentials(self.home)
+        blob = json.dumps(findings)
+        self.assertNotIn(secret, blob)
+        # but the pattern name must be reported
+        self.assertTrue(any("tskey-api" in f.get("pattern", "") for f in findings))
+
+    def test_scan_empty_home_returns_empty(self):
+        findings = p.scan_memory_credentials(self.home)
+        self.assertEqual(findings, [])
+
+
+class TestCmdHermetic(unittest.TestCase):
+    """cmd_privileges must not probe the REAL home (#870 review item 8)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_cmd_privileges_uses_injected_home(self):
+        args = _FakeArgs(json=True)
+        with mock.patch.object(p, "build_report",
+                               wraps=p.build_report) as mock_br:
+            with mock.patch("pathlib.Path.home", return_value=self.home):
+                with self.assertRaises(SystemExit):
+                    p.cmd_privileges(args)
+            # build_report was called — verify it used our home (no home=
+            # override means it reads Path.home() which we patched).
+            mock_br.assert_called_once()
+
+
+class TestPEMKeyDetection(unittest.TestCase):
+    """PEM-format private keys must be detected (#870 review)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_pem_file_in_ssh_is_detected(self):
+        pem = self.home / ".ssh" / "legacy.pem"
+        _mk(pem, "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n", 0o600)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertIn("~/.ssh/legacy.pem", paths)
+
+
+class TestSubdirRecursion(unittest.TestCase):
+    """Subdirs of ~/.secrets must be scanned (#870 review)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets" / "subdir").mkdir(parents=True)
+        (self.home / ".ssh").mkdir()
+
+    def test_file_in_subdir_is_found(self):
+        _mk(self.home / ".secrets" / "subdir" / "nested-token", "secret", 0o600)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertIn("~/.secrets/subdir/nested-token", paths)
+
+
+class TestVaultDirScan(unittest.TestCase):
+    """The vault store dir ~/.claude/secrets/ must be scanned (#870 review)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+        (self.home / ".claude" / "secrets").mkdir(parents=True)
+
+    def test_vault_file_is_found(self):
+        _mk(self.home / ".claude" / "secrets" / "mystery-vault-entry",
+            "vaulted", 0o600)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertIn("~/.claude/secrets/mystery-vault-entry", paths)
 
 
 if __name__ == "__main__":
