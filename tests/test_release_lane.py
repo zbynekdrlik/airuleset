@@ -285,6 +285,74 @@ class TestReleaseIdleSegment(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# oldest_ahead_ts + deploy_age threshold wiring (#846 continuation)
+# ---------------------------------------------------------------------------
+
+
+class TestOldestAheadThreshold(unittest.TestCase):
+    """#846: oldest_ahead_ts >= 2h AND (deploy_age >= 3h OR unmeasurable)."""
+
+    def _rstate(self, ahead=10, in_flight=False):
+        return {"ahead": ahead, "in_flight": in_flight, "train": True}
+
+    def test_oldest_1h59_waits(self):
+        """oldest commit ahead is 1h59m old → gap is fresh → wait."""
+        now = 10000
+        oldest_ts = now - (2 * 3600 - 1)  # 1h59m59s
+        action, _, reason = _release_decision(
+            {"first_seen": 0}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=oldest_ts, deploy_age=4 * 3600)
+        self.assertEqual(action, "wait")
+        self.assertIn("fresh", reason)
+
+    def test_oldest_2h00_plus_deploy_3h_nudges(self):
+        """oldest commit ahead is exactly 2h AND deploy age >= 3h → nudge."""
+        now = 10000
+        oldest_ts = now - 2 * 3600  # exactly 2h
+        action, _, reason = _release_decision(
+            {"first_seen": 0}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=oldest_ts, deploy_age=3 * 3600)
+        self.assertEqual(action, "nudge")
+
+    def test_deploy_age_none_ignores_deploy_threshold(self):
+        """deploy_age=None → the 3h conjunct is ignored → gap-only path."""
+        now = 10000
+        oldest_ts = now - 3 * 3600  # 3h old
+        action, _, reason = _release_decision(
+            {"first_seen": 0}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=oldest_ts, deploy_age=None)
+        self.assertEqual(action, "nudge")
+
+    def test_deploy_recent_waits(self):
+        """deploy_age < 3h (measurable) → wait."""
+        now = 10000
+        oldest_ts = now - 3 * 3600  # 3h old
+        action, _, reason = _release_decision(
+            {"first_seen": 0}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=oldest_ts,
+            deploy_age=3 * 3600 - 1)  # 2h59m59s
+        self.assertEqual(action, "wait")
+        self.assertIn("deploy-recent", reason)
+
+    def test_oldest_none_ignores_2h_threshold(self):
+        """oldest_ahead_ts=None → the 2h conjunct is ignored (today's
+        gap-only behaviour preserved)."""
+        now = 10000
+        action, _, reason = _release_decision(
+            {"first_seen": 0}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=None, deploy_age=4 * 3600)
+        self.assertEqual(action, "nudge")
+
+    def test_both_none_legacy_behaviour(self):
+        """Both None → pure gap-only (identical to legacy 5-arg)."""
+        now = 10000
+        action, _, reason = _release_decision(
+            {"first_seen": 0}, self._rstate(), now=now, cadence=3600,
+            min_ahead=1, oldest_ahead_ts=None, deploy_age=None)
+        self.assertEqual(action, "nudge")
+
+
+# ---------------------------------------------------------------------------
 # Legacy backward compat — _release_decision without lane
 # ---------------------------------------------------------------------------
 
