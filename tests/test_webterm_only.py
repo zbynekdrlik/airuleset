@@ -6,7 +6,6 @@ no real ssh, no real authorized_keys touched.
 import os
 import sys
 import tempfile
-import textwrap
 import unittest
 from unittest import mock
 
