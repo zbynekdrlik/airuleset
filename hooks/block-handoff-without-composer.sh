@@ -21,7 +21,12 @@ case "$CMD" in
     *) exit 0 ;;
 esac
 
-case "$CMD" in *"airuleset"*"handoff"*) exit 0 ;; esac
+# Allow the CLI composer itself — anchored on the SUBCOMMAND position
+# (airuleset.py handoff or airuleset handoff as the invoked program),
+# not a loose substring pair that body content can satisfy.
+case "$CMD" in
+    *"airuleset.py handoff"*|*"airuleset handoff"*) exit 0 ;;
+esac
 case "$CMD" in *"airuleset:handoff-ok"*) exit 0 ;; esac
 
 case "$CMD" in

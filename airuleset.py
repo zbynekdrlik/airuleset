@@ -3213,8 +3213,9 @@ def cmd_handoff(args):
         print("handoff BLOCK: cannot read self-review file: %s" % e)
         return 1
 
-    # Resolve repo root for lens list (the TARGET repo, not airuleset).
-    target_root = _repo_root() if not repo else None
+    # Resolve repo root for lens list (the TARGET repo checkout, when
+    # the cwd IS the target repo; otherwise fall back to the default).
+    target_root = _repo_root()
     lenses = _load_lens_list(target_root)
 
     # Validate table.
@@ -3225,7 +3226,7 @@ def cmd_handoff(args):
 
     # Get bounce round.
     self_login = _gh_login()
-    rnd = _bounce_round(int(issue), self_login, cwd=None)
+    rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
 
     # Round >= 2 requires extra fields.
     if rnd >= 2:
@@ -3243,7 +3244,8 @@ def cmd_handoff(args):
             return 1
         # Validate reviewed-by-tier value.
         valid_tiers = {"claude-fable-5", "claude-opus-4-6"}
-        tier_val = reviewed_by_tier.split()[0] if reviewed_by_tier else ""
+        parts = reviewed_by_tier.split() if reviewed_by_tier else []
+        tier_val = parts[0] if parts else ""
         if tier_val not in valid_tiers:
             print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
                   % ", ".join(sorted(valid_tiers)))
@@ -3281,6 +3283,10 @@ def cmd_handoff(args):
             break
     if not remote_sha:
         print("handoff BLOCK: branch '%s' not found on remote" % branch)
+        return 1
+    if remote_sha != head_sha:
+        print("handoff BLOCK: HEAD %s does not match remote branch '%s' "
+              "tip %s — push first" % (head_sha[:12], branch, remote_sha[:12]))
         return 1
 
     # Compose the comment body.

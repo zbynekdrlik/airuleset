@@ -2220,15 +2220,14 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
 # Bounce round derivation (#843) — one function feeds CLI + slice-quals
 # ---------------------------------------------------------------------------
 
-# Matches a line-start READY-FOR-REVIEW that is NOT a gatekeeper comment.
-# Reuses the same regex airuleset._READINESS_LINE_RE uses so the definition
-# of "a hand-off comment" is single-sourced; we only count own-authored
-# ones here.
+# Matches a line-start READY-FOR-REVIEW (a duplicated copy of the same
+# pattern airuleset._READINESS_LINE_RE defines — kept local to avoid a
+# circular import from this leaf module).
 _BOUNCE_RFR_RE = re.compile(
     r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
 
 
-def _bounce_round(number, self_login, cwd=None, runner=None):
+def _bounce_round(number, self_login, cwd=None, runner=None, repo=None):
     """Derive the bounce round for issue `number`.
 
     round = count(own prior comments whose body carries a line-start
@@ -2238,13 +2237,15 @@ def _bounce_round(number, self_login, cwd=None, runner=None):
     Fail-safe: gh error -> 1 (never a false Fable requirement; an over-count
     on a re-sync round escalates the review tier = SAFE direction).
 
-    `runner` injectable for tests (returns a fake ``_gh_out`` result)."""
+    `runner` injectable for tests (returns a fake ``_gh_out`` result).
+    `repo` passes ``-R owner/name`` to gh for cross-repo resolution."""
     import airuleset
 
     run = runner or airuleset._gh_out
 
     # Fetch comments + labels in one call.
-    raw = run("issue", "view", str(number), "--json",
+    r_args = ["-R", repo] if repo else []
+    raw = run("issue", "view", str(number), *r_args, "--json",
               "comments,labels", cwd=cwd, timeout=15)
     if not raw:
         return 1  # gh failed -> fail-safe round 1
