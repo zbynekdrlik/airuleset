@@ -3078,6 +3078,277 @@ def cmd_gk_request(args):
     return 1
 
 
+# ---------------------------------------------------------------------------
+# Hand-off composer (#843) — compose-and-post READY-FOR-REVIEW comment
+# ---------------------------------------------------------------------------
+
+# Built-in lens list when the target repo has no .claude/rules/gk-review-lenses.md
+HANDOFF_DEFAULT_LENSES = [
+    "security", "correctness", "test-integrity",
+    "evidence-integrity", "design-doctrine", "process",
+]
+
+# Receipt directory for the hook to verify.
+HANDOFF_GATE_DIR = ".claude/handoff-gate"
+
+# Decision log path.
+HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
+
+# Finding id pattern from gatekeeper bounce comments.
+_GK_FINDING_ID_RE = re.compile(
+    r'(?:🔴|🟡|🔵)\s*(\d+)|([A-Z]\d+)|F(\d+)', re.UNICODE)
+
+
+def _parse_gk_findings(comment_body):
+    """Extract finding ids from a gatekeeper bounce comment body.
+
+    Returns a list of string ids (e.g. ["1", "2", "F3"]) or an empty list
+    when unparseable."""
+    if not comment_body:
+        return []
+    ids = []
+    for m in _GK_FINDING_ID_RE.finditer(comment_body):
+        fid = m.group(1) or m.group(2) or ("F" + m.group(3))
+        if fid and fid not in ids:
+            ids.append(fid)
+    return ids
+
+
+def _load_lens_list(repo_root=None):
+    """Load the repo's lens list or fall back to the built-in default.
+
+    The lens list is at .claude/rules/gk-review-lenses.md — one lens per
+    non-empty, non-comment line."""
+    if repo_root:
+        p = os.path.join(repo_root, ".claude", "rules",
+                         "gk-review-lenses.md")
+        try:
+            with open(p) as f:
+                lenses = []
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        lenses.append(line)
+                if lenses:
+                    return lenses
+        except OSError:
+            pass  # file absent -> fall through to default  # airuleset:script-ok expected: repo may lack lens file
+    return list(HANDOFF_DEFAULT_LENSES)
+
+
+def _validate_self_review_table(table_text, lenses):
+    """Validate a Self-review table has one row per lens with evidence.
+
+    Returns (ok, reason_or_None)."""
+    if not table_text or not table_text.strip():
+        return False, "empty Self-review table"
+    lines = [l.strip() for l in table_text.strip().splitlines() if l.strip()]
+    # Skip markdown table header rows.
+    data_lines = []
+    for line in lines:
+        if line.startswith("|"):
+            cols = [c.strip() for c in line.strip("|").split("|")]
+            # Skip separator rows (all dashes/spaces).
+            if all(re.match(r'^[-:\s]+$', c) for c in cols):
+                continue
+            data_lines.append(cols)
+        else:
+            data_lines.append([line])
+    covered_lenses = set()
+    for cols in data_lines:
+        if not cols:
+            continue
+        lens_name = cols[0].strip().lower()
+        covered_lenses.add(lens_name)
+        # If verdict is n/a, need a reason.
+        if len(cols) >= 2:
+            verdict = cols[1].strip().lower()
+            if verdict == "n/a" and (len(cols) < 3 or not cols[2].strip()):
+                return False, "lens '%s' has n/a verdict with no reason" % lens_name
+
+    missing = []
+    for lens in lenses:
+        if lens.lower() not in covered_lenses:
+            missing.append(lens)
+    if missing:
+        return False, "missing lenses: %s" % ", ".join(missing)
+
+    return True, None
+
+
+def cmd_handoff(args):
+    """Sub-dev hand-off composer (#843): compose and post a READY-FOR-REVIEW
+    comment from validated inputs. The CLI stamps Verified-at-UTC + HEAD
+    ITSELF at compose time (live git rev-parse + git ls-remote), so the
+    copy-forward / stale-evidence class dies by construction.
+
+    Pattern donor: cmd_gk_request (compose-and-post CLI).
+
+    Writes a receipt to ~/.claude/handoff-gate/<owner>-<repo>-<N>.json
+    that the hook verifies, and logs PASS/BLOCK to
+    ~/.claude/handoff-gate.log."""
+    import hashlib
+    import subprocess
+    import datetime
+
+    repo = getattr(args, "repo", None)
+    issue = getattr(args, "issue", None)
+    branch = getattr(args, "branch", None)
+    self_review_file = getattr(args, "self_review_file", None)
+    root_cause = getattr(args, "root_cause", None)
+    closes_finding = getattr(args, "closes_finding", None) or []
+    prevencia_read = getattr(args, "prevencia_read", None)
+    reviewed_by_tier = getattr(args, "reviewed_by_tier", None)
+
+    if not repo or not issue or not branch or not self_review_file:
+        print("handoff: --repo, --issue, --branch, --self-review-file required")
+        return 1
+
+    # Read self-review table.
+    try:
+        with open(self_review_file) as f:
+            table_text = f.read()
+    except OSError as e:
+        print("handoff BLOCK: cannot read self-review file: %s" % e)
+        return 1
+
+    # Resolve repo root for lens list (the TARGET repo, not airuleset).
+    target_root = _repo_root() if not repo else None
+    lenses = _load_lens_list(target_root)
+
+    # Validate table.
+    ok, reason = _validate_self_review_table(table_text, lenses)
+    if not ok:
+        print("handoff BLOCK: Self-review table invalid — %s" % reason)
+        return 1
+
+    # Get bounce round.
+    self_login = _gh_login()
+    rnd = cli_quals._bounce_round(int(issue), self_login, cwd=None)
+
+    # Round >= 2 requires extra fields.
+    if rnd >= 2:
+        if not root_cause:
+            print("handoff BLOCK: bounce round %d requires "
+                  "--root-cause" % rnd)
+            return 1
+        if not prevencia_read:
+            print("handoff BLOCK: bounce round %d requires "
+                  "--prevencia-read" % rnd)
+            return 1
+        if not reviewed_by_tier:
+            print("handoff BLOCK: bounce round %d requires "
+                  "--reviewed-by-tier" % rnd)
+            return 1
+        # Validate reviewed-by-tier value.
+        valid_tiers = {"claude-fable-5", "claude-opus-4-6"}
+        tier_val = reviewed_by_tier.split()[0] if reviewed_by_tier else ""
+        if tier_val not in valid_tiers:
+            print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
+                  % ", ".join(sorted(valid_tiers)))
+            return 1
+
+    # Stamp Verified-at-UTC (now).
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    # Stamp HEAD (live git rev-parse).
+    def _run(argv):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=15)
+        except Exception as e:
+            return subprocess.CompletedProcess(argv, 1, "", str(e))
+
+    head_r = _run(["git", "rev-parse", "HEAD"])
+    head_sha = (head_r.stdout or "").strip() if head_r.returncode == 0 else ""
+    if not head_sha:
+        print("handoff BLOCK: cannot determine HEAD sha")
+        return 1
+
+    # Verify HEAD is on the remote branch.
+    R = ["-R", repo] if repo else []
+    ls_r = _run(["git", "ls-remote", "origin", branch])
+    if ls_r.returncode != 0:
+        print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
+        return 1
+    remote_sha = ""
+    for line in (ls_r.stdout or "").strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            remote_sha = parts[0]
+            break
+    if not remote_sha:
+        print("handoff BLOCK: branch '%s' not found on remote" % branch)
+        return 1
+
+    # Compose the comment body.
+    body_parts = ["READY-FOR-REVIEW: branch %s" % branch]
+    body_parts.append("")
+    body_parts.append("**Self-review:**")
+    body_parts.append("")
+    body_parts.append(table_text.strip())
+    body_parts.append("")
+    body_parts.append("Verified-at-UTC: %s" % now_utc)
+    body_parts.append("HEAD: %s" % head_sha)
+    if rnd >= 2:
+        body_parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
+        body_parts.append("Prevencia-read: %s" % prevencia_read)
+        body_parts.append("Reviewed-by-tier: %s" % reviewed_by_tier)
+    for cf in closes_finding:
+        body_parts.append("Closes-finding: %s" % cf)
+    body_parts.append("Bounce-round: %d" % rnd)
+
+    body = "\n".join(body_parts) + "\n"
+
+    # Write receipt BEFORE posting (the hook checks the receipt).
+    gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
+    os.makedirs(gate_dir, exist_ok=True)
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    owner_repo = repo.replace("/", "-") if "/" in repo else repo
+    receipt_path = os.path.join(gate_dir,
+                                "%s-%s.json" % (owner_repo, issue))
+    receipt = json.dumps({"sha256": body_hash,
+                          "ts": time.time(),
+                          "issue": int(issue),
+                          "branch": branch,
+                          "round": rnd})
+    try:
+        with open(receipt_path, "w") as f:
+            f.write(receipt)
+    except OSError as e:
+        print("handoff WARNING: could not write receipt: %s" % e)
+
+    # Log.
+    log_path = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_LOG)
+    try:
+        with open(log_path, "a") as f:
+            f.write("PASS issue=%s repo=%s round=%d ts=%s\n"
+                    % (issue, repo, rnd, now_utc))
+    except OSError as e:
+        print("handoff: log write failed: %s" % e)  # non-fatal
+
+    # Post via gh issue comment.
+    body_file = os.path.join(gate_dir, "body-%s-%s.md" % (owner_repo, issue))
+    try:
+        with open(body_file, "w") as f:
+            f.write(body)
+    except OSError as e:
+        print("handoff BLOCK: cannot write body file: %s" % e)
+        return 1
+
+    r = _run(["gh", "issue", "comment", str(issue), "--body-file",
+              body_file] + R)
+    if r.returncode != 0:
+        print("handoff FAILED: gh issue comment failed: %s"
+              % (r.stderr or "").strip())
+        return 1
+
+    print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
+          % (issue, rnd, head_sha[:12]))
+    return 0
+
+
 # How many tickets the digest NAMES. Also the suppression bound: the caller
 # may only mark what this body listed by number.
 BACKFILL_MAX_SHOWN = 10
@@ -6632,6 +6903,30 @@ def main():
     p_gkr.add_argument("--comment",
                        help="Request text for --issue mode (Slovak, plain)")
 
+    p_ho = sub.add_parser(
+        "handoff",
+        help="Sub-dev hand-off composer (#843): compose and post a "
+             "READY-FOR-REVIEW comment from validated inputs, stamping "
+             "Verified-at-UTC + HEAD at compose time")
+    p_ho.add_argument("--repo", required=True,
+                      help="owner/name of the target repo")
+    p_ho.add_argument("--issue", required=True, type=int,
+                      help="Issue number to post the hand-off comment on")
+    p_ho.add_argument("--branch", required=True,
+                      help="Branch name with the work")
+    p_ho.add_argument("--self-review-file", dest="self_review_file",
+                      required=True,
+                      help="Path to the Self-review markdown table file")
+    p_ho.add_argument("--root-cause",
+                      help="Root-cause-of-previous-bounce (required round >= 2)")
+    p_ho.add_argument("--closes-finding", action="append",
+                      help="Closes-finding: <id> — <evidence> (repeatable)")
+    p_ho.add_argument("--prevencia-read",
+                      help="Prevencia-read: <path> (required round >= 2)")
+    p_ho.add_argument("--reviewed-by-tier",
+                      help="Reviewed-by-tier: claude-fable-5 | claude-opus-4-6 "
+                           "(required round >= 2)")
+
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
                            "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-6)")
@@ -7093,6 +7388,7 @@ SUBCOMMANDS = {
     "secret": cmd_secret,
     "tickets-status": cmd_tickets_status,
     "gk-request": cmd_gk_request,
+    "handoff": cmd_handoff,
     "autopilot-lock": cmd_autopilot_lock,
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,

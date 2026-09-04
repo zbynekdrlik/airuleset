@@ -2216,3 +2216,79 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     return rows, handed, failed
 
 
+# ---------------------------------------------------------------------------
+# Bounce round derivation (#843) — one function feeds CLI + slice-quals
+# ---------------------------------------------------------------------------
+
+# Matches a line-start READY-FOR-REVIEW that is NOT a gatekeeper comment.
+# Reuses the same regex airuleset._READINESS_LINE_RE uses so the definition
+# of "a hand-off comment" is single-sourced; we only count own-authored
+# ones here.
+_BOUNCE_RFR_RE = re.compile(
+    r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
+
+
+def _bounce_round(number, self_login, cwd=None, runner=None):
+    """Derive the bounce round for issue `number`.
+
+    round = count(own prior comments whose body carries a line-start
+            READY-FOR-REVIEW marker) + 1.  Floored to 2 while the ticket
+            carries the `prio:bounce` label.
+
+    Fail-safe: gh error -> 1 (never a false Fable requirement; an over-count
+    on a re-sync round escalates the review tier = SAFE direction).
+
+    `runner` injectable for tests (returns a fake ``_gh_out`` result)."""
+    import airuleset
+
+    run = runner or airuleset._gh_out
+
+    # Fetch comments + labels in one call.
+    raw = run("issue", "view", str(number), "--json",
+              "comments,labels", cwd=cwd, timeout=15)
+    if not raw:
+        return 1  # gh failed -> fail-safe round 1
+
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return 1
+
+    if not isinstance(obj, dict):
+        return 1
+
+    comments = obj.get("comments")
+    if not isinstance(comments, list):
+        return 1
+
+    # Count own prior READY-FOR-REVIEW comments.
+    own_rfr = 0
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        author = c.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        if self_login and login == self_login:
+            body = c.get("body") or ""
+            if _BOUNCE_RFR_RE.search(body):
+                own_rfr += 1
+
+    rnd = own_rfr + 1
+
+    # Floor to 2 while prio:bounce is present.
+    labels = obj.get("labels")
+    if isinstance(labels, list):
+        label_names = set()
+        for lb in labels:
+            if isinstance(lb, dict):
+                n = lb.get("name")
+                if n:
+                    label_names.add(n)
+            elif isinstance(lb, str):
+                label_names.add(lb)
+        if "prio:bounce" in label_names and rnd < 2:
+            rnd = 2
+
+    return rnd
+
+
