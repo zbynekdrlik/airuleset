@@ -295,11 +295,19 @@ class TestMemoryCredScan(unittest.TestCase):
         findings = p.scan_memory_credentials(self.home)
         self.assertEqual(findings, [])
 
+    def test_sk_prefix_no_false_positive_on_prose(self):
+        mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "prose.md").write_text(
+            "task-runner ask-before disk-guard\n")
+        findings = p.scan_memory_credentials(self.home)
+        self.assertEqual(findings, [])
+
     def test_memory_scan_multiple_patterns(self):
         mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
         mem_dir.mkdir(parents=True)
         (mem_dir / "multi.md").write_text(
-            "ghp_abcdef123456 and cfat_xyzxyz\n")
+            "ghp_abcdef1234567890abcdef12 and cfat_xyzxyzxyzxyzxyzxyzxyz12\n")
         findings = p.scan_memory_credentials(self.home)
         patterns_found = {f["pattern"] for f in findings}
         self.assertIn("github-pat", patterns_found)
@@ -308,7 +316,7 @@ class TestMemoryCredScan(unittest.TestCase):
     def test_build_report_includes_memory(self):
         mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
         mem_dir.mkdir(parents=True)
-        (mem_dir / "leak.md").write_text("tskey-api-LEAKED123\n")
+        (mem_dir / "leak.md").write_text("tskey-api-LEAKED12345\n")
         rep = p.build_report(home=self.home)
         self.assertIn("memory_credentials", rep)
         self.assertTrue(len(rep["memory_credentials"]) >= 1)

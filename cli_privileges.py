@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -264,23 +265,26 @@ PRIVILEGES: List[Privilege] = [
     ),
     Privilege(
         name="cloudflared_tunnel_creds",
-        kind=KIND_API_TOKEN,
+        kind=KIND_STORE,
         local_path="~/.cloudflared",
-        reach="cloudflared tunnel credentials JSON files (per-tunnel auth) — "
-              "the sole on-box secret for each managed Cloudflare tunnel",
+        reach="cloudflared dir — per-tunnel credentials JSON files (the sole "
+              "on-box secret for each managed tunnel) + cert.pem if present",
         rotation="new tunnel creds on the new box; old creds deleted",
         must_move=True,
-        used_by=("cli_webterm_tunnel.py:35 (tunnel creds path)",),
+        used_by=("cli_webterm_tunnel.py:34 (WEBTERM_CLOUDFLARED_DIR)",),
     ),
     Privilege(
         name="cloudflared_config",
         kind=KIND_API_TOKEN,
-        local_path="~/.cloudflared/config.yml",
-        reach="cloudflared default config (may reference tunnel UUID + ingress "
-              "rules for webterm/drop-gateway tunnels)",
-        rotation="re-render on the new box from cli_webterm_tunnel",
+        local_path="~/.cloudflared/webterm-owner.yml",
+        reach="airuleset's DEDICATED webterm tunnel config (never the default "
+              "config.yml — that belongs to spinbike on dev1, see "
+              "cli_webterm_tunnel.py:36)",
+        rotation="re-render on the new box from cli_webterm_tunnel + "
+                 "cli_drop_gateway",
         must_move=True,
-        used_by=("cli_drop_gateway.py:66 (config path)",),
+        used_by=("cli_webterm_tunnel.py:38 (WEBTERM_OWNER_TUNNEL_CONFIG)",
+                 "cli_drop_gateway.py:497 (drop-gateway ingress config)"),
     ),
     Privilege(
         name="sudo_nopasswd",
@@ -291,7 +295,7 @@ PRIVILEGES: List[Privilege] = [
         rotation="the new airuleset box is sudo-LESS; sudo stays on dev1 for "
                  "the local newlevel account only",
         must_move=False,
-        used_by=("airuleset.py:1053 (provision_owner_sudo)",),
+        used_by=("airuleset.py:1157 (provision_owner_sudo)",),
     ),
     Privilege(
         name="gh_cli_token",
@@ -302,7 +306,7 @@ PRIVILEGES: List[Privilege] = [
         rotation="re-auth `gh` on the new box with a fine-grained PAT; "
                  "revoke the old PAT",
         must_move=True,
-        used_by=("airuleset.py:5676 (~/.config/gh/hosts.yml)",),
+        used_by=("airuleset.py:5788 (~/.config/gh/hosts.yml)",),
     ),
     Privilege(
         name="gh_app_token",
@@ -311,7 +315,7 @@ PRIVILEGES: List[Privilege] = [
         reach="GitHub App token (alternative auth path for gh CLI)",
         rotation="re-provision on the new box; revoke the old token",
         must_move=True,
-        used_by=("airuleset.py:2317 (gh-app-tokens/primary)",),
+        used_by=("airuleset.py:2372 (gh-app-tokens/primary)",),
     ),
     Privilege(
         name="soniox_source",
@@ -321,7 +325,7 @@ PRIVILEGES: List[Privilege] = [
               "reads and fans out to fleet targets)",
         rotation="new Soniox key on the new box; fan out via push",
         must_move=True,
-        used_by=("cli_remote.py:99 (SONIOX_ENV_SOURCE)",),
+        used_by=("cli_remote.py:99 (SONIOX_KEY_SOURCE)",),
         value_key="SONIOX_API_KEY",
     ),
     Privilege(
@@ -332,7 +336,7 @@ PRIVILEGES: List[Privilege] = [
               "box, consumed by meeting-analysis)",
         rotation="re-delivered by push from the source; no separate rotation",
         must_move=True,
-        used_by=("cli_remote.py:163 (SONIOX_ENV_DEST fan-out)",),
+        used_by=("cli_remote.py:163 (soniox.env fan-out delivery)",),
         value_key="SONIOX_API_KEY",
     ),
     Privilege(
@@ -421,15 +425,18 @@ def _ssh_fingerprint(path: Path) -> Optional[str]:
 
 
 def _looks_like_pem_key(path: Path) -> bool:
-    """True iff the file starts with a PEM private-key header (RSA/EC/OPENSSH)
-    or has a .pem extension — covers legacy keys ssh-keygen may reject."""
+    """True iff the file starts with a PEM private-key header (RSA, EC, PKCS#8,
+    OPENSSH) or has a .pem extension — covers legacy keys ssh-keygen may reject."""
     if path.suffix == ".pem":
         return True
     try:
-        head = path.read_bytes()[:64]
+        head = path.read_bytes()[:80]
     except OSError:
         return False
-    return b"BEGIN RSA PRIVATE KEY" in head or b"BEGIN OPENSSH PRIVATE KEY" in head
+    return (b"BEGIN RSA PRIVATE KEY" in head
+            or b"BEGIN OPENSSH PRIVATE KEY" in head
+            or b"BEGIN EC PRIVATE KEY" in head
+            or b"BEGIN PRIVATE KEY" in head)
 
 
 def _looks_like_ssh_key(path: Path) -> bool:
@@ -671,17 +678,19 @@ def scan_undeclared(home: Path, declared_paths: set) -> List[dict]:
     return findings
 
 
-# well-known token PREFIXES to scan for in project memory files — narrow,
+# well-known token REGEX patterns to scan for in project memory files — narrow,
 # high-confidence patterns only; NEVER emit the matched value (#870 review).
+# Each pattern uses a left-boundary (?<![A-Za-z0-9]) + minimum tail length to
+# avoid false-positives on ordinary prose (e.g. "sk-" matching "task-", "ask-").
 _MEMORY_TOKEN_PATTERNS = [
-    ("tskey-api-", "tailscale-api-key"),
-    ("tskey-", "tailscale-key"),
-    ("ghp_", "github-pat"),
-    ("gho_", "github-oauth"),
-    ("github_pat_", "github-fine-grained-pat"),
-    ("xoxb-", "slack-bot-token"),
-    ("sk-", "openai-api-key"),
-    ("cfat_", "cloudflare-account-token"),
+    (re.compile(r"(?<![A-Za-z0-9])tskey-api-[A-Za-z0-9]{10,}"), "tailscale-api-key"),
+    (re.compile(r"(?<![A-Za-z0-9])tskey-[A-Za-z0-9]{10,}"), "tailscale-key"),
+    (re.compile(r"(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{20,}"), "github-pat"),
+    (re.compile(r"(?<![A-Za-z0-9])gho_[A-Za-z0-9]{20,}"), "github-oauth"),
+    (re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9]{20,}"), "github-fine-grained-pat"),
+    (re.compile(r"(?<![A-Za-z0-9])xoxb-[0-9A-Za-z-]{20,}"), "slack-bot-token"),
+    (re.compile(r"(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_-]{20,}"), "openai-api-key"),
+    (re.compile(r"(?<![A-Za-z0-9])cfat_[A-Za-z0-9_-]{20,}"), "cloudflare-account-token"),
 ]
 
 
@@ -709,8 +718,8 @@ def scan_memory_credentials(home: Optional[Path] = None) -> List[dict]:
                             encoding="utf-8", errors="replace")
                     except OSError:
                         continue  # airuleset:script-ok unreadable memory file — skip, never crash
-                    for prefix, pattern_name in _MEMORY_TOKEN_PATTERNS:
-                        if prefix in text:
+                    for pat_re, pattern_name in _MEMORY_TOKEN_PATTERNS:
+                        if pat_re.search(text):
                             rel = "~/.claude/projects/%s/memory/%s" % (
                                 proj_dir.name, md_file.name)
                             findings.append({
