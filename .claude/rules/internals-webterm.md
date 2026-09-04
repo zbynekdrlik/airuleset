@@ -267,6 +267,76 @@ Reusable shape for growing ANY lane's session set (the next "add X to <human>'s 
   (StepanDK's own isolated personal account — a third person's account on someone's dashboard
   is the original #661 sin). Box-keyed alias `fs` (like spinbike `sb`) at `cli_aliases`.
 
+### #867 webterm — adding a WHOLE NEW human lane (dominika), not just extending an existing one
+
+The #661 section above grows an EXISTING lane's session set; #867 is the sibling recipe for a
+BRAND-NEW per-human lane (owner + david + marek → + dominika). It is a config-only add over the
+`cli_webterm_lane.LaneSpec` engine (#665) — no new engine, no copied render/setup body. The exact
+touch set (each a near-verbatim mirror of the marek lane), in one commit:
+
+- **`cli_webterm_<name>.py`** — a THIN module: per-user constants + `_spec()` + wrappers. Pick a
+  fresh port pair (owner 7682/8080, david 7683/8081, marek 7684/8082 → next 7685/8083), fresh
+  socket basenames / `~/.claude/webterm-<name>-*` paths / `webterm-<name>-{ttyd,gateway,tunnel}.service`
+  units / a DEDICATED `~/.cloudflared/webterm-<name>.yml`, the supervisor-created tunnel UUID, the
+  hostname, and a `_<NAME>_GO_LIVE` checklist. `render_lane_unit_note(...)` supplies the honesty-bar.
+- **`cli_webterm_profiles.py`** — `PROFILE = "<name>"` constant, `<NAME>_GATEWAY_USER`,
+  `WEBTERM_<NAME>_IDENTITY = "~/.secrets/webterm_<name>_ed25519"` (NEVER the fleet gatekeeper key),
+  a `<name>_inventory()` leaf (zero airuleset import), a `profile_for_host` account branch, and a
+  `profile_inventory` branch. `allowed_ids`/`u_tenant_entries` need NO edit — they route through
+  `profile_inventory`.
+- **`cli_webterm.py`** — a `webterm_inventory` branch, a `maybe_setup_webterm` dispatch branch, and a
+  `WEBTERM_DASHBOARD_TABS["<name>"]` list (its ids ARE the lane inventory ids; consumed via
+  `LaneSpec.dashboard_human="<name>"`).
+- **`cli_webterm_access.py`** — a `WEBTERM_ACCESS_APPS["<name>"]` entry (hostname + owner-provided
+  `allowed_emails` — deny-by-default, a wrong address only LOCKS OUT).
+- **`cli_fleet.py`** — a `REMOTE_HOSTS` `<name>@subdev` entry (marek shape: same VPS + operator
+  `gatekeeper_access` key, so `push` reaches the account) AND a classification row (see below).
+
+Non-obvious decisions #867 settled, reusable for the next lane:
+
+- **`identity_key=None` for an ssh-only OBSERVER lane too.** dominika has NO local attach (both tabs
+  are ssh), so marek's "keyless local core tab" reason does not apply — but `None` STILL wins:
+  gating the whole lane on the dedicated key (as david's `_spec()` does — a day-1 legacy choice)
+  would no-op every `write_artifacts` re-render until the key lands, a #684 parity regression. With
+  `None` the gateway+tunnel+Access front+dashboard come up as soon as the account+ttyd exist, and
+  only the ssh TABS fail VISIBLY until the go-live key+authorized_keys land. Prefer `None` for any
+  NEW lane; david's key-gate is not the pattern to copy.
+- **Fleet classification of an OBSERVE-only, non-dev human.** `test_every_remote_hosts_user_is_classified`
+  forces every `REMOTE_HOSTS` user into `AUTHORITY_BY_USER` (reduced) XOR `FULL_AUTHORITY_USERS`.
+  An observer must NEVER be `full` (merge/deploy/close), so she goes in `AUTHORITY_BY_USER` at the
+  LEAST-privilege `fork-no-merge` (the safe fail-direction; `AUTHORITY_BY_USER` may hold no `full`
+  value — `test_authority_profiles`). She is not a real hand-off stream, so the
+  `_own_handoff_label`/`_ticket_is_stream_labeled` "membership == is-a-stream" TICKET-path consumers
+  may see her as one — harmless, because she authors/works no ticket. `skill_names_for_user` gives
+  her NO full-authority/maintainer skills (not in FULL_AUTHORITY_USERS/MAINTAINER_USERS) and NO
+  dev-stream extras (not in SKILLS_EXTRA_BY_USER).
+- **BUT `AUTHORITY_BY_USER` membership ALSO triggers INSTALL/PUSH-time STREAM provisioning — NOT just
+  the ticket-path — so an observer needs a dedicated exclusion set (#867 review 🟡, the gap the first
+  cut MISSED).** Five consumers key on `user in AUTHORITY_BY_USER` at every install/push, regardless
+  of tickets: `ensure_stream_tmux_session` (auto-creates a tmux session and TYPES `claude` into it —
+  a live Claude session burning tokens on a viewer account), `report_stream_dev_env` (dev-env/
+  TODO-PROVISIONING gap noise), `provision_subdev_soniox_key` (writes `~/.soniox.env` — a needless
+  credential footprint), `is_single_session_box_user` (ssh-auto-attach + per-window naming), and
+  watchdog `_REDUCED_STREAM_USERS` (bounce/gkreq sweeps). An observer wants NONE of these. FIX = a
+  HAND-MAINTAINED `cli_fleet.WEBTERM_OBSERVER_USERS` frozenset (+ `is_webterm_observer`, facade
+  re-exported), a strict SUBSET of `AUTHORITY_BY_USER` (test-locked), that each consumer excludes.
+  So "check that install does not deploy dev-stream extras" (the ticket's own phrasing) means the
+  FULL consumer list, not only `skill_names_for_user` — grep `AUTHORITY_BY_USER` across airuleset.py
+  / cli_remote.py / cli_bashrc_appliers.py / watchdog for every membership test before claiming an
+  observer is inert.
+- **`u_tenant` is decided by TENANT, never by "it's a tab" (#703).** Both dominika tabs are
+  CROSS-TENANT OBSERVE (montalu5 is marek's montalu-family stream; miva1 is a separate stream
+  notify-routed to the OWNER), so NEITHER carries `u_tenant` → `u_tenant_entries("dominika") == []`
+  (her lane U-dot poll is on but reads an empty scoped map — harmless). A NEW lane only opts a tab
+  into `u_tenant` when the target ACCOUNT is genuinely within that lane's tenant.
+- **Tests: a whole new `test_webterm_<name>.py` (mirror `test_webterm_marek.py`) + extend the shared
+  files** — `test_webterm_lane.py` rule-of-N (all non-owner lanes' skeletons byte-identical mod
+  params), `test_webterm_per_human_tabs.py` (`<NAME>_ORDER` + alias order from the #592 source),
+  `test_webterm_u_tenant_703.py` (the empty/negative case for an observer), and
+  `test_webterm_lane_parity_684.py` (u_status false on a direct lane render). New source/test files
+  under 1000 lines pass the ratchet on the default cap, but ENROLL them + hand-raise the ceilings of
+  the files you grew (`--update` sweeps unrelated main-landed enrollments — hand-edit your own only).
+
 ### #686 webterm U-dot — a per-box AGGREGATION over tickets-status caches must FRESHNESS-filter, or a dead session's frozen U inflates it forever
 
 The #677 U-dot collector (`cli_webterm.py` `_box_u_count` local + the inline

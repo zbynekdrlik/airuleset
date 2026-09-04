@@ -131,6 +131,33 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         got = {e["id"] for e in w.entries_for_tab_list(inv, w.WEBTERM_DASHBOARD_TABS["david"])}
         self.assertEqual(got, {"david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"})
 
+    def test_dominika_domain_resolves_her_lane_inventory_to_exact_order(self):
+        # #867 (owner request 2026-09-04): dominika's OBSERVE set is exactly the
+        # two subdev streams she watches — montalu5-subdev then miva1-subdev. The
+        # policy ids are the DOMINIKA LANE inventory ids
+        # (cli_webterm_profiles.dominika_inventory — the inventory her gateway
+        # actually renders with human="dominika"), consumed via
+        # LaneSpec.dashboard_human="dominika".
+        got = [e["id"] for e in w.entries_for_tab_list(
+            profiles.dominika_inventory(), w.WEBTERM_DASHBOARD_TABS["dominika"])]
+        self.assertEqual(got, ["montalu5-subdev", "miva1-subdev"])
+        self.assertEqual(w.WEBTERM_DASHBOARD_TABS["dominika"], got)
+
+    def test_dominika_lane_render_alias_order_and_exclusions(self):
+        # The prod dominika-lane render path: her scoped inventory + human="dominika".
+        html = w.render_dashboard_html(
+            profiles.dominika_inventory(), ttyd_base="/t", human="dominika",
+            term_grid=(176, 51))
+        aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
+        # montalu5-subdev -> "m5", miva1-subdev -> "miva", from the SINGLE #592
+        # cli_aliases source.
+        self.assertEqual(aliases, ["m5", "miva"])
+        # No other person's/stream's account on dominika's dashboard: never marek,
+        # a david id, or an owner-realm box.
+        for foreign in ('title="marek@subdev"', 'title="dev1', 'title="gatekeeper"',
+                        'title="david1'):
+            self.assertNotIn(foreign, html)
+
 
 class TestOwnerDashboardRender(unittest.TestCase):
     def test_owner_dashboard_html_excludes_other_humans(self):

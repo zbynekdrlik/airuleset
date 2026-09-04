@@ -97,6 +97,23 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
+        # dominika -- webterm OBSERVER account (airuleset#867, 2026-09-04, owner
+        # request). NOT a dev stream: she runs ONLY the dominika webterm gateway
+        # (cli_webterm_dominika) and watches two OTHER streams (montalu5 + miva1)
+        # over loopback ssh; she works no tickets, has no Discord persona, no
+        # notify routing. Registered here so `push` reaches her account and runs
+        # `maybe_setup_webterm` (the marek entry's shape: same subdev VPS, same
+        # operator gatekeeper_access identity — byte-copied authorized_keys is the
+        # go-live owner step). Classified reduced `fork-no-merge` (the
+        # LEAST-privilege profile) in AUTHORITY_BY_USER below, NEVER full: an
+        # observe-only account must never merge/deploy/close (see that row).
+        "name": "dominika@subdev",
+        "host": "100.118.174.27",
+        "user": "dominika",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+    {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
         # VPS as marek/david/simap (airuleset#300; tracking ticket for the
         # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
@@ -453,6 +470,21 @@ AUTHORITY_BY_USER = {
     "montalu1": "branch-merge",
     "david1": "fork-no-merge",
     "simap1": "fork-no-merge",
+    # dominika (airuleset#867, 2026-09-04): a webterm OBSERVER, NOT a dev stream —
+    # she works no tickets, merges/deploys/closes nothing. But
+    # `test_every_remote_hosts_user_is_classified` requires every REMOTE_HOSTS user
+    # to sit in EXACTLY ONE registry: FULL_AUTHORITY_USERS (merge-to-main + deploy +
+    # close) is WRONG for an observer, so she goes here with the LEAST-privilege
+    # reduced profile `fork-no-merge` (the safe fail-direction — never full). She is
+    # not a real hand-off stream, so the `_own_handoff_label`/`_ticket_is_stream_
+    # labeled` "AUTHORITY_BY_USER == is-a-stream" consumers may see her as a stream
+    # — harmless, because she never authors/works a ticket, so those paths never
+    # fire for her; and `fork-no-merge` (not `full`) keeps this row consistent with
+    # the "no `full` value in AUTHORITY_BY_USER" invariant
+    # (test_authority_profiles.py). She gets NO full-authority/maintainer skills
+    # (not in FULL_AUTHORITY_USERS/MAINTAINER_USERS) and NO dev-stream extras (not
+    # in SKILLS_EXTRA_BY_USER) — skill_names_for_user gates all of those.
+    "dominika": "fork-no-merge",
 }
 
 
@@ -491,6 +523,33 @@ AUTHORITY_BY_USER = {
 # decision A) made the marker a CAP that can only LOWER, never raise. Everything
 # ELSE in neither registry still fails SAFE to `fork-no-merge`.
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
+
+
+# Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a
+# webterm gateway (maybe_setup_webterm) and VIEW other streams, never to run a
+# Claude stream of its own. It MUST still be classified
+# (test_every_remote_hosts_user_is_classified), and full is wrong for an observer,
+# so it sits in AUTHORITY_BY_USER at fork-no-merge — but AUTHORITY_BY_USER
+# membership ALSO means "is a reduced sub-dev stream" to install/push-time
+# provisioning consumers: ensure_stream_tmux_session (types `claude` into an
+# auto-created tmux session — an unwanted Claude session burning tokens on a viewer
+# account), report_stream_dev_env (dev-env/TODO-PROVISIONING gap noise),
+# provision_subdev_soniox_key (writes ~/.soniox.env — a needless credential
+# footprint), is_single_session_box_user (ssh-auto-attach + per-window naming), and
+# _REDUCED_STREAM_USERS (bounce/gkreq cross-stream sweeps). An observer wants NONE
+# of those — only the webterm gateway. This HAND-MAINTAINED set (never derived) is
+# the ONE exclusion those consumers honour. Kept a strict SUBSET of
+# AUTHORITY_BY_USER (test-locked): an observer is a classified reduced account
+# MINUS stream provisioning, not a third authority tier — resolve_authority still
+# returns its fork-no-merge (harmless: an observer authors/works no ticket).
+WEBTERM_OBSERVER_USERS = frozenset({"dominika"})
+
+
+def is_webterm_observer(user):
+    """True iff `user` is a webterm OBSERVER account (#867) — provisioned with a
+    webterm gateway only, excluded from every stream-provisioning side effect of
+    AUTHORITY_BY_USER membership. See WEBTERM_OBSERVER_USERS for the full rationale."""
+    return user in WEBTERM_OBSERVER_USERS
 
 
 def _github_ci_runner_source(user):

@@ -5418,6 +5418,8 @@ from cli_fleet import (  # noqa: E402, F401
     AUTHORITY_PROFILES as AUTHORITY_PROFILES,
     AUTHORITY_BY_USER as AUTHORITY_BY_USER,
     FULL_AUTHORITY_USERS as FULL_AUTHORITY_USERS,
+    WEBTERM_OBSERVER_USERS as WEBTERM_OBSERVER_USERS,
+    is_webterm_observer as is_webterm_observer,
     _is_github_ci_runner as _is_github_ci_runner,
     _github_ci_runner_source as _github_ci_runner_source,
     STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
@@ -5550,7 +5552,10 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
     kills/re-cwds/sends keys, per #308's own rule below) and cheap, so it
     now runs on EVERY call whenever a session exists, bootstrapped or not."""
     user = user or _current_user()
-    if user not in AUTHORITY_BY_USER:
+    if user not in AUTHORITY_BY_USER or user in WEBTERM_OBSERVER_USERS:
+        # #867: a webterm OBSERVER (dominika) is in AUTHORITY_BY_USER only for the
+        # classify-all gate — it must NEVER get an auto-launched `claude` tmux
+        # session (a viewer account, no stream of its own). See WEBTERM_OBSERVER_USERS.
         return None
     sentinel = sentinel_path or STREAM_TMUX_BOOTSTRAP_SENTINEL
     run = run or _default_tmux_run
@@ -5690,7 +5695,9 @@ def report_stream_dev_env(user=None):
     to be a false positive — the file is gatekeeper-authored and airuleset
     cannot recreate it). No-op (prints nothing) for a non-stream account."""
     user = user or _current_user()
-    if user not in AUTHORITY_BY_USER:
+    if user not in AUTHORITY_BY_USER or user in WEBTERM_OBSERVER_USERS:
+        # #867: a webterm OBSERVER is not a dev stream — no dev-env/TODO-PROVISIONING
+        # gap report (it never runs stream work). See WEBTERM_OBSERVER_USERS.
         return
     gaps = _stream_provisioning_gaps()
     todo = Path.home() / "TODO-PROVISIONING.md"

@@ -89,6 +89,14 @@ class TestUTenantSets703(unittest.TestCase):
                 if e.get("user") == "newlevel":
                     self.assertIsNot(e.get("u_tenant"), True, e["id"])
 
+    def test_dominika_set_is_empty_observe_only(self):
+        # #867: dominika is a PURE OBSERVER — both her tabs (montalu5 + miva1) are
+        # CROSS-TENANT (she operates neither account), so NEITHER carries u_tenant
+        # and her lane collector reads NOTHING. A non-vacuous check: she DOES have a
+        # non-empty inventory, but zero of it is within-tenant.
+        self.assertTrue(profiles.dominika_inventory())          # inventory non-empty
+        self.assertEqual(profiles.u_tenant_entries(profiles.DOMINIKA), [])
+
     def test_fail_closed_for_owner_and_unknown_profiles(self):
         # The owner profile has NO u_tenant set (its collector is the separate
         # owner-only --u-collect path); an unknown lane collects nothing.

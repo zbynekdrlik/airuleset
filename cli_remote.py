@@ -209,8 +209,13 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     # non-existent account). (All three #537 renames — montalu1/simap1/david1 —
     # are now live, so no host is pending today; the filter stays for a future
     # rename.)
+    # #867: a webterm OBSERVER (in AUTHORITY_BY_USER only for the classify-all gate)
+    # runs no meeting-analysis, so it must NOT receive the Soniox key — a needless
+    # credential footprint. An explicit `soniox: True` host flag still forces it.
     targets = [h for h in _deployable_hosts(hosts)
-               if h.get("user") in airuleset.AUTHORITY_BY_USER or h.get("soniox")]
+               if (h.get("user") in airuleset.AUTHORITY_BY_USER
+                   and not airuleset.is_webterm_observer(h.get("user")))
+               or h.get("soniox")]
     if not targets:
         return []
 

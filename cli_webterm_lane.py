@@ -100,9 +100,15 @@ class LaneSpec:
     """Everything the shared engine needs to provision ONE per-developer lane. Pure
     data — the thin lane modules build it from their own module-level constants (so
     tests that patch those constants keep working) and pass it to the functions
-    below. ``identity_key=None`` means a local-attach lane (no ssh key required in
-    the prerequisite gate); ``retire_credential_path=None`` means the lane never had
-    a legacy password credential to retire."""
+    below. ``identity_key=None`` means the lane is NOT gated on an ssh key in the
+    prerequisite gate — either a local-attach lane (marek's own subdev tab, no ssh
+    key at all) OR an ssh-only lane that deliberately declines the gate so its
+    gateway/tunnel/dashboard come up immediately and its ssh tabs degrade to a
+    VISIBLE failure until the key lands (dominika, #867 — the #684 parity choice;
+    prefer this for a NEW lane over david's day-1 key-gate). A non-None
+    ``identity_key`` (david) DOES gate provisioning on that key.
+    ``retire_credential_path=None`` means the lane never had a legacy password
+    credential to retire."""
     name: str
     gateway_user: str
     profile: str
@@ -277,8 +283,11 @@ def _ttyd_available():
 
 def prerequisites_ready(spec):
     """(ok, reason) — True only when this box may actually provision: running as the
-    lane's gateway account with ttyd installed (and, for an ssh-based lane, the
-    dedicated key present). Every False is a SAFE no-op reason, never a failure."""
+    lane's gateway account with ttyd installed (and, ONLY when the spec sets a
+    non-None ``identity_key``, that key present — david; a lane with
+    ``identity_key=None``, incl. the ssh-only dominika lane, is NOT gated on a key,
+    its ssh tabs degrade visibly until the key lands, #867). Every False is a SAFE
+    no-op reason, never a failure."""
     from cli_filedrop_watchdog import _whoami
     who = _whoami()
     if who != spec.gateway_user:

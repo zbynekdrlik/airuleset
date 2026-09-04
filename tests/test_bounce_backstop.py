@@ -388,9 +388,15 @@ class TestBounceQuals(unittest.TestCase):
         # onboarding a new stream into the authority map auto-registers it and
         # the staleness class cannot recur. RED before the fix (the hand-listed
         # tuple was a strict subset).
+        # #867: MINUS the webterm OBSERVER accounts (cli_fleet.WEBTERM_OBSERVER_USERS)
+        # — an observer is in AUTHORITY_BY_USER only for the classify-all gate, it
+        # authors/works no ticket, so it is NOT a bounce/gkreq participant.
         expected = {u for u, p in airuleset.AUTHORITY_BY_USER.items()
-                    if p != "full"}
+                    if p != "full"} - set(airuleset.WEBTERM_OBSERVER_USERS)
         self.assertEqual(set(wd._REDUCED_STREAM_USERS), expected)
+        # non-vacuous: the carve-out is real (dominika is non-full yet excluded).
+        self.assertIn("dominika", airuleset.AUTHORITY_BY_USER)
+        self.assertNotIn("dominika", wd._REDUCED_STREAM_USERS)
 
     def test_live_reduced_streams_are_registered(self):
         # #564: the exact live streams the issue-561 audit found missing.

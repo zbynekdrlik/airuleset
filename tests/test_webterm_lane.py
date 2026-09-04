@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cli_webterm_lane as lane      # noqa: E402
 import cli_webterm_david as d        # noqa: E402
 import cli_webterm_marek as mk       # noqa: E402
+import cli_webterm_dominika as dn    # noqa: E402  (#867 — the FOURTH lane)
 
 
 class TestLaneEngineExposesTheSingleProvisioner(unittest.TestCase):
@@ -42,31 +43,38 @@ class TestLaneEngineExposesTheSingleProvisioner(unittest.TestCase):
 
 
 class TestBothLanesGoThroughTheEngine(unittest.TestCase):
-    def test_both_specs_are_lanespecs(self):
+    # #867: the rule-of-three is now a rule-of-FOUR (owner + david + marek +
+    # dominika) — every NON-owner lane (david/marek/dominika) is a thin façade over
+    # the ONE engine, so a new human lane stays a config entry, never a copy.
+    def test_all_lane_specs_are_lanespecs(self):
         self.assertIsInstance(d._spec(), lane.LaneSpec)
         self.assertIsInstance(mk._spec(), lane.LaneSpec)
+        self.assertIsInstance(dn._spec(), lane.LaneSpec)
 
     def test_gateway_render_delegates_to_the_one_engine(self):
-        # If either lane kept its OWN render body, patching the engine would not be
+        # If any lane kept its OWN render body, patching the engine would not be
         # observed by it — the whole point of the consolidation.
         sentinel = "SENTINEL-GATEWAY-UNIT\n"
         with m.patch.object(lane, "render_gateway_unit", return_value=sentinel):
             self.assertEqual(d.render_david_gateway_unit(), sentinel)
             self.assertEqual(mk.render_marek_gateway_unit(), sentinel)
+            self.assertEqual(dn.render_dominika_gateway_unit(), sentinel)
 
     def test_ttyd_render_delegates_to_the_one_engine(self):
         sentinel = "SENTINEL-TTYD-UNIT\n"
         with m.patch.object(lane, "render_ttyd_unit", return_value=sentinel):
             self.assertEqual(d.render_david_ttyd_unit(), sentinel)
             self.assertEqual(mk.render_marek_ttyd_unit(), sentinel)
+            self.assertEqual(dn.render_dominika_ttyd_unit(), sentinel)
 
     def test_unit_note_comes_from_the_one_shared_renderer(self):
         # The _*_UNIT_NOTE near-copies (the ticket's named drift site) collapse to
-        # ONE renderer both lanes call at spec-build time.
+        # ONE renderer every lane calls at spec-build time.
         sentinel = "# SENTINEL SHARED NOTE\n"
         with m.patch.object(lane, "render_lane_unit_note", return_value=sentinel):
             self.assertEqual(d._spec().unit_note, sentinel)
             self.assertEqual(mk._spec().unit_note, sentinel)
+            self.assertEqual(dn._spec().unit_note, sentinel)
 
 
 class TestLaneSkeletonIsIdenticalModuloParams(unittest.TestCase):
@@ -100,16 +108,22 @@ class TestLaneSkeletonIsIdenticalModuloParams(unittest.TestCase):
         return text
 
     def test_gateway_unit_skeleton_identical(self):
-        ds, ms = d._spec(), mk._spec()
+        # #867: all THREE non-owner lanes' gateway units are byte-identical after
+        # the per-user params are normalised — a 4th human was a config entry.
+        ds, ms, ns = d._spec(), mk._spec(), dn._spec()
         db = self._norm(self._body(d.render_david_gateway_unit()), ds)
         mb = self._norm(self._body(mk.render_marek_gateway_unit()), ms)
+        nb = self._norm(self._body(dn.render_dominika_gateway_unit()), ns)
         self.assertEqual(db, mb)
+        self.assertEqual(db, nb)
 
     def test_ttyd_unit_skeleton_identical(self):
-        ds, ms = d._spec(), mk._spec()
+        ds, ms, ns = d._spec(), mk._spec(), dn._spec()
         db = self._norm(self._body(d.render_david_ttyd_unit()), ds)
         mb = self._norm(self._body(mk.render_marek_ttyd_unit()), ms)
+        nb = self._norm(self._body(dn.render_dominika_ttyd_unit()), ns)
         self.assertEqual(db, mb)
+        self.assertEqual(db, nb)
 
 
 if __name__ == "__main__":
