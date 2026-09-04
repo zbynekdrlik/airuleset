@@ -251,13 +251,20 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 #                 attempts (the bounded-retry back-off — one cadence, so a
 #                 persistently-swallowing pane is not re-typed every sweep).
 
-def _release_decision(rec, rstate, now, cadence, min_ahead):
+def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None):
     """Pure verdict for ONE armed session's release-gap state. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `rstate` is
     the fetched `{"ahead": int, "in_flight": bool, "train": bool}` (the #698
     `train` key is ignored by this decider), or None when UNDETERMINED (a
     gh/ssh error, or a repo with no integration branch) — None fails safe to
     `skip`.
+
+    #846: `lane` is an optional `LaneResult` from `classify_release_lane`. When
+    present and `in_flight` is True: if the lane's stage is in STALLED_STAGES
+    (cut-ci-red, shadow-failed), the in-flight release is STALLED and needs a
+    nudge — the semantic flip (today's `in_flight=True` blanket suppressor
+    becomes conditional). When `lane` is None → today's exact behaviour
+    (backward compat for legacy callers).
 
     The gap is "real" when `ahead >= min_ahead`. Below that (incl. ahead 0) is a
     drained/absent gap -> `clear` (pop the rec). A real gap with `in_flight` True
@@ -286,9 +293,16 @@ def _release_decision(rec, rstate, now, cadence, min_ahead):
     if ahead < min_ahead:
         return ("clear", None, "no-gap")
     if in_flight:
-        # The train is already moving -> reset the stall anchor, never nudge.
-        return ("inflight", {"first_seen": now, "last_nudge": None,
-                             "sig": _sig(rstate)}, "release-in-flight")
+        # #846: in_flight + STALLED lane (cut-ci-red, shadow-failed) → nudge
+        # instead of suppressing. The train is "in flight" but stuck on a RED
+        # gate — the exact shape the 5h gk incident produced.
+        from watchdog.release_lane import STALLED_STAGES
+        if (lane is not None and hasattr(lane, "stage")
+                and lane.stage in STALLED_STAGES):
+            pass  # fall through to the stalled-train cadence logic below
+        else:
+            return ("inflight", {"first_seen": now, "last_nudge": None,
+                                 "sig": _sig(rstate)}, "release-in-flight")
     first_seen = rec.get("first_seen") if isinstance(rec, dict) else None
     if not isinstance(first_seen, (int, float)):
         first_seen = now
@@ -303,12 +317,33 @@ def _release_decision(rec, rstate, now, cadence, min_ahead):
     return ("wait", new_rec, "grace")
 
 
-def _nudge_text(ahead, integration, prod):
+def _nudge_text(ahead, integration, prod, lane=None, deploy_age_h=None):
     """The release-gap keystroke injected into the armed loop. Carries the shared
     `stuck-check: ` prefix (own-payload recognition + machine-prompt exclusion —
     see the module docstring). Names the branches and the gap, and points at the
     project's own release pipeline (e.g. `/process-subdev`) WITHOUT hardcoding it
-    as the only option — the job is generic over full-authority repos."""
+    as the only option — the job is generic over full-authority repos.
+
+    #846: when `lane` is a LaneResult with a non-empty action, generate a
+    stage-derived text with evidence. The text is ≤700 chars (#714 cap)."""
+    prefix = "stuck-check: release-idle"
+    age_sfx = ""
+    if isinstance(deploy_age_h, (int, float)) and deploy_age_h > 0:
+        age_sfx = ", posledný PROD deploy ~%dh" % int(deploy_age_h)
+    if lane is not None and hasattr(lane, "action") and lane.action:
+        head = ("%s — `%s` je %d commitov pred `%s`%s. %s (%s)."
+                % (prefix, integration, ahead, prod, age_sfx,
+                   lane.action, lane.evidence)
+                if lane.evidence
+                else "%s — `%s` je %d commitov pred `%s`%s. %s."
+                % (prefix, integration, ahead, prod, age_sfx,
+                   lane.action))
+        doctrine = (" Doktrína: in-flight vetva = FROZEN (len release-blocking "
+                    "fix), NIKDY re-cut — každý restart stojí celý chvost.")
+        text = head + doctrine
+        if len(text) > 700:
+            text = head[:700]
+        return text
     return (
         "stuck-check: release-gap — integračná vetva `%s` je %d commitov PRED "
         "`%s` (produkcia) a ŽIADNY release nie je in flight (žiaden otvorený "
@@ -318,6 +353,59 @@ def _nudge_text(ahead, integration, prod):
         "verify), otvor/pokračuj release PR a dotiahni vlak do `%s`. Ak zámerne "
         "ešte batchuješ ďalšie tickety, potvrď to; inak vydaj TERAZ."
         % (integration, ahead, prod, integration, prod, prod))
+
+
+# --- DEPLOY AGE + FOOTER CACHE (#846) --------------------------------------
+
+def _parse_iso_ts(s):
+    """Parse an ISO 8601 timestamp string to a Unix epoch float, or None."""
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        from datetime import datetime
+        s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _deploy_age_hours(rstate, now):
+    """Return the age of the last PROD deploy in hours, or None."""
+    if not isinstance(rstate, dict):
+        return None
+    ts = _parse_iso_ts(rstate.get("last_deploy_ts"))
+    if ts is None:
+        return None
+    age = now - ts
+    if age < 0:
+        return 0
+    return age / 3600.0
+
+
+def _write_release_idle_cache(cwd, rstate, now, dry_run):
+    """Write the footer cache for the `rel <Nh>` segment (#846). The cache is a
+    ts-stamped JSON at `~/.claude/release-idle/<cwd-key>.json`, read by
+    `statusbar.release_idle_segment`. Only written on a full-authority train repo
+    with a measurable deploy age. `dry_run` writes nothing."""
+    if dry_run:
+        return
+    if not isinstance(rstate, dict) or not rstate.get("train"):
+        return
+    deploy_age_h = _deploy_age_hours(rstate, now)
+    import json as _json
+    from pathlib import Path
+    import statusbar
+    key = statusbar.cwd_key(cwd)
+    cache_dir = Path(os.path.expanduser("~")) / ".claude" / "release-idle"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": now, "deploy_age_h": deploy_age_h}
+        p = cache_dir / ("%s.json" % key)
+        with open(p, "w", encoding="utf-8") as fh:
+            _json.dump(entry, fh)
+    except OSError:  # airuleset:script-ok footer cache write is best-effort (never blocks the sweep)
+        return
 
 
 # --- ORPHAN REAPER ---------------------------------------------------------
@@ -435,11 +523,17 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                     "no nudge" % (loc, e))
         return logs
 
+    # #846: classify the release lane for stage-derived nudge text + footer cache
+    from watchdog.release_lane import classify_release_lane
+    lane = classify_release_lane(rstate)
+    # #846: write footer cache (deploy age for `rel <Nh>` segment)
+    _write_release_idle_cache(cwd, rstate, now, dry_run)
+
     rec = rrecs.get(sid)
     if not isinstance(rec, dict):
         rec = {}
     action, new_rec, reason = _release_decision(rec, rstate, now, cadence,
-                                                min_ahead)
+                                                min_ahead, lane=lane)
 
     if action == "skip":
         logs.append("release-gap %s -> skip:%s (state unchanged)" % (loc, reason))
@@ -528,7 +622,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                     "flight)" % (loc, ahead))
         return logs
 
-    text = _nudge_text(ahead, _integration_branch(), _prod_branch())
+    deploy_age_h = _deploy_age_hours(rstate, now)
+    text = _nudge_text(ahead, _integration_branch(), _prod_branch(),
+                       lane=lane, deploy_age_h=deploy_age_h)
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
     # residual stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

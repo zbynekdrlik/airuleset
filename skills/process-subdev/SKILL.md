@@ -201,6 +201,10 @@ repo's own CLAUDE.md / playbook is what names the command.
 - **Gatekeeper never patches a sub-dev's failures** — a red job is a finding, not work.
   (Narrow exception: a pure doc-only merge conflict from the integration branch moving
   is release-integration mechanics gatekeeper may resolve.)
+- **Release-lane discipline (#846):** an in-flight release branch (develop→staging cut PR
+  open) is FROZEN — only release-blocking fixes with a release-fix marker. A shadow/CI
+  spec failure on staging = cherry-pick the fix onto staging, NEVER re-cut (each restart
+  costs the whole tail). An infra-class shadow failure (rate limit, timeout) = rerun.
 
 ### 5. Verdict
 

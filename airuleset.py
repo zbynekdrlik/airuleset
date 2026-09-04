@@ -4840,22 +4840,31 @@ def _watchdog_release_state_fetch(cwd):
         return None
     # (1) gap: integration ahead of prod. A 404 (no integration branch) -> not a
     # release repo (clean "no gap", `train` False, full-TTL). Any OTHER error ->
-    # None (transient).
+    # None (transient). #846: widened jq extracts oldest_ahead_ts too.
+    not_a_train = {"ahead": 0, "in_flight": False, "train": False}
     try:
         r = subprocess.run(
             ["gh", "api", "repos/%s/compare/%s...%s" % (repo, prod, integ),
-             "--jq", ".ahead_by"],
+             "--jq",
+             '{ahead:.ahead_by, oldest:(.commits[0].commit.committer.date // null)}'],
             cwd=cwd, capture_output=True, text=True, timeout=15)
     except Exception:
         return None
     if r.returncode != 0:
         if _gh_not_found(r.stderr):
-            return {"ahead": 0, "in_flight": False, "train": False}
+            return dict(not_a_train)
         return None
     try:
-        ahead = int((r.stdout or "").strip())
+        cmp = json.loads((r.stdout or "").strip())
     except (ValueError, TypeError):
         return None
+    if not isinstance(cmp, dict):
+        return None
+    try:
+        ahead = int(cmp.get("ahead", 0))
+    except (ValueError, TypeError):
+        return None
+    oldest_ahead_ts = cmp.get("oldest")  # ISO string or null
     # (2) 3-branch gate (review F6, widened by #698): a real release train has a
     # `staging` branch — checked on the DRAINED path too, because the job-20
     # release-landed escalation may only ever claim "train drained" for a
@@ -4876,7 +4885,7 @@ def _watchdog_release_state_fetch(cwd):
         return None
     train = r.returncode == 0
     if not train:
-        return {"ahead": 0, "in_flight": False, "train": False}
+        return dict(not_a_train)
     # (3) in-flight: an open release PR whose base is staging or prod, queried
     # server-side per base (review F1 — never a truncated default-limit window).
     # #698 review fix: MEASURED for the DRAINED (ahead 0) verdict too, not only
@@ -4886,11 +4895,15 @@ def _watchdog_release_state_fetch(cwd):
     # running" it never checked (2-4 extra cached gh calls per drained train
     # repo per TTL, same trade the staging gate above already accepted).
     in_flight = False
+    cut_pr = None     # #846: develop→staging PR detail
+    promote_pr = None  # #846: staging→main PR detail
     for base in (staging, prod):
         try:
             r = subprocess.run(
                 ["gh", "pr", "list", "--repo", repo, "--state", "open",
-                 "--base", base, "--json", "number", "--limit", "1"],
+                 "--base", base,
+                 "--json", "number,statusCheckRollup,mergeable",
+                 "--limit", "3"],
                 capture_output=True, text=True, timeout=15)
         except Exception:
             return None
@@ -4902,7 +4915,10 @@ def _watchdog_release_state_fetch(cwd):
             return None
         if isinstance(prs, list) and prs:
             in_flight = True
-            break
+            if base == staging:
+                cut_pr = prs[0]
+            elif base == prod:
+                promote_pr = prs[0]
     # (4) a genuine deploy/release workflow running/queued (only if no release PR),
     # server-side status-filtered + event-filtered (review F1 both directions).
     if not in_flight:
@@ -4924,8 +4940,52 @@ def _watchdog_release_state_fetch(cwd):
             if isinstance(page, list):
                 runs.extend(page)
         in_flight = _release_train_run_in_flight(runs, staging, prod)
+    # (5) #846: last PROD deploy age — the newest SUCCESS of the deploy workflow.
+    # Workflow name = env with default (#574 branch-env pattern); 404 -> field None.
+    deploy_wf = os.environ.get("AIRULESET_RELEASE_DEPLOY_WORKFLOW",
+                               "deploy-prod.yml")
+    last_deploy_ts = None
+    try:
+        r = subprocess.run(
+            ["gh", "run", "list", "--repo", repo, "-w", deploy_wf,
+             "--status", "success", "--limit", "1",
+             "--json", "updatedAt,databaseId"],
+            capture_output=True, text=True, timeout=15)
+    except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
+        last_deploy_ts = None
+    else:
+        if r.returncode == 0:
+            try:
+                drs = json.loads(r.stdout or "[]")
+            except (ValueError, TypeError):
+                drs = []
+            if isinstance(drs, list) and drs and isinstance(drs[0], dict):
+                last_deploy_ts = drs[0].get("updatedAt")
+    # (6) #846: shadow run state — only when a cut PR is open.
+    shadow_run = None
+    if cut_pr is not None:
+        shadow_wf = os.environ.get("AIRULESET_RELEASE_SHADOW_WORKFLOW",
+                                   "deploy-staging-shadow.yml")
+        try:
+            r = subprocess.run(
+                ["gh", "run", "list", "--repo", repo, "-w", shadow_wf,
+                 "--branch", staging, "--limit", "1",
+                 "--json", "status,conclusion,databaseId"],
+                capture_output=True, text=True, timeout=15)
+        except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
+            shadow_run = None
+        else:
+            if r.returncode == 0:
+                try:
+                    srs = json.loads(r.stdout or "[]")
+                except (ValueError, TypeError):
+                    srs = []
+                if isinstance(srs, list) and srs and isinstance(srs[0], dict):
+                    shadow_run = srs[0]
     return {"ahead": ahead if ahead > 0 else 0, "in_flight": in_flight,
-            "train": True}
+            "train": True, "cut_pr": cut_pr, "promote_pr": promote_pr,
+            "shadow_run": shadow_run, "last_deploy_ts": last_deploy_ts,
+            "oldest_ahead_ts": oldest_ahead_ts}
 
 
 def _watchdog_vault_purge():
