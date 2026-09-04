@@ -113,7 +113,7 @@ them, never drop silently.
 ## Phase 4 — Synthesize the tiered roadmap
 
 - **Milestone:** `arch-review: <model> <YYYY-MM-DD>` — model name from THIS session's
-  environment (e.g. `opus-4.8`), date from the system clock at run time.
+  environment (e.g. `opus-4.6`), date from the system clock at run time.
 - **Epic issue per dimension** that has surviving findings — a parent summarizing the
   theme with a child-issue checklist in its body.
 - **Child issue per concrete fix**, linked to its epic.

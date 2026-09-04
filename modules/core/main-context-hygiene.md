@@ -2,7 +2,7 @@
 
 **Context gate — related rules you MUST also apply:**
 - `claude-code-tooling.md` — the in-session subagent / agent-strip surfaces (foreground vs background)
-- `model-awareness.md` — tier the delegated read: low/medium effort on the cheap end (Opus 4.8 low where a surface can name it; an ad-hoc `Explore`/`general-purpose` read-only sweep runs `model: "sonnet"` low — never an inherited-Fable mechanical dispatch; Haiku for the most trivial)
+- `model-awareness.md` — tier the delegated read: low/medium effort on the cheap end (Opus 4.6 low where a surface can name it; an ad-hoc `Explore`/`general-purpose` read-only sweep runs `model: "sonnet"` low — never an inherited-Fable mechanical dispatch; Haiku for the most trivial)
 - `subagent-type-discipline.md` — use ONLY a listed `subagent_type` (`Explore` / `general-purpose`); never invent one
 - `subagent-continuation.md` — every dispatch is one-shot; embed all context in the prompt
 

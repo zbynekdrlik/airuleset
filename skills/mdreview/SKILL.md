@@ -34,7 +34,7 @@ Hard lines that protect the user's work:
 
 ## Step 0 — Read the live model (NEVER hardcode a generation)
 
-Read THIS session's `## Environment` block. Note the live primary model (e.g. `Opus 4.8`, ID `claude-opus-4-8`), newest family, and subagent models. ALL search queries below are built from this value at runtime. A hardcoded model version anywhere in this skill body is itself a finding — fix it.
+Read THIS session's `## Environment` block. Note the live primary model (e.g. `Opus 4.6`, ID `claude-opus-4-6`), newest family, and subagent models. ALL search queries below are built from this value at runtime. A hardcoded model version anywhere in this skill body is itself a finding — fix it.
 
 ## Step 1 — Structural baseline via rules-audit (do NOT re-grep)
 

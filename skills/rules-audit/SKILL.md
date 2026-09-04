@@ -97,7 +97,7 @@ Per `~/.claude/projects/<project>/memory/MEMORY.md`:
 
 ### 7. Model currency (CHECK EVERY RUN — models release often)
 Rules are tuned per model generation. When a newer Claude ships, stale version strings and behavior notes mislead the agent.
-- [ ] Read THIS session's `## Environment` block → note the live model (e.g. `Opus 4.8 (1M context)`, ID `claude-opus-4-8`)
+- [ ] Read THIS session's `## Environment` block → note the live model (e.g. `Opus 4.6 (1M context)`, ID `claude-opus-4-6`)
 - [ ] `grep -rn "4\.7\|4\.6\|Opus 4\|Sonnet 4\|Haiku 4\|claude-opus\|claude-sonnet\|claude-haiku" modules/` — list every hardcoded model reference
 - [ ] Any reference older than the live model → STALE. Bump version strings AND any behavior notes that named the old gen (e.g. "4.7 literalism" → current gen)
 - [ ] `model-awareness.md` + `claude-code-tooling.md` are the canonical model docs — they MUST name the current primary model and current default effort tier
@@ -164,7 +164,7 @@ Return a punch list ordered by impact:
 - ...
 
 ### Model currency
-- Live model: <e.g. Opus 4.8 (claude-opus-4-8)>
+- Live model: <e.g. Opus 4.6 (claude-opus-4-6)>
 - Stale refs: model-awareness.md L3 "Opus 4.7", claude-code-tooling.md L11 "Opus 4.7" — action: bump to current gen
 - Behavior notes naming old gen: <file:line> — action: relabel / websearch-backed rewrite
 

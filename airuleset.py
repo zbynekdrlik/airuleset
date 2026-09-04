@@ -56,59 +56,77 @@ EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")
 # User can still raise per session with `/effort`, or opt into ultracode by hand.
 MANAGED_EFFORT_LEVEL = "high"
 
-# Managed default MAIN-session model (user directive 2026-08-13): **Opus 5
-# is BANNED everywhere** ("opus 5 sa nesmie pouzivat... by default pri
-# spusteni claude fable") — the managed MAIN default is **Fable 5**, and the
-# unconditional-managed-default treatment is exactly what makes the ban
-# self-healing fleet-wide: a stale banned id a prior session left in
-# settings.json is overwritten on the next install/push (the live dev1
-# regression the #440 STEP 0 validation observed — a hand-flip to Fable did
-# not survive the next push while this constant still carried the old id).
-# The previous value was the 2026-07-25 cost-fix package's Opus 5 default;
-# the full policy history lives in the fable-advisor skill.
-# The `[1m]` suffix is a DELIBERATE part of the id, not a typo: it is how
-# Claude Code's own usage tracking keys the 1M-context variant (verified —
-# `lastModelUsage` entries in ~/.claude.json store ids exactly like
-# `claude-fable-5[1m]`, distinct from the bare key) — kept so this change
-# does NOT also shrink the context window. The user relies on the 1M window
-# to avoid context-loss regressions. burn.tier("claude-fable-5[1m]") →
-# "fable", so the statusline highlight keeps working unchanged.
-MANAGED_MODEL = "claude-fable-5[1m]"
+# --------------------------------------------------------------------------- #
+# Model lineup — an ALLOWLIST of EXACT ids, the single source of truth (owner
+# directive 2026-09-04, #871: "chcem pouzivat by default vzdy sonnet-5,
+# opus-4.6, fable-5.0"). The float vector this closes: a bare alias
+# (`fable`/`opus`/`sonnet`/`haiku`) resolves to the LATEST model of that
+# family, so `fable` silently became the BANNED Fable 5.1 the day 5.1 shipped
+# (and `sonnet` would jump to the next Sonnet the day it ships). An exact id
+# never floats. A dispatch therefore NEVER carries a `model` param — the model
+# choice is carried by a PINNED agent definition (frontmatter `model: <exact
+# id>`) or a Workflow `opts.model: '<exact id>'`. A new model version joins the
+# fleet ONLY by an owner-approved edit of this table, never by an alias float.
+MODEL_TIERS = {
+    "fable": "claude-fable-5",        # main default + design/review phases (5.0)
+    "opus": "claude-opus-4-6",        # implementation escalation / gate-CLOSED fallback
+    "sonnet": "claude-sonnet-5",      # settled-design implementation + mechanical
+    "haiku": "claude-haiku-4-5",      # trivial reads
+}
+
+# Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is
+# BANNED**; 2026-09-04: **Fable 5.1 BANNED**, exact-id allowlist) — Fable 5.0,
+# derived from MODEL_TIERS so the lineup has ONE source. The `[1m]` suffix is a
+# DELIBERATE part of the id, not a typo: it is how Claude Code's own usage
+# tracking keys the 1M-context variant (verified — `lastModelUsage` entries in
+# ~/.claude.json store ids exactly like `claude-fable-5[1m]`) — kept so this
+# does NOT shrink the context window. The unconditional-managed-default
+# treatment (cli_config.apply_managed_settings_defaults) is what makes the
+# lineup self-healing: any settings.json `model` != MANAGED_MODEL is overwritten
+# on the next install/push. burn.tier("claude-fable-5[1m]") → "fable", so the
+# statusline highlight keeps working. Full policy history: the fable-advisor skill.
+MANAGED_MODEL = MODEL_TIERS["fable"] + "[1m]"
+
+
+def _normalize_model(value):
+    """Lower-cased, quote/space-stripped, `[Nm]`-tag-dropped model string —
+    the shared normalizer for the allowlist predicates below."""
+    v = (value or "").strip().strip("'\"").strip().lower()
+    return re.sub(r"\s*\[\d+m\]$", "", v).strip()
+
+
+def is_allowed_model(value):
+    """True iff `value` is one of the EXACT allowlisted tier ids
+    (MODEL_TIERS.values()), tolerating the `[1m]` context tag (so the Fable
+    main form `claude-fable-5[1m]` is allowed). EXACT membership, never a
+    substring — a superseded/floating id (`claude-opus-4-6`, `claude-fable-5-1`,
+    a bare alias) is never allowed."""
+    v = _normalize_model(value)
+    return bool(v) and v in {m.lower() for m in MODEL_TIERS.values()}
+
+
+# Bare aliases that FLOAT to the latest model of a family — the exact vector
+# #871 closes. Banned as a dispatch value everywhere.
+_BARE_ALIASES = ("fable", "opus", "opusplan", "sonnet", "haiku")
 
 
 def is_banned_model(value):
-    """True iff `value` names a BANNED model — the single shared predicate
-    reused by `cli_config.apply_managed_settings_defaults` (settings.json
-    self-heal) and `tests/test_launch_model_ban.py`, so the two can never
-    drift on what "banned" means (#495 lesson: one source, never a
-    duplicated predicate).
-
-    The ban set (model-awareness.md):
-      * **Opus 5** — any `opus-5` id (bare `claude-opus-5*` AND provider-
-        prefixed/dated `us.anthropic.claude-opus-5-...`), plus the bare
-        `opus`/`opusplan` aliases that route to it (2026-08-13 directive).
-      * **Fable 5.1** — any `fable-5-1` id (`claude-fable-5-1`, the `[1m]`
-        form), plus the bare `fable` alias, which the Agent `model` param
-        floats to LATEST = 5.1 (owner directive 2026-09-04, #871). Fable
-        5.0 (`claude-fable-5`) is the ONLY allowed Fable and is the managed
-        default (`MANAGED_MODEL`).
-
-    False-positive-safe by construction: the allowed ids never contain the
-    banned substrings — `claude-fable-5[1m]` (managed default) strips to
-    `claude-fable-5` which contains neither `opus-5` nor `fable-5-1`;
-    `claude-opus-4-8` shares only the `opus-4` fragment; `claude-sonnet-4-5`
-    / `claude-haiku-4-5` match nothing. Bare aliases are checked by EXACT
-    set membership, never substring, so `opus` inside `claude-opus-4-8` and
-    `fable` inside `claude-fable-5` are never flagged."""
-    v = (value or "").strip().strip("'\"").strip().lower()
-    v = re.sub(r"\s*\[\d+m\]$", "", v).strip()   # drop a trailing [Nm] context tag
-    if v in ("opus", "opusplan", "fable"):        # bare aliases that float to a banned model
+    """True iff `value` names a model that is NOT on the exact-id allowlist —
+    the single shared predicate reused by `cli_config.apply_managed_settings_
+    defaults` (self-heal) and `tests/test_launch_model_ban.py`, so the two can
+    never drift (#495 one-source lesson). Allowlist semantics (owner directive
+    2026-09-04, #871): a non-empty value that is neither an exact allowlisted
+    tier id nor empty is banned — this covers every bare alias (which floats),
+    every superseded id (`claude-opus-4-6`/`-4-7`, `claude-opus-5`,
+    `claude-fable-5-1`), and any unknown id. An EMPTY value is not "banned"
+    (there is nothing to heal). MANAGED_MODEL is itself allowlisted, so the
+    unconditional self-heal can only ever land an allowed id."""
+    v = _normalize_model(value)
+    if not v:
+        return False
+    if v in _BARE_ALIASES:            # a bare alias floats — always banned as a value
         return True
-    if "opus-5" in v:                             # any Opus 5 id (incl. prefixed/dated)
-        return True
-    if "fable-5-1" in v:                          # any Fable 5.1 id (incl. [1m] form)
-        return True
-    return False
+    return not is_allowed_model(value)
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC
@@ -389,7 +407,8 @@ from cli_deployer_glue import (  # noqa: E402
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/
-AGENT_NAMES = ["autopilot-worker", "ticket-validator", "fable-advisor"]
+AGENT_NAMES = ["autopilot-worker", "ticket-validator", "fable-advisor",
+               "sonnet-mechanical", "sonnet-implementer"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"
 
@@ -6564,7 +6583,7 @@ def main():
 
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
-                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-8)")
+                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-6)")
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 

@@ -36,7 +36,7 @@ def cmd_fable_gate(args):
     otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn).
     The orchestrator / autopilot supervisor runs this ONCE per qualifying
     task/batch before dispatching `model: fable`; CLOSED → the same work runs
-    on claude-opus-4-8 (agent-definition frontmatter / Workflow opts.model
+    on claude-opus-4-6 (agent-definition frontmatter / Workflow opts.model
     full id / inheritance — never the banned bare alias)."""
     from watchdog import fable_gate
     ok, reason = fable_gate(threshold=getattr(args, "threshold", None))
