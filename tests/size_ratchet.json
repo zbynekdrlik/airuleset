@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6982,
+    "airuleset.py": 7004,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -448,7 +448,7 @@
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 229,
     "airuleset.py::cmd_watchdog": 250,
-    "airuleset.py::main": 741,
+    "airuleset.py::main": 751,
     "cli_quals.py::_slice_mine_and_handed": 217,
     "cli_quals_cmd.py::cmd_core_quals": 219,
     "cli_remote.py::_deploy_to_all_remotes": 299,
