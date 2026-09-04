@@ -1102,7 +1102,7 @@ def test_scratch_empty_cwd_key_removed_after_sweep(tmp_path):
     dead = ck / _DEAD_UUID / "tasks" / "old.bin"
     _mkfile(dead, age_days=30)
     proc = _mkfakeproc(tmp_path, [])                # empty but readable /proc
-    results = cs.sweep_claude_scratch(
+    cs.sweep_claude_scratch(
         tmp_dir=str(tmp_path), uid=uid, dry_run=False, force=True, now=_NOW,
         min_age_days=7, proc_dir=proc,
         log_path=tmp_path / "log.log", state_path=tmp_path / "state.json")
