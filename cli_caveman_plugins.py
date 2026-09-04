@@ -387,6 +387,63 @@ def _plugin_registry_keys(registry_path: Path = None) -> set:
     plugins = data.get("plugins") if isinstance(data, dict) else None
     return set(plugins.keys()) if isinstance(plugins, dict) else set()
 
+def _heal_stale_plugin_registry(registry_path: Path = None) -> set:
+    """Remove registry entries whose installPath no longer exists on disk.
+
+    After an account rename (e.g. montalu → montalu1, #537/#845) every
+    plugin installPath still points at the old home (/home/montalu/…) — a
+    nonexistent directory.  ``_managed_plugin_built()`` checks only key
+    PRESENCE, so ``setup_managed_plugins()`` reports "already built" and
+    never reinstalls.  This function heals those stale entries: it reads
+    the full registry, checks each entry's ``installPath``, removes any
+    entry whose path does not exist on disk, writes back (only when
+    something changed), and logs one line per healed key (machine
+    channel — never an owner ping).  After healing, the existing
+    ``_managed_plugin_built()`` naturally returns False for the healed
+    keys, and ``claude plugin install`` reinstalls them fresh — the same
+    flow a first-time box takes.
+
+    Applies to EVERY plugin in the registry, not only the managed
+    baseline set, so any future account rename or home-dir migration is
+    self-healing.  Idempotent; read-only when nothing is stale.
+
+    Returns the set of healed (removed) plugin keys."""
+    import airuleset
+    path = registry_path or (airuleset.CLAUDE_DIR / "plugins" / "installed_plugins.json")
+    try:
+        raw = airuleset.read_file_safe(path)
+    except (OSError, UnicodeDecodeError):
+        return set()
+    if not raw.strip():
+        return set()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return set()
+
+    healed = set()
+    for key in list(plugins.keys()):
+        entries = plugins[key]
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            install_path = entry.get("installPath")
+            if install_path and not Path(install_path).exists():
+                del plugins[key]
+                healed.add(key)
+                print(f"    healed stale registry entry: {key} "
+                      f"(installPath {install_path!r} does not exist)")
+                break
+    if healed:
+        path.write_text(json.dumps(data, indent=2) + "\n")
+    return healed
+
+
 def _managed_plugin_built(key: str) -> bool:
     """True iff claude's OWN plugin registry (installed_plugins.json) has
     an entry for this plugin key — never a proxy for it.
@@ -517,6 +574,8 @@ def setup_managed_plugins() -> bool:
         print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
     else:
         print("    settings.json: already correct")
+
+    _heal_stale_plugin_registry()
 
     market_ok = {}
     for key in MANAGED_PLUGINS:
