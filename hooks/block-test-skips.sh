@@ -89,10 +89,18 @@ case "$CUR_BRANCH" in
         git rev-parse -q --verify origin/staging >/dev/null && BASE_REF="origin/staging" ;;
     *)
         for CAND in develop dev; do
-            if [ "$CAND" != "$CUR_BRANCH" ] && \
-               git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
-                BASE_REF="origin/${CAND}"
-                break
+            if [ "$CAND" != "$CUR_BRANCH" ]; then
+                # #847: on a fork-no-merge stream origin/<CAND> is the
+                # personal fork (stale); upstream/<CAND> is the canonical
+                # integration branch. Prefer upstream when it exists — fall
+                # back to origin for same-repo streams (no upstream remote).
+                if git rev-parse -q --verify "upstream/${CAND}" >/dev/null 2>&1; then
+                    BASE_REF="upstream/${CAND}"
+                    break
+                elif git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                    BASE_REF="origin/${CAND}"
+                    break
+                fi
             fi
         done ;;
 esac
