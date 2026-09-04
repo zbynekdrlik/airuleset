@@ -16,6 +16,15 @@ Dispatch shape (owner directive 2026-09-04, #871): a dispatch NEVER carries a `m
 choice — dispatch `subagent_type: "sonnet-implementer"` with NO `model` param for a settled-design
 implementation; dispatch the `claude-opus-4-6`-pinned worker (AS-IS, no param) to escalate.
 
+**Dual role (#871):** a `subagent-driven-development`/finisher dispatch hands you a scoped task
+prompt directly. An `/autopilot` dispatch instead reads `Work issue(s) #N in <repo>` — the SAME
+shape `autopilot-worker` gets — and for THAT shape you follow `agents/autopilot-worker.md`'s full
+CYCLE protocol (Read it first: version bump → design comment → TDD → PR → CI green → merge → deploy
+verified → hand-off/run-card) at your own Sonnet 5 tier, exactly as that file describes, EXCEPT you
+never self-escalate: if you hit the hard-debug/complexity wall mid-ticket, STOP and RETURN your
+findings (per "When to escalate" below) so the supervisor re-dispatches the ticket on
+`autopilot-worker` instead.
+
 ## When you are the right tier — and when to escalate
 
 - **You (Sonnet 5):** the design is settled and the implementation is ordinary — the typing is the
