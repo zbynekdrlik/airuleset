@@ -6114,6 +6114,7 @@ from cli_vault import (  # noqa: E402
 # cli_burn.py is a self-contained leaf; its 3 REMOTE_HOSTS-referencing functions
 # reach that shared deploy registry via a lazily-placed deferred `import
 # airuleset` (C/D technique), never a module-top back-import.
+from cli_model_audit import cmd_model_audit as cmd_model_audit  # noqa: E402
 from cli_burn import (  # noqa: E402
     cmd_fable_gate as cmd_fable_gate,
     _burn_remote_cmd as _burn_remote_cmd,
@@ -6587,6 +6588,17 @@ def main():
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
+    p_maudit = sub.add_parser(
+        "model-audit",
+        help="#871 READ-ONLY: list every live pane's (and its subagents') newest "
+             "served model, flag any outside the exact-id allowlist (MODEL_TIERS). "
+             "Never keystrokes, never writes. Exit 1 if any banned model is live.")
+    p_maudit.add_argument("--json", action="store_true",
+                          help="machine-readable output")
+    p_maudit.add_argument("--violations-only", dest="violations_only",
+                          action="store_true",
+                          help="print only flagged (banned) rows")
+
     p_wacc = sub.add_parser(
         "webterm-access",
         help="#612: reconcile the Cloudflare Access email-OTP app(s) in front of "
@@ -7034,6 +7046,7 @@ SUBCOMMANDS = {
     "autopilot-lock": cmd_autopilot_lock,
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
+    "model-audit": cmd_model_audit,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
