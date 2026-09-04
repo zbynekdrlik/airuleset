@@ -53,6 +53,8 @@ KIND_API_TOKEN = "api-token"
 KIND_OAUTH = "oauth"
 KIND_HOP = "hop"
 KIND_SUDO = "sudo"
+KIND_PASSWORD = "password"  # airuleset:secret-ok kind label
+KIND_STORE = "store"  # airuleset:secret-ok kind label
 
 #: The account's default ssh key — the identity the no-``identity`` REMOTE_HOSTS
 #: entries authorize. Used as the bucket key for those hosts so the default-key
@@ -236,6 +238,126 @@ PRIVILEGES: List[Privilege] = [
                  "cli_resource_guards.py:33"),
         identity_of="~/.secrets/gatekeeper_access_ed25519",
     ),
+    # --- #870 review-fix: completeness entries (Fable review + supervisor) ---
+    Privilege(
+        name="vault_store",
+        kind=KIND_STORE,
+        local_path="~/.claude/secrets",
+        reach="filedrop vault store dir — every `secret request` value lives "
+              "here; `--persist` writes a ~/.secrets copy",
+        rotation="vault entries are transient (TTL ~24h); the dir itself moves "
+                 "with the account",
+        must_move=True,
+        used_by=("filedrop/vault.py:185 (secrets_dir())",),
+    ),
+    Privilege(
+        name="fleet_shared_password",
+        kind=KIND_PASSWORD,
+        local_path="",
+        reach="fleet shared ssh password (sshpass -p) — dev2, montalu1-8, "
+              "forestshop admin/stepan (the no-identity hosts that also "
+              "accept the default key)",
+        rotation="pin identities per issue 659/679; phase out shared password",
+        must_move=True,
+        used_by=("cli_remote.py:306 (sshpass -p)",
+                 "cli_remote.py:983"),
+    ),
+    Privilege(
+        name="cloudflared_tunnel_creds",
+        kind=KIND_API_TOKEN,
+        local_path="~/.cloudflared",
+        reach="cloudflared tunnel credentials JSON files (per-tunnel auth) — "
+              "the sole on-box secret for each managed Cloudflare tunnel",
+        rotation="new tunnel creds on the new box; old creds deleted",
+        must_move=True,
+        used_by=("cli_webterm_tunnel.py:35 (tunnel creds path)",),
+    ),
+    Privilege(
+        name="cloudflared_config",
+        kind=KIND_API_TOKEN,
+        local_path="~/.cloudflared/config.yml",
+        reach="cloudflared default config (may reference tunnel UUID + ingress "
+              "rules for webterm/drop-gateway tunnels)",
+        rotation="re-render on the new box from cli_webterm_tunnel",
+        must_move=True,
+        used_by=("cli_drop_gateway.py:66 (config path)",),
+    ),
+    Privilege(
+        name="sudo_nopasswd",
+        kind=KIND_SUDO,
+        local_path="",
+        reach="NOPASSWD sudo on dev1 (provision_owner_sudo) — package install, "
+              "systemd system units, owner-key provisioning as root",
+        rotation="the new airuleset box is sudo-LESS; sudo stays on dev1 for "
+                 "the local newlevel account only",
+        must_move=False,
+        used_by=("airuleset.py:1053 (provision_owner_sudo)",),
+    ),
+    Privilege(
+        name="gh_cli_token",
+        kind=KIND_OAUTH,
+        local_path="~/.config/gh/hosts.yml",
+        reach="gh CLI auth token (issues + contents across managed repos) — "
+              "the primary GitHub auth every `gh` invocation uses",
+        rotation="re-auth `gh` on the new box with a fine-grained PAT; "
+                 "revoke the old PAT",
+        must_move=True,
+        used_by=("airuleset.py:5676 (~/.config/gh/hosts.yml)",),
+    ),
+    Privilege(
+        name="gh_app_token",
+        kind=KIND_OAUTH,
+        local_path="~/.config/gh-app-tokens/primary",
+        reach="GitHub App token (alternative auth path for gh CLI)",
+        rotation="re-provision on the new box; revoke the old token",
+        must_move=True,
+        used_by=("airuleset.py:2317 (gh-app-tokens/primary)",),
+    ),
+    Privilege(
+        name="soniox_source",
+        kind=KIND_API_TOKEN,
+        local_path="~/devel/voiceagent/.env",
+        reach="Soniox API key source (the origin file soniox provisioning "
+              "reads and fans out to fleet targets)",
+        rotation="new Soniox key on the new box; fan out via push",
+        must_move=True,
+        used_by=("cli_remote.py:99 (SONIOX_ENV_SOURCE)",),
+        value_key="SONIOX_API_KEY",
+    ),
+    Privilege(
+        name="soniox_fanout",
+        kind=KIND_API_TOKEN,
+        local_path="~/.soniox.env",
+        reach="Soniox API key local fanout copy (the delivered copy on this "
+              "box, consumed by meeting-analysis)",
+        rotation="re-delivered by push from the source; no separate rotation",
+        must_move=True,
+        used_by=("cli_remote.py:163 (SONIOX_ENV_DEST fan-out)",),
+        value_key="SONIOX_API_KEY",
+    ),
+    Privilege(
+        name="hetzner_airuleset",
+        kind=KIND_API_TOKEN,
+        local_path="~/.secrets/hetzner-airuleset",
+        reach="Hetzner API token for the airuleset project (F1 box "
+              "provisioning — server create/delete/manage)",
+        rotation="after migration this token stays ONLY on the airuleset box; "
+                 "revoke from dev1",
+        must_move=True,
+        used_by=("airuleset.py (F1 provisioning, issue 870)",),
+    ),
+    Privilege(
+        name="tailscale_api_key",
+        kind=KIND_API_TOKEN,
+        local_path="",
+        reach="Tailscale API key (tskey-api-...) — creates pre-auth keys, "
+              "adds/removes tailnet devices; found in plaintext in project "
+              "memory on dev1 (the shared-blast-radius the ticket cites)",
+        rotation="new key in Tailscale admin console; `secret request --persist` "
+              "on the new box; revoke old; delete the memory file on dev1",
+        must_move=True,
+        used_by=("wireguard project memory (plaintext in md file)",),
+    ),
 ]
 
 
@@ -298,11 +420,22 @@ def _ssh_fingerprint(path: Path) -> Optional[str]:
     return None
 
 
+def _looks_like_pem_key(path: Path) -> bool:
+    """True iff the file starts with a PEM private-key header (RSA/EC/OPENSSH)
+    or has a .pem extension — covers legacy keys ssh-keygen may reject."""
+    if path.suffix == ".pem":
+        return True
+    try:
+        head = path.read_bytes()[:64]
+    except OSError:
+        return False
+    return b"BEGIN RSA PRIVATE KEY" in head or b"BEGIN OPENSSH PRIVATE KEY" in head
+
+
 def _looks_like_ssh_key(path: Path) -> bool:
     """True iff ``ssh-keygen -lf`` accepts the file as a key (private or
-    public) — the reliable way to tell a key from config/known_hosts without
-    reading its bytes here."""
-    return _ssh_fingerprint(path) is not None
+    public), OR the file is a PEM-format private key ssh-keygen may reject."""
+    return _ssh_fingerprint(path) is not None or _looks_like_pem_key(path)
 
 
 def _token_len(path: Path, value_key: str) -> Optional[int]:
@@ -360,6 +493,19 @@ def fleet_identity_paths() -> set:
 # --------------------------------------------------------------------------- #
 # probe
 # --------------------------------------------------------------------------- #
+def _probe_sudo() -> str:
+    """Read-only sudo probe: `sudo -n true` with a short timeout. Never
+    prompts for a password (``-n`` = non-interactive)."""
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "true"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "sudo available" if r.returncode == 0 else "sudo unavailable"
+    except (OSError, subprocess.SubprocessError):
+        return "sudo probe failed"
+
+
 def probe_entry(priv: Privilege, home: Path,
                 fleet_buckets: Optional[dict] = None) -> dict:
     """Read-only live state of ONE declared entry. Never returns a token
@@ -382,17 +528,31 @@ def probe_entry(priv: Privilege, home: Path,
                         if (fleet_buckets is not None and priv.identity_of)
                         else []),
     }
-    if priv.kind == KIND_HOP or not priv.local_path:
+    if priv.kind in (KIND_HOP, KIND_PASSWORD, KIND_SUDO) or not priv.local_path:
         rec["detail"] = "derived reach (no local file)"
         rec["present"] = True
+        if priv.kind == KIND_SUDO:
+            rec["detail"] = _probe_sudo()
         return rec
 
     path = _expand(priv.local_path, home)
-    if not path.exists():
-        rec["detail"] = "absent"
+    try:
+        if not path.exists():
+            rec["detail"] = "absent"
+            return rec
+        # Use lstat to detect symlinks (#870 review: symlink-aware)
+        st = path.lstat()
+    except OSError as exc:
+        rec["detail"] = "error: %s" % type(exc).__name__
+        rec["wrong_mode"] = True  # cannot verify → finding
         return rec
 
-    st = path.stat()
+    if path.is_symlink():
+        rec["detail"] = "SYMLINK (-> %s)" % str(path.resolve())
+        rec["present"] = True
+        rec["wrong_mode"] = True  # a symlink credential is a finding
+        return rec
+
     is_dir = path.is_dir()
     rec["present"] = True
     rec["mode"] = "0%o" % stat.S_IMODE(st.st_mode)
@@ -403,10 +563,11 @@ def probe_entry(priv: Privilege, home: Path,
     if priv.kind == KIND_SSH_KEY:
         fp = _ssh_fingerprint(path)
         rec["detail"] = "fp=" + fp if fp else "fingerprint unavailable"
+    elif priv.kind == KIND_STORE:
+        # directory entry — mode is the important signal
+        rec["detail"] = "dir present (mode=%s)" % rec["mode"]
     elif priv.kind in (KIND_API_TOKEN, KIND_OAUTH):
         if priv.kind == KIND_OAUTH:
-            # a structured credential file (git-credentials) — present+mode is
-            # the useful signal; never parse a value out of it.
             rec["detail"] = "present (structured credential file)"
         else:
             n = _token_len(path, priv.value_key)
@@ -422,53 +583,144 @@ _SSH_SAFE_NAMES = {
 }
 
 
-def scan_undeclared(home: Path, declared_paths: set) -> List[dict]:
-    """Find credentials on disk that the registry does NOT declare. In
-    ``~/.secrets`` EVERY regular file is a credential by convention, so any
-    non-declared file (and not a ``.pub`` of a declared key) is a finding. In
-    ``~/.ssh`` only files ``ssh-keygen -lf`` accepts as a PRIVATE key (not a
-    ``.pub``, not config/known_hosts) count."""
+def _scan_dir_recursive(base: Path, prefix: str, declared: set,
+                        declared_pubs: set, where: str,
+                        key_only: bool) -> List[dict]:
+    """Scan a directory (recursively) for undeclared credentials. When
+    ``key_only`` is True, only files that look like ssh keys are flagged."""
     findings: List[dict] = []
-    declared = set(declared_paths)
-    declared_pubs = {p + ".pub" for p in declared}
+    try:
+        entries = sorted(base.iterdir())
+    except OSError:
+        findings.append({
+            "path": prefix,
+            "where": where,
+            "mode": "unreadable",
+            "owner": "?",
+            "error": True,
+        })
+        return findings
 
-    secrets_dir = home / ".secrets"
-    if secrets_dir.is_dir():
-        for f in sorted(secrets_dir.iterdir()):
-            if not f.is_file():
-                continue
-            rel = "~/.secrets/" + f.name
-            if rel in declared or rel in declared_pubs:
-                continue
-            if f.name.endswith(".pub") and ("~/.secrets/" + f.name[:-4]) in declared:
-                continue
-            st = f.stat()
+    for f in entries:
+        rel = prefix + f.name
+        if f.is_symlink():
+            # Symlinks to credentials are a finding (#870 review)
+            try:
+                st = f.lstat()
+            except OSError:
+                st = None
             findings.append({
                 "path": rel,
-                "where": ".secrets",
-                "mode": "0%o" % stat.S_IMODE(st.st_mode),
-                "owner": _owner(st),
+                "where": where,
+                "mode": "0%o" % stat.S_IMODE(st.st_mode) if st else "?",
+                "owner": _owner(st) if st else "?",
+                "symlink": True,
             })
-
-    ssh_dir = home / ".ssh"
-    if ssh_dir.is_dir():
-        for f in sorted(ssh_dir.iterdir()):
-            if not f.is_file():
+            continue
+        if f.is_dir():
+            # Recurse into subdirectories (#870 review)
+            findings.extend(_scan_dir_recursive(
+                f, rel + "/", declared, declared_pubs, where, key_only))
+            continue
+        if not f.is_file():
+            continue
+        if rel in declared or rel in declared_pubs:
+            continue
+        if f.name.endswith(".pub"):
+            base_rel = prefix + f.name[:-4]
+            if base_rel in declared:
                 continue
+        if key_only:
             if f.name in _SSH_SAFE_NAMES or f.name.endswith(".pub"):
-                continue
-            rel = "~/.ssh/" + f.name
-            if rel in declared:
                 continue
             if not _looks_like_ssh_key(f):
                 continue
-            st = f.stat()
-            findings.append({
-                "path": rel,
-                "where": ".ssh",
-                "mode": "0%o" % stat.S_IMODE(st.st_mode),
-                "owner": _owner(st),
-            })
+        try:
+            st = f.lstat()
+        except OSError:
+            st = None
+        findings.append({
+            "path": rel,
+            "where": where,
+            "mode": "0%o" % stat.S_IMODE(st.st_mode) if st else "?",
+            "owner": _owner(st) if st else "?",
+        })
+    return findings
+
+
+def scan_undeclared(home: Path, declared_paths: set) -> List[dict]:
+    """Find credentials on disk that the registry does NOT declare. In
+    ``~/.secrets`` EVERY regular file is a credential by convention (recurses
+    subdirs), so any non-declared file is a finding. In ``~/.ssh`` only files
+    that look like a PRIVATE key count. Also scans ``~/.claude/secrets/``
+    (the vault store dir, #870 review)."""
+    declared = set(declared_paths)
+    declared_pubs = {p + ".pub" for p in declared}
+    findings: List[dict] = []
+
+    for dirname, prefix, where, key_only in [
+        (".secrets", "~/.secrets/", ".secrets", False),
+        (".ssh", "~/.ssh/", ".ssh", True),
+        (str(Path(".claude") / "secrets"), "~/.claude/secrets/",
+         ".claude/secrets", False),
+    ]:
+        d = home / dirname
+        if d.is_dir():
+            findings.extend(_scan_dir_recursive(
+                d, prefix, declared, declared_pubs, where, key_only))
+    return findings
+
+
+# well-known token PREFIXES to scan for in project memory files — narrow,
+# high-confidence patterns only; NEVER emit the matched value (#870 review).
+_MEMORY_TOKEN_PATTERNS = [
+    ("tskey-api-", "tailscale-api-key"),
+    ("tskey-", "tailscale-key"),
+    ("ghp_", "github-pat"),
+    ("gho_", "github-oauth"),
+    ("github_pat_", "github-fine-grained-pat"),
+    ("xoxb-", "slack-bot-token"),
+    ("sk-", "openai-api-key"),
+    ("cfat_", "cloudflare-account-token"),
+]
+
+
+def scan_memory_credentials(home: Optional[Path] = None) -> List[dict]:
+    """Read-only scan of ``~/.claude/projects/*/memory/*.md`` for well-known
+    token prefixes. Reports path + pattern-name ONLY — NEVER the matched
+    value. Surfaces plaintext credentials in project memory files (the
+    Tailscale API key found on dev1, #870)."""
+    h = _home(home)
+    findings: List[dict] = []
+    mem_glob = h / ".claude" / "projects"
+    if not mem_glob.is_dir():
+        return findings
+    try:
+        for proj_dir in sorted(mem_glob.iterdir()):
+            mem_dir = proj_dir / "memory"
+            if not mem_dir.is_dir():
+                continue
+            try:
+                for md_file in sorted(mem_dir.iterdir()):
+                    if not md_file.is_file() or md_file.suffix != ".md":
+                        continue
+                    try:
+                        text = md_file.read_text(
+                            encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue  # airuleset:script-ok unreadable memory file — skip, never crash
+                    for prefix, pattern_name in _MEMORY_TOKEN_PATTERNS:
+                        if prefix in text:
+                            rel = "~/.claude/projects/%s/memory/%s" % (
+                                proj_dir.name, md_file.name)
+                            findings.append({
+                                "path": rel,
+                                "pattern": pattern_name,
+                            })
+            except OSError:
+                continue  # airuleset:script-ok unreadable memory dir — skip
+    except OSError:
+        return findings  # airuleset:script-ok projects dir unreadable — empty result
     return findings
 
 
@@ -481,15 +733,18 @@ def build_report(home: Optional[Path] = None) -> dict:
     declared_paths = {p.local_path for p in PRIVILEGES if p.local_path}
     undeclared = scan_undeclared(h, declared_paths)
 
+    memory_creds = scan_memory_credentials(h)
     wrong_mode = [e for e in entries if e.get("wrong_mode")]
-    exit_code = 1 if (undeclared or wrong_mode) else 0
+    exit_code = 1 if (undeclared or wrong_mode or memory_creds) else 0
     return {
         "entries": entries,
         "undeclared": undeclared,
+        "memory_credentials": memory_creds,
         "findings": {
             "undeclared_count": len(undeclared),
             "wrong_mode_count": len(wrong_mode),
             "wrong_mode_names": [e["name"] for e in wrong_mode],
+            "memory_credential_count": len(memory_creds),
         },
         "exit_code": exit_code,
     }
@@ -527,9 +782,16 @@ def render_table(report: dict) -> str:
     else:
         lines.append("UNDECLARED credentials on disk: none")
     lines.append("")
+    mem = report.get("memory_credentials", [])
+    if mem:
+        lines.append("MEMORY CREDENTIALS (plaintext in project memory) — %d:" % len(mem))
+        for m in mem:
+            lines.append("  %-50s pattern=%s" % (m["path"], m["pattern"]))
+    lines.append("")
     f = report["findings"]
-    lines.append("FINDINGS: undeclared=%d wrong-mode=%d%s" % (
+    lines.append("FINDINGS: undeclared=%d wrong-mode=%d memory-creds=%d%s" % (
         f["undeclared_count"], f["wrong_mode_count"],
+        f.get("memory_credential_count", 0),
         (" [" + ", ".join(f["wrong_mode_names"]) + "]") if f["wrong_mode_names"] else ""))
     lines.append("exit=%d (%s)" % (
         report["exit_code"],

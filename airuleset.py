@@ -3927,12 +3927,15 @@ from cli_resource_guards import (  # noqa: E402, F401
 # --- #870 F0: privilege inventory of the control account -- a self-contained
 # leaf (stdlib only; its ssh reach is derived from cli_fleet via a LAZY import).
 # Re-exported here so `SUBCOMMANDS["privileges"]` and the tests
-# (`airuleset.cmd_privileges` / `airuleset.build_report`) resolve through this
+# (`airuleset.cmd_privileges` / `airuleset.privileges_build_report`) resolve through this
 # module, the same facade convention every other leaf uses.
 from cli_privileges import (  # noqa: E402, F401
     cmd_privileges as cmd_privileges,
     build_report as privileges_build_report,
+    scan_memory_credentials as scan_memory_credentials,
     PRIVILEGES as PRIVILEGES,
+    KIND_PASSWORD as KIND_PASSWORD,
+    KIND_STORE as KIND_STORE,
 )
 
 # --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed

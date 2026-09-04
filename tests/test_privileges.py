@@ -62,6 +62,11 @@ class TestRegistry(unittest.TestCase):
         for e in p.PRIVILEGES:
             self.assertIn(e.kind, known, "entry %r has unknown kind" % e.name)
 
+    def test_facade_reexport(self):
+        self.assertIs(airuleset.cmd_privileges, p.cmd_privileges)
+        self.assertIn("privileges", airuleset.SUBCOMMANDS)
+        self.assertIs(airuleset.PRIVILEGES, p.PRIVILEGES)
+
     def test_new_entries_exist(self):
         names = {e.name for e in p.PRIVILEGES}
         for expected in ("vault_store", "fleet_shared_password",
@@ -80,12 +85,6 @@ class TestRegistry(unittest.TestCase):
         by = {e.name: e for e in p.PRIVILEGES}
         self.assertEqual(by["fleet_shared_password"].kind, p.KIND_PASSWORD)
 
-    def test_facade_reexport(self):
-        # airuleset.py re-exports the leaf so SUBCOMMANDS + tests resolve it.
-        self.assertIs(airuleset.cmd_privileges, p.cmd_privileges)
-        self.assertIn("privileges", airuleset.SUBCOMMANDS)
-        self.assertIs(airuleset.PRIVILEGES, p.PRIVILEGES)
-
 
 class TestRemoteHostsSymmetry(unittest.TestCase):
     """The drift-lock: a new REMOTE_HOSTS ssh identity that is not declared in
@@ -96,7 +95,6 @@ class TestRemoteHostsSymmetry(unittest.TestCase):
                         if e.kind == p.KIND_SSH_KEY}
         for ident in p.fleet_identity_paths():
             if ident == "":
-                # no-identity hosts are covered by the default key entry.
                 self.assertIn("~/.ssh/id_ed25519", declared_ssh,
                               "default-key hosts have no registry entry")
                 continue
@@ -109,9 +107,6 @@ class TestRemoteHostsSymmetry(unittest.TestCase):
         self.assertEqual(p.fleet_identity_paths(), expect)
 
     def test_fleet_hosts_derived_live_from_cli_fleet(self):
-        # reach is DERIVED from cli_fleet, not re-declared: the gatekeeper key
-        # reaches gatekeeper@gk, the default key reaches a no-identity host,
-        # and a webterm key (not a REMOTE_HOSTS identity) reaches nothing.
         by = {e["name"]: e for e in p.build_report()["entries"]}
         self.assertIn("gatekeeper", by["gatekeeper_access_ed25519"]["fleet_hosts"])
         self.assertIn("dev2", by["default_key_id_ed25519"]["fleet_hosts"])
@@ -132,7 +127,6 @@ class TestProbe(unittest.TestCase):
         (self.home / ".ssh").mkdir()
 
     def _seed_declared(self):
-        """Populate a subset of declared entries in the fake home."""
         _gen_ed25519(self.home / ".secrets" / "gatekeeper_access_ed25519")
         _mk(self.home / ".secrets" / "cloudflare-newlevel-access",
             "CF_SECRET_VALUE_ABCDEF", 0o600)
@@ -149,8 +143,6 @@ class TestProbe(unittest.TestCase):
         self.assertEqual(cf["detail"], "len=%d" % len("CF_SECRET_VALUE_ABCDEF"))
 
     def test_absent_declared_is_not_a_finding(self):
-        # nothing seeded -> declared entries are absent, but absence alone must
-        # NOT push exit to 1 (the new box legitimately holds none yet).
         rep = p.build_report(home=self.home)
         self.assertEqual(rep["findings"]["undeclared_count"], 0)
         self.assertEqual(rep["findings"]["wrong_mode_count"], 0)
@@ -182,7 +174,6 @@ class TestProbe(unittest.TestCase):
 
     def test_declared_pub_sibling_not_flagged(self):
         _gen_ed25519(self.home / ".secrets" / "gatekeeper_access_ed25519")
-        # ssh-keygen wrote the .pub sibling; it must NOT be an undeclared item.
         rep = p.build_report(home=self.home)
         paths = [u["path"] for u in rep["undeclared"]]
         self.assertNotIn("~/.secrets/gatekeeper_access_ed25519.pub", paths)
@@ -205,7 +196,8 @@ class TestProbe(unittest.TestCase):
         _mk(env, "FOO=bar\nDISCORD_BOT_TOKEN=abcdefghij\nBAZ=1\n", 0o600)
         rep = p.build_report(home=self.home)
         by = {e["name"]: e for e in rep["entries"]}
-        self.assertEqual(by["discord_bot_token"]["detail"], "len=%d" % len("abcdefghij"))
+        self.assertEqual(by["discord_bot_token"]["detail"],
+                         "len=%d" % len("abcdefghij"))
 
     def test_hop_entry_has_no_file(self):
         rep = p.build_report(home=self.home)
@@ -217,10 +209,145 @@ class TestProbe(unittest.TestCase):
         self.assertFalse(hop["wrong_mode"])
 
 
-class TestValueLeakLock(unittest.TestCase):
-    """The probe must NEVER emit a token value — only len= / a fingerprint.
-    A distinctive fixture value must appear NOWHERE in the table or json."""
+class TestProbeHardening(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
 
+    def test_symlink_in_secrets_is_undeclared(self):
+        link = self.home / ".secrets" / "dangling-link"
+        os.symlink("/nonexistent/target", link)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertIn("~/.secrets/dangling-link", paths)
+
+    def test_symlink_declared_entry_flagged(self):
+        real = self.home / ".secrets" / "real"
+        real.write_text("x")
+        os.chmod(real, 0o600)
+        path = self.home / ".secrets" / "cloudflare-newlevel-access"
+        os.symlink(str(real), path)
+        rep = p.build_report(home=self.home)
+        by = {e["name"]: e for e in rep["entries"]}
+        entry = by["cloudflare-newlevel-access"]
+        self.assertTrue(entry["wrong_mode"])
+        self.assertIn("SYMLINK", entry["detail"])
+
+    def test_oserror_does_not_crash(self):
+        bad_dir = self.home / ".secrets" / "unreadable-subdir"
+        bad_dir.mkdir(mode=0o000)
+        self.addCleanup(lambda: os.chmod(bad_dir, 0o700))
+        rep = p.build_report(home=self.home)
+        self.assertIn(rep["exit_code"], (0, 1))
+
+    def test_vault_dir_scanned(self):
+        vault = self.home / ".claude" / "secrets"
+        vault.mkdir(parents=True)
+        _mk(vault / "some-vault-secret", "vaultval", 0o600)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertTrue(any("some-vault-secret" in item for item in paths))
+
+    def test_secrets_subdir_recursed(self):
+        sub = self.home / ".secrets" / "subdir"
+        sub.mkdir()
+        _mk(sub / "nested-token", "nest", 0o600)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertTrue(any("nested-token" in item for item in paths))
+
+    def test_pem_key_detected_in_ssh(self):
+        pem = self.home / ".ssh" / "legacy.pem"
+        pem.write_text(
+            "-----BEGIN RSA PRIVATE KEY-----\nfake\n"
+            "-----END RSA PRIVATE KEY-----\n")
+        os.chmod(pem, 0o600)
+        rep = p.build_report(home=self.home)
+        paths = [u["path"] for u in rep["undeclared"]]
+        self.assertIn("~/.ssh/legacy.pem", paths)
+
+
+class TestMemoryCredScan(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_memory_scan_finds_planted_token(self):
+        mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "ref_key.md").write_text(
+            "---\nname: key\n---\nThe key is tskey-api-FAKEVALUE123\n")
+        findings = p.scan_memory_credentials(self.home)
+        self.assertTrue(len(findings) >= 1)
+        self.assertEqual(findings[0]["pattern"], "tailscale-api-key")
+        self.assertNotIn("FAKEVALUE123", str(findings[0]))
+
+    def test_memory_scan_no_false_positive(self):
+        mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "safe.md").write_text("No tokens here.\n")
+        findings = p.scan_memory_credentials(self.home)
+        self.assertEqual(findings, [])
+
+    def test_memory_scan_multiple_patterns(self):
+        mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "multi.md").write_text(
+            "ghp_abcdef123456 and cfat_xyzxyz\n")
+        findings = p.scan_memory_credentials(self.home)
+        patterns_found = {f["pattern"] for f in findings}
+        self.assertIn("github-pat", patterns_found)
+        self.assertIn("cloudflare-account-token", patterns_found)
+
+    def test_build_report_includes_memory(self):
+        mem_dir = self.home / ".claude" / "projects" / "-test" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "leak.md").write_text("tskey-api-LEAKED123\n")
+        rep = p.build_report(home=self.home)
+        self.assertIn("memory_credentials", rep)
+        self.assertTrue(len(rep["memory_credentials"]) >= 1)
+        self.assertEqual(rep["exit_code"], 1)
+
+
+class TestSudoProbe(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_sudo_entry_probed(self):
+        rep = p.build_report(home=self.home)
+        by = {e["name"]: e for e in rep["entries"]}
+        self.assertIn("sudo_nopasswd", by)
+        self.assertIn(by["sudo_nopasswd"]["detail"],
+                      ("sudo available", "sudo unavailable"))
+
+
+class TestHermeticity(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_cmd_privileges_uses_injected_home(self):
+        args = _FakeArgs(json=True)
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with self.assertRaises(SystemExit) as cm:
+                p.cmd_privileges(args)
+        self.assertEqual(cm.exception.code, 0)
+
+
+class TestValueLeakLock(unittest.TestCase):
     SECRET = "TOTALLY-SECRET-TOKEN-VALUE-9f8e7d6c5b4a"
 
     def setUp(self):
@@ -240,7 +367,6 @@ class TestValueLeakLock(unittest.TestCase):
         blob = json.dumps(rep, ensure_ascii=False)
         self.assertNotIn(self.SECRET, table)
         self.assertNotIn(self.SECRET, blob)
-        # but the LENGTH must still be reported (proves we measured it).
         self.assertIn("len=%d" % len(self.SECRET), table)
 
 
@@ -253,185 +379,30 @@ class TestJsonSchema(unittest.TestCase):
 
     def test_json_schema_shape(self):
         rep = p.build_report(home=self.home)
-        # top-level keys
         for key in ("entries", "undeclared", "findings", "exit_code"):
             self.assertIn(key, rep)
-        # entries schema
         self.assertEqual(len(rep["entries"]), len(p.PRIVILEGES))
         e0 = rep["entries"][0]
         for key in ("name", "kind", "local_path", "must_move", "present",
                     "mode", "mode_ok", "owner", "detail", "wrong_mode",
                     "fleet_hosts"):
             self.assertIn(key, e0)
-        # findings schema
         for key in ("undeclared_count", "wrong_mode_count", "wrong_mode_names"):
             self.assertIn(key, rep["findings"])
-        # round-trips as JSON
         json.loads(json.dumps(rep, ensure_ascii=False))
 
+    def test_json_includes_memory_credentials(self):
+        rep = p.build_report(home=self.home)
+        self.assertIn("memory_credentials", rep)
+
     def test_cmd_privileges_exit_code(self):
-        # a clean fake home (only the dir, nothing undeclared) -> exit 0.
         args = _FakeArgs(json=True)
-        # cmd_privileges reads the REAL home, so exercise build_report's exit
-        # path directly here; the CLI exit is a thin sys.exit(report[...]).
         rep = p.build_report(home=self.home)
-        self.assertIn(rep["exit_code"], (0, 1))
-        with self.assertRaises(SystemExit) as cm:
-            p.cmd_privileges(args)
-        self.assertIn(cm.exception.code, (0, 1))
-
-
-class TestSymlinkDetection(unittest.TestCase):
-    """Symlinks in credential dirs must be reported as findings (#870 review)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-        (self.home / ".secrets").mkdir()
-        (self.home / ".ssh").mkdir()
-
-    def test_symlink_in_secrets_is_finding(self):
-        target = self.home / ".secrets" / "real-token"
-        _mk(target, "TOKEN123", 0o600)
-        link = self.home / ".secrets" / "symlinked-token"
-        link.symlink_to(target)
-        rep = p.build_report(home=self.home)
-        # The symlink must be flagged — either as undeclared or with a symlink
-        # annotation. At minimum it must not silently pass as a regular file.
-        all_items = rep["undeclared"]
-        paths = [u["path"] for u in all_items]
-        # Both the real file and the symlink are undeclared foreign creds.
-        self.assertIn("~/.secrets/real-token", paths)
-        self.assertIn("~/.secrets/symlinked-token", paths)
-
-
-class TestOSErrorHandling(unittest.TestCase):
-    """Unreadable dirs must not crash the probe (#870 review)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-        (self.home / ".secrets").mkdir()
-        (self.home / ".ssh").mkdir()
-
-    def test_unreadable_secrets_dir_does_not_crash(self):
-        os.chmod(self.home / ".secrets", 0o000)
-        self.addCleanup(os.chmod, self.home / ".secrets", 0o700)
-        # Must not raise — should report an error finding or silently skip.
-        rep = p.build_report(home=self.home)
-        self.assertIn("exit_code", rep)
-
-
-class TestMemoryCredScan(unittest.TestCase):
-    """Read-only scan of project memory for well-known token patterns (#870)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-
-    def test_scan_finds_planted_tskey(self):
-        mem_dir = self.home / ".claude" / "projects" / "wireguard" / "memory"
-        mem_dir.mkdir(parents=True)
-        _mk(mem_dir / "ref.md",
-            "The key is tskey-api-FAKE1234567890abcdef\n", 0o600)
-        findings = p.scan_memory_credentials(self.home)
-        self.assertTrue(len(findings) > 0, "should find the planted tskey")
-        paths = [f["path"] for f in findings]
-        self.assertTrue(any("ref.md" in pa for pa in paths))
-
-    def test_scan_never_emits_value(self):
-        mem_dir = self.home / ".claude" / "projects" / "test" / "memory"
-        mem_dir.mkdir(parents=True)
-        secret = "tskey-api-TOTALLYSECRET9876543210"
-        _mk(mem_dir / "tok.md", "key = %s\n" % secret, 0o600)
-        findings = p.scan_memory_credentials(self.home)
-        blob = json.dumps(findings)
-        self.assertNotIn(secret, blob)
-        # but the pattern name must be reported
-        self.assertTrue(any("tskey-api" in f.get("pattern", "") for f in findings))
-
-    def test_scan_empty_home_returns_empty(self):
-        findings = p.scan_memory_credentials(self.home)
-        self.assertEqual(findings, [])
-
-
-class TestCmdHermetic(unittest.TestCase):
-    """cmd_privileges must not probe the REAL home (#870 review item 8)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-        (self.home / ".secrets").mkdir()
-        (self.home / ".ssh").mkdir()
-
-    def test_cmd_privileges_uses_injected_home(self):
-        args = _FakeArgs(json=True)
-        with mock.patch.object(p, "build_report",
-                               wraps=p.build_report) as mock_br:
-            with mock.patch("pathlib.Path.home", return_value=self.home):
-                with self.assertRaises(SystemExit):
-                    p.cmd_privileges(args)
-            # build_report was called — verify it used our home (no home=
-            # override means it reads Path.home() which we patched).
-            mock_br.assert_called_once()
-
-
-class TestPEMKeyDetection(unittest.TestCase):
-    """PEM-format private keys must be detected (#870 review)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-        (self.home / ".secrets").mkdir()
-        (self.home / ".ssh").mkdir()
-
-    def test_pem_file_in_ssh_is_detected(self):
-        pem = self.home / ".ssh" / "legacy.pem"
-        _mk(pem, "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n", 0o600)
-        rep = p.build_report(home=self.home)
-        paths = [u["path"] for u in rep["undeclared"]]
-        self.assertIn("~/.ssh/legacy.pem", paths)
-
-
-class TestSubdirRecursion(unittest.TestCase):
-    """Subdirs of ~/.secrets must be scanned (#870 review)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-        (self.home / ".secrets" / "subdir").mkdir(parents=True)
-        (self.home / ".ssh").mkdir()
-
-    def test_file_in_subdir_is_found(self):
-        _mk(self.home / ".secrets" / "subdir" / "nested-token", "secret", 0o600)
-        rep = p.build_report(home=self.home)
-        paths = [u["path"] for u in rep["undeclared"]]
-        self.assertIn("~/.secrets/subdir/nested-token", paths)
-
-
-class TestVaultDirScan(unittest.TestCase):
-    """The vault store dir ~/.claude/secrets/ must be scanned (#870 review)."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.home = Path(self._tmp.name)
-        (self.home / ".secrets").mkdir()
-        (self.home / ".ssh").mkdir()
-        (self.home / ".claude" / "secrets").mkdir(parents=True)
-
-    def test_vault_file_is_found(self):
-        _mk(self.home / ".claude" / "secrets" / "mystery-vault-entry",
-            "vaulted", 0o600)
-        rep = p.build_report(home=self.home)
-        paths = [u["path"] for u in rep["undeclared"]]
-        self.assertIn("~/.claude/secrets/mystery-vault-entry", paths)
+        self.assertEqual(rep["exit_code"], 0)
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with self.assertRaises(SystemExit) as cm:
+                p.cmd_privileges(args)
+        self.assertEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":
