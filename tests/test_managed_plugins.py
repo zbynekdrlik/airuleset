@@ -766,6 +766,109 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
             "plugin again)")
 
 
+def _write_plugin_registry_with_paths(claude_dir: Path, key_path_map: dict):
+    """Write a fake registry where each key maps to an installPath.
+
+    ``key_path_map`` is ``{"key@market": "/install/path", ...}``.
+    The shape matches the REAL registry structure observed on dev1:
+    ``{"version": 2, "plugins": {"key": [{"scope": "user",
+    "installPath": "/path/..."}]}}``."""
+    reg_dir = claude_dir / "plugins"
+    reg_dir.mkdir(parents=True, exist_ok=True)
+    plugins = {}
+    for key, path in key_path_map.items():
+        plugins[key] = [{"scope": "user", "installPath": path}]
+    data = {"version": 2, "plugins": plugins}
+    (reg_dir / "installed_plugins.json").write_text(json.dumps(data))
+
+
+class TestStaleInstallPathHealing(TestCase):
+    """#845: after an account rename (montalu → montalu1, #537) every
+    plugin installPath still points at /home/montalu/… (nonexistent).
+    _managed_plugin_built() checks only key PRESENCE so
+    setup_managed_plugins() reports 'already built' and never reinstalls.
+    A stale installPath must be treated as 'not built' → re-install."""
+
+    def test_stale_installpath_triggers_reinstall(self):
+        """RED: a managed plugin with a stale installPath (nonexistent
+        dir) must be reinstalled by setup_managed_plugins()."""
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = Path(tempfile.mkdtemp())
+        # Write a registry where every managed plugin has an installPath
+        # pointing to a NONEXISTENT directory (the exact post-rename shape).
+        stale_paths = {k: "/nonexistent/old-home/.claude/plugins/cache/"
+                       + k.replace("@", "/") for k in airuleset.MANAGED_PLUGINS}
+        _write_plugin_registry_with_paths(d, stale_paths)
+        settings_path = d / "settings.json"
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            ok = airuleset.setup_managed_plugins()
+        self.assertTrue(ok)
+        install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
+        installed_keys = {c[3] for c in install_calls}
+        self.assertEqual(
+            installed_keys,
+            set(airuleset.MANAGED_PLUGINS),
+            "plugins with stale installPaths (nonexistent dirs) must be "
+            "reinstalled — a stale registry entry must never count as "
+            "'already built' (#845)")
+
+    def test_valid_installpath_is_not_healed(self):
+        """A registry entry whose installPath EXISTS on disk must NOT be
+        touched — only genuinely stale entries are healed."""
+        d = Path(tempfile.mkdtemp())
+        # Create a real installPath dir so the entry is NOT stale.
+        valid_path = d / "plugins" / "cache" / "valid"
+        valid_path.mkdir(parents=True)
+        _write_plugin_registry_with_paths(
+            d, {"superpowers@claude-plugins-official": str(valid_path)})
+        # Also write the OTHER managed plugins with valid paths.
+        reg_path = d / "plugins" / "installed_plugins.json"
+        data = json.loads(reg_path.read_text())
+        for k in airuleset.MANAGED_PLUGINS:
+            if k not in data["plugins"]:
+                kdir = d / "plugins" / "cache" / k.replace("@", "_")
+                kdir.mkdir(parents=True, exist_ok=True)
+                data["plugins"][k] = [{"scope": "user",
+                                       "installPath": str(kdir)}]
+        reg_path.write_text(json.dumps(data))
+        settings_path = d / "settings.json"
+        playwright_cache = Path(tempfile.mkdtemp())
+        (playwright_cache / "chromium-1234").mkdir()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE",
+                               playwright_cache), \
+                m.patch("subprocess.run") as run:
+            ok = airuleset.setup_managed_plugins()
+        self.assertTrue(ok)
+        run.assert_not_called()
+
+    def test_registry_without_installpath_is_unchanged(self):
+        """Entries that lack installPath entirely (the shape the test
+        helper _write_plugin_registry writes) must be treated as built —
+        backwards-compatible with the pre-#845 behaviour."""
+        d = Path(tempfile.mkdtemp())
+        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
+        settings_path = d / "settings.json"
+        playwright_cache = Path(tempfile.mkdtemp())
+        (playwright_cache / "chromium-1234").mkdir()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE",
+                               playwright_cache), \
+                m.patch("subprocess.run") as run:
+            ok = airuleset.setup_managed_plugins()
+        self.assertTrue(ok)
+        run.assert_not_called()
+
+
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
     """#273: a still-failing plugin install (after correct marketplace
     registration) must fail the target's deploy loudly (non-zero exit),
