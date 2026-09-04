@@ -120,13 +120,63 @@ def is_banned_model(value):
     every superseded id (`claude-opus-4-7`/`-4-8`, the BANNED `claude-opus-5`,
     `claude-fable-5-1`), and any unknown id. An EMPTY value is not "banned"
     (there is nothing to heal). MANAGED_MODEL is itself allowlisted, so the
-    unconditional self-heal can only ever land an allowed id."""
+    unconditional self-heal can only ever land an allowed id.
+
+    This is the EXACT-match, DISPATCH-surface predicate (the Agent-tool hook,
+    settings self-heal) — it stays exact on purpose. For a READ-ONLY audit
+    comparison against a served transcript model id (which may carry a
+    trailing Anthropic date-stamp, e.g. `claude-haiku-4-5-20251001`), use
+    `is_banned_model_for_audit` below instead."""
     v = _normalize_model(value)
     if not v:
         return False
     if v in _BARE_ALIASES:            # a bare alias floats — always banned as a value
         return True
     return not is_allowed_model(value)
+
+
+# #871 adversarial review 🔴3a: `cli_model_audit.py` / `watchdog/model_audit_job.py`
+# (Job 41) compared a served transcript model id against `is_banned_model`
+# EXACTLY, so a legitimately-served DATED snapshot id for an allowlisted tier
+# (Anthropic sometimes serves `claude-haiku-4-5-20251001` for the `claude-
+# haiku-4-5` tier) flagged as a FALSE `BANNED` violation. Dispatch SURFACES
+# (the Agent-tool hook, settings self-heal) stay on the exact predicates
+# above — this tolerant pair is for READ-ONLY audit comparisons only.
+_SERVED_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _strip_served_date_suffix(value):
+    """Strip a trailing `-YYYYMMDD` (exactly 8 digits) date-stamp suffix from
+    a served model id after the shared normalizer, e.g.
+    `claude-haiku-4-5-20251001` -> `claude-haiku-4-5`. A `-1`/`-11` suffix
+    (the BANNED `claude-fable-5-1`) is NOT 8 digits and is never stripped —
+    the alias-float ban survives this tolerance untouched."""
+    return _SERVED_DATE_SUFFIX_RE.sub("", _normalize_model(value))
+
+
+def is_allowed_model_for_audit(value):
+    """AUDIT-surface tolerance (#871): like `is_allowed_model`, but ALSO
+    allows a served model id carrying a trailing `-YYYYMMDD` date-stamp
+    suffix for an otherwise-allowlisted tier. Use ONLY for a READ-ONLY audit
+    comparison (`cli_model_audit.py`, `watchdog/model_audit_job.py`) — never
+    for a dispatch-surface check, which stays exact (`is_allowed_model`)."""
+    if is_allowed_model(value):
+        return True
+    stripped = _strip_served_date_suffix(value)
+    return bool(stripped) and stripped in {m.lower() for m in MODEL_TIERS.values()}
+
+
+def is_banned_model_for_audit(value):
+    """AUDIT-surface counterpart to `is_banned_model` — see
+    `is_allowed_model_for_audit`. A bare alias stays banned (an alias never
+    carries a date suffix, so this tolerance never weakens the alias-float
+    ban); an empty value stays not-banned."""
+    v = _normalize_model(value)
+    if not v:
+        return False
+    if v in _BARE_ALIASES:
+        return True
+    return not is_allowed_model_for_audit(value)
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC

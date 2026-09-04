@@ -491,12 +491,25 @@ def transcript_last_assistant_model(path):
     if none / unreadable. #871: `airuleset.py model-audit` reads this per live
     pane + subagent transcript to flag a session that FLOATED onto a model
     outside the exact-id allowlist (`model_changed` mid-lifetime — the launch
-    pin fixes only LAUNCH, never the running session)."""
+    pin fixes only LAUNCH, never the running session).
+
+    #871 adversarial review 🔴3b: this used to claim the shared skip semantics
+    but never actually applied the `text in _SENTINELS` check — it accepted
+    ANY entry carrying a non-empty `message.model`, including a trailing
+    SYNTHETIC/bookkeeping assistant record (observed in live transcripts
+    carrying `"model":"<synthetic>"` with sentinel/empty text), which is not
+    a real served model and produced a false model-float violation. Fixed by
+    applying the SAME sentinel-text skip `transcript_last_assistant_text`
+    uses, so the walk keeps scanning backward past a synthetic entry to the
+    last REAL served model."""
     for entry in reversed(_iter_jsonl_tail(path)):
         if not isinstance(entry, dict) or entry.get("type") != "assistant":
             continue
         if entry.get("isApiErrorMessage") is True:
             return ""
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue
         msg = entry.get("message")
         if not isinstance(msg, dict):
             continue

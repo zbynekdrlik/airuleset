@@ -61,7 +61,10 @@ def audit_model_floats(panes, projects_dir, find_transcript, read_model,
             records.append({
                 "pane": pane_id, "cwd": cwd, "kind": "main",
                 "transcript": str(main_path), "model": main_model,
-                "banned": airuleset.is_banned_model(main_model),
+                # #871 review 🔴3a: the AUDIT-tolerant predicate — tolerates a
+                # served dated snapshot id for an allowlisted tier, never a
+                # dispatch-surface check (those stay exact elsewhere).
+                "banned": airuleset.is_banned_model_for_audit(main_model),
             })
         for sub in subagent_iter(main_path):
             m = read_model(sub)
@@ -70,7 +73,7 @@ def audit_model_floats(panes, projects_dir, find_transcript, read_model,
             records.append({
                 "pane": pane_id, "cwd": cwd, "kind": "sub",
                 "transcript": str(sub), "model": m,
-                "banned": airuleset.is_banned_model(m),
+                "banned": airuleset.is_banned_model_for_audit(m),
             })
     return records
 

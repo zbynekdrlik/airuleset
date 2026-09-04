@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 7056,
+    "airuleset.py": 7106,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -435,7 +435,7 @@
     "watchdog/stash.py": 1514,
     "watchdog/sweep_jobs.py": 368,
     "watchdog/tmux_io.py": 1105,
-    "watchdog/transcripts.py": 1639,
+    "watchdog/transcripts.py": 1652,
     "watchdog/u_freshness.py": 365,
     "watchdog/u_labels.py": 369,
     "watchdog/usage.py": 395,

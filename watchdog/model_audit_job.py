@@ -20,7 +20,10 @@ MODEL_AUDIT_INTERVAL_S = 3600
 def _flag(read_model, path, kind, pane, cwd, out):
     import airuleset
     m = read_model(path)
-    if m and airuleset.is_banned_model(m):
+    # #871 review 🔴3a: the AUDIT-tolerant predicate — a served dated
+    # snapshot id for an allowlisted tier (e.g. claude-haiku-4-5-20251001)
+    # must not journal a false model-float violation.
+    if m and airuleset.is_banned_model_for_audit(m):
         out.append("model-float %s pane=%s model=%s cwd=%s "
                     "(off the allowlist — /model -> Fable 5 or relaunch)"
                     % (kind, pane, m, cwd))
