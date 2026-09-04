@@ -555,3 +555,4 @@ The david/marek lanes now have their own U-dot (owner ruling 2026-08-25) without
   ONLY its own entries — a full `size_ratchet.py --update` also sweeps in ~25 unrelated
   main-landed enrollments/tightenings (conflict surface for sibling lanes; the supervisor's
   merge-side ratchet pass owns those).
+- **#869 webterm-only key manager: quarantine/backup files containing FOREIGN keys must use `os.open(path, O_WRONLY|O_CREAT|O_TRUNC, 0o600)` from creation, never `open()+chmod()`.** The umask window between `open()` and `chmod()` briefly exposes the file at default umask perms — on a shared box (subdev: N uids) that window leaks foreign key material to peer accounts. `cli_owner_keys.py` does NOT have this problem (append-only, never writes a file of foreign keys); `cli_webterm_only.py` does (quarantine files contain the removed blobs). The `_write_0600()` helper centralises it. Fable adversarial review finding, 2026-09-05.
