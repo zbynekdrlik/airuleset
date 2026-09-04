@@ -554,7 +554,7 @@ push / PR / merge / deploy, never that backup.
    param of any kind.
    **TRAP (live gk incident 2026-08-14, closed by construction since #871): passing a `model` param
    of ANY kind is NEVER correct** — `hooks/block-unpinned-model-dispatch.sh` rejects it outright on
-   the `Agent` tool, aliased (`"opus"`, which used to resolve to the BANNED Opus 5) or exact-id. A gk
+   the `Agent` tool, aliased (`model: "opus"`, which used to resolve to the BANNED Opus 5) or exact-id. A gk
    main, told every dispatch must carry an explicit model, once launched Opus 5 live this way before
    catching + re-dispatching without the override — that whole failure class is now impossible. The
    Opus 4.6 tier is reached by NO `model` param, ever: either a model-less sub-dispatch inheriting

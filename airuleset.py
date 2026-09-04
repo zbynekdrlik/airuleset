@@ -99,8 +99,8 @@ def is_allowed_model(value):
     """True iff `value` is one of the EXACT allowlisted tier ids
     (MODEL_TIERS.values()), tolerating the `[1m]` context tag (so the Fable
     main form `claude-fable-5[1m]` is allowed). EXACT membership, never a
-    substring — a superseded/floating id (`claude-opus-4-6`, `claude-fable-5-1`,
-    a bare alias) is never allowed."""
+    substring — a superseded/floating BANNED id (`claude-opus-4-7`,
+    BANNED `claude-fable-5-1`, a bare alias) is never allowed."""
     v = _normalize_model(value)
     return bool(v) and v in {m.lower() for m in MODEL_TIERS.values()}
 
@@ -117,7 +117,7 @@ def is_banned_model(value):
     never drift (#495 one-source lesson). Allowlist semantics (owner directive
     2026-09-04, #871): a non-empty value that is neither an exact allowlisted
     tier id nor empty is banned — this covers every bare alias (which floats),
-    every superseded id (`claude-opus-4-6`/`-4-7`, `claude-opus-5`,
+    every superseded id (`claude-opus-4-7`/`-4-8`, the BANNED `claude-opus-5`,
     `claude-fable-5-1`), and any unknown id. An EMPTY value is not "banned"
     (there is nothing to heal). MANAGED_MODEL is itself allowlisted, so the
     unconditional self-heal can only ever land an allowed id."""

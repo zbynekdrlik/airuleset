@@ -1402,8 +1402,9 @@ Do ONE of these, then continue:
 
   • DISPATCH the state-gathering. Anything that is not a single fact — "what
     is the state of these five tickets", "why did that run fail", "read this
-    file/log" — goes to an Agent (subagent_type: Explore or general-purpose,
-    model: sonnet, effort: low/medium for a mechanical read). It brings back
+    file/log" — goes to the pinned sonnet-mechanical agent (subagent_type:
+    sonnet-mechanical, no model param, effort low/medium for a mechanical
+    read; #871 -- a model param is banned outright now). It brings back
     a CONCLUSION; you keep coordinating (main-context-hygiene.md). A
     dispatch resets this counter immediately.
   • BATCH the remaining reads into ONE call. Five \`gh issue view\` calls are
@@ -1432,8 +1433,9 @@ takes its own context with it (model-awareness.md ADVISOR shape; measured
 2026-07-26: gatekeeper's main ran 1222 Bash calls vs 97 dispatches in one
 hour, each re-sending the whole context — #66):
 
-  • dispatch an Explore/general-purpose subagent (model: sonnet, low/medium
-    effort for a mechanical read) and take back its CONCLUSION, not the raw
+  • dispatch the pinned sonnet-mechanical agent (subagent_type:
+    sonnet-mechanical, no model param, low/medium effort for a mechanical
+    read; #871) and take back its CONCLUSION, not the raw
     dump — main-context-hygiene.md.
   • then act on the conclusion here — that is the coordinator's job.
 
@@ -1454,8 +1456,9 @@ short surgical edits (under ${MAX} chars) — a dispatched WORKER types settled
 code (model-awareness.md ADVISOR shape; the /goal generalization is #54,
 david@subdev inline-354-edits incident):
 
-  • dispatch the implementation to a worker NOW — an Agent
-    (subagent_type: general-purpose, model: sonnet, effort: high) whose
+  • dispatch the implementation to a worker NOW — the pinned
+    sonnet-implementer agent (subagent_type: sonnet-implementer, no model
+    param, effort: high; #871) whose
     prompt carries the FULL context you hold (files, decisions, exact
     diffs to make, test expectations) — "I have it in my head" is not a
     reason; the prompt is how the head is handed over. For issue-shaped
