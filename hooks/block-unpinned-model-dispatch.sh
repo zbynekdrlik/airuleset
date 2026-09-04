@@ -15,7 +15,12 @@ set -euo pipefail
 #   * Agent    — block ANY non-empty .tool_input.model param (aliases are the
 #                float vector; the pinned agent type carries the model).
 #   * Workflow — block any .tool_input.script `(opts.)model: '<v>'` whose value
-#                is NOT one of the exact allowlisted ids.
+#                is NOT one of the exact allowlisted ids. A `.tool_input.
+#                scriptPath`-invoked Workflow (the documented iterate pattern —
+#                persist the script, re-invoke by path) is scanned the SAME
+#                way: its file content is read and checked, fail-OPEN if the
+#                path is unreadable (never wedge a dispatch on a transient
+#                read failure).
 #
 # Exit 2 = block; Claude reads STDERR as the reason. Stdin contract: the JSON
 # payload arrives on STDIN (.tool_input.*), never $TOOL_INPUT. Fail-open on a
@@ -24,6 +29,12 @@ set -euo pipefail
 # ALLOWLIST below MUST equal airuleset.MODEL_TIERS.values(); a lock test
 # (tests/test_block_unpinned_model_dispatch.py) asserts they match, so a
 # MODEL_TIERS edit that forgets this hook fails CI.
+#
+# KNOWN RESIDUAL (#871 adversarial review 🔵): the Workflow scan is a plain
+# grep over the script TEXT — it also matches a `model:` token that appears
+# inside PROSE or a string LITERAL (e.g. a prompt that merely NAMES a banned
+# id, not an actual opts.model assignment). This is the fail-SAFE direction
+# (over-block, never a silent bypass), so it is accepted, not fixed.
 
 command -v jq &>/dev/null || exit 0
 
@@ -32,6 +43,22 @@ INPUT=$(cat 2>/dev/null || echo "")
 
 MODEL=$(printf '%s' "$INPUT" | jq -r '.tool_input.model // empty' 2>/dev/null || echo "")
 SCRIPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.script // empty' 2>/dev/null || echo "")
+SCRIPT_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.scriptPath // empty' 2>/dev/null || echo "")
+
+# A scriptPath-invoked Workflow carries no inline `script` — read the file and
+# scan it the same way. Fail-OPEN on an unreadable path (never wedge a
+# dispatch on a transient read failure).
+if [ -n "$SCRIPT_PATH" ] && [ -r "$SCRIPT_PATH" ]; then
+    FILE_CONTENT=$(cat "$SCRIPT_PATH" 2>/dev/null || echo "")
+    if [ -n "$FILE_CONTENT" ]; then
+        if [ -n "$SCRIPT" ]; then
+            SCRIPT="$SCRIPT
+$FILE_CONTENT"
+        else
+            SCRIPT="$FILE_CONTENT"
+        fi
+    fi
+fi
 
 # The exact-id allowlist — keep in sync with airuleset.MODEL_TIERS (lock-tested).
 ALLOWLIST_RE='^(claude-fable-5|claude-opus-4-6|claude-sonnet-5|claude-haiku-4-5)(\[[0-9]+m\])?$'
@@ -70,8 +97,8 @@ if [ -n "$SCRIPT" ]; then
             break
         fi
     done < <(printf '%s' "$SCRIPT" \
-                | grep -oiE "model:[[:space:]]*[\"']?[a-z0-9._-]*[\"']?" \
-                | sed -E "s/^model:[[:space:]]*[\"']?//I; s/[\"']?$//")
+                | grep -oiE "model:[[:space:]]*[\"'\`]?[a-z0-9._-]*[\"'\`]?" \
+                | sed -E "s/^model:[[:space:]]*[\"'\`]?//I; s/[\"'\`]?\$//")
     if [ -n "$BADVAL" ]; then
         echo "BLOCKED: Workflow stage model \"$BADVAL\" is not an exact allowlisted id." >&2
         _pointer
