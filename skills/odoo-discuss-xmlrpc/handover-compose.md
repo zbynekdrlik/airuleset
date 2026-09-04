@@ -231,10 +231,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   armne SÁM cez `/json/2` — `schedule_close_hide_guarded(channel_id, hours=None)`.
   Guard: internal user + member/creator + sub-thread. **Kým release s metódou
   nie je na PROD, `GATEKEEPER-ACTION:` ostáva arm path.**
-  Mechanizmus (#5630): `_company_base_schedule_close_hide()` + ICP poháňa
-  `unpin_dt`, NIKDY `active=False`.
+  Mechanizmus (#5630): `_company_base_schedule_close_hide()` + ICP
+  `mail.closed_thread_hide_hours` (default 10h) poháňa `unpin_dt`, NIKDY
+  `active=False`.
   **Disarm-on-reply (#5630→SEM):** klientska odpoveď DISARMuje hide — zlož
-  marker EXPLICITNE; re-arm až po uzavretí.
+  marker EXPLICITNE (nikdy `last_interest_dt` race); re-arm až po uzavretí.
   **Per-stream sweep:** stream pravidelne auditne SVOJE vlákna — hotová téma
   s closing nótou → hide arm; bez nóty → nóta + arm; živá → nechať.
 

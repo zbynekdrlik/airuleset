@@ -16,7 +16,14 @@ set -euo pipefail
 # A workstation (dev1/dev2/gk) or a box with no marker exits 0 immediately — the
 # gk/owner can archive for cleanup, never blocked.
 #
-# Bypass: `# airuleset:discuss-archive-ok <reason>` as a trailing comment (logged).
+# Bypass (rare, NOT auto-logged — same honest convention as
+# block-heavy-build-toolchain.sh): `# airuleset:discuss-archive-ok <reason>` as
+# a trailing comment.
+#
+# DELIBERATELY NARROW (fail toward ALLOW): only KNOWN archive/deactivation shapes
+# are blocked. Accepted residuals: uppercase `FALSE`; `discuss.channel` `unlink`
+# (outright deletion — strictly worse than archiving); a bypass marker inside a
+# quoted string (low exploitability, same as block-heavy-build-toolchain.sh).
 #
 # Reads `.tool_input.command` on STDIN. Exit 2 = block (reason on STDERR).
 # Exit 0 = allow. ANY classifier malfunction FAILS OPEN.
@@ -55,7 +62,7 @@ if re.search(r'action_archive', cmd, re.IGNORECASE):
         "Use the sanctioned TTL self-hide instead:\n"
         "  schedule_close_hide_guarded(channel_id, hours=None) via /json/2\n"
         "(see skills/odoo-discuss-xmlrpc/handover-compose.md, #788/#853).\n"
-        "Bypass (rare, logged): # airuleset:discuss-archive-ok <reason>\n",
+        "Bypass (rare): # airuleset:discuss-archive-ok <reason>\n",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -67,20 +74,21 @@ if re.search(r'toggle_active', cmd, re.IGNORECASE):
         "Use the sanctioned TTL self-hide instead:\n"
         "  schedule_close_hide_guarded(channel_id, hours=None) via /json/2\n"
         "(see skills/odoo-discuss-xmlrpc/handover-compose.md, #788/#853).\n"
-        "Bypass (rare, logged): # airuleset:discuss-archive-ok <reason>\n",
+        "Bypass (rare): # airuleset:discuss-archive-ok <reason>\n",
         file=sys.stderr,
     )
     sys.exit(2)
 
 # 3. active=False / active: false in a write context
-#    Match both Python dict syntax and JSON syntax
-if re.search(r"""['"]active['"]\s*:\s*(False|false)\b""", cmd):
+#    Match Python dict syntax, JSON syntax, AND kwarg/attribute forms
+if re.search(r"""['"]active['"]\s*:\s*(False|false)\b""", cmd) or \
+   re.search(r"""\bactive\s*=\s*(False|false)\b""", cmd):
     print(
         "\n🚫 BLOCKED: setting discuss.channel active=False is banned on stream boxes.\n"
         "Use the sanctioned TTL self-hide instead:\n"
         "  schedule_close_hide_guarded(channel_id, hours=None) via /json/2\n"
         "(see skills/odoo-discuss-xmlrpc/handover-compose.md, #788/#853).\n"
-        "Bypass (rare, logged): # airuleset:discuss-archive-ok <reason>\n",
+        "Bypass (rare): # airuleset:discuss-archive-ok <reason>\n",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -89,4 +97,5 @@ if re.search(r"""['"]active['"]\s*:\s*(False|false)\b""", cmd):
 sys.exit(0)
 PYEOF
 
-exit "$RC"
+[ "$RC" -eq 2 ] || exit 0
+exit 2

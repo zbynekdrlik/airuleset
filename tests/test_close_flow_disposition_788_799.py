@@ -68,8 +68,9 @@ class Test799ClosureBullet(unittest.TestCase):
 
     def test_mid_window_reply_cancels_tacit_close(self):
         # lock the operative negation: a client reply mid-window must NOT be
-        # tacitly closed.
+        # tacitly closed, and silence must exclude a #745 reaction.
         self.assertIn("reaguj (#625)", self.win)
+        self.assertIn("#745", self.win)
 
     def test_acceptance_tacit_is_evidence_not_disposition(self):
         # must still carry a #627 disposition (mirrors #755 Acceptance-cited).
@@ -109,7 +110,7 @@ class Test788DispositionBullet(unittest.TestCase):
 
     def test_disarm_on_reply_decision(self):
         for tok in ("Disarm-on-reply", "DISARMuje hide",
-                    "EXPLICITNE"):
+                    "EXPLICITNE", "last_interest_dt"):
             self.assertIn(tok, self.win,
                           "#788 disposition bullet lost disarm token %r" % tok)
 
