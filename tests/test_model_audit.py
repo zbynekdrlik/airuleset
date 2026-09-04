@@ -142,6 +142,22 @@ class TestAuditModelFloats(TestCase):
         self.assertEqual(len(recs), 1)
         self.assertFalse(recs[0]["banned"], recs[0])
 
+    def test_dedupes_a_subagent_transcript_reported_more_than_once(self):
+        # #871: two panes resolving to the SAME main transcript (or a
+        # subagent_iter that yields the same path twice for any other
+        # reason) must not double-report the same sub transcript.
+        panes = [("%p1", "/a"), ("%p2", "/a")]
+        model_of = {"/x/a.jsonl": "claude-sonnet-5",
+                    "/x/a.jsonl#sub0": "claude-fable-5-1"}
+        find = self._fake_find({"/a": "claude-sonnet-5"})
+        read = lambda p: model_of.get(str(p), "")  # noqa: E731
+        subs = lambda main: [str(main) + "#sub0"]  # noqa: E731
+
+        recs = cli_model_audit.audit_model_floats(panes, "/proj", find, read,
+                                                  subagent_iter=subs)
+        sub_recs = [r for r in recs if r["kind"] == "sub"]
+        self.assertEqual(len(sub_recs), 1, sub_recs)
+
     def test_fable_5_1_still_flagged_despite_date_suffix_tolerance(self):
         # the date-suffix tolerance must NOT accidentally allow the banned
         # claude-fable-5-1 -- "-1" is not an 8-digit date suffix.
@@ -152,6 +168,67 @@ class TestAuditModelFloats(TestCase):
                                                   subagent_iter=lambda m: [])
         self.assertEqual(len(recs), 1)
         self.assertTrue(recs[0]["banned"], recs[0])
+
+
+class TestSubagentRecencyWindow(TestCase):
+    """#871 RED: a live pane's `subagents/` dir accumulates EVERY
+    subagent ever dispatched in that session's whole lifetime (weeks) --
+    `_subagent_transcripts` must consider only those written within
+    `cli_model_audit.MODEL_AUDIT_SUBAGENT_RECENCY_S` seconds of now. A
+    long-dead historical subagent (banned model, from before the ban even
+    existed) is not a live FLOAT risk and must not be reported."""
+
+    def _session_dir(self, tmpdir):
+        import os as _os
+        main_path = _os.path.join(tmpdir, "sess.jsonl")
+        subdir = _os.path.join(tmpdir, "sess", "subagents")
+        os_makedirs = _os.makedirs
+        os_makedirs(subdir, exist_ok=True)
+        return main_path, subdir
+
+    def test_old_subagent_excluded_only_recent_reported(self):
+        import os
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as d:
+            main_path, subdir = self._session_dir(d)
+            _write_transcript(Path(main_path), "claude-sonnet-5")
+            recent = os.path.join(subdir, "recent.jsonl")
+            old = os.path.join(subdir, "old.jsonl")
+            _write_transcript(Path(recent), "claude-fable-5-1")  # BANNED
+            _write_transcript(Path(old), "claude-fable-5-1")     # BANNED, stale
+            now = time.time()
+            os.utime(recent, (now, now))
+            three_days_ago = now - 3 * 86400
+            os.utime(old, (three_days_ago, three_days_ago))
+
+            panes = [("%p", "/proj")]
+            find = lambda pd, cwd: (main_path, 0.0)  # noqa: E731
+            recs = cli_model_audit.audit_model_floats(
+                panes, "/proj", find, transcript_last_assistant_model)
+            sub_recs = [r for r in recs if r["kind"] == "sub"]
+            self.assertEqual(len(sub_recs), 1, sub_recs)
+            self.assertEqual(sub_recs[0]["transcript"], recent)
+            self.assertTrue(sub_recs[0]["banned"])
+
+    def test_subagent_transcripts_helper_filters_by_mtime(self):
+        import os
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as d:
+            main_path, subdir = self._session_dir(d)
+            recent = os.path.join(subdir, "recent.jsonl")
+            old = os.path.join(subdir, "old.jsonl")
+            Path(recent).write_text("{}\n", encoding="utf-8")
+            Path(old).write_text("{}\n", encoding="utf-8")
+            now = time.time()
+            os.utime(recent, (now, now))
+            os.utime(old, (now - 3 * 86400, now - 3 * 86400))
+
+            out = cli_model_audit._subagent_transcripts(main_path, now=now)
+            self.assertEqual(out, [recent])
 
 
 class TestAuditTolerantPredicate(TestCase):
