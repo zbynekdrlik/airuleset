@@ -657,11 +657,14 @@ gap in either.
    DESIGN-HEAVY member: run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the whole
    batch (the gate guards EVERY automatic Fable dispatch — this DESIGN-phase consult and the later
    REVIEW-phase pass reuse the SAME gate result, see the Model bullet in Step 2). Gate OPEN → dispatch ONE read-only
-   `subagent_type: "Plan"` agent per member at `model: "fable"`; gate CLOSED → do NOT spend a new
-   gated dispatch (omitting the override would inherit the Fable main — exactly what a CLOSED gate
-   says there is no headroom for): hold the design synthesis in the main session itself (the
+   `subagent_type: "fable-advisor"` agent per member (no `model` param — its frontmatter pins
+   `claude-fable-5`, #871; the built-in `Plan` agent type is retired for this dispatch since it has
+   no pinned tier and a `model` param on it is now blocked outright); gate CLOSED → do NOT spend a
+   new gated dispatch (a model-less dispatch would inherit the Fable main — exactly what a CLOSED
+   gate says there is no headroom for): hold the design synthesis in the main session itself (the
    Fable-MAIN-at-CLOSED carve-out, `model-awareness.md`), grounding it via cheap read-only
-   collection — never the banned `opus` alias, never sonnet for judgment. The (gate-OPEN) `Plan`
+   collection on the pinned `sonnet-mechanical` agent — never Opus/Sonnet for the judgment itself.
+   The (gate-OPEN) `fable-advisor`
    dispatch asks
    for 2-3 candidate architectural approaches with trade-offs and a recommendation, grounded in a
    WHOLE-REPO view. Post the `Plan` agent's synthesis to the ticket via `gh issue comment <N>`
@@ -715,43 +718,47 @@ gap in either.
      worker's OWN Step 0 now posts its own validation evidence per issue as a durable `gh issue
      comment`, mechanically checked at its SubagentStop (`design_gate.py`) — so validation coverage
      no longer depends on your Step 1b prose actually having run for this specific dispatch.
-   - **Model — PER-PHASE, FLEET-WIDE** (`model-awareness.md` ACTIVE policy 2026-08-26; Opus 5 is
-     BANNED — never any `opus`-aliased dispatch, never sonnet on anything complex; the old airuleset
-     Fable-MAJORITY exception is ABOLISHED — the same split on every repo). A ticket runs on TWO
-     tiers, never one: **(a) the DESIGN phase** (Step 1c) and **(b) the REVIEW phase** are the
-     gated-Fable dispatches; **(c) the IMPLEMENTATION worker** runs Sonnet 5 by default (a
-     settled-design ticket) or Opus 4.6 (complexity). The `autopilot-worker` frontmatter pins
-     `model: claude-opus-4-6` = the escalation tier + fail-safe default; for an ordinary
-     SETTLED-DESIGN ticket downtier it with an explicit **`model: "sonnet"`**, and OMIT the param
-     (frontmatter pin stands → Opus 4.6) to ESCALATE when the implementation carries complexity —
-     a multi-component change, concurrency, a security boundary, a hard-debug lane, or a
-     prior Sonnet worker already failed on this ticket (unsure → Opus 4.6; 4.8 has no param alias and the
-     `opus` alias is banned, so the pin is the only way to reach it — fail-safe UP). Either way
-     **the implementation worker carries no Fable override** —
-     never a `model: fable` override, never `model: "sonnet"` for a complex ticket, never the
-     banned `opus` alias (#721).
+   - **Model — PER-PHASE, FLEET-WIDE, EXACT-ID ALLOWLIST** (`model-awareness.md` ACTIVE policy
+     2026-08-26 + #871; Opus 5 AND Fable 5.1 are BANNED — a dispatch NEVER carries a `model` param
+     at all, aliased or exact-id; never sonnet on anything complex; the old airuleset Fable-MAJORITY
+     exception is ABOLISHED — the same split on every repo). A ticket runs on TWO tiers, never one:
+     **(a) the DESIGN phase** (Step 1c) and **(b) the REVIEW phase** are the gated dispatches of the
+     pinned `fable-advisor` agent; **(c) the IMPLEMENTATION worker** runs Sonnet 5 by default (a
+     settled-design ticket) or Opus 4.6 (complexity) — chosen by WHICH PINNED AGENT TYPE you
+     dispatch, never a param: `subagent_type: "sonnet-implementer"` (no `model` param — its
+     frontmatter pins `claude-sonnet-5`) for an ordinary SETTLED-DESIGN ticket, or `subagent_type:
+     "autopilot-worker"` (its frontmatter pins `claude-opus-4-6`) to ESCALATE when the
+     implementation carries complexity — a multi-component change, concurrency, a security
+     boundary, a hard-debug lane, or a prior Sonnet worker already failed on this ticket (unsure →
+     `autopilot-worker`; the pin is the ONLY way to reach Opus 4.6 now — fail-safe UP). Either way
+     **the implementation worker NEVER dispatches as `fable-advisor`** — never a Fable override,
+     never Sonnet for a complex ticket (#721).
      For the DESIGN consult (Step 1c) and the REVIEW pass, run
      `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE —
-     **gate OPEN (exit 0) → dispatch `model: fable` for that PHASE; gate CLOSED (exit 1) → dispatch AS-IS on `claude-opus-4-6`.**
+     **gate OPEN (exit 0) → dispatch the pinned `fable-advisor` agent for that PHASE; gate CLOSED
+     (exit 1) → dispatch `autopilot-worker` AS-IS (`claude-opus-4-6`).**
      Whether a ticket EARNS the Fable design + review phases is the JUDGMENT-CONTENT phase selector
      (non-trivial implementation, review of a non-trivial change, hard debug, design/synthesis —
      when unsure, it QUALIFIES for those phases); a genuinely routine/mechanical ticket (one obvious
      shape, zero design decisions) gets a one-paragraph design comment (written by the WORKER on its
      own implementation tier — Sonnet 5 for a settled-design ticket) + a trivial-diff review, no
-     Fable at all. Never dispatch an automatic `model: fable` without the gate check. You
+     Fable at all. Never dispatch the `fable-advisor` agent without the gate check. You
      (the main session) re-verify every line of the worker's evidence block regardless of its model.
-     - **SETTLED-DESIGN vs COMPLEX at DISPATCH (which implementation tier the worker gets, #721)** —
-       decided from the SAME Step-1c triage, never at cycle time: a member that is NOT design-heavy
-       AND carries NO escalation criterion → dispatch the worker with an explicit `model: "sonnet"`
-       (Sonnet 5, the default). A member that is design-heavy, OR carries any of — a multi-component
-       change, concurrency, a security boundary, a hard-debug lane, or a prior Sonnet worker already
-       failed on this ticket — → dispatch it AS-IS (no `model` param → the frontmatter pin, Opus 4.6);
-       unsure → AS-IS (4.8). "Settled" means the APPROACH is decided (a design-heavy member already
+     - **SETTLED-DESIGN vs COMPLEX at DISPATCH (which agent type/implementation tier the worker
+       gets, #721/#871)** — decided from the SAME Step-1c triage, never at cycle time: a member
+       that is NOT design-heavy AND carries NO escalation criterion → dispatch `subagent_type:
+       "sonnet-implementer"` (Sonnet 5, the default, no `model` param — its OWN pinned frontmatter
+       is `claude-sonnet-5`; the prompt shape is IDENTICAL to an `autopilot-worker` dispatch — "Work
+       issue(s) #N in <repo>" — since it follows the same CYCLE, at its Sonnet tier). A member that
+       is design-heavy, OR carries any of — a multi-component change, concurrency, a security
+       boundary, a hard-debug lane, or a prior Sonnet worker already failed on this ticket — →
+       dispatch `subagent_type: "autopilot-worker"` (its own pin, Opus 4.6); unsure →
+       `autopilot-worker`. "Settled" means the APPROACH is decided (a design-heavy member already
        got its Step-1c Fable synthesis), NOT that the worker's own CYCLE-step-2 design comment is
        already posted — the worker still writes that during implementation, on its dispatched tier.
-       A Sonnet worker that hits a hard wall mid-ticket cannot re-tier itself: it RETURNS with its
-       findings → you re-dispatch that ticket AS-IS on the `claude-opus-4-6` pin (the "prior Sonnet
-       worker failed" criterion).
+       A `sonnet-implementer` worker that hits a hard wall mid-ticket cannot re-tier itself: it
+       RETURNS with its findings → you re-dispatch that ticket on `autopilot-worker` (the "prior
+       Sonnet worker failed" criterion).
    - **Authority rides the dispatch.** Include the resolved profile in every worker prompt
      (`Authority profile: <profile>` + what "done" means for it). branch-merge: the worker's PR
      targets and merges into the INTEGRATION branch (develop unless the project CLAUDE.md names
