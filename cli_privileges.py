@@ -54,6 +54,12 @@ KIND_OAUTH = "oauth"
 KIND_HOP = "hop"
 KIND_SUDO = "sudo"
 
+#: The account's default ssh key — the identity the no-``identity`` REMOTE_HOSTS
+#: entries authorize. Used as the bucket key for those hosts so the default-key
+#: entry's ``fleet_hosts`` is derived live, distinct from the webterm keys whose
+#: ``identity_of`` is "" (not a REMOTE_HOSTS identity at all).
+DEFAULT_SSH_KEY = "~/.ssh/id_ed25519"
+
 
 @dataclass(frozen=True)
 class Privilege:
@@ -117,7 +123,7 @@ PRIVILEGES: List[Privilege] = [
                  "de-authorize dev1's old default key on those targets",
         must_move=True,
         used_by=("cli_fleet.py:190 (default-key REMOTE_HOSTS)",),
-        identity_of="",  # the default (no-identity) reach
+        identity_of=DEFAULT_SSH_KEY,  # covers the no-identity fleet bucket
     ),
     Privilege(
         name="spinbike_vps",
@@ -331,7 +337,9 @@ def _fleet_hosts_by_identity() -> dict:
     import cli_fleet
     buckets: dict = {}
     for h in cli_fleet.REMOTE_HOSTS:
-        ident = h.get("identity", "") or ""
+        # no-identity hosts authorize the account DEFAULT key, so bucket them
+        # under it (the default-key entry's identity_of), never under "".
+        ident = (h.get("identity", "") or "") or DEFAULT_SSH_KEY
         buckets.setdefault(ident, []).append(h["name"])
     for h in getattr(cli_fleet, "SHARED_STREAM_GUARD_HOSTS", []):
         ident = h.get("identity", "") or ""
@@ -352,9 +360,13 @@ def fleet_identity_paths() -> set:
 # --------------------------------------------------------------------------- #
 # probe
 # --------------------------------------------------------------------------- #
-def probe_entry(priv: Privilege, home: Path) -> dict:
+def probe_entry(priv: Privilege, home: Path,
+                fleet_buckets: Optional[dict] = None) -> dict:
     """Read-only live state of ONE declared entry. Never returns a token
-    value — only present/mode/owner/fingerprint or ``len=``."""
+    value — only present/mode/owner/fingerprint or ``len=``. For an ssh-key /
+    hop entry whose reach is derived from ``cli_fleet``, ``fleet_hosts`` lists
+    the actual hosts that identity reaches (live from the registry, never
+    re-declared)."""
     rec: dict = {
         "name": priv.name,
         "kind": priv.kind,
@@ -366,6 +378,9 @@ def probe_entry(priv: Privilege, home: Path) -> dict:
         "owner": None,
         "detail": "",
         "wrong_mode": False,
+        "fleet_hosts": (sorted(fleet_buckets.get(priv.identity_of, []))
+                        if (fleet_buckets is not None and priv.identity_of)
+                        else []),
     }
     if priv.kind == KIND_HOP or not priv.local_path:
         rec["detail"] = "derived reach (no local file)"
@@ -461,7 +476,8 @@ def build_report(home: Optional[Path] = None) -> dict:
     """The whole F0 result: probed declared entries + undeclared extras +
     a findings summary + the exit code. `home` is test-injectable."""
     h = _home(home)
-    entries = [probe_entry(p, h) for p in PRIVILEGES]
+    buckets = _fleet_hosts_by_identity()
+    entries = [probe_entry(p, h, buckets) for p in PRIVILEGES]
     declared_paths = {p.local_path for p in PRIVILEGES if p.local_path}
     undeclared = scan_undeclared(h, declared_paths)
 

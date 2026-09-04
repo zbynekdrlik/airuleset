@@ -89,6 +89,15 @@ class TestRemoteHostsSymmetry(unittest.TestCase):
         expect = {(h.get("identity", "") or "") for h in cli_fleet.REMOTE_HOSTS}
         self.assertEqual(p.fleet_identity_paths(), expect)
 
+    def test_fleet_hosts_derived_live_from_cli_fleet(self):
+        # reach is DERIVED from cli_fleet, not re-declared: the gatekeeper key
+        # reaches gatekeeper@gk, the default key reaches a no-identity host,
+        # and a webterm key (not a REMOTE_HOSTS identity) reaches nothing.
+        by = {e["name"]: e for e in p.build_report()["entries"]}
+        self.assertIn("gatekeeper", by["gatekeeper_access_ed25519"]["fleet_hosts"])
+        self.assertIn("dev2", by["default_key_id_ed25519"]["fleet_hosts"])
+        self.assertEqual(by["webterm_david_ed25519"]["fleet_hosts"], [])
+
 
 class _FakeArgs:
     def __init__(self, json=False):
@@ -232,7 +241,8 @@ class TestJsonSchema(unittest.TestCase):
         self.assertEqual(len(rep["entries"]), len(p.PRIVILEGES))
         e0 = rep["entries"][0]
         for key in ("name", "kind", "local_path", "must_move", "present",
-                    "mode", "mode_ok", "owner", "detail", "wrong_mode"):
+                    "mode", "mode_ok", "owner", "detail", "wrong_mode",
+                    "fleet_hosts"):
             self.assertIn(key, e0)
         # findings schema
         for key in ("undeclared_count", "wrong_mode_count", "wrong_mode_names"):
