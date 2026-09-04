@@ -102,6 +102,13 @@ RELEASE_GAP_MIN_S = 1 * 3600
 # AIRULESET_RELEASE_GAP_MIN_AHEAD, floored at 1 — a units error must never make a
 # 0-commit "gap" nudge). Default 1: any unreleased integration commit qualifies.
 RELEASE_GAP_MIN_AHEAD = 1
+# #846: time-based thresholds for the gap trigger. The gap is ripe when the
+# oldest commit ahead is at least 2h old AND the last deploy is at least 3h
+# ago (or unmeasurable → that conjunct is ignored). Unmeasurable
+# oldest_ahead_ts → the 2h conjunct is ignored too (fail-safe toward today's
+# gap-only behaviour, never toward suppressing a real nudge).
+OLDEST_AHEAD_THRESHOLD_S = 2 * 3600   # 2 hours
+DEPLOY_AGE_THRESHOLD_S = 3 * 3600     # 3 hours
 # env AIRULESET_RELEASE_STATE_FETCH_TTL_S — how long a `{ahead,in_flight,train}` read is
 # CACHED per repo (`state["release_state_cache"]`, keyed by cwd, shared across
 # every armed pane on that repo). 30 min — half the #812 1h cadence (was ~8% of
@@ -251,7 +258,8 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 #                 attempts (the bounded-retry back-off — one cadence, so a
 #                 persistently-swallowing pane is not re-typed every sweep).
 
-def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None):
+def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
+                      oldest_ahead_ts=None, deploy_age=None):
     """Pure verdict for ONE armed session's release-gap state. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `rstate` is
     the fetched `{"ahead": int, "in_flight": bool, "train": bool}` (the #698
@@ -265,6 +273,15 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None):
     nudge — the semantic flip (today's `in_flight=True` blanket suppressor
     becomes conditional). When `lane` is None → today's exact behaviour
     (backward compat for legacy callers).
+
+    #846 continuation: `oldest_ahead_ts` (epoch, or None when unmeasurable) and
+    `deploy_age` (seconds since last deploy, or None when unmeasurable) are
+    time-based threshold gates on the nudge trigger. The gap is ripe only when
+    `oldest_ahead_age >= OLDEST_AHEAD_THRESHOLD_S` (2h) AND
+    (`deploy_age >= DEPLOY_AGE_THRESHOLD_S` (3h) OR deploy_age is None).
+    Unmeasurable oldest_ahead_ts → the 2h conjunct is ignored (fail-safe toward
+    today's gap-only behaviour). Both default None for legacy 5-arg callers
+    (thresholds inactive → byte-identical to pre-#846).
 
     The gap is "real" when `ahead >= min_ahead`. Below that (incl. ahead 0) is a
     drained/absent gap -> `clear` (pop the rec). A real gap with `in_flight` True
@@ -292,6 +309,19 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None):
         return ("skip", rec, "undetermined")
     if ahead < min_ahead:
         return ("clear", None, "no-gap")
+    # #846 continuation: time-based thresholds gate whether the gap is ripe.
+    # When oldest_ahead_ts is measurable, the oldest commit ahead must be at
+    # least OLDEST_AHEAD_THRESHOLD_S old. When unmeasurable → conjunct ignored
+    # (fail-safe toward today's gap-only behaviour).
+    if isinstance(oldest_ahead_ts, (int, float)):
+        oldest_age = now - oldest_ahead_ts
+        if oldest_age < OLDEST_AHEAD_THRESHOLD_S:
+            return ("wait", rec, "gap-fresh")
+    # When deploy_age is measurable, it must be at least DEPLOY_AGE_THRESHOLD_S.
+    # Unmeasurable → conjunct ignored.
+    if isinstance(deploy_age, (int, float)):
+        if deploy_age < DEPLOY_AGE_THRESHOLD_S:
+            return ("wait", rec, "deploy-recent")
     if in_flight:
         # #846: in_flight + STALLED lane (cut-ci-red, shadow-failed) → nudge
         # instead of suppressing. The train is "in flight" but stuck on a RED
@@ -532,8 +562,17 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     rec = rrecs.get(sid)
     if not isinstance(rec, dict):
         rec = {}
+    # #846 continuation: extract oldest_ahead_ts and deploy_age (seconds) from
+    # rstate for the time-based threshold gates.
+    oldest_ahead_ts = _parse_iso_ts(rstate.get("oldest_ahead_ts")
+                                    ) if isinstance(rstate, dict) else None
+    deploy_age_h = _deploy_age_hours(rstate, now)
+    deploy_age_s = (deploy_age_h * 3600.0
+                    if isinstance(deploy_age_h, (int, float)) else None)
     action, new_rec, reason = _release_decision(rec, rstate, now, cadence,
-                                                min_ahead, lane=lane)
+                                                min_ahead, lane=lane,
+                                                oldest_ahead_ts=oldest_ahead_ts,
+                                                deploy_age=deploy_age_s)
 
     if action == "skip":
         logs.append("release-gap %s -> skip:%s (state unchanged)" % (loc, reason))
