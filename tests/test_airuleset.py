@@ -1850,6 +1850,41 @@ class TestPrePushTestCheckSubjectRecognition(TestCase):
                          "non-test subject wrongly counted: " + (r.stdout + r.stderr))
         self.assertIn("BLOCKED", r.stdout + r.stderr)
 
+    def test_fix_before_test_subject_still_blocks(self):
+        """Y1 review finding: Gate 2 ordering must still block when a fix
+        commit appears BEFORE a test-subject commit — the per-commit walk
+        must not degenerate into a branch-wide pre-scan."""
+        root, g = self._mkrepo()
+        # Fix commit FIRST (wrong order)
+        open(os.path.join(root, "src_mod.rs"), "a").write("// fix\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "fix: edge case in overall_pass")
+        # Test-subject commit AFTER (too late)
+        open(os.path.join(root, "src_mod.rs"), "a").write("// red change\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "test: add assertion for edge case")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2,
+                         "fix-before-test order not blocked: " + (r.stdout + r.stderr))
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+    def test_testing_prefix_does_not_count_as_test_commit(self):
+        """Y2 review finding: `testing:` (longer than `test:`) must NOT
+        match the `^test[:(]` regex — the boundary at `[:(]` pins the
+        exact `test(` / `test:` prefixes only."""
+        root, g = self._mkrepo()
+        open(os.path.join(root, "src_mod.rs"), "a").write("// tweak\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "testing: tighten the loop")
+        open(os.path.join(root, "src_mod.rs"), "a").write("// fix\n")
+        g("add", "src_mod.rs")
+        g("commit", "-qm", "fix: edge case in overall_pass")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2,
+                         "testing: wrongly counted as test commit: "
+                         + (r.stdout + r.stderr))
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
 
 class TestPrePushBaseSyncHook(TestCase):
     """pre-push-base-sync.sh — GLOBAL conflict-churn guard. Blocks a push ONLY when
