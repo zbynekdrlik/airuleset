@@ -261,13 +261,19 @@ def _session_registry_signal(cwd_key, uuid, home, now, proc_dir) -> str:
             reg_names = os.listdir(sdir)
         except OSError:
             reg_names = []
+        had_corrupt = False
         for rn in reg_names:
             if not rn.endswith(".json"):
                 continue
             try:
                 data = json.loads((sdir / rn).read_text())
             except (OSError, ValueError):
-                return _SESS_UNDET
+                # Fable review 2 blue 1: a single corrupt registry file must
+                # NOT disable the whole rung -- keep scanning for a genuine
+                # match (a corrupt file only poisons the verdict when no
+                # readable record decides it).
+                had_corrupt = True
+                continue
             if not isinstance(data, dict) or data.get("sessionId") != uuid:
                 continue
             pid = data.get("pid")
@@ -284,7 +290,9 @@ def _session_registry_signal(cwd_key, uuid, home, now, proc_dir) -> str:
                 return _SESS_LIVE
         except OSError:
             return _SESS_UNDET
-        return _SESS_DEAD
+        # A corrupt file that we skipped (no match found among readable
+        # files) MIGHT have been this uuid's record -- fail-safe UNDET/KEEP.
+        return _SESS_UNDET if had_corrupt else _SESS_DEAD
     except OSError:
         return _SESS_UNDET
 
@@ -394,7 +402,9 @@ def scratch_session_live_recheck(path, home=None, now=None, proc_dir=None) -> bo
         if not _SESSION_UUID_RE.match(p.name):
             return False
     except Exception:
-        return False
+        # Fable review 2 blue 2: a path we cannot even classify should
+        # refuse the delete (fail-safe KEEP), not allow it.
+        return True
     try:
         return _session_liveness(p, p.parent.name, p.name, home, now, proc_dir) != _SESS_DEAD
     except Exception:

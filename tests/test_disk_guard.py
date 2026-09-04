@@ -1192,12 +1192,10 @@ def test_drain_refuses_scratch_delete_when_recheck_says_live(tmp_path):
     (sess / "tasks").mkdir(parents=True)
     (sess / "tasks" / "f.bin").write_bytes(b"x" * 100)
     a = {"cls": "scratch", "path": str(sess), "bytes": 100, "kind": "delete"}
-    raised = False
-    try:
-        dg._perform_action(a, scratch_live_fn=lambda p, n: True, now=_NOW)
-    except OSError:
-        raised = True
-    assert raised, "a session that raced live must be REFUSED"
+    # Fable review 2: _perform_action returns -1 (REFUSE signal) instead of
+    # raising, so execute_drain logs it as REFUSE, not FAIL.
+    result = dg._perform_action(a, scratch_live_fn=lambda p, n: True, now=_NOW)
+    assert result == -1, "a session that raced live must return -1 (REFUSE)"
     assert sess.exists(), "a refused session must NOT be deleted"
     dg._perform_action(a, scratch_live_fn=lambda p, n: False, now=_NOW)
     assert not sess.exists(), "a genuinely dead session is deleted normally"
@@ -1231,3 +1229,26 @@ def test_largest_live_scratch_single_discovery_and_change_only_log(tmp_path, mon
     dg.run_disk_guard(**kw)
     assert log.read_text().count("LIVE-SCRATCH") == 1, \
         "an unchanged largest_live_scratch must not log a second LIVE-SCRATCH line"
+
+
+def test_no_scratch_discovery_at_healthy_pressure(tmp_path):
+    """Fable review round 2 RED: at healthy pressure (<80%), the du-heavy
+    scratch discovery must NEVER run -- it is gated on the same pressure
+    floor as the drain itself. A box at 40% must not walk /tmp every 60s."""
+    uid = os.getuid()
+    calls = {"n": 0}
+
+    def _counting_discover(now, home):
+        calls["n"] += 1
+        return []
+
+    dg.run_disk_guard(
+        now=_NOW, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (40, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: uid or 1000, mounts=("/",),
+        scratch_discover_fn=_counting_discover)
+    assert calls["n"] == 0, \
+        "scratch discovery must NOT run at healthy pressure (<80%%)"
+    status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert "largest_live_scratch" not in status, \
+        "no largest_live_scratch at healthy pressure"

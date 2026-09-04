@@ -1193,11 +1193,12 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         # <uuid>`) between plan and act -- re-check per-session liveness right
         # before rmtree and REFUSE if it is now live/undeterminable (the sweep
         # path already does this; the disk-guard drain path did not).
+        # Returns -1 (REFUSE signal) instead of raising, so execute_drain logs
+        # it as a safety REFUSE, not a FAIL (Fable review round 2, blue 2).
         if a.get("cls") == "scratch":
             live_fn = scratch_live_fn or _default_scratch_live
             if live_fn(path, now):
-                raise OSError("scratch session %s became live/undeterminable since "
-                              "plan -- refused (TOCTOU #863)" % path)
+                return -1
         _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes
     return 0
@@ -1292,6 +1293,12 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             except Exception as e:
                 rung_lines.append(_log_line(now, "FAIL", path, planned,
                                             "action error: %r" % e))
+                continue
+            # #863 Fable review 2: a TOCTOU safety REFUSE (the session became
+            # live since plan) is logged as REFUSE, not as a success or FAIL.
+            if freed is not None and freed < 0:
+                rung_lines.append(_log_line(now, "REFUSE", path, planned,
+                                            "TOCTOU: session live/undeterminable since plan (#863)"))
                 continue
             verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
             rung_lines.append(_log_line(now, verb, path, planned,
@@ -1504,8 +1511,12 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # ONCE per drain and ONLY when a drain runs (gated on the SAME cadence as
     # the drain -- not a second full discovery every poll in the 80-95 % band),
     # and its rows are SHARED with the scratch drain planner below.
-    will_drain = (not is_root) and _cadence_allows_drain(
-        status["worst_pct"], _drain_due(home, now, min_drain_interval_s), dry_run=dry_run)
+    will_drain = ((not is_root)
+                  and status["level"] not in ("ok", "notice")
+                  and _cadence_allows_drain(
+                      status["worst_pct"],
+                      _drain_due(home, now, min_drain_interval_s),
+                      dry_run=dry_run))
     scratch_rows = None
     if will_drain:
         # visibility only, NEVER deleted, no ping (the session cleans its own
@@ -1583,9 +1594,10 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                               now=now, dry_run=dry_run)
         if not dry_run:
             _mark_drained(home, now)        # never cadence-gate a REAL drain off a dry-run
-        # #863 review 6: after the drain, rmdir a cwd-key dir emptied by removing
-        # its LAST dead session (derived from the ACTUAL removed session paths,
-        # empty-only -- a live sibling keeps the dir non-empty and safe).
+        # #863 review 6: after the drain, rmdir cwd-key dirs that HELD planned
+        # dead-session candidates (reason=None + uuid). Safe because rmdir is
+        # empty-only + uid-scoped: a not-actually-removed session (ladder stopped
+        # early, or TOCTOU refused) keeps its dir non-empty and the rmdir skips.
         if not dry_run and scratch_rows:
             try:
                 from cli_scratch_sweep import _remove_empty_cwd_key_dirs as _rm_ck
