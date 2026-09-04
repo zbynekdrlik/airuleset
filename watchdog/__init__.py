@@ -1894,6 +1894,15 @@ from watchdog.wip_ref_sweep import (  # noqa: E402
     WIP_REF_SWEEP_INTERVAL_S as WIP_REF_SWEEP_INTERVAL_S,
 )
 
+# #871 — Job 41, the MODEL-FLOAT AUDIT (stdlib-only + one local `airuleset`
+# import inside `_flag`, no watchdog-package import at its top level → no
+# cycle). Imported as a submodule (not `from ... import model_float_audit_job`)
+# so the characterization suite's recording-stub seam
+# (`wd.model_audit_job.model_float_audit_job`) patches the SAME callable
+# run_once actually invokes below — a bare-name local import would rebind a
+# fresh reference every call and never see the patch.
+from watchdog import model_audit_job as model_audit_job  # noqa: E402,F401
+
 # #834 — Job 40, the per-box DISK-PRESSURE GUARD (stdlib-only, no watchdog
 # import at its top level → no cycle; reuses the per-class discovery functions
 # under pressure).
@@ -2051,7 +2060,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
              u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False):
-    """Scan every `claude` pane once. 40 numbered jobs per poll — 34 LIVE and 6
+    """Scan every `claude` pane once. 41 numbered jobs per poll — 35 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2718,6 +2727,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           filesystem, never as root (the root/system leg is #841). >= 90 % after
           the drain → machine-channel escalation, box-wide deduped once/day.
           `watchdog/disk_guard.py`'s docstring is the SSOT.
+      (41) MODEL-FLOAT AUDIT (#871), self-gated to hourly via `_sweep_due`
+          (`state["model_audit_last_ts"]`) — ALWAYS wired (reads only local
+          transcripts + the pane list already fetched above, no external
+          fetch). Reads the newest-assistant model of every live pane's MAIN
+          transcript and its single newest subagent transcript, and journals
+          any model NOT on the exact-id allowlist (`airuleset.MODEL_TIERS`) —
+          a session that floated off its launch pin mid-lifetime (e.g. onto
+          the banned Fable 5.1). MACHINE-CHANNEL ONLY (the #850 repo-health
+          class) — never pings the owner; the remedy is `/model` or a
+          relaunch. `watchdog/model_audit_job.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -2790,7 +2809,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                          # shared transcript, or a sudo-hosted one, is
                                          # still genuinely LIVE even though job 10 skips
                                          # it this particular sweep.
-    for pid, cwd in list_claude_panes(run, dry_run=dry_run):
+    # Materialized ONCE (#871 review) — job 41 (model_float_audit) reuses this
+    # SAME list below instead of a second `list_claude_panes` tmux call; the
+    # characterization suite pins "pane loop runs before EVERY standalone job,
+    # list_claude_panes never fires twice" (test_run_once_characterization.py).
+    panes = list(list_claude_panes(run, dry_run=dry_run))
+    for pid, cwd in panes:
         live_pane_ids.add(pid)
         tinfo = find_active_transcript(projects_dir, cwd)
         if not tinfo:
@@ -4535,24 +4559,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
 
     # Job 41 — MODEL-FLOAT AUDIT (#871). ALWAYS wired (reads local transcripts
     # + the pane list, no external fetch), self-gated to hourly via the GATE
-    # (`_sweep_due` — so `list_claude_panes` only runs when due). MACHINE-CHANNEL
+    # (`_sweep_due` — so the actual per-pane transcript work only runs when
+    # due; it reuses the SAME `panes` list the pane loop above already
+    # materialized — no second `list_claude_panes` tmux call). MACHINE-CHANNEL
     # ONLY (the #850 repo-health class): journals a `model-float …` line per
     # live pane/subagent on a model outside the exact-id allowlist
     # (airuleset.MODEL_TIERS) — a session that floated off the launch pin — and
     # NEVER pings the owner. Read-only; the remedy is the owner's `/model` or a
     # relaunch. `due_fn=lambda: True` inside the job because the GATE already
     # proved it is due (the job then advances `state["model_audit_last_ts"]`).
-    from watchdog.model_audit_job import (MODEL_AUDIT_INTERVAL_S,
-                                          model_float_audit_job)
-    from watchdog.repo_health import _sweep_due as _model_audit_sweep_due
     _add("model_float_audit",
-         lambda: _model_audit_sweep_due(state, "model_audit_last_ts", now,
-                                        MODEL_AUDIT_INTERVAL_S),
-         lambda: model_float_audit_job(
-             now, state, list_claude_panes(run, dry_run=dry_run),
+         lambda: _sweep_due(state, "model_audit_last_ts", now,
+                            model_audit_job.MODEL_AUDIT_INTERVAL_S),
+         lambda: model_audit_job.model_float_audit_job(
+             now, state, panes,
              projects_dir, transcript_last_assistant_model,
              find_active_transcript, newest_subagent_transcript,
-             due_fn=lambda *a, **k: True),
+             dry_run=dry_run, due_fn=lambda *a, **k: True),
          "model-float-audit error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
