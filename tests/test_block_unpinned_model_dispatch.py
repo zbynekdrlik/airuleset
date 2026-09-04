@@ -66,6 +66,17 @@ class TestWorkflowScript(TestCase):
             r = run_hook({"tool_input": {"script": s}})
             self.assertEqual(r.returncode, 2, "%r should block: %s" % (s, r.stderr))
 
+    def test_blocks_backtick_quoted_banned_value(self):
+        # #871 adversarial review 🟡4: a template-literal value used only
+        # `"`/`'` in the quote class, so a backtick-quoted value skipped
+        # detection entirely (empty capture -> no violation found).
+        r = run_hook({"tool_input": {"script": "agent(x, {model: `claude-opus-5`})"}})
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_backtick_quoted_allowlisted_value(self):
+        r = run_hook({"tool_input": {"script": "agent(x, {model: `claude-fable-5`})"}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_blocks_superseded_id_in_script(self):
         for s in ("opts.model: 'claude-fable-5-1'",
                   "opts.model: 'claude-opus-4-8'",
@@ -84,6 +95,48 @@ class TestWorkflowScript(TestCase):
 
     def test_allows_script_with_no_model(self):
         r = run_hook({"tool_input": {"script": "agent(x, {effort: 'high'})"}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestWorkflowScriptPath(TestCase):
+    """#871 adversarial review 🟡5: a Workflow invoked via `scriptPath` (the
+    documented iterate pattern — persist the script, re-invoke by path) was
+    never scanned at all — only `.tool_input.script` was read. The hook must
+    read scriptPath's FILE content and scan it the same way, fail-open if
+    the path is unreadable."""
+
+    def _script_file(self, tmp_path_dir, content):
+        import tempfile
+        f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".js", dir=tmp_path_dir, delete=False)
+        f.write(content)
+        f.close()
+        return f.name
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.mkdtemp(prefix="airuleset-scriptpath-871-")
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_blocks_banned_model_in_scriptpath_file(self):
+        p = self._script_file(
+            self._tmpdir, "agent(x, {model: 'claude-opus-5'})")
+        r = run_hook({"tool_input": {"scriptPath": p}})
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_allowlisted_model_in_scriptpath_file(self):
+        p = self._script_file(
+            self._tmpdir, "agent(x, {model: 'claude-fable-5'})")
+        r = run_hook({"tool_input": {"scriptPath": p}})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_fails_open_on_unreadable_scriptpath(self):
+        r = run_hook({"tool_input": {
+            "scriptPath": "/tmp/airuleset-871-does-not-exist.js"}})
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
