@@ -4217,7 +4217,17 @@ class TestStreamAuthorityHasNotifyRouting(TestCase):
     documented exemption -- or the NEXT new stream account repeats #259
     exactly as simap did (no onboarding step is guaranteed to catch it)."""
 
-    EXEMPT = {"marek"}   # own tmux session name + own DISCORD_*_MAREK keys
+    # marek: own tmux session name + own DISCORD_*_MAREK keys.
+    # dominika (#867): a webterm OBSERVER, not a notify stream — she works no
+    # tickets and has NO Discord persona (owner request 2026-09-04 is explicit:
+    # a webterm viewer of montalu5 + miva1, nothing more). Her routing DECISION
+    # is deliberate: no STREAM_NOTIFY_OWNER entry, because she never emits a
+    # ❓/✅/run-card. She lands in AUTHORITY_BY_USER only because
+    # test_every_remote_hosts_user_is_classified forces a reduced-vs-full
+    # classification (least-privilege fork-no-merge, cli_fleet), NOT because she
+    # is a real stream — so a documented exemption here, not a routing row, is
+    # the correct half of that same "explicit decision" the test demands.
+    EXEMPT = {"marek", "dominika"}
 
     def test_every_authority_user_has_a_routing_decision(self):
         import notify

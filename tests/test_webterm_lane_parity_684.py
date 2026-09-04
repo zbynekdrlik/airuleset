@@ -196,9 +196,14 @@ class TestLaneNeverEnablesOwnerUStatus(unittest.TestCase):
         david_lane = w.render_dashboard_html(_inv(["david1"]), ttyd_base="/t", human=None)
         marek_lane = w.render_dashboard_html(_inv(["marek-subdev"]), ttyd_base="/t",
                                              human="marek")
+        # #867: the dominika lane behaves exactly like david/marek — a direct render
+        # (no lane_u_status) never turns on the owner U-status poll.
+        dominika_lane = w.render_dashboard_html(_inv(["montalu5-subdev"]),
+                                                ttyd_base="/t", human="dominika")
         self.assertIn('"u_status": true', owner)
         self.assertIn('"u_status": false', david_lane)
         self.assertIn('"u_status": false', marek_lane)
+        self.assertIn('"u_status": false', dominika_lane)
 
 
 if __name__ == "__main__":
