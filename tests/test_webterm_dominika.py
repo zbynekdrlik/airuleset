@@ -192,6 +192,67 @@ class TestDominikaFleetEntry(unittest.TestCase):
         self.assertNotIn("dominika", cli_fleet.FULL_AUTHORITY_USERS)
 
 
+class TestDominikaObserverExclusions(unittest.TestCase):
+    """#867 review 🟡: dominika is in AUTHORITY_BY_USER ONLY for the classify-all
+    gate — she is a webterm OBSERVER (cli_fleet.WEBTERM_OBSERVER_USERS), so every
+    install/push-time STREAM-provisioning consumer that keys on AUTHORITY_BY_USER
+    membership must EXCLUDE her: no auto-`claude` tmux session, no dev-env gap
+    report, no Soniox key, no ssh-auto-attach/window-naming, no bounce/gkreq sweep."""
+
+    def test_is_webterm_observer_and_subset_of_authority(self):
+        import cli_fleet
+        self.assertTrue(cli_fleet.is_webterm_observer("dominika"))
+        self.assertFalse(cli_fleet.is_webterm_observer("montalu5"))
+        # A strict SUBSET of AUTHORITY_BY_USER — an observer is a classified
+        # reduced account minus stream provisioning, never a third authority tier.
+        self.assertLessEqual(set(cli_fleet.WEBTERM_OBSERVER_USERS),
+                             set(cli_fleet.AUTHORITY_BY_USER))
+
+    def test_no_auto_claude_tmux_session(self):
+        import airuleset
+        calls = []
+        # A real reduced stream WOULD proceed past the gate (reaches the tmux
+        # probe); dominika must return None BEFORE touching `run`.
+        rc = airuleset.ensure_stream_tmux_session(
+            user="dominika", run=lambda *a, **k: calls.append(a))
+        self.assertIsNone(rc)
+        self.assertEqual(calls, [], "observer must never spawn/type into tmux")
+
+    def test_no_dev_env_gap_report(self):
+        import airuleset
+        # Returns early (prints nothing) — never calls _stream_provisioning_gaps.
+        with m.patch.object(airuleset, "_stream_provisioning_gaps",
+                            side_effect=AssertionError("observer is not a dev stream")):
+            self.assertIsNone(airuleset.report_stream_dev_env(user="dominika"))
+
+    def test_not_a_single_session_box_user(self):
+        import cli_bashrc_appliers as ba
+        self.assertFalse(ba.is_single_session_box_user("dominika"))
+        # non-vacuous: a real reduced stream on the same box IS one.
+        self.assertTrue(ba.is_single_session_box_user("montalu5"))
+
+    def test_excluded_from_reduced_stream_sweep(self):
+        import watchdog
+        self.assertNotIn("dominika", watchdog._REDUCED_STREAM_USERS)
+        self.assertIn("montalu5", watchdog._REDUCED_STREAM_USERS)  # non-vacuous
+
+    def test_soniox_key_not_delivered_to_observer(self):
+        import airuleset
+        import cli_remote
+        by_name = {h["name"]: h for h in airuleset.REMOTE_HOSTS}
+        hosts = [by_name["dominika@subdev"], by_name["montalu5@subdev"]]
+        # Missing source → every TARGETED host is reported failed. So the failure
+        # set names exactly the targets: montalu5 (a real stream) IN, dominika
+        # (observer) OUT. run is never reached (source read fails first).
+        failures = cli_remote.provision_subdev_soniox_key(
+            hosts=hosts, run=lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("must not ssh — source is missing")),
+            source=Path("/nonexistent/soniox.env"))
+        failed_names = {name for name, _reason in failures}
+        self.assertIn("montalu5@subdev", failed_names)     # targeted (non-vacuous)
+        self.assertNotIn("dominika@subdev", failed_names)  # observer excluded
+
+
 class TestDominikaAccessApp(unittest.TestCase):
     def test_dominika_access_app_declared_with_owner_provided_email(self):
         spec = access.WEBTERM_ACCESS_APPS.get("dominika")

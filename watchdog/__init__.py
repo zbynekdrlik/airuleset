@@ -931,8 +931,12 @@ BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this of
 # cleanly. AUTHORITY_BY_USER carries both a rename base and its numbered alias
 # during a transition (e.g. david + david1); the duplicates are equivalents and
 # every consumer unions/dedupes, so a slice is never narrowed by carrying both.
+# #867: exclude webterm OBSERVER accounts (in AUTHORITY_BY_USER only for the
+# classify-all gate, never a real reduced stream) so they are not swept into the
+# bounce/gkreq cross-stream flow — an observer authors/works no ticket.
 _REDUCED_STREAM_USERS = tuple(
-    u for u, _prof in cli_fleet.AUTHORITY_BY_USER.items() if _prof != "full")
+    u for u, _prof in cli_fleet.AUTHORITY_BY_USER.items()
+    if _prof != "full" and u not in cli_fleet.WEBTERM_OBSERVER_USERS)
 
 BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
                 "gatekeeper-returned work is waiting. Per the autopilot "

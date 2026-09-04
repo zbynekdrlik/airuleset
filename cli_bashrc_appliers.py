@@ -445,6 +445,11 @@ def is_single_session_box_user(user: str = None) -> bool:
     per-project navigation (#593, the #592 regression on dev1/dev2)."""
     import airuleset
     u = user or airuleset._current_user()
+    # #867: a webterm OBSERVER (dominika) is in AUTHORITY_BY_USER only for the
+    # classify-all gate — it is NOT a one-tmux-session stream account, so it gets
+    # neither the #264 ssh-auto-attach nor the #554/#592 window-naming block.
+    if u in airuleset.WEBTERM_OBSERVER_USERS:
+        return False
     return u in airuleset.AUTHORITY_BY_USER or u in SSH_ATTACH_EXTRA_USERS
 
 

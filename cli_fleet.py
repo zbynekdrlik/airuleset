@@ -525,6 +525,33 @@ AUTHORITY_BY_USER = {
 FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 
 
+# Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a
+# webterm gateway (maybe_setup_webterm) and VIEW other streams, never to run a
+# Claude stream of its own. It MUST still be classified
+# (test_every_remote_hosts_user_is_classified), and full is wrong for an observer,
+# so it sits in AUTHORITY_BY_USER at fork-no-merge — but AUTHORITY_BY_USER
+# membership ALSO means "is a reduced sub-dev stream" to install/push-time
+# provisioning consumers: ensure_stream_tmux_session (types `claude` into an
+# auto-created tmux session — an unwanted Claude session burning tokens on a viewer
+# account), report_stream_dev_env (dev-env/TODO-PROVISIONING gap noise),
+# provision_subdev_soniox_key (writes ~/.soniox.env — a needless credential
+# footprint), is_single_session_box_user (ssh-auto-attach + per-window naming), and
+# _REDUCED_STREAM_USERS (bounce/gkreq cross-stream sweeps). An observer wants NONE
+# of those — only the webterm gateway. This HAND-MAINTAINED set (never derived) is
+# the ONE exclusion those consumers honour. Kept a strict SUBSET of
+# AUTHORITY_BY_USER (test-locked): an observer is a classified reduced account
+# MINUS stream provisioning, not a third authority tier — resolve_authority still
+# returns its fork-no-merge (harmless: an observer authors/works no ticket).
+WEBTERM_OBSERVER_USERS = frozenset({"dominika"})
+
+
+def is_webterm_observer(user):
+    """True iff `user` is a webterm OBSERVER account (#867) — provisioned with a
+    webterm gateway only, excluded from every stream-provisioning side effect of
+    AUTHORITY_BY_USER membership. See WEBTERM_OBSERVER_USERS for the full rationale."""
+    return user in WEBTERM_OBSERVER_USERS
+
+
 def _github_ci_runner_source(user):
     """The `--explain` `source` string IF this process is the GITHUB-HOSTED CI
     runner for airuleset's own CI, else None (airuleset#839). Named DISTINCTLY
