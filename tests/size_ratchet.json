@@ -250,7 +250,7 @@
     "tests/test_measure_scrollback_events.py": 251,
     "tests/test_meeting_analysis_redaction.py": 161,
     "tests/test_meeting_analysis_skill.py": 88,
-    "tests/test_memory_classification_860.py": 90,
+    "tests/test_memory_classification_860.py": 91,
     "tests/test_merge_drivers.py": 431,
     "tests/test_model_audit.py": 263,
     "tests/test_model_float_audit_job.py": 143,
