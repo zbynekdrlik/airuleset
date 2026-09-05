@@ -5698,6 +5698,10 @@ def cmd_watchdog(args):
                     # Job 42 (#866) — NICE-CHECK SELF-CHECK. Enabled on every
                     # real poll; left False in run_once unit tests.
                     nice_check_enabled=True,
+                    # Job 43 (#858) — MDREVIEW CADENCE. Dev1-gated, daily
+                    # TTL. Enabled on every real poll; left False in
+                    # run_once unit tests.
+                    mdreview_cadence_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
@@ -6668,6 +6672,9 @@ from cli_skill_usage import (  # noqa: E402, F401
     cmd_skill_usage as cmd_skill_usage,
     scan_usage as scan_usage,
 )
+from cli_mdreview_audit import (  # noqa: E402, F401
+    cmd_mdreview_audit as cmd_mdreview_audit,
+)
 
 # --- #868: W-drain receipt CLI (block-dispatch-over-wdrain.sh companion).
 from cli_wdrain import (  # noqa: E402
@@ -7537,6 +7544,15 @@ def main():
     p_wdrain.add_argument("--cwd", default=None,
                           help="Override cwd for cache key resolution")
 
+    # --- #858: mdreview-audit ---
+    p_ma = sub.add_parser(
+        "mdreview-audit",
+        help="Structured review input for fleet-wide mdreview (#858)")
+    p_ma.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_ma.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -7673,6 +7689,7 @@ SUBCOMMANDS = {
     "skill-usage": cmd_skill_usage,
     "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
+    "mdreview-audit": cmd_mdreview_audit,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

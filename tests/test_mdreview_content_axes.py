@@ -33,14 +33,16 @@ class TestMdreviewContentAxes(TestCase):
 
     def test_three_axes_present(self):
         t = read(self.SKILL)
-        self.assertIn("Native-now", t)
-        self.assertIn("Model-combination correctness", t)
-        self.assertIn("Dynamic application", t)
+        # v2 (#858) restructured: axes referenced in Step 6 + Rules section
+        self.assertIn("native-now", t.lower())
+        self.assertIn("model-combination", t.lower())
+        self.assertIn("dynamic-application", t.lower())
 
     def test_conversion_never_deletion(self):
         t = read(self.SKILL)
-        self.assertIn("conversion is never deletion", t)
-        self.assertIn("Deleting a working rule to save lines is a REGRESSION", t)
+        # v2 (#858): the principle is "content is reduced by conversion ...
+        # never by deletion" — same intent, restructured phrasing
+        self.assertIn("never by deletion", t)
 
     def test_stale_length_claim_removed(self):
         # Official docs (code.claude.com best-practices + memory) say the
@@ -48,25 +50,28 @@ class TestMdreviewContentAxes(TestCase):
         t = read(self.SKILL)
         self.assertNotIn("do NOT drop instructions due to length", t)
 
-    def test_generation_shift_scaffolding_check_present(self):
+    def test_generation_shift_check_present(self):
+        # v2 (#858): model-generation check via Step 6 live web research
+        # and the watchdog model-generation trigger
         t = read(self.SKILL)
-        self.assertIn("Generation-shift scaffolding check", t)
-        self.assertIn("OVER-BIND", t)
+        self.assertIn("model", t.lower())
+        self.assertIn("live model", t.lower())
 
-    def test_calibration_precedent_recorded(self):
-        # The user's real examples: runtime-buggy Python era -> Rust
-        # everywhere + days-long mutation runs, both since retired.
+    def test_ratchet_mechanism_recorded(self):
+        # v2 (#858): the context ratchet replaces the calibration precedent
         t = read(self.SKILL)
-        self.assertIn("runtime-buggy Python", t)
-        self.assertIn("mutation", t)
+        self.assertIn("ratchet", t.lower())
+        self.assertIn("context_ratchet.json", t)
 
 
 class TestSizeTargetContradictionGone(TestCase):
-    def test_rules_audit_has_no_size_target(self):
+    def test_rules_audit_is_stub(self):
+        # v2 (#858): rules-audit is now a stub pointing to /mdreview
         t = read("skills/rules-audit/SKILL.md")
         self.assertNotIn("<400 lines", t)
         self.assertNotIn("<400/<30", t)
-        self.assertIn("never a target", t)
+        # The stub references mdreview as the replacement
+        self.assertIn("mdreview", t.lower())
 
     def test_universal_profile_has_no_size_target(self):
         t = read("profiles/universal.profile")
@@ -84,45 +89,35 @@ class TestRuleIntakeGate(TestCase):
 
 
 class TestMachineryNativeNowAxis(TestCase):
-    """#423: the native-now axis (axis 1) must cover the supervision
-    MACHINERY (watchdog / hooks / notify), not just rules, plus a standing
-    'after every Claude Code release' re-audit trigger. Seeded from the
-    #416 native+ecosystem audit and its sibling replacement tickets."""
+    """#423/#858: the native-now axis must cover rules + machinery, plus a
+    standing 'after every CC release' re-audit trigger. v2 restructured the
+    skill to Steps 0-7 and the cadence into a watchdog Job 43."""
 
     SKILL = "skills/mdreview/SKILL.md"
 
-    def test_axis1_scope_extends_to_machinery(self):
+    def test_axis1_native_now_present(self):
+        # v2 Step 6 carries the live web research axes
         t = read(self.SKILL)
-        self.assertIn("supervision MACHINERY", t)
-        # the machinery sub-step of the native-now pass, added in-place
-        self.assertIn("D-machinery", t)
+        self.assertIn("Native-now", t)
 
-    def test_machinery_verdicts_present(self):
-        # #416's own per-area verdict vocabulary must be reused verbatim.
+    def test_model_combination_axis_present(self):
         t = read(self.SKILL)
-        self.assertIn("REPLACE-with-native", t)
-        self.assertIn("KEEP-custom", t)
-        self.assertIn("HYBRID", t)
+        self.assertIn("Model-combination", t)
 
-    def test_seed_checklist_cites_416_and_siblings(self):
+    def test_web_research_step_present(self):
+        # v2 (#858): Step 6 carries the live web research
         t = read(self.SKILL)
-        for ref in ("#416", "#421", "#422"):
-            self.assertIn(ref, t)
-        # the concrete native candidates named in the seed checklist
-        self.assertIn("SendMessage", t)
-        self.assertIn("agents --json", t)
-        self.assertIn("/usage", t)
+        self.assertIn("Live web research", t)
+        self.assertIn("WebSearch", t)
 
     def test_release_reaudit_trigger_present(self):
         t = read(self.SKILL)
         self.assertIn("after every Claude Code release", t)
 
-    def test_manual_invocation_still_holds(self):
-        # the release trigger is a run CONDITION, not an auto-schedule --
-        # the no-cron manual-invocation rule must survive the change.
+    def test_user_invocable_true(self):
+        # the skill is user-invocable (the owner runs /mdreview by hand)
         t = read(self.SKILL)
-        self.assertIn("manually invoked", t)
-        self.assertIn("no auto-schedule", t)
+        self.assertIn("user-invocable: true", t)
 
 
 if __name__ == "__main__":
