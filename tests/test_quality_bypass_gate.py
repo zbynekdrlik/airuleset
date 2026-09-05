@@ -41,6 +41,8 @@ from unittest import TestCase, main
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 MODULE = ROOT / "modules" / "core" / "autonomous-quality-discipline.md"
+# #859 batch 4a: the deep companion has the full governance text
+MODULE_DEEP = ROOT / "skills" / "autonomous-quality-discipline-deep" / "DEEP.md"
 
 
 def run(msg):
@@ -170,7 +172,8 @@ class TestModuleClaimMatchesReality(TestCase):
             "the module must not restate the false blanket claim")
 
     def test_module_states_which_half_is_hard(self):
-        t = MODULE.read_text(encoding="utf-8")
+        # #859 batch 4a: stub + companion = the full governance text
+        t = MODULE.read_text(encoding="utf-8") + "\n" + MODULE_DEEP.read_text(encoding="utf-8")
         self.assertIn("stop-check-prose-violations.sh", t)
         # the split must be visible to the reader, not just to the hook
         self.assertRegex(t, r"(?i)unambiguous[^\n]*(hard|block)")
