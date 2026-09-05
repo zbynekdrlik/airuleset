@@ -2051,3 +2051,58 @@ def test_status_json_shape_lock_top_consumers_item_shape(tmp_path):
     for item in cached["top_consumers"]:
         assert "path" in item and "bytes" in item, (
             "#895: each top_consumers item must have 'path' and 'bytes'")
+
+
+# --------------------------------------------------------------------------- #
+# #895 — >=95% severe escalation (auto-ticket, no Discord ping)
+# --------------------------------------------------------------------------- #
+def test_severe_ticket_fires_at_95_pct(tmp_path):
+    """#895: file_severe_ticket fires at >=95% and produces a SEVERE-TICKET log."""
+    import time as _time
+    marker = dg._severe_ticket_marker(5000.0)
+    if os.path.exists(marker):
+        os.unlink(marker)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    status = {"worst_pct": 96, "dim": "bytes"}
+    top = [("/tmp/big", 500_000_000)]
+    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, top,
+                                 dry_run=True, run_fn=fake_run)
+    assert any("SEVERE-TICKET" in ln for ln in logs), (
+        "#895: file_severe_ticket must produce a SEVERE-TICKET log line")
+
+
+def test_severe_ticket_skips_below_95(tmp_path):
+    """#895: file_severe_ticket must NOT fire below 95%."""
+    status = {"worst_pct": 93, "dim": "bytes"}
+    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, [],
+                                 dry_run=True)
+    assert not logs, "#895: no severe ticket below 95%"
+
+
+def test_severe_ticket_daily_dedup(tmp_path):
+    """#895: a second call on the same day must be deduped by the marker."""
+    import time as _time
+    marker = dg._severe_ticket_marker(5000.0)
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        os.write(fd, b"test\n")
+        os.close(fd)
+        status = {"worst_pct": 97, "dim": "bytes"}
+        logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, [],
+                                     dry_run=False)
+        assert not logs, "#895: severe ticket must be deduped by daily marker"
+    finally:
+        if os.path.exists(marker):
+            os.unlink(marker)
+
+
+def test_severe_ticket_source_has_gk_request():
+    """#895: file_severe_ticket source must reference gk-request."""
+    import inspect
+    src = inspect.getsource(dg.file_severe_ticket)
+    assert "gk-request" in src

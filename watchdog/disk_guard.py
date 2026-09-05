@@ -73,6 +73,7 @@ NOTICE_PCT = 75            # footer NOTICE band (footer render itself narrowed t
 DRAIN_PCT = 80             # AUTO-DRAIN at/above this
 CRITICAL_PCT = 90          # machine-channel escalation at/above this (red footer)
 DISK_CRITICAL_PCT = 95     # #854: at/above this the drain runs EVERY poll (cadence gate bypassed)
+SEVERE_PCT = 95            # #895: at/above this, file a gk-request ticket with top_consumers
 TARGET_PCT = 75            # drain stops once the worst mount is back below this
 MOUNTS = ("/", "/home", "/tmp")
 
@@ -2173,6 +2174,73 @@ def escalate(status, home, now, dry_run, top_consumers_fn=None):
     return [line]
 
 
+def _severe_ticket_marker(now):
+    return "/tmp/airuleset-disk-guard-severe-%s" % time.strftime(
+        "%Y%m%d", time.gmtime(now))
+
+
+def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None):
+    """#895: at >=95% after drain, file a gk-request ticket with
+    top_consumers detail. Daily-deduped, NEVER a Discord ping.
+    ``run_fn`` is injectable for testing (default: subprocess.run)."""
+    if status.get("worst_pct", 0) < SEVERE_PCT:
+        return []
+    marker = _severe_ticket_marker(now)
+    if os.path.exists(marker):
+        return []
+    run_fn = run_fn or subprocess.run
+    hostname = socket.gethostname()
+    top_detail = "; ".join("%s=%s" % (p, _human(b)) for p, b in (top or []))
+    title = "Disk pressure >=95%% on %s (%d%%)" % (hostname, status["worst_pct"])
+    body = ("Auto-filed by disk-guard at %d%% (%s) on %s.\n\n"
+            "Top consumers:\n%s\n\nDrain ran but could not bring the box "
+            "under %d%%." % (
+                status["worst_pct"], status.get("dim", "bytes"), hostname,
+                top_detail or "(none)", TARGET_PCT))
+    logs = []
+    line = _log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
+                     "filing gk-request: %s" % title)
+    logs.append(line)
+    _append_log(_log_path(home), [line])
+    if not dry_run:
+        try:
+            import airuleset as _ars
+            repo_dir = os.path.dirname(os.path.abspath(_ars.__file__))
+            argv = [
+                sys.executable, os.path.join(repo_dir, "airuleset.py"),
+                "gk-request",
+                "--title", title,
+                "--body", body,
+                "--repo", "zbynekdrlik/airuleset",
+            ]
+            r = run_fn(argv, capture_output=True, text=True, timeout=60)
+            if getattr(r, "returncode", 1) != 0:
+                _dbg("severe ticket gk-request failed rc=%s: %s"
+                     % (getattr(r, "returncode", None),
+                        (getattr(r, "stderr", "") or "").strip()[:200]))
+                logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
+                                     status["worst_pct"],
+                                     "gk-request failed: %s" % (
+                                         getattr(r, "stderr", "") or "")[:200]))
+        except Exception as e:
+            _dbg("severe ticket error: %r" % e)
+            logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
+                                 status["worst_pct"], "error: %r" % e))
+        try:
+            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            os.write(fd, (line + "\n").encode("utf-8"))
+            os.close(fd)
+            try:
+                os.chmod(marker, 0o666)
+            except OSError:
+                pass          # airuleset:script-ok best-effort chmod
+        except FileExistsError:
+            _dbg("severe marker won by another user this poll — deduped")
+        except OSError as e:
+            _dbg("severe marker write failed: %r" % e)
+    return logs
+
+
 # --------------------------------------------------------------------------- #
 # cadence + single-instance lock
 # --------------------------------------------------------------------------- #
@@ -2445,6 +2513,13 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 logs.append("disk-guard: top-consumers post-drain write error: %r" % e)
         if post["level"] == "critical":
             logs += escalate(post, home, now, dry_run)
+            # #895: at >=95% file a gk-request ticket (daily-deduped, no ping)
+            if post["worst_pct"] >= SEVERE_PCT:
+                top_for_ticket = (
+                    [(d["path"], d["bytes"]) for d in post.get("top_consumers", [])]
+                    if post.get("top_consumers") else [])
+                logs += file_severe_ticket(post, home, now, top_for_ticket,
+                                          dry_run=dry_run)
     finally:
         _release_lock(lock)
     return logs
