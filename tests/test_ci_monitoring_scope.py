@@ -81,13 +81,15 @@ class TestGhRunWatchBanIsMeasured(unittest.TestCase):
         self.assertIn("gh run watch", _text(CI_MONITORING))
 
     def test_ban_cites_the_measured_api_cost(self):
-        text = _text(CI_MONITORING)
+        # Measurement detail moved to history (#859 batch 2); assert there
+        hist = REPO / ".claude" / "rules-reference" / "ci-monitoring-history.md"
+        text = _text(hist)
         self.assertIn("71 API calls", text)
-        self.assertRegex(text, r"5000|5,000")
 
     def test_ban_notes_interval_does_not_rescue_it(self):
-        """--interval 30 still costs ~2200/h — it re-polls every job."""
-        text = _text(CI_MONITORING)
+        """--interval 30 detail moved to history (#859 batch 2)."""
+        hist = REPO / ".claude" / "rules-reference" / "ci-monitoring-history.md"
+        text = _text(hist)
         self.assertIn("--interval 30", text)
 
 
@@ -121,7 +123,9 @@ class TestIncidentNarrativeLivesInThePlaybook(unittest.TestCase):
     def test_module_keeps_the_corrected_citation_pointer(self):
         text = _text(CI_MONITORING)
         self.assertIn("#29193", text)
-        self.assertIn("OPPOSITE failure mode", text)
+        # "OPPOSITE failure mode" archaeology moved to history (#859 batch 2)
+        hist = REPO / ".claude" / "rules-reference" / "ci-monitoring-history.md"
+        self.assertIn("OPPOSITE failure mode", _text(hist))
 
     def test_module_does_not_carry_the_research_narrative(self):
         text = _text(CI_MONITORING)

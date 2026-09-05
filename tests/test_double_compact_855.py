@@ -370,7 +370,10 @@ class TestSelfPrintsHintOnTurnRunning(unittest.TestCase):
 
 class TestDoctrine(unittest.TestCase):
     def test_completion_report_822_reworded_typed_at_idle(self):
-        t = COMPLETION.read_text(encoding="utf-8")
+        # #822 compact mechanics moved to history (#859 batch 1/2); check there
+        hist = (COMPLETION.parent.parent.parent / ".claude" / "rules-reference"
+                / "completion-report-history.md")
+        t = hist.read_text(encoding="utf-8")
         idx = t.find("#822")
         self.assertGreater(idx, 0)
         window = t[idx:idx + 900]
