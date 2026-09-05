@@ -62,6 +62,44 @@ class TestStretchOriginPinsTop798(unittest.TestCase):
                       "stretchFrameToFill must use translate() for centering "
                       "when origin is '0 0'")
 
+    def test_transform_shape_discriminates_from_center_origin(self):
+        """Y2 (review finding): the transform assignment must be the
+        translate(tx, ty) scale(sx, sy) shape with origin '0 0', not the
+        old scale-only shape with origin '50% 50%'.  A plain string/regex
+        lock on the template — the node numeric lock stays."""
+        import re
+        fn = _extract_js_function(self.html, "stretchFrameToFill")
+        # Lock the combined shape: the JS string builds
+        # 'translate(tx, ty) scale(sx, sy)' via concatenation.
+        # Match the pattern in the JS source (string concat form).
+        self.assertRegex(
+            fn,
+            re.compile(r"'translate\("),
+            "stretchFrameToFill must build a 'translate(...)' string")
+        self.assertRegex(
+            fn,
+            re.compile(r"scale\("),
+            "stretchFrameToFill must build a 'scale(...)' string")
+        # Lock that both appear on the SAME assignment line
+        assign_lines = [ln for ln in fn.splitlines()
+                        if "translate(" in ln and "scale(" in ln]
+        self.assertTrue(
+            assign_lines,
+            "stretchFrameToFill must have translate() and scale() on the "
+            "same transform assignment (the combined shape)")
+        # Lock origin '0 0' on the same function (structural, not numeric)
+        self.assertIn("'0 0'", fn,
+                      "stretchFrameToFill must set transformOrigin to '0 0'")
+        # Negative lock: the old center-origin shape must not appear in code
+        code_lines = [ln for ln in fn.splitlines()
+                      if not ln.strip().startswith("//")]
+        code_only = "\n".join(code_lines)
+        self.assertNotRegex(
+            code_only,
+            re.compile(r"\.transform\s*=\s*'scale\("),
+            "stretchFrameToFill code must not use a bare 'scale(...)' "
+            "transform (the old center-origin shape)")
+
     @unittest.skipIf(shutil.which("node") is None, "node not available")
     def test_grid_top_safe_under_perturbation_at_959x602(self):
         """At the #798 viewport (959px wide, 602px slot = 639-37 tabbar), the
