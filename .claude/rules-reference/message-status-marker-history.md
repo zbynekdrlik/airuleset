@@ -25,6 +25,10 @@ Delivery-side safety nets: a reworded still-unanswered question EDITS the existi
 
 The owner's rule verbatim: "Nech nie je rozdiel medzi nocou a dnom. Claude ma robit 24/7."
 
+#### Idle-park definition
+
+NEVER idle-park a blocked session (repeated `⏳ WORKING: parked` turns with no work done and no question asked) — under an armed `/goal` that spins re-poked turns into the block cap and floods the chat; blocked = ASK, never park.
+
 #### Codex-bridge truncated question incident (2026-07-04)
 
 The truncated, context-free codex-bridge ping ("…sklad zač", 2026-07-04) was the reported failure ("nemá úvod, je urezaná").

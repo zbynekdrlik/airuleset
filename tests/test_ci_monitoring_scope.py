@@ -85,6 +85,7 @@ class TestGhRunWatchBanIsMeasured(unittest.TestCase):
         hist = REPO / ".claude" / "rules-reference" / "ci-monitoring-history.md"
         text = _text(hist)
         self.assertIn("71 API calls", text)
+        self.assertRegex(text, r"5000|5,000")
 
     def test_ban_notes_interval_does_not_rescue_it(self):
         """--interval 30 detail moved to history (#859 batch 2)."""
