@@ -1,0 +1,32 @@
+# Autonomous Verification — History & Rationale (#859)
+
+This file contains the incident narratives and backstory moved VERBATIM from
+`modules/core/autonomous-verification.md` during the context-diet conversion
+(#859 batch 1). The directive, protocol, banned phrases, and tool-request
+shapes stay always-on in the module.
+
+---
+
+## Mobile-app emulator lesson
+
+For a mobile-app project (Android/iOS), the tester-handoff ban above applies EXACTLY as written — the user's own phone is never the verification tool, an emulator is. For a mobile-app project, an Android emulator (`adb`) or iOS simulator **IS the Playwright-equivalent**: verify ON THE EMULATOR yourself, and build your own diagnostic telemetry (logcat, a debug overlay, an in-app log screen) the same way you'd read a DOM or a console. A real montalu3 incident (odoo-erp, #424): the agent made the user hand-install an APK on their OWN phone 10x over 2 hours, with an agreed emulator sitting unused the whole time — the agent later admitted it never needed the human at all.
+
+The user's real device may appear ONLY as a FINAL ACCEPTANCE step, once your OWN emulator-side verification is already green — never as an iterative debug channel. "Install the new build and tell me if it crashes now" / "try again on your phone" / any rewording asking the user to run a NOT-YET-verified build so YOU can see the result is banned in all rewordings — it is the same tester-handoff violation this whole module bans, just wearing a mobile-specific disguise.
+
+## Missing-utility install lesson
+
+When work hits a missing locally-installable dependency — `command not found`, `ModuleNotFoundError` / `ImportError`, a tool erroring because its library is absent — the FIRST reflex is: **INSTALL it NOW** (`sudo -n apt-get install -y <pkg>`, `pip install`, `npm i -g`, whatever the box uses), then re-run the original command. The user's standing directive (2026-07-24, after repeated incidents): *"ak ti niečo chýba, máš to doinštalovať — mína hrozne veľa času a energie, keď sa stále rieši, že niečo nefunguje, lebo chýba nejaká utilita."*
+
+- **BANNED: switching to a degraded workaround instead of installing** — a different runner because a test plugin lacks its library (dev1 jinja2/pytest-html, 2026-07-24), hand-parsing instead of the proper tool, skipping the step. Install the missing piece; the workaround costs more than the install every time.
+- **BANNED: burning turns diagnosing "broken" behavior that is just an uninstalled utility.** A not-found error is not a mystery to investigate — it is an `apt-get`/`pip` away from gone (subdev's silently dead notify chain was one missing `jq`, 2026-07-22).
+- **No sudo on a restricted box** (david/marek/montalu) → your `sudo -n` attempt fails fast; THEN **file the request via `python3 ~/devel/airuleset/airuleset.py gk-request --title "..."`** (the existing stream→supervisor channel — these boxes work tickets, not prompts, so there is no interactive user to ask directly like "ask for the TOOL" below assumes), naming the exact package + why you need it. Whoever fulfils it adds the package to `RUNTIME_DEPS` in `airuleset.py` and runs `push`, which installs + verifies it on every target in one shot. Never a workaround, never giving up — this is the sudo-less counterpart of "ask for the TOOL" below.
+- **A NEW runtime dependency your change introduces on managed boxes goes into `RUNTIME_DEPS`** in airuleset.py — install/push auto-installs and verifies the whole list on EVERY target at every deploy, so a provisioning gap can never silently rot a box again.
+- **EXCEPTION — a heavy build toolchain is NEVER installed on a shared-stream box (#778).** The "install it now" reflex does NOT apply to a JVM/Android/React-Native build toolchain (JDK/Gradle/Kotlin/Android SDK/emulator/`qemu-system*`) on a shared-stream box (subdev — a box running N isolated Claude stream users): those boxes are Claude-only and such a build there collapses them (#774). Do NOT `apt`/`curl`/hand-install it locally — run the build on **dev2** (`ssh newlevel@dev2`, the owner-designated build + emulator lane); CI/EAS is the complement. Mechanically enforced there (`block-heavy-build-toolchain.sh` + watchdog Job 38 `heavy_build_reaper`); see `no-local-builds.md`.
+
+## Self-service prod-read doctrine — mechanization history
+
+**This is now MECHANICALLY gated on BOTH sides (#516).** At FILING time a sub-dev's gk action request (`airuleset.py gk-request`, or a raw `needs-gatekeeper` / `GATEKEEPER-ACTION:` escalation) must carry a `Self-service-checked: <what I tried myself — RO channel / fresh prod copy — and what LIVE PROD intervention I need from gk>` line, or `hooks/block-gk-request-without-selfservice.sh` BLOCKS it; at RECEIPT time the gatekeeper's watchdog auto-bounces a needs-gatekeeper action request that carries no such line back to the owning stream (`prio:bounce` + template comment). The prose above is the WHY; the gate is a logged, falsifiable claim, not a substitute for it. **And the OWNER-CHAT path is now ALSO hook-gated (#608, third recurrence of this class — montalu3 2026-08-21 told the owner it could not verify prod notifications though it had `REFRESH-DEV-BOX-FROM-PROD`):** `hooks/stop-check-prose-violations.sh` blocks an owner-facing message that claims prod state cannot be read/verified/seen ("neviem na prode zistiť/overiť", "nevidím na prode", "cannot verify on PROD", "can't see what's on prod") UNLESS the same message shows a self-service attempt (a `REFRESH-DEV-BOX-FROM-PROD` / fresh-prod-copy mention, an RO-channel read, a `Self-service-checked:` line) OR an explicit `UNVERIFIED:` with the exhausted path — the same decision tree as above, made mechanical on the chat surface #516 did not cover.
+
+## Verification content read-back — the montalu3 incident
+
+**Mechanical anchor (#446 — this discipline provably failed as prose):** montalu3 (2026-08-13) shipped order-status notification emails with 0 € prices everywhere — only send/delivery was verified, never the RENDERED content, though the sent mail was readable from the DB. The report-level trace is therefore MANDATORY and hook-enforced: every `## ✅ Work Complete` report carries `✅ Výstup: <concrete observed values read back from the real artifact>` (or an explicit `n/a — <prečo>` when the work truly has no user-facing output) — see `completion-report.md` (Hard rules); `stop-check-prose-violations.sh` blocks a report without it, with a value-free line, or with an `n/a` contradicting the report's own 🌐/📱 surface.
