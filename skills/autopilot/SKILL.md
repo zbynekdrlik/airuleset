@@ -576,6 +576,7 @@ gap in either.
      owner never first learns of the debt by seeing `W 34` in the footer himself. This lane is the
      `W`-side parallel of the `prio:bounce` seeding below — it runs at the same batch-start moment
      and takes precedence over seeding a NEW I lane while the strop is breached.
+     Record the pass with `python3 ~/devel/airuleset/airuleset.py wdrain-pass --record --verdicts-file F` — `block-dispatch-over-wdrain.sh` mechanically enforces it (#868); `WDRAIN-BYPASS: <reason>` in the dispatch prompt is the logged escape for a release-blocking gk order.
    - **Seed — PRIORITY LANE first (`prio:bounce`).** Open non-skip issues labeled `prio:bounce`
      (a reviewer/gatekeeper-INJECTED priority ticket — the bounce lane from odoo-erp #1599, but the
      label is a GENERIC cross-repo convention every repo/stream honors, never an odoo-specific
