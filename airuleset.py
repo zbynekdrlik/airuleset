@@ -87,6 +87,12 @@ MODEL_TIERS = {
 # statusline highlight keeps working. Full policy history: the fable-advisor skill.
 MANAGED_MODEL = MODEL_TIERS["fable"] + "[1m]"
 
+# Valid reviewed-by-tier values — the TWO review-capable tiers (Fable = gate
+# OPEN, Opus = gate CLOSED / trivial-diff), derived from MODEL_TIERS so there
+# is ONE source.  Used by cmd_handoff validation AND the SubagentStop
+# review-tier gate (hooks/subagent-stop-check-review-tier.sh).  #876.
+REVIEWED_BY_TIER_VALUES = {MODEL_TIERS["fable"], MODEL_TIERS["opus"]}
+
 
 def _normalize_model(value):
     """Lower-cased, quote/space-stripped, `[Nm]`-tag-dropped model string —
@@ -3305,13 +3311,12 @@ def cmd_handoff(args):
             print("handoff BLOCK: bounce round %d requires "
                   "--reviewed-by-tier" % rnd)
             return 1
-        # Validate reviewed-by-tier value.
-        valid_tiers = {"claude-fable-5", "claude-opus-4-6"}
+        # Validate reviewed-by-tier value — shared constant (#876).
         parts = reviewed_by_tier.split() if reviewed_by_tier else []
         tier_val = parts[0] if parts else ""
-        if tier_val not in valid_tiers:
+        if tier_val not in REVIEWED_BY_TIER_VALUES:
             print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
-                  % ", ".join(sorted(valid_tiers)))
+                  % ", ".join(sorted(REVIEWED_BY_TIER_VALUES)))
             return 1
 
     # Stamp Verified-at-UTC (now).

@@ -536,6 +536,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/notify-compact-subagent-boundary.sh",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/subagent-stop-check-review-tier.sh",
+            "timeout": 15
           }
         ]
       }
