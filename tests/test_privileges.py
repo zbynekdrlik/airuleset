@@ -334,11 +334,50 @@ class TestSudoProbe(unittest.TestCase):
         (self.home / ".ssh").mkdir()
 
     def test_sudo_entry_probed(self):
+        """Real-host probe returns one of the three known detail strings."""
         rep = p.build_report(home=self.home)
         by = {e["name"]: e for e in rep["entries"]}
         self.assertIn("sudo_nopasswd", by)
         self.assertIn(by["sudo_nopasswd"]["detail"],
-                      ("sudo available", "sudo unavailable"))
+                      ("sudo available", "sudo unavailable",
+                       "sudo probe failed"))
+
+    # -- hermetic tests: inject fake subprocess.run, never call real sudo -- #
+
+    def test_sudo_available(self):
+        fake = subprocess.CompletedProcess(["sudo", "-n", "true"], 0)
+        with mock.patch.object(p.subprocess, "run", return_value=fake):
+            self.assertEqual(p._probe_sudo(), "sudo available")
+
+    def test_sudo_unavailable_nonzero(self):
+        fake = subprocess.CompletedProcess(["sudo", "-n", "true"], 1)
+        with mock.patch.object(p.subprocess, "run", return_value=fake):
+            self.assertEqual(p._probe_sudo(), "sudo unavailable")
+
+    def test_sudo_missing_binary(self):
+        """A missing sudo binary (FileNotFoundError) is 'sudo unavailable',
+        NOT 'sudo probe failed' — this is the canonical no-sudo state on a
+        CI runner or a minimal container."""
+        with mock.patch.object(
+            p.subprocess, "run",
+            side_effect=FileNotFoundError("[Errno 2] No such file or directory: 'sudo'"),
+        ):
+            self.assertEqual(p._probe_sudo(), "sudo unavailable")
+
+    def test_sudo_timeout(self):
+        with mock.patch.object(
+            p.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["sudo"], 5),
+        ):
+            self.assertEqual(p._probe_sudo(), "sudo probe failed")
+
+    def test_sudo_unexpected_os_error(self):
+        """A genuinely unexpected OSError (not ENOENT) is 'sudo probe failed'."""
+        with mock.patch.object(
+            p.subprocess, "run",
+            side_effect=PermissionError("[Errno 13] Permission denied"),
+        ):
+            self.assertEqual(p._probe_sudo(), "sudo probe failed")
 
 
 class TestHermeticity(unittest.TestCase):
