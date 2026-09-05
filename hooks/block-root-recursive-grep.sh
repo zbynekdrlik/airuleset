@@ -112,6 +112,25 @@ RECURSIVE_LONG = {"--recursive", "--dereference-recursive"}
 DIR_RECURSE_VALUES = {"recurse"}
 
 
+def _is_claude_home_root(t):
+    """True if `t` (already trailing-slash and glob stripped) is under
+    `~/.claude`, `$HOME/.claude`, `${HOME}/.claude`, or
+    `/home/<user>/.claude` — the multi-GB JSONL transcript tree (#865).
+    ANY depth is blocked (`.claude`, `.claude/projects`, `.claude/projects/x`)
+    because the transcripts live throughout the tree."""
+    # ~ forms
+    if t == "~/.claude" or t.startswith("~/.claude/"):
+        return True
+    # $HOME / ${HOME} forms
+    for pfx in ("$HOME", "${HOME}", "$home", "${home}"):
+        if t == pfx + "/.claude" or t.startswith(pfx + "/.claude/"):
+            return True
+    # /home/<user>/.claude (any user, any depth)
+    if re.match(r"^/home/[^/]+/\.claude(/|$)", t):
+        return True
+    return False
+
+
 def _norm_root(tok):
     """A path token normalized for blocked-root comparison, or None if it is
     obviously not a bare root (contains an inner path component)."""
@@ -133,6 +152,10 @@ def _norm_root(tok):
         return "~"
     # /home/<single-component> == a whole user home (no deeper path)
     if re.match(r"^/home/[^/]+$", t):
+        return t
+    # #865 — ~/.claude transcript tree is a blocked root (the multi-GB JSONL
+    # tree; a recursive grep there ate 21 GB RSS+swap on subdev for 71 min).
+    if _is_claude_home_root(t):
         return t
     return None
 
@@ -378,13 +401,15 @@ PYEOF
 
 cat >&2 <<'MSG'
 BLOCKED: a RECURSIVE grep whose search ROOT is `/` or another huge non-repo
-root (`/home`, `~`, `$HOME`, a top-level system dir). #776 — this is exactly
-the shape that spawns a runaway ugrep.
+root (`/home`, `~`, `$HOME`, `~/.claude`, a top-level system dir). #776/#865 —
+this is exactly the shape that spawns a runaway ugrep or a multi-GB grep.
 
 WHY: Claude Code shadows every Bash `grep` into `ugrep -G --ignore-files ...`
 (shell-snapshots), and the bundled ugrep 7.5.0 busy-loops at 100% CPU forever
 on a whole-filesystem recursive scan; the child orphans when the tool call
-times out and runs for DAYS (subdev #774, upstream cc#81916).
+times out and runs for DAYS (subdev #774, upstream cc#81916). The ~/.claude
+tree contains multi-GB JSONL transcripts — a recursive grep there ate 21 GB
+RSS+swap on subdev for 71 min (#865).
 
 Do this instead:
 
@@ -393,6 +418,9 @@ Do this instead:
       grep -rn "pattern" .            (cwd/repo)
       grep -rn "pattern" ./src        (a subdir)
       grep -rn "pattern" path/to/dir  (a specific tree)
+  • For ~/.claude transcripts, grep the ONE session file:
+      grep "pattern" <session>.jsonl          (one file)
+      tail -c 200000 <session>.jsonl | grep   (bounded tail)
 
 A non-recursive grep, or a recursive grep with a scoped root, passes freely.
 

@@ -88,7 +88,21 @@ never the author, and you compose the note per `skills/odoo-discuss-xmlrpc/hando
 `READY-FOR-REVIEW:` comment convention, posted right after your integration-branch merge lands (the
 repo's `subdev-handoff-label` workflow auto-applies the `ready-for-review` label from that comment,
 and `/process-subdev`'s queue query picks it up); also try `gh issue edit <N> --add-label
-ready-for-review` best-effort and silently accept a 403. **Your OWN self-authored sub-findings**
+ready-for-review` best-effort and silently accept a 403. **Hand-off comment = `airuleset.py handoff`
+(#843, BOTH reduced-authority profiles).** The CLI composes and posts the READY-FOR-REVIEW comment
+from validated inputs, stamping `Verified-at-UTC` + `HEAD:` at compose time (live `git rev-parse` /
+`git ls-remote`), so the copy-forward / stale-evidence class dies BY CONSTRUCTION. Write the
+`Self-review:` table (from CYCLE step 6) to a temp file, then:
+`python3 ~/devel/airuleset/airuleset.py handoff --repo <owner/name> --issue <N> --branch <branch>`
+`  --self-review-file <table.md>`
+`  [--root-cause "<lens> — <why my self-review missed it>"]`
+`  [--closes-finding "<id> — <evidence>"]`
+`  [--prevencia-read "<path to the Prevencia rule file>"]`
+`  [--reviewed-by-tier "claude-fable-5 | claude-opus-4-6"]`
+Round ≥ 2 REQUIRES `--root-cause`, `--prevencia-read`, and `--reviewed-by-tier`; the CLI refuses
+without them. `--closes-finding` is repeatable (one per id from the newest gk verdict). The hook
+`block-handoff-without-composer.sh` blocks a raw `READY-FOR-REVIEW` comment post on a reduced-
+authority box unless the body's sha256 matches a fresh receipt from the CLI. **Your OWN self-authored sub-findings**
 (tickets YOU filed while working) you MAY close, with evidence in the closing comment — that is
 normal bookkeeping (gatekeeper-refined semantics, 2026-07-11), unchanged for either profile. At
 each ASSIGNED ticket's hand-off (BOTH reduced-authority profiles), **FIRE THE HAND-OFF CARD** (the
@@ -570,6 +584,18 @@ push / PR / merge / deploy, never that backup.
    An "it's just a script / MVP" justification for missing structure, error paths, or tests on
    production-classified code is itself a FINDING, never a mitigation — a YES to any of these
    blocks the verdict at the same severity as a correctness bug.
+   **The reviewer's brief MUST include the REPO'S LENS LIST (#843).** Load
+   `.claude/rules/gk-review-lenses.md` from the TARGET repo when present; else the built-in six:
+   security / correctness / test-integrity / evidence-integrity / design-doctrine / process. The
+   review output is a `Self-review:` fenced Markdown table — one row per lens with a verdict + a
+   `file:line` evidence citation (an `n/a` row needs a reason). This table is the machine-readable
+   artifact the hand-off comment carries (NO second dispatch — step 6 IS the self-review).
+   **Bounce round ≥ 2 escalation (#843).** When the ticket carries `prio:bounce` or a prior gk
+   bounce comment exists (derive the round from `slice-quals --bounces`), run `fable-gate` ONCE:
+   OPEN → dispatch the pinned `fable-advisor` for the review; CLOSED → fresh-context consult
+   inheriting `claude-opus-4-6`. Record the tier honestly via `--reviewed-by-tier` on the hand-off
+   CLI. BEFORE writing any code for a bounce ticket, read the newest gk verdict comment + its
+   `Prevencia:` rule file path (if any) and QUOTE that path in the design comment (CYCLE step 2).
    **Record that pass as its own durable comment too (#214) — the supervisor's completion-report
    audit line only relays your CLAIM, it is never a substitute for the review actually having
    happened.** For EACH member, post `gh issue comment <N> --body "<ran /review +

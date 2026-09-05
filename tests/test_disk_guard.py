@@ -8,12 +8,33 @@ logged), and never deletes on uncertainty. These tests assert on PLANS and
 skip-reasons and injected seams — never on a real deletion path.
 """
 
+import json
 import os
 import types
+from pathlib import Path
 
 import watchdog.disk_guard as dg
 import cli_worktree_sweep as wt
+import cli_scratch_sweep as cs
 import statusbar
+
+
+def _mkfakeproc(root, entries):
+    """A fake `/proc`-shaped tree (same helper shape as test_fleet_hygiene.py —
+    this repo has no tests/__init__.py, so the small helper is duplicated
+    rather than cross-imported, an established convention)."""
+    proc = Path(root) / "proc"
+    proc.mkdir(parents=True, exist_ok=True)
+    for e in entries:
+        pdir = proc / e["pid"]
+        pdir.mkdir()
+        if e.get("cwd") is not None:
+            os.symlink(e["cwd"], pdir / "cwd")
+        fdd = pdir / "fd"
+        fdd.mkdir()
+        for i, target in enumerate(e.get("fds", [])):
+            os.symlink(target, fdd / str(i))
+    return str(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -992,3 +1013,624 @@ def test_oneoff_venvs_select_numbered_never_stable(tmp_path):
     assert "airuleset-lint" not in by
     assert by["lint-3907"]["reason"] is None
     assert by["lint-99"]["reason"] is not None      # too recent → kept
+
+
+# --------------------------------------------------------------------------- #
+# #862 — runner-superseded: reclaim `bin.<ver>`/`externals.<ver>` version dirs
+# left behind by a gh-runner self-update, never the symlink target nor the
+# version a live Runner.Listener is executing; skipped while a Runner.Worker
+# of that root is live.
+# --------------------------------------------------------------------------- #
+def _mk_runner_root(root, cur="2.337.0", old="2.336.0"):
+    """A fixture gh-runner install: bin/externals symlinks -> the `cur` version,
+    plus a superseded `old` version dir for each. Returns the root Path."""
+    rd = root / "actions-runner"
+    rd.mkdir(parents=True)
+    vers = [cur] + ([old] if old else [])
+    for name in ("bin", "externals"):
+        for ver in vers:
+            d = rd / ("%s.%s" % (name, ver))
+            d.mkdir()
+            (d / "f").write_bytes(b"x" * 100)
+        (rd / name).symlink_to(rd / ("%s.%s" % (name, cur)))
+    (rd / "_work").mkdir()
+    return rd
+
+
+def test_runner_superseded_selects_old_versions_never_symlink_target(tmp_path):
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    # a live Listener executing the CURRENT version (resolved via /proc/exe);
+    # no Runner.Worker -> the rung runs
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener], update_argv_fn=lambda: [])
+    by = {os.path.basename(r["path"]): r for r in rows}
+    # the superseded 2.336.0 dirs are selected for delete
+    assert by["bin.2.336.0"]["kind"] == "delete" and by["bin.2.336.0"]["reason"] is None
+    assert by["externals.2.336.0"]["kind"] == "delete"
+    # the CURRENT (symlink target = live Listener) versions are kept
+    assert by["bin.2.337.0"]["kind"] == "skip"
+    assert by["externals.2.337.0"]["kind"] == "skip"
+    # the bare `bin`/`externals` symlinks are never candidates
+    assert "bin" not in by and "externals" not in by
+    # absent root -> nothing to do
+    assert dg.discover_superseded_runner_versions(
+        runner_root=str(tmp_path / "absent"), proc_exes_fn=lambda: [], update_argv_fn=lambda: []) == []
+
+
+def test_runner_superseded_keeps_staged_newer_version(tmp_path):
+    # 🔴1 the REAL self-update window (the "symlink-new / listener-old" window the
+    # old test modelled never actually occurs — update.sh swaps the symlink only
+    # AFTER the Listener exits, then relaunches on the new symlink). What DOES
+    # happen: the SelfUpdater unpacks bin.2.338.0 / externals.2.338.0 while
+    # bin/externals still point at 2.337.0 and no Worker runs. Those STAGED newer
+    # dirs (>= current) are what update.sh is about to switch to → keep them.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root, cur="2.337.0", old=None)      # only the current pair
+    for name in ("bin", "externals"):
+        d = rd / ("%s.2.338.0" % name)
+        d.mkdir()
+        (d / "f").write_bytes(b"x" * 100)
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener], update_argv_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["bin.2.338.0"]["kind"] == "skip"
+    assert "staged" in (by["bin.2.338.0"]["reason"] or "").lower()
+
+
+def test_runner_superseded_failsafe_keep_when_unresolved(tmp_path):
+    # (a) `bin` symlink missing -> cannot prove the current version -> KEEP all
+    root_a = tmp_path / "a"
+    rd_a = _mk_runner_root(root_a)
+    (rd_a / "bin").unlink()
+    rows_a = dg.discover_superseded_runner_versions(
+        runner_root=str(root_a), proc_exes_fn=lambda: [], update_argv_fn=lambda: [])
+    assert rows_a and all(r["kind"] == "skip" for r in rows_a)
+
+    # (b) a live Listener of this root whose exe path carries NO resolvable
+    # version (launched via the `bin` symlink) -> KEEP all
+    root_b = tmp_path / "b"
+    rd_b = _mk_runner_root(root_b)
+    listener = str(rd_b / "bin" / "Runner.Listener")   # symlink path, no version
+    rows_b = dg.discover_superseded_runner_versions(
+        runner_root=str(root_b), proc_exes_fn=lambda: [listener], update_argv_fn=lambda: [])
+    assert rows_b and all(r["kind"] == "skip" for r in rows_b)
+
+    # (c) proc scan failed (sentinel) -> KEEP all
+    root_c = tmp_path / "c"
+    _mk_runner_root(root_c)
+    rows_c = dg.discover_superseded_runner_versions(
+        runner_root=str(root_c), proc_exes_fn=lambda: ["PROC-ERROR"], update_argv_fn=lambda: [])
+    assert rows_c and all(r["kind"] == "skip" for r in rows_c)
+
+
+def test_runner_superseded_gated_on_runner_worker(tmp_path):
+    # a live Runner.Worker of this root -> the whole root skips (a self-update
+    # may be in flight through _work/_update; never race it).
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    worker = str(rd / "bin.2.337.0" / "Runner.Worker")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [worker], update_argv_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+    assert any("worker" in (r.get("reason") or "").lower() for r in rows)
+
+
+def test_runner_superseded_scopes_worker_to_its_own_root(tmp_path):
+    # a Worker of `actions-runner-2` must NOT gate `actions-runner` (prefix
+    # collision guard: match on the trailing-slash path boundary).
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)                       # tmp/gh-runner/actions-runner
+    rd2 = root / "actions-runner-2"
+    rd2.mkdir()
+    other_worker = str(rd2 / "bin.2.337.0" / "Runner.Worker")
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [other_worker, listener], update_argv_fn=lambda: [])
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["bin.2.336.0"]["kind"] == "delete"    # not gated by the sibling's worker
+
+
+def test_runner_superseded_in_the_fence_and_sudo_class():
+    assert "runner-superseded" in dg.RECLAIMABLE_CLASSES
+    assert "runner-superseded" in dg.SUDO_CLASSES     # gh-runner home is a foreign user
+
+
+def test_runner_superseded_skips_root_during_self_update(tmp_path):
+    # 🔴1 a `_work/_update` staging dir (or a live update.sh scoped to this root)
+    # means a self-update is mid-flight → skip the WHOLE root, never race the swap.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)                               # cur 2.337.0 + old 2.336.0
+    (rd / "_work" / "_update").mkdir()
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener], update_argv_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+    assert any("self-update" in (r.get("reason") or "").lower() for r in rows)
+    # 🔵10 the whole-root skip carries the summed candidate bytes (not a bare 0)
+    assert any(r["bytes"] > 0 for r in rows)
+
+    # a live update.sh scoped under a DIFFERENT root (no _work/_update marker) also skips
+    rootb = _mk_runner_root(tmp_path / "b")
+    line = "12345 /bin/bash %s/bin.2.337.0/update.sh" % str(rootb)
+    rows_b = dg.discover_superseded_runner_versions(
+        runner_root=str(tmp_path / "b"),
+        proc_exes_fn=lambda: [str(rootb / "bin.2.337.0" / "Runner.Listener")],
+        update_argv_fn=lambda: [line])
+    assert rows_b and all(r["kind"] == "skip" for r in rows_b)
+
+
+def test_default_runner_proc_exes_failsafe_on_unresolvable_exe(monkeypatch):
+    # 🔴2 a pgrep'd runner pid whose exe can't be resolved (no NOPASSWD sudo /
+    # hidepid / a `(deleted)` exe) makes the WHOLE scan fail safe to the sentinel,
+    # never silently drops the pid to an empty list (which would let the rung
+    # delete a live version).
+    monkeypatch.setattr(dg.os, "readlink",
+                        lambda p: (_ for _ in ()).throw(OSError("EACCES")))
+
+    def _pg(pat):
+        return "424242" if pat == dg.RUNNER_LISTENER_BASENAME else ""
+
+    class _R:
+        def __init__(self, rc, out):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    # sudo readlink fails (rc != 0) → sentinel
+    exes = dg._default_runner_proc_exes(pgrep_fn=_pg, run_fn=lambda *a, **k: _R(1, ""))
+    assert exes == [dg.PROC_ERROR_SENTINEL]
+
+    # exe resolves to a NON-runner basename (a `... (deleted)` exe) → sentinel
+    exes2 = dg._default_runner_proc_exes(
+        pgrep_fn=_pg,
+        run_fn=lambda *a, **k: _R(0, "/x/bin.2.337.0/Runner.Listener (deleted)\n"))
+    assert exes2 == [dg.PROC_ERROR_SENTINEL]
+
+    # pgrep error → sentinel
+    assert dg._default_runner_proc_exes(pgrep_fn=lambda pat: "PGREP-ERROR") == [dg.PROC_ERROR_SENTINEL]
+
+    # happy path: a resolvable Runner.Listener exe is returned
+    exes4 = dg._default_runner_proc_exes(
+        pgrep_fn=_pg, run_fn=lambda *a, **k: _R(0, "/x/bin.2.337.0/Runner.Listener\n"))
+    assert exes4 == ["/x/bin.2.337.0/Runner.Listener"]
+
+
+def test_runner_superseded_ignores_non_version_suffixes(tmp_path):
+    # 🟡3 bin.bak / externals.old / bin.2.336.0.bak are NOT version dirs → never
+    # delete candidates; the real superseded 2.336.0 still is.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    for junk in ("bin.bak", "externals.old", "bin.2.336.0.bak"):
+        (rd / junk).mkdir()
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener], update_argv_fn=lambda: [])
+    names = {os.path.basename(r["path"]) for r in rows if r.get("path")}
+    assert not (names & {"bin.bak", "externals.old", "bin.2.336.0.bak"})
+    by = {os.path.basename(r["path"]): r for r in rows}
+    assert by["bin.2.336.0"]["kind"] == "delete"
+
+
+def test_runner_superseded_realpath_scopes_symlinked_root(tmp_path):
+    # 🟡4 /proc exe paths are realpath-resolved; the root-scope prefix must accept
+    # the realpath too, or a live Runner.Worker under a SYMLINKED root is never
+    # matched → the self-update gate is bypassed and superseded dirs deleted while
+    # a job runs.
+    real = tmp_path / "real"
+    rd = _mk_runner_root(real)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    worker_real = os.path.realpath(str(rd / "bin.2.337.0" / "Runner.Worker"))
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(link), proc_exes_fn=lambda: [worker_real], update_argv_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)   # worker gates the root
+
+
+def test_runner_superseded_dangling_symlink_keeps_all(tmp_path):
+    # 🟡5 a bin/externals symlink pointing at a non-existent target (mid-swap)
+    # cannot prove the current version → KEEP the whole root.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    (rd / "bin").unlink()
+    (rd / "bin").symlink_to(rd / "bin.9.9.9")               # dangling
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [], update_argv_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+
+
+def test_runner_superseded_real_bin_dir_keeps_all(tmp_path):
+    # 🟡7 a fresh tarball extracted `bin` as a REAL directory (not a symlink) →
+    # cannot resolve the current version → KEEP the whole root (fail-safe).
+    root = tmp_path / "gh-runner"
+    rd = root / "actions-runner"
+    rd.mkdir(parents=True)
+    (rd / "bin").mkdir()                                    # real dir, NOT a symlink
+    (rd / "externals.2.337.0").mkdir()
+    (rd / "externals.2.336.0").mkdir()
+    (rd / "externals").symlink_to(rd / "externals.2.337.0")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [], update_argv_fn=lambda: [])
+    assert rows and all(r["kind"] == "skip" for r in rows)
+
+
+def test_plan_superseded_maps_delete_and_skip_via_norm_action(tmp_path, monkeypatch):
+    # 🟡7 the ladder wrapper _plan_superseded_runner_versions must map discovery
+    # rows through _norm_action end-to-end (a candidate → delete with bytes > 0;
+    # a kept row → skip).
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    real = dg.discover_superseded_runner_versions
+    monkeypatch.setattr(dg, "discover_superseded_runner_versions",
+                        lambda **k: real(runner_root=str(root), proc_exes_fn=lambda: [listener]))
+    actions = dg._plan_superseded_runner_versions(str(tmp_path), 0)
+    by = {os.path.basename(a["path"]): a for a in actions if a.get("path") not in (None, "-")}
+    assert by["bin.2.336.0"]["kind"] == "delete"
+    assert by["bin.2.336.0"]["bytes"] > 0                   # 🟡7 delete row carries real bytes
+    assert by["bin.2.336.0"]["cls"] == "runner-superseded"
+    assert by["bin.2.337.0"]["kind"] == "skip"
+
+
+def test_runner_superseded_reverify_refuses_now_current_version(tmp_path):
+    # 🟡6 between plan and act a self-update may move the symlink onto the dir we
+    # planned to reclaim — _perform_action re-resolves and REFUSES, never reaching
+    # the rm seam; a genuinely superseded dir still proceeds (non-tautology).
+    rd = _mk_runner_root(tmp_path / "r")                    # bin -> bin.2.337.0
+    calls = []
+
+    def rec(*a, **k):
+        calls.append(a[0])
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    act_cur = {"cls": "runner-superseded", "kind": "delete",
+               "path": str(rd / "bin.2.337.0"), "bytes": 100}
+    raised = False
+    try:
+        dg._perform_action(act_cur, sudo_ok=False, run_fn=rec)
+    except OSError:
+        raised = True
+    assert raised and calls == []                           # rm seam never reached
+
+    act_old = {"cls": "runner-superseded", "kind": "delete",
+               "path": str(rd / "bin.2.336.0"), "bytes": 100}
+    dg._perform_action(act_old, sudo_ok=False, run_fn=rec)
+    assert any("bin.2.336.0" in " ".join(c) for c in calls)
+
+
+# --------------------------------------------------------------------------- #
+# #862 review nits — per-root update.sh scoping, hermetic tests (see the 13
+# discover_superseded_runner_versions() calls above, now all injecting
+# update_argv_fn), single du walk per skip, and padded version compare.
+# --------------------------------------------------------------------------- #
+def test_runner_update_sh_scoped_by_trailing_slash_not_substring(tmp_path):
+    # #862 fix 1: `_runner_update_in_flight` used to strip the trailing slash
+    # off `prefixes` before the substring match, so a live `update.sh` scoped
+    # under `actions-runner-2` also matched the shorter `actions-runner` root
+    # (an unanchored substring collision, same class as the Worker-scoping
+    # guard in test_runner_superseded_scopes_worker_to_its_own_root). The
+    # trailing slash anchors the match to only that root and its own children.
+    rd = tmp_path / "actions-runner"                # no _work/_update here
+    rd.mkdir()
+    prefixes = (str(tmp_path / "actions-runner") + "/",)
+    other_root_line = "12345 /bin/bash %s/actions-runner-2/bin.2.337.0/update.sh" % tmp_path
+    assert dg._runner_update_in_flight(
+        rd, prefixes, [other_root_line]) is False
+    same_root_line = "12345 /bin/bash %s/bin.2.337.0/update.sh" % rd
+    assert dg._runner_update_in_flight(
+        rd, prefixes, [same_root_line]) is True
+
+
+def test_runner_superseded_update_sh_under_sibling_root_never_gates(tmp_path):
+    # end-to-end version of the fix-1 unit test above: a live update.sh scoped
+    # to `actions-runner-2` must NOT skip the sibling `actions-runner` root.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)                       # tmp/gh-runner/actions-runner
+    rd2 = root / "actions-runner-2"
+    rd2.mkdir()
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    line = "12345 /bin/bash %s/bin.2.337.0/update.sh" % str(rd2)
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener],
+        update_argv_fn=lambda: [line])
+    by = {os.path.basename(r["path"]): r for r in rows
+         if r.get("path") and r["path"].startswith(str(rd) + "/")}
+    assert by["bin.2.336.0"]["kind"] == "delete"     # not gated by the sibling's update.sh
+    assert by["externals.2.336.0"]["kind"] == "delete"
+
+
+def test_runner_superseded_candidate_bytes_walked_once_per_discovery(tmp_path):
+    # #862 fix 3: `_sum_superseded_candidate_bytes` walks every version dir with
+    # `du` — memoize it per `_plan_superseded_for_root` call so a whole-root
+    # fail-safe skip never re-walks the same directories more than once.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root)                               # cur 2.337.0 + old 2.336.0
+    (rd / "_work" / "_update").mkdir()                       # self-update in flight -> skip
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    calls = []
+
+    def counting_dir_stats(path):
+        calls.append(path)
+        return (100, 1)
+
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener],
+        update_argv_fn=lambda: [], dir_stats_fn=counting_dir_stats)
+    assert rows and all(r["kind"] == "skip" for r in rows)
+    # 4 real version dirs (bin.2.337.0, bin.2.336.0, externals.2.337.0,
+    # externals.2.336.0) -> exactly 4 du calls, never doubled by a repeated walk
+    assert len(calls) == 4, calls
+    assert len(set(calls)) == 4                              # each dir walked once
+
+
+def test_runner_version_tuple_ge_pads_differing_segment_counts():
+    # #862 fix 4: `bin.2.337` (2 segments) vs a current `2.337.0` (3 segments)
+    # must compare EQUAL -- plain Python tuple comparison treats the shorter
+    # tuple as LESS than a longer one sharing its leading segments even when
+    # the missing segments are all `0` (`(2, 337) < (2, 337, 0)`), which would
+    # wrongly let a same-version staged dir fall through as delete instead of
+    # KEEP.
+    assert dg._runner_version_tuple_ge((2, 337), (2, 337, 0)) is True
+    assert dg._runner_version_tuple_ge((2, 337, 0), (2, 337)) is True
+    assert dg._runner_version_tuple_ge((2, 336), (2, 337, 0)) is False
+    assert dg._runner_version_tuple_ge((2, 338), (2, 337, 0)) is True
+    assert dg._runner_version_tuple_ge((2, 337, 0), (2, 337, 0)) is True
+
+
+def test_runner_superseded_keeps_staged_version_with_fewer_segments(tmp_path):
+    # end-to-end version of the fix-4 unit test: `bin.2.337` (fewer segments,
+    # same value as current `2.337.0`) must be KEPT, never deleted as if it
+    # were an older/superseded version.
+    root = tmp_path / "gh-runner"
+    rd = _mk_runner_root(root, cur="2.337.0", old=None)
+    d = rd / "bin.2.337"
+    d.mkdir()
+    (d / "f").write_bytes(b"x" * 100)
+    listener = str(rd / "bin.2.337.0" / "Runner.Listener")
+    rows = dg.discover_superseded_runner_versions(
+        runner_root=str(root), proc_exes_fn=lambda: [listener],
+        update_argv_fn=lambda: [])
+    by = {os.path.basename(r["path"]): r for r in rows if r.get("path")}
+    assert by["bin.2.337"]["kind"] == "skip"
+    assert by["bin.2.337"]["reason"] is not None
+
+
+# #863 — scratch rung at <cwd-key>/<session-uuid> granularity
+# --------------------------------------------------------------------------- #
+_NOW = 1_000_000_000.0
+_DAY = 86400.0
+_DEAD_UUID = "74e50984-1111-2222-3333-444444444444"
+_LIVE_UUID = "f219f0e3-5555-6666-7777-888888888888"
+
+
+def _mkfile(path, age_days, now=_NOW, nbytes=2048):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * nbytes)
+    mt = now - age_days * _DAY
+    os.utime(path, (mt, mt))
+
+
+def _scratch_cwd_key(root, uid):
+    r = Path(root) / ("claude-%d" % uid)
+    return r / "-home-gatekeeper-devel-odoo-odoo-erp"
+
+
+def test_scratch_per_session_dead_sibling_swept_while_live_sibling_kept(tmp_path):
+    """The #863 core: a DEAD session subtree is a genuine candidate even when a
+    LIVE sibling in the SAME cwd-key keeps it looking recent. Both are OLD by
+    mtime; the live one is held live by a process cwd, the dead one is not."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    dead = ck / _DEAD_UUID / "tasks" / "old.bin"
+    live = ck / _LIVE_UUID / "scratchpad" / "old.bin"
+    _mkfile(dead, age_days=30)
+    _mkfile(live, age_days=30)                      # OLD by mtime — kept only via liveness
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "606078", "cwd": str((ck / _LIVE_UUID).resolve())}])
+    rows = cs.discover_claude_scratch_candidates(
+        tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+        proc_dir=proc, home=str(tmp_path))
+    by = {r["uuid"]: r for r in rows if r.get("uuid")}
+    assert _DEAD_UUID in by and _LIVE_UUID in by, "each session-uuid is its own candidate"
+    assert by[_DEAD_UUID]["reason"] is None, "the dead session must be a genuine (sweepable) candidate"
+    assert by[_LIVE_UUID]["reason"] is not None, "the live sibling must be kept"
+    assert by[_LIVE_UUID]["live"] is True
+
+
+def test_scratch_live_session_never_swept_even_at_critical(tmp_path):
+    """A live session (recent transcript jsonl signal, no process cwd match) is
+    kept UNCONDITIONALLY — discovery carries no pressure level, so keeping is by
+    construction independent of critical/>=95%. Its subtree is OLD by mtime."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    live = ck / _LIVE_UUID / "scratchpad" / "old.bin"
+    _mkfile(live, age_days=30)
+    # fresh transcript for this uuid -> session-uuid liveness signal
+    tj = Path(tmp_path) / ".claude" / "projects" / "-home-gatekeeper-devel-odoo-odoo-erp" / ("%s.jsonl" % _LIVE_UUID)
+    _mkfile(tj, age_days=0)
+    proc = _mkfakeproc(tmp_path, [])                # NO process holds the subtree
+    rows = cs.discover_claude_scratch_candidates(
+        tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+        proc_dir=proc, home=str(tmp_path))
+    by = {r["uuid"]: r for r in rows if r.get("uuid")}
+    assert by[_LIVE_UUID]["reason"] is not None
+    assert by[_LIVE_UUID]["live"] is True, "a fresh transcript uuid signal must keep the session"
+
+
+def test_scratch_unresolvable_uuid_kept(tmp_path):
+    """Fail-safe: a session whose liveness cannot be resolved (no readable /proc)
+    is KEPT, never swept — even though it is old and no live signal exists."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    sess = ck / _DEAD_UUID / "tasks" / "old.bin"
+    _mkfile(sess, age_days=30)
+    rows = cs.discover_claude_scratch_candidates(
+        tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+        proc_dir=str(tmp_path / "no-such-proc"), home=str(tmp_path))
+    by = {r["uuid"]: r for r in rows if r.get("uuid")}
+    assert by[_DEAD_UUID]["reason"] is not None, "unresolvable liveness must fail-safe to KEEP"
+    assert by[_DEAD_UUID]["live"] is False, "undeterminable liveness is NOT a real live session"
+    assert "undeterminable" in by[_DEAD_UUID]["reason"]
+
+
+def test_scratch_empty_cwd_key_removed_after_sweep(tmp_path):
+    """After the last dead session in a cwd-key is swept, the now-empty cwd-key
+    dir is removed too (inode hygiene)."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    dead = ck / _DEAD_UUID / "tasks" / "old.bin"
+    _mkfile(dead, age_days=30)
+    proc = _mkfakeproc(tmp_path, [])                # empty but readable /proc
+    cs.sweep_claude_scratch(
+        tmp_dir=str(tmp_path), uid=uid, dry_run=False, force=True, now=_NOW,
+        min_age_days=7, proc_dir=proc,
+        log_path=tmp_path / "log.log", state_path=tmp_path / "state.json")
+    assert not (ck / _DEAD_UUID).exists(), "the dead session subtree must be swept"
+    assert not ck.exists(), "the emptied cwd-key dir must be removed after the sweep"
+
+
+def test_status_records_largest_live_scratch(tmp_path):
+    """At >=80% pressure the guard records the largest LIVE session scratchpad it
+    kept into status.json (visibility only — never deleted, no ping)."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    big_live = ck / _LIVE_UUID / "scratchpad" / "big.bin"
+    small_dead = ck / _DEAD_UUID / "tasks" / "old.bin"
+    _mkfile(big_live, age_days=30, nbytes=9000)
+    _mkfile(small_dead, age_days=30, nbytes=100)
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "606078", "cwd": str((ck / _LIVE_UUID).resolve())}])
+
+    def _discover(now, home):
+        return cs.discover_claude_scratch_candidates(
+            tmp_dir=str(tmp_path), uid=uid, now=now, min_age_days=7,
+            proc_dir=proc, home=str(tmp_path))
+
+    def _noop_planners(_home, _now):
+        return [("noop", lambda: [])]
+
+    dg.run_disk_guard(
+        now=_NOW, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (96, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: uid or 1000, mounts=("/",),
+        planners_fn=_noop_planners, scratch_discover_fn=_discover)
+    status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    lls = status.get("largest_live_scratch")
+    assert lls is not None, "status.json must record the largest live scratch"
+    assert _LIVE_UUID in lls["path"], "the LIVE session must be the one recorded, not the dead one"
+    assert lls["bytes"] == 9000
+
+
+def test_session_uuid_live_registry_resumed_session(tmp_path):
+    """#863 : a resumed (`claude -c`) session's process holds an fd on a NEW
+    uuid dir, not its sessionId, so the /proc-fd scan misses the real scratchpad
+    session. The AUTHORITATIVE signal is the sessions registry
+    (`~/.claude/sessions/*.json` -> {"pid","sessionId"}): a record for this uuid
+    whose /proc/<pid> exists => live, even with an OLD transcript and no fd."""
+    home = tmp_path / "home"
+    sdir = home / ".claude" / "sessions"
+    sdir.mkdir(parents=True)
+    (sdir / ("%d.json" % os.getpid())).write_text(
+        json.dumps({"pid": os.getpid(), "sessionId": _LIVE_UUID}))
+    proc = _mkfakeproc(tmp_path, [{"pid": str(os.getpid()), "cwd": str(tmp_path)}])
+    _mkfile(home / ".claude" / "projects" / "-home-x" / ("%s.jsonl" % _LIVE_UUID),
+            age_days=30)
+    assert cs._session_uuid_live("-home-x", _LIVE_UUID, str(home), _NOW, proc) is True
+    (sdir / "deadrec.json").write_text(
+        json.dumps({"pid": 999999999, "sessionId": _DEAD_UUID}))
+    _mkfile(home / ".claude" / "projects" / "-home-x" / ("%s.jsonl" % _DEAD_UUID),
+            age_days=30)
+    assert cs._session_uuid_live("-home-x", _DEAD_UUID, str(home), _NOW, proc) is False
+
+
+def test_scratch_unrelated_empty_cwd_key_survives_sweep(tmp_path):
+    """#863 : the empty-cwd-key rmdir removes ONLY the cwd-key dir a session was
+    actually swept from THIS run -- never an unrelated empty cwd-key dir (the
+    #355 'created seconds ago must stay protected' principle)."""
+    uid = os.getuid()
+    root = Path(tmp_path) / ("claude-%d" % uid)
+    ck_swept = root / "-home-x-proj"
+    _mkfile(ck_swept / _DEAD_UUID / "tasks" / "old.bin", age_days=30)
+    ck_unrelated = root / "-home-y-other"
+    ck_unrelated.mkdir(parents=True)
+    proc = _mkfakeproc(tmp_path, [])
+    cs.sweep_claude_scratch(
+        tmp_dir=str(tmp_path), uid=uid, dry_run=False, force=True, now=_NOW,
+        min_age_days=7, proc_dir=proc, home=str(tmp_path),
+        log_path=tmp_path / "l.log", state_path=tmp_path / "s.json")
+    assert not (ck_swept / _DEAD_UUID).exists(), "dead session swept"
+    assert not ck_swept.exists(), "the emptied cwd-key of the swept session removed"
+    assert ck_unrelated.exists(), "an unrelated empty cwd-key dir must survive"
+
+
+def test_drain_refuses_scratch_delete_when_recheck_says_live(tmp_path):
+    """#863 : the disk-guard drain executor re-checks per-session liveness
+    immediately before rmtree -- a session that raced live between plan and act
+    is refused (the sweep path already does this; the drain path did not)."""
+    sess = tmp_path / "claude-x" / "-home-x" / _DEAD_UUID
+    (sess / "tasks").mkdir(parents=True)
+    (sess / "tasks" / "f.bin").write_bytes(b"x" * 100)
+    a = {"cls": "scratch", "path": str(sess), "bytes": 100, "kind": "delete"}
+    # Fable review 2: _perform_action returns -1 (REFUSE signal) instead of
+    # raising, so execute_drain logs it as REFUSE, not FAIL.
+    result = dg._perform_action(a, scratch_live_fn=lambda p, n: True, now=_NOW)
+    assert result == -1, "a session that raced live must return -1 (REFUSE)"
+    assert sess.exists(), "a refused session must NOT be deleted"
+    dg._perform_action(a, scratch_live_fn=lambda p, n: False, now=_NOW)
+    assert not sess.exists(), "a genuinely dead session is deleted normally"
+
+
+def test_largest_live_scratch_single_discovery_and_change_only_log(tmp_path, monkeypatch):
+    """#863 : at >=80% the largest-live-scratch visibility must NOT run a SECOND
+    full scratch discovery every poll -- the drain SHARES the one it already did
+    -- and the LIVE-SCRATCH log line is written only when the value CHANGES."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    _mkfile(ck / _LIVE_UUID / "scratchpad" / "big.bin", age_days=30, nbytes=5000)
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "42", "cwd": str((ck / _LIVE_UUID).resolve())}])
+    calls = {"n": 0}
+    real = cs.discover_claude_scratch_candidates
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(tmp_dir=str(tmp_path), uid=uid, now=k.get("now"),
+                    min_age_days=7, proc_dir=proc, home=str(tmp_path))
+
+    monkeypatch.setattr(cs, "discover_claude_scratch_candidates", _counting)
+    log = tmp_path / ".claude" / "disk-guard" / "disk-guard.log"
+    kw = dict(now=_NOW, home=str(tmp_path), dry_run=True,
+              statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
+              geteuid_fn=lambda: uid or 1000, mounts=("/",))
+    dg.run_disk_guard(**kw)
+    assert calls["n"] == 1, "exactly ONE scratch discovery per drain poll"
+    assert log.exists() and log.read_text().count("LIVE-SCRATCH") == 1
+    dg.run_disk_guard(**kw)
+    assert log.read_text().count("LIVE-SCRATCH") == 1, \
+        "an unchanged largest_live_scratch must not log a second LIVE-SCRATCH line"
+
+
+def test_no_scratch_discovery_at_healthy_pressure(tmp_path):
+    """Fable review round 2 RED: at healthy pressure (<80%), the du-heavy
+    scratch discovery must NEVER run -- it is gated on the same pressure
+    floor as the drain itself. A box at 40% must not walk /tmp every 60s."""
+    uid = os.getuid()
+    calls = {"n": 0}
+
+    def _counting_discover(now, home):
+        calls["n"] += 1
+        return []
+
+    dg.run_disk_guard(
+        now=_NOW, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (40, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: uid or 1000, mounts=("/",),
+        scratch_discover_fn=_counting_discover)
+    assert calls["n"] == 0, \
+        "scratch discovery must NOT run at healthy pressure (<80%%)"
+    status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert "largest_live_scratch" not in status, \
+        "no largest_live_scratch at healthy pressure"

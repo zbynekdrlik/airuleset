@@ -211,6 +211,11 @@ CANONICAL_SWEEP = [
     # standalone_job`'s "list_claude_panes never fires twice" assertion.
     JobSpec("model_float_audit", "wd.model_audit_job", "model_float_audit_job",
             None, None, "list", "model-float-audit error"),
+
+    # (42) — #866 nice-check self-check. Gated on `nice_check_enabled` bool
+    # (True in cmd_watchdog, left False in run_once unit tests).
+    JobSpec("nice_check", "wd.nice_check", "nice_check_job",
+            "nice_check_enabled", True, "list", "nice-check error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]
@@ -218,7 +223,8 @@ ALWAYS_ON_ORDER = [s.label for s in CANONICAL_SWEEP if s.gate is None]
 
 _OWNERS = {"wd": wd, "wd.compact": wd.compact, "wd.goal": wd.goal,
            "wd.disk_guard": wd.disk_guard,
-           "wd.model_audit_job": wd.model_audit_job}
+           "wd.model_audit_job": wd.model_audit_job,
+           "wd.nice_check": wd.nice_check}
 
 
 def _gate_to_labels():

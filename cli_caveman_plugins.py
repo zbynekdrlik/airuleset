@@ -372,20 +372,95 @@ def _plugin_registry_keys(registry_path: Path = None) -> set:
     "Install complete." was still reported)."""
     import airuleset
     path = registry_path or (airuleset.CLAUDE_DIR / "plugins" / "installed_plugins.json")
-    try:
-        raw = airuleset.read_file_safe(path)
-    except (OSError, UnicodeDecodeError) as e:
-        print(f"    warning: cannot read plugin registry {path} ({e})",
-              file=sys.stderr)
-        return set()
-    if not raw.strip():
-        return set()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return set()
+    data = _load_plugin_registry(path)
     plugins = data.get("plugins") if isinstance(data, dict) else None
     return set(plugins.keys()) if isinstance(plugins, dict) else set()
+
+def _load_plugin_registry(path: Path) -> dict:
+    """Read and parse installed_plugins.json, returning the parsed dict.
+
+    Returns ``{}`` on missing/unreadable/unparsable file -- never raises.
+    Shared by ``_plugin_registry_keys()`` and
+    ``_heal_stale_plugin_registry()`` to avoid duplicating the
+    read/parse ladder (#845 review finding 4)."""
+    import airuleset
+    try:
+        raw = airuleset.read_file_safe(path)
+    except (OSError, UnicodeDecodeError):
+        return {}
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+def _heal_stale_plugin_registry(registry_path: Path = None) -> set:
+    """Remove registry entries whose installPath no longer exists on disk.
+
+    After an account rename (e.g. montalu → montalu1, #537/#845) every
+    plugin installPath still points at the old home (/home/montalu/…) — a
+    nonexistent directory.  ``_managed_plugin_built()`` checks only key
+    PRESENCE, so ``setup_managed_plugins()`` reports "already built" and
+    never reinstalls.  This function heals those stale entries: it reads
+    the full registry, checks each entry's ``installPath``, removes any
+    entry whose path does not exist on disk, writes back (only when
+    something changed), and logs one line per healed key (machine
+    channel — never an owner ping).  After healing, the existing
+    ``_managed_plugin_built()`` naturally returns False for the healed
+    keys, and ``claude plugin install`` reinstalls them fresh — the same
+    flow a first-time box takes.
+
+    Applies to EVERY plugin in the registry, not only the managed
+    baseline set, so any future account rename or home-dir migration is
+    self-healing.  Idempotent; read-only when nothing is stale.
+
+    Returns the set of healed (removed) plugin keys."""
+    import airuleset
+    import tempfile
+    path = registry_path or (airuleset.CLAUDE_DIR / "plugins" / "installed_plugins.json")
+    data = _load_plugin_registry(path)
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return set()
+
+    healed = set()
+    for key in list(plugins.keys()):
+        entries = plugins[key]
+        if not isinstance(entries, list):
+            continue
+        cleaned = []
+        stale_found = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                cleaned.append(entry)
+                continue
+            install_path = entry.get("installPath")
+            if install_path and not Path(install_path).exists():
+                stale_found = True
+                print(f"    healed stale registry entry: {key} "
+                      f"(installPath {install_path!r} does not exist)")
+            else:
+                cleaned.append(entry)
+        if stale_found:
+            healed.add(key)
+            if cleaned:
+                plugins[key] = cleaned
+            else:
+                del plugins[key]
+    if healed:
+        new_content = json.dumps(data, indent=2) + "\n"
+        try:
+            fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+            os.write(fd, new_content.encode())
+            os.close(fd)
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"    warning: could not write healed registry {path} "
+                  f"({e}) -- install loop continues", file=sys.stderr)
+            return set()
+    return healed
+
 
 def _managed_plugin_built(key: str) -> bool:
     """True iff claude's OWN plugin registry (installed_plugins.json) has
@@ -517,6 +592,8 @@ def setup_managed_plugins() -> bool:
         print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
     else:
         print("    settings.json: already correct")
+
+    _heal_stale_plugin_registry()
 
     market_ok = {}
     for key in MANAGED_PLUGINS:

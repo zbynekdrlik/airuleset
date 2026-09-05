@@ -196,10 +196,11 @@ class FetchCarriesTrainKey(unittest.TestCase):
             return airuleset._watchdog_release_state_fetch("/r")
 
     def test_full_path_gap_carries_train_true(self):
-        self.assertEqual(
-            self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
-                        prs={}, runs={}),
-            {"ahead": 9, "in_flight": False, "train": True})
+        rstate = self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
+                             prs={}, runs={})
+        self.assertEqual(rstate["ahead"], 9)
+        self.assertFalse(rstate["in_flight"])
+        self.assertTrue(rstate["train"])
 
     def test_compare_404_no_integration_branch_train_false(self):
         self.assertEqual(
@@ -209,9 +210,11 @@ class FetchCarriesTrainKey(unittest.TestCase):
     def test_drained_with_staging_is_proven_train(self):
         # THE #698 branch: ahead 0 no longer short-circuits blind — staging is
         # verified so a drained verdict can honestly say "train": True.
-        self.assertEqual(
-            self._fetch(compare=(0, "0", ""), staging=(0, "staging", "")),
-            {"ahead": 0, "in_flight": False, "train": True})
+        rstate = self._fetch(compare=(0, "0", ""),
+                             staging=(0, "staging", ""))
+        self.assertEqual(rstate["ahead"], 0)
+        self.assertFalse(rstate["in_flight"])
+        self.assertTrue(rstate["train"])
 
     def test_drained_without_staging_train_false(self):
         # a 2-branch repo with a stray develop == main must never read as a
@@ -235,15 +238,17 @@ class FetchCarriesTrainKey(unittest.TestCase):
             prs={}, runs={"in_progress": [
                 {"status": "in_progress", "event": "push",
                  "headBranch": "main", "name": "Deploy"}]})
-        self.assertEqual(rstate,
-                         {"ahead": 0, "in_flight": True, "train": True})
+        self.assertEqual(rstate["ahead"], 0)
+        self.assertTrue(rstate["in_flight"])
+        self.assertTrue(rstate["train"])
         self.assertFalse(owr._release_train_drained(rstate))
 
     def test_drained_but_open_release_pr_is_in_flight(self):
         rstate = self._fetch(compare=(0, "0", ""), staging=(0, "staging", ""),
                              prs={"main": [{"number": 9}]})
-        self.assertEqual(rstate,
-                         {"ahead": 0, "in_flight": True, "train": True})
+        self.assertEqual(rstate["ahead"], 0)
+        self.assertTrue(rstate["in_flight"])
+        self.assertTrue(rstate["train"])
         self.assertFalse(owr._release_train_drained(rstate))
 
     def test_gap_but_no_staging_train_false(self):

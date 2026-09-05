@@ -173,6 +173,57 @@ class TestBlockRootRecursiveGrep(TestCase):
         # quoted grep pattern.
         self.assertBlocked('grep -rn "airuleset:root-grep-ok" /')
 
+    # ---- #865: ~/.claude transcript tree is a blocked root -----------------
+    def test_blocks_grep_rn_tilde_claude(self):
+        self.assertBlocked("grep -rn foo ~/.claude")
+
+    def test_blocks_grep_rn_tilde_claude_trailing_slash(self):
+        self.assertBlocked("grep -rn foo ~/.claude/")
+
+    def test_blocks_grep_rn_tilde_claude_projects(self):
+        self.assertBlocked("grep -rn foo ~/.claude/projects")
+
+    def test_blocks_grep_rn_tilde_claude_projects_subdir(self):
+        self.assertBlocked("grep -rn foo ~/.claude/projects/somerepo")
+
+    def test_blocks_grep_rn_dollar_home_claude(self):
+        self.assertBlocked("grep -rn foo $HOME/.claude")
+
+    def test_blocks_grep_rn_braces_home_claude(self):
+        self.assertBlocked("grep -rn foo ${HOME}/.claude")
+
+    def test_blocks_grep_rn_home_user_claude(self):
+        self.assertBlocked("grep -rn foo /home/montalu1/.claude")
+
+    def test_blocks_grep_rn_home_user_claude_projects(self):
+        self.assertBlocked("grep -rn foo /home/montalu1/.claude/projects")
+
+    def test_blocks_grep_o_incident_shape(self):
+        # The exact #865 incident shape
+        self.assertBlocked(
+            "grep -rn -o 'Otázka' /home/montalu1/.claude/")
+
+    def test_blocks_grep_rn_tilde_claude_glob(self):
+        self.assertBlocked("grep -rn foo ~/.claude/*")
+
+    def test_allows_scoped_repo_path_still_passes_865(self):
+        # 2+ components under /home is a repo checkout — STILL allowed (#865)
+        self.assertAllowed("grep -rn foo /home/newlevel/devel/airuleset")
+
+    def test_allows_specific_claude_session_file(self):
+        # A non-recursive grep on a specific session file is fine
+        self.assertAllowed(
+            "grep -n foo /home/user/.claude/projects/repo/session.jsonl")
+
+    def test_allows_scoped_devel_dir(self):
+        # A grep over a normal project dir under ~/devel STILL passes
+        self.assertAllowed("grep -rn foo ~/devel/airuleset")
+
+    def test_bypass_marker_allows_claude_root(self):
+        # The bypass mechanism must work for the new blocked roots too
+        self.assertAllowed(
+            "grep -rn foo ~/.claude  # airuleset:root-grep-ok debugging")
+
 
 if __name__ == "__main__":
     main()
