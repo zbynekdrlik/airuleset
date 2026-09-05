@@ -6641,6 +6641,9 @@ from cli_skill_usage import (  # noqa: E402, F401
     cmd_skill_usage as cmd_skill_usage,
     scan_usage as scan_usage,
 )
+from cli_mdreview_audit import (  # noqa: E402, F401
+    cmd_mdreview_audit as cmd_mdreview_audit,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -7466,6 +7469,15 @@ def main():
     p_su.add_argument("--days", type=int, default=60,
                       help="Window in days (default 60)")
 
+    # --- #858: mdreview-audit ---
+    p_ma = sub.add_parser(
+        "mdreview-audit",
+        help="Structured review input for fleet-wide mdreview (#858)")
+    p_ma.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_ma.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -7600,6 +7612,7 @@ SUBCOMMANDS = {
     "model-audit": cmd_model_audit,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
+    "mdreview-audit": cmd_mdreview_audit,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

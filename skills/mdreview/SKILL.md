@@ -1,223 +1,102 @@
 ---
 name: mdreview
-description: Live web-research + ecosystem audit of the ruleset across dev1+dev2. Invokes rules-audit for the offline structural baseline, then adds what needs the network. Reviews CONTENT along three axes — (1) what the live models now do correctly natively, (2) whether the current model COMBINATION is used correctly, (3) whether rules load DYNAMICALLY (context only when needed) — never line count. Solved-problem content is CONVERTED to the right surface (hook / on-demand skill / path-scoped rule), never deleted. Run manually when you want the ruleset re-checked against the latest published guidance — and re-run it after every Claude Code release to re-audit both rules AND the supervision machinery (watchdog/hooks/notify) against new native features (#416/#423).
+description: Fleet-wide ruleset review consuming the structured `mdreview-audit` JSON artifact. Step 1 reads the newest artifact (runs `mdreview-audit --fleet` if stale >7d) for the structural baseline (inventories, cross-surface dedup pairs, memory R/P/S candidates, zero-caller skills, scoping matrix). Then adds what needs the network — native-now evidence, model-combination audit, dynamic-application triage, bidirectional dedup verdicts, memory-promotion decisions, scoping-matrix review. Content is the indicator, never line count; the context ratchet ceiling only goes DOWN. Run after every CC release and on the watchdog's 30d/model-generation cadence trigger.
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUserQuestion, Skill
 ---
 
-# /mdreview — Live Web + Ecosystem Rule Audit
+# /mdreview v2 — Fleet-Wide Ruleset Review
 
-`rules-audit` is the fast OFFLINE structural auditor (size, dupes, orphans, contradictions, model-version strings, override-reconcile, mutation-budget). This skill is the LIVE layer: it runs `rules-audit` for the structural baseline, then adds only what needs the network — current published best practices, a keep-or-cut review, and a plugins/MCP/tooling surface audit. Every change it proposes carries a source URL.
+**Goal — CONTENT is the indicator, never line count.** Every rule here originates from a concrete problem; that work is never thrown away because a doc says "keep CLAUDE.md short". Size is a review-due trigger + a one-way ratchet (`tests/context_ratchet.json`, #857); content is reduced by conversion (hook/paths-scoped rule/reference archive) and native-now evidence, never by deletion.
 
-## Goal — CONTENT is the indicator, never line count (READ FIRST)
+## Step 0 — Read the live model
 
-**The goal is a regularly-REVIEWED, EFFECTIVE ruleset. Growth/size is NOT the indicator — CONTENT is** (the user's directive, 2026-07-09). Every rule here originates from a CONCRETE development problem the user actually hit; that work is never thrown away because a doc says "keep CLAUDE.md short". Size is a review-due trigger + a one-way ratchet (ceiling only ever DOWN — `tests/context_ratchet.json`, #857); content is reduced by conversion (hook/paths-scoped rule/reference archive) and native-now evidence, never by deletion of solved problems.
+Read this session's `## Environment` block. Note the live primary model. ALL search queries are built from this value at runtime. A hardcoded model version anywhere in this skill body is itself a finding.
 
-The review examines content along **three axes**:
-
-1. **Native-now** — what does the LIVE model generation already do correctly by itself? A rule the current models follow without being told is a conversion/removal candidate — but only with evidence (the live gen's official prompting doc, or an observed behavior check). Extra teeth for new generations: official 4.8/Fable-5 docs state more-literal models OVER-BIND stale scaffolding ("may follow that instruction more faithfully than earlier models did"; "skills developed for prior models are often too prescriptive... can degrade output quality") — so a stale rule is not just dead weight, it actively mis-steers. Flag rules tuned to an older generation's weaknesses.
-   **Calibration precedent (real):** early generations wrote runtime-buggy Python → the user moved everything to Rust (maximum pre-compile/compile checks) and ran days-long FULL mutation tests to hold production quality. Current generations made both largely unnecessary — the full mutation runs are OFF and non-Rust languages are back in use. Rules born of that era are exactly what this axis re-examines on every run.
-   **Scope is rules AND machinery (#416/#423):** this axis also re-audits the supervision MACHINERY (watchdog jobs, hooks, notify seams, custom mechanisms) — much of it built before a native Claude Code equivalent existed and never re-checked after a release — with the same per-area verdicts and citations demanded of a rule. The operational checklist lives in Step A → D-machinery.
-2. **Model-combination correctness** — is the CURRENT model lineup used right? Audit `model-awareness.md` + every dispatch surface (skills/agents `model:`/`opts.model` values, effort tiers, the fable-gate) against the live official model docs: right tier per stage, judgment vs execution vs mechanical, gated escalation. A tiering doc that lags the lineup is a top-priority finding.
-3. **Dynamic application** — does each always-on module NEED to be in context every turn of every project? If a rule fires only during a specific task-type (deploy, migration, mutation, Windows, hardware) or area, propose CONVERSION to an on-demand surface: a skill, a `paths:`-scoped rule, or a hook + one-line pointer. Content moves VERBATIM to the new surface — conversion is never deletion, so the solved problem cannot come back. Only convert when on-demand loading does not weaken enforcement of something that must fire every relevant turn.
-
-Hard lines that protect the user's work:
-
-- KEEP every rule that still helps functionality or task completion — even if long. A rule that solved a real recurring problem stays (on SOME surface).
-- Bare REMOVAL only with proof: (a) the live model does it natively now (cited/observed), (b) a hook deterministically enforces it, or (c) true duplicate. No evidence → keep. Deleting a working rule to save lines is a REGRESSION — the user has lived this: rules cut for size, solved problems came back.
-- Official size guidance (code.claude.com best-practices/memory: bloat reduces adherence, ~200-line-per-file target) is answered by axes 1+3 — native-now evidence and dynamic loading — NEVER by pruning solved-problem content to chase the number.
-
-## Spine
-
-1. Read live model from Environment → 2. `Skill(rules-audit)` for structural baseline → 3. Web best-practice research (Step A) → 4. Ecosystem audits — plugins/skills health, MCP, and the MANDATORY per-project tooling pass (Steps B/C/D) → 5. Score → 6. AskUserQuestion review-loop (incl. all tooling findings) → 7. audit log + validate + push.
-
-## Step 0 — Read the live model (NEVER hardcode a generation)
-
-Read THIS session's `## Environment` block. Note the live primary model (e.g. `Opus 4.6`, ID `claude-opus-4-6`), newest family, and subagent models. ALL search queries below are built from this value at runtime. A hardcoded model version anywhere in this skill body is itself a finding — fix it.
-
-## Step 1 — Structural baseline via rules-audit (do NOT re-grep)
-
-```
-Skill(skill: "rules-audit")
-```
-
-Consume its punch-list verbatim (size budget, per-module line ranking, duplicates, orphans for modules/hooks/memory-refs, contradictions, context-gate coverage, §0 override-reconcile, §0b CI mutation-budget, memory hygiene, model-version-string bumping). This skill does NOT re-implement any of those greps — that is the deduplication. Everything below is the LIVE/ECOSYSTEM delta only.
-
-## Step 1b — Official Anthropic CLAUDE.md framework (cited backbone)
-
-```
-Skill(skill: "claude-md-management:claude-md-improver")   # Anthropic's own quality criteria + length budget
-Skill(skill: "claude-md-management:revise-claude-md")     # merge learnings without bloat
-```
-
-Capture the length budget, scope rules, and Include/Exclude table they apply. Tag findings `[anthropic-official]` — they outrank community blogs on conflict.
-
-## Step A — Modern best-practice checklist (live web)
-
-Run AFTER Step 1. Every change carries a source URL; no URL = no change. Official Anthropic docs (`code.claude.com`, `platform.claude.com`, `anthropic.com/engineering`) outrank community blogs.
-
-WebSearch then WebFetch, queries built from the live model:
-`"Claude <live-model> prompt engineering best practices"`, `"Claude Code <current-year> hooks skills features"`, `"CLAUDE.md best practices length budget"`, `"Anthropic agent skills spec"`. Record each source URL + date + author + a one-line summary to a research note.
-
-**A. Dynamic-application triage (AXIS 3 — a primary axis of every run).** Anthropic: CLAUDE.md loads every session, so only always-relevant rules belong inline; sometimes-relevant workflows live in skills (loaded on demand). Walk EVERY always-loaded module and ask: does this need to fire every turn of every project? Only during a specific task (deploy/migration/windows/mutation/hardware) or area? → propose CONVERSION to an on-demand skill / `paths:`-scoped rule / hook + one-line pointer, content moved VERBATIM (conversion, never deletion). Propose the move ONLY when on-demand loading does NOT weaken enforcement of something that matters — a rule that must fire every relevant turn stays inline (or becomes a hook). Each conversion is a real enforcement change → present with the tradeoff, never as a line-cutting reflex.
-Sources: code.claude.com/docs/en/best-practices · platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
-
-**B. Prose → hook conversion (advisory → deterministic).** Anthropic: hooks guarantee the action, CLAUDE.md is only advisory. `grep -rnE "MUST|NEVER|always run|banned|forbidden" modules/`; list hook keys in `settings/`. A mechanically-checkable rule with NO hook → flag HOOKABLE (PreToolUse exit-2 blocks, Stop exit-2 forces continue) + trim prose to a one-line pointer. Cross-check existing hooks — never double-enforce.
-Sources: code.claude.com/docs/en/best-practices · code.claude.com/docs/en/hooks-guide
-
-**C. Size as a review trigger (NOT a target).** rules-audit reports the resolved size (N lines). Use it ONLY to decide WHETHER a periodic review is due and WHICH modules to look at first (largest → review first) — never as a number to hit. Do NOT state a target line count, and do NOT require the punch list to "move toward" any size. Per rule the test is: *does this still help functionality or task completion?* → keep. *Is it provably obsolete (native-now / hook-enforced / duplicate)?* → cut with evidence. Anthropic's Include/Exclude table applies to genuinely low-value lines (restating standard conventions, tutorials, linkable API docs) — NOT to rules that earn their place. When unsure whether a rule still matters: KEEP it.
-Sources: code.claude.com/docs/en/best-practices · platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
-
-**D. Native-now pass (AXIS 1 — default KEEP, evidence flips it).** For each module, ask what the offline auditor can't: (1) does the *current* model generation do this natively now (read the live model's prompting doc; where cheap, verify by observed behavior)? (2) does a HOOK now enforce it deterministically? If you can PROVE either (cite the doc / the hook key), propose removal or reduction to a one-line pointer. If you cannot prove it → KEEP (uncertainty defaults to keeping). **Generation-shift scaffolding check (run on every new model gen):** official 4.8/Fable-5 prompting docs mandate re-evaluating old scaffolding — flag rules that force interim status cadence, enumerate behaviors a brief instruction now covers, or were tuned to an older gen's weaknesses; more-literal models follow stale rules MORE faithfully, so a wrong-for-today rule actively mis-steers (a "harness effect, not a capability regression").
-
-**D-machinery — Native-now for the supervision MACHINERY, not just rules (AXIS 1 extension — #416/#423).** Walk the custom supervision machinery the same way the rule pass walks modules: watchdog jobs (`watchdog/__init__.py` `run_once()`), hooks (`hooks/` + `settings/`), and notify seams (`notify/`). Per area ask — does the CURRENT Claude Code version (read this session's live `claude --version`) or a mature plugin now do this natively? Emit a verdict WITH a citation (native doc URL + CC version): **REPLACE-with-native** (custom code dies) / **KEEP-custom** (cite what native provably still can't do) / **HYBRID** (native core + thin custom edge); sort by (custom lines removed × fragility of the heuristic removed). Route every REPLACE/HYBRID through the Step F review-loop as a follow-up ticket — a machinery replacement is a real behavior change, never applied from inside this skill. Seed checklist from the #416 native+ecosystem audit (VERIFY the current native state, never assume — most of it was true only when the code was built): tmux keystroke nudges/re-asks → native cross-session SendMessage (#422); session-stall detection by pane-parsing → native `claude agents --json` states + task notifications (#421); custom burn/usage tracking → native `/usage`; compact-boundary keystrokes → native auto-compact + PreCompact/Stop hooks; goal auto-arm/re-arm → native /goal + /loop + ScheduleWakeup; watchdog periodic jobs (reping/reconcile) → CronCreate / Cloud Routines / headless `claude -p`. Default stays KEEP-custom where native genuinely lacks it (Discord policy layer, backlog-supervisor, fleet patrol, per-ticket cards) — same evidence bar as a rule: proof flips it, uncertainty keeps it.
-Sources: #416 native+ecosystem audit · code.claude.com/docs/en/cross-session-messaging.md · agent-view.md · goal.md · scheduled-tasks.md · routines.md · hooks.md
-
-**E. Model-combination audit (AXIS 2 — read the live docs).** WebFetch the current generation's prompting + models docs; propagate to `model-awareness.md`. Verify the whole COMBINATION, not just version strings: (a) `model-awareness.md` tiering matches the live lineup (judgment / execution / mechanical / gated escalation tiers still name the right models + efforts); (b) every dispatch surface agrees — grep skills/, agents/, hooks/ for `model:` / `opts.model` / effort values that lag the policy; (c) the escalation gate (fable-gate) still matches how the top tier is priced/limited. Also flag per the live gen: pure-negative rules with no positive exemplar (positive examples beat bans); rules using "only-high-severity / only-important" language (the harness now honors it → suppresses findings → prefer report-everything-then-filter); rules that rely on the model silently generalizing one example (state scope + "applies to all rewordings").
-Source: platform.claude.com/docs/en/build-with-claude/prompt-engineering (substitute the live model's prompting page) + the live models overview
-
-**F. Reachability triage (AXIS 4 — #216, worker-path enforcement claims).** Run
-`python3 -m pytest tests/test_worker_evidence_reachability.py -q` (a red run IS a finding, not a
-skip-and-continue). Then `grep -rn "enforced by" agents/*.md` and confirm each named hook is
-registered in `settings/hooks.json` under `SubagentStop` or a matching `PreToolUse` — a bare
-`Stop`-only registration is the exact #215 false-claim shape (Stop never fires for a subagent). Any
-module `→ skill` stub the worker path is supposed to execute needs either a restatement inline in
-`agents/autopilot-worker.md` or a hook backing it directly — a stub with neither is the e9d1022
-regression shape (18 days silently unreachable before anyone noticed).
-Sources: this repo's own #215/#216 incident + `tests/test_worker_evidence_reachability.py`
-
-## Step B — Installed skills & plugins: health + upgrade
-
-Two SEPARATE worlds; commands do NOT overlap.
-
-| World | What | "Upgrade" mechanism |
-|---|---|---|
-| A. Marketplace plugins | `claude plugin` installs (superpowers, discord, caveman, claude-mem, context7, playwright, frontend-design, rust-analyzer-lsp, claude-md-management) | `claude plugin marketplace update <mkt>` → `claude plugin update <name>` → restart to apply |
-| B. airuleset skills | the managed set in `SKILL_NAMES` (ci-monitor, autopilot, mdreview, …), symlinked, NO version | `git pull` in `~/devel/airuleset` → `python3 airuleset.py push` |
-
-Inventory + outdated detection (no native "what's outdated" command):
-```bash
-claude plugin list                                   # name, version, enabled/disabled, scope
-claude plugin details superpowers                    # component inventory + projected token cost (spot bloat)
-python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.claude/plugins/installed_plugins.json')));[print(k,v[0].get('version'),v[0].get('gitCommitSha','-')[:12]) for k,v in d['plugins'].items()]"
-python3 ~/devel/airuleset/airuleset.py validate      # airuleset skills — validate checks ALL managed skills (NOT `status`, it truncates)
-# git-backed marketplace (caveman): commits-behind
-git -C ~/.claude/plugins/marketplaces/caveman fetch -q && echo "behind: $(git -C ~/.claude/plugins/marketplaces/caveman rev-list --count HEAD..origin/HEAD 2>/dev/null)"
-# orphan / broken skills
-find ~/.claude/skills/ -maxdepth 1 -xtype l          # dangling symlinks
-ls ~/.claude/skills/*.md 2>/dev/null                 # flat .md = legacy; a .md duplicating a dir = shadowing
-```
-
-Decision rules:
-- **Upgrade gotcha:** `claude plugin update` can compare a STALE local clone and report "already latest" → ALWAYS `claude plugin marketplace update <mkt>` FIRST, then `claude plugin update <name>`, then restart Claude Code to apply.
-- Official plugins auto-update at startup; 3rd-party (caveman) + disabled (claude-mem) do NOT — upgrade by hand.
-- `version: "unknown"` (context7/playwright/frontend-design) is NORMAL — they declare no semver; track by Last-updated date / gitCommitSha.
-- **claude-mem is DISABLED and several majors behind, and overlaps airuleset's file-memory** → keep DISABLED or `claude plugin uninstall claude-mem@thedotmack`; never silently re-enable a badly-behind plugin or run two memory systems.
-- airuleset skill stale → `git pull` + `python3 airuleset.py push`. Symlink dangling → `python3 airuleset.py install`.
-- Foreign-owned orphan skills (`win-mcp.md`, `test-contact-form.md`) → file an issue, do NOT auto-delete (see project skill-ownership rule).
-Sources: code.claude.com/docs/en/discover-plugins · `claude plugin --help`
-
-### B2 — Slash-command surface: ergonomics + collisions + quality-command coverage (#447)
-
-The USER-FACING slash surface is its own audit axis of every run — a mis-firing or missing
-command wastes the user's time directly. Precedent: `/exit` kept mis-invoking `/playbook-review`
-from the picker (transcript-proven, the user's own words: "to sa len omylom stlacilo namiesto
-/exit") until #447 hid it. The picker executes the HIGHLIGHTED row on Enter with undocumented
-ranking and known mis-selection bugs (upstream anthropics/claude-code issues 11431 — `/com` ran
-`/pr_comments`; 26307 — stale filtering; 41828) — a command need NOT share letters with what the
-user typed to be mis-run, so visibility itself is the exposure.
-
-Inventory (what the user can actually type on THIS box):
-```bash
-grep -L '^user-invocable: false' ~/devel/airuleset/skills/*/SKILL.md  # visible airuleset set (line-anchored: a skill BODY citing the field must not hide that skill from this inventory)
-# cross-check per-box scoping: SKILLS_MAINTAINER_ONLY / SKILLS_FULL_AUTHORITY_ONLY in airuleset.py
-claude plugin list                                                     # plugin command surface
-# built-ins: code.claude.com/docs/en/commands.md (/exit /quit /clear /help /compact …)
-```
-
-Checks, each producing Step F findings:
-1. **Agent-only skills must be hidden.** Any skill the user never deliberately types (post-ticket
-   mandates, worker-path machinery, stub targets) carrying `user-invocable: true` is picker noise
-   AND a mis-selection hazard → flag: flip to `user-invocable: false` (documented frontmatter
-   field — hides from the picker, model Skill-tool invocation unaffected; skills.md frontmatter
-   table). Evidence bar: transcript ratio of model-side `"skill":"<name>"` invocations vs
-   user-typed `<command-name>` ones — a skill with ~zero deliberate user invocations is agent-only.
-2. **Collision check** of every VISIBLE command against built-ins and against each other: prefix
-   overlap, small edit distance, or duplicated purpose (two visible commands doing one job). Flag
-   collisions for rename/hide — with the upstream-picker caveat above, closeness is a hazard even
-   without shared letters, so the fix that always works is fewer visible entries.
-3. **Quality-command coverage.** Which quality-raising commands (review / verify / audit /
-   simplify / security classes) exist installed vs available (reuse the Step D1 catalog + the
-   built-ins list) but are NOT wired into any standard flow (worker CYCLE, completion-report
-   gates, this skill itself)? Per command: installed? visible? wired-where? verdict
-   (wire-into-flow / keep-manual / skip + why). A wire-into-autopilot verdict is a FLOW change →
-   always a Step F user decision + a follow-up ticket for the autopilot lane, never applied from
-   here (the built-in review/code-review skill stays BANNED in the worker path per #363).
-
-All B2 findings route through the Step F review-loop like every other audit line — never
-auto-applied.
-Sources: code.claude.com/docs/en/skills.md (frontmatter: `user-invocable`) · code.claude.com/docs/en/commands.md · upstream anthropics/claude-code issue 11431 · #447
-
-## Step C — MCP / connector audit (read-only)
+## Step 1 — Structured baseline from the JSON artifact (replaces rules-audit)
 
 ```bash
-claude mcp list                                      # health + needs-auth + DUPLICATES
+# Read the newest artifact; run the audit if stale >7d
+ls -t ~/.claude/mdreview-audit/*.json 2>/dev/null | head -1
+# If missing or older than 7 days:
+python3 ~/devel/airuleset/airuleset.py mdreview-audit --fleet --json
 ```
-Cross-reference `~/.claude.json` (global `mcpServers` vs project-scoped). Checks:
-- **Prefer PROJECT-SCOPED over global (the direction).** A server in global `mcpServers` (or an account-level claude.ai connector) is visible to ALL projects — including ones that should never touch it (e.g. n8n tools loaded into projects with nothing to do with n8n). Flag global/account MCP that belongs to ONE project → recommend moving it to that project's `.mcp.json`. Goal: each project sees only the MCP it actually uses.
-- **Redundancy:** the same service wired twice (e.g. a claude.ai n8n connector AND a self-hosted `n8n-mcp`) loads its tool schema twice. Flag it — but VERIFY which one a project actually uses before recommending removal; never assume "unused" and drop. Resolve via the OWNING project, not a blind global delete.
-- **Health:** a server showing `Failed to connect` is broken (fix the endpoint) or dead (owning project removes it) — surface it, don't silently ignore.
-- **Connected = real cost; needs-auth = cheap.** A CONNECTED MCP injects its full tool schema every turn (codex-bridge, n8n, playwright = dozens of tools each). A `needs-auth` connector exposes only ~2 auth stubs until authed, so its context cost is LOW — do NOT over-weight unused needs-auth connectors. The real saving is consolidating duplicate CONNECTED servers and scoping globals to their project.
-- **Secret hygiene:** never print bearer tokens; mask.
-Verdicts (always for the OWNING project to action, never a blind global edit): move-to-project-scope / consolidate-duplicate / fix-or-remove-broken / keep.
-Source: code.claude.com/docs/en/mcp
 
-## Step D — New-tooling research: ecosystem + MANDATORY per-project pass
+The artifact (`~/.claude/mdreview-audit/<date>.json`, schema 1) carries:
+- **Per-box inventory** — global modules (resolved bytes), skill bodies + desc chars, path-scoped rules, per-project CLAUDE.md + always-on rules
+- **Cross-surface dedup pairs** — exact-hash matches of normalized sentences (>=40 chars) across module/skill/rule/project surfaces; flagged at >=2 shared hashes or 1 hash of >=120-char sentence
+- **Memory R/P/S candidates** — R (rule/procedure: doctrine vocab), P (fact/preference), S (credential-like: LOUD flag, value NEVER in output); per-R: proposed target surface
+- **Zero-caller skills** — from `skill-usage --json` (90d fleet window)
+- **Scoping matrix** — per-box role (gk/stream/workstation) + profile/module/skill presence
 
-Principle (verified): LSP plugins and on-demand Skills REDUCE context; always-on MCP servers INCREASE it. "Install more to reduce chaos" is usually wrong. Rubric: `score = (dev_velocity × context_reduction) / setup_cost`, each 1-5. INSTALL only if ≥3 AND no context regression. `context_reduction`: 5 = LSP/Skill that removes reads; 3 = on-demand; 1 = always-on MCP injecting schema every turn (auto-disqualifies any "reduce chaos" justification).
+Consume the artifact's punch-list directly. Do NOT re-grep what the artifact already computed.
 
-**D1 — Ecosystem layer (global).** WebSearch `"best Claude Code plugins <year>"`, `"Claude Code LSP token reduction"`, `"MCP context overhead"`. Extract the FULL local marketplace catalog — do NOT guess plugin names:
-```bash
-python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.claude/plugins/marketplaces/claude-plugins-official/.claude-plugin/marketplace.json')));[print(p.get('name'),'|',(p.get('description') or '')[:80]) for p in d.get('plugins',[])]"
-```
-Cross-check `claude plugin list` so you never re-recommend an installed plugin.
+### Former rules-audit checks (now scripted in the artifact)
 
-**D2 — PER-PROJECT pass (MANDATORY — this IS the tooling research, not optional).** A generic "install pyright" answer is a FAILURE of this step. Go project-by-project across the user's actual repos and find what helps EACH one:
-1. Enumerate the MAINTAINED set ONLY (dev1 + dev2) — a git repo with RECENT activity: `git -C <d> log --since="90 days ago" --oneline | wc -l` > 0. EXCLUDE forks / vendored upstreams (e.g. obs-studio, DistroAV), scratch dirs, non-git ops folders, and dormant repos (0 commits/90d). Recommending tooling for an unmaintained or fork project is NOISE — the user explicitly flagged scanning every `~/devel` dir as wrong (a clangd "win" that evaporated once scoped, because every C/C++ repo was a dormant fork). For each MAINTAINED project detect its REAL stack (Cargo.toml / package.json / pyproject / __manifest__.py / go.mod / C/C++ sources) and what it integrates (read its CLAUDE.md/README — external services, hardware, APIs, DBs).
-2. Match each project against the full D1 catalog. Per project decide: a per-language LSP for an in-use language with NO LSP yet (e.g. `clangd-lsp` for real C/C++); a PROJECT-SCOPED domain MCP ONLY if that project automates that exact service as a recurring workflow; an on-demand skill for a recurring task; or — a valid, common answer — NOTHING NEW (covered by installed LSPs + context7).
-3. **Fan out** — dozens of projects → use a Workflow / parallel agents clustered by stack; each agent reads a cluster's CLAUDE.md files and returns structured per-project verdicts. Cover EVERY active project, not a sample (log any skipped + why).
-4. **Cross-cut:** report LSP coverage across ALL projects — which in-use languages still lack an LSP (recurring gap = C/C++ → `clangd-lsp` for the OBS/JUCE projects). pyright/typescript/rust-analyzer already installed.
-5. Be HONEST about fit: the user's stack is mostly self-hosted media/AV/network — the SaaS-heavy catalog matches few projects. Say so; never manufacture a match.
+The following checks from the former `rules-audit` skill are now covered by the artifact's structured output. Review each section:
 
-Decision rules:
-- NEVER add an always-on MCP to "reduce chaos" — only for a concrete recurring workflow, and PROJECT-SCOPED (`.mcp.json` in that project), never a global connector visible to all projects.
-- Memory is SOLVED (built-in MEMORY.md + airuleset file-memory) — keep claude-mem DISABLED.
-- SKIP (overlaps local skills): pr-review-toolkit, code-review, commit-commands, frontend-design.
+1. **Size metric** — review-due trigger, largest-first priority; the artifact's `global_modules` resolved bytes vs `context_ratchet.json` ceilings
+2. **Duplicates** — the artifact's `dedup_pairs` list: cross-surface verbatim sentences. Verdict per pair: merge/consolidate/keep-both-with-reason
+3. **Orphans** — modules in `modules/` not in any profile; skills with zero callers (the artifact's zero-caller list)
+4. **Contradictions** — global rule says X, project overrides to Y (read the artifact's per-project rules inventory)
+5. **Context-gate coverage** — high-traffic modules should have "Context gate" pointers
+6. **Memory hygiene** — the artifact's R/P/S classification: R candidates for promotion, P for keep, S for LOUD alert
+7. **Model currency** — stale version strings (grep the live model against the artifact's inventory)
 
-**D3 — Hand off, don't reach in.** A project-scoped MCP / skill / config belongs to the OWNING project (stay-in-lane). For each such recommendation, FORMULATE a ready-to-paste handoff prompt for that project's Claude (what to install, how to scope it, what to verify). The user pastes it into that project's session — you NEVER edit another project's code/config.
+## Step 2 — Scoping-matrix review
 
-Output: a per-project table (project | real stack | tool | type | scope | why | score | verdict), the cross-cutting LSP-coverage line, the project-scoped-MCP handoff prompts, and an honest "these need nothing new" list — ALL surfaced to the user in Step F, never auto-applied.
+Read the artifact's `scoping` section. For each box/role combination:
+- Does the box's profile match its role? (gk = full review + deploy; stream = reduced; workstation = dev)
+- Any module deployed where it doesn't belong? (a gk-only module on a stream box, a stream skill on gk)
+- Any box WITHOUT a module it should have?
 
-## Step E — caveman-compatibility
+## Step 3 — Bidirectional dedup verdicts
 
-caveman lite is active (strips articles/filler). Rules must lean on STRUCTURAL markers (✅ ❌ 🌐, headers, code blocks), NOT exact prose strings. Flag any rule/hook whose enforcement depends on a literal phrase a compressor could mangle.
+The artifact lists cross-surface dedup pairs. For EACH pair, decide:
+- **Module ↔ Skill** — if the content is identical, keep it on the EFFECTIVE surface (modules for always-on, skill for on-demand). The other gets a one-line pointer (the #9 stub pattern).
+- **Module ↔ Project CLAUDE.md** — project-specific content in a global module → move to project `paths:` rule. Global discipline in a project CLAUDE.md → delete from project (inherits from global).
+- **Skill ↔ Rule** — a skill body and a path-scoped rule covering the same topic → consolidate per the content surface that loads (#104: skill bodies don't reach dispatched workers).
 
-## Step F — Score, apply, log
+## Step 4 — Memory-promotion decisions
 
-1. **Score** each proposed change `Impact × Confidence ÷ Effort`; sort high→low.
-2. **AskUserQuestion — EVERYTHING goes to the user's review.** Per change (or grouped): Apply now / Defer-to-issue (`gh issue create`) / Reject. Never apply silently. This INCLUDES every tooling finding (plugin installs, per-project recommendations, MCP changes): present each with a "what next?" choice — install now / hand off a project-scoped prompt to the owning project's Claude / skip. A plugin install changes the user's environment → it is ALWAYS user-reviewed, never auto-run on the agent's own judgement. A found-but-unpresented recommendation is a dropped finding.
-3. **Apply** accepted edits to `modules/` / skills / `settings/`. Heavy situational modules → MOVE TO SKILL per Step A.
-4. **Validate + deploy:** `python3 airuleset.py validate` MUST pass, then `python3 airuleset.py push` (deploys dev1 + dev2 — never bare `git push`).
-5. **Log** to `audits/mdreview-<date>.md`: every finding, its score, source URL, verdict (applied / deferred-#N / rejected / KEPT-still-effective). Record the resolved size as a tracked metric over time — NOT as a pass/fail vs a budget. A run whose verdict is "reviewed, all rules still earn their place, nothing cut" is a SUCCESSFUL run.
+For each R-classified memory item:
+- **Promote** to the proposed target surface (managed module / project `paths:` rule / hook), with evidence
+- **Dedup-delete** if it duplicates a managed rule
+- **Hand-off** if it belongs to another project's own rule surface
+- **Keep** in memory if it's a genuine per-box preference that varies by box
+
+For S-flagged items: LOUD alert — a credential in memory is a leak surface. The value is NEVER in the output; surface the file path + pattern name only.
+
+## Step 5 — Zero-caller skills
+
+From the artifact's zero-caller list (skill-usage 90d fleet window):
+- A skill with ZERO calls across the fleet in 90 days is a retirement candidate
+- Ask the user per candidate: retire (delete) / keep (with reason) / convert to `paths:` rule
+- User-invocable: false skills with zero model invocations are agent-only dead code
+
+## Step 6 — Live web research (AXIS 1–3, extends the artifact)
+
+WebSearch + WebFetch, queries built from the live model:
+- Native-now: `"Claude <live-model> prompt engineering best practices"` — what does the current gen do natively?
+- Model-combination: `"Claude Code <year> hooks skills features"` — audit `model-awareness.md` against the live docs
+- Dynamic-application: `"CLAUDE.md best practices length budget"` — which always-on modules should be `paths:` scoped?
+
+Every proposed change carries a source URL; no URL = no change.
+
+## Step 7 — Score, apply, log
+
+1. **Score** each proposed change: `Impact × Confidence / Effort`; sort high→low.
+2. **AskUserQuestion** — EVERYTHING goes to the user's review. Per change: Apply now / Defer-to-issue / Reject. Never apply silently.
+3. **Apply** accepted edits.
+4. **Validate + deploy:** `python3 airuleset.py validate` then `python3 airuleset.py push`.
+5. **Log** to `audits/mdreview-<date>.md`: every finding, score, source, verdict. A run whose verdict is "reviewed, all rules still earn their place" is a SUCCESSFUL run.
 
 ## Rules
 
-- **Content over line count.** The three axes (native-now / model-combination / dynamic application) are the review; size is a review-due trigger + a one-way ratchet (ceiling only ever DOWN — `tests/context_ratchet.json`, #857), never a target. Keep every rule that still helps; bare-cut ONLY proven-obsolete (native-now / hook-enforced / duplicate); situational rules CONVERT to on-demand surfaces verbatim. Deleting a working rule to save size is a regression.
-- Every proposed change cites a source URL (or hook key / duplicate file:line) captured THIS run. No evidence → no change. Uncertainty → keep.
-- Model generation is read from Environment ONCE (Step 0) — never hardcoded in a query.
-- Structural checks are owned by `rules-audit` (Step 1) — do NOT re-grep them here.
-- MCP/connector changes are for the OWNING project to apply (prefer project-scoped); never blind-edit global MCP config.
-- Never apply silently; always validate before push; always sync dev1 + dev2.
-- **Re-audit trigger — after every Claude Code release.** A new CC version is the standing signal to re-run this skill: new native features can make BOTH rules AND the supervision machinery (watchdog / hooks / notify) natively redundant (#416/#423). This is a run CONDITION (a reason to invoke), not an auto-schedule — the manual-invocation rule below still holds.
-- This skill is manually invoked — no auto-schedule, no cron (competes with active dev runners).
+- **Content over line count.** The three axes (native-now / model-combination / dynamic application) are the review; size is a one-way ratchet, never a target.
+- Every proposed change cites a source URL or artifact evidence. No evidence → no change.
+- Model generation is read from Environment ONCE — never hardcoded.
+- MCP/connector changes are for the OWNING project to apply.
+- Never apply silently; always validate before push.
+- **Re-audit trigger:** after every Claude Code release + the watchdog's 30d/model-generation cadence.

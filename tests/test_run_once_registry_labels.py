@@ -81,6 +81,7 @@ EXPECTED_STANDALONE = [
     "disk_guard",                       # (40) — #834 per-box disk-pressure guard
     "model_float_audit",                # (41) — #871 model-float audit
     "nice_check",                       # (42) — #866 nice-0 self-check
+    "mdreview_cadence",                 # (43) — #858 mdreview recurring cadence
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
