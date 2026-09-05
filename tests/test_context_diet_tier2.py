@@ -181,6 +181,11 @@ class TestCompletionReportConversion(TestCase):
     def test_compact_instruction_stays(self):
         self.assertIn("compact-request --self", self.module)
 
+    def test_boundary_trigger_skips_gates_not_applies(self):
+        # Y1 fix: --self deliberately SKIPS the #99/#48 gates, never "applies"
+        self.assertIn("deliberately SKIPS", self.module)
+        self.assertNotIn("gates apply", self.module)
+
     def test_pointer_exists(self):
         self.assertIn("completion-report-history.md", self.module)
 
