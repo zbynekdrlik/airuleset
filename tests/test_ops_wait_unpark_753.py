@@ -224,9 +224,10 @@ class FlagSetsReturnsUnpark(unittest.TestCase):
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: DRAINED):
             sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
-        # #818 extended the tuple to 6 (…, tacit_wait, tacit_close); the unpark
-        # set stays index 3 (appended after), so this lock is unaffected bar len.
-        self.assertEqual(6, len(sets))
+        # #818 extended the tuple to 6, #881 to 8 (…, converge, no_target);
+        # the unpark set stays index 3 (appended after), so this lock is
+        # unaffected bar len.
+        self.assertEqual(8, len(sets))
         self.assertEqual({41}, sets[3])
 
 

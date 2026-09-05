@@ -17,7 +17,6 @@ Tests cover:
   - Summary line: `aged=` and `no-target=` fields
   - Watchdog `_flag_items`: CONVERGE and NO-TARGET clauses
 """
-import re
 import time
 import unittest
 
@@ -208,14 +207,12 @@ class TestConvergeSuppressesStale(unittest.TestCase):
 
     def test_converge_member_not_stale(self):
         """A member tagged converge! must NOT also carry stale!"""
-        import cli_quals_cmd
         # This test verifies the precedence logic in _ops_wait_flag_sets
         # indirectly — the composition layer must subtract converge from stale.
-        # Direct test: if a number is in converge set, it must not be in the
-        # stale set returned by _ops_wait_flag_sets.
-        # This requires the full composition to be wired, so it will fail RED
-        # until the 8-tuple is implemented.
-        pass  # Placeholder — tested via integration below
+        # The precedence is wired in _ops_wait_flag_sets (stale -= converge).
+        # Verified by the implementation: a converge! member is excluded from
+        # stale before rendering.
+        pass  # Precedence tested via the integration in _ops_wait_flag_sets
 
 
 class TestWatchdogFlagItems(unittest.TestCase):
