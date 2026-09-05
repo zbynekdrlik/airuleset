@@ -41,6 +41,23 @@ class TestConstants(unittest.TestCase):
             self.assertFalse(lo <= dg.DROP_PORT_BASE <= hi,
                              "DROP_PORT_BASE %d collides with %d-%d" % (dg.DROP_PORT_BASE, lo, hi))
 
+    def test_no_duplicate_ports_per_box(self):
+        """#889: each account on the same box must have a distinct port."""
+        from collections import defaultdict
+        by_box = defaultdict(list)
+        for (node, user), lane in dg.DROP_LANES.items():
+            by_box[node].append((user, lane.port))
+        for node, entries in by_box.items():
+            ports = [p for _, p in entries]
+            self.assertEqual(len(ports), len(set(ports)),
+                             "duplicate ports on box %s: %s" % (node, entries))
+
+    def test_no_duplicate_hosts_fleet_wide(self):
+        """#889: each hostname must be globally unique."""
+        hosts = [lane.host for lane in dg.DROP_LANES.values()]
+        self.assertEqual(len(hosts), len(set(hosts)),
+                         "duplicate hostnames: %s" % hosts)
+
     def test_drop_hosts_are_flat_single_level_under_newlevel_media(self):
         # LOAD-BEARING: *.newlevel.media Universal SSL is ONE level, so a 2-level
         # host would have no valid edge cert and break mandatory TLS.
@@ -287,12 +304,12 @@ class TestCmdDropGateway(unittest.TestCase):
         dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = self._orig
 
     def test_no_lane_box_is_a_clean_noop(self):
-        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="dev1"))
+        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="dev1", _username="newlevel"))
         self.assertEqual(rc, 0)
 
     def test_dry_run_does_not_write_config_or_marker(self):
         before = Path(self.cfg).read_text(encoding="utf-8")
-        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="spinbike", _username="newlevel",
                                        _marker_path=self.marker))
         self.assertEqual(rc, 0)
         self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before)
@@ -305,7 +322,7 @@ class TestCmdDropGateway(unittest.TestCase):
             calls.append(argv)
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                        _marker_path=self.marker, _run=fake_run))
         self.assertEqual(rc, 0)
         out = Path(self.cfg).read_text(encoding="utf-8")
@@ -320,7 +337,7 @@ class TestCmdDropGateway(unittest.TestCase):
         def failing_run(argv, **kw):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
 
-        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                        _marker_path=self.marker, _run=failing_run))
         self.assertEqual(rc, 1)
         # A failed restart must NOT claim the lane is live.
@@ -423,7 +440,7 @@ class TestCmdDropGatewayRerunAfterFailedRestart(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         # Apply #1: config gets the ingress, restart FAILS → no marker.
-        rc1 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc1 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                         _marker_path=self.marker, _run=failing))
         self.assertEqual(rc1, 1)
         self.assertFalse(os.path.exists(self.marker))
@@ -431,7 +448,7 @@ class TestCmdDropGatewayRerunAfterFailedRestart(unittest.TestCase):
 
         # Apply #2: config already carries the ingress (changed=False) AND the
         # marker is still absent → it MUST restart again, then mark live.
-        rc2 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc2 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                         _marker_path=self.marker, _run=ok))
         self.assertEqual(rc2, 0)
         self.assertTrue(calls2, "apply #2 must restart even though config is unchanged")
@@ -470,7 +487,7 @@ class TestAccessGatedMarker(unittest.TestCase):
 
         with mock.patch.object(dg, "_reconcile_access",
                                return_value=(False, "Access ERROR: boom")):
-            rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="subdev",
+            rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="subdev", _username="david1",
                                            _marker_path=self.marker, _run=ok_restart))
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(self.marker))
@@ -494,7 +511,7 @@ class TestUuidMismatchRefused(unittest.TestCase):
         dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = self._orig
 
     def test_wrong_tunnel_uuid_refused(self):
-        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                        _marker_path=os.path.join(self.tmp, "m")))
         self.assertEqual(rc, 1)
 
@@ -575,10 +592,11 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
         self.assertTrue(calls, "must restart after re-adding the ingress")
 
     def test_present_ingress_is_noop_no_restart(self):
+        spinbike_port = dg.DROP_LANES[("spinbike", "newlevel")].port
         once = dg.render_drop_ingress_augmentation(
-            SPINBIKE_CONFIG, "drop-spinbike.newlevel.media")
+            SPINBIKE_CONFIG, "drop-spinbike.newlevel.media", spinbike_port)
         Path(self.cfg).write_text(once, encoding="utf-8")
-        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
+        dg.write_drop_marker("drop-spinbike.newlevel.media", spinbike_port, path=self.marker)
         calls, r = self._run_noop()
         self.assertTrue(dg.reconcile_drop_ingress_on_install(
             run=r, nodename="spinbike", marker_path=self.marker))

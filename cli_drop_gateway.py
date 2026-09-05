@@ -39,7 +39,8 @@ REPO_DIR = Path(__file__).resolve().parent
 # on a shared box gets its own port, so concurrent ephemeral servers (upload,
 # secret show, secret request) never collide. Range 8870-8889 sits above show's
 # 8850-8869 and below no other airuleset range. Distinct from filedrop 8788,
-# upload 8799-8819, secret 8830-8849, show 8850-8869.
+# upload 8799-8819, secret 8830-8849, show 8850-8869. Grandfathered:
+# spinbike's 8828 predates the per-account range and sits in the gap.
 DROP_PORT_BASE = 8870
 DROP_PORT_MAX = 8889
 
@@ -207,7 +208,7 @@ DROP_ACCESS_APPS = {
     "drop-subdev-dominika.newlevel.media": {
         "hostname": "drop-subdev-dominika.newlevel.media",
         "name": "drop — dominika",
-        "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
+        "allowed_emails": ["dominika@grena.sk", "drlik.zbynek@gmail.com"],
         "session_duration": "24h",
     },
 }
@@ -331,24 +332,49 @@ def resolve_public_lane(want_public=True, have_encrypted_private=None,
 _CATCHALL_RE = re.compile(r"^(\s*)-\s*service:\s*http_status:404\s*$")
 
 
-def _drop_ingress_already_present(config_text, drop_host):
-    return bool(re.search(r"(?m)^\s*-\s*hostname:\s*" + re.escape(drop_host) + r"\s*$",
-                          config_text))
+def _drop_ingress_already_present(config_text, drop_host, port=None):
+    """True when `drop_host` is already an ingress hostname. When `port` is given,
+    also verifies the service line points at the right port (#889 migration: a
+    host present at the OLD port 8828 must be rewritten to its per-account port)."""
+    m = re.search(r"(?m)^\s*-\s*hostname:\s*" + re.escape(drop_host) + r"\s*$",
+                  config_text)
+    if not m:
+        return False
+    if port is None:
+        return True
+    # Check the service line immediately following the hostname line.
+    rest = config_text[m.end():]
+    svc_m = re.match(r"\n\s*service:\s*http://127\.0\.0\.1:(\d+)\s*$", rest, re.M)
+    if svc_m and int(svc_m.group(1)) == port:
+        return True
+    return False  # hostname present but wrong port — needs rewrite
+
+
+def _remove_ingress_for_host(config_text, drop_host):
+    """Remove a hostname+service ingress entry for `drop_host` from the config.
+    Returns the config unchanged if the host is not present."""
+    # Match the hostname line + the immediately following service line.
+    pat = (r"(?m)^(\s*)-\s*hostname:\s*" + re.escape(drop_host) +
+           r"\s*\n\s*service:\s*\S+\s*\n")
+    return re.sub(pat, "", config_text)
 
 
 def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT_BASE):
     """`config_text` with a drop-host ingress inserted BEFORE the catch-all 404,
     preserving EVERY existing ingress entry.
 
-    Idempotent: if `drop_host` is already an ingress hostname, returns
-    `config_text` unchanged. Works on the well-known cloudflared config shape (an
-    `ingress:` list whose last entry is `- service: http_status:404`). REFUSES
-    (raises ValueError) when it cannot find that catch-all, rather than guessing
-    where the drop ingress belongs and corrupting a live prod config that also
-    serves a real website (spinbike.sk).
+    Port-aware idempotent (#889): if `drop_host` is already present with the
+    CORRECT port, returns unchanged. If present with a WRONG port (the 8828->8870
+    migration), removes the stale entry and re-adds with the correct port. Works
+    on the well-known cloudflared config shape (an `ingress:` list whose last
+    entry is `- service: http_status:404`). REFUSES (raises ValueError) when it
+    cannot find that catch-all.
     """
-    if _drop_ingress_already_present(config_text, drop_host):
+    if _drop_ingress_already_present(config_text, drop_host, port=port):
         return config_text
+    # If the hostname exists but at the wrong port, remove it first (migration).
+    if _drop_ingress_already_present(config_text, drop_host, port=None):
+        config_text = _remove_ingress_for_host(config_text, drop_host)
     lines = config_text.splitlines(keepends=True)
     for i, line in enumerate(lines):
         m = _CATCHALL_RE.match(line.rstrip("\n"))
@@ -433,14 +459,23 @@ def _lanes_for_box(nodename):
     return [((n, u), lane) for (n, u), lane in DROP_LANES.items() if n == nodename]
 
 
-def cmd_drop_gateway(args):
-    """Reconcile THIS box's public-TLS drop lanes (#889). DEFAULT is DRY-RUN (no
-    writes, prints the plan) — the `cmd_webterm_access` pattern.
+def _lanes_for_tunnel(nodename, tunnel_uuid):
+    """DropLane entries on this box sharing a specific tunnel UUID."""
+    return [((n, u), lane) for (n, u), lane in DROP_LANES.items()
+            if n == nodename and lane.tunnel_uuid == tunnel_uuid]
 
-    `--apply`: idempotently augment the box's EXISTING cloudflared tunnel config
-    with ALL per-account drop ingresses for this box (preserving every existing
-    entry), reconcile Access apps, restart the tunnel, then write the go-live
-    marker for the invoking account. DNS (flat CNAMEs) is a manual runbook step.
+
+def cmd_drop_gateway(args):
+    """Reconcile THIS account's drop lane on THIS box (#889). DEFAULT is DRY-RUN
+    (no writes, prints the plan) — the `cmd_webterm_access` pattern.
+
+    `--apply`: idempotently augment the invoking account's tunnel config with
+    the drop ingress lines for ALL accounts sharing THAT tunnel (preserving
+    every existing entry), reconcile Access apps, restart the tunnel, then write
+    the go-live marker. DNS (flat CNAMEs) is a manual runbook step.
+
+    On subdev, three different tunnels exist (david/marek/dominika), so each
+    gateway account runs `--apply` for its OWN tunnel only.
 
     Injectable for offline tests: `run` (systemctl), `marker_path`, `nodename`.
     """
@@ -448,42 +483,54 @@ def cmd_drop_gateway(args):
     nodename = getattr(args, "_nodename", None)
     marker_path = getattr(args, "_marker_path", None)
     dry_run = getattr(args, "dry_run", False) or not getattr(args, "apply", False)
+    username = getattr(args, "_username", None)
 
     node = nodename or os.uname().nodename
-    box_lanes = _lanes_for_box(node)
-    if not box_lanes:
-        print("drop-gateway: this box (%s) has no declared drop lanes — nothing "
-              "to do (drop lanes exist for boxes: %s)."
-              % (node, ", ".join(sorted({n for (n, _u) in DROP_LANES}))))
+
+    # Resolve the invoking account's lane first.
+    if username is None:
+        try:
+            username = _current_username()
+        except Exception:
+            username = None
+    my_lane = drop_lane_for_account(node, username) if username else None
+
+    if my_lane is None:
+        all_boxes = sorted({n for (n, _u) in DROP_LANES})
+        print("drop-gateway: no registered drop lane for %s@%s — nothing to do "
+              "(drop lanes exist for boxes: %s)."
+              % (username or "?", node, ", ".join(all_boxes)))
         return 0
 
-    # Use the first lane to read the tunnel config (all lanes on a box share
-    # the same tunnel config via gateway_account).
-    _key0, lane0 = box_lanes[0]
+    # Process only lanes sharing THIS account's tunnel (#889 review C1: subdev
+    # has 3 different tunnels, never graft one tunnel's lanes onto another's).
+    tunnel_lanes = _lanes_for_tunnel(node, my_lane.tunnel_uuid)
 
     mode = "DRY-RUN (no writes)" if dry_run else "APPLY"
-    print("drop-gateway [%s] box=%s lanes=%d tunnel=%s config=%s"
-          % (mode, node, len(box_lanes), lane0.tunnel_uuid, lane0.tunnel_config))
+    print("drop-gateway [%s] account=%s@%s lanes=%d tunnel=%s config=%s"
+          % (mode, username, node, len(tunnel_lanes),
+             my_lane.tunnel_uuid, my_lane.tunnel_config))
 
     try:
-        config_text = Path(lane0.tunnel_config).read_text(encoding="utf-8")
+        config_text = Path(my_lane.tunnel_config).read_text(encoding="utf-8")
     except OSError as e:
         print("drop-gateway: cannot read tunnel config %s: %s"
-              % (lane0.tunnel_config, e), file=sys.stderr)
+              % (my_lane.tunnel_config, e), file=sys.stderr)
         return 1
 
     # Refuse to edit a config that is NOT this lane's tunnel (m1).
     cfg_uuid = _config_tunnel_uuid(config_text)
-    if cfg_uuid is not None and cfg_uuid != lane0.tunnel_uuid:
+    if cfg_uuid is not None and cfg_uuid != my_lane.tunnel_uuid:
         print("drop-gateway: %s declares tunnel %s, not this lane's %s — refusing "
               "to edit the wrong tunnel's config"
-              % (lane0.tunnel_config, cfg_uuid, lane0.tunnel_uuid), file=sys.stderr)
+              % (my_lane.tunnel_config, cfg_uuid, my_lane.tunnel_uuid), file=sys.stderr)
         return 1
 
-    # Add ALL per-account ingress lines for this box.
+    # Add ingress lines for all lanes sharing THIS tunnel (C1 fix: never graft
+    # one tunnel's lanes onto another's — subdev has 3 different tunnels).
     augmented = config_text
     added_hosts = []
-    for (_n, _u), lane in box_lanes:
+    for (_n, _u), lane in tunnel_lanes:
         try:
             new = render_drop_ingress_augmentation(augmented, lane.host, lane.port)
         except ValueError as e:
@@ -499,10 +546,10 @@ def cmd_drop_gateway(args):
             print("  ingress: ADD %s" % h)
     else:
         print("  ingress: all %d hosts already present (idempotent no-op)"
-              % len(box_lanes))
+              % len(tunnel_lanes))
 
     if dry_run:
-        for (_n, _u), lane in box_lanes:
+        for (_n, _u), lane in tunnel_lanes:
             print("  access:  [%s] %s" % (_u, _reconcile_access(lane, dry_run=True)[1]))
             print("  DNS (manual runbook): CNAME %s -> %s.cfargotunnel.com (proxied)"
                   % (lane.host, lane.tunnel_uuid))
@@ -510,40 +557,33 @@ def cmd_drop_gateway(args):
         return 0
 
     if changed:
-        Path(lane0.tunnel_config).write_text(augmented, encoding="utf-8")
+        Path(my_lane.tunnel_config).write_text(augmented, encoding="utf-8")
         print("  wrote %s (drop ingress added, existing entries preserved)"
-              % lane0.tunnel_config)
+              % my_lane.tunnel_config)
 
     # Restart whenever the config changed OR the invoking account's lane is not
     # yet LIVE (marker absent) — so a re-run AFTER a failed restart still
     # restarts, instead of writing the LIVE marker over a tunnel that never
     # reloaded (#664 review C1).
-    # Resolve the invoking account's OWN lane for the marker write.
-    try:
-        me = _current_username()
-    except Exception:
-        me = None
-    my_lane = drop_lane_for_account(node, me) if me else lane0
-
     if changed or read_drop_marker(marker_path) is None:
-        argv = _restart_argv(lane0)
+        argv = _restart_argv(my_lane)
         try:
-            r = run(argv, capture_output=True, text=True, env=_restart_env(lane0))
+            r = run(argv, capture_output=True, text=True, env=_restart_env(my_lane))
             rc = getattr(r, "returncode", 1)
         except Exception as e:                         # pragma: no cover - defensive
             print("  tunnel restart errored (%s) — config written; restart %s "
-                  "by hand" % (e, lane0.tunnel_service), file=sys.stderr)
+                  "by hand" % (e, my_lane.tunnel_service), file=sys.stderr)
             return 1
         if rc != 0:
             print("  tunnel restart FAILED (%s): %s"
                   % (" ".join(argv), (getattr(r, "stderr", "") or "").strip()),
                   file=sys.stderr)
             return 1
-        print("  restarted %s" % lane0.tunnel_service)
+        print("  restarted %s" % my_lane.tunnel_service)
 
-    # Reconcile Access for ALL access-gated lanes on this box.
+    # Reconcile Access for access-gated lanes sharing this tunnel.
     access_failed = False
-    for (_n, _u), lane in box_lanes:
+    for (_n, _u), lane in tunnel_lanes:
         access_ok, access_msg = _reconcile_access(lane, dry_run=False)
         print("  access:  [%s] %s" % (_u, access_msg))
         if not access_ok and lane.access:
@@ -556,8 +596,8 @@ def cmd_drop_gateway(args):
 
     write_drop_marker(my_lane.host, my_lane.port, path=marker_path)
     print("  marker written (%s) — public drop lane is now LIVE for %s on this box"
-          % (marker_path or DROP_MARKER, me or "this account"))
-    for (_n, _u), lane in box_lanes:
+          % (marker_path or DROP_MARKER, username or "this account"))
+    for (_n, _u), lane in tunnel_lanes:
         print("  DNS: ensure CNAME %s -> %s.cfargotunnel.com (proxied) exists"
               % (lane.host, lane.tunnel_uuid))
     return 0
