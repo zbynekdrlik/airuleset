@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_webterm_lane as lane      # noqa: E402
 import cli_webterm_david as d        # noqa: E402
-import cli_webterm_marek as mk       # noqa: E402
+# #882: marek webterm module deleted
 import cli_webterm_dominika as dn    # noqa: E402  (#867 — the FOURTH lane)
 
 
@@ -48,7 +48,7 @@ class TestBothLanesGoThroughTheEngine(unittest.TestCase):
     # the ONE engine, so a new human lane stays a config entry, never a copy.
     def test_all_lane_specs_are_lanespecs(self):
         self.assertIsInstance(d._spec(), lane.LaneSpec)
-        self.assertIsInstance(mk._spec(), lane.LaneSpec)
+        # #882: marek webterm module deleted
         self.assertIsInstance(dn._spec(), lane.LaneSpec)
 
     def test_gateway_render_delegates_to_the_one_engine(self):
@@ -57,14 +57,14 @@ class TestBothLanesGoThroughTheEngine(unittest.TestCase):
         sentinel = "SENTINEL-GATEWAY-UNIT\n"
         with m.patch.object(lane, "render_gateway_unit", return_value=sentinel):
             self.assertEqual(d.render_david_gateway_unit(), sentinel)
-            self.assertEqual(mk.render_marek_gateway_unit(), sentinel)
+            # #882: marek webterm module deleted
             self.assertEqual(dn.render_dominika_gateway_unit(), sentinel)
 
     def test_ttyd_render_delegates_to_the_one_engine(self):
         sentinel = "SENTINEL-TTYD-UNIT\n"
         with m.patch.object(lane, "render_ttyd_unit", return_value=sentinel):
             self.assertEqual(d.render_david_ttyd_unit(), sentinel)
-            self.assertEqual(mk.render_marek_ttyd_unit(), sentinel)
+            # #882: marek webterm module deleted
             self.assertEqual(dn.render_dominika_ttyd_unit(), sentinel)
 
     def test_unit_note_comes_from_the_one_shared_renderer(self):
@@ -73,7 +73,7 @@ class TestBothLanesGoThroughTheEngine(unittest.TestCase):
         sentinel = "# SENTINEL SHARED NOTE\n"
         with m.patch.object(lane, "render_lane_unit_note", return_value=sentinel):
             self.assertEqual(d._spec().unit_note, sentinel)
-            self.assertEqual(mk._spec().unit_note, sentinel)
+            # #882: marek webterm module deleted
             self.assertEqual(dn._spec().unit_note, sentinel)
 
 
@@ -108,21 +108,17 @@ class TestLaneSkeletonIsIdenticalModuloParams(unittest.TestCase):
         return text
 
     def test_gateway_unit_skeleton_identical(self):
-        # #867: all THREE non-owner lanes' gateway units are byte-identical after
-        # the per-user params are normalised — a 4th human was a config entry.
-        ds, ms, ns = d._spec(), mk._spec(), dn._spec()
+        # #882: marek webterm module deleted — compare david vs dominika only.
+        ds, ns = d._spec(), dn._spec()
         db = self._norm(self._body(d.render_david_gateway_unit()), ds)
-        mb = self._norm(self._body(mk.render_marek_gateway_unit()), ms)
         nb = self._norm(self._body(dn.render_dominika_gateway_unit()), ns)
-        self.assertEqual(db, mb)
         self.assertEqual(db, nb)
 
     def test_ttyd_unit_skeleton_identical(self):
-        ds, ms, ns = d._spec(), mk._spec(), dn._spec()
+        # #882: marek webterm module deleted — compare david vs dominika only.
+        ds, ns = d._spec(), dn._spec()
         db = self._norm(self._body(d.render_david_ttyd_unit()), ds)
-        mb = self._norm(self._body(mk.render_marek_ttyd_unit()), ms)
         nb = self._norm(self._body(dn.render_dominika_ttyd_unit()), ns)
-        self.assertEqual(db, mb)
         self.assertEqual(db, nb)
 
 

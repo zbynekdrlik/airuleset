@@ -385,7 +385,7 @@ SUBDEV_ACCOUNTS_FALLBACK = {
     "montalu6": "default",
     "montalu7": "default",
     "montalu8": "default",
-    "marek": "gatekeeper_access_ed25519",
+    # #882: marek entry removed (marek webterm module deleted)
     "david1": "gatekeeper_access_ed25519",
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",

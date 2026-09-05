@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock as m
 
 import cli_webterm_david as dv
-import cli_webterm_marek as mk
+# #882: marek webterm module deleted
 import cli_webterm_lane as lane  # #665 shared provisioner (shutil seam)
 import cli_webterm_tunnel as tun
 
@@ -160,54 +160,9 @@ class TestDavidTunnelProvision(_DavidTunnelIsolate, unittest.TestCase):
             self.assertIn(["enable", "--now", "webterm-david-tunnel.service"], self.sysctl)
 
 
-class _MarekTunnelIsolate:
-    def _iso(self, stack, tmp):
-        p = Path(tmp)
-        (p / ".cloudflared").mkdir(parents=True, exist_ok=True)
-        (p / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
-        stack.enter_context(m.patch.object(tun, "WEBTERM_CLOUDFLARED_DIR", p / ".cloudflared"))
-        pt = {
-            "WEBTERM_MAREK_TUNNEL_CREDS": p / ".cloudflared" / (mk.WEBTERM_MAREK_TUNNEL_UUID + ".json"),
-            "WEBTERM_MAREK_TUNNEL_CONFIG": p / ".cloudflared" / "webterm-marek.yml",
-            "WEBTERM_MAREK_TUNNEL_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-marek-tunnel.service",
-        }
-        for name, val in pt.items():
-            stack.enter_context(m.patch.object(mk, name, val))
-        stack.enter_context(m.patch.object(lane.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
-        stack.enter_context(m.patch.object(tun.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
-        import cli_filedrop_watchdog as fw
-        self.sysctl = []
-        stack.enter_context(m.patch.object(
-            fw, "_run_systemctl", lambda args: (self.sysctl.append(list(args)), (0, "", ""))[1]))
-        stack.enter_context(m.patch.object(fw, "_whoami", lambda: "marek"))
-        return pt
-
-
-class TestMarekTunnelProvision(_MarekTunnelIsolate, unittest.TestCase):
-    def test_no_op_when_creds_absent(self):
-        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
-            pt = self._iso(st, tmp)
-            ok = mk.setup_webterm_marek_tunnel(run=lambda *a, **k: None)
-            self.assertFalse(ok)
-            self.assertFalse(pt["WEBTERM_MAREK_TUNNEL_SERVICE_DEST"].exists())
-            self.assertEqual(self.sysctl, [])
-
-    def test_provisions_managed_unit_with_unix_origin(self):
-        # #663: marek's tunnel config must front the gateway's UNIX socket, not a
-        # TCP loopback port — the third coordinated surface (unit + launch + config)
-        # so a partial revert to http://127.0.0.1:8082 cannot slip through green.
-        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
-            pt = self._iso(st, tmp)
-            pt["WEBTERM_MAREK_TUNNEL_CREDS"].write_text('{"TunnelID":"x"}\n')
-            ok = mk.setup_webterm_marek_tunnel(run=lambda *a, **k: None)
-            self.assertTrue(ok)
-            cfg = pt["WEBTERM_MAREK_TUNNEL_CONFIG"].read_text()
-            self.assertIn("tunnel: " + mk.WEBTERM_MAREK_TUNNEL_UUID, cfg)
-            self.assertIn("hostname: marek.newlevel.media", cfg)
-            self.assertIn("service: unix:/run/user/", cfg)
-            self.assertIn("webterm-marek-gateway.sock", cfg)
-            self.assertNotIn("http://127.0.0.1", cfg)
-            self.assertIn(["enable", "--now", "webterm-marek-tunnel.service"], self.sysctl)
+# #882: marek webterm module deleted — _MarekTunnelIsolate and
+# TestMarekTunnelProvision classes removed (they tested marek-specific
+# tunnel provisioning that no longer exists).
 
 
 if __name__ == "__main__":

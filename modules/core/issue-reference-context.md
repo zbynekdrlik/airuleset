@@ -37,4 +37,4 @@ vlákno „Zakaznicky portal 3" — https://<instancia>/odoo/discuss?active_id=d
 - Origin: airuleset **#657**, extending **#650** (the `❓` client-posting approval question already hook-enforces NAMING the exact target thread — `stop-check-question-quality.sh` Check 6) and **#595** (deep-link URLs for every openable reference in a client message). This doctrine widens the requirement to EVERY owner-facing mention and adds the thread's OWN deep URL alongside the name.
 - Mechanically backstopped on the wider owner-facing prose surface: `hooks/stop-check-prose-violations.sh` HARD-blocks a bare Discuss channel id (in an Odoo-context message) that carries no clickable `discuss.channel_<N>` deep URL. The hook is a narrow high-confidence backstop; THIS doctrine covers every rewording universally.
 
-Applies to all streams (montalu*/david*/marek/gk) and all messages and all rewordings.
+Applies to all streams (montalu*/david*/miva*/gk) and all messages and all rewordings.

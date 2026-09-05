@@ -81,32 +81,19 @@ REMOTE_HOSTS = [
         "user": "montalu4",
         "repo_path": "~/devel/airuleset",
     },
-    {
-        # Marek's isolated user — MIGRATED 2026-07-21/22 from the gatekeeper
-        # VPS to the dedicated subdev VPS (Hetzner cx33/nbg1 "subdev", project
-        # odoo-subdev, id 153587360): tailscale 100.118.174.27 / MagicDNS
-        # "subdev", public 116.203.108.177 = subdev.newlevel.media (fallback
-        # only — address by tailscale per machine-identities). Old marek@gk
-        # account is BLOCKED (ForceCommand notice). Same gatekeeper_access key
-        # (authorized_keys byte-copied in the migration). Evidence: airuleset
-        # #23 + odoo-erp #1895 hand-over comments.
-        "name": "marek@subdev",
-        "host": "100.118.174.27",
-        "user": "marek",
-        "repo_path": "~/devel/airuleset",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-    },
+    # marek@subdev — REMOVED (#882, 2026-09-05, owner GO odoo-erp#6257):
+    # stream decommissioned, Hetzner server+DNS destroyed, account locked/nologin.
     {
         # dominika -- webterm OBSERVER account (airuleset#867, 2026-09-04, owner
         # request). NOT a dev stream: she runs ONLY the dominika webterm gateway
         # (cli_webterm_dominika) and watches two OTHER streams (montalu5 + miva1)
         # over loopback ssh; she works no tickets, has no Discord persona, no
         # notify routing. Registered here so `push` reaches her account and runs
-        # `maybe_setup_webterm` (the marek entry's shape: same subdev VPS, same
-        # operator gatekeeper_access identity — byte-copied authorized_keys is the
-        # go-live owner step). Classified reduced `fork-no-merge` (the
-        # LEAST-privilege profile) in AUTHORITY_BY_USER below, NEVER full: an
-        # observe-only account must never merge/deploy/close (see that row).
+        # `maybe_setup_webterm` (same subdev VPS, same operator gatekeeper_access
+        # identity — byte-copied authorized_keys is the go-live owner step).
+        # Classified reduced `fork-no-merge` (the LEAST-privilege profile) in
+        # AUTHORITY_BY_USER below, NEVER full: an observe-only account must never
+        # merge/deploy/close (see that row).
         "name": "dominika@subdev",
         "host": "100.118.174.27",
         "user": "dominika",
@@ -115,12 +102,12 @@ REMOTE_HOSTS = [
     },
     {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
-        # VPS as marek/david/simap (airuleset#300; tracking ticket for the
+        # VPS as david/simap (airuleset#300; tracking ticket for the
         # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
         # user + own SSH keypair, read-only GitHub deploy key, `develop`
         # checkout, empty tmux session -- but no airuleset config until this
         # entry lands. Registered with the SAME operator gatekeeper_access
-        # identity requirement as marek/david/simap (never montalu's
+        # identity requirement as david/simap (never montalu's
         # default-key path), matching this ticket's own "same phase-1
         # isolated shape as simap" framing.
         "name": "miva1@subdev",
@@ -364,7 +351,7 @@ REMOTE_HOSTS = [
         # home moved to /home/simap1, linger re-enabled; the old
         # `simap@subdev` entry + its AUTHORITY_BY_USER row are GONE — the
         # OS account no longer exists). Original build history: airuleset#143
-        # (Odoo 19 demo, gatekeeper_access identity, marek's operator keys).
+        # (Odoo 19 demo, gatekeeper_access identity, operator keys).
         "name": "simap1@subdev",
         "host": "100.118.174.27",
         "user": "simap1",
@@ -399,8 +386,8 @@ def paused_reason(remote):
 
 
 # Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a
-# property of its LINUX USER (streams are separate users by construction: david /
-# marek / montalu), resolved at RUNTIME — no per-box state to lose on a home-dir
+# property of its LINUX USER (streams are separate users by construction: david1 /
+# montalu1 / miva1), resolved at RUNTIME — no per-box state to lose on a home-dir
 # migration (the AIRULESET_NOTIFY_OWNER loss pattern), and every push carries the
 # map to every managed target. Profiles:
 #   full          — merge PR to main + main green + deploy verified (default)
@@ -418,7 +405,7 @@ def paused_reason(remote):
 # `full` is granted ONLY via the registries below. Only the user adds markers.
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
-    "marek": "branch-merge",
+    # marek — REMOVED (#882, 2026-09-05): stream decommissioned (odoo-erp#6257).
     # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
     # moved to the numbered block below; the OS account `david` is gone.
     # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
@@ -460,7 +447,7 @@ AUTHORITY_BY_USER = {
     "montalu8": "branch-merge",
     # montalu1/david1/simap1 (#537): the NUMBERED names for the base-stream
     # rename (owner directive on #532 — montalu->montalu1, david->david1,
-    # simap->simap1; marek STAYS marek, deliberately NOT renamed). All three
+    # simap->simap1; marek was un-renamed but is now decommissioned #882). All three
     # renames are now LIVE (montalu1 2026-08-19, simap1 2026-08-18, david1
     # 2026-08-21) — each runs as the new OS account, so every base row above is
     # gone. Each keeps its base's authority profile. STREAM_RENAME_ALIASES
@@ -548,7 +535,7 @@ WEBTERM_OBSERVER_USERS = frozenset({"dominika"})
 # Webterm-ONLY accounts (#869, owner directive 2026-09-04): these users access
 # their streams EXCLUSIVELY via the webterm gateway (david.newlevel.media,
 # dominika.newlevel.media) — no personal SSH key, no password login.  Direct
-# SSH is a fallback for the owner (zbynek) and marek ONLY.
+# SSH is a fallback for the owner (zbynek) ONLY (#882: marek decommissioned).
 #
 # DISTINCT from WEBTERM_OBSERVER_USERS: observer = provisioning PROFILE
 # (gateway-only, no Claude stream — dominika); webterm-only = SSH ACCESS POLICY
@@ -661,8 +648,8 @@ def _is_github_ci_runner(user) -> bool:
 # explicit source of truth for the in-progress rename, so `cli_quals`'
 # `_stream_rename_equivalents()` (the alias primitive that `_slice_quals` and
 # `_ticket_is_stream_labeled` both consume) has one table to read, never a
-# scattered set of literals. `marek` is deliberately ABSENT — the owner keeps
-# it un-renamed. Read via `airuleset.STREAM_RENAME_ALIASES` (the facade
+# scattered set of literals. `marek` was deliberately absent (un-renamed) and
+# is now decommissioned (#882). Read via `airuleset.STREAM_RENAME_ALIASES` (the facade
 # re-export), NEVER `cli_fleet.STREAM_RENAME_ALIASES` directly, so a
 # `patch.object(airuleset, "STREAM_RENAME_ALIASES", ...)` in a test is honoured
 # (the same L-E rule AUTHORITY_BY_USER above follows).
@@ -688,7 +675,7 @@ STREAM_RENAME_ALIASES = {
 # no-op and the `watchdog.resource_guard` verify job is the backstop).
 #
 # `host` is subdev's TAILSCALE IP (the same 100.118.174.27 the montalu*/david*/
-# marek/simap1/miva1 REMOTE_HOSTS entries above all share) — stable across LAN
+# simap1/miva1 REMOTE_HOSTS entries above all share) — stable across LAN
 # switches (#1). Every reduced-authority stream in AUTHORITY_BY_USER lives on
 # THIS box, so this single entry covers the whole shared-stream fleet;
 # `tests/test_resource_guards.py` drift-locks that (a new shared-stream host

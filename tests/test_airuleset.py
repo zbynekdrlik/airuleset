@@ -4294,16 +4294,15 @@ class TestStreamNotifyOwnerRouting(TestCase):
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), owner, who)
 
-    def test_forestshop_dev_accounts_resolve_to_marek(self):
+    def test_forestshop_dev_accounts_resolve_to_zbynek(self):
         # airuleset#572: the forestshop-dev box's two linux accounts (admin,
-        # stepan) redirect to claude-marek, resolved directly inside
-        # resolve_owner() with no TMUX and no env override -- without the
-        # STREAM_NOTIFY_OWNER entries they returned "" and the ping fell to
-        # the shared channel.
+        # stepan) originally redirected to claude-marek. #882 (2026-09-05):
+        # marek decommissioned, rerouted to zbynek (rejected: deletion →
+        # #572 shared-channel regression).
         for who in ("admin", "stepan"):
             with m.patch.dict(os.environ, {}, clear=True), \
                     m.patch.object(self.notify, "_current_user", return_value=who):
-                self.assertEqual(self.notify.resolve_owner(), "marek", who)
+                self.assertEqual(self.notify.resolve_owner(), "zbynek", who)
 
     def test_env_override_still_wins_over_the_stream_map(self):
         # montalu/david keep a redundant hand-added bashrc export from
@@ -5976,9 +5975,9 @@ class TestTmuxWindowSizeNoResize(TestCase):
         # in the window-naming feature) -- a resize subcommand rendered there
         # would bypass the version gate and the doctrine with zero friction.
         base = Path(airuleset.__file__).resolve().parent
+        # #882: cli_webterm_marek.py removed from this list (marek webterm module deleted)
         for name in ("cli_bashrc_appliers.py", "cli_webterm.py",
-                     "cli_webterm_lane.py", "cli_webterm_david.py",
-                     "cli_webterm_marek.py"):
+                     "cli_webterm_lane.py", "cli_webterm_david.py"):
             f = base / name
             if f.exists():
                 self.assertNotIn("resize-window", f.read_text(),
