@@ -643,17 +643,24 @@ class TestHashPersist(unittest.TestCase):
 class TestDedupWiring(unittest.TestCase):
 
     def test_local_audit_populates_dedup_pairs(self):
-        """Verify the dedup_pairs key is populated from real file content."""
+        """Verify the dedup_pairs key is populated. Hermetized with patched
+        CLAUDE_DIR so we don't scan the real ~/.claude (#858 re-review 🔵4)."""
         from cli_mdreview_audit import cmd_mdreview_audit
         import argparse
         import io
         from contextlib import redirect_stdout
-        args = argparse.Namespace(fleet=False, json_output=True)
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            cmd_mdreview_audit(args)  # airuleset:script-ok test captures output
-        output = buf.getvalue()
-        if output.strip():
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_claude = Path(tmp) / ".claude"
+            fake_claude.mkdir()
+            (fake_claude / "skills").mkdir()
+            args = argparse.Namespace(fleet=False, json_output=True)
+            buf = io.StringIO()
+            with mock.patch("cli_mdreview_audit.CLAUDE_DIR", fake_claude):
+                with redirect_stdout(buf):
+                    cmd_mdreview_audit(args)
+            output = buf.getvalue()
+            self.assertTrue(output.strip(),
+                            "cmd_mdreview_audit --json must produce output")
             data = json.loads(output)
             self.assertIn("dedup_pairs", data,
                           "output must include dedup_pairs key")
