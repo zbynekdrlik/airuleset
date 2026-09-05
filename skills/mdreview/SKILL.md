@@ -77,7 +77,7 @@ From the artifact's zero-caller list (skill-usage 90d fleet window):
 
 ## Step 5b — /skill-doctor: per-skill health (#893)
 
-Run `/skill-doctor` once on the current box (non-interactive: `echo '/skill-doctor' | claude -p`). Skills and plugins are airuleset-managed and installed identically fleet-wide, so install-shape signals are fleet-invariant — one box answers for all.
+Run `/skill-doctor` once on the current box (non-interactive: `echo '/skill-doctor' | claude -p`). Install-shape signals (context cost, duplicates, plugin wiring) are fleet-invariant — airuleset manages them identically, so one box answers for all. The 7-day token attribution is per-machine usage and stays a SECONDARY signal.
 
 **Consume (unique signals /skill-doctor provides):**
 - **Per-skill context cost** (~N tokens/turn for description listing) — rank skills by always-on cost; top-cost skills are first candidates to slim descriptions or convert to `paths:` rules. Feeds the #857 context ceiling.
