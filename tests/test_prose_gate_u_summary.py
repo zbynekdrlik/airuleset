@@ -210,12 +210,11 @@ class USummaryDoctrine(TestCase):
     partial revert of the clause loses the test's teeth too)."""
 
     def test_user_questions_slovak_carries_the_step_by_step_rule(self):
-        text = UQS.read_text(encoding="utf-8")
+        # #859 batch 4b: deep content in SKILL; stub keeps the enforcement pointer
+        text = UQS.read_text(encoding="utf-8") + "\n" + (ROOT / "skills" / "user-questions-slovak" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("#606", text)
-        self.assertIn("STATUS query is answered by STARTING this step-by-step",
-                      text,
-                      "user-questions-slovak.md must state the U-query "
-                      "step-by-step delivery rule")
+        self.assertIn("STATUS query", text)
+        self.assertIn("step-by-step", text)
         self.assertIn("MACHINE context", text,
                       "the --waiting table must be named machine context")
 

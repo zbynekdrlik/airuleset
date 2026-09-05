@@ -31,7 +31,8 @@ def read(rel):
 
 class TestCiMonitoringDurationSplit(TestCase):
     def test_mechanism_is_chosen_by_expected_wait_length(self):
-        t = read("modules/core/ci-monitoring.md")
+        # Deep content moved to companion (#859 batch 4c)
+        t = read("skills/ci-monitoring-deep/DEEP.md")
         low = t.lower()
         self.assertIn("expected wait", low)
         self.assertIn("short wait", low)
@@ -149,7 +150,7 @@ class TestMemoryPressureReapDeathModeNamed(TestCase):
     not)."""
 
     SURFACES = (
-        "modules/core/ci-monitoring.md",
+        "skills/ci-monitoring-deep/DEEP.md",
         "skills/verify-launched-work-liveness/SKILL.md",
         "modules/quality/verify-launched-work-liveness.md",
     )
@@ -157,7 +158,7 @@ class TestMemoryPressureReapDeathModeNamed(TestCase):
     # stays terse (reap named + recovery), so the env kill-switch / minutes /
     # subagent-exempt asserts below apply only to these two.
     FULL = (
-        "modules/core/ci-monitoring.md",
+        "skills/ci-monitoring-deep/DEEP.md",
         "skills/verify-launched-work-liveness/SKILL.md",
     )
 

@@ -211,7 +211,8 @@ class DoctrineLock(unittest.TestCase):
         self.assertIn("STILL blocked on the SAME unanswered", t)
 
     def test_user_questions_slovak_teaches_ask_once(self):
-        t = self._read("modules/core/user-questions-slovak.md")
+        # #859 batch 4b: stub + SKILL carry the full detail
+        t = self._read("modules/core/user-questions-slovak.md") + "\n" + self._read("skills/user-questions-slovak/SKILL.md")
         self.assertNotIn("SOFT allowance to re-show", t)
         self.assertIn("emitted ONCE", t)
 

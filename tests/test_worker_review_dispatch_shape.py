@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKER_MD = ROOT / "agents" / "autopilot-worker.md"
 SKILL_MD = ROOT / "skills" / "autopilot" / "SKILL.md"
 COMPLETION_REPORT_MD = ROOT / "modules" / "core" / "completion-report.md"
+COMPLETION_REPORT_DEEP = ROOT / "skills" / "completion-report-deep" / "DEEP.md"
 
 # The exact audit-line strings several other tests already lock byte-for-byte
 # (test_prose_gate_undeterminable.py, test_prose_gate_retry_state.py,
@@ -76,7 +77,7 @@ class TestLockedAuditLinesUntouched(unittest.TestCase):
     """
 
     def test_completion_report_still_carries_the_locked_review_audit_line(self):
-        text = COMPLETION_REPORT_MD.read_text(encoding="utf-8")
+        text = COMPLETION_REPORT_MD.read_text(encoding="utf-8") + "\n" + COMPLETION_REPORT_DEEP.read_text(encoding="utf-8")
         for line in LOCKED_AUDIT_LINES:
             self.assertIn(line, text,
                           "the #363 fix must never change the audit-line "
@@ -202,7 +203,7 @@ class TestCompletionReportForbidsTheBuiltinReviewSkill(unittest.TestCase):
     """
 
     def setUp(self):
-        self.text = COMPLETION_REPORT_MD.read_text(encoding="utf-8")
+        self.text = COMPLETION_REPORT_MD.read_text(encoding="utf-8") + "\n" + COMPLETION_REPORT_DEEP.read_text(encoding="utf-8")
 
     def test_pre_completion_gate_forbids_the_builtin_skill(self):
         marker = "Apply `/review` standards"

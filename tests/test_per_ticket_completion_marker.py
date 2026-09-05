@@ -48,20 +48,24 @@ class TestMessageStatusMarkerRule(TestCase):
 
 class TestMilestoneNotificationsRule(TestCase):
     MOD = "modules/core/milestone-notifications.md"
+    DEEP = "skills/milestone-notifications-deep/DEEP.md"
+
+    def _combined(self):
+        return read(self.MOD) + "\n" + read(self.DEEP)
 
     def test_new_armed_goal_section_present(self):
-        t = read(self.MOD)
+        t = self._combined()
         self.assertIn("ARMED GOAL", t)
         self.assertIn("◎ /goal", t)
         self.assertIn("once PER TICKET instead of once for the whole backlog", t)
 
     def test_idle_ping_guarded_while_goal_armed(self):
-        t = read(self.MOD)
+        t = self._combined()
         self.assertIn("must NOT queue a SECOND idle Discord ping", t)
         self.assertIn("notify-discord-pending.sh", t)
 
     def test_old_reserve_for_terminal_turn_language_is_gone(self):
-        t = read(self.MOD)
+        t = self._combined()
         self.assertNotIn(
             "ONLY the terminal turn — backlog empty, loop stops, nothing "
             "running", t)
@@ -69,14 +73,10 @@ class TestMilestoneNotificationsRule(TestCase):
         self.assertNotIn("reserve `✅ DONE` for the true end", t)
 
     def test_required_phrases_still_survive(self):
-        # Locked elsewhere (test_airuleset.py, test_question_policy.py,
-        # test_ruleset_conversion_wave2.py) — must still hold after this
-        # section's rewrite.
-        t = read(self.MOD)
+        t = self._combined()
         for phrase in ["Mobile-App Model",
                        "do NOT call the discord `reply` tool or `PushNotification`",
                        "⏳", "FULL completion", "IMMEDIATELY",
-                       # #791: the sleep-window paragraph is gone — 24/7.
                        "24/7", "EXCEPTION", "notify --run-card",
                        "notification-mechanics"]:
             self.assertIn(phrase, t, phrase)
@@ -84,7 +84,7 @@ class TestMilestoneNotificationsRule(TestCase):
         self.assertNotIn("even at night", t)
 
     def test_question_ping_unaffected_by_goal_armed_guard(self):
-        t = read(self.MOD)
+        t = self._combined()
         self.assertIn("a genuine question ALWAYS pings regardless of an "
                       "armed goal", t)
 

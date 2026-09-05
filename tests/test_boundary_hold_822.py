@@ -129,7 +129,8 @@ class TestBoundaryHoldDoctrine(unittest.TestCase):
         self.assertIn("LIVE-VERIFY", window)
 
     def test_completion_report_points_at_the_boundary_hold(self):
-        t = read(COMPLETION)
+        # #859 batch 4b: deep content in companion
+        t = read(COMPLETION) + "\n" + read("skills/completion-report-deep/DEEP.md")
         self.assertIn("sleep 45 && echo boundary-hold", t)
 
     def test_step5_anchors_stay_inside_the_locked_window(self):

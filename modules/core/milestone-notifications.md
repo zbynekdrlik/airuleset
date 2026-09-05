@@ -5,7 +5,7 @@
 - `autopilot` skill — the ONE per-ticket device card (the EXCEPTION below) is fired by the worker directly at merge
 - `notification-mechanics` skill — the retired api-error/limit/burn alert-class suppression (#546), per-owner thread + `DISCORD_MIRROR` routing, and the per-ticket card's field-by-field composition moved there VERBATIM — load it before authoring/debugging the notify hooks or watchdog
 
-**The device (Discord / phone) is notified ONLY when Claude genuinely ASKS (`❓ NEEDS YOU`) or has FULLY completed (`✅ DONE`) — never on `⏳ WORKING`, never on routine per-phase progress.** The mechanism is AUTOMATIC via three hooks (`notify-discord-pending.sh`, `notify-discord.sh`, `notify-discord-send.sh`) — do NOT hand-fire per-phase pings.
+**The device (Discord / phone) is notified ONLY when Claude genuinely ASKS (`❓ NEEDS YOU`) or has FULLY completed (`✅ DONE`) — never on `⏳ WORKING`, never on routine per-phase progress. 24/7 — no night/day difference (#791).** The mechanism is AUTOMATIC via three hooks (`notify-discord-pending.sh`, `notify-discord.sh`, `notify-discord-send.sh`) — do NOT hand-fire per-phase pings.
 
 **Device content = Slovak, phone-readable.** `✅ DONE:` = ONE short Slovak line. `❓` = the FULL `**Otázka — projekt …:**` question block (hook-enforced `stop-check-question-quality.sh`).
 

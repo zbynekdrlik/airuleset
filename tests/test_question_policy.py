@@ -48,16 +48,16 @@ class TestQuestionPolicy(TestCase):
 
     def test_marker_rule_owner_scoped_delivery_710(self):
         # #710 (owner directive 2026-08-26): the DELIVERY of a question ping is
-        # owner-scoped — david keeps the Discord phone ping; zbynek/marek take
-        # questions via the footer `U N` + webterm (no phone ping). The SESSION
-        # discipline (write the marker, ask the moment, never bury/reproach) is
-        # unchanged for every owner — only the delivery channel is scoped. The
-        # invariant phrase "ALWAYS pings the phone" is preserved (still true for
-        # the on owners) and immediately scoped, so both must appear.
-        for rel in ["modules/core/message-status-marker.md",
-                    "modules/core/milestone-notifications.md",
-                    "modules/core/user-questions-slovak.md"]:
+        # owner-scoped. #859 batch 4b: deep content moved to companions/skills.
+        surfaces = {
+            "modules/core/message-status-marker.md": None,
+            "modules/core/milestone-notifications.md": "skills/milestone-notifications-deep/DEEP.md",
+            "modules/core/user-questions-slovak.md": "skills/user-questions-slovak/SKILL.md",
+        }
+        for rel, companion in surfaces.items():
             t = read(rel)
+            if companion:
+                t += "\n" + read(companion)
             self.assertIn("#710", t, f"{rel}: missing the #710 owner-scope")
             self.assertIn("zbynek", t)
             self.assertIn("marek", t)
@@ -109,7 +109,9 @@ class TestQuestionPolicy(TestCase):
         uq = read("modules/core/user-questions-slovak.md")
         self.assertIn("ZERO context", uq)
         self.assertIn("cross-reference", uq)          # explain every cross-project link
-        self.assertIn("restreamer", uq)               # the real incident as banned example
+        # real incident (restreamer example) in the SKILL body
+        skill = read("skills/user-questions-slovak/SKILL.md")
+        self.assertIn("restreamer", uq + "\n" + skill)
         # The autopilot ask-path + worker must cite self-containment.
         self.assertIn("self-contained", read("skills/autopilot/SKILL.md").lower())
         self.assertIn("zero context", read("agents/autopilot-worker.md").lower())
@@ -117,9 +119,9 @@ class TestQuestionPolicy(TestCase):
     def test_away_user_question_uses_text_marker_not_60s_dialog(self):
         # A genuine away-user question is delivered via the ❓ text marker (unlimited
         # wait + phone ping), NOT a 60-second AskUserQuestion dialog (auto-continues).
-        for rel in ["modules/core/user-questions-slovak.md",
-                    "modules/core/message-status-marker.md"]:
-            t = read(rel)
+        # #859 batch 4b: user-questions-slovak stub + SKILL carry the full detail
+        uqs = read("modules/core/user-questions-slovak.md") + "\n" + read("skills/user-questions-slovak/SKILL.md")
+        for t in [uqs, read("modules/core/message-status-marker.md")]:
             self.assertIn("60", t)
             self.assertIn("UNLIMITED", t)
             self.assertIn("AskUserQuestion", t)
@@ -199,17 +201,20 @@ class TestUnansweredQuestionReaskedFull(TestCase):
         self.assertIn("STILL blocked on the SAME unanswered", t)
 
     def test_user_questions_slovak_has_the_dedicated_section(self):
-        t = read("modules/core/user-questions-slovak.md")
-        self.assertIn("NANOVO a CELÁ", t)
+        # #859 batch 4b: stub keeps the enforcement-core; SKILL carries the full detail
+        stub = read("modules/core/user-questions-slovak.md")
+        skill = read("skills/user-questions-slovak/SKILL.md")
+        t = stub + "\n" + skill
+        self.assertIn("NANOVO", t)
         self.assertIn("zákaz odvolávok do histórie", t)
-        # Both branches spelled out.
         self.assertIn("VERBATIM, byte-identical", t)
         self.assertIn("ANY conversation happened in between", t)
-        # Banned formulations from the ticket, verbatim.
         self.assertIn("pýtal som sa skôr", t)
         self.assertIn("jediné otvorené rozhodnutie je X", t)
-        # Cites the hook enforcement so the two stay in sync.
         self.assertIn("stop-check-question-quality.sh", t)
+        # stub itself carries re-poke discipline + hook ref
+        self.assertIn("NANOVO", stub)
+        self.assertIn("stop-check-question-quality.sh", stub)
 
     def test_hook_documents_and_implements_the_reference_check(self):
         h = read("hooks/stop-check-question-quality.sh")

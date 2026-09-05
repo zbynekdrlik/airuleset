@@ -30,6 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 AUTOVERIFY = ROOT / "modules" / "core" / "autonomous-verification.md"
+AUTOVERIFY_DEEP = ROOT / "skills" / "autonomous-verification-deep" / "DEEP.md"
 WORKER = ROOT / "agents" / "autopilot-worker.md"
 PROCESS_SUBDEV = ROOT / "skills" / "process-subdev" / "SKILL.md"
 
@@ -63,7 +64,7 @@ class _TeethMixin:
 
 class TestAutonomousVerificationDoctrine(_TeethMixin, unittest.TestCase):
     def setUp(self):
-        self.t = read(AUTOVERIFY)
+        self.t = read(AUTOVERIFY) + "\n" + read(AUTOVERIFY_DEEP)
         self.n = norm(self.t)
 
     def test_subsection_header_present(self):
