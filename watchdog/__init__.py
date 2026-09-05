@@ -1923,6 +1923,11 @@ from watchdog import disk_guard_root as disk_guard_root  # noqa: E402,F401
 # watchdog import at its top level → no cycle; read-only, never renice).
 from watchdog import nice_check as nice_check  # noqa: E402,F401
 
+# #858 — Job 43, mdreview recurring cadence (stdlib-only + one local
+# `airuleset` import for MODEL_TIERS; no watchdog import at top level → no
+# cycle; imports NO notify — lock-tested).
+from watchdog import mdreview_cadence as mdreview_cadence  # noqa: E402,F401
+
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
 # `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
@@ -2071,8 +2076,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
              u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
-             nice_check_enabled=False):
-    """Scan every `claude` pane once. 42 numbered jobs per poll — 36 LIVE and 6
+             nice_check_enabled=False,
+             mdreview_cadence_enabled=False):
+    """Scan every `claude` pane once. 43 numbered jobs per poll — 37 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2763,6 +2769,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           field 19; journals any non-zero nice (machine-channel only — never
           an owner ping). Read-only: never calls renice or mutates scheduling.
           `watchdog/nice_check.py`'s docstring is the SSOT.
+      (43) MDREVIEW CADENCE (#858), gated on `mdreview_cadence_enabled` (True
+          in cmd_watchdog, left False in unit tests). Dev1-only (full authority
+          + airuleset checkout). Daily TTL; due on 30d since pinned-ticket
+          CLOSE or MODEL_TIERS hash change → runs mdreview-audit --fleet,
+          REOPENs the pinned ticket + posts summary. Imports NO notify.
+          `watchdog/mdreview_cadence.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4614,6 +4626,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     _add("nice_check", lambda: nice_check_enabled,
          lambda: nice_check.nice_check_job(dry_run=dry_run),
          "nice-check error")
+
+    # Job 43 (#858) — MDREVIEW CADENCE. Dev1-gated, daily TTL, imports NO
+    # notify. On due: runs mdreview-audit → REOPENs the pinned ticket.
+    _add("mdreview_cadence", lambda: mdreview_cadence_enabled,
+         lambda: mdreview_cadence.mdreview_cadence_job(
+             now, state, dry_run=dry_run),
+         "mdreview-cadence error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
