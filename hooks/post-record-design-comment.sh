@@ -503,9 +503,13 @@ try:
                     arch_ok, arch_reason = True, "ok (trivial -- architecture not required)"
                 else:
                     arch_ok, arch_reason = dg.classify_architecture_section(body)
-                if not (arch_ok and triage_ok):
+                # #877 -- Shared-benefit: unconditional (no trivial
+                # exemption -- the incident WAS a trivial ticket).
+                sb_ok, sb_reason = dg.classify_shared_benefit(body)
+                if not (arch_ok and triage_ok and sb_ok):
                     parts = [r for ok2, r in
-                             ((arch_ok, arch_reason), (triage_ok, triage_reason))
+                             ((arch_ok, arch_reason), (triage_ok, triage_reason),
+                              (sb_ok, sb_reason))
                              if not ok2]
                     dg.write_reject_reason(repo_key, issue, "; ".join(parts), kind=kind)
                     # #414-review MINOR-2 -- this text IS design-shaped

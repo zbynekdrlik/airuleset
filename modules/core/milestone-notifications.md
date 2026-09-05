@@ -25,7 +25,7 @@ A completed ticket/batch inside a `/goal` / `/autopilot` loop ends its own repor
 
 **The device ping is guarded ONLY when a card was actually DELIVERED** — a per-ticket `✅ DONE` must NOT queue a SECOND idle Discord ping when the sanctioned per-ticket run-card (the EXCEPTION below) already gave phone visibility for that ticket, because a second ping per ticket is exactly the per-phase noise the user removed. But the condition is DELIVERY, never an armed goal. `notify-discord-pending.sh` still reads the SAME `◎ /goal` signal the watchdog's own goal jobs key on (never a second, invented detector), and then additionally requires a DELIVERED card marker for this repo newer than the previous `✅` boundary in this session: card delivered → suppress; **no card, a card that failed to send, or anything unprovable (no cwd, no `origin`) → the ping goes through**, exactly as it did before the guard existed.
 
-(The `❓ ASKED` / `❓ NEEDS YOU` question ping is UNCHANGED and unaffected by this — a genuine question ALWAYS pings regardless of an armed goal; only the ROUTINE per-ticket `✅` is goal-guarded. Owner-scoped delivery (#710): david = Discord phone ping; zbynek/marek = footer `U N` + webterm (no phone ping). 24/7 no-night-cutoff (#791). Full policy: `message-status-marker.md`.)
+(The `❓ ASKED` / `❓ NEEDS YOU` question ping is UNCHANGED and unaffected by this — a genuine question ALWAYS pings regardless of an armed goal; only the ROUTINE per-ticket `✅` is goal-guarded. Owner-scoped delivery (#710): david = Discord phone ping; zbynek = footer `U N` + webterm (no phone ping; marek decommissioned #882). 24/7 no-night-cutoff (#791). Full policy: `message-status-marker.md`.)
 
 #### API-error / limit / token-burn alerts are RETIRED from Discord (#546, 2026-08-18 owner directive)
 
@@ -35,9 +35,9 @@ A completed ticket/batch inside a `/goal` / `/autopilot` loop ends its own repor
 
 During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), routine per-phase progress (merged, deployed, CI green) does NOT ping the device — the device stays quiet until a worker raises a real `❓` question, fires the per-ticket merge card (the EXCEPTION below), or the whole run ends `✅`. Do NOT hand-fire a per-phase ping.
 
-#### Every device message goes to the owner's OWN thread AND @mentions them (zbynek / marek)
+#### Every device message goes to the owner's OWN thread AND @mentions them (zbynek)
 
-Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is automatically POSTED to that owner's **own thread** (`claude-zbynek` / `claude-marek`, never shared) and prefixed with their `<@id>` — including session-personas PARALLEL-mirrored to a real human via `DISCORD_MIRROR_<OWNER>` (e.g. `david`'s pings also reach `zbynek`'s thread). **Exception (#296): a `❓` question ping routes to a separate per-owner questions thread, `claude-<owner>-q`** — `✅` and the autopilot card stay in the normal `claude-<owner>` thread (the api-error/limit/burn alert pings that used to share it are retired, #546). You do nothing; never strip the mention. Full thread + mirror + questions-thread routing lives in the `notification-mechanics` skill.
+Each project runs in a tmux session grouped by owner. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is automatically POSTED to that owner's **own thread** (`claude-zbynek` / `claude-david`, never shared) and prefixed with their `<@id>` — including session-personas PARALLEL-mirrored to a real human via `DISCORD_MIRROR_<OWNER>` (e.g. `david`'s pings also reach `zbynek`'s thread; marek decommissioned #882). **Exception (#296): a `❓` question ping routes to a separate per-owner questions thread, `claude-<owner>-q`** — `✅` and the autopilot card stay in the normal `claude-<owner>` thread (the api-error/limit/burn alert pings that used to share it are retired, #546). You do nothing; never strip the mention. Full thread + mirror + questions-thread routing lives in the `notification-mechanics` skill.
 
 #### EXCEPTION — `/autopilot` per-ticket completion card (the ONE sanctioned per-ticket hand-fire)
 

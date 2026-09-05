@@ -2337,7 +2337,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           integration branch is ahead of prod, a `staging` branch exists, and
           NO release is in flight, it keystrokes the armed loop to run its
           release pipeline (the recurring "merged into develop but never
-          released"). And, when `queue_fetch` is wired, the gk QUEUE-ARRIVAL
+          released"); #883 extended this to also nudge a STALLED in-flight
+          release (cut-ci-red/shadow-failed) using a gh-observed inactivity
+          anchor (30 min threshold) that survives the inflight flap reset. And, when `queue_fetch` is wired, the gk QUEUE-ARRIVAL
           watcher (#733, `queue_arrival_recheck.goal_queue_arrival_recheck`) —
           FULL-authority only, snapshots the union `ready-for-review ∪
           needs-gatekeeper ∪ prio:bounce` per repo and, on a SET DELTA (a NEW

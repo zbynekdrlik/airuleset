@@ -124,13 +124,13 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         # `-c <home>` puts the stray's cwd at the passed HOME so the cwd-guard
         # (a stray sits in $HOME, a work session in a project dir) treats it as
         # a stray.
-        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "marek",
+        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "montalu4",
                                     "-c", self.iso.dir).returncode, 0)
         # a GROUPED stream work session (marek's real `marek-3` shape) must be
         # PRESERVED: create a base then a grouped sibling matching a stray name.
         self.iso.t("-f", "/dev/null", "new-session", "-d", "-s", "montwork")
         self.iso.t("new-session", "-d", "-t", "montwork", "-s", "montalu2")
-        self.assertIn("marek", self.iso.names())
+        self.assertIn("montalu4", self.iso.names())
 
         stray_res = tmuxprov._owner_box_stray_name_res("zbynek",
                                                        single_session=False)
@@ -138,11 +138,11 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         # (#{pane_current_command}/#{pane_current_path} of the just-spawned pane)
         # through a DETERMINISTIC settled line, so the sweep's absorb decision no
         # longer depends on the transient real-box read that flaked under
-        # full-suite load. marek is still really created + really killed; every
+        # full-suite load. montalu4 is still really created + really killed; every
         # other read (the grouped `montalu2` skip) hits the real isolated server.
         # `_idle_ps` keeps the child-guard from probing the real bash panes.
         hermetic_run = _pane_read_override(
-            self.iso, {"marek": _settled_pane_line(self.iso.dir)})
+            self.iso, {"montalu4": _settled_pane_line(self.iso.dir)})
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
                 "zbynek", run=hermetic_run, stray_name_res=stray_res,
@@ -150,11 +150,11 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
             log = (Path(td) / "normalize.log").read_text()
 
         after = self.iso.names()
-        self.assertNotIn("marek", after)      # standalone stray absorbed
+        self.assertNotIn("montalu4", after)      # standalone stray absorbed
         self.assertIn("zbynek", after)        # owner never touched
         self.assertIn("montalu2", after)      # grouped work session preserved
         self.assertIn("killed", log)
-        self.assertIn("marek", log)
+        self.assertIn("montalu4", log)
 
     def test_hermetic_pane_read_absorbs_stray_under_transient_load(self):
         # #711/#427: the ROOT of the full-suite flake -- the sweep reads the
@@ -168,9 +168,9 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
                                     "-s", "zbynek", "-x", "80", "-y", "24")
                          .returncode, 0)
         # a REAL standalone bare-bash stray in $HOME (the creator-path shape).
-        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "marek",
+        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "montalu4",
                                     "-c", self.iso.dir).returncode, 0)
-        self.assertIn("marek", self.iso.names())
+        self.assertIn("montalu4", self.iso.names())
 
         stray_res = tmuxprov._owner_box_stray_name_res("zbynek",
                                                        single_session=False)
@@ -178,38 +178,38 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         # PHASE 1 -- the flake, made deterministic: the #427 load transient
         # (bash still sourcing its rc reads a NON-bare #{pane_current_command})
         # makes the sweep SKIP the genuinely-idle stray. Same real marek; only
-        # the one pane read is injected. marek SURVIVES (this is the flake).
-        transient_run = _pane_read_override(self.iso, {"marek": "0\t\tcat\t1\t"})
+        # the one pane read is injected. montalu4 SURVIVES (this is the flake).
+        transient_run = _pane_read_override(self.iso, {"montalu4": "0\t\tcat\t1\t"})
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
                 "zbynek", run=transient_run, stray_name_res=stray_res,
                 audit_dir=td, ps_run=_idle_ps, home=self.iso.dir)
             log1 = (Path(td) / "normalize.log").read_text()
-        self.assertIn("marek", self.iso.names())   # transient read -> skipped
+        self.assertIn("montalu4", self.iso.names())   # transient read -> skipped
         self.assertIn("skip", log1)
         self.assertIn("non-shell", log1)
 
         # PHASE 2 -- the fix: routing that SAME still-alive stray's read through
         # the DETERMINISTIC settled line (its true post-settle state) absorbs it.
         settled_run = _pane_read_override(
-            self.iso, {"marek": _settled_pane_line(self.iso.dir)})
+            self.iso, {"montalu4": _settled_pane_line(self.iso.dir)})
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
                 "zbynek", run=settled_run, stray_name_res=stray_res,
                 audit_dir=td, ps_run=_idle_ps, home=self.iso.dir)
             log2 = (Path(td) / "normalize.log").read_text()
-        self.assertNotIn("marek", self.iso.names())   # settled read -> absorbed
+        self.assertNotIn("montalu4", self.iso.names())   # settled read -> absorbed
         self.assertIn("killed", log2)
 
     def test_subdev_box_never_sweeps_foreign_names(self):
         # on a single-session (subdev) box the widening is OFF, so a session
         # named after ANOTHER stream is never a candidate -- only `<owner>-N`.
-        self.iso.t("-f", "/dev/null", "new-session", "-d", "-s", "marek",
+        self.iso.t("-f", "/dev/null", "new-session", "-d", "-s", "montalu4",
                    "-x", "80", "-y", "24")
         self.iso.t("new-session", "-A", "-d", "-s", "david")
-        stray_res = tmuxprov._owner_box_stray_name_res("marek",
+        stray_res = tmuxprov._owner_box_stray_name_res("montalu4",
                                                        single_session=True)
-        tmuxprov._live_normalize_owner_session("marek", run=self.run,
+        tmuxprov._live_normalize_owner_session("montalu4", run=self.run,
                                                stray_name_res=stray_res)
         self.assertIn("david", self.iso.names())  # foreign stream NOT swept
 

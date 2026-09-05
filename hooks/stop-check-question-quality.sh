@@ -243,6 +243,37 @@ if [ -n "$MARKER_RAW" ]; then
     fi
 fi
 
+# #878 — semantic same-question key: a reworded full block / ❓ ASKED for the
+# SAME #N set is a repeat even if the prose differs. Fires ONLY when LASTQF
+# exists (a delivered unanswered question) AND the turn is a full-block /
+# ❓ ASKED shape (not a bare re-poke — those pass at the byte-match above).
+LASTQ_REFS="/tmp/claude-lastq-refs-${SID}"
+if [ -n "$MARKER_RAW" ] && [ -f "$LASTQF" ]; then
+    # 🟡4: capture the full owner/repo#N token when present so odoo-erp#356
+    # and bare #356 do NOT conflate to the same key.
+    ASKED_REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '(([A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    if [ -n "$ASKED_REFS" ] && [ -f "$LASTQ_REFS" ]; then
+        STORED_REFS=$(cat "$LASTQ_REFS" 2>/dev/null || echo "")
+        if [ -n "$STORED_REFS" ] && [ "$ASKED_REFS" = "$STORED_REFS" ]; then
+            IS_FULL_OR_ASKED=0
+            if grep -qiE "$ASKED_RX" <<<"$MSG"; then IS_FULL_OR_ASKED=1; fi
+            if LC_ALL=C.UTF-8 grep -qiE 'Ot(á|a)zka[[:space:]]*(—|–|-)[[:space:]]*projekt' <<<"$MSG"; then IS_FULL_OR_ASKED=1; fi
+            if [ "$IS_FULL_OR_ASKED" = 1 ]; then
+                if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+                    echo "$((RETRIES+1))" > "$RETRY_FILE"
+                    QH=""
+                    if type _qhash >/dev/null 2>&1; then QH=$(_qhash "$MARKER_RAW"); fi
+                    _delivery_log_blocked_repeat "$QH"
+                    printf '%s\n' "Otázka k rovnakým ticketom (#N sada: ${ASKED_REFS}) už bola doručená a je nezodpovedaná (qhash ${QH:-?}) — nesie ju footer U N + label needs-answer. Preformulovaný blok je stále tá istá otázka. Zmaž riadok \`❓ ASKED:\` / celý \`**Otázka — projekt …**\` blok a ukonči ťah len \`⏳ WORKING\` / \`✅ DONE\` podľa reálneho stavu ostatnej práce. Ak je to SKUTOČNE NOVÁ (druhá) otázka k tomu istému ticketu, ponechaj label \`needs-answer\` + napíš novú otázku ako \`gh issue comment <N>\` a doruč ju až po zodpovedaní prvej; teraz ukonči len holým markerom (#878)." >&2
+                    exit 2
+                fi
+                rm -f "$RETRY_FILE" 2>/dev/null || true
+                exit 0
+            fi
+        fi
+    fi
+fi
+
 # The block the device ping will carry — SAME extraction as the pending hook
 # (contiguous paragraph ending at the marker; a bare marker under 200 chars
 # pulls in the one paragraph directly above, minus headings/rules).
@@ -523,4 +554,14 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
 fi
 
 [ -z "$VIOLATION" ] && rm -f "$RETRY_FILE" 2>/dev/null || true
+
+# #878 — record the #N refs of this passing question turn for the semantic
+# same-question key. Written on every PASSING full-block/ASKED question so the
+# sidecar is always current.
+if [ -z "$VIOLATION" ] && [ -n "$MARKER_RAW" ]; then
+    _REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '(([A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    if [ -n "$_REFS" ]; then
+        printf '%s' "$_REFS" > "/tmp/claude-lastq-refs-${SID}" 2>/dev/null || true
+    fi
+fi
 exit 0

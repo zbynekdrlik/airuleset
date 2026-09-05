@@ -872,9 +872,10 @@ MAREK_MP_APPROVED = MAREK_MP_MARKEAI + "  # " + APPROVAL_EVID + "  " + BINDING_E
 
 
 class TestSignatureWord(TestCase):
-    def test_marek_stream_signs_marekai(self):
-        # montalu4 -> owner marek -> "MarekAI" (odoo-erp #3864 handover account)
-        self.assertEqual(g.signature_word("montalu4"), "MarekAI")
+    def test_marek_stream_signs_zbynekai_after_882(self):
+        # montalu4 was marek's stream; #882 decommissioned marek, so montalu4
+        # now routes to zbynek and signs ZbynekAI (the default).
+        self.assertEqual(g.signature_word("montalu4"), "ZbynekAI")
 
     def test_zbynek_streams_sign_zbynekai(self):
         for u in ("montalu2", "montalu6", "montalu"):
@@ -906,19 +907,22 @@ class TestSignaturePresentIdentityAware(TestCase):
 
 
 class TestEvaluateMessagePostIdentity(TestCase):
-    def test_marek_stream_expected_is_marekai(self):
+    def test_montalu4_expected_is_zbynekai_after_882(self):
+        # montalu4 was marek's; #882 decommissioned marek -> ZbynekAI default
         v = g.evaluate_message_post(UNSIGNED_MP, "montalu4")
         self.assertIsNotNone(v)
         self.assertEqual(v.number, "4")
-        self.assertEqual(v.expected, "MarekAI 4")
+        self.assertEqual(v.expected, "ZbynekAI 4")
 
-    def test_marek_stream_correct_marekai_passes(self):
-        self.assertIsNone(g.evaluate_message_post(MAREK_MP_MARKEAI, "montalu4"))
+    def test_montalu4_correct_zbynekai_passes_after_882(self):
+        # montalu4 now expects ZbynekAI (not MarekAI) after #882
+        self.assertIsNone(g.evaluate_message_post(MAREK_MP_WRONG_ZBYNEK, "montalu4"))
 
-    def test_marek_stream_wrong_zbynekai_is_a_violation(self):
-        v = g.evaluate_message_post(MAREK_MP_WRONG_ZBYNEK, "montalu4")
+    def test_montalu4_wrong_marekai_is_a_violation_after_882(self):
+        # MarekAI is now WRONG for montalu4 (expects ZbynekAI post-#882)
+        v = g.evaluate_message_post(MAREK_MP_MARKEAI, "montalu4")
         self.assertIsNotNone(v)
-        self.assertEqual(v.expected, "MarekAI 4")
+        self.assertEqual(v.expected, "ZbynekAI 4")
 
     def test_zbynek_stream_wrong_marekai_is_a_violation(self):
         # the REVERSE direction: a zbynek stream signing MarekAI must still BLOCK
@@ -933,20 +937,22 @@ class TestEvaluateMessagePostIdentity(TestCase):
 
 
 class TestHookSignatureIdentity(_HookBase):
-    def test_marek_stream_wrong_zbynekai_blocked_with_marekai_expected(self):
-        r = self.run_hook(command="python3 -c '" + MAREK_MP_WRONG_ZBYNEK + "'",
+    def test_montalu4_wrong_marekai_blocked_after_882(self):
+        # Post-#882: montalu4 expects ZbynekAI, so MarekAI is WRONG now
+        r = self.run_hook(command="python3 -c '" + MAREK_MP_MARKEAI + "'",
                           user="montalu4")
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("MarekAI 4", r.stderr)
-        self.assertNotIn("ZbynekAI 4", r.stderr)
+        self.assertIn("ZbynekAI 4", r.stderr)
 
-    def test_marek_stream_unsigned_blocked_with_marekai_expected(self):
+    def test_montalu4_unsigned_blocked_with_zbynekai_expected_after_882(self):
         r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu4")
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("MarekAI 4", r.stderr)
+        self.assertIn("ZbynekAI 4", r.stderr)
 
-    def test_marek_stream_signed_and_approved_passes(self):
-        cmd = "python3 -c '" + MAREK_MP_APPROVED + "'"
+    def test_montalu4_zbynekai_signed_and_approved_passes_after_882(self):
+        # Post-#882: montalu4 now uses ZbynekAI + needs approval evidence
+        approved = MAREK_MP_WRONG_ZBYNEK + "  # " + APPROVAL_EVID + "  " + BINDING_EVID
+        cmd = "python3 -c '" + approved + "'"
         self.assertEqual(self.run_hook(command=cmd, user="montalu4").returncode, 0)
 
 

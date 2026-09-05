@@ -3155,6 +3155,7 @@ def cmd_gk_request(args):
 HANDOFF_DEFAULT_LENSES = [
     "security", "correctness", "test-integrity",
     "evidence-integrity", "design-doctrine", "process",
+    "shared-benefit",  # #877 — fleet-wide, unconditional
 ]
 
 # Receipt directory for the hook to verify.
@@ -3183,11 +3184,18 @@ def _parse_gk_findings(comment_body):
     return ids
 
 
+_LENS_ID_RE = re.compile(r'^[a-z][a-z0-9-]+$')
+
+
 def _load_lens_list(repo_root=None):
     """Load the repo's lens list or fall back to the built-in default.
 
-    The lens list is at .claude/rules/gk-review-lenses.md — one lens per
-    non-empty, non-comment line."""
+    The lens list is at .claude/rules/gk-review-lenses.md.  Only lines
+    matching the lens-id shape (^[a-z][a-z0-9-]+$) are extracted — a bare
+    id-shaped line anywhere (including inside a code block) is treated as
+    a lens id; prose paragraphs, markdown tables and headers are filtered
+    out by the shape check.  If the file is absent or yields zero valid
+    ids, falls back to HANDOFF_DEFAULT_LENSES (#880)."""
     if repo_root:
         p = os.path.join(repo_root, ".claude", "rules",
                          "gk-review-lenses.md")
@@ -3196,7 +3204,7 @@ def _load_lens_list(repo_root=None):
                 lenses = []
                 for line in f:
                     line = line.strip()
-                    if line and not line.startswith("#"):
+                    if _LENS_ID_RE.match(line):
                         lenses.append(line)
                 if lenses:
                     return lenses
@@ -3339,7 +3347,7 @@ def cmd_handoff(args):
 
     # Verify HEAD is on the remote branch.
     R = ["-R", repo] if repo else []
-    ls_r = _run(["git", "ls-remote", "origin", branch])
+    ls_r = _run(["git", "ls-remote", "origin", "refs/heads/" + branch])
     if ls_r.returncode != 0:
         print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
         return 1
@@ -4902,6 +4910,10 @@ def _watchdog_ops_wait_fetch(cwd):
                         # dropped the false "remind DNES" nudge), so it is
                         # deliberately NOT parsed here (the #753 no-dead-parse rule).
                         "tacit_close": "tacit-close?" in reason,
+                        # #881: convergence tags consumed by the job-20 nudge's
+                        # CONVERGE and NO-TARGET clauses.
+                        "converge": "converge!" in reason,
+                        "no_target": "no-target!" in reason,
                         "title": title})
     return members
 
@@ -5270,7 +5282,7 @@ def _watchdog_release_state_fetch(cwd):
             r = subprocess.run(
                 ["gh", "pr", "list", "--repo", repo, "--state", "open",
                  "--base", base,
-                 "--json", "number,statusCheckRollup,mergeable",
+                 "--json", "number,statusCheckRollup,mergeable,updatedAt",
                  "--limit", "3"],
                 capture_output=True, text=True, timeout=15)
         except Exception:
@@ -5338,7 +5350,7 @@ def _watchdog_release_state_fetch(cwd):
             r = subprocess.run(
                 ["gh", "run", "list", "--repo", repo, "-w", shadow_wf,
                  "--branch", staging, "--limit", "1",
-                 "--json", "status,conclusion,databaseId"],
+                 "--json", "status,conclusion,databaseId,updatedAt"],
                 capture_output=True, text=True, timeout=15)
         except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
             shadow_run = None
@@ -6397,6 +6409,9 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
+    _converge_flagged as _converge_flagged,
+    _no_target_flagged as _no_target_flagged,
+    OPS_WAIT_CONVERGE_AGE_D as OPS_WAIT_CONVERGE_AGE_D,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
     _label_exists_on_repo as _label_exists_on_repo,

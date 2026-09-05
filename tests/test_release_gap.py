@@ -167,6 +167,225 @@ class TestReleaseDecision(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 1b. #883 — stalled-release flap-proof nudge (gh-observed inactivity anchor).
+# --------------------------------------------------------------------------- #
+
+class TestStalledRelease883(unittest.TestCase):
+    """#883 — the 10h release 2.250.0 stall: the inflight action resets
+    first_seen/last_nudge on every flap, so a stalled release that briefly
+    transitions to cut-in-progress (a CI rerun) then back to shadow-failed
+    never accumulates enough wait time to reach the cadence.
+
+    The fix: a `last_stall_nudge` field that survives the inflight reset, plus
+    a gh-observed `last_action_ts` inactivity anchor (30 min default)."""
+
+    def _stalled_lane(self):
+        """A LaneResult whose stage is in STALLED_STAGES (shadow-failed)."""
+        from watchdog.release_lane import LaneResult
+        return LaneResult("shadow-failed", "shadow FAILED", "run #42")
+
+    def test_stalled_after_flap_nudges(self):
+        """THE INCIDENT REPRO: rec fresh from an inflight reset 10 min ago
+        (first_seen=now-600, last_nudge=None), rstate stalled, inactivity
+        > 30 min. TODAY: returns wait:grace because anchor is < cadence.
+        AFTER FIX: nudge:stalled because the inactivity anchor is met."""
+        rec = {"first_seen": NOW - 600, "last_nudge": None}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=NOW - 35 * 60)  # 35 min inactive
+        self.assertEqual(action, "nudge")
+        self.assertEqual(reason, "stalled")
+
+    def test_fresh_activity_suppresses_stall_nudge(self):
+        """Inactivity < 30 min -> wait:stall-active, even if the generic
+        anchor is past the cadence. This locks the '>30 min' half."""
+        rec = {"first_seen": NOW - 2 * CAD, "last_nudge": None}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=NOW - 10 * 60)  # 10 min = fresh
+        self.assertEqual(action, "wait")
+        self.assertEqual(reason, "stall-active")
+
+    def test_last_stall_nudge_survives_inflight_flap(self):
+        """An inflight action must carry last_stall_nudge from the old rec
+        so the re-nudge cadence survives the first_seen reset."""
+        rec = {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - 5 * DAY,
+               "last_stall_nudge": NOW - 600}
+        rstate = {"ahead": 99, "in_flight": True}
+        action, out, _reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN)
+        self.assertEqual(action, "inflight")
+        # last_stall_nudge carried forward, NOT reset
+        self.assertEqual(out.get("last_stall_nudge"), NOW - 600)
+
+    def test_stall_cadence_gates_re_nudge(self):
+        """A stalled release recently nudged (last_stall_nudge < cadence ago)
+        must wait, not re-nudge."""
+        rec = {"first_seen": NOW - 600, "last_nudge": None,
+               "last_stall_nudge": NOW - 600}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=NOW - 35 * 60)
+        self.assertEqual(action, "wait")
+        self.assertEqual(reason, "stall-cadence")
+
+    def test_unmeasurable_last_action_falls_back_to_anchor(self):
+        """When last_action_ts is None (unmeasurable), fall back to the
+        existing anchor-based behavior (#134 anti-silence). An anchor
+        past the cadence still nudges."""
+        rec = {"first_seen": NOW - CAD - 1, "last_nudge": None}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=None)
+        self.assertEqual(action, "nudge")
+        # Falls back to the generic anchor path, reason is "due" (today's path)
+        self.assertIn(reason, ("stalled", "due"))
+
+    def test_unmeasurable_anchor_within_grace_waits(self):
+        """Unmeasurable last_action_ts, anchor NOT past cadence -> wait.
+        This anti-silence lock proves the fallback doesn't instant-nudge."""
+        rec = {"first_seen": NOW - 1, "last_nudge": None}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=None)
+        self.assertEqual(action, "wait")
+
+
+class TestLastActionTs883(unittest.TestCase):
+    """#883 — _last_action_ts pure helper unit tests."""
+
+    def test_shadow_updated_at(self):
+        rstate = {"shadow_run": {"updatedAt": "2026-09-05T10:00:00Z"}}
+        ts = rg._last_action_ts(rstate)
+        self.assertIsNotNone(ts)
+        self.assertIsInstance(ts, float)
+
+    def test_cut_pr_updated_at(self):
+        rstate = {"cut_pr": {"updatedAt": "2026-09-05T10:00:00Z"}}
+        ts = rg._last_action_ts(rstate)
+        self.assertIsNotNone(ts)
+
+    def test_max_of_sources(self):
+        rstate = {
+            "shadow_run": {"updatedAt": "2026-09-05T08:00:00Z"},
+            "cut_pr": {"updatedAt": "2026-09-05T10:00:00Z"},
+        }
+        ts = rg._last_action_ts(rstate)
+        # cut_pr.updatedAt is newer, so that should be the max
+        shadow_ts = rg._parse_iso_ts("2026-09-05T08:00:00Z")
+        cutpr_ts = rg._parse_iso_ts("2026-09-05T10:00:00Z")
+        self.assertEqual(ts, cutpr_ts)
+        self.assertGreater(ts, shadow_ts)
+
+    def test_none_rstate_returns_none(self):
+        self.assertIsNone(rg._last_action_ts(None))
+
+    def test_empty_rstate_returns_none(self):
+        self.assertIsNone(rg._last_action_ts({}))
+
+    def test_malformed_timestamps_returns_none(self):
+        rstate = {"shadow_run": {"updatedAt": "not-a-date"},
+                  "cut_pr": {"updatedAt": 12345}}
+        self.assertIsNone(rg._last_action_ts(rstate))
+
+    def test_bool_timestamp_ignored(self):
+        """Bool is an int subclass — must not read as a valid epoch."""
+        rstate = {"shadow_run": {"updatedAt": True}}
+        self.assertIsNone(rg._last_action_ts(rstate))
+
+    def test_statuscheckrollup_completed_at(self):
+        rstate = {"cut_pr": {
+            "statusCheckRollup": [
+                {"completedAt": "2026-09-05T12:00:00Z"},
+                {"completedAt": "2026-09-05T11:00:00Z"},
+            ],
+        }}
+        ts = rg._last_action_ts(rstate)
+        expected = rg._parse_iso_ts("2026-09-05T12:00:00Z")
+        self.assertEqual(ts, expected)
+
+
+class TestStallCadenceBackoff883(unittest.TestCase):
+    """#883 review Yellow 1: the stall re-nudge gate must consult
+    max(last_stall_nudge, last_nudge) so #749's back-off (which advances
+    last_nudge) is effective on the stall path."""
+
+    def _stalled_lane(self):
+        from watchdog.release_lane import LaneResult
+        return LaneResult("shadow-failed", "shadow FAILED", "run #42")
+
+    def test_last_nudge_backoff_gates_stall_renudge(self):
+        """#749 back-off advances last_nudge. The stall re-nudge gate must
+        consult it, not only last_stall_nudge."""
+        rec = {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - 100,
+               "last_stall_nudge": NOW - CAD - 1}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=NOW - 35 * 60)
+        # last_nudge (NOW-100) is fresher than last_stall_nudge (past cadence)
+        # -> the gate reads max(NOW-100, NOW-CAD-1) = NOW-100 < cadence -> wait
+        self.assertEqual(action, "wait")
+        self.assertEqual(reason, "stall-cadence")
+
+    def test_unmeasurable_last_nudge_backoff_gates_stall(self):
+        """Same test for the unmeasurable-last_action_ts path."""
+        rec = {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - 100,
+               "last_stall_nudge": NOW - CAD - 1}
+        rstate = {"ahead": 254, "in_flight": True}
+        action, _out, reason = rg._release_decision(
+            rec, rstate, NOW, CAD, MIN,
+            lane=self._stalled_lane(),
+            last_action_ts=None)
+        self.assertEqual(action, "wait")
+        self.assertEqual(reason, "stall-cadence")
+
+
+class TestNudgeText883(unittest.TestCase):
+    """#883 Blue 1: the bez akcie ~NNm suffix in the stalled nudge text."""
+
+    def test_inactive_m_in_stalled_text(self):
+        from watchdog.release_lane import LaneResult
+        lane = LaneResult("shadow-failed", "shadow FAILED", "run #42")
+        text = rg._nudge_text(254, "develop", "main", lane=lane,
+                              inactive_m=45)
+        self.assertIn("bez akcie ~45m", text)
+        self.assertTrue(len(text) <= 700)
+
+    def test_no_inactive_m_omits_suffix(self):
+        from watchdog.release_lane import LaneResult
+        lane = LaneResult("shadow-failed", "shadow FAILED", "run #42")
+        text = rg._nudge_text(254, "develop", "main", lane=lane,
+                              inactive_m=None)
+        self.assertNotIn("bez akcie", text)
+
+
+class TestStallInactivityThreshold883(unittest.TestCase):
+    """#883 Blue 2: env override + 10-min floor for stall inactivity."""
+
+    def test_default_is_30min(self):
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_RELEASE_STALL_INACTIVITY_S", None)
+            self.assertEqual(rg._stall_inactivity_threshold(), 1800)
+
+    def test_floor_is_10min(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_RELEASE_STALL_INACTIVITY_S": "60"}):
+            self.assertEqual(rg._stall_inactivity_threshold(), 600)
+
+
+# --------------------------------------------------------------------------- #
 # 2. Origin-slug parse (pure, in airuleset.py).
 # --------------------------------------------------------------------------- #
 

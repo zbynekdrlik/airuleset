@@ -50,10 +50,10 @@ PENDING = ROOT / "hooks" / "notify-discord-pending.sh"
 class TestQuestionPingOffPredicate(unittest.TestCase):
     def test_off_owners(self):
         self.assertTrue(notify.question_ping_off("zbynek"))
-        self.assertTrue(notify.question_ping_off("marek"))
+        # marek REMOVED from OFF set (#882, 2026-09-05: decommissioned)
+        self.assertFalse(notify.question_ping_off("marek"))
         # case / whitespace normalized
         self.assertTrue(notify.question_ping_off("  ZBYNEK "))
-        self.assertTrue(notify.question_ping_off("Marek"))
 
     def test_david_stays_on(self):
         self.assertFalse(notify.question_ping_off("david"))
@@ -73,8 +73,9 @@ class TestQuestionPingOffPredicate(unittest.TestCase):
         self.assertFalse(notify.question_ping_off(None))
         self.assertFalse(notify.question_ping_off("someoneelse"))
 
-    def test_owners_off_set_is_exactly_zbynek_and_marek(self):
-        self.assertEqual(set(notify.QUESTION_PING_OWNERS_OFF), {"zbynek", "marek"})
+    def test_owners_off_set_is_exactly_zbynek(self):
+        # marek removed #882 (decommissioned)
+        self.assertEqual(set(notify.QUESTION_PING_OWNERS_OFF), {"zbynek"})
 
 
 # --------------------------------------------------------------------------- #
@@ -131,11 +132,12 @@ class TestSendSuppressesQuestionsForOffOwners(_HomeIsolated):
         self.assertEqual(r, "suppressed")
         self.assertEqual(self.posts, [], "a zbynek question must POST nothing")
 
-    def test_marek_question_send_suppressed(self):
+    def test_marek_question_send_no_longer_suppressed(self):
+        # marek removed from OFF set (#882, decommissioned)
         self._write_env()
         r = notify.send("otázka?", owner="marek", kind="questions")
-        self.assertEqual(r, "suppressed")
-        self.assertEqual(self.posts, [], "a marek question must POST nothing")
+        self.assertEqual(r, "sent")
+        self.assertEqual(len(self.posts), 1)
 
     def test_david_question_send_still_sends(self):
         self._write_env()
@@ -160,7 +162,7 @@ class TestSendSuppressesQuestionsForOffOwners(_HomeIsolated):
 
     def test_return_message_id_shape_is_respected(self):
         self._write_env()
-        r = notify.send("q?", owner="marek", kind="questions", return_message_id=True)
+        r = notify.send("q?", owner="zbynek", kind="questions", return_message_id=True)
         self.assertEqual(r, ("suppressed", None))
 
     def test_dry_run_suppressed_mutates_nothing(self):
@@ -297,12 +299,14 @@ class InteractiveQuestionSuppression(unittest.TestCase):
                              for ln in dlog.splitlines() if len(ln.split()) > 1),
                          "a suppressed question must not log a 'sent' line: " + repr(dlog))
 
-    def test_marek_interactive_question_suppressed(self):
+    def test_marek_interactive_question_no_longer_suppressed(self):
+        # marek removed from OFF set (#882, decommissioned) — delivery proceeds
         sid = self._sid("marek")
         r = self._fire(sid, "marek", _NEEDS_YOU, mid="710002")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn("710002", self._qmap(), self._qmap())
-        self.assertTrue(any("suppressed" in ln for ln in self._dlog().splitlines()),
+        self.assertIn("710002", self._qmap(), self._qmap())
+        self.assertTrue(any(len(ln.split()) > 1 and ln.split()[1] == "sent"
+                            for ln in self._dlog().splitlines()),
                         repr(self._dlog()))
 
     def test_david_interactive_question_still_delivers_and_records(self):

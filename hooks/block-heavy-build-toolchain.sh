@@ -43,7 +43,7 @@ set -euo pipefail
 # --- BOX-CLASS GATE: no-op off a shared-stream box -------------------------
 BOX_CLASS_FILE="${HOME:-/nonexistent}/.claude/airuleset-box-class"
 CLASS="$(cat "$BOX_CLASS_FILE" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
-[ "$CLASS" = "shared-stream" ] || exit 0
+[ "$CLASS" = "shared-stream" ] || [ "$CLASS" = "controller" ] || exit 0
 
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
