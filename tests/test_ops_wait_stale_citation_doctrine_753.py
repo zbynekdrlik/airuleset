@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
 
 FINDER = "A W-push resets `stale!` ONLY with a source CITATION (#753)"
@@ -37,7 +38,7 @@ def _norm_window(text, start_token, end_marker="\n- **"):
 
 class DoctrineContentLock(unittest.TestCase):
     def test_statusline_W_bullet_carries_753_mechanism(self):
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")
         line = _line_with(text, FINDER)
         self.assertTrue(line, "the W bullet must carry the #753 citation sentence")
         for tok in TOKENS:

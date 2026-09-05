@@ -1,7 +1,7 @@
 ---
 name: view-image-urls
 user-invocable: false
-description: View image URLs (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg) and JS-walled pages (X.com, Instagram). Download + Read for images; Playwright for JS-gated pages.
+description: View image URLs (prnt.sc, imgur, gyazo, ibb.co, .png/.jpg) + JS-walled pages (X.com, twitter.com, Instagram, LinkedIn). Download+Read first, no browser needed. NEVER claim "is not installed".
 ---
 
 ### Viewing Image URLs and JS-Walled Pages — Download-and-Read FIRST, Browser Only When Needed, NEVER "I can't read this"
@@ -70,7 +70,7 @@ These are client-rendered SPAs: the CONTENT (post text, author, replies) is buil
 
 #### The iron rule
 
-**NEVER answer "I can't read this" (image or page) while you have an untried path.** For an image: download it with `curl` and Read the file first. For a JS-walled page: render it in Playwright first (navigate + snapshot, with one retry on a login wall). Only after a genuine attempt may you report what is actually blocked — and even then, show what you DID get (the placeholder state, or the partial snapshot), never a bare refusal. And never explain a gap with "Playwright is not installed" — it is installed AND enabled on every managed box (#542), and an image never needed it.
+**NEVER answer "I can't read this" (image or page) while you have an untried path.** For an image: download it locally with curl and open it with the Read tool first. For a JS-walled page: render it in Playwright first (navigate + snapshot, with one retry on a login wall). Only after a genuine attempt may you report what is actually blocked — and even then, show what you DID get (the placeholder state, or the partial snapshot), never a bare refusal. And NEVER claim Playwright "is not installed" — it is installed AND enabled on every managed box (#542), and an image never needed it.
 
 #### System / client-message attachments (Odoo ir.attachment, mail attachments) — the SAME rule, a different channel
 
