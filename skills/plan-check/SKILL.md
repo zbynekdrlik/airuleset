@@ -2,7 +2,6 @@
 name: plan-check
 description: Audit whether the plan and original prompt were fulfilled 100%. Use when work appears done but before sending the completion report.
 user-invocable: false
-disable-model-invocation: true
 ---
 
 # Plan Fulfillment Check

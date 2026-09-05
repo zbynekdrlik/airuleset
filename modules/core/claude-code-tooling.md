@@ -20,7 +20,7 @@ Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **Th
 
 **ultracode** mode = `xhigh` + permission to launch multi-agent workflows (not a separate API tier); NO LONGER a managed launch flag (owner directive 2026-08-30) — sessions launch at effort `high`, ultracode is a per-session opt-in.
 
-Dynamic Workflows authoring detail + per-stage model tiering: companion `skills/claude-code-workflows/DEEP.md` (#859).
+**Parallel lanes are the default — never silently fall back to a single sequential pass where the task allows parallel lanes.** The `/autopilot` loop uses CONTINUOUS REFILL (#848, retiring bounded batches): keep up to 5 lanes live, refill a returned lane's slot immediately, compact at every integration cycle. Dynamic Workflows authoring detail + per-stage model tiering: companion `skills/claude-code-workflows/DEEP.md` (#859).
 
 #### Autonomous Goals (`/goal`)
 

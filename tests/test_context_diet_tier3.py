@@ -226,12 +226,23 @@ class TestSkillDescriptionRatchet(unittest.TestCase):
 class TestAgentOnlySkillFlags(unittest.TestCase):
     """Skills that are agent-only/dispatch-only must have both flags."""
 
-    AGENT_ONLY = ["fable-advisor", "ci-monitor", "plan-check", "notification-mechanics"]
+    # plan-check dropped disable-model-invocation (#859 batch 3b, 🔴4:
+    # completion-report.md mandates `Invoke plan-check` = Skill tool call).
+    # fable-advisor keeps it: loaded via situational trigger on fable-gate,
+    # not the Skill tool; model-awareness says "load it" but the conf binding
+    # handles that load path.
+    AGENT_ONLY = ["fable-advisor", "ci-monitor", "notification-mechanics"]
 
     def test_agent_only_skills_have_disable_model_invocation(self):
         for name in self.AGENT_ONLY:
             t = _read(f"skills/{name}/SKILL.md")
             self.assertIn("disable-model-invocation: true", t, f"{name} missing disable-model-invocation")
+
+    def test_plan_check_is_model_invocable(self):
+        """plan-check must be callable via Skill tool (completion-report.md)."""
+        t = _read("skills/plan-check/SKILL.md")
+        self.assertNotIn("disable-model-invocation: true", t,
+                         "plan-check must NOT have disable-model-invocation")
 
     def test_agent_only_skills_have_user_invocable_false(self):
         for name in self.AGENT_ONLY:
@@ -246,10 +257,11 @@ class TestNudgeModuleContextCost(unittest.TestCase):
 
     def _run_hook(self, file_path):
         hook = os.path.join(REPO_DIR, "hooks/nudge-module-context-cost.sh")
-        payload = json.dumps({"file_path": file_path})
+        # Real PreToolUse payload shape: .tool_input.file_path
+        payload = json.dumps({"tool_input": {"file_path": file_path}})
         r = subprocess.run(
             ["bash", hook],
-            input=payload, capture_output=True, text=True, timeout=10,
+            input=payload, capture_output=True, text=True, timeout=30,
             cwd=REPO_DIR,
         )
         return r
@@ -263,9 +275,11 @@ class TestNudgeModuleContextCost(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
 
     def test_prints_context_cost_on_module_path(self):
-        result = self._run_hook(os.path.join(REPO_DIR, "modules/core/test.md"))
-        # Must always exit 0 (non-blocking)
+        # Real modules/core/*.md Write payload — must print Context-cost: in stderr
+        result = self._run_hook(os.path.join(REPO_DIR, "modules/core/statusline-vocabulary.md"))
         self.assertEqual(result.returncode, 0)
+        self.assertIn("Context-cost:", result.stderr,
+                      "nudge hook must print Context-cost: on stderr for a modules/ Write")
 
 
 # --- A4: CLAUDE.md context-cost paragraph ---
@@ -276,6 +290,82 @@ class TestContextCostParagraph(unittest.TestCase):
         self.assertIn("Context-cost", t)
         self.assertIn("nudge-module-context-cost.sh", t)
         self.assertIn("context-baseline", t)
+
+
+# --- Functional injector tests for new batch-3 rows (🔴1 + 🟡7) ---
+
+HOOK = os.path.join(REPO_DIR, "hooks", "inject-situational-rule.sh")
+
+
+def _inject(tool_input, tool_name="Bash", session_id=None):
+    """Drive the real inject-situational-rule.sh; fresh session_id per call."""
+    if session_id is None:
+        import uuid
+        session_id = f"diet3-{uuid.uuid4().hex[:12]}"
+    payload = json.dumps(
+        {"session_id": session_id, "tool_name": tool_name, "tool_input": tool_input}
+    )
+    r = subprocess.run(
+        ["bash", HOOK], input=payload, capture_output=True, text=True, timeout=15,
+        cwd=REPO_DIR,
+    )
+    return r
+
+
+def _injected_text(result):
+    """Return the additionalContext string from the hook output, or ''."""
+    out = result.stdout.strip()
+    if not out:
+        return ""
+    data = json.loads(out)
+    spec = data.get("hookSpecificOutput", {})
+    return spec.get("additionalContext", "")
+
+
+class TestWorkflowToolInjection(unittest.TestCase):
+    """🔴1: the Workflow tool matcher must fire inject-situational-rule.sh
+    and inject the claude-code-workflows DEEP body."""
+
+    def test_workflow_tool_call_injects_deep_body(self):
+        r = _inject({"scriptPath": "workflow.js"}, tool_name="Workflow")
+        ctx = _injected_text(r)
+        self.assertIn("opts.model", ctx,
+                      "Workflow tool call must inject per-stage tiering doctrine")
+
+    def test_workflow_prompt_injects_deep_body(self):
+        r = _inject({"prompt": "build a parallel fan-out workflow"}, tool_name="UserPromptSubmit")
+        ctx = _injected_text(r)
+        # The prompt arm fires on "workflow" / "fan-out" / "parallel.*agent"
+        self.assertIn("opts.model", ctx,
+                      "UserPromptSubmit about workflows must inject the DEEP body")
+
+
+class TestStatuslineDeepOrdering(unittest.TestCase):
+    """🟡6: W-specific prompt must get DEEP-2 body first."""
+
+    def test_w_prompt_gets_deep2_body(self):
+        r = _inject({"prompt": "W 34?"}, tool_name="UserPromptSubmit")
+        ctx = _injected_text(r)
+        # DEEP-2 has the W state machine detail
+        self.assertIn("ops-wait", ctx.lower(),
+                      "W prompt must inject the W-body (DEEP-2)")
+
+    def test_i_prompt_gets_deep1_body(self):
+        r = _inject({"prompt": "I 12?"}, tool_name="UserPromptSubmit")
+        ctx = _injected_text(r)
+        # DEEP-1 has I/U/gk detail
+        self.assertIn("I N", ctx,
+                      "I prompt must inject the I-body (DEEP-1)")
+
+
+class TestReceiveFilesCredentialsInjection(unittest.TestCase):
+    """Functional test for receive-files-credentials binding."""
+
+    def test_secret_request_injects_deep(self):
+        r = _inject({"command": "python3 airuleset.py secret request API_KEY"})
+        ctx = _injected_text(r)
+        self.assertIn("secret", ctx.lower(),
+                      "secret request must inject credentials companion")
 
 
 if __name__ == "__main__":

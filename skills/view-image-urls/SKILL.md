@@ -1,7 +1,7 @@
 ---
 name: view-image-urls
 user-invocable: false
-description: View image URLs (prnt.sc, imgur, gyazo, ibb.co, .png/.jpg) + JS-walled pages (X.com, twitter.com, Instagram, LinkedIn). Download+Read first, no browser needed. NEVER claim "is not installed".
+description: View image URLs (prnt.sc, imgur, gyazo, ibb.co, .png/.jpg) + JS-walled pages (X.com, twitter.com, Instagram, LinkedIn) + Odoo ir.attachment. Download+Read first; load on pasted image URLs.
 ---
 
 ### Viewing Image URLs and JS-Walled Pages — Download-and-Read FIRST, Browser Only When Needed, NEVER "I can't read this"

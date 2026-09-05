@@ -1,7 +1,7 @@
 ---
 name: claude-code-log
 user-invocable: false
-description: Browse, export, or archive Claude Code session transcripts as HTML/Markdown using claude-code-log. Load for transcript reading or token-usage review.
+description: Browse, export, or archive Claude Code session transcripts as HTML/Markdown using claude-code-log. Load when browsing/exporting transcripts or reviewing token usage.
 ---
 
 ### Browsing / Exporting / Archiving Transcripts — `claude-code-log` (adopt, don't build — #420)

@@ -1,6 +1,6 @@
 ---
 name: cloudflare-api-tokens
-description: Cloudflare API credential taxonomy — find, verify, name, persist tokens. Load before any Cloudflare API work or when a cfat_/legacy token appears.
+description: Cloudflare credential taxonomy — cfat_ account-owned token, legacy user token, Global API Key, Origin CA key. FIND, VERIFY, NAME, PERSIST. Load on any CF API work.
 user-invocable: false
 ---
 

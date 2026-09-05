@@ -1,6 +1,6 @@
 ---
 name: onboard-project
-description: Onboard a project under airuleset — git repo + GitHub remote + branch convention + CLAUDE.md + foundation tickets + registry entry.
+description: Onboard a project under airuleset — git repo + GitHub remote + branch convention + CLAUDE.md + foundation tickets + registry. Use when the user says "onboard <project>" or "audit the registry".
 user-invocable: true
 ---
 

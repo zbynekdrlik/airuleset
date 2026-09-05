@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: Autonomous issue backlog — dispatches workers, drives /goal loop, merges, deploys, fires per-ticket Discord cards. Use when the user says /autopilot or wants hands-off issue processing.
+description: Autonomous issue backlog — /goal loop, workers, merge+deploy. DEFAULT (no dialog arg) = zero questions at start; dialog = run the interactive start-of-run flow.
 argument-hint: "[status] [manual] [dialog]"
 user-invocable: true
 disable-model-invocation: true
@@ -1319,6 +1319,8 @@ reproach.
   that is continuing after a ticket is DONE, not skipping a ticket that needs your answer.)
 
 ## Step 4a — End-of-run reconciliation sweep (when the backlog goes empty, BEFORE the final report)
+
+**Note:** this sweep is UNCONDITIONAL, dialog or not — it always runs at backlog-empty.
 
 When the workable backlog empties, the run has just changed a lot of code while the context is still
 fresh. Reconcile the WHOLE tracker NOW — **including the `autopilot-skip` issues** — so no ticket
