@@ -36,10 +36,27 @@ SPINBIKE_CONFIG = (
 class TestConstants(unittest.TestCase):
     def test_drop_port_distinct_from_every_other_range(self):
         # filedrop 8788, upload 8799-8819, secret 8830-8849, show 8850-8869.
-        self.assertNotEqual(dg.DROP_PORT, 8788)
+        self.assertNotEqual(dg.DROP_PORT_BASE, 8788)
         for lo, hi in [(8799, 8819), (8830, 8849), (8850, 8869)]:
-            self.assertFalse(lo <= dg.DROP_PORT <= hi,
-                             "DROP_PORT %d collides with %d-%d" % (dg.DROP_PORT, lo, hi))
+            self.assertFalse(lo <= dg.DROP_PORT_BASE <= hi,
+                             "DROP_PORT_BASE %d collides with %d-%d" % (dg.DROP_PORT_BASE, lo, hi))
+
+    def test_no_duplicate_ports_per_box(self):
+        """#889: each account on the same box must have a distinct port."""
+        from collections import defaultdict
+        by_box = defaultdict(list)
+        for (node, user), lane in dg.DROP_LANES.items():
+            by_box[node].append((user, lane.port))
+        for node, entries in by_box.items():
+            ports = [p for _, p in entries]
+            self.assertEqual(len(ports), len(set(ports)),
+                             "duplicate ports on box %s: %s" % (node, entries))
+
+    def test_no_duplicate_hosts_fleet_wide(self):
+        """#889: each hostname must be globally unique."""
+        hosts = [lane.host for lane in dg.DROP_LANES.values()]
+        self.assertEqual(len(hosts), len(set(hosts)),
+                         "duplicate hostnames: %s" % hosts)
 
     def test_drop_hosts_are_flat_single_level_under_newlevel_media(self):
         # LOAD-BEARING: *.newlevel.media Universal SSL is ONE level, so a 2-level
@@ -53,22 +70,23 @@ class TestConstants(unittest.TestCase):
 
 class TestDropLaneRegistry(unittest.TestCase):
     def test_spinbike_lane(self):
-        lane = dg.drop_lane_for_box("spinbike")
+        lane = dg.drop_lane_for_account("spinbike", "newlevel")
         self.assertIsNotNone(lane)
         self.assertEqual(lane.host, "drop-spinbike.newlevel.media")
         self.assertFalse(lane.access)            # owner box → token-only TLS
         self.assertTrue(lane.tunnel_system_unit)  # system unit → sudo restart
 
-    def test_subdev_lane_is_access_gated(self):
-        lane = dg.drop_lane_for_box("subdev")
+    def test_subdev_david1_lane_is_access_gated(self):
+        lane = dg.drop_lane_for_account("subdev", "david1")
         self.assertIsNotNone(lane)
         self.assertEqual(lane.host, "drop-david.newlevel.media")
+        self.assertEqual(lane.port, 8870)
         self.assertTrue(lane.access)             # double protection Access+token
         self.assertFalse(lane.tunnel_system_unit)  # --user unit
 
-    def test_unknown_box_has_no_lane(self):
-        self.assertIsNone(dg.drop_lane_for_box("dev1"))
-        self.assertIsNone(dg.drop_lane_for_box("some-random-box"))
+    def test_unknown_account_has_no_lane(self):
+        self.assertIsNone(dg.drop_lane_for_account("dev1", "newlevel"))
+        self.assertIsNone(dg.drop_lane_for_account("some-random-box", "nobody"))
 
     def test_gateway_account_is_a_fleet_deploy_target(self):
         # #838: a sibling account's install-time ingress re-assert diverts to a
@@ -81,7 +99,7 @@ class TestDropLaneRegistry(unittest.TestCase):
         import cli_fleet
         target_names = {h.get("name") for h in cli_fleet.REMOTE_HOSTS}
         checked = 0
-        for node, lane in dg.DROP_LANES.items():
+        for (node, _user), lane in dg.DROP_LANES.items():
             if lane.gateway_account is not None:
                 expected = "%s@%s" % (lane.gateway_account, node)
                 self.assertIn(
@@ -90,8 +108,8 @@ class TestDropLaneRegistry(unittest.TestCase):
                     "(%s) so it heals the shared tunnel its siblings depend on"
                     % (lane.gateway_account, node, expected))
                 checked += 1
-        self.assertEqual(checked, 1, "expected exactly the subdev/david1 lane to "
-                         "carry a gateway_account (non-vacuous lock)")
+        self.assertGreaterEqual(checked, 1, "expected at least one lane with a "
+                                  "gateway_account (non-vacuous lock)")
 
 
 class TestIngressAugmentation(unittest.TestCase):
@@ -104,7 +122,7 @@ class TestIngressAugmentation(unittest.TestCase):
             self.assertIn("hostname: %s" % h, out)
         # The new ingress points at loopback:DROP_PORT.
         self.assertIn("- hostname: drop-spinbike.newlevel.media", out)
-        self.assertIn("service: http://127.0.0.1:%d" % dg.DROP_PORT, out)
+        self.assertIn("service: http://127.0.0.1:%d" % dg.DROP_PORT_BASE, out)
         # It sits BEFORE the catch-all (that ordering is what makes cloudflared
         # route the drop host instead of 404-ing it).
         self.assertLess(out.index("drop-spinbike.newlevel.media"),
@@ -114,7 +132,7 @@ class TestIngressAugmentation(unittest.TestCase):
         out = dg.render_drop_ingress_augmentation(SPINBIKE_CONFIG,
                                                   "drop-spinbike.newlevel.media")
         self.assertIn("  - hostname: drop-spinbike.newlevel.media\n"
-                      "    service: http://127.0.0.1:%d\n" % dg.DROP_PORT, out)
+                      "    service: http://127.0.0.1:%d\n" % dg.DROP_PORT_BASE, out)
 
     def test_idempotent_second_pass_is_a_noop(self):
         once = dg.render_drop_ingress_augmentation(SPINBIKE_CONFIG,
@@ -169,102 +187,42 @@ class TestResolvePublicLane(unittest.TestCase):
         self.present = os.path.join(self.tmp, "present.conf")
         self.absent = os.path.join(self.tmp, "absent.conf")
         # A marker matching subdev's registered lane host.
-        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.present)
+        dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.present)
 
-    def _r(self, want, have, marker, nodename="subdev", username="newlevel"):
-        # username defaults to a NON-consumer account so the pre-#786 truth-table
-        # tests stay deterministic regardless of the REAL invoking account — the
-        # suite also runs on david1@subdev (a #786 consumer), where a username-less
-        # resolve would resolve the live account and flip the default to public.
-        return dg.resolve_public_lane(want, have, marker_path=marker,
+    def _r(self, marker, nodename="subdev", username="david1"):
+        # #889: resolve_public_lane no longer uses want_public/have_encrypted_private.
+        return dg.resolve_public_lane(marker_path=marker,
                                       nodename=nodename, username=username)
 
     def test_no_marker_never_offers_public(self):
-        # Even with --public, no live drop lane on this box → None (no 404 URL).
-        self.assertIsNone(self._r(True, False, self.absent))
-        self.assertIsNone(self._r(True, True, self.absent))
+        # No live marker → None (no 404 URL).
+        self.assertIsNone(self._r(self.absent))
 
-    def test_explicit_public_uses_lane_from_registry(self):
-        # Returned host/port are the REGISTRY's, not the marker's raw strings.
-        self.assertEqual(self._r(True, True, self.present),
-                         ("drop-david.newlevel.media", dg.DROP_PORT))
+    def test_marker_present_uses_lane_from_registry(self):
+        # #889: registered lane + marker = public. Always.
+        self.assertEqual(self._r(self.present),
+                         ("drop-david.newlevel.media", 8870))
 
-    def test_auto_fallback_when_no_encrypted_private(self):
-        # No tailscale (have_encrypted_private=False) → public even without --public.
-        self.assertEqual(self._r(False, False, self.present),
-                         ("drop-david.newlevel.media", dg.DROP_PORT))
-
-    def test_encrypted_private_and_no_public_flag_keeps_today(self):
-        # tailscale present + no --public → None (today's private-only behaviour).
-        self.assertIsNone(self._r(False, True, self.present))
-
-    def test_box_with_no_registered_lane_never_offers_public(self):
-        # A marker on a box that isn't in DROP_LANES → None (registry-gated).
-        self.assertIsNone(self._r(True, False, self.present, nodename="dev1"))
+    def test_account_with_no_registered_lane_returns_none(self):
+        # An unregistered account → None (registry-gated).
+        self.assertIsNone(self._r(self.present, nodename="dev1", username="newlevel"))
 
     def test_mismatched_marker_host_is_refused(self):
-        # A stale/foreign marker whose host != this box's registered lane host is
-        # refused — a credential URL is never routed to a mutable marker host (A-M2).
+        # A stale/foreign marker whose host != this account's registered lane host
+        # is refused — a credential URL is never routed to a mutable marker host.
         wrong = os.path.join(self.tmp, "wrong.conf")
-        dg.write_drop_marker("attacker.example.com", 8828, path=wrong)
-        self.assertIsNone(self._r(True, False, wrong))
-
-    # --- #786: the CONSUMER, not the box, drives the default channel. ---
-    def test_david_consumer_defaults_to_public_without_flag(self):
-        # subdev HAS tailscale (have_encrypted_private=True) and no --public, but
-        # david1/david2's CONSUMER (David's laptop) has none — so the public lane
-        # is the DEFAULT, no --public needed. THIS is the #786 fix.
-        self.assertEqual(
-            dg.resolve_public_lane(False, True, marker_path=self.present,
-                                   nodename="subdev", username="david1"),
-            ("drop-david.newlevel.media", dg.DROP_PORT))
-        self.assertEqual(
-            dg.resolve_public_lane(False, True, marker_path=self.present,
-                                   nodename="subdev", username="david2"),
-            ("drop-david.newlevel.media", dg.DROP_PORT))
-
-    def test_non_david_consumer_on_subdev_keeps_private(self):
-        # marek/montalu consumers on the SAME box DO have tailscale → unchanged
-        # private-by-default behaviour (the force is per-account, not per-box).
-        self.assertIsNone(
-            dg.resolve_public_lane(False, True, marker_path=self.present,
-                                   nodename="subdev", username="marek"))
-        self.assertIsNone(
-            dg.resolve_public_lane(False, True, marker_path=self.present,
-                                   nodename="subdev", username="montalu"))
-
-    def test_david_consumer_force_still_needs_a_live_marker(self):
-        # The consumer force flips only the DEFAULT — it can NEVER invent a lane:
-        # no live marker on this box → None even for david1 (no 404 URL).
-        self.assertIsNone(
-            dg.resolve_public_lane(False, True, marker_path=self.absent,
-                                   nodename="subdev", username="david1"))
+        dg.write_drop_marker("attacker.example.com", 8870, path=wrong)
+        self.assertIsNone(self._r(wrong))
 
 
-class TestConsumerForcesPublic(unittest.TestCase):
-    def test_david_accounts_on_subdev_force_public(self):
-        self.assertTrue(dg.consumer_forces_public("subdev", "david1"))
-        self.assertTrue(dg.consumer_forces_public("subdev", "david2"))
 
-    def test_non_david_account_on_subdev_does_not_force(self):
-        for u in ("marek", "montalu", "newlevel", "gatekeeper"):
-            self.assertFalse(dg.consumer_forces_public("subdev", u), u)
 
-    def test_david_name_on_other_box_does_not_force(self):
-        # The force is keyed on (box, account); a david-named account elsewhere
-        # (were there one) does NOT force — only the registered subdev tuples do.
-        self.assertFalse(dg.consumer_forces_public("dev1", "david1"))
-        self.assertFalse(dg.consumer_forces_public("spinbike", "david1"))
+class TestPublicDefault889(unittest.TestCase):
+    """#889: public HTTPS is the DEFAULT for all accounts."""
 
-    def test_unresolvable_username_fails_safe_false(self):
-        # Any error resolving the invoking account → False (today's box-driven
-        # behaviour), never a spurious public force.
-        def _boom():
-            raise OSError("no pwd entry")
-        orig = dg._current_username
-        dg._current_username = _boom
-        self.addCleanup(setattr, dg, "_current_username", orig)
-        self.assertFalse(dg.consumer_forces_public("subdev", None))
+    def test_no_consumer_forces_public(self):
+        self.assertFalse(hasattr(dg, "consumer_forces_public"))
+        self.assertFalse(hasattr(dg, "NO_TAILSCALE_CONSUMER_ACCOUNTS"))
 
 
 class TestUrlLine(unittest.TestCase):
@@ -276,12 +234,12 @@ class TestUrlLine(unittest.TestCase):
 
 class TestRestartArgv(unittest.TestCase):
     def test_system_unit_uses_sudo(self):
-        argv = dg._restart_argv(dg.drop_lane_for_box("spinbike"))
+        argv = dg._restart_argv(dg.drop_lane_for_account("spinbike", "newlevel"))
         self.assertEqual(argv[:3], ["sudo", "-n", "systemctl"])
         self.assertIn("spinbike-tunnel.service", argv)
 
     def test_user_unit_uses_user_flag(self):
-        argv = dg._restart_argv(dg.drop_lane_for_box("subdev"))
+        argv = dg._restart_argv(dg.drop_lane_for_account("subdev", "david1"))
         self.assertNotIn("sudo", argv)
         self.assertEqual(argv[:2], ["systemctl", "--user"])
 
@@ -302,7 +260,7 @@ class TestRestartEnv(unittest.TestCase):
         with m.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("XDG_RUNTIME_DIR", None)
             os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
-            env = dg._restart_env(dg.drop_lane_for_box("subdev"))
+            env = dg._restart_env(dg.drop_lane_for_account("subdev", "david1"))
         self.assertIsNotNone(env, "a --user restart MUST carry an explicit env")
         self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/%d" % uid)
         self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
@@ -318,13 +276,13 @@ class TestRestartEnv(unittest.TestCase):
         with m.patch.dict(os.environ,
                           {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False):
             os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
-            env = dg._restart_env(dg.drop_lane_for_box("subdev"))
+            env = dg._restart_env(dg.drop_lane_for_account("subdev", "david1"))
         self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/4242")
         self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
                          "unix:path=/run/user/4242/bus")
 
     def test_system_unit_env_is_inherit_none(self):
-        self.assertIsNone(dg._restart_env(dg.drop_lane_for_box("spinbike")))
+        self.assertIsNone(dg._restart_env(dg.drop_lane_for_account("spinbike", "newlevel")))
 
 
 def _args(**kw):
@@ -339,19 +297,19 @@ class TestCmdDropGateway(unittest.TestCase):
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
         Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
         # Point the spinbike lane at our temp config for the duration of the test.
-        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
-        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+        self._orig = dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = Path(self.cfg)
 
     def tearDown(self):
-        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = self._orig
 
     def test_no_lane_box_is_a_clean_noop(self):
-        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="dev1"))
+        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="dev1", _username="newlevel"))
         self.assertEqual(rc, 0)
 
     def test_dry_run_does_not_write_config_or_marker(self):
         before = Path(self.cfg).read_text(encoding="utf-8")
-        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=False, _nodename="spinbike", _username="newlevel",
                                        _marker_path=self.marker))
         self.assertEqual(rc, 0)
         self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before)
@@ -364,14 +322,14 @@ class TestCmdDropGateway(unittest.TestCase):
             calls.append(argv)
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                        _marker_path=self.marker, _run=fake_run))
         self.assertEqual(rc, 0)
         out = Path(self.cfg).read_text(encoding="utf-8")
         self.assertIn("- hostname: drop-spinbike.newlevel.media", out)
         self.assertIn("http_status:404", out)  # catch-all preserved
         self.assertEqual(dg.read_drop_marker(self.marker),
-                         ("drop-spinbike.newlevel.media", dg.DROP_PORT))
+                         ("drop-spinbike.newlevel.media", 8828))
         # The spinbike tunnel (system unit) was restarted via sudo systemctl.
         self.assertTrue(any(a[:3] == ["sudo", "-n", "systemctl"] for a in calls))
 
@@ -379,7 +337,7 @@ class TestCmdDropGateway(unittest.TestCase):
         def failing_run(argv, **kw):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
 
-        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                        _marker_path=self.marker, _run=failing_run))
         self.assertEqual(rc, 1)
         # A failed restart must NOT claim the lane is live.
@@ -405,25 +363,22 @@ class TestSecretPublicLaneHelper(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
 
-    def test_no_tailscale_box_with_live_marker_auto_uses_public(self):
+    def test_account_with_live_marker_uses_public(self):
         from unittest import mock
-        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
-        lane = dg.drop_lane_for_box("subdev")
-        with mock.patch("filedrop.bind_ips", return_value=["127.0.0.1"]), \
-             mock.patch("filedrop._is_tailscale", return_value=False), \
-             mock.patch.object(dg, "drop_lane_for_box", return_value=lane), \
+        # #889: public is the default — no tailscale check needed.
+        dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
+        lane = dg.drop_lane_for_account("subdev", "david1")
+        with mock.patch.object(dg, "drop_lane_for_account", return_value=lane), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
             host, port = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
-        self.assertEqual((host, port), ("drop-david.newlevel.media", dg.DROP_PORT))
+        self.assertEqual((host, port), ("drop-david.newlevel.media", 8870))
 
-    def test_tailscale_box_without_flag_keeps_private(self):
+    def test_account_without_marker_returns_none(self):
         from unittest import mock
-        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
-        lane = dg.drop_lane_for_box("subdev")
-        with mock.patch("filedrop.bind_ips", return_value=["100.100.0.1"]), \
-             mock.patch("filedrop._is_tailscale", return_value=True), \
-             mock.patch.object(dg, "drop_lane_for_box", return_value=lane), \
+        # No marker = no public lane.
+        with mock.patch.object(dg, "drop_lane_for_account",
+                               return_value=dg.drop_lane_for_account("subdev", "david1")), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
             host, port = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
@@ -467,11 +422,11 @@ class TestCmdDropGatewayRerunAfterFailedRestart(unittest.TestCase):
         self.cfg = os.path.join(self.tmp, "config.yml")
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
         Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
-        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
-        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+        self._orig = dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = Path(self.cfg)
 
     def tearDown(self):
-        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = self._orig
 
     def test_second_apply_still_restarts_and_only_then_marks_live(self):
         calls1, calls2 = [], []
@@ -485,7 +440,7 @@ class TestCmdDropGatewayRerunAfterFailedRestart(unittest.TestCase):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         # Apply #1: config gets the ingress, restart FAILS → no marker.
-        rc1 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc1 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                         _marker_path=self.marker, _run=failing))
         self.assertEqual(rc1, 1)
         self.assertFalse(os.path.exists(self.marker))
@@ -493,12 +448,12 @@ class TestCmdDropGatewayRerunAfterFailedRestart(unittest.TestCase):
 
         # Apply #2: config already carries the ingress (changed=False) AND the
         # marker is still absent → it MUST restart again, then mark live.
-        rc2 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc2 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                         _marker_path=self.marker, _run=ok))
         self.assertEqual(rc2, 0)
         self.assertTrue(calls2, "apply #2 must restart even though config is unchanged")
         self.assertEqual(dg.read_drop_marker(self.marker),
-                         ("drop-spinbike.newlevel.media", dg.DROP_PORT))
+                         ("drop-spinbike.newlevel.media", 8828))
 
 
 class TestAccessGatedMarker(unittest.TestCase):
@@ -518,11 +473,11 @@ class TestAccessGatedMarker(unittest.TestCase):
             "  - hostname: david.newlevel.media\n"
             "    service: http://127.0.0.1:8081\n"
             "  - service: http_status:404\n", encoding="utf-8")
-        self._orig = dg.DROP_LANES["subdev"].tunnel_config
-        dg.DROP_LANES["subdev"].tunnel_config = Path(self.cfg)
+        self._orig = dg.DROP_LANES[("subdev", "david1")].tunnel_config
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = Path(self.cfg)
 
     def tearDown(self):
-        dg.DROP_LANES["subdev"].tunnel_config = self._orig
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = self._orig
 
     def test_failed_access_reconcile_blocks_the_marker(self):
         from unittest import mock
@@ -532,7 +487,7 @@ class TestAccessGatedMarker(unittest.TestCase):
 
         with mock.patch.object(dg, "_reconcile_access",
                                return_value=(False, "Access ERROR: boom")):
-            rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="subdev",
+            rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="subdev", _username="david1",
                                            _marker_path=self.marker, _run=ok_restart))
         self.assertEqual(rc, 1)
         self.assertFalse(os.path.exists(self.marker))
@@ -549,14 +504,14 @@ class TestUuidMismatchRefused(unittest.TestCase):
         Path(self.cfg).write_text(
             "tunnel: 00000000-dead-beef-0000-000000000000\n"
             "ingress:\n  - service: http_status:404\n", encoding="utf-8")
-        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
-        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+        self._orig = dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = Path(self.cfg)
 
     def tearDown(self):
-        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = self._orig
 
     def test_wrong_tunnel_uuid_refused(self):
-        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike", _username="newlevel",
                                        _marker_path=os.path.join(self.tmp, "m")))
         self.assertEqual(rc, 1)
 
@@ -570,11 +525,11 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.cfg = os.path.join(self.tmp, "config.yml")
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
-        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
-        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+        self._orig = dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = Path(self.cfg)
 
     def tearDown(self):
-        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+        dg.DROP_LANES[("spinbike", "newlevel")].tunnel_config = self._orig
 
     def _run_noop(self):
         calls = []
@@ -637,10 +592,11 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
         self.assertTrue(calls, "must restart after re-adding the ingress")
 
     def test_present_ingress_is_noop_no_restart(self):
+        spinbike_port = dg.DROP_LANES[("spinbike", "newlevel")].port
         once = dg.render_drop_ingress_augmentation(
-            SPINBIKE_CONFIG, "drop-spinbike.newlevel.media")
+            SPINBIKE_CONFIG, "drop-spinbike.newlevel.media", spinbike_port)
         Path(self.cfg).write_text(once, encoding="utf-8")
-        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
+        dg.write_drop_marker("drop-spinbike.newlevel.media", spinbike_port, path=self.marker)
         calls, r = self._run_noop()
         self.assertTrue(dg.reconcile_drop_ingress_on_install(
             run=r, nodename="spinbike", marker_path=self.marker))
@@ -668,12 +624,12 @@ class TestReconcileRestartCarriesUserBusEnv(unittest.TestCase):
             "  - hostname: david.newlevel.media\n"
             "    service: http://127.0.0.1:8081\n"
             "  - service: http_status:404\n", encoding="utf-8")
-        self._orig = dg.DROP_LANES["subdev"].tunnel_config
-        dg.DROP_LANES["subdev"].tunnel_config = Path(self.cfg)
-        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+        self._orig = dg.DROP_LANES[("subdev", "david1")].tunnel_config
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = Path(self.cfg)
+        dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
 
     def tearDown(self):
-        dg.DROP_LANES["subdev"].tunnel_config = self._orig
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = self._orig
 
     def test_user_lane_restart_receives_env_with_the_bus(self):
         captured = {}
@@ -722,14 +678,14 @@ class TestReconcileSiblingAccount838(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.cfg = os.path.join(self.tmp, "config.yml")
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
-        self._orig = dg.DROP_LANES["subdev"].tunnel_config
-        dg.DROP_LANES["subdev"].tunnel_config = Path(self.cfg)
+        self._orig = dg.DROP_LANES[("subdev", "david1")].tunnel_config
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = Path(self.cfg)
         # The lane went LIVE (marker present) — the sibling's marker is seeded
         # per the #786 runbook so its secret request/upload uses the public lane.
-        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+        dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
 
     def tearDown(self):
-        dg.DROP_LANES["subdev"].tunnel_config = self._orig
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = self._orig
 
     def _run_recorder(self):
         calls = []

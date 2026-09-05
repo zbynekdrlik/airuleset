@@ -193,23 +193,14 @@ def _secret_select_ips(ips, allow_plain=False):
 
 
 def _secret_public_lane(args):
-    """(public_host, port) for the public-TLS drop lane, or (None, None) (#664).
+    """(public_host, port) for the public-TLS drop lane, or (None, None).
 
-    Delegates the decision to `cli_drop_gateway.resolve_public_lane`: the lane is
-    used only when this box has a LIVE drop marker AND (`--public` was passed OR
-    the invoking unix account has a no-tailscale CONSUMER — `consumer_forces_public`,
-    the #786 default for david1/david2 whose consumer is David's tailscale-less
-    laptop — OR the box has no tailscale, the no-tailscale auto-fallback). "Has
-    tailscale" is the user-reachable encrypted transport; loopback/LAN do not count
-    (loopback is never reachable BY the user, LAN is unencrypted), so the check
-    keys on a real tailscale interface. A box with tailscale, no `--public`, and a
-    non-consumer account returns (None, None) — today's behaviour untouched.
+    #889: public HTTPS is the DEFAULT for every account. Delegates to
+    `cli_drop_gateway.resolve_public_lane` which returns the lane whenever a
+    registered lane + live marker exist. No tailscale check needed.
     """
-    from filedrop import _is_tailscale
-    from filedrop import bind_ips
     import cli_drop_gateway as _dg
-    have_tailscale = any(_is_tailscale(ip) for ip in bind_ips())
-    lane = _dg.resolve_public_lane(getattr(args, "public", False), have_tailscale)
+    lane = _dg.resolve_public_lane()
     if lane:
         return lane[0], lane[1]
     return None, None
