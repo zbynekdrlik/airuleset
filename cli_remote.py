@@ -1195,6 +1195,7 @@ def _runner_shape_env(base_env, repo_dir, tmp_home):
     env["HOME"] = tmp_home
     env["XDG_CONFIG_HOME"] = str(Path(tmp_home) / ".config")
     env["XDG_CACHE_HOME"] = str(Path(tmp_home) / ".cache")
+    env["XDG_DATA_HOME"] = str(Path(tmp_home) / ".local" / "share")
     # Strip PYTEST_ADDOPTS so a dev-shell override never de-mirrors Pass A
     # from CI (F3, #875 review).
     env.pop("PYTEST_ADDOPTS", None)
