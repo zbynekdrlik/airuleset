@@ -4910,6 +4910,10 @@ def _watchdog_ops_wait_fetch(cwd):
                         # dropped the false "remind DNES" nudge), so it is
                         # deliberately NOT parsed here (the #753 no-dead-parse rule).
                         "tacit_close": "tacit-close?" in reason,
+                        # #881: convergence tags consumed by the job-20 nudge's
+                        # CONVERGE and NO-TARGET clauses.
+                        "converge": "converge!" in reason,
+                        "no_target": "no-target!" in reason,
                         "title": title})
     return members
 
@@ -6405,6 +6409,9 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
+    _converge_flagged as _converge_flagged,
+    _no_target_flagged as _no_target_flagged,
+    OPS_WAIT_CONVERGE_AGE_D as OPS_WAIT_CONVERGE_AGE_D,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
     _label_exists_on_repo as _label_exists_on_repo,

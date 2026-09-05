@@ -423,6 +423,26 @@ def _tacit_close_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _converge_numbers(members):
+    """#881: the subset of `_member_numbers` flagged `converge!` — a W member
+    whose self-declared target date has passed OR whose createdAt age exceeds
+    OPS_WAIT_CONVERGE_AGE_D with no valid future target. The mandatory verdict
+    (close/unpark/re-lane/re-target-with-citation). Only the structured shape
+    carries the flag."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("converge")
+            and isinstance(m.get("number"), int)]
+
+
+def _no_target_numbers(members):
+    """#881: the subset of `_member_numbers` flagged `no-target!` — a W member
+    with no valid `Ops-wait-target:` marker. The session must set a target or
+    issue a verdict. Only the structured shape carries the flag."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("no_target")
+            and isinstance(m.get("number"), int)]
+
+
 # #698 — above this many release-landed-flagged W members on one box, the
 # escalated sub-clause additionally instructs the session to summarise the
 # state to the owner via the standard ❓ channel (the ticket's own >N=5; never
@@ -655,12 +675,21 @@ def _flag_items(w_members, release_landed):
             "W-OVERFLOW %d>%d (#754 -- W-drain PRED I: "
             "zavri/odparkuj/cituj; nedá sa → zhrň ownerovi ❓)."
             % (w_total, WDRAIN_ESCALATE_N))
+    # #881 — CONVERGE: a W member whose target date passed or whose createdAt
+    # age exceeds 14d with no future target. The verdict mandate — close/unpark/
+    # re-lane/re-target with citation. Second priority after W-OVERFLOW so it
+    # survives the NUDGE_MAX_CHARS cap.
+    converge = len(_converge_numbers(w_members))
+    if converge:
+        items.append(
+            "CONVERGE %d (#881 -- target-miss/vek >14d: vydaj VERDIKT "
+            "zavri/odparkuj/preradi/nový Ops-wait-target s citáciou; "
+            "freshness push verdikt NEnahrádza)."
+            % converge)
     # #818 — TACIT-CLOSE: a delivered+reminded acceptance member past its #799
-    # N=3 silence window is a cheap W-drain CANDIDATE (close, never remind). High
-    # priority (right after W-OVERFLOW) — closing it directly pays down the #754
-    # W-debt. The action is a tacit close, NOT a second reminder: verify the
-    # reminder was genuinely SENT (re-read the cited msg-id) + check #745
-    # reactions + the Discuss thread, then closing note + `Acceptance-tacit:`.
+    # N=3 silence window is a cheap W-drain CANDIDATE (close, never remind).
+    # Priority: after CONVERGE, before NO-TARGET (a direct W-drain action pays
+    # down the #754 debt faster than a marker-backfill).
     tacit_close = len(_tacit_close_numbers(w_members))
     if tacit_close:
         items.append(
@@ -668,6 +697,14 @@ def _flag_items(w_members, release_landed):
             "pripomienka ODOSLANÁ (re-read msg-id) + #745 reakcie, POSTni "
             "closing nótu, close s Acceptance-tacit; NEpripomínaj)."
             % tacit_close)
+    # #881 — NO-TARGET: after TACIT-CLOSE so a bulk marker-backfill at rollout
+    # cannot crowd out the cheap direct W-drain action.
+    no_target = len(_no_target_numbers(w_members))
+    if no_target:
+        items.append(
+            "NO-TARGET %d (#881 -- W bez Ops-wait-target; doplň "
+            "'Ops-wait-target: <event> by <YYYY-MM-DD>')."
+            % no_target)
     stale = len(_stale_numbers(w_members))
     if stale:
         items.append("STALE %d (#607 -- pošli vecnú pripomienku "
