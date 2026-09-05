@@ -531,9 +531,13 @@ def _ops_wait_flag_sets(ops_wait, root):
     # #881: convergence tags from the SAME shared ages fetch.
     converge = airuleset._converge_flagged(ops_wait, ages_fn=_ages)
     no_target = airuleset._no_target_flagged(ops_wait, ages_fn=_ages)
-    # Precedence: specific-verdict tags suppress converge!
+    # Precedence: specific-verdict tags suppress converge! and no-target!
+    # (a tacit-close/unpark/gk-handoff member already has a verdict in
+    # flight — demanding "set a target" on a ticket whose verdict is
+    # close/unpark is noise).
     verdict_in_flight = unpark | gk_handoff | tacit
     converge = converge - verdict_in_flight
+    no_target = no_target - verdict_in_flight - converge
     # converge! suppresses stale! — the verdict is strictly stronger
     stale = stale - converge
     return (stale, recheck, gk_handoff, unpark, tacit_wait, tacit_close,

@@ -686,18 +686,10 @@ def _flag_items(w_members, release_landed):
             "zavri/odparkuj/preradi/nový Ops-wait-target s citáciou; "
             "freshness push verdikt NEnahrádza)."
             % converge)
-    no_target = len(_no_target_numbers(w_members))
-    if no_target:
-        items.append(
-            "NO-TARGET %d (#881 -- W bez Ops-wait-target; doplň "
-            "'Ops-wait-target: <event> by <YYYY-MM-DD>')."
-            % no_target)
     # #818 — TACIT-CLOSE: a delivered+reminded acceptance member past its #799
-    # N=3 silence window is a cheap W-drain CANDIDATE (close, never remind). High
-    # priority (right after W-OVERFLOW + CONVERGE) — closing it directly pays
-    # down the #754 W-debt. The action is a tacit close, NOT a second reminder:
-    # verify the reminder was genuinely SENT (re-read the cited msg-id) + check
-    # #745 reactions + the Discuss thread, then closing note + `Acceptance-tacit:`.
+    # N=3 silence window is a cheap W-drain CANDIDATE (close, never remind).
+    # Priority: after CONVERGE, before NO-TARGET (a direct W-drain action pays
+    # down the #754 debt faster than a marker-backfill).
     tacit_close = len(_tacit_close_numbers(w_members))
     if tacit_close:
         items.append(
@@ -705,6 +697,14 @@ def _flag_items(w_members, release_landed):
             "pripomienka ODOSLANÁ (re-read msg-id) + #745 reakcie, POSTni "
             "closing nótu, close s Acceptance-tacit; NEpripomínaj)."
             % tacit_close)
+    # #881 — NO-TARGET: after TACIT-CLOSE so a bulk marker-backfill at rollout
+    # cannot crowd out the cheap direct W-drain action.
+    no_target = len(_no_target_numbers(w_members))
+    if no_target:
+        items.append(
+            "NO-TARGET %d (#881 -- W bez Ops-wait-target; doplň "
+            "'Ops-wait-target: <event> by <YYYY-MM-DD>')."
+            % no_target)
     stale = len(_stale_numbers(w_members))
     if stale:
         items.append("STALE %d (#607 -- pošli vecnú pripomienku "

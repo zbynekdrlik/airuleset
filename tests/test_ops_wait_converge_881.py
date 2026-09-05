@@ -9,7 +9,7 @@ no valid future target.
 
 Tests cover:
   - `_OPS_WAIT_TARGET_RX` regex (valid/invalid/prose-mention/derivative)
-  - `_ops_wait_target_of()` (newest-marker-wins, self-author-only)
+  - `_comment_ops_wait_target()` (marker extraction from comment body)
   - `_converge_flagged()` (target-miss, age ceiling, future-target suppresses)
   - `_no_target_flagged()` (missing marker, immediate on park)
   - Tag precedence: converge! suppresses stale!, tacit/unpark suppress converge!
@@ -61,6 +61,47 @@ class TestOpsWaitTargetRegex(unittest.TestCase):
         m = self._rx().search(body)
         self.assertIsNotNone(m)
         self.assertEqual(m.group("date"), "2026-09-20")
+
+
+class TestOwnTargetExtraction(unittest.TestCase):
+    """_issue_comment_ages extracts own_target from the NEWEST own comment
+    carrying a valid Ops-wait-target marker (newest comment-ts wins, NOT the
+    date inside). Foreign-author markers are ignored."""
+
+    def test_newest_comment_wins(self):
+        """Two own comments with targets — newer comment's date wins."""
+        import cli_quals
+        comments = [
+            {"createdAt": "2026-09-01T10:00:00Z",
+             "author": {"login": "me"},
+             "body": "Ops-wait-target: release v3 by 2026-12-31"},
+            {"createdAt": "2026-09-03T10:00:00Z",
+             "author": {"login": "me"},
+             "body": "Ops-wait-target: client reply by 2026-09-15"},
+        ]
+        from unittest import mock
+        import airuleset
+        raw = '{"comments": %s}' % __import__("json").dumps(comments)
+        with mock.patch.object(airuleset, "_gh_out", return_value=raw):
+            result = cli_quals._issue_comment_ages(1, "me", None)
+        self.assertEqual(result["own_target"], "2026-09-15",
+                         "newer comment (2026-09-03) must win")
+
+    def test_foreign_author_ignored(self):
+        """A marker by a different author is NOT extracted."""
+        import cli_quals
+        comments = [
+            {"createdAt": "2026-09-01T10:00:00Z",
+             "author": {"login": "someone-else"},
+             "body": "Ops-wait-target: foreign event by 2026-12-01"},
+        ]
+        from unittest import mock
+        import airuleset
+        raw = '{"comments": %s}' % __import__("json").dumps(comments)
+        with mock.patch.object(airuleset, "_gh_out", return_value=raw):
+            result = cli_quals._issue_comment_ages(1, "me", None)
+        self.assertIsNone(result["own_target"],
+                          "foreign author marker must be ignored")
 
 
 class TestConvergeFlagged(unittest.TestCase):
@@ -205,14 +246,60 @@ class TestConvergeSuppressesStale(unittest.TestCase):
     """converge! suppresses stale! — demanding a freshness push alongside
     a verdict mandate would re-legitimize the push as currency."""
 
-    def test_converge_member_not_stale(self):
+    def test_converge_member_not_in_stale(self):
         """A member tagged converge! must NOT also carry stale!"""
-        # This test verifies the precedence logic in _ops_wait_flag_sets
-        # indirectly — the composition layer must subtract converge from stale.
-        # The precedence is wired in _ops_wait_flag_sets (stale -= converge).
-        # Verified by the implementation: a converge! member is excluded from
-        # stale before rendering.
-        pass  # Precedence tested via the integration in _ops_wait_flag_sets
+        from unittest import mock
+        import airuleset
+        import cli_quals_cmd
+        from datetime import datetime, timezone, timedelta
+        old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+        ow = {100: {"number": 100, "createdAt": old,
+                     "labels": [{"name": "ops-wait"}],
+                     "title": "test convergence"}}
+        # ages: no target (converge!), very old own_cited (stale!)
+        ages = {"own": time.time() - 200000, "any": time.time() - 200000,
+                "own_cited": time.time() - 200000,
+                "own_oldest": time.time() - 200000,
+                "own_final_reminder": None, "own_target": None}
+        with mock.patch.object(airuleset, "_stream_self_login", lambda: "me"), \
+                mock.patch.object(airuleset, "_issue_comment_ages",
+                                  lambda n, *a, **k: ages), \
+                mock.patch.object(airuleset, "resolve_authority",
+                                  lambda cwd=None: "full"), \
+                mock.patch.object(airuleset, "_watchdog_release_state_fetch",
+                                  lambda cwd: None):
+            sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
+        stale, _recheck, _gkh, _unpark, _tw, _tc, converge, _nt = sets
+        self.assertIn(100, converge, "member should be in converge set")
+        self.assertNotIn(100, stale, "converge! must suppress stale!")
+
+    def test_verdict_in_flight_suppresses_converge(self):
+        """unpark?/gk-handoff!/tacit suppress converge!"""
+        from unittest import mock
+        import airuleset
+        import cli_quals_cmd
+        from datetime import datetime, timezone, timedelta
+        old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+        # Member with gk-handoff label (a verdict-in-flight)
+        ow = {200: {"number": 200, "createdAt": old,
+                     "labels": [{"name": "ops-wait"},
+                                {"name": "needs-gatekeeper"}],
+                     "title": "gk-blocked ticket"}}
+        ages = {"own": time.time() - 200000, "any": time.time() - 200000,
+                "own_cited": time.time() - 200000,
+                "own_oldest": time.time() - 200000,
+                "own_final_reminder": None, "own_target": None}
+        with mock.patch.object(airuleset, "_stream_self_login", lambda: "me"), \
+                mock.patch.object(airuleset, "_issue_comment_ages",
+                                  lambda n, *a, **k: ages), \
+                mock.patch.object(airuleset, "resolve_authority",
+                                  lambda cwd=None: "full"), \
+                mock.patch.object(airuleset, "_watchdog_release_state_fetch",
+                                  lambda cwd: None):
+            sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
+        _stale, _recheck, gkh, _unpark, _tw, _tc, converge, _nt = sets
+        self.assertIn(200, gkh, "member should be in gk-handoff set")
+        self.assertNotIn(200, converge, "gk-handoff! must suppress converge!")
 
 
 class TestWatchdogFlagItems(unittest.TestCase):

@@ -1034,11 +1034,23 @@ def _comment_ops_wait_target(body):
     """#881: extract the `Ops-wait-target: <event> by <YYYY-MM-DD>` date from
     `body`, or None if no valid marker is present. Returns the date string
     (YYYY-MM-DD) only — the event text is for human reading, not machine use.
+    A format-valid but calendar-invalid date (2026-99-99) returns None — a
+    typo'd date degrades to "no valid marker" (→ `no-target!`), matching the
+    design's "a date-less marker is NOT valid" stance.
     None/empty/non-str → None."""
     if not isinstance(body, str) or not body.strip():
         return None
     m = _OPS_WAIT_TARGET_RX.search(body)
-    return m.group("date") if m else None
+    if not m:
+        return None
+    date_str = m.group("date")
+    # Validate the date is calendar-valid, not just format-valid.
+    from datetime import datetime
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None                                  # 2026-99-99 → no marker
+    return date_str
 
 
 def _parse_iso_ts(s):
@@ -1545,7 +1557,8 @@ def _converge_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
 
     Two prongs (OR):
     1. TARGET-MISS: the newest valid own `Ops-wait-target:` marker's date
-       has PASSED (< today, Europe/Bratislava calendar date).
+       has PASSED (< today UTC — the safe direction: fires up to ~2h late
+       for Europe/Bratislava, never early).
     2. AGE CEILING: no valid FUTURE-dated target exists AND createdAt age
        > OPS_WAIT_CONVERGE_AGE_D (14 days). A valid future target
        SUPPRESSES the ceiling — the session's declared expectation is
@@ -1587,10 +1600,11 @@ def _no_target_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
     parked ticket with NO valid `Ops-wait-target:` marker on any own comment.
 
     Fires IMMEDIATELY on park (no grace period): parking requires a target
-    marker; its absence is the defect the tag surfaces. A member that also
-    tags `converge!` is NOT excluded — `converge!` subsumes `no-target!`
-    (the verdict includes setting a target), but both are surface-level tags
-    here; the composition layer decides precedence.
+    marker; its absence is the defect the tag surfaces. The composition
+    layer (`_ops_wait_flag_sets`) subtracts `verdict_in_flight | converge`
+    from this set — a converge! member already demands a verdict (which
+    includes setting a target), and a tacit/unpark/gk-handoff member has
+    a verdict in flight.
 
     Fail-safe: gh error / comment fetch failure → UNTAGGED."""
     flagged = set()
