@@ -46,6 +46,7 @@ from watchdog import ops_wait_recheck as owr
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 
 # A deterministic weekday timeline: now = Friday noon UTC (2026-09-04). Working
 # deltas are then unambiguous regardless of the calendar the suite runs on.
@@ -364,11 +365,14 @@ class NudgeTacitCloseClause(unittest.TestCase):
 
 class DoctrineNamesTacitMechanism(unittest.TestCase):
     def _w_line(self):
-        text = STATUS.read_text(encoding="utf-8")
+        # #859 batch 3: the #818 tacit-window mechanism prose moved out of the
+        # always-on module into the on-demand DEEP-2 companion — find the
+        # operative physical line there instead.
+        text = STATUS_DEEP2.read_text(encoding="utf-8")
         for ln in text.splitlines():
-            if "`· W N` (#510" in ln:
+            if "#818 mechanika" in ln:
                 return ln
-        self.fail("W bullet not found in statusline-vocabulary.md")
+        self.fail("W bullet not found in statusline-vocabulary-deep/DEEP-2.md")
 
     def test_marker_and_tags_and_negation(self):
         line = self._w_line()

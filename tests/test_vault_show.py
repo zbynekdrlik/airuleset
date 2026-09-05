@@ -466,6 +466,9 @@ class TestShowCliWiring(_StoreCase):
 class TestShowDoctrine(TestCase):
     RECV = ROOT / "modules" / "core" / "receive-files-via-upload-url.md"
     DELIVER = ROOT / "modules" / "core" / "deliver-files-as-urls.md"
+    # #859 batch 3: the `secret show` output-direction detail moved out of the
+    # always-on module into this on-demand companion.
+    RECV_DEEP = ROOT / "skills" / "receive-files-credentials" / "DEEP.md"
 
     def _line_with(self, text, finder, *cotokens):
         """Per-line teeth (#500): the ONE operative line containing `finder`
@@ -477,7 +480,7 @@ class TestShowDoctrine(TestCase):
             "no %r line carries all of %r" % (finder, cotokens))
 
     def test_receive_module_documents_the_output_direction(self):
-        t = self.RECV.read_text(encoding="utf-8")
+        t = self.RECV_DEEP.read_text(encoding="utf-8")
         self.assertIn("Delivering a CREDENTIAL TO the Owner", t)
         # The command line names both sources.
         self._line_with(t, "secret show <NAME>", "secret show <NAME>",

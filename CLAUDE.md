@@ -73,6 +73,7 @@ Every new rule originates from a real problem — but it must land on the RIGHT 
 2. **Situational** (fires only for one task-type/area — deploy, migration, hardware, mutation, one language)? → a `rules/` path-scoped rule (auto-injects on matching Reads), or a binding in `hooks/situational-triggers.conf` (auto-injects on the matching ACTION; extending that table is not a new hook). A SKILL is a valid destination ONLY for a WORKFLOW invoked by name — NEVER for knowledge/rules: a skill body loads only on an explicit Skill call, and #91 measured 32 of 53 skills with zero lifetime loads (rules parked there behaved as deleted, 2026-07-09→07-27).
 3. **Topic already owned by an existing module?** → extend that module; never create a parallel new one.
 4. Only a genuinely always-relevant, cross-project discipline becomes a NEW module — and its body cites the originating incident + date, so future `/mdreview` native-now passes have something to re-validate against.
+5. **Context-cost:** every module edit must state before/after `context-baseline` bytes in the design comment. The `nudge-module-context-cost.sh` hook prints current bytes / ceiling / headroom on every `modules/**` write (#859 A4). The `context-baseline --check` push gate is the blocking teeth (down-only ratchet).
 
 ## Supervision machinery — FREEZE LIFTED; quality bar instead (user decision, 2026-08-15)
 

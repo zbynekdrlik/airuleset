@@ -1,6 +1,6 @@
 ---
 name: comprehensive-logging
-description: Comprehensive logging discipline (log everything, DB tables over ephemeral logs, log levels, anti-patterns) for MVP/bug-prone projects. Load before or while writing feature code that needs to be debuggable from logs alone, or when reviewing a PR that trims logging.
+description: Log everything — DB tables over ephemeral logs, log levels, anti-patterns. Load before writing debuggable feature code.
 user-invocable: false
 ---
 

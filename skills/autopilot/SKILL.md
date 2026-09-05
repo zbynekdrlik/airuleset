@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Usage: /autopilot [status] [manual] [dialog]. Hands-off loop that solves the WHOLE GitHub backlog. To cut long-CI cost it BUNDLES bundle-safe small issues into ONE worker run → ONE PR closing all → ONE CI cycle (the bundling gate decides; big/schema/API/security/cross-cut issues run solo). By DEFAULT it works the backlog with CONTINUOUS REFILL (#848, retiring #723's batch mode): it keeps up to 5 such bundled units live as PARALLEL isolation:worktree in-session BACKGROUND autopilot-worker lanes (run_in_background — your main session stays FREE + thin, every worker stays visible in the agent strip) that can still ASK YOU the important questions directly, then the supervisor integrates each returned branch SERIALLY under an integration mutex (one merge/PR/CI/deploy at a time per repo; falls back to one-worker-at-a-time when worktree isolation isn't available) AND refills the returned lane's slot immediately. After EVERY integration cycle it compacts the main session (live lanes or not — the STEP-0 experiment proved a compact over live lanes is safe). Never pre-filters needs-input issues and never refuses to start. status = show backlog + skipped, run nothing. manual = stop every PR at green for your merge. Merge/deploy follow pr-merge-policy.md (opt-out airuleset:merge=manual). DEFAULT (no dialog arg) = zero questions at start: preflight → banner → print the /goal line → stop, respecting existing autopilot-skip labels silently (nothing un-skipped, nothing added, nothing closed). dialog = run the interactive start-of-run flow first — reviews the skip set (asks which already-skipped issues to un-skip), lets you exclude more (autopilot-skip), and lets you interactively CLOSE obsolete issues — same flow the /autopilot-dialog alias runs. End-of-run (backlog empty) it does a reconciliation sweep over ALL remaining open issues INCLUDING skips — while context is fresh — closing/rescoping any ticket the run overcame (hard-overcome auto-closes with evidence; uncertain asks) — this sweep is UNCONDITIONAL, dialog or not. You can also close any issue anytime via 'close #N (reason)'."
+description: Autonomous issue backlog — /goal loop, workers, merge+deploy. DEFAULT (no dialog arg) = zero questions at start; dialog = run the interactive start-of-run flow.
 argument-hint: "[status] [manual] [dialog]"
 user-invocable: true
 disable-model-invocation: true
@@ -518,6 +518,12 @@ is blocked by `block-foreign-airuleset-write.sh` RULE B2 (#817) from mutating th
 so a GENUINE airuleset serial-fallback dispatch must set the STANDING env `AIRULESET_ALLOW_WORKTREE_ESCAPE=1`
 on the worker (a per-command `VAR=1 …` prefix does NOT reach the hook); other repos are unaffected.
 
+**On airuleset, never bypass `cmd_push` with a bare `git push` — the push gate's runner-shape Pass A
+IS the integration lane's CI-parity second pass (#875).** `cmd_push` runs a CI-mirroring hermetic
+pytest subset under a clean HOME (no `~/.claude`, no dev1 tools) before the full unittest pass,
+catching env-coupled test failures pre-push instead of one 15-min CI cycle later. Workers touching
+env-coupled code cite a Pass-A-green line in their LANE-RETURN.
+
 **Repo-flow policy — which target a round's branches integrate into:**
 - **Local-merge repo** (pushes straight to `main`, no PR/CI — e.g. airuleset itself): the round's
   worktree branches each merge `--no-ff` into local `main` ONE AT A TIME (Step 4), THEN one full
@@ -982,7 +988,11 @@ gap in either.
    > 1. For each worker (any order), spot-check its evidence against its own worktree: `git -C
    >    <worktree-path> log --oneline` / `git -C <worktree-path> diff <base>` — confirm the
    >    claimed commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review`
-   >    results genuinely exist on that branch before trusting it enough to merge.
+   >    results genuinely exist on that branch before trusting it enough to merge. **Review-tier
+   >    consistency (#876):** a returned lane whose evidence block lacks `reviewed-by-tier:` or
+   >    whose tier is inconsistent with the gate state is NOT integrated — dispatch the review
+   >    yourself (run `fable-gate`, dispatch `fable-advisor` at OPEN / model-less consult at
+   >    CLOSED over the branch diff) and record the miss as a comment on the ticket.
    > 2. **BEFORE each `--no-ff` merge, ASSERT the shared checkout's HEAD is still the integration
    >    target** — `git symbolic-ref --short HEAD` MUST print exactly `main` (local-merge repo) or
    >    `dev` (`dev`→`main` PR repo). If it names a `worktree-agent-*`/`worktree-issue-*` branch
@@ -1319,6 +1329,8 @@ reproach.
   that is continuing after a ticket is DONE, not skipping a ticket that needs your answer.)
 
 ## Step 4a — End-of-run reconciliation sweep (when the backlog goes empty, BEFORE the final report)
+
+**Note:** this sweep is UNCONDITIONAL, dialog or not — it always runs at backlog-empty.
 
 When the workable backlog empties, the run has just changed a lot of code while the context is still
 fresh. Reconcile the WHOLE tracker NOW — **including the `autopilot-skip` issues** — so no ticket

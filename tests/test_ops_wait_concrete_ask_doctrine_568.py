@@ -24,6 +24,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
 
 # UNIQUE to the #568 clause (verified absent elsewhere): the operative
@@ -53,7 +54,7 @@ def _norm_window(text, start_token, end_marker="\n- **"):
 
 class ConcreteAskDoctrineContentLock(unittest.TestCase):
     def test_statusline_W_bullet_carries_568_clause(self):
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3
         line = _line_with(text, FINDER)
         self.assertTrue(line, "the W bullet must carry the #568 concrete-ask clause")
         for tok in TOKENS:
@@ -72,7 +73,7 @@ class ConcreteAskDoctrineContentLock(unittest.TestCase):
     def test_568_clause_lives_inside_the_570_W_push_block(self):
         # provenance guard: the #568 clause must sit next to the #570
         # stale!/tlač-dopredu mechanism it guards, not float off elsewhere.
-        for path in (STATUS, SKILL):
+        for path in (STATUS_DEEP2, SKILL):  # #859 batch 3: W moved to companion
             text = path.read_text(encoding="utf-8")
             self.assertIn("stale! freshness tag is MECHANICAL (#570)", text,
                           "%s lost the #570 anchor the #568 clause guards" % path.name)

@@ -1,6 +1,6 @@
 ---
 name: architecture-check
-description: Deep full-project architecture & code-quality review that fans out per-dimension agents (architecture/patchwork, SOTA/idioms, dead-code/YAGNI, tests/security/deps), adversarially verifies findings, dedups against open issues, and files a tiered roadmap of GitHub issues (milestone + epics + children). Read-only on code. Run manually — e.g. each time a new Claude model ships — to plan the next improvement rounds.
+description: Periodic deep-audit of a project's architecture — multi-agent fan-out review producing a tiered issue roadmap. Manual-only.
 user-invocable: true
 disable-model-invocation: true
 ---

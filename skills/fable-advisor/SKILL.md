@@ -1,6 +1,8 @@
 ---
 name: fable-advisor
-description: One-shot Fable ADVISOR consult for a genuinely HARD decision — the master session (any model) grounds the problem into a tight digest, checks the budget gate, dispatches ONE Fable call (digest in → decision out) and hands execution to the IMPLEMENTATION worker (Sonnet 5 for a settled-design ticket, the pinned Opus 4.6 for complexity — and a hard-consult's own ticket is by definition complex, so it runs Opus 4.6; the implementing worker is never Fable; per the 2026-08-26 per-phase policy + #721, gated Fable is the DESIGN and REVIEW phases only). Load when a hard design fork / root-cause dead-end / safety-critical verdict needs top-tier judgment WITHOUT re-grounding the whole problem on Fable.
+user-invocable: false
+disable-model-invocation: true
+description: One-shot Fable 5.0 ADVISOR consult — digest in, decision out. Dispatch for gated design or review phase; never for implementation.
 ---
 
 # Fable Advisor — digest in, decision out, execution elsewhere

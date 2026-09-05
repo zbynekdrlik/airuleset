@@ -32,6 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 UQS = ROOT / "modules" / "core" / "user-questions-slovak.md"
 VOCAB = ROOT / "modules" / "core" / "statusline-vocabulary.md"
+# #859 batch 3: the deep U state-machine detail (incl. the #606 step-by-step
+# clause this class locks) moved to this companion.
+VOCAB_DEEP1 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-1.md"
 SKILL = ROOT / "skills" / "autopilot" / "SKILL.md"
 
 
@@ -217,12 +220,13 @@ class USummaryDoctrine(TestCase):
                       "the --waiting table must be named machine context")
 
     def test_statusline_vocabulary_U_bullet_carries_the_rule(self):
-        text = VOCAB.read_text(encoding="utf-8")
-        # find the physical U-bullet line and assert the #606 clause is ON it
-        # (the whole U bullet is one physical line).
+        # #859 batch 3: the U bullet's deep #606 clause moved to companion
+        text = VOCAB_DEEP1.read_text(encoding="utf-8")
+        # find the physical line carrying the #606 step-by-step clause
+        # (it is one physical line in the companion).
         u_line = next(
             (ln for ln in text.splitlines()
-             if "· U N`" in ln or "`· U N`" in ln), "")
+             if "KROK-ZA-KROKOM" in ln), "")
         self.assertTrue(u_line, "could not locate the U bullet line")
         self.assertIn("#606", u_line,
                       "the U bullet must carry the #606 clause")

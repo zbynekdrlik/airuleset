@@ -19,6 +19,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
 
 FINDER = "Pipeline-gated tail + umbrella = W (#578)"
@@ -50,7 +51,7 @@ def _norm_window(text, start_token, end_marker="\n- **"):
 
 class PipelineGatedDoctrineLock(unittest.TestCase):
     def test_status_W_bullet_carries_578_clause(self):
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3
         line = _line_with(text, FINDER)
         self.assertTrue(line, "the STATUS W bullet must carry the #578 clause")
         for tok in TOKENS:
@@ -70,7 +71,7 @@ class PipelineGatedDoctrineLock(unittest.TestCase):
         # #622: the boundary is now stated on BOTH surfaces as the #539 chained-I
         # → I fallback being CANCELLED — a bare needs-acceptance is queued → U,
         # while a release/blocker-gated pipeline/umbrella ticket goes to W.
-        for path in (STATUS, SKILL):
+        for path in (STATUS_DEEP2, SKILL):  # #859 batch 3: W moved to companion
             text = path.read_text(encoding="utf-8")
             self.assertTrue("chained-I" in text and "zrušený" in text,
                             "%s must distinguish #578 W from a bare needs-acceptance "

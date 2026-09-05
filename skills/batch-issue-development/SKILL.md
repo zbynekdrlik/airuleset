@@ -1,6 +1,6 @@
 ---
 name: batch-issue-development
-description: Batch-issue development policy — bundling gate (≤300 LoC/issue, ≤600 LoC + ≤4 issues per PR), one PR per batch, chain-without-prompting, single-feature-single-PR (no progressive multi-PR rollouts). Load at the START of any /issue-planner or /autopilot run and whenever deciding how to bundle or split issues into PRs.
+description: Batch-issue bundling gate (≤300 LoC/issue, ≤4 issues/PR), one PR per batch, single-feature-single-PR. Load at /autopilot or /issue-planner start.
 user-invocable: false
 ---
 
