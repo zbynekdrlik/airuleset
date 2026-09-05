@@ -5719,6 +5719,10 @@ def cmd_watchdog(args):
                     # TTL. Enabled on every real poll; left False in
                     # run_once unit tests.
                     mdreview_cadence_enabled=True,
+                    # Jobs 44+45 (#885) — PRIORITY POLICY + ORPHAN POLL
+                    # REAPER. Enabled on every real poll; left False in
+                    # run_once unit tests.
+                    priority_policy_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
