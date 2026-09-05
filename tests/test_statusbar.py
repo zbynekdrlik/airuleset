@@ -1213,7 +1213,7 @@ class RefreshCLI(unittest.TestCase):
         # TWO streams that both once owned a ticket (A -> B -> unlabelled)
         # BOTH reclaim it. Ticket #8 has NO current stream label (so the
         # cheap current-owner skip does not filter it out) but its history
-        # shows stream:marek FIRST, then this stream's own handed-by LAST --
+        # shows stream:montalu4 FIRST, then this stream's own handed-by LAST --
         # only the temporally-last event may win. `getpass.getuser()`'s own
         # value is this stream's identity in the test.
         user = getpass.getuser()
@@ -1224,7 +1224,7 @@ class RefreshCLI(unittest.TestCase):
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             graphql_body = json.dumps({"data": {"repository": {"i8": {
                 "timelineItems": {"nodes": [
-                    {"label": {"name": "stream:marek"}},        # earlier
+                    {"label": {"name": "stream:montalu4"}},      # earlier
                     {"label": {"name": "handed-by:%s" % user}},  # LAST
                 ]}}}}})
             fake_gh = Path(bindir) / "gh"
@@ -1328,7 +1328,7 @@ class RefreshCLI(unittest.TestCase):
                 '  *label:stream:*) echo "[]";;\n'
                 '  *label:needs-gatekeeper,ready-for-review*) '
                 'echo \'[{"number":55,"labels":[{"name":"needs-gatekeeper"},'
-                '{"name":"stream:marek"}]}]\';;\n'
+                '{"name":"stream:montalu4"}]}]\';;\n'
                 '  *graphql*) echo \'{"data":{"repository":{"i55":'
                 '{"timelineItems":{"nodes":[{"label":{"name":"handed-by:%s"}}'
                 ']}}}}}\';;\n' % user +
@@ -1345,12 +1345,12 @@ class RefreshCLI(unittest.TestCase):
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 0)
-            self.assertEqual(cache["gk"], 0)     # #55 stays marek's, not ours
+            self.assertEqual(cache["gk"], 0)     # #55 stays montalu4's, not ours
 
     def test_refresh_full_authority_excludes_other_streams_labels(self):
         # Stream-label ownership (odoo-erp PR #1440, 2026-07-11): the FULL box's
         # counter = tickets THIS box should work via /autopilot — open minus
-        # autopilot-skip minus stream:david/montalu/marek (sub-dev-owned). #367:
+        # autopilot-skip minus stream:david/montalu (sub-dev-owned). #367:
         # N is now `_obligation_quals()`'s own union (`_core_search_excl()` +
         # needs-gatekeeper + ready-for-review), each a REAL `gh issue list
         # --json ...` array call. Only the core-partition qual's search string
@@ -1367,7 +1367,7 @@ class RefreshCLI(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
-                '  *-label:stream:david*-label:stream:marek*-label:stream:montalu*) '
+                '  *-label:stream:david*-label:stream:montalu*) '
                 "echo '%s';;\n" % TEN +
                 '  *) echo "[]";;\n'
                 'esac\n')

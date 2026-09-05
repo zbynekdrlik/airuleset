@@ -167,7 +167,7 @@ _SUBDEV_ACCOUNTS_HARDCODED = {
     "montalu3": "default", "montalu4": "default",
     "montalu5": "default", "montalu6": "default",
     "montalu7": "default", "montalu8": "default",
-    "marek": "gatekeeper_access_ed25519",
+    # marek REMOVED (#882, 2026-09-05: stream decommissioned)
     "david1": "gatekeeper_access_ed25519",
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",

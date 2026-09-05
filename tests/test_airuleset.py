@@ -4208,13 +4208,9 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertNotIn("montalu", self.notify.STREAM_NOTIFY_OWNER)
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
-        # montalu4 is Marek's OWN dev stream (airuleset#295 — the user's own
-        # statement, independently corroborated by odoo-erp#2961's
-        # 2026-08-05 ACCESS DECISION comment: montalu4 is the ONLY
-        # montalu-family account marek's SSH key was added to). Routing it
-        # to zbynek was the #295 bug — this assertion was INVERTED from
-        # "zbynek" as the RED half of that fix's regression test.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "marek")
+        # montalu4 was marek's stream (airuleset#295); #882 decommissioned
+        # marek and re-routed montalu4 to zbynek.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "zbynek")
         # montalu5/6/7/8: owner routing decision 2026-08-19 (airuleset#572)
         # REVERSED the 2026-08-11 #378 decision that montalu5 was Marek's --
         # montalu5 now routes to zbynek (-> claude-zbynek), same as 6/7/8.
@@ -4245,15 +4241,11 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david2"], "david")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david3"], "david")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david4"], "david")
-        # admin/stepan (airuleset#572, 2026-08-19): the forestshop-dev box's
-        # two linux accounts route to claude-marek. They have no Discord
-        # identity of their own and are absent from AUTHORITY_BY_USER (full
-        # authority) -- without this redirect resolve_owner() returned "" and
-        # the ping fell to the shared DISCORD_NOTIFICATION_CHANNEL_ID thread.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["admin"], "marek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["stepan"], "marek")
-        # marek is deliberately absent: its own tmux session name already
-        # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
+        # admin/stepan (airuleset#572): the forestshop-dev box's two linux
+        # accounts route to zbynek (#882: marek decommissioned, re-routed).
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["admin"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["stepan"], "zbynek")
+        # marek decommissioned (#882) — absent from STREAM_NOTIFY_OWNER.
         self.assertNotIn("marek", self.notify.STREAM_NOTIFY_OWNER)
 
     def test_a_mapped_user_resolves_with_no_tmux_and_no_env_override(self):
@@ -4359,8 +4351,8 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.stream_redirect("montalu1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("montalu2"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("montalu3"), "zbynek")
-        # montalu4 → marek (airuleset#295) — see the sibling assertion above.
-        self.assertEqual(self.notify.stream_redirect("montalu4"), "marek")
+        # montalu4 → zbynek (#882: marek decommissioned, montalu4 re-routed)
+        self.assertEqual(self.notify.stream_redirect("montalu4"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("simap1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
         # david1 (renamed from david, #537) redirects to the `david` owner

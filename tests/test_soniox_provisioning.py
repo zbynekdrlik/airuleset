@@ -53,12 +53,12 @@ FAKE_HOSTS = [
      "repo_path": "~/devel/airuleset"},
     {"name": "montalu@subdev", "host": "9.9.9.9", "user": "montalu",
      "repo_path": "~/devel/airuleset"},
-    {"name": "marek@subdev", "host": "9.9.9.9", "user": "marek",
+    {"name": "montalu2@subdev", "host": "9.9.9.9", "user": "montalu2",
      "repo_path": "~/devel/airuleset",
      "identity": "~/.secrets/gatekeeper_access_ed25519"},
 ]
 
-FAKE_AUTHORITY = {"montalu": "branch-merge", "marek": "branch-merge"}
+FAKE_AUTHORITY = {"montalu": "branch-merge", "montalu2": "branch-merge"}
 
 
 def _fake_cp(returncode=0, stdout="", stderr=""):
@@ -132,7 +132,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
                 hosts=FAKE_HOSTS, run=run, source=missing)
         self.assertEqual(calls, [], "a missing source must never attempt ssh")
         self.assertIn("MISSING", out.getvalue().upper())
-        # both stream accounts (montalu, marek) are reported failed — dev2 is not
+        # both stream accounts (montalu, montalu2) are reported failed — dev2 is not
         self.assertEqual(len(failed), 2)
         self.assertTrue(all("soniox" in reason for _n, reason in failed))
 
@@ -168,7 +168,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
             failed = airuleset.provision_subdev_soniox_key(
                 hosts=FAKE_HOSTS, run=run, source=src)
         self.assertEqual(failed, [])
-        self.assertEqual(len(calls), 2)   # montalu + marek — never dev2
+        self.assertEqual(len(calls), 2)   # montalu + montalu2 — never dev2
         self.assertFalse(any("1.2.3.4" in " ".join(str(x) for x in argv)
                              for argv, _kw in calls))
 
@@ -198,7 +198,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
             return _fake_cp()
 
         with m.patch.object(airuleset, "AUTHORITY_BY_USER",
-                             {"marek": "branch-merge"}):
+                             {"montalu2": "branch-merge"}):
             airuleset.provision_subdev_soniox_key(
                 hosts=[FAKE_HOSTS[2]], run=run, source=src)
         argv, _kw = calls[0]
@@ -277,7 +277,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
 
     def test_skip_names_prevents_a_second_connection_attempt(self):
         # montalu is in the skip set (its deploy leg already failed auth,
-        # per cmd_push's own reported findings this run) -- marek is not.
+        # per cmd_push's own reported findings this run) -- montalu2 is not.
         src = self._source_with_key()
         calls = []
 
@@ -292,7 +292,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
         self.assertEqual(len(calls), 1, "the skipped host must never be "
                           "contacted a second time")
         argv, _kw = calls[0]
-        self.assertIn("marek@", " ".join(str(a) for a in argv))
+        self.assertIn("montalu2@", " ".join(str(a) for a in argv))
         self.assertNotIn("montalu@", " ".join(str(a) for a in argv))
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0][0], "montalu@subdev")
@@ -375,7 +375,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
             return _fake_cp()
 
         with m.patch.object(airuleset, "AUTHORITY_BY_USER",
-                             {"marek": "branch-merge"}):
+                             {"montalu2": "branch-merge"}):
             airuleset.provision_subdev_soniox_key(
                 hosts=[FAKE_HOSTS[2]], run=run, source=src)
         argv, _kw = calls[0]
@@ -476,7 +476,7 @@ class TestSonioxFlaggedNonSubdevHost(TestCase):
         # #537: montalu was renamed to montalu1 (live 2026-08-19) — the
         # numbered account is the real deployable target now.
         self.assertIn("montalu1@100.118.174.27", joined)
-        self.assertIn("marek@100.118.174.27", joined)
+        self.assertIn("montalu2@100.118.174.27", joined)
 
 
 # ---------------------------------------------------------------------------
