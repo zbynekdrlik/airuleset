@@ -309,7 +309,6 @@ class TestCliWdrainPass(unittest.TestCase):
     def test_citationless_verdict_rejected(self):
         sys.path.insert(0, str(REPO))
         try:
-            from cli_wdrain import _parse_verdicts_file, cmd_wdrain_pass
             from cli_quals import _comment_has_citation
             # A citation that passes _comment_has_citation
             self.assertTrue(_comment_has_citation("see v1.2.3"))
