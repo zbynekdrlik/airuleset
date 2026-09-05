@@ -28,10 +28,22 @@ class TestAirulesRelay888(unittest.TestCase):
         self.assertIn("App-token", doctrine,
                       "doctrine must reference App-token boxes")
 
-    def test_gk_request_supports_repo_flag(self):
-        """gk-request --repo is wired (already exists, regression lock)."""
+    def test_gk_request_repo_flag_exists(self):
+        """gk-request argparser has --repo (the relay path depends on it).
+
+        Content-lock: removing --repo from the gk-request parser in
+        airuleset.py must make this test RED."""
+        import inspect
         import airuleset
         self.assertIn("gk-request", airuleset.SUBCOMMANDS)
+        # Lock the --repo flag on the REAL parser source: find the
+        # gk-request parser section and assert --repo is declared there
+        src = inspect.getsource(airuleset.main)
+        gkr_idx = src.index("gk-request")
+        # The --repo add_argument must follow the gk-request parser
+        gkr_section = src[gkr_idx:gkr_idx + 600]
+        self.assertIn('"--repo"', gkr_section,
+                      "gk-request parser must have --repo argument")
 
 
 if __name__ == "__main__":
