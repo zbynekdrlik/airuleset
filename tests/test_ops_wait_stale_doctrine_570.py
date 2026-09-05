@@ -17,6 +17,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
+# #859 batch 3: the deep W-bullet state-machine detail (incl. the #570
+# stale-freshness mechanism this class locks) moved to this companion.
+STATUS_DEEP2 = REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
 
 FINDER = "stale! freshness tag is MECHANICAL (#570)"
@@ -40,7 +43,7 @@ def _norm_window(text, start_token, end_marker="\n- **"):
 
 class DoctrineContentLock(unittest.TestCase):
     def test_statusline_W_bullet_carries_570_mechanism(self):
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3: moved to companion
         line = _line_with(text, FINDER)
         self.assertTrue(line, "the W bullet must carry the #570 stale! sentence")
         for tok in TOKENS:
@@ -57,7 +60,7 @@ class DoctrineContentLock(unittest.TestCase):
                           "autopilot SKILL lost the #570 token %r" % tok)
 
     def test_owner_verbatim_quote_present_in_status(self):
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3: moved to companion
         self.assertIn("15 veci ktore mas pushovat dopredu", text,
                       "the owner's verbatim W quote must anchor the doctrine")
 

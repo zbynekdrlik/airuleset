@@ -59,6 +59,7 @@ def read(rel):
 ADVISOR = "skills/fable-advisor/SKILL.md"
 MODULE = "modules/core/model-awareness.md"
 TOOLING = "modules/core/claude-code-tooling.md"
+TOOLING_WF = "skills/claude-code-workflows/DEEP.md"  # #859 batch 3: Workflow detail
 
 
 class TestOpus5BanLineup(TestCase):
@@ -346,7 +347,7 @@ class TestWorkflowStageTiering(TestCase):
     """claude-code-tooling.md's per-stage mirror of the same policy."""
 
     def test_judgment_stages_gate_fable_closed_opus_4_8(self):
-        t = read(TOOLING)
+        t = read(TOOLING_WF)  # #859 batch 3: moved to companion
         self.assertIn("`opts.model: 'claude-fable-5'`", t)
         self.assertIn("ONLY when the budget gate is OPEN", t)
         # #715 (2026-08-26): the Fable stages are the DESIGN + REVIEW (+
@@ -364,7 +365,7 @@ class TestWorkflowStageTiering(TestCase):
         # the same settled-vs-complex split as the autopilot worker. It still
         # NEVER runs Fable (the per-phase invariant from #715 stays). #715's
         # flat "execution stage = claude-opus-4-6" default is retired.
-        t = read(TOOLING)
+        t = read(TOOLING_WF)  # #859 batch 3: moved to companion
         self.assertIn("EXECUTION stages", t)
         self.assertIn(
             "code transforms/migrations → `opts.model: 'claude-sonnet-5'`", t)
@@ -379,7 +380,7 @@ class TestWorkflowStageTiering(TestCase):
         self.assertNotIn("opts.model: 'opus'", read(TOOLING))
 
     def test_advisor_digest_shape_survives(self):
-        t = read(TOOLING)
+        t = read(TOOLING_WF)  # #859 batch 3: moved to companion
         self.assertIn("ADVISOR call: digest in, decision out", t)
         self.assertIn("grounds itself by re-reading the sources", t)
 
@@ -766,7 +767,7 @@ class TestUltracodeStandingDefault(TestCase):
 
     def test_max_acceleration_doctrine_is_explicit(self):
         # UNCHANGED by #751 — only the launch flags reversed, not the doctrine.
-        t = read(TOOLING)
+        t = read(TOOLING_WF)  # #859 batch 3: moved to companion
         self.assertIn("disjoint lanes", t)
         self.assertIn("integration strictly serial", t)
         self.assertIn("single-worker only when the task genuinely cannot parallelize", t)

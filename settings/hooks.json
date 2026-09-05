@@ -309,6 +309,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-foreign-airuleset-write.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/nudge-module-context-cost.sh",
+            "timeout": 5
           }
         ]
       },
@@ -339,6 +344,10 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-unpinned-model-dispatch.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
       },

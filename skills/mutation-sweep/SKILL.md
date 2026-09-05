@@ -1,6 +1,6 @@
 ---
 name: mutation-sweep
-description: "Run the FULL-TREE mutation sweep ON DEMAND — catches up all mutation coverage the diff-scoped PR gates skipped across the week's merges. Run it when active work is done and there's capacity (no cron, no collision with your nonstop dev). Fires the repo's workflow_dispatch full-mutation workflow, monitors to terminal, confirms survivors filed as test-quality issues. Usage: /mutation-sweep [all]"
+description: On-demand full-tree mutation sweep via /mutation-sweep. User-fired, never cron. Load before running a full mutation pass.
 argument-hint: "[all]"
 user-invocable: true
 disable-model-invocation: true

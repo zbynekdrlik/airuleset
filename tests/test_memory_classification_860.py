@@ -45,7 +45,8 @@ class TestWorkflowJoinByIndexPromoted(unittest.TestCase):
     is caught even if a sibling bullet quotes the same phrase."""
 
     def setUp(self):
-        self.text = (REPO / "modules" / "core" / "claude-code-tooling.md").read_text()
+        # #859 batch 3: Workflow detail moved to companion
+        self.text = (REPO / "skills" / "claude-code-workflows" / "DEEP.md").read_text()
 
     def test_index_join_line_carries_all_tokens(self):
         """The ONE physical line with 'joining aggregate results' must also
