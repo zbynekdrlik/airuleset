@@ -652,7 +652,7 @@ class TestConfRendering(unittest.TestCase):
         """The rendered conf must include dominika (#869)."""
         conf = cli_webterm_only.render_subdev_accounts_conf()
         lines = conf.strip().splitlines()
-        users = [l.split("\t")[0] for l in lines]
+        users = [line.split("\t")[0] for line in lines]
         self.assertIn("dominika", users)
 
     def test_conf_matches_fallback(self):
