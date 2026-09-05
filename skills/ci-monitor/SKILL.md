@@ -1,7 +1,8 @@
 ---
 name: ci-monitor
 description: Monitor GitHub Actions CI pipelines after pushing code. Use after every push to ensure all jobs pass before reporting success.
-user-invocable: true
+user-invocable: false
+disable-model-invocation: true
 ---
 
 # CI Pipeline Monitoring

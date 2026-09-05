@@ -1,6 +1,6 @@
 ---
 name: fast-iterate
-description: Toggle Tier-2 fast-iterate mode in the current project. Enables full local builds + cross-compile + iterate-locally-before-push workflow. Use when CI roundtrips slow down development (e.g. 10-15 min free GitHub Windows runner cycles for tiny code tweaks). Usage: /fast-iterate on | /fast-iterate off | /fast-iterate status
+description: Toggle Tier-2 fast-iterate mode — full local builds + cross-compile. Use when CI roundtrips slow development.
 user-invocable: true
 ---
 

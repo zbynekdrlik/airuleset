@@ -1,6 +1,6 @@
 ---
 name: rules-audit
-description: Periodic audit of airuleset modules, project CLAUDE.md files, and memory.md to find duplicates, bloat, contradictions, orphans, STALE MODEL REFERENCES (bumps to current Claude generation), and outdated guidance (websearches Anthropic best practices for rules to add/change/remove). Run monthly or when rule count/token budget grows or a new Claude model ships.
+description: Audit rules for staleness, redundancy, and missed conversions. Periodic review of the always-on profile.
 user-invocable: true
 disable-model-invocation: true
 ---

@@ -1,7 +1,7 @@
 ---
 name: view-image-urls
 user-invocable: false
-description: How to VIEW a URL the user pasted when it must be SEEN, or when WebFetch can't read it — image/screenshot hosts (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg/.webp links) AND JS-walled / bot-blocked social pages (X.com, twitter.com, mobile.twitter.com posts, Instagram, Facebook, LinkedIn posts). For an IMAGE the FIRST move needs NO browser — download it locally with curl and open it with the Read tool (Read renders local image pixels). Playwright is only for a genuinely hostile JS-gated CDN or a JS-walled social page. NEVER answer "I can't read this", and NEVER claim Playwright "is not installed". Also covers a SYSTEM-carried attachment on a client message (Odoo ir.attachment, mail attachments) — read it BEFORE interpreting the text, the same "download it and Read it" doctrine generalized past a pasted URL. Load the moment a user message contains such a URL to look at, when WebFetch already failed/refused to read a pasted link, or when interpreting a client message that carries an attachment.
+description: View image URLs (prnt.sc, imgur, gyazo, ibb.co, direct .png/.jpg) and JS-walled pages (X.com, Instagram). Download + Read for images; Playwright for JS-gated pages.
 ---
 
 ### Viewing Image URLs and JS-Walled Pages — Download-and-Read FIRST, Browser Only When Needed, NEVER "I can't read this"

@@ -1,6 +1,6 @@
 ---
 name: mdreview
-description: Live web-research + ecosystem audit of the ruleset across dev1+dev2. Invokes rules-audit for the offline structural baseline, then adds what needs the network. Reviews CONTENT along three axes — (1) what the live models now do correctly natively, (2) whether the current model COMBINATION is used correctly, (3) whether rules load DYNAMICALLY (context only when needed) — never line count. Solved-problem content is CONVERTED to the right surface (hook / on-demand skill / path-scoped rule), never deleted. Run manually when you want the ruleset re-checked against the latest published guidance — and re-run it after every Claude Code release to re-audit both rules AND the supervision machinery (watchdog/hooks/notify) against new native features (#416/#423).
+description: Review always-on modules for native-now conversion, model-combination, and dynamic application. Periodic rules-diet audit.
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUserQuestion, Skill
