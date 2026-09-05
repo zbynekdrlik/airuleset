@@ -462,6 +462,77 @@ def _heal_stale_plugin_registry(registry_path: Path = None) -> set:
     return healed
 
 
+def _heal_stale_marketplace_registry(registry_path: Path = None) -> set:
+    """Remove marketplace entries whose installLocation no longer exists.
+
+    After an account rename (#537/#845) the SECOND registry file
+    ``~/.claude/plugins/known_marketplaces.json`` keeps stale
+    ``installLocation`` paths (e.g. ``/home/montalu/.claude/plugins/
+    marketplaces/claude-plugins-official``).  ``ensure_marketplace_registered()``
+    runs an idempotent ``claude plugin marketplace add`` that does NOT
+    rewrite a stale ``installLocation`` — it sees the entry as "already
+    registered" and exits 0, but the subsequent ``claude plugin install``
+    fails "marketplace directory does not exist".
+
+    This function heals those stale entries: it reads the full marketplace
+    registry, checks each entry's ``installLocation``, removes any entry
+    whose path does not exist on disk, writes back (only when something
+    changed), and prints a ``heal:`` line per dropped entry.  After healing,
+    ``ensure_marketplace_registered()`` re-adds the marketplace under the
+    real ``$HOME``, and plugin install succeeds.
+
+    Fail-safe: unreadable / malformed JSON → leave untouched + print a
+    warning, never crash install.  Idempotent; read-only when nothing is
+    stale.
+
+    Returns the set of healed (dropped) marketplace names."""
+    import airuleset
+    import tempfile
+    path = registry_path or (airuleset.CLAUDE_DIR / "plugins"
+                             / "known_marketplaces.json")
+    if not path.is_file():
+        return set()
+    try:
+        raw = airuleset.read_file_safe(path)
+    except (OSError, UnicodeDecodeError):
+        return set()
+    if not raw.strip():
+        return set()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"    warning: {path} is malformed JSON — left untouched",
+              file=sys.stderr)
+        return set()
+    if not isinstance(data, dict):
+        return set()
+
+    healed = set()
+    for name in list(data.keys()):
+        entry = data[name]
+        if not isinstance(entry, dict):
+            continue
+        install_loc = entry.get("installLocation")
+        if install_loc and not Path(install_loc).exists():
+            healed.add(name)
+            del data[name]
+            print(f"    healed stale marketplace entry: {name} "
+                  f"(installLocation {install_loc!r} does not exist)")
+    if healed:
+        new_content = json.dumps(data, indent=2) + "\n"
+        try:
+            fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+            os.write(fd, new_content.encode())
+            os.close(fd)
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"    warning: could not write healed marketplace "
+                  f"registry {path} ({e}) -- install loop continues",
+                  file=sys.stderr)
+            return set()
+    return healed
+
+
 def _managed_plugin_built(key: str) -> bool:
     """True iff claude's OWN plugin registry (installed_plugins.json) has
     an entry for this plugin key — never a proxy for it.
@@ -593,6 +664,7 @@ def setup_managed_plugins() -> bool:
     else:
         print("    settings.json: already correct")
 
+    healed_markets = _heal_stale_marketplace_registry()
     _heal_stale_plugin_registry()
 
     market_ok = {}
