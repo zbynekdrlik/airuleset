@@ -4,7 +4,7 @@ Owner directive 2026-08-22 (comment 5380361224): REPLACE the per-developer
 webterm PASSWORD with a Cloudflare Access application in FRONT of the public
 hostname — email one-time-PIN verification at the Cloudflare edge. Authorization
 becomes a DECLARED LIST OF ALLOWED E-MAILS, not a secret anybody stores or
-relays. Adding a person (marek is explicitly next) is a ONE-LINE change to
+relays. Adding a person is a ONE-LINE change to
 `allowed_emails` + `airuleset.py webterm-access --apply`.
 
 This leaf OWNS three things:
@@ -72,16 +72,16 @@ WEBTERM_ACCESS_TRUST_HEADER = "Cf-Access-Authenticated-User-Email"
 # david's list is OWNER-PROVIDED (#612 needs-answer). Go-live needs TWO owner
 # inputs: (1) David's email here (one line), and (2) a Cloudflare token with
 # `Access: Apps and Policies: Edit` at WEBTERM_ACCESS_TOKEN_FILE (see above — the
-# existing account token is read-only for Access). marek is added the SAME
-# one-line way once the owner confirms #612 works reliably (incl. #613/#615).
+# existing account token is read-only for Access). A new person is added the
+# SAME one-line way (marek was decommissioned #882, 2026-09-05).
 #
 # The OWNER side (`zbynek.newlevel.media`) is NOW a declared Access app (#635,
 # owner ROZHODNUTÉ 2026-08-22, REVERSING the pre-#635 "grey/DNS-only, Access
 # inapplicable, tailnet-only" state): the owner chose to move his terminal behind
 # Cloudflare Access like David's, trading direct tailnet-only exposure for
 # any-network access with email-OTP instead of a password. `allowed_emails` is the
-# whole authorization — the owner today; marek is ONE more line once the owner
-# says so (the #612 one-line-extensibility property, carried here). The gateway on
+# whole authorization — the owner today (the #612 one-line-extensibility
+# property; marek was decommissioned #882). The gateway on
 # this hostname switches to `--trust-access-header` mode (password retired) via the
 # `OWNER_GATEWAY_ACCESS_MODE` go-live gate in cli_webterm.py, and the grey DNS
 # A-record is cut over to a proxied CNAME onto a dedicated cloudflared tunnel.
@@ -95,7 +95,7 @@ WEBTERM_ACCESS_APPS = {
     "owner": {
         "hostname": "zbynek.newlevel.media",
         "name": "webterm — zbynek",
-        "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635; marek = +1 line
+        "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635
         "session_duration": "24h",
     },
     # marek realm REMOVED (#882, 2026-09-05: stream decommissioned, odoo-erp#6257).
