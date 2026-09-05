@@ -26,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
 # #859 batch 3: the deep W-bullet state-machine detail (incl. the #799 tacit
 # terminal clause this class locks) moved to this companion.
