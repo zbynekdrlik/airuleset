@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -427,6 +428,24 @@ class TestDrainScript895(unittest.TestCase):
 class TestSevereEscalation895(unittest.TestCase):
     """#895: >=95% machine-side escalation — file a gk-request ticket."""
 
+    def setUp(self):
+        # #896-899 negative lock: this class exercises the REAL `gh`-backed
+        # filer's default path -- ANY test here that forgets to inject
+        # `run_fn` must hard-fail instead of silently filing a real ticket
+        # (exactly how 4 real duplicate tickets were filed, evidence #896-899).
+        self._real_run = subprocess.run
+        patcher = mock.patch.object(subprocess, "run", self._guarded_run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _guarded_run(self, argv, *a, **kw):
+        if isinstance(argv, (list, tuple)) and any("gk-request" == str(x) for x in argv):
+            raise AssertionError(
+                "TEST REACHED THE REAL subprocess.run WITH gk-request IN "
+                "ARGV (%r) -- inject run_fn instead (the #896-899 "
+                "duplicate-ticket incident)" % (argv,))
+        return self._real_run(argv, *a, **kw)
+
     def test_severe_pct_constant_exists(self):
         import watchdog.disk_guard as dg
         self.assertEqual(dg.SEVERE_PCT, 95)
@@ -447,30 +466,29 @@ class TestSevereEscalation895(unittest.TestCase):
         self.assertIn("SEVERE-TICKET", logs[0])
 
     def test_file_severe_ticket_daily_dedup(self):
+        """#895/#896-899: dedup now lives in a durable per-box state file
+        under the guard's own state dir (derived from `home`), not the old
+        world-writable `/tmp` date marker -- `home=td` already isolates it,
+        no monkeypatch needed."""
         import watchdog.disk_guard as dg
         with tempfile.TemporaryDirectory() as td:
-            marker = os.path.join(td, "marker")
-            # Monkey-patch the marker path for this test
-            orig = dg._severe_ticket_marker
-            dg._severe_ticket_marker = lambda now: marker
-            try:
-                status = {"worst_pct": 96, "dim": "bytes"}
-                # First call (dry_run=False but with injected run_fn)
-                calls = []
-                dg.file_severe_ticket(
-                    status, td, 1000, [("/tmp/big", 5000000000)],
-                    dry_run=False,
-                    run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
-                # The marker should be written
-                self.assertTrue(os.path.exists(marker))
-                # Second call should be deduped
-                logs2 = dg.file_severe_ticket(
-                    status, td, 1000, [("/tmp/big", 5000000000)],
-                    dry_run=False,
-                    run_fn=lambda *a, **kw: calls.append(a))
-                self.assertEqual(logs2, [])
-            finally:
-                dg._severe_ticket_marker = orig
+            status = {"worst_pct": 96, "dim": "bytes"}
+            # First call (dry_run=False but with injected run_fn)
+            dg.file_severe_ticket(
+                status, td, 1000, [("/tmp/big", 5000000000)],
+                dry_run=False,
+                run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+            # The durable state file should be written
+            state_path = dg._severe_ticket_state_path(td)
+            self.assertTrue(os.path.exists(state_path))
+            # Second call should be deduped
+            calls = []
+            logs2 = dg.file_severe_ticket(
+                status, td, 1000, [("/tmp/big", 5000000000)],
+                dry_run=False,
+                run_fn=lambda *a, **kw: calls.append(a))
+            self.assertEqual(logs2, [])
+            self.assertEqual(calls, [], "a deduped call must never reach run_fn")
 
 
 class TestNotifyImportForbidden(unittest.TestCase):
