@@ -35,10 +35,19 @@ def _run_hook(payload, env_extra=None):
     return p.returncode, p.stderr
 
 
+def _cwd_key(cwd):
+    """Compute the cwd key using the SAME function statusbar uses."""
+    sys.path.insert(0, str(REPO))
+    try:
+        import statusbar
+        return statusbar.cwd_key(cwd)
+    finally:
+        sys.path.pop(0)
+
+
 def _make_cache(tmpdir, cwd, ops_wait, ts=None, extra=None):
     """Write a tickets-status cache file for the given cwd."""
-    import hashlib
-    key = hashlib.sha1(str(cwd).encode()).hexdigest()[:12]
+    key = _cwd_key(cwd)
     cache_dir = pathlib.Path(tmpdir) / ".claude" / "tickets-status"
     cache_dir.mkdir(parents=True, exist_ok=True)
     entry = {"ops_wait": ops_wait, "ts": ts or time.time()}
@@ -50,8 +59,7 @@ def _make_cache(tmpdir, cwd, ops_wait, ts=None, extra=None):
 
 def _make_receipt(tmpdir, cwd, expires_at):
     """Write a wdrain receipt for the given cwd."""
-    import hashlib
-    key = hashlib.sha1(str(cwd).encode()).hexdigest()[:12]
+    key = _cwd_key(cwd)
     receipt_dir = pathlib.Path(tmpdir) / ".claude" / "wdrain"
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt = {"expires_at": expires_at, "ts": int(time.time()), "cwd": str(cwd)}

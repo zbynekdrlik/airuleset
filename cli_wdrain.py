@@ -27,22 +27,6 @@ def _receipt_path(cwd, home=None):
     return _wdrain_dir(home) / (key + ".json")
 
 
-def _load_current_ops_wait_members(cwd):
-    """Load ops-wait member numbers from the tickets-status cache.
-
-    Returns a set of int issue numbers, or None on any failure (fail-open
-    for the caller to decide).
-    """
-    key = statusbar.cwd_key(cwd)
-    cache_path = statusbar.cache_dir() / (key + ".json")
-    cache = statusbar._load(cache_path)
-    if not isinstance(cache, dict):
-        return None
-    # The cache carries ops_wait as a count, not member list.
-    # We need to run the CLI to get members. Return None here —
-    # cmd_wdrain_pass shells out to --ops-wait for the member list.
-    return None
-
 
 def _compute_expires_at(now):
     """Compute receipt expiry: now + 24h WORKING time (weekend-aware, #607).
@@ -187,6 +171,17 @@ def cmd_wdrain_pass(args):
         )
     except Exception as exc:
         print(f"ERROR: failed to run {quals_cmd} --ops-wait: {exc}", file=sys.stderr)
+        return 1
+
+    # #868 review RED-1: a failed quals subprocess must NOT mint a receipt.
+    # A gh outage/auth error returns rc!=0 + empty stdout; treating that as
+    # "no members" would persist a ~96h false pass. Genuine zero is rc=0 +
+    # empty stdout.
+    if result.returncode != 0:
+        print(f"ERROR: {quals_cmd} --ops-wait failed (rc={result.returncode})",
+              file=sys.stderr)
+        if result.stderr.strip():
+            print(f"  {result.stderr.strip()[:200]}", file=sys.stderr)
         return 1
 
     # Parse ops-wait members (issue numbers from column 0, skip # lines)

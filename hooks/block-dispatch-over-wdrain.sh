@@ -29,9 +29,13 @@ command -v jq &>/dev/null || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 [ -n "$INPUT" ] || exit 0
 
-# Only gate Agent tool calls
+# Only gate Agent and Task tool calls (#868 review YELLOW-4: Task is a
+# live dispatch surface — block-main-implementation.sh registers under both)
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
-[ "$TOOL_NAME" = "Agent" ] || exit 0
+case "$TOOL_NAME" in
+    Agent|Task) ;;
+    *) exit 0 ;;
+esac
 
 # Only gate implementation-worker types
 SUBAGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
@@ -99,12 +103,13 @@ if [ -f "$RECEIPT_FILE" ]; then
     esac
 fi
 
-# Check for WDRAIN-BYPASS: token in the prompt
+# Check for WDRAIN-BYPASS: token in the prompt (line-anchored to avoid
+# ticket-body injection — #868 review YELLOW-3)
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // empty' 2>/dev/null || echo "")
-if printf '%s' "$PROMPT" | grep -qF 'WDRAIN-BYPASS:'; then
+if printf '%s' "$PROMPT" | grep -qE '^WDRAIN-BYPASS:'; then
     # Log the bypass and allow
     mkdir -p "$RECEIPT_DIR"
-    BYPASS_REASON=$(printf '%s' "$PROMPT" | grep -oP 'WDRAIN-BYPASS:\s*\K.*' | head -1)
+    BYPASS_REASON=$(printf '%s' "$PROMPT" | grep -oP '^WDRAIN-BYPASS:\s*\K.*' | head -1)
     printf '%s\t%s\t%s\t%s\n' "$(date -Iseconds)" "$CWD_KEY" "$SUBAGENT_TYPE" "$BYPASS_REASON" \
         >> "$RECEIPT_DIR/bypass.log" 2>/dev/null || true
     exit 0

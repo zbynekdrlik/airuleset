@@ -422,7 +422,7 @@
     "tests/test_watchdog_tmux_io_split.py": 159,
     "tests/test_watchdog_transcripts_split.py": 114,
     "tests/test_watchdog_wedge_split.py": 371,
-    "tests/test_wdrain_gate_868.py": 391,
+    "tests/test_wdrain_gate_868.py": 399,
     "tests/test_wdrain_lane_754.py": 188,
     "tests/test_webterm.py": 1981,
     "tests/test_webterm_access.py": 265,
