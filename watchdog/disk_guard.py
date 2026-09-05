@@ -95,6 +95,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "runner-checkout", "user-cache", "claude-version", "oneoff-venv",
     # #862 — superseded gh-runner bin.<ver>/externals.<ver> version dirs:
     "runner-superseded",
+    # #849 — disposable CC runtime metadata (tasks, debug, shell-snapshots):
+    "claude-metadata",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -146,6 +148,10 @@ ONEOFF_VENV_MIN_AGE_DAYS = 2
 # one-off numbered venvs: `~/.venvs/lint-3907`, `ruff31522`, `mcp-4574`, … + `/tmp/lintvenv-*`
 ONEOFF_VENV_NAME_RE = _re.compile(r"^(lint|ruff|mcp)[-]?\d+$")
 ONEOFF_VENV_TMP_RE = _re.compile(r"^lintvenv-")
+
+# #849 — disposable CC runtime metadata dirs under ~/.claude/
+CLAUDE_METADATA_SUBDIRS = ("tasks", "debug", "shell-snapshots")
+CLAUDE_METADATA_MIN_AGE_DAYS = 7
 
 
 def _dbg(msg):
@@ -1278,6 +1284,52 @@ def discover_oneoff_venvs(home=None, now=None, min_age_days=ONEOFF_VENV_MIN_AGE_
     return out
 
 
+def discover_stale_claude_metadata(home=None, now=None,
+                                   min_age_days=CLAUDE_METADATA_MIN_AGE_DAYS):
+    """Per-child sweep of ``~/.claude/tasks/``, ``~/.claude/debug/``, and
+    ``~/.claude/shell-snapshots/`` (#849 ask 3). These are pure disposable CC
+    runtime artifacts — tasks = CC's task registry, debug = CC's debug data,
+    shell-snapshots = CC's shell state captures. Each TOP-LEVEL child is aged
+    independently: mtime > ``min_age_days`` → candidate (``reason=None``);
+    otherwise kept. Never follows symlinks. Returns
+    ``[{cls:"claude-metadata", path, bytes, reason}]``."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    cutoff = min_age_days * 86400
+    out = []
+    for subdir in CLAUDE_METADATA_SUBDIRS:
+        d = Path(home) / ".claude" / subdir
+        if not d.is_dir():
+            continue
+        try:
+            for entry in sorted(d.iterdir()):
+                cpath = str(entry)
+                if entry.is_symlink():
+                    out.append({"cls": "claude-metadata", "path": cpath,
+                                "bytes": 0,
+                                "reason": "symlink — never followed"})
+                    continue
+                try:
+                    st = os.lstat(cpath)
+                except OSError as e:
+                    out.append({"cls": "claude-metadata", "path": cpath,
+                                "bytes": 0,
+                                "reason": "could not stat: %s" % e})
+                    continue
+                age = now - st.st_mtime
+                size = _safe_dir_size(cpath) if entry.is_dir() else st.st_size
+                row = {"cls": "claude-metadata", "path": cpath, "bytes": size,
+                       "reason": None}
+                if age < cutoff:
+                    row["reason"] = ("too recent (%.1fd < %dd)"
+                                     % (age / 86400.0, min_age_days))
+                out.append(row)
+        except OSError as e:
+            out.append({"cls": "claude-metadata", "path": None,
+                        "reason": "could not walk %s: %s" % (d, e)})
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # rung PLANNERS (adapters over the existing per-class discovery functions)
 # --------------------------------------------------------------------------- #
@@ -1304,6 +1356,9 @@ def _plan_scratch(home, now, scratch_rows=None):
                 else (discover_claude_scratch_candidates(now=now, home=home) or []))
         for r in rows:
             actions.append(_row_to_action("scratch", r, "delete"))
+            # #849 ask 2: stale scratchpad children inside a LIVE/UNDET session
+            for child in r.get("stale_children", []):
+                actions.append(_row_to_action("scratch", child, "delete"))
     except Exception as e:
         actions.append({"cls": "scratch", "path": "-", "bytes": 0, "kind": "skip",
                         "reason": "scratch discovery error: %r" % e})
@@ -1354,6 +1409,11 @@ def _plan_cli_versions(home, now):
 def _plan_uploads(home, now):
     return [_row_to_action("uploads", r, "delete")
             for r in discover_stale_uploads(home=home, now=now)]
+
+
+def _plan_claude_metadata(home, now):
+    return [_norm_action("claude-metadata", r, "delete")
+            for r in discover_stale_claude_metadata(home=home, now=now)]
 
 
 def _plan_transcripts(home, now):
@@ -1456,6 +1516,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
+        ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
@@ -1744,24 +1805,70 @@ def _ranked_consumers(home, now):
     return ranked
 
 
-def escalate(status, home, now, dry_run):
+def _collect_top_consumers(home, now, limit=5):
+    """Default implementation for the escalation's top-N path-level detail
+    (#849 ask 5). Runs the CHEAP planners and returns top consumers."""
+    all_actions = []
+    for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
+                        ("uploads", lambda: _plan_uploads(home, now)),
+                        ("cli-version", lambda: _plan_cli_versions(home, now)),
+                        ("scratch", lambda: _plan_scratch(home, now)),
+                        ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
+                        ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
+                        ("claude-version", lambda: _plan_claude_versions(home, now)),
+                        ("user-cache", lambda: _plan_user_cache(home, now))):
+        try:
+            all_actions.extend(plan())
+        except Exception as e:
+            _dbg("top-consumers %s failed: %r" % (label, e))
+    return _top_consumers_by_path(all_actions, limit=limit)
+
+
+def _top_consumers_by_path(actions, limit=5):
+    """Top-N reclaimable candidates by bytes, from a FLAT action list (#849
+    ask 5). Only actionable candidates (kind != skip/report, reason == None)
+    are considered. Returns ``[(path, bytes)]`` sorted descending."""
+    candidates = []
+    for a in actions:
+        if a.get("kind") in ("skip", "report"):
+            continue
+        if a.get("reason") is not None:
+            continue
+        candidates.append((a.get("path", "-"), a.get("bytes", 0) or 0))
+    candidates.sort(key=lambda t: t[1], reverse=True)
+    return candidates[:limit]
+
+
+def escalate(status, home, now, dry_run, top_consumers_fn=None):
     """Machine-channel LOUD escalation at ≥90 % after the drain, deduped ONCE
     per box per day via a world-readable ``/tmp`` marker (so N stream users on
     subdev do not each alarm). No Discord ping in this lane — the owner-facing
-    daily ❓ is #841; the red footer segment IS the in-session surface."""
+    daily ❓ is #841; the red footer segment IS the in-session surface.
+    #849 ask 5: also names the top-5 consumers by PATH for actionability.
+    ``top_consumers_fn`` is injectable for testing (default collects from the
+    existing planners)."""
     marker = "/tmp/airuleset-disk-guard-escalated-%s" % time.strftime(
         "%Y%m%d", time.gmtime(now))
     if os.path.exists(marker):
         return []
     ranked = _ranked_consumers(home, now)
     summary = ", ".join("%s=%s" % (c, _human(b)) for c, b in ranked[:6]) or "(none own-home)"
+    # #849 ask 5: path-level top-N detail for actionability
+    if top_consumers_fn is not None:
+        top = top_consumers_fn(home, now, limit=5)
+    else:
+        top = _collect_top_consumers(home, now, limit=5)
+    top_detail = ", ".join("%s=%s" % (p, _human(b)) for p, b in top) if top else ""
+    esc_parts = ["dim=%s still-critical after drain; reclaimable-own-home: %s"
+                 % (status["dim"], summary)]
+    if top_detail:
+        esc_parts.append("top-5-by-path: %s" % top_detail)
     line = _log_line(now, "ESCALATE", socket.gethostname(),
-                     status["worst_pct"],
-                     "dim=%s still-critical after drain; reclaimable-own-home: %s"
-                     % (status["dim"], summary))
+                     status["worst_pct"], "; ".join(esc_parts))
     _append_log(_log_path(home), [line])
     print("disk-guard ESCALATE (%s): still %d%% (%s) after drain — %s"
-          % (socket.gethostname(), status["worst_pct"], status["dim"], summary),
+          % (socket.gethostname(), status["worst_pct"], status["dim"],
+             summary + ((" | " + top_detail) if top_detail else "")),
           file=sys.stderr)
     if not dry_run:
         try:
