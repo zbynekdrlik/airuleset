@@ -643,7 +643,7 @@ def cmd_slice_quals(args):
     want_waiting = getattr(args, "waiting", False)
     want_ops_wait = getattr(args, "ops_wait", False)
     want_audit = getattr(args, "audit", False)   # #578
-    want_bounces = getattr(args, "bounces", False)   # #843
+    want_bounces = getattr(args, "bounces", False) is True   # #843
     if not (want_count or want_list or want_waiting or want_ops_wait
             or want_audit or want_bounces):
         for q in quals:

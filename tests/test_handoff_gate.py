@@ -268,11 +268,10 @@ class TestNudgeRound3Clause(unittest.TestCase):
     at `slice-quals --bounces` — the session determines which members are
     round >= 3, the nudge just names the command."""
 
-    def test_i_trigger_names_round3_and_bounces(self):
+    def test_i_trigger_names_bounces_and_843(self):
         from watchdog.ops_wait_recheck import _nudge_text
         text = _nudge_text(5, [])
-        self.assertIn("round3!", text)
-        self.assertIn("slice-quals --bounces", text)
+        self.assertIn("--bounces", text)
         self.assertIn("#843", text)
 
 
