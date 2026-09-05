@@ -4,7 +4,7 @@ set -euo pipefail
 # Hook: SubagentStop — #876 review-tier consistency gate. A worktree-mode
 # autopilot-worker's LANE-RETURN (or full-flow merged return) MUST carry a
 # `reviewed-by-tier:` line naming the tier that produced the review
-# (claude-fable-5 | claude-opus-4-6), consistent with the gate state and the
+# (claude-fable-5-1 | claude-opus-4-6), consistent with the gate state and the
 # dispatch observable in its own transcript.
 #
 # Stage 1 (message only): a COMPLETED return with no `reviewed-by-tier:` line
@@ -13,8 +13,8 @@ set -euo pipefail
 #
 # Stage 2 (transcript consistency): walks the transcript for `fable-gate` calls
 #   and `fable-advisor` Agent dispatches. Table:
-#   - OPEN + claude-fable-5 line + fable-advisor dispatch => pass
-#   - claude-fable-5 line with NO fable-advisor dispatch => BLOCK (fabricated)
+#   - OPEN + claude-fable-5-1 line + fable-advisor dispatch => pass
+#   - claude-fable-5-1 line with NO fable-advisor dispatch => BLOCK (fabricated)
 #   - OPEN + claude-opus-4-6 without trivial-diff => BLOCK (downtier)
 #   - CLOSED + claude-opus-4-6 => pass
 #   - trivial-diff declaration, no gate call => pass
@@ -142,7 +142,7 @@ try:
     from airuleset import REVIEWED_BY_TIER_VALUES
     valid_tiers = REVIEWED_BY_TIER_VALUES
 except Exception:
-    valid_tiers = {"claude-fable-5", "claude-opus-4-6"}
+    valid_tiers = {"claude-fable-5-1", "claude-opus-4-6"}
 
 if tier_val not in valid_tiers:
     # Invalid tier value — pass (fail-open, the handoff CLI validates).
@@ -218,7 +218,7 @@ except Exception:
 # - A worker that never runs fable-gate + writes "gate:CLOSED" passes
 #   (PASS_NO_GATE fail-open). Supervisor Step 4 is the second net.
 verdict = None
-if tier_val == "claude-fable-5":
+if tier_val == "claude-fable-5-1":
     if not has_fable_dispatch:
         verdict = "BLOCK_NO_DISPATCH"
     # else: fable tier + dispatch = consistent, pass.
@@ -318,7 +318,7 @@ case "$VERDICT" in
         REASON="Completed return has NO reviewed-by-tier line (#876). Every worktree-mode
 and full-flow return MUST carry:
 
-  reviewed-by-tier: claude-fable-5|claude-opus-4-6 [trivial-diff] gate:<OPEN|CLOSED|n/a>
+  reviewed-by-tier: claude-fable-5-1|claude-opus-4-6 [trivial-diff] gate:<OPEN|CLOSED|n/a>
 
 Missing for:
 ${LINES}
@@ -330,8 +330,8 @@ You are blocked once per issue; if the review genuinely cannot be dispatched,
 report that and stop."
         ;;
     BLOCK_NO_DISPATCH)
-        REASON="reviewed-by-tier claims claude-fable-5 but NO fable-advisor Agent dispatch
-found in the transcript (#876). A claude-fable-5 review tier requires a real
+        REASON="reviewed-by-tier claims claude-fable-5-1 but NO fable-advisor Agent dispatch
+found in the transcript (#876). A claude-fable-5-1 review tier requires a real
 fable-advisor dispatch — an in-context self-review cannot claim the Fable tier.
 
 Fix: run fable-gate, dispatch fable-advisor (OPEN) or the model-less Opus consult
@@ -344,10 +344,10 @@ report that and stop."
     BLOCK_DOWNTIER)
         REASON="reviewed-by-tier claims claude-opus-4-6 but fable-gate was OPEN in the
 transcript (#876). A non-trivial diff with gate OPEN must dispatch fable-advisor
-and record reviewed-by-tier: claude-fable-5 — or declare trivial-diff explicitly.
+and record reviewed-by-tier: claude-fable-5-1 — or declare trivial-diff explicitly.
 
 Fix: dispatch fable-advisor for the review (gate is OPEN), paste the verdict,
-update reviewed-by-tier to claude-fable-5 gate:OPEN, and repost LANE-RETURN.
+update reviewed-by-tier to claude-fable-5-1 gate:OPEN, and repost LANE-RETURN.
 
 You are blocked once per issue; if the review genuinely cannot be dispatched,
 report that and stop."

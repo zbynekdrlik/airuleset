@@ -649,7 +649,7 @@ TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || ec
 # PREVIOUS turn's. Replaying the real 2026-07-25 incident prefix (session
 # 2d02a127, lines 38913-38935) pins the window exactly — the /model switch
 # marker landed at 38915, the first Opus assistant entry only at 38932, and
-# the Write blocked at 38934 read `claude-fable-5` off the tail.
+# the Write blocked at 38934 read `claude-fable-5-1` off the tail.
 #
 # So the tail's newest model is NOT authoritative on its own. Two corrections:
 #   a) take the model from a PARSED top-level assistant entry (`.message.model`
@@ -717,7 +717,7 @@ for raw in lines:
     if not isinstance(c, str) or "Set model to" not in c:
         continue
     picked = re.sub(r"\x1b\[[0-9;]*m", "", c).split("Set model to", 1)[1]
-    model = "claude-fable-5" if re.search(r"fable", picked, re.I) else ""
+    model = "claude-fable-5-1" if re.search(r"fable", picked, re.I) else ""
 
 print(model)
 PYEOF

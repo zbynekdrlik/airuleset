@@ -9,7 +9,7 @@ their accounts (montalu5 started 2026-08-12, david 2026-08-13 15:06). Once
 argv forever; a rewritten on-disk launcher only affects the NEXT launch, and
 `-c` alone continues the prior transcript's model (only an explicit --model
 forces it). The on-disk launcher + MANAGED_MODEL on all accounts now bake
-claude-fable-5[1m]; montalu6 (started 2026-08-15) runs fable-5 correctly, so the
+claude-fable-5-1[1m]; montalu6 (started 2026-08-15) runs fable-5 correctly, so the
 CURRENT code does not launch opus-5 -- the two offenders were pre-ban ghosts
 self-healing at their next natural relaunch.
 
@@ -61,22 +61,22 @@ class TestBannedPredicateItself(TestCase):
             self.assertTrue(airuleset.is_banned_model(banned),
                             "%r should be BANNED" % banned)
 
-    def test_catches_every_fable_5_1_form(self):
-        # #871 — Fable 5.1 joins the ban: any fable-5-1 id AND the bare
-        # `fable` alias (the Agent `model` param floats it to LATEST = 5.1).
-        for banned in ("claude-fable-5-1", "claude-fable-5-1[1m]",
-                       "CLAUDE-FABLE-5-1", "'claude-fable-5-1'",
-                       " claude-fable-5-1 ", "claude-fable-5-1-20260901",
+    def test_catches_fable_5_0_and_bare_alias(self):
+        # #894: Fable 5.0 (claude-fable-5) is retired from the lineup.
+        # The bare `fable` alias is still banned (alias float vector).
+        for banned in ("claude-fable-5", "claude-fable-5[1m]",
+                       "CLAUDE-FABLE-5", "'claude-fable-5'",
+                       " claude-fable-5 ",
                        "fable", "fable[1m]", "FABLE", "'fable'", " fable "):
             self.assertTrue(airuleset.is_banned_model(banned),
-                            "%r should be BANNED (Fable 5.1 / bare alias)" % banned)
+                            "%r should be BANNED (Fable 5.0 / bare alias)" % banned)
 
     def test_clears_every_allowed_model(self):
         # #871: exact-id allowlist semantics -- only the CURRENT MODEL_TIERS
         # ids (+ the Fable main [1m] form) clear the predicate. claude-opus-4-8
         # is the SUPERSEDED predecessor (renamed to claude-opus-4-6) and is
         # correctly BANNED now -- see test_superseded_opus_4_8_is_now_banned.
-        for ok in ("claude-fable-5[1m]", "claude-fable-5",
+        for ok in ("claude-fable-5-1[1m]", "claude-fable-5-1",
                    "claude-opus-4-6[1m]", "claude-opus-4-6",
                    "claude-sonnet-5", "claude-haiku-4-5"):
             self.assertFalse(airuleset.is_banned_model(ok),

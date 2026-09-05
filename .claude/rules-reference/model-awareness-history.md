@@ -8,7 +8,13 @@ always-on in the module.
 
 ---
 
-## Fable 5.1 ban directive (2026-09-04)
+## Fable 5.1 @ medium — tiering revision (2026-09-05, #894, revises #871)
+
+**Owner directive (2026-09-05, verbatim):** *"Čítal som na X-ku, že fable 5.1 najlepšie pracuje na medium efforte. Zatiaľ sme sa tu bavili o tom, aký má byť model používaný na čo, ale zatiaľ som ani raz nepočul, že by sa využíval pre subagentov a tu v hlavnom agente aj výber effortu. Chcel by som teda miesto fable 5.0, na ktorý sme prešli, využívať fable 5.1 medium effort, a tiež pri používaní opus-4.6 by som možno uprednostnil trošku vyšší effort, ak by to mohlo niečomu pomôcť."*
+
+**What changed:** `MODEL_TIERS["fable"]` swapped from `claude-fable-5` (5.0) to `claude-fable-5-1` (5.1). All dispatch surfaces (agent frontmatter, hook allowlist, doctrine, tests) updated. The Fable design/review dispatch effort changed from `xhigh` to `medium` per the owner's X-based finding. Fable 5.0 is retired from the lineup (not banned like Opus 5 — just no longer in MODEL_TIERS). The allowlist-of-exact-ids + pinned-agent-type + no-`model`-param architecture from #871 stays fully intact.
+
+## Fable 5.1 ban directive (2026-09-04, SUPERSEDED by #894 above)
 
 **Owner directive (2026-09-04, verbatim):** *"Znova mam extremne zle vysleddky z noveho modelu fable 5.1 a potrebujem sa vratit na fable 5.0 pri vsetkych targetoch."* — same-day scope extension, verbatim: *"Cize chcem pouzivat by default vzdy sonnet-5, opus-4.6, fable-5.0, vies to teda zabezpecit?"*
 

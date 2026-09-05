@@ -3204,7 +3204,7 @@ class RunOnceNewJobsWiring(unittest.TestCase):
         # picked up (node/claude foreground, resolvable transcript, idle at a
         # bare prompt). Nothing may propose restarting it.
         _seed_transcript(proj, "/home/newlevel/devel/demo", "sess-x",
-                         "claude-fable-5")
+                         "claude-fable-5-1")
         state_path = Path(tmp) / "state.json"
         tmux = RestartFakeTmux(
             [("%1", "node", "/home/newlevel/devel/demo")], MR_IDLE_CAP)

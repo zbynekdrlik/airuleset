@@ -102,7 +102,7 @@ def _entry(role_type, content, **extra):
     return json.dumps(d)
 
 
-def transcript(model="claude-fable-5"):
+def transcript(model="claude-fable-5-1"):
     lines = [
         json.dumps({"type": "user", "message": {"role": "user",
                                                 "content": "do the thing"}}),
@@ -149,7 +149,7 @@ def goal_armed_transcript(model="claude-opus-4-8"):
 
 
 class MainImplementationGuard(unittest.TestCase):
-    def _run(self, tool="Edit", content=BIG, model="claude-fable-5",
+    def _run(self, tool="Edit", content=BIG, model="claude-fable-5-1",
              agent_id=None, transcript_text=None, sid=None, bypass=None,
              command=None, bypass_reason=None, presence_age=None,
              extra_env=None, file_path=None):
@@ -228,7 +228,7 @@ class MainImplementationGuard(unittest.TestCase):
 
     def test_model_switch_mid_session_uses_latest(self):
         # /model can change mid-session — the LAST assistant entry decides
-        tx = transcript("claude-fable-5") + transcript("claude-opus-4-8")
+        tx = transcript("claude-fable-5-1") + transcript("claude-opus-4-8")
         out = self._run(transcript_text=tx)
         self.assertEqual(out.returncode, 0, out.stderr)
 
@@ -253,7 +253,7 @@ class MainImplementationGuard(unittest.TestCase):
         # PREVIOUS turn's Fable one. CC's own `/model` stdout marker is the
         # only in-file evidence of the switch — it must win over the older
         # assistant entry.
-        tx = (transcript("claude-fable-5")
+        tx = (transcript("claude-fable-5-1")
               + _entry("user", "<local-command-stdout>Set model to \x1b[1m"
                                "Opus 5 (1M context) (default)\x1b[22m and saved "
                                "as your default for new sessions"
@@ -286,7 +286,7 @@ class MainImplementationGuard(unittest.TestCase):
               + json.dumps({"type": "user", "message": {"content": [
                   {"tool_use_id": "t1", "type": "tool_result",
                    "content": '{"type":"assistant","message":{"model":'
-                              '"claude-fable-5","role":"assistant"}}'}]}})
+                              '"claude-fable-5-1","role":"assistant"}}'}]}})
               + "\n")
         out = self._run(transcript_text=tx)
         self.assertEqual(out.returncode, 0,
@@ -296,7 +296,7 @@ class MainImplementationGuard(unittest.TestCase):
     def test_plain_fable_main_still_blocked_after_the_38_fix(self):
         # regression guard: no switch marker, no quoting — the ordinary
         # Fable-main case #32 exists for must still block.
-        out = self._run(transcript_text=transcript("claude-fable-5"))
+        out = self._run(transcript_text=transcript("claude-fable-5-1"))
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_threshold_env_tunable(self):
@@ -386,8 +386,8 @@ class MainImplementationGuard(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
 
     def test_goal_armed_and_fable_both_hold_still_blocked(self):
-        out = self._run(transcript_text=goal_armed_transcript("claude-fable-5"),
-                        model="claude-fable-5")
+        out = self._run(transcript_text=goal_armed_transcript("claude-fable-5-1"),
+                        model="claude-fable-5-1")
         self.assertEqual(out.returncode, 2, out.stderr)
 
 
@@ -546,7 +546,7 @@ class MainBashGuard(unittest.TestCase):
     def test_fable_main_bash_sweep_blocked(self):
         helper = MainImplementationGuard()
         out = helper._run(tool="Bash", command="grep -rn 'TODO' .",
-                          model="claude-fable-5")
+                          model="claude-fable-5-1")
         self.assertEqual(out.returncode, 2, out.stderr)
 
 
@@ -1589,7 +1589,7 @@ class AwayEngagement128(unittest.TestCase):
     def test_fable_attended_session_still_blocks(self):
         helper = MainImplementationGuard()
         out = helper._run(tool="Write", presence_age=30,
-                          transcript_text=transcript("claude-fable-5"))
+                          transcript_text=transcript("claude-fable-5-1"))
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     # ---- the block log must say WHICH rule engaged ----
@@ -2092,7 +2092,7 @@ class SmallBoundedReadsAllowed178(unittest.TestCase):
     def _fable(self, command):
         helper = MainImplementationGuard()
         return helper._run(tool="Bash", command=command,
-                           transcript_text=transcript("claude-fable-5"))
+                           transcript_text=transcript("claude-fable-5-1"))
 
     def test_cat_one_real_small_file_allowed(self):
         with TemporaryDirectory() as d:
@@ -2128,7 +2128,7 @@ class BookkeepingWritesExempt178(unittest.TestCase):
     SIZE-CAPPED, not unlimited (unlimited /tmp writes let a main session
     stage an implementation to /tmp then `cp` it into the repo)."""
 
-    def _write(self, file_path, content=MID_1200, model="claude-fable-5"):
+    def _write(self, file_path, content=MID_1200, model="claude-fable-5-1"):
         helper = MainImplementationGuard()
         return helper._run(tool="Write", content=content, file_path=file_path,
                            transcript_text=transcript(model))
@@ -2269,7 +2269,7 @@ class SmallBoundedReadsStillBlockedControls178(unittest.TestCase):
     def _fable(self, command):
         helper = MainImplementationGuard()
         return helper._run(tool="Bash", command=command,
-                           transcript_text=transcript("claude-fable-5"))
+                           transcript_text=transcript("claude-fable-5-1"))
 
     def test_cat_of_a_file_just_over_the_byte_bound_blocked(self):
         with TemporaryDirectory() as d:
@@ -2312,7 +2312,7 @@ class AggregateReadBudget178Review(unittest.TestCase):
     def _fable(self, command):
         helper = MainImplementationGuard()
         return helper._run(tool="Bash", command=command,
-                           transcript_text=transcript("claude-fable-5"))
+                           transcript_text=transcript("claude-fable-5-1"))
 
     def test_two_chained_reads_over_the_aggregate_budget_blocked(self):
         with TemporaryDirectory() as d:
@@ -2348,7 +2348,7 @@ class GrepDereferenceRecursive178Review(unittest.TestCase):
     def _fable(self, command):
         helper = MainImplementationGuard()
         return helper._run(tool="Bash", command=command,
-                           transcript_text=transcript("claude-fable-5"))
+                           transcript_text=transcript("claude-fable-5-1"))
 
     def test_dereference_recursive_grep_against_a_directory_still_blocked(self):
         out = self._fable("grep --dereference-recursive pattern .")

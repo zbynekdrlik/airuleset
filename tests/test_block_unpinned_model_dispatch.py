@@ -37,7 +37,7 @@ class TestAgentModelParam(TestCase):
         # so an Agent `model` param is never right.
         for m in ("fable", "opus", "sonnet", "haiku", "opusplan",
                   "claude-fable-5-1", "claude-opus-4-8",
-                  "claude-fable-5", "claude-sonnet-5", "claude-opus-4-6"):
+                  "claude-fable-5-1", "claude-sonnet-5", "claude-opus-4-6"):
             r = run_hook({"tool_input": {"subagent_type": "general-purpose",
                                          "model": m}})
             self.assertEqual(r.returncode, 2, "%r should block: %s" % (m, r.stderr))
@@ -74,22 +74,22 @@ class TestWorkflowScript(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_allows_backtick_quoted_allowlisted_value(self):
-        r = run_hook({"tool_input": {"script": "agent(x, {model: `claude-fable-5`})"}})
+        r = run_hook({"tool_input": {"script": "agent(x, {model: `claude-fable-5-1`})"}})
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_blocks_superseded_id_in_script(self):
-        for s in ("opts.model: 'claude-fable-5-1'",
+        for s in ("opts.model: 'claude-fable-5'",
                   "opts.model: 'claude-opus-4-8'",
                   "opts.model: 'claude-opus-5'"):
             r = run_hook({"tool_input": {"script": s}})
             self.assertEqual(r.returncode, 2, "%r should block: %s" % (s, r.stderr))
 
     def test_allows_exact_allowlisted_ids_in_script(self):
-        for s in ("agent(x, {model: 'claude-fable-5'})",
+        for s in ("agent(x, {model: 'claude-fable-5-1'})",
                   "agent(x, {model: 'claude-sonnet-5'})",
                   "agent(x, {model: 'claude-opus-4-6'})",
                   "agent(x, {model: 'claude-haiku-4-5'})",
-                  "agent(x, {model: 'claude-fable-5[1m]'})"):
+                  "agent(x, {model: 'claude-fable-5-1[1m]'})"):
             r = run_hook({"tool_input": {"script": s}})
             self.assertEqual(r.returncode, 0, "%r should pass: %s" % (s, r.stderr))
 
@@ -130,7 +130,7 @@ class TestWorkflowScriptPath(TestCase):
 
     def test_allows_allowlisted_model_in_scriptpath_file(self):
         p = self._script_file(
-            self._tmpdir, "agent(x, {model: 'claude-fable-5'})")
+            self._tmpdir, "agent(x, {model: 'claude-fable-5-1'})")
         r = run_hook({"tool_input": {"scriptPath": p}})
         self.assertEqual(r.returncode, 0, r.stderr)
 

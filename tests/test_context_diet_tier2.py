@@ -53,7 +53,7 @@ class TestModelAwarenessConversion(TestCase):
 
     # --- core enforcement stays in the module ---
     def test_tier_table_stays(self):
-        self.assertIn("claude-fable-5", self.module)
+        self.assertIn("claude-fable-5-1", self.module)
         self.assertIn("claude-opus-4-6", self.module)
 
     def test_banned_opus5_stays(self):
@@ -300,9 +300,10 @@ class TestModelAwarenessB2(TestCase):
     def test_721_burn_narrative_not_in_module(self):
         self.assertNotIn("burn only SHIFTED, it did not shrink", self.module)
 
-    def test_fable51_ban_rule_stays(self):
+    def test_fable51_is_the_fleet_tier(self):
+        # #894: Fable 5.1 is now the fleet tier, not banned.
         self.assertIn("Fable 5.1", self.module)
-        self.assertIn("BANNED fleet-wide", self.module)
+        self.assertIn("claude-fable-5-1", self.module)
 
 
 class TestMessageStatusMarkerConversion(TestCase):

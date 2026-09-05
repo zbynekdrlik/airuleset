@@ -45,7 +45,7 @@ def _write(root, project, session, lines):
 
 class TestTier(unittest.TestCase):
     def test_matches_known_models(self):
-        self.assertEqual(burn.tier("claude-fable-5"), "fable")
+        self.assertEqual(burn.tier("claude-fable-5-1"), "fable")
         self.assertEqual(burn.tier("claude-opus-5[1m]"), "opus")
         self.assertEqual(burn.tier("claude-sonnet-5"), "sonnet")
         self.assertEqual(burn.tier("claude-haiku-4-5"), "haiku")
@@ -67,18 +67,18 @@ class TestScan(unittest.TestCase):
             _write(tmp, "proj-a", "s1", [
                 _line("claude-opus-5", i=0, cw=0, cr=2000000, o=0,
                       ts=now.isoformat()),
-                _line("claude-fable-5", i=0, cw=0, cr=500000, o=0,
+                _line("claude-fable-5-1", i=0, cw=0, cr=500000, o=0,
                       ts=now.isoformat(), sidechain=True),
             ])
             report = burn.scan(tmp, days=7, now=now)
             self.assertEqual(report["files_scanned"], 1)
             self.assertEqual(report["usage_lines"], 2)
             self.assertIn("claude-opus-5", report["by_model"])
-            self.assertIn("claude-fable-5", report["by_model"])
+            self.assertIn("claude-fable-5-1", report["by_model"])
             # opus cache_read $0.5/Mtok * 2,000,000 = $1.00 exactly
             self.assertEqual(report["by_model"]["claude-opus-5"]["usd"], 1.0)
             # fable cache_read $1.0/Mtok * 500,000 = $0.50 exactly
-            self.assertEqual(report["by_model"]["claude-fable-5"]["usd"], 0.5)
+            self.assertEqual(report["by_model"]["claude-fable-5-1"]["usd"], 0.5)
             self.assertIn("proj-a", report["by_project"])
             self.assertIn("main|opus", report["main_vs_sidechain"])
             self.assertIn("sidechain|fable", report["main_vs_sidechain"])
@@ -1402,15 +1402,15 @@ class TestFleetBudgetAlert(unittest.TestCase):
             {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 80, "per_host": {}},
             {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 90, "per_host": {
                 "dev1": _host_row(1.0, 5, 1000, {"claude-sonnet-5": 1.0}),
-                "dev2": _host_row(9.0, 5, 1000, {"claude-fable-5": 9.0}),
+                "dev2": _host_row(9.0, 5, 1000, {"claude-fable-5-1": 9.0}),
             }},
         ]
         alert = burn.fleet_budget_alert(rows, cache, now=now)
         self.assertIsNotNone(alert)
         self.assertEqual(alert["top_host"], "dev2")
-        self.assertEqual(alert["top_model"], "claude-fable-5")
+        self.assertEqual(alert["top_model"], "claude-fable-5-1")
         self.assertIn("dev2", alert["message"])
-        self.assertIn("claude-fable-5", alert["message"])
+        self.assertIn("claude-fable-5-1", alert["message"])
 
 
 class TestHourlyBurnAlert(unittest.TestCase):

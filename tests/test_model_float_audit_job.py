@@ -24,7 +24,7 @@ class TestModelFloatAuditJob(TestCase):
     def test_flags_floated_main_and_sub(self):
         panes = [("%p", "/repo")]
         find = _find({"/repo": 1})
-        models = {"/t/repo.jsonl": "claude-fable-5-1",       # main floated to 5.1
+        models = {"/t/repo.jsonl": "claude-fable-5",          # main on retired 5.0
                   "/t/repo.jsonl.sub": "claude-opus-4-8"}    # sub on superseded opus
         read = lambda p: models.get(str(p), "")  # noqa: E731
         subs = lambda main, now: [str(main) + ".sub"]  # noqa: E731
@@ -32,14 +32,14 @@ class TestModelFloatAuditJob(TestCase):
         out = model_float_audit_job(0.0, state, panes, "/proj", read, find,
                                     subs, due_fn=lambda *a, **k: True)
         self.assertEqual(len(out), 2, out)
-        self.assertTrue(any("claude-fable-5-1" in ln and "main" in ln for ln in out))
+        self.assertTrue(any("claude-fable-5" in ln and "main" in ln for ln in out))
         self.assertTrue(any("claude-opus-4-8" in ln and "sub" in ln for ln in out))
         self.assertIn("model_audit_last_ts", state)
 
     def test_allowlisted_models_silent(self):
         panes = [("%p", "/ok")]
         find = _find({"/ok": 1})
-        models = {"/t/ok.jsonl": "claude-fable-5",
+        models = {"/t/ok.jsonl": "claude-fable-5-1",
                   "/t/ok.jsonl.sub": "claude-sonnet-5"}
         read = lambda p: models.get(str(p), "")  # noqa: E731
         out = model_float_audit_job(0.0, {}, panes, "/proj", read, find,
@@ -84,7 +84,7 @@ class TestModelFloatAuditJob(TestCase):
         panes = [("%p1", "/a"), ("%p2", "/a")]
         find = _find({"/a": 1})
         models = {"/t/a.jsonl": "claude-sonnet-5",
-                  "/t/a.jsonl#sub0": "claude-fable-5-1"}
+                  "/t/a.jsonl#sub0": "claude-opus-5"}
         read = lambda p: models.get(str(p), "")  # noqa: E731
         subs = lambda main, now: [str(main) + "#sub0"]  # noqa: E731
         out = model_float_audit_job(0.0, {}, panes, "/proj", read, find,
@@ -118,8 +118,8 @@ class TestModelFloatAuditJob(TestCase):
             _write(main_path, "claude-sonnet-5")
             recent = os.path.join(subdir, "recent.jsonl")
             old = os.path.join(subdir, "old.jsonl")
-            _write(recent, "claude-fable-5-1")
-            _write(old, "claude-fable-5-1")
+            _write(recent, "claude-opus-5")
+            _write(old, "claude-opus-5")
             now = time.time()
             os.utime(recent, (now, now))
             os.utime(old, (now - 3 * 86400, now - 3 * 86400))

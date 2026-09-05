@@ -3808,7 +3808,7 @@ class TestManagedModelDefault(TestCase):
         # entries in ~/.claude.json, which key the 1M variant as a distinct
         # `<model>[1m]` id) so this change never also shrinks context and
         # re-triggers context-loss regressions.
-        self.assertEqual(airuleset.MANAGED_MODEL, "claude-fable-5[1m]")
+        self.assertEqual(airuleset.MANAGED_MODEL, "claude-fable-5-1[1m]")
 
     def test_overrides_an_existing_model_choice(self):
         # unconditional, like effortLevel/disableAgentView/tui — a managed
@@ -8425,7 +8425,7 @@ class TestDiscordAutopilotNotify(TestCase):
         for t in [
             "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
             "API Error: The socket connection was closed unexpectedly.",
-            "There's an issue with the selected model (claude-fable-5). It may not exist...",
+            "There's an issue with the selected model (claude-fable-5-1). It may not exist...",
             "API Error: Overloaded",
             "Claude usage limit reached. Try again later.",
         ]:

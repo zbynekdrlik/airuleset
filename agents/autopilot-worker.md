@@ -98,7 +98,7 @@ from validated inputs, stamping `Verified-at-UTC` + `HEAD:` at compose time (liv
 `  [--root-cause "<lens> — <why my self-review missed it>"]`
 `  [--closes-finding "<id> — <evidence>"]`
 `  [--prevencia-read "<path to the Prevencia rule file>"]`
-`  [--reviewed-by-tier "claude-fable-5 | claude-opus-4-6"]`
+`  [--reviewed-by-tier "claude-fable-5-1 | claude-opus-4-6"]`
 Round ≥ 2 REQUIRES `--root-cause`, `--prevencia-read`, and `--reviewed-by-tier`; the CLI refuses
 without them. `--closes-finding` is repeatable (one per id from the newest gk verdict). The hook
 `block-handoff-without-composer.sh` blocks a raw `READY-FOR-REVIEW` comment post on a reduced-
@@ -767,7 +767,7 @@ plan: <per issue, N/N acceptance-criteria items fulfilled — your own self-audi
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a".>
 review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
-reviewed-by-tier: claude-fable-5|claude-opus-4-6 [trivial-diff] gate:<OPEN|CLOSED|n/a> — the tier that produced the Self-review table (#876, SubagentStop-enforced by subagent-stop-check-review-tier.sh)
+reviewed-by-tier: claude-fable-5-1|claude-opus-4-6 [trivial-diff] gate:<OPEN|CLOSED|n/a> — the tier that produced the Self-review table (#876, SubagentStop-enforced by subagent-stop-check-review-tier.sh)
 achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into your ticket's own run-card at its integration cycle>
 worktree: <your worktree's absolute path>
 branch: <your worktree branch name (the EXACT name, #503 case 1) — the supervisor merges directly from this ref; also state the refs/autopilot-wip/<branch> durability backup you pushed to origin>

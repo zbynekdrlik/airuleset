@@ -196,7 +196,7 @@ class TestReviewTierHook(unittest.TestCase):
         ], transcript)
 
         msg = _worktree_return_msg(
-            reviewed_by_tier="claude-fable-5 gate:OPEN")
+            reviewed_by_tier="claude-fable-5-1 gate:OPEN")
         payload = _base_payload(msg, transcript_path=transcript,
                                 session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
@@ -232,7 +232,7 @@ class TestReviewTierHook(unittest.TestCase):
         ], transcript)
 
         msg = _worktree_return_msg(
-            reviewed_by_tier="claude-fable-5 gate:OPEN")
+            reviewed_by_tier="claude-fable-5-1 gate:OPEN")
         payload = _base_payload(msg, transcript_path=transcript,
                                 session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
@@ -306,7 +306,7 @@ class TestReviewTierHook(unittest.TestCase):
     # Case 7: unreadable transcript + line present => pass + log line
     def test_case7_unreadable_transcript_passes(self):
         msg = _worktree_return_msg(
-            reviewed_by_tier="claude-fable-5 gate:OPEN")
+            reviewed_by_tier="claude-fable-5-1 gate:OPEN")
         payload = _base_payload(msg, transcript_path="/nonexistent/path.jsonl",
                                 session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
@@ -396,7 +396,7 @@ class TestReviewTierHook(unittest.TestCase):
                          transcript)
 
         msg = _worktree_return_msg(
-            reviewed_by_tier="claude-fable-5 gate:OPEN")
+            reviewed_by_tier="claude-fable-5-1 gate:OPEN")
         payload = _base_payload(msg, transcript_path=transcript,
                                 session_id=self.sid)
 
@@ -435,7 +435,7 @@ class TestSharedTierConstant(unittest.TestCase):
         sys.path.insert(0, str(REPO_ROOT))
         import importlib
         airuleset = importlib.import_module("airuleset")
-        self.assertIn("claude-fable-5", airuleset.REVIEWED_BY_TIER_VALUES)
+        self.assertIn("claude-fable-5-1", airuleset.REVIEWED_BY_TIER_VALUES)
         self.assertIn("claude-opus-4-6", airuleset.REVIEWED_BY_TIER_VALUES)
         self.assertEqual(len(airuleset.REVIEWED_BY_TIER_VALUES), 2)
 
@@ -473,7 +473,7 @@ class TestWorkerDoctrineReviewedByTier(unittest.TestCase):
         self.assertIn("reviewed-by-tier:", worker)
         # The worktree evidence block specifically.
         self.assertIn(
-            "reviewed-by-tier: claude-fable-5|claude-opus-4-6", worker)
+            "reviewed-by-tier: claude-fable-5-1|claude-opus-4-6", worker)
 
     def test_step6_qualifies_self_review(self):
         worker = (REPO_ROOT / "agents" / "autopilot-worker.md").read_text()

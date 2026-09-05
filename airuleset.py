@@ -68,22 +68,22 @@ MANAGED_EFFORT_LEVEL = "high"
 # id>`) or a Workflow `opts.model: '<exact id>'`. A new model version joins the
 # fleet ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
-    "fable": "claude-fable-5",        # main default + design/review phases (5.0)
+    "fable": "claude-fable-5-1",        # main default + design/review phases (5.1 @ medium)
     "opus": "claude-opus-4-6",        # implementation escalation / gate-CLOSED fallback
     "sonnet": "claude-sonnet-5",      # settled-design implementation + mechanical
     "haiku": "claude-haiku-4-5",      # trivial reads
 }
 
 # Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is
-# BANNED**; 2026-09-04: **Fable 5.1 BANNED**, exact-id allowlist) — Fable 5.0,
+# BANNED**; 2026-09-05: Fable 5.1 @ medium replaces 5.0, #894) — Fable 5.1,
 # derived from MODEL_TIERS so the lineup has ONE source. The `[1m]` suffix is a
 # DELIBERATE part of the id, not a typo: it is how Claude Code's own usage
 # tracking keys the 1M-context variant (verified — `lastModelUsage` entries in
-# ~/.claude.json store ids exactly like `claude-fable-5[1m]`) — kept so this
+# ~/.claude.json store ids exactly like `claude-fable-5-1[1m]`) — kept so this
 # does NOT shrink the context window. The unconditional-managed-default
 # treatment (cli_config.apply_managed_settings_defaults) is what makes the
 # lineup self-healing: any settings.json `model` != MANAGED_MODEL is overwritten
-# on the next install/push. burn.tier("claude-fable-5[1m]") → "fable", so the
+# on the next install/push. burn.tier("claude-fable-5-1[1m]") → "fable", so the
 # statusline highlight keeps working. Full policy history: the fable-advisor skill.
 MANAGED_MODEL = MODEL_TIERS["fable"] + "[1m]"
 
@@ -104,9 +104,9 @@ def _normalize_model(value):
 def is_allowed_model(value):
     """True iff `value` is one of the EXACT allowlisted tier ids
     (MODEL_TIERS.values()), tolerating the `[1m]` context tag (so the Fable
-    main form `claude-fable-5[1m]` is allowed). EXACT membership, never a
-    substring — a superseded/floating BANNED id (`claude-opus-4-7`,
-    BANNED `claude-fable-5-1`, a bare alias) is never allowed."""
+    main form `claude-fable-5-1[1m]` is allowed). EXACT membership, never a
+    substring — a superseded/floating id (`claude-opus-4-7`,
+    retired `claude-fable-5`, a bare alias) is never allowed."""
     v = _normalize_model(value)
     return bool(v) and v in {m.lower() for m in MODEL_TIERS.values()}
 
@@ -7168,7 +7168,7 @@ def main():
     p_ho.add_argument("--prevencia-read",
                       help="Prevencia-read: <path> (required round >= 2)")
     p_ho.add_argument("--reviewed-by-tier",
-                      help="Reviewed-by-tier: claude-fable-5 | claude-opus-4-6 "
+                      help="Reviewed-by-tier: claude-fable-5-1 | claude-opus-4-6 "
                            "(required round >= 2)")
 
     p_gate = sub.add_parser(
