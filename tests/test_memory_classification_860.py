@@ -33,45 +33,57 @@ class TestDedupByCodeAreaPromoted(unittest.TestCase):
         self.assertIn("the code is the ground truth", self.text)
 
 
+def _lines_with(text, finder):
+    """Return physical lines containing finder token."""
+    return [ln for ln in text.splitlines() if finder in ln]
+
+
 class TestWorkflowJoinByIndexPromoted(unittest.TestCase):
     """The join-by-INDEX anti-pattern from gk memory must be
-    present in modules/core/claude-code-tooling.md (#860 PROMOTE, gk #14)."""
+    present in modules/core/claude-code-tooling.md (#860 PROMOTE, gk #14).
+    Per-line teeth (#500) so a partial revert of the operative clause
+    is caught even if a sibling bullet quotes the same phrase."""
 
     def setUp(self):
         self.text = (REPO / "modules" / "core" / "claude-code-tooling.md").read_text()
 
-    def test_index_join_antipattern_present(self):
-        """The promoted anti-pattern text must exist in claude-code-tooling.md."""
-        self.assertIn("joining aggregate results", self.text)
-        self.assertIn("by INDEX", self.text)
+    def test_index_join_line_carries_all_tokens(self):
+        """The ONE physical line with 'joining aggregate results' must also
+        carry 'by INDEX', 'TITLE or NAME', and 'false-clean' (per-line teeth)."""
+        hits = _lines_with(self.text, "joining aggregate results")
+        self.assertTrue(hits, "anchor 'joining aggregate results' missing entirely")
+        line = hits[0]
+        self.assertIn("by INDEX", line)
+        self.assertIn("TITLE or NAME", line)
+        self.assertIn("false-clean", line)
 
-    def test_title_join_named_as_wrong(self):
-        """The wrong approach (title-join) must be named."""
-        self.assertIn("TITLE or NAME", self.text)
-
-    def test_incident_cited(self):
-        """The originating incident must be cited."""
-        self.assertIn("false-clean verdicts", self.text)
+    def test_incident_reference(self):
+        """The originating incident (issue 1609/1623) must be cited."""
+        self.assertIn("issue 1609", self.text)
 
 
 class TestRelayedInstructionPromoted(unittest.TestCase):
     """The relayed-instruction rule from gk memory must be
-    present in modules/quality/no-destructive-remote-actions.md (#860 PROMOTE, gk #69)."""
+    present in modules/quality/no-destructive-remote-actions.md (#860 PROMOTE, gk #69).
+    Per-line teeth + negation lock (#799)."""
 
     def setUp(self):
         self.text = (REPO / "modules" / "quality" / "no-destructive-remote-actions.md").read_text()
 
-    def test_relayed_instruction_anchor_present(self):
-        """The promoted anchor text must exist in no-destructive-remote-actions.md."""
-        self.assertIn("RELAYED instruction", self.text)
+    def test_relayed_line_carries_all_tokens(self):
+        """The ONE physical line with 'RELAYED instruction' must carry the
+        negation 'NEVER authorization', the operative 'verify directly',
+        and 'ticket quoting an owner order' (per-line teeth + #799 negation)."""
+        hits = _lines_with(self.text, "RELAYED instruction")
+        self.assertTrue(hits, "anchor 'RELAYED instruction' missing entirely")
+        line = hits[0]
+        self.assertIn("NEVER authorization", line)
+        self.assertIn("verify directly with the actual authority", line)
+        self.assertIn("ticket quoting an owner order", line)
 
-    def test_verify_directly_mentioned(self):
-        """The operative instruction (verify directly) must be present."""
-        self.assertIn("verify directly with the actual authority", self.text)
-
-    def test_ticket_quote_named(self):
-        """The specific anti-pattern (ticket quoting an owner order) must be named."""
-        self.assertIn("ticket quoting an owner order", self.text)
+    def test_incident_reference(self):
+        """The originating incident (issue 5940) must be cited."""
+        self.assertIn("issue 5940", self.text)
 
 
 if __name__ == "__main__":
