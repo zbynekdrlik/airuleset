@@ -309,7 +309,7 @@
     "tests/test_owner_key_provisioning.py": 380,
     "tests/test_owner_session_audit_660.py": 126,
     "tests/test_owner_stray_creator_660.py": 218,
-    "tests/test_owner_vps_provisioning.py": 472,
+    "tests/test_owner_vps_provisioning.py": 505,
     "tests/test_paused_fleet_target_851.py": 215,
     "tests/test_per_ticket_completion_marker.py": 155,
     "tests/test_playbook.py": 104,
