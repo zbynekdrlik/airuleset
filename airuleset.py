@@ -4246,6 +4246,20 @@ from cli_resource_guards import (  # noqa: E402, F401
     render_sysctl_vm as render_sysctl_vm,
 )
 
+# --- #870 F0: privilege inventory of the control account -- a self-contained
+# leaf (stdlib only; its ssh reach is derived from cli_fleet via a LAZY import).
+# Re-exported here so `SUBCOMMANDS["privileges"]` and the tests
+# (`airuleset.cmd_privileges` / `airuleset.privileges_build_report`) resolve through this
+# module, the same facade convention every other leaf uses.
+from cli_privileges import (  # noqa: E402, F401
+    cmd_privileges as cmd_privileges,
+    build_report as privileges_build_report,
+    scan_memory_credentials as scan_memory_credentials,
+    PRIVILEGES as PRIVILEGES,
+    KIND_PASSWORD as KIND_PASSWORD,
+    KIND_STORE as KIND_STORE,
+)
+
 # --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed
 # by cmd_push (via `airuleset.provision_disk_guard_root`, the facade name, so it
 # stays test-patchable) as one non-fatal LOUD step after the resource-guards
@@ -7079,6 +7093,16 @@ def main():
                           action="store_true",
                           help="print only flagged (banned) rows")
 
+    # --- #870 F0: privilege inventory (migration-completeness gate) --------
+    p_priv = sub.add_parser(
+        "privileges",
+        help="Inventory the control account's credentials/reach (#870 F0) — "
+             "declared registry vs a read-only live probe; exit 1 on any "
+             "undeclared-or-wrong-mode credential, exit 0 clean. Never prints "
+             "a token value.")
+    p_priv.add_argument("--json", action="store_true",
+                        help="Emit the full report as JSON instead of a table")
+
     p_wacc = sub.add_parser(
         "webterm-access",
         help="#612: reconcile the Cloudflare Access email-OTP app(s) in front of "
@@ -7555,6 +7579,7 @@ SUBCOMMANDS = {
     "goal-arm": cmd_goal_arm,
     "goal-roster": cmd_goal_roster,
     "fable-gate": cmd_fable_gate,
+    "privileges": cmd_privileges,
     "webterm-access": cmd_webterm_access,
     "webterm-only": cmd_webterm_only,
     "drop-gateway": cmd_drop_gateway,
