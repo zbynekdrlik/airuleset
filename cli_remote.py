@@ -1255,6 +1255,7 @@ def _run_pass_a(repo_dir):
         argv = [
             sys.executable, "-m", "pytest", "tests/",
             *deny_args,
+            "-n", "auto",
             "-p", "no:cacheprovider",
             "-o", "addopts=",
             "-q",
