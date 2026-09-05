@@ -16,6 +16,9 @@ REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
 CLAUDE_MD = CLAUDE_DIR / "CLAUDE.md"
 
+# Projects registry (repo-checked, read by --fleet to derive per-host project dirs)
+REGISTRY_PATH = str(REPO_DIR / "projects-registry.json")
+
 # Ratchet file (repo-checked, NOT registered with ratchet-union merge driver)
 CONTEXT_RATCHET_PATH = REPO_DIR / "tests" / "context_ratchet.json"
 
@@ -220,6 +223,24 @@ def measure_mcp():
         "servers": enabled,
         "estimate": True,
     }
+
+
+# -- Registry project lookup ---------------------------------------------
+
+def _registry_projects_for_host(hostname, registry_path=None):
+    """Return the list of project `path` values from projects-registry.json
+    whose `host` field matches `hostname`. Missing/unreadable registry
+    returns []. Never raises."""
+    reg_path = registry_path or REGISTRY_PATH
+    try:
+        data = json.loads(Path(reg_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e["path"] for e in data
+            if isinstance(e, dict) and e.get("host") == hostname
+            and e.get("path")]
 
 
 # -- MEMORY.md measurement ----------------------------------------------
@@ -489,6 +510,7 @@ def run_fleet(runner=None):
     runner: callable(host_entry) -> (stdout_str, returncode) for testing.
     """
     import datetime
+    import socket
     import subprocess
     import cli_remote
 
@@ -496,9 +518,14 @@ def run_fleet(runner=None):
     boxes = []
     failed = []
 
+    # Load registry once for per-host project dirs (#857)
+    registry_missing = not Path(REGISTRY_PATH).exists()
+
     # Local box in-process (design: "Local box in-process")
     if not runner:
-        local_data = measure_box()
+        local_hostname = socket.gethostname()
+        local_projects = _registry_projects_for_host(local_hostname)
+        local_data = measure_box(local_projects)
         boxes.append(local_data)
 
     for host in hosts:
@@ -520,6 +547,10 @@ def run_fleet(runner=None):
                     f"{repo_path}/airuleset.py",
                     "context-baseline", "--json"
                 ]
+                # Derive per-host project dirs from registry (#857)
+                host_projects = _registry_projects_for_host(name)
+                for pd in host_projects:
+                    cmd.extend(["--project", pd])
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=30)
                 stdout = result.stdout
@@ -535,12 +566,15 @@ def run_fleet(runner=None):
                 subprocess.TimeoutExpired) as e:
             failed.append({"host": name, "error": type(e).__name__})
 
-    return {
+    result_data = {
         "schema": 1,
         "date": datetime.date.today().isoformat(),
         "boxes": boxes,
         "failed": failed,
     }
+    if registry_missing:
+        result_data["registry"] = "missing"
+    return result_data
 
 
 # -- Push summary line --------------------------------------------------
@@ -594,9 +628,7 @@ def cmd_context_baseline(args):
         save_snapshot(data)
         return
 
-    project_dirs = []
-    if getattr(args, "project", None):
-        project_dirs = [args.project]
+    project_dirs = getattr(args, "project", None) or []
 
     data = measure_box(project_dirs)
 

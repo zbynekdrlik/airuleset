@@ -6996,8 +6996,8 @@ def main():
                       help="Run on every deployable host via ssh")
     p_cb.add_argument("--json", dest="json_output", action="store_true",
                       help="JSON output")
-    p_cb.add_argument("--project", default=None,
-                      help="Project directory to measure")
+    p_cb.add_argument("--project", action="append", default=None,
+                      help="Project directory to measure (repeatable)")
     p_cb.add_argument("--check", action="store_true",
                       help="Check repo against ratchet ceilings (exit 1 if over)")
     p_cb.add_argument("--update-ratchet", dest="update_ratchet",
