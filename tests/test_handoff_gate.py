@@ -118,6 +118,120 @@ class TestLoadLens(unittest.TestCase):
             self.assertEqual(airuleset._load_lens_list(td), ["alpha", "beta"])
 
 
+class TestLensProseFile880(unittest.TestCase):
+    """#880: _load_lens_list must extract ONLY lens-id-shaped lines from a
+    prose gk-review-lenses.md and fall back to defaults when no ids found."""
+
+    # A representative excerpt of odoo-erp's prose gk-review-lenses.md that
+    # contains section headers with the 6 canonical lens ids (### security etc.)
+    # plus prose paragraphs, markdown tables, and code blocks.
+    PROSE_DOC = (
+        "# Gatekeeper cold-review lenses\n"
+        "\n"
+        "**Owner ruling (2026-09-02, verbatim):** some text that is NOT a lens\n"
+        "This file is the **published** version of the lenses.\n"
+        "\n"
+        "## The Self-review block\n"
+        "\n"
+        "| lens | verdict | evidence |\n"
+        "|---|---|---|\n"
+        "| security | 0 | f:1 |\n"
+        "\n"
+        "### security\n"
+        "\n"
+        "A long prose paragraph about the security lens.\n"
+        "Multiple lines of guidance for the reviewer.\n"
+        "\n"
+        "### correctness\n"
+        "\n"
+        "Guidance for correctness review.\n"
+        "\n"
+        "### test-integrity\n"
+        "\n"
+        "Test integrity guidance.\n"
+        "\n"
+        "### evidence-integrity\n"
+        "\n"
+        "Evidence integrity guidance.\n"
+        "\n"
+        "### design-doctrine\n"
+        "\n"
+        "Design doctrine guidance.\n"
+        "\n"
+        "### process\n"
+        "\n"
+        "Process guidance.\n"
+    )
+
+    def test_prose_file_yields_sane_lens_count(self):
+        """A prose lenses doc must yield exactly the lens ids, not hundreds
+        of bogus lines."""
+        with tempfile.TemporaryDirectory() as td:
+            d = os.path.join(td, ".claude", "rules")
+            os.makedirs(d)
+            with open(os.path.join(d, "gk-review-lenses.md"), "w") as f:
+                f.write(self.PROSE_DOC)
+            lenses = airuleset._load_lens_list(td)
+            # Must NOT produce hundreds of lines (the bug: 628 bogus lenses).
+            self.assertLessEqual(len(lenses), 10,
+                                 "Loader yielded %d lenses from prose doc" % len(lenses))
+            # Must contain the 6 canonical lenses.
+            for canon in airuleset.HANDOFF_DEFAULT_LENSES:
+                self.assertIn(canon, lenses,
+                              "Missing canonical lens '%s'" % canon)
+
+    def test_prose_lenses_validate_against_valid_table(self):
+        """A valid 6-lens self-review table must pass validation even when
+        the lenses doc is prose-format."""
+        with tempfile.TemporaryDirectory() as td:
+            d = os.path.join(td, ".claude", "rules")
+            os.makedirs(d)
+            with open(os.path.join(d, "gk-review-lenses.md"), "w") as f:
+                f.write(self.PROSE_DOC)
+            lenses = airuleset._load_lens_list(td)
+            table = (
+                "| Lens | Verdict | Evidence |\n"
+                "|---|---|---|\n"
+                "| security | pass | f:1 |\n"
+                "| correctness | pass | f:2 |\n"
+                "| test-integrity | pass | f:3 |\n"
+                "| evidence-integrity | pass | f:4 |\n"
+                "| design-doctrine | pass | f:5 |\n"
+                "| process | pass | f:6 |\n"
+            )
+            ok, reason = airuleset._validate_self_review_table(table, lenses)
+            self.assertTrue(ok, "Valid table rejected: %s" % reason)
+
+    def test_simple_id_file_still_works(self):
+        """A simple one-id-per-line file (the original format) still works."""
+        with tempfile.TemporaryDirectory() as td:
+            d = os.path.join(td, ".claude", "rules")
+            os.makedirs(d)
+            with open(os.path.join(d, "gk-review-lenses.md"), "w") as f:
+                f.write("# header\nalpha\nbeta\ngamma\n")
+            lenses = airuleset._load_lens_list(td)
+            self.assertEqual(lenses, ["alpha", "beta", "gamma"])
+
+
+class TestLsRemoteRefPick880(unittest.TestCase):
+    """#880: ls-remote output with refs/autopilot-wip/<branch> must pick
+    refs/heads/<branch>, not the wip ref (which sorts first alphabetically)."""
+
+    def test_heads_ref_preferred_over_wip(self):
+        """When both refs/heads/X and refs/autopilot-wip/X exist, the
+        composer must compare HEAD against refs/heads/X."""
+        # The fix is to call `git ls-remote origin refs/heads/<branch>`
+        # instead of `git ls-remote origin <branch>`, so we test the
+        # _load_lens_list shape is not enough — we test the ls-remote
+        # call uses the explicit refs/heads/ prefix.
+        import inspect
+        src = inspect.getsource(airuleset.cmd_handoff)
+        # The ls-remote call must use "refs/heads/" + branch, not bare branch.
+        self.assertIn('"refs/heads/" + branch', src,
+                      "cmd_handoff ls-remote call must use explicit "
+                      "refs/heads/ prefix to avoid matching wip refs")
+
+
 class TestParseFindings(unittest.TestCase):
     """_parse_gk_findings: extract ids from gk bounce comments."""
 

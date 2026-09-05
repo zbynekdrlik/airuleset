@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 7704,
+    "airuleset.py": 7706,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -220,7 +220,7 @@
     "tests/test_goal_turn_boundary.py": 125,
     "tests/test_goal_undeterminable_pane.py": 111,
     "tests/test_guard_jq_fork_fallback_835.py": 205,
-    "tests/test_handoff_gate.py": 279,
+    "tests/test_handoff_gate.py": 393,
     "tests/test_handover_proposal_rules.py": 958,
     "tests/test_heavy_build_reaper.py": 311,
     "tests/test_hook_deny_stderr.py": 223,
