@@ -1,6 +1,6 @@
 ---
 name: mdreview
-description: Fleet-wide ruleset review consuming the structured `mdreview-audit` JSON artifact. Step 1 reads the newest artifact (runs `mdreview-audit --fleet` if stale >7d) for the structural baseline (inventories, cross-surface dedup pairs, memory R/P/S candidates, zero-caller skills, scoping matrix). Then adds what needs the network — native-now evidence, model-combination audit, dynamic-application triage, bidirectional dedup verdicts, memory-promotion decisions, scoping-matrix review. Content is the indicator, never line count; the context ratchet ceiling only goes DOWN. Run after every CC release and on the watchdog's 30d/model-generation cadence trigger.
+description: Fleet-wide ruleset review — reads mdreview-audit artifact for structural baseline, adds native-now evidence + model-combination audit. Run after CC releases or on the 30d cadence.
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUserQuestion, Skill

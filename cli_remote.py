@@ -1178,6 +1178,101 @@ def _deploy_to_all_remotes(failed, auth_failed):
             shutil.rmtree(control_dir, ignore_errors=True)
 
 
+def _runner_shape_env(base_env, repo_dir, tmp_home):
+    """Build a CI-mirroring env dict with a fresh HOME (#875).
+
+    ``tmp_home`` is a CALLER-OWNED directory (a TemporaryDirectory context
+    manager in ``_run_pass_a``'s own ``with`` block, so it is cleaned up
+    when the pass finishes — never leaked).
+
+    The fresh HOME is seeded with a minimal ``.gitconfig`` carrying the same
+    two ``safe.directory`` entries the CI workflow sets (ci.yml L58/L64) —
+    without them, every ``git -C <workspace>`` inside a relocated-HOME
+    subprocess dies ``fatal: detected dubious ownership`` (the #683 run-3
+    debug, internals-ci.md).
+    """
+    env = dict(base_env)
+    env["HOME"] = tmp_home
+    env["XDG_CONFIG_HOME"] = str(Path(tmp_home) / ".config")
+    env["XDG_CACHE_HOME"] = str(Path(tmp_home) / ".cache")
+    env["XDG_DATA_HOME"] = str(Path(tmp_home) / ".local" / "share")
+    # Strip PYTEST_ADDOPTS so a dev-shell override never de-mirrors Pass A
+    # from CI (F3, #875 review).
+    env.pop("PYTEST_ADDOPTS", None)
+    # Seed .gitconfig with the safe.directory entries CI sets.
+    gitconfig = Path(tmp_home) / ".gitconfig"
+    gitconfig.write_text(
+        "[safe]\n"
+        "\tdirectory = %s\n"
+        "\tdirectory = %s\n"
+        % (str(repo_dir), str(repo_dir / ".git"))
+    )
+    return env
+
+
+def _run_pass_a(repo_dir):
+    """Run the CI-mirroring hermetic pytest subset under a clean HOME (#875).
+
+    Returns the subprocess returncode. Prints wall time and pytest version.
+    All temp dirs are owned by this function's own context managers — nothing
+    is leaked (F1, #875 review).
+    """
+    import subprocess
+    import tempfile
+    import time as _time_mod
+    with tempfile.TemporaryDirectory() as _rescue_a, \
+            tempfile.TemporaryDirectory() as _lock_a, \
+            tempfile.TemporaryDirectory() as _suite_a, \
+            tempfile.TemporaryDirectory(prefix="airuleset-runner-home-") as _home_a:
+        base = dict(os.environ)
+        base["AIRULESET_DRAFT_RESCUE_DIR"] = str(
+            Path(_rescue_a) / "draft-rescue")
+        base["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
+        base["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
+            Path(_lock_a) / "autopilot-lock")
+        base["AIRULESET_SESSION_STATUS_DIR"] = str(
+            Path(_lock_a) / "session-status")
+        base["AIRULESET_CONTENT_DEDUP_DIR"] = str(
+            Path(_lock_a) / "content-dedup")
+        base["AIRULESET_GOAL_ROSTER_PATH"] = str(
+            Path(_lock_a) / "goal-roster.json")
+        base["AIRULESET_MDREVIEW_STATE_PATH"] = str(
+            Path(_lock_a) / "mdreview-cadence.json")
+        base["AIRULESET_RESURRECT_ACTION"] = ""
+        base["TMPDIR"] = str(_suite_a)
+        env = _runner_shape_env(base, repo_dir, _home_a)
+        # Build the CI argv from the deny-list.
+        ci_result = subprocess.run(
+            [sys.executable, str(repo_dir / "scripts" / "ci_pytest_args.py"),
+             str(repo_dir / ".github" / "box-bound-tests.txt")],
+            capture_output=True, text=True, cwd=str(repo_dir),
+        )
+        if ci_result.returncode != 0:
+            print("  PASS A FAILED: ci_pytest_args.py error: %s"
+                  % ci_result.stderr.strip(), file=sys.stderr)
+            return 1
+        deny_args = [a for a in ci_result.stdout.strip().split("\n") if a]
+        argv = [
+            sys.executable, "-m", "pytest", "tests/",
+            *deny_args,
+            "-n", "auto",
+            "-p", "no:cacheprovider",
+            "-o", "addopts=",
+            "-q",
+        ]
+        t0 = _time_mod.monotonic()
+        result = subprocess.run(argv, cwd=str(repo_dir), env=env)
+        wall = _time_mod.monotonic() - t0
+        # Pytest version diagnostic (dev1 vs CI's pinned 8.3.2).
+        try:
+            import importlib.metadata
+            _pv = importlib.metadata.version("pytest")
+        except Exception:  # noqa: BLE001 — diagnostic only
+            _pv = "unknown"
+        print("  Pass A: wall %.1fs, pytest %s" % (wall, _pv))
+    return result.returncode
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -1211,9 +1306,22 @@ def cmd_push(args):
         sys.exit(1)
     print("  Ruff clean.")
 
-    # 0b. Run the full test suite — fail-closed before any push/deploy.
-    print("Running test suite (fail-closed before push)...")
+    # 0b. Pass A — runner-shape: the CI-mirroring hermetic subset under a
+    # clean HOME, serial pytest, exact CI argv (#875). Catches env-coupled
+    # test failures BEFORE they burn a 15-min CI cycle. Pass B (the existing
+    # unittest run) follows only when Pass A is green.
     import tempfile
+    print("Running Pass A (runner-shape, clean HOME, CI hermetic subset)...")
+    if _run_pass_a(REPO_DIR) != 0:
+        print("  PASS A FAILED (runner-shape, clean HOME) — refusing to push. "
+              "The CI hermetic subset is red under a runner-like env.",
+              file=sys.stderr)
+        sys.exit(1)
+    print("  Pass A clean.")
+
+    # 0c. Pass B — Run the full test suite (existing) — fail-closed before
+    # any push/deploy.
+    print("Running Pass B (full test suite, real env)...")
     # #271: `deliver_with_stash`/`_send_goal_verified` persist non-empty
     # input-box content to `watchdog.draft_rescue_dir()` (default
     # `~/.claude/draft-rescue/`) BEFORE any keystroke — and the live

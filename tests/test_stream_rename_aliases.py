@@ -109,8 +109,9 @@ class TestAuthorityCoversNewNames(TestCase):
                     old, airuleset.AUTHORITY_BY_USER,
                     "%s renamed away — stale AUTHORITY_BY_USER row" % old)
 
-    def test_marek_authority_unchanged_and_no_marek1(self):
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
+    def test_marek_removed_from_authority_882(self):
+        # marek decommissioned #882 — no longer in AUTHORITY_BY_USER
+        self.assertNotIn("marek", airuleset.AUTHORITY_BY_USER)
         self.assertNotIn("marek1", airuleset.AUTHORITY_BY_USER)
 
 

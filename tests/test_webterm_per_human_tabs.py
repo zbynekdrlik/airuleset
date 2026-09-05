@@ -93,38 +93,12 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         for excluded in ZBYNEK_EXCLUDED:
             self.assertNotIn(excluded, got)
 
-    def test_marek_domain_resolves_his_lane_inventory_to_exact_order(self):
-        # #661 rework (owner ruling 2026-08-25): marek's set grew from the
-        # rejected single member to marek + montalu4 + his dev1/dev2 sessions +
-        # his forestshop VPS. #787 (2026-08-31) added montalu2; an owner
-        # request 2026-09-03 added miva1-subdev + gatekeeper (so marek can SEE
-        # the miva subdev stream and the gk box). The policy ids are the MAREK
-        # LANE inventory ids (cli_webterm_profiles.marek_inventory — the
-        # inventory his gateway actually renders with human="marek"), NOT the
-        # fleet ids: his `dev1`/`dev2` entries attach HIS `marek` tmux group,
-        # never the owner's; his `gatekeeper` entry attaches the OWNER's gk group.
-        got = [e["id"] for e in w.entries_for_tab_list(
-            profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
-        self.assertEqual(got, ["marek-subdev", "montalu2-subdev", "miva1-subdev",
-                               "montalu4-subdev", "dev1", "dev2", "gatekeeper",
-                               "forestshop"])
-        self.assertEqual(w.WEBTERM_DASHBOARD_TABS["marek"], got)
-
-    def test_marek_lane_render_alias_order_and_exclusions(self):
-        # The prod marek-lane render path: his scoped inventory + human="marek".
-        html = w.render_dashboard_html(
-            profiles.marek_inventory(), ttyd_base="/t", human="marek",
-            term_grid=(176, 51))
-        aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
-        # owner-req 2026-09-03: miva1-subdev -> "miva" (after m2), gatekeeper ->
-        # "gk" (after dev2), from the SINGLE #592 cli_aliases source.
-        self.assertEqual(aliases,
-                         ["marek", "m2", "miva", "m4", "dev1", "dev2", "gk", "fs"])
-        # No third person's personal account on Marek's dashboard (the original
-        # #661 sin): stepan@forestshop-dev must never render here.
-        self.assertNotIn("stepan", html)
-        # A lane render never enables the owner-only U-status poll (#677).
-        self.assertIn('"u_status": false', html)
+    def test_marek_lane_removed_882(self):
+        # marek decommissioned (#882, 2026-09-05): no WEBTERM_DASHBOARD_TABS
+        # entry, no marek_inventory, no profile constant.
+        self.assertNotIn("marek", w.WEBTERM_DASHBOARD_TABS)
+        self.assertFalse(hasattr(profiles, "marek_inventory"))
+        self.assertFalse(hasattr(profiles, "MAREK"))
 
     def test_david_domain_shows_only_david_accounts(self):
         inv = _owner_inv()
@@ -204,10 +178,12 @@ class TestConnectAllowlistUnchanged(unittest.TestCase):
     def test_connect_allowlist_stays_full_fleet(self):
         # #661 is VISIBILITY, not an auth boundary: the inventory that feeds the
         # connect allowlist is NOT filtered — the owner keeps reachability.
+        # marek-subdev removed from fleet #882.
         inv = _owner_inv()
         ids = {e["id"] for e in inv}
-        for foreign in ("marek-subdev", "stepan-forestshop-dev", "david3-subdev"):
+        for foreign in ("stepan-forestshop-dev", "david3-subdev"):
             self.assertIn(foreign, ids)
+        self.assertNotIn("marek-subdev", ids)
 
 
 class TestDavidProfileOwnDomain(unittest.TestCase):

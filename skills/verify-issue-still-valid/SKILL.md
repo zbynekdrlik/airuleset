@@ -1,6 +1,6 @@
 ---
 name: verify-issue-still-valid
-description: Verify a GitHub issue/ticket is still real (not already fixed, obsolete, or overcome by later commits) BEFORE implementing it or asking the user about it. Load before starting work on any ticket, and before /autopilot or /issue-planner select or dispatch a ticket.
+description: Verify a GitHub issue is still real before implementing. Reproduce LIVE, close/rescope with evidence if already overcome.
 user-invocable: false
 ---
 

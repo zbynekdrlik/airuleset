@@ -48,7 +48,9 @@ import time
 FLEET_PUSH_PUBKEYS = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGyVa+vk1mN9ZDh9VeBCOGx4r1OVGmcb5n67md"
     "t+R3Q/ gatekeeper-access dev1->odoo-gatekeeper",
-    # F1: append new pubkey here
+    # F1 new push key (generated on airuleset box, #870)
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGOHYeG/kHVSzo+k0d9fDHRbGKIN9lMhs2nX"
+    "5loR3/AP airuleset-push@airuleset #870",
 )
 
 # Backwards-compatible alias — the first member IS the old single pubkey.
@@ -383,7 +385,7 @@ SUBDEV_ACCOUNTS_FALLBACK = {
     "montalu6": "default",
     "montalu7": "default",
     "montalu8": "default",
-    "marek": "gatekeeper_access_ed25519",
+    # #882: marek entry removed (marek webterm module deleted)
     "david1": "gatekeeper_access_ed25519",
     "david2": "gatekeeper_access_ed25519",
     "david3": "gatekeeper_access_ed25519",

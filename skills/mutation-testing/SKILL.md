@@ -1,6 +1,6 @@
 ---
 name: mutation-testing
-description: Mutation-testing policy + setup (two-tier gate — diff-scoped ≤20-min PR gate + on-demand /mutation-sweep full sweep; cargo-mutants/StrykerJS config; budget-overrun = setup bug). Load BEFORE adding, auditing, or debugging a mutation-testing CI job, or when a mutation gate overruns its budget.
+description: Mutation testing policy — diff-scoped ≤20-min PR gate + on-demand /mutation-sweep. Load before adding or debugging a mutation CI job.
 user-invocable: false
 ---
 

@@ -49,8 +49,9 @@ class TestProfileForHostAccountAware(unittest.TestCase):
     def test_subdev_default_is_still_david(self):
         self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
 
-    def test_subdev_marek_account_is_still_marek(self):
-        self.assertEqual(p.profile_for_host("subdev", account="marek"), p.MAREK)
+    def test_subdev_marek_account_falls_to_david_after_882(self):
+        # marek profile removed (#882); marek account now falls through to david
+        self.assertEqual(p.profile_for_host("subdev", account="marek"), p.DAVID)
 
     def test_dev1_is_owner_regardless_of_account(self):
         self.assertEqual(p.profile_for_host("dev1", account="dominika"), p.OWNER)
@@ -175,12 +176,14 @@ class TestDominikaFleetEntry(unittest.TestCase):
     must never merge/deploy/close."""
 
     def test_dominika_remote_host_registered_marek_shape(self):
+        # #882: marek@subdev removed — compare against david1@subdev instead
+        # (same subdev VPS, same operator gk_access key pattern)
         import cli_fleet
         e = next(h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "dominika@subdev")
-        marek = next(h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "marek@subdev")
-        self.assertEqual(e["host"], marek["host"])          # same subdev VPS
+        david1 = next(h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "david1@subdev")
+        self.assertEqual(e["host"], david1["host"])         # same subdev VPS
         self.assertEqual(e["user"], "dominika")
-        self.assertEqual(e["identity"], marek["identity"])  # operator gk_access key
+        self.assertEqual(e["identity"], david1["identity"]) # operator gk_access key
         self.assertEqual(e["repo_path"], "~/devel/airuleset")
 
     def test_dominika_is_reduced_never_full(self):
@@ -287,13 +290,11 @@ class TestDominikaUnitRender(unittest.TestCase):
 
     def test_dominika_ports_are_distinct_from_owner_david_and_marek(self):
         import cli_webterm_david as d
-        import cli_webterm_marek as mk
+        # #882: marek webterm module deleted — check david + owner only
         self.assertNotIn(dn.WEBTERM_DOMINIKA_GATEWAY_PORT,
-                         (w.WEBTERM_GATEWAY_PORT, d.WEBTERM_DAVID_GATEWAY_PORT,
-                          mk.WEBTERM_MAREK_GATEWAY_PORT))
+                         (w.WEBTERM_GATEWAY_PORT, d.WEBTERM_DAVID_GATEWAY_PORT))
         self.assertNotIn(dn.WEBTERM_DOMINIKA_TTYD_PORT,
-                         (w.WEBTERM_TTYD_PORT, d.WEBTERM_DAVID_TTYD_PORT,
-                          mk.WEBTERM_MAREK_TTYD_PORT))
+                         (w.WEBTERM_TTYD_PORT, d.WEBTERM_DAVID_TTYD_PORT))
 
     def test_gateway_after_points_at_dominika_ttyd_unit(self):
         unit = dn.render_dominika_gateway_unit()
@@ -311,13 +312,11 @@ class TestDominikaUnitRender(unittest.TestCase):
         self.assertEqual(dn.WEBTERM_DOMINIKA_TUNNEL_UUID,
                          "7792f710-16fb-41da-b46d-1d7b1cd0f8a6")
         import cli_webterm_david as d
-        import cli_webterm_marek as mk
+        # #882: marek webterm module deleted — check david only
         self.assertNotIn(dn.WEBTERM_DOMINIKA_TUNNEL_UUID,
-                         (d.WEBTERM_DAVID_TUNNEL_UUID, mk.WEBTERM_MAREK_TUNNEL_UUID))
+                         (d.WEBTERM_DAVID_TUNNEL_UUID,))
         self.assertNotEqual(dn.WEBTERM_DOMINIKA_TUNNEL_CONFIG,
                             d.WEBTERM_DAVID_TUNNEL_CONFIG)
-        self.assertNotEqual(dn.WEBTERM_DOMINIKA_TUNNEL_CONFIG,
-                            mk.WEBTERM_MAREK_TUNNEL_CONFIG)
 
 
 class TestDominikaPrerequisiteGate(unittest.TestCase):

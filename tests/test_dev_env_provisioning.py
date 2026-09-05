@@ -428,7 +428,7 @@ class TestEnsureStreamTmuxSession(TestCase):
         def run(argv):
             raise OSError("tmux missing")
         result = airuleset.ensure_stream_tmux_session(
-            user="marek", run=run, sentinel_path=self._sentinel())
+            user="montalu1", run=run, sentinel_path=self._sentinel())
         self.assertIn("unreachable", result)
 
     def test_unreachable_tmux_never_writes_the_sentinel(self):
@@ -440,7 +440,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             raise OSError("tmux missing")
 
         airuleset.ensure_stream_tmux_session(
-            user="marek", run=run, sentinel_path=sentinel)
+            user="montalu1", run=run, sentinel_path=sentinel)
         self.assertFalse(sentinel.exists())
 
     def test_second_call_never_recreates_a_session_the_user_deliberately_killed(self):
@@ -735,7 +735,7 @@ class TestApplyStreamSshAttach(TestCase):
     def test_creates_file_when_absent(self):
         d = tempfile.mkdtemp()
         p = Path(d) / ".bashrc"
-        changed = airuleset.apply_stream_ssh_attach(p, user="marek")
+        changed = airuleset.apply_stream_ssh_attach(p, user="montalu1")
         self.assertTrue(changed)
         self.assertTrue(p.exists())
 
@@ -1701,7 +1701,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         d = tempfile.mkdtemp()
         p = Path(d) / ".tmux.conf"
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="marek", run=lambda argv: None)
+            p, user="montalu1", run=lambda argv: None)
         self.assertTrue(changed)
         self.assertTrue(p.exists())
 

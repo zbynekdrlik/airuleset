@@ -73,13 +73,11 @@ class TestProvisionOwnerQuestionThreadForInstall(unittest.TestCase):
             self.assertEqual(calls, [], "suppressed owner must make ZERO Discord calls")
             self.assertNotIn("_Q=", Path(p).read_text())
 
-    def test_suppressed_owner_marek_is_skipped(self):
-        r = notify.provision_owner_question_thread_for_install(
-            env={"DISCORD_BOT_TOKEN": "tok",
-                 "DISCORD_NOTIFICATION_CHANNEL_MAREK": "mthread"},
-            http=lambda *a, **k: self.fail("marek must make no Discord call"),
-            owner="marek")
-        self.assertEqual(r["status"], "skip-suppressed")
+    def test_marek_no_longer_suppressed_882(self):
+        # marek decommissioned #882 — no longer in QUESTION_PING_OWNERS_OFF,
+        # so provision_owner_question_thread_for_install would NOT skip him.
+        # Since marek is decommissioned, this just verifies the OFF predicate.
+        self.assertFalse(notify.question_ping_off("marek"))
 
     def test_no_owner_is_skipped(self):
         r = notify.provision_owner_question_thread_for_install(

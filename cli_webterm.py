@@ -205,8 +205,7 @@ def _login_user(profile):
     mode, so no credential is generated for them)."""
     if profile == profiles.DAVID:
         return "david"
-    if profile == profiles.MAREK:
-        return profiles.MAREK_GATEWAY_USER
+    # marek profile REMOVED (#882)
     return WEBTERM_LOGIN_USER
 
 
@@ -227,8 +226,7 @@ def webterm_inventory(profile=profiles.OWNER):
     airuleset facade (test-patchable)."""
     if profile == profiles.DAVID:
         return profiles.david_inventory()
-    if profile == profiles.MAREK:
-        return profiles.marek_inventory()
+    # marek profile REMOVED (#882)
     if profile == profiles.DOMINIKA:
         return profiles.dominika_inventory()
     import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
@@ -673,16 +671,7 @@ WEBTERM_DASHBOARD_TABS = {
     # miva1 + gatekeeper as OBSERVE tabs): his own subdev account first
     # (default-active tab), his montalu2 stream, the miva1 subdev stream, his
     # montalu4 stream, his `marek` tmux sessions on dev1 + dev2, the gk box,
-    # and his forestshop VPS (handled like the owner's spinbike `sb` tab). The
-    # ids are the MAREK LANE inventory ids (cli_webterm_profiles.marek_inventory)
-    # -- his lane render consumes this list via LaneSpec.dashboard_human="marek",
-    # so it dictates order + exclusivity there. NB: `dev1`/`dev2` here name
-    # MAREK's lane entries (which attach HIS `marek` tmux group), and
-    # `gatekeeper` names his OBSERVE entry (which attaches the OWNER's gk group),
-    # not the fleet's owner entries -- the two id namespaces meet only in tests,
-    # never in a prod render.
-    "marek": ["marek-subdev", "montalu2-subdev", "miva1-subdev",
-              "montalu4-subdev", "dev1", "dev2", "gatekeeper", "forestshop"],
+    # marek lane REMOVED (#882, 2026-09-05: stream decommissioned)
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
     # ids david1..4 + codex-bridge) and does NOT consume this list; this records
@@ -1675,9 +1664,7 @@ def maybe_setup_webterm():
     if prof == profiles.DAVID:
         import cli_webterm_david
         return cli_webterm_david.setup_webterm_david_service()
-    if prof == profiles.MAREK:
-        import cli_webterm_marek
-        return cli_webterm_marek.setup_webterm_marek_service()
+    # marek webterm lane REMOVED (#882, 2026-09-05: stream decommissioned)
     if prof == profiles.DOMINIKA:
         import cli_webterm_dominika
         return cli_webterm_dominika.setup_webterm_dominika_service()
