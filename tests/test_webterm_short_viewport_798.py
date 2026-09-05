@@ -257,15 +257,14 @@ class TestShortViewportRealBrowser798(unittest.TestCase):
     def test_tall_viewport_stays_crisp_no_grow(self):
         # a viewport that fits the grid must NOT grow the box: reconcileFrameFit
         # detects under-fit, clears any explicit box, and leaves the existing #700
-        # `stretchFrameToFill` transform (a centred fill) untouched. (We assert only
-        # these #798-scoped properties, not the grid's exact footprint -- that is
-        # #700's centred-fill geometry, covered by its own tests, and it uses a
-        # '50% 50%' origin the over-fit mapping here does not model.)
+        # `stretchFrameToFill` transform untouched.
+        # #798 REOPEN: stretchFrameToFill now uses '0 0' + translate (instead of
+        # the old '50% 50%' center-scale), so a translate IS present in the under-
+        # fit transform -- that is stretchFrameToFill's own, not reconcileFrameFit
+        # hijacking. The assertion checks only that the box is NOT explicitly grown.
         m = self._measure(760)  # 760 - 37 = 723 slot, comfortably fits the grid
         self.assertFalse(m["boxExplicit"],
                          "a fitting viewport must leave the box slot-sized (no grow)")
-        self.assertNotIn("translate", m.get("transform", "") or "",
-                         "reconcileFrameFit must not hijack the under-fit transform")
 
 
 def _grab(html, const_name):
