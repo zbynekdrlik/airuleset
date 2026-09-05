@@ -2174,19 +2174,82 @@ def escalate(status, home, now, dry_run, top_consumers_fn=None):
     return [line]
 
 
-def _severe_ticket_marker(now):
-    return "/tmp/airuleset-disk-guard-severe-%s" % time.strftime(
-        "%Y%m%d", time.gmtime(now))
+SEVERE_TICKET_STATE_NAME = "severe-ticket-state.json"
+# #896-899 incident (2026-09-05): the OLD dedup was a WORLD-WRITABLE, date-
+# keyed `/tmp` marker written ONLY on a successful `gh` call. On the exact
+# disk-full box this code exists for, that marker WRITE can itself fail
+# (ENOSPC) -- silently swallowed -- so the NEXT poll (or the next fresh /tmp,
+# e.g. a container/worktree with no prior marker) saw "not filed yet" and
+# refiled for real. FOUR real duplicate tickets were filed this way within an
+# 8-minute window. Fixed by moving the dedup state to a DURABLE per-box file
+# under the guard's own state dir (derived from `home`, never `~/.claude`
+# resolved directly -- #861) recording the last-filed timestamp, PLUS an
+# IN-MEMORY within-run guard that survives even when THAT write itself fails
+# (the #545 `_record_tier0_bypass` "disk write can fail" lesson, reused here).
+SEVERE_TICKET_REFILE_S = 24 * 3600     # re-file only after this cooldown
+
+_SEVERE_TICKET_FILED_THIS_PROCESS = {}     # {state_path_str: last_filed_ts}
+
+
+def _severe_ticket_state_path(home):
+    return _guard_dir(home) / SEVERE_TICKET_STATE_NAME
+
+
+def _severe_ticket_recently_filed(state_path, now, refile_s=None):
+    """True iff a severe ticket was already filed within `refile_s` --
+    checked BOTH via the in-memory within-run guard (set the instant a filing
+    succeeds, so it holds even when the durable write below fails) and the
+    durable per-box state file (across-run / across-process). A future-dated
+    stamp never wedges the gate open forever (mirrors the sibling #545
+    `_record_tier0_bypass` dedup shape)."""
+    refile_s = SEVERE_TICKET_REFILE_S if refile_s is None else refile_s
+    key = str(state_path)
+    mem_ts = _SEVERE_TICKET_FILED_THIS_PROCESS.get(key)
+    if isinstance(mem_ts, (int, float)) and 0 <= now - mem_ts < refile_s:
+        return True
+    try:
+        st = json.loads(Path(state_path).read_text())
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        st = None
+    # No durable record at all (first-ever filing, or an unreadable/missing
+    # file) is NEVER "recently filed" -- only a GENUINE prior timestamp is
+    # checked against the cooldown (a bare `ts=0` default would otherwise
+    # misread "never filed" as "filed at epoch 0" for any small `now`).
+    if isinstance(st, dict) and "last_filed_ts" in st:
+        try:
+            ts = float(st["last_filed_ts"])
+        except (TypeError, ValueError):
+            return False
+        if 0 <= now - ts < refile_s:
+            return True
+    return False
+
+
+def _mark_severe_ticket_filed(state_path, now, issue=None):
+    """Record a successful filing BOTH in-memory FIRST (so it holds even if
+    the durable write immediately below fails on a genuinely full disk, #545)
+    and durably on disk (best-effort -- a write failure here is logged, never
+    raised, and the in-memory guard has already made this call safe for the
+    rest of THIS process's lifetime)."""
+    _SEVERE_TICKET_FILED_THIS_PROCESS[str(state_path)] = now
+    try:
+        Path(state_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(state_path).write_text(json.dumps({"last_filed_ts": now, "issue": issue}))
+    except OSError as e:
+        _dbg("severe ticket state write failed: %r" % e)
 
 
 def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None):
     """#895: at >=95% after drain, file a gk-request ticket with
-    top_consumers detail. Daily-deduped, NEVER a Discord ping.
-    ``run_fn`` is injectable for testing (default: subprocess.run)."""
+    top_consumers detail. Deduped via `_severe_ticket_recently_filed` (durable
+    per-box state + in-memory within-run guard -- #896-899), NEVER a Discord
+    ping. ``run_fn`` is injectable for testing (default: subprocess.run) --
+    a test exercising this path MUST inject a recorder; letting a test reach
+    the real default is exactly how the #896-899 duplicate tickets happened."""
     if status.get("worst_pct", 0) < SEVERE_PCT:
         return []
-    marker = _severe_ticket_marker(now)
-    if os.path.exists(marker):
+    state_path = _severe_ticket_state_path(home)
+    if _severe_ticket_recently_filed(state_path, now):
         return []
     run_fn = run_fn or subprocess.run
     hostname = socket.gethostname()
@@ -2223,20 +2286,12 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None):
                                      "gk-request failed: %s" % (
                                          getattr(r, "stderr", "") or "")[:200]))
             else:
-                # #895 F5 fix: write the dedup marker ONLY on success —
-                # a transient failure must not suppress the next day's retry.
-                try:
-                    fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-                    os.write(fd, (line + "\n").encode("utf-8"))
-                    os.close(fd)
-                    try:
-                        os.chmod(marker, 0o666)
-                    except OSError:
-                        pass      # airuleset:script-ok best-effort chmod
-                except FileExistsError:
-                    _dbg("severe marker won by another user this poll — deduped")
-                except OSError as e:
-                    _dbg("severe marker write failed: %r" % e)
+                # #895 F5 / #896-899: mark filed ONLY on success — a transient
+                # failure must not suppress the retry. In-memory FIRST (holds
+                # for the rest of this process even if the durable write below
+                # fails on a full disk), durable state second (best-effort).
+                _mark_severe_ticket_filed(
+                    state_path, now, (getattr(r, "stdout", "") or "").strip() or None)
         except Exception as e:
             _dbg("severe ticket error: %r" % e)
             logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
@@ -2350,7 +2405,8 @@ def _largest_live_scratch(rows):
 
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
-                   planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None):
+                   planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
+                   top_consumers_fn=None, severe_run_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -2362,7 +2418,18 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     (`largest_live_scratch` — visibility only, never deleted, the `disk NN%`
     finding's addressee) and feeds the scratch drain planner; the LIVE-SCRATCH
     log line is written only when that value CHANGES. Best-effort; returns log
-    lines for the sweep's own log."""
+    lines for the sweep's own log.
+
+    ``top_consumers_fn`` (injectable, #896-899) feeds BOTH the escalation log
+    AND the severe-ticket body from the SAME computed list — the prior code
+    read `post.get("top_consumers")`, populated ONLY on the real
+    (``planners_fn is None``) path, so any test/caller injecting its own
+    ``planners_fn`` (every disk_guard test forcing ≥95 %) silently filed a
+    ticket body with "Top consumers:\\n(none)". ``severe_run_fn`` is the
+    injectable filer seam forwarded to :func:`file_severe_ticket` — a caller
+    (a test in particular) exercising the ≥95 % path MUST inject a recorder
+    here; leaving it unset reaches the REAL ``subprocess.run`` default, which
+    is exactly how the #896-899 duplicate tickets were filed."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     mounts = mounts or MOUNTS
@@ -2515,14 +2582,25 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             except Exception as e:
                 logs.append("disk-guard: top-consumers post-drain write error: %r" % e)
         if post["level"] == "critical":
-            logs += escalate(post, home, now, dry_run)
-            # #895: at >=95% file a gk-request ticket (daily-deduped, no ping)
+            # #896-899: compute top consumers ONCE here (the SAME injectable
+            # seam escalate() already exposes) and reuse the SAME list for
+            # BOTH the escalation log line and the severe-ticket body -- the
+            # OLD code instead read `post.get("top_consumers")`, populated
+            # ONLY on the real (`planners_fn is None`) path a few lines above,
+            # so any caller (every disk_guard test forcing >=95%) injecting
+            # its own `planners_fn` silently filed a ticket body with
+            # "Top consumers:\n(none)" (the #896-899 real-ticket evidence).
+            top_now = (top_consumers_fn(home, now, limit=5) if top_consumers_fn is not None
+                      else _collect_top_consumers(home, now, limit=5, scratch_rows=scratch_rows))
+            logs += escalate(post, home, now, dry_run,
+                             top_consumers_fn=lambda *_a, **_kw: top_now)
+            # #895/#896-899: at >=95% file a gk-request ticket (dedup via
+            # `_severe_ticket_recently_filed`, no ping). `severe_run_fn` is
+            # the injectable filer seam -- a caller exercising this path MUST
+            # inject a recorder; the unset default reaches the REAL `gh`.
             if post["worst_pct"] >= SEVERE_PCT:
-                top_for_ticket = (
-                    [(d["path"], d["bytes"]) for d in post.get("top_consumers", [])]
-                    if post.get("top_consumers") else [])
-                logs += file_severe_ticket(post, home, now, top_for_ticket,
-                                          dry_run=dry_run)
+                logs += file_severe_ticket(post, home, now, top_now,
+                                          dry_run=dry_run, run_fn=severe_run_fn)
     finally:
         _release_lock(lock)
     return logs
