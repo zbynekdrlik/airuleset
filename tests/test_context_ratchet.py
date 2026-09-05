@@ -615,7 +615,7 @@ class TestFleetProjectArgs(unittest.TestCase):
             with patch("cli_remote._deployable_hosts",
                        return_value=fake_hosts), \
                  patch.object(cb, "_registry_projects_for_host",
-                              wraps=cb._registry_projects_for_host) as spy, \
+                              wraps=cb._registry_projects_for_host), \
                  patch.object(cb, "REGISTRY_PATH", str(reg)):
                 data = cb.run_fleet(runner=fake_runner)
 
