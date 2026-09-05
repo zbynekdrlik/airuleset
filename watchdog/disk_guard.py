@@ -2090,17 +2090,19 @@ def _ranked_consumers(home, now):
     return ranked
 
 
-def _collect_top_consumers(home, now, limit=5):
+def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
     """Default implementation for the escalation's top-N path-level detail
-    (#849 ask 5). Runs the CHEAP planners and returns top consumers."""
+    (#849 ask 5). Runs the CHEAP planners and returns top consumers.
+    #892: accepts pre-computed `scratch_rows` to avoid a doubled du-heavy walk."""
     all_actions = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
                         ("uploads", lambda: _plan_uploads(home, now)),
                         ("cli-version", lambda: _plan_cli_versions(home, now)),
-                        ("scratch", lambda: _plan_scratch(home, now)),
+                        ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
                         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
                         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
                         ("claude-version", lambda: _plan_claude_versions(home, now)),
+                        ("playwright-browser", lambda: _plan_playwright_browsers(home, now)),
                         ("user-cache", lambda: _plan_user_cache(home, now))):
         try:
             all_actions.extend(plan())
@@ -2428,7 +2430,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         # _collect_top_consumers would re-discover scratch, doubling the du walk).
         if planners_fn is None:
             try:
-                top = _collect_top_consumers(home, now, limit=3)
+                top = _collect_top_consumers(home, now, limit=3, scratch_rows=scratch_rows)
                 post["top_consumers"] = [{"path": p, "bytes": b} for p, b in top]
                 post["top_consumers_ts"] = now
                 # Carry forward largest_live_scratch if computed this poll

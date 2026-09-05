@@ -1914,6 +1914,11 @@ def test_claude_version_keeps_staged_newer_version(tmp_path):
     assert by_path["2.1.260"].get("kind") == "skip" or by_path["2.1.260"].get("reason") is not None, (
         "#892: a staged newer version (2.1.260 > running 2.1.258) must be "
         "KEPT, not deleted — it is a pending self-update")
+    # The older version must STILL be a delete candidate (not kept-all)
+    assert "2.1.255" in by_path, "the older version dir must appear in results"
+    assert by_path["2.1.255"].get("reason") is None, (
+        "#892: a strictly-older version (2.1.255 < running 2.1.258) must be "
+        "a delete candidate, not kept")
 
 
 def test_playwright_browser_rung_discovers_stale_revisions(tmp_path):
@@ -1948,6 +1953,16 @@ def test_playwright_browser_rung_discovers_stale_revisions(tmp_path):
     assert "chromium-1140" in by_path, "current chromium revision must be discovered"
     assert by_path["chromium-1140"].get("reason") is not None, (
         "#892: chromium-1140 (newest) must be kept")
+    # The headless shell family must be treated SEPARATELY from chromium
+    assert "chromium_headless_shell-1100" in by_path, \
+        "old headless shell revision must be discovered"
+    assert by_path["chromium_headless_shell-1100"].get("reason") is None, (
+        "#892: chromium_headless_shell-1100 (old, superseded by -1140 in its "
+        "OWN family) should be deletable")
+    assert "chromium_headless_shell-1140" in by_path, \
+        "current headless shell revision must be discovered"
+    assert by_path["chromium_headless_shell-1140"].get("reason") is not None, (
+        "#892: chromium_headless_shell-1140 (newest in its family) must be kept")
 
 
 def test_top_consumers_survives_non_drain_poll(tmp_path):
