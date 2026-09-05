@@ -510,6 +510,10 @@ def _probe_sudo() -> str:
             capture_output=True, text=True, timeout=5,
         )
         return "sudo available" if r.returncode == 0 else "sudo unavailable"
+    except FileNotFoundError:
+        # No sudo binary on this system — the canonical "unavailable" state
+        # (CI runners, minimal containers).
+        return "sudo unavailable"
     except (OSError, subprocess.SubprocessError):
         return "sudo probe failed"
 

@@ -7,6 +7,8 @@ paths:
 
 Staršie/hlbšie tests/ lekcie (archív) sú v `.claude/rules-reference/internals-archive.md` (on-demand, bez `paths` — grepni ho). Sem pribúdajú NOVÉ lekcie, kým súbor neprekročí ratchet strop, potom sa najstaršie presunú do archívu.
 
+- **Hermetic subset must not probe the host's sudo (#870).** `_probe_sudo()` runs `sudo -n true` — a `FileNotFoundError` (no sudo binary, the canonical CI-runner state) must map to `"sudo unavailable"`, NOT `"sudo probe failed"`. Test `TestSudoProbe` via `mock.patch.object(p.subprocess, "run")` for all branches; never call real sudo from CI.
+
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #799 cap — grep "#485" there]** the pid-SID recyclable-`/tmp`-state hook-dedup test-flake class (uuid sid + precise addCleanup, never a box-wide glob).
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #830 cap — grep "#488" there]** the cp-backup/mutate/restore MANDATE for UNCOMMITTED code (never `git checkout <file>`, which reverts to HEAD and SILENTLY deletes uncommitted helpers → post-restore ImportError).
 - **NEVER run a line-dedup union resolver on `.claude/rules-reference/internals-archive.md` itself — it deduped the archive against ITSELF and silently dropped ~598 KB (the whole theirs-side) during a batch-29 cross-base merge (2026-08-15); the content-lock tests (test_ci_monitoring_scope / test_context_diet_tier1 / test_long_wait_background_waiter) were what caught it.** The archive is APPEND-ONLY: resolve its merge conflicts as base-version + append every section/line the branches added (rebuild script in the incident commit), and any `- ` bullet dedup may compare OTHER files against the archive, never the archive against itself.

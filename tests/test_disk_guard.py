@@ -1634,3 +1634,197 @@ def test_no_scratch_discovery_at_healthy_pressure(tmp_path):
     status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
     assert "largest_live_scratch" not in status, \
         "no largest_live_scratch at healthy pressure"
+
+
+# --------------------------------------------------------------------------- #
+# #849 — standalone function-level tests (complement the #863-era class tests)
+# --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# #849 ask 2 — per-child scratchpad aging inside a live session
+# --------------------------------------------------------------------------- #
+class TestScratchpadChildAging849:
+    """A LIVE session's scratchpad/ children are aged INDEPENDENTLY: an old child
+    not held by any open fd is a genuine candidate, while a fresh child and an
+    in-use old child are kept. The live session ITSELF is never swept."""
+
+    def test_stale_child_is_candidate_fresh_child_kept(self, tmp_path):
+        uid = os.getuid()
+        ck = _scratch_cwd_key(tmp_path, uid)
+        sess = ck / _LIVE_UUID
+        _mkfile(sess / "scratchpad" / "old-venv" / "lib" / "big.so",
+                age_days=10, nbytes=50000)
+        _mkfile(sess / "scratchpad" / "current-ticket" / "scratch.py",
+                age_days=0.5, nbytes=1000)
+        proc = _mkfakeproc(tmp_path, [
+            {"pid": "42", "cwd": str(sess.resolve())}])
+        rows = cs.discover_claude_scratch_candidates(
+            tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+            proc_dir=proc, home=str(tmp_path))
+        sess_row = next(r for r in rows if r.get("uuid") == _LIVE_UUID)
+        assert sess_row["reason"] is not None, "the live session itself is kept"
+        children = sess_row.get("stale_children", [])
+        assert len(children) >= 1, "stale scratchpad children must be reported"
+        old_child = next((c for c in children if "old-venv" in c["path"]), None)
+        assert old_child is not None, "the old child must be a candidate"
+        assert old_child["reason"] is None, "old + not-in-use -> reason=None (candidate)"
+        fresh_child = next((c for c in children if "current-ticket" in c["path"]), None)
+        assert fresh_child is None, "a fresh child must NOT appear as stale"
+
+    def test_in_use_old_child_kept(self, tmp_path):
+        uid = os.getuid()
+        ck = _scratch_cwd_key(tmp_path, uid)
+        sess = ck / _LIVE_UUID
+        old_dir = sess / "scratchpad" / "held-venv"
+        _mkfile(old_dir / "data.bin", age_days=10, nbytes=30000)
+        proc = _mkfakeproc(tmp_path, [
+            {"pid": "42", "cwd": str(sess.resolve()),
+             "fds": [str(old_dir.resolve())]}])
+        rows = cs.discover_claude_scratch_candidates(
+            tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+            proc_dir=proc, home=str(tmp_path))
+        sess_row = next(r for r in rows if r.get("uuid") == _LIVE_UUID)
+        children = sess_row.get("stale_children", [])
+        held = [c for c in children if "held-venv" in c["path"] and c["reason"] is None]
+        assert len(held) == 0, "an in-use old child must be kept (reason != None)"
+
+    def test_drain_includes_stale_scratchpad_children(self, tmp_path):
+        """The drain ladder's scratch rung emits DELETE actions for stale
+        scratchpad children reported by the discovery."""
+        fake_rows = [
+            {"path": "/tmp/sess/scratchpad", "reason": "live session -- kept",
+             "uuid": "a" * 36, "live": True, "size": 100000,
+             "stale_children": [
+                 {"path": "/tmp/sess/scratchpad/old-venv", "size": 50000,
+                  "reason": None, "cls": "scratch"},
+                 {"path": "/tmp/sess/scratchpad/fresh", "size": 1000,
+                  "reason": "too recent", "cls": "scratch"},
+             ]},
+        ]
+        actions = dg._plan_scratch(str(tmp_path), _NOW, scratch_rows=fake_rows)
+        delete_paths = [a["path"] for a in actions if a.get("kind") == "delete"]
+        assert "/tmp/sess/scratchpad/old-venv" in delete_paths, \
+            "stale scratchpad child must become a DELETE action"
+        skip_paths = [a["path"] for a in actions if a.get("kind") == "skip"]
+        assert any("fresh" in p for p in skip_paths), \
+            "a fresh scratchpad child must be a SKIP"
+
+
+# --------------------------------------------------------------------------- #
+# #849 ask 3 — claude metadata dirs sweep
+# --------------------------------------------------------------------------- #
+class TestClaudeMetadata849:
+    """~/.claude/tasks/, ~/.claude/debug/, ~/.claude/shell-snapshots/ children
+    older than 7d are genuine deletion candidates."""
+
+    def test_stale_children_are_candidates(self, tmp_path):
+        old_mt = _NOW - 14 * _DAY
+        fresh_mt = _NOW - 1 * _DAY
+        for d in ("tasks", "debug", "shell-snapshots"):
+            _mkfile(tmp_path / ".claude" / d / "old-entry" / "data.json",
+                    age_days=14)
+            os.utime(str(tmp_path / ".claude" / d / "old-entry"), (old_mt, old_mt))
+            _mkfile(tmp_path / ".claude" / d / "fresh-entry" / "data.json",
+                    age_days=1)
+            os.utime(str(tmp_path / ".claude" / d / "fresh-entry"),
+                     (fresh_mt, fresh_mt))
+        rows = dg.discover_stale_claude_metadata(
+            home=str(tmp_path), now=_NOW, min_age_days=7)
+        candidates = [r for r in rows if r["reason"] is None]
+        kept = [r for r in rows if r["reason"] is not None]
+        assert len(candidates) == 3, "3 old entries (one per dir) are candidates"
+        assert all("old-entry" in r["path"] for r in candidates)
+        assert len(kept) == 3, "3 fresh entries are kept"
+        assert all("fresh-entry" in r["path"] for r in kept)
+        assert all(r["cls"] == "claude-metadata" for r in rows)
+
+    def test_symlinks_never_followed(self, tmp_path):
+        d = tmp_path / ".claude" / "tasks"
+        d.mkdir(parents=True)
+        os.symlink("/etc/passwd", str(d / "evil-link"))
+        rows = dg.discover_stale_claude_metadata(
+            home=str(tmp_path), now=_NOW, min_age_days=7)
+        assert all(r["reason"] is not None for r in rows), \
+            "a symlink child must never be a candidate"
+
+    def test_metadata_in_reclaimable_classes(self):
+        assert "claude-metadata" in dg.RECLAIMABLE_CLASSES
+
+    def test_metadata_in_drain_ladder(self, tmp_path):
+        planners = dg._default_planners(str(tmp_path), _NOW)
+        labels = [label for label, _ in planners]
+        assert "claude-metadata" in labels, \
+            "claude-metadata must be a rung in the drain ladder"
+
+    def test_live_session_tasks_kept(self, tmp_path):
+        """A tasks/ child whose name is a live session uuid is KEPT even if
+        old (Fable review finding 1: a live session's task registry must
+        never be deleted)."""
+        home = tmp_path
+        live_uuid = _LIVE_UUID
+        td = home / ".claude" / "tasks" / live_uuid
+        _mkfile(td / "task.json", age_days=40)
+        # Make the session registry say this uuid is live
+        sdir = home / ".claude" / "sessions"
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "reg.json").write_text(json.dumps(
+            {"pid": os.getpid(), "sessionId": live_uuid}))
+        rows = dg.discover_stale_claude_metadata(
+            home=str(home), now=_NOW, min_age_days=7, proc_dir="/proc")
+        candidates = [r for r in rows if r.get("reason") is None]
+        assert len(candidates) == 0, \
+            "a live session's tasks/ dir must be KEPT, never a candidate"
+        kept = [r for r in rows if r.get("reason") is not None]
+        assert len(kept) == 1
+        assert "live session" in kept[0]["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# #849 ask 5 — escalation names top-5 consumers by path
+# --------------------------------------------------------------------------- #
+class TestEscalationTop5Paths849:
+    """The escalation at >=90% must name the TOP-5 consumers BY PATH,
+    not just by class."""
+
+    def test_top_consumers_by_path_pure(self):
+        """The pure selector returns the top-N actionable candidates by bytes."""
+        actions = [
+            {"cls": "scratch", "path": "/big1", "bytes": 500, "kind": "delete", "reason": None},
+            {"cls": "scratch", "path": "/big2", "bytes": 200, "kind": "delete", "reason": None},
+            {"cls": "worktree", "path": "/wt3", "bytes": 100, "kind": "delete", "reason": None},
+            {"cls": "uploads", "path": "/up4", "bytes": 50, "kind": "skip", "reason": "too recent"},
+        ]
+        top = dg._top_consumers_by_path(actions, limit=5)
+        assert len(top) == 3
+        assert top[0] == ("/big1", 500)
+        assert top[1] == ("/big2", 200)
+        assert top[2] == ("/wt3", 100)
+
+    def test_escalation_output_includes_top5_via_seam(self, tmp_path):
+        """The escalation log line must include a 'top-5-by-path' section
+        naming the largest individual candidates, driven via the injectable
+        top_consumers_fn seam (Fable review finding 3)."""
+        import time as _time
+        marker = "/tmp/airuleset-disk-guard-escalated-%s" % _time.strftime(
+            "%Y%m%d", _time.gmtime(_NOW))
+        if os.path.exists(marker):
+            os.unlink(marker)
+        status = {"worst_pct": 95, "dim": "bytes"}
+        fake_top = [("/tmp/big1", 500_000_000), ("/home/x/wt2", 200_000_000)]
+        lines = dg.escalate(
+            status, str(tmp_path), _NOW, dry_run=True,
+            top_consumers_fn=lambda h, n, limit: fake_top[:limit])
+        assert len(lines) >= 1, "escalation must produce at least one log line"
+        text = lines[0]
+        assert "top-5-by-path" in text, \
+            "the escalation must include a 'top-5-by-path' section"
+        assert "/tmp/big1" in text, "the largest consumer must be named by path"
+        assert "/home/x/wt2" in text
+
+    def test_escalation_source_has_top5_detail(self):
+        """The escalate() function source must reference top-5-by-path."""
+        import inspect
+        src = inspect.getsource(dg.escalate)
+        assert "top-5-by-path" in src, \
+            "escalate() must include top-5-by-path detail"

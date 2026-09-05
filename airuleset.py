@@ -2797,6 +2797,10 @@ def cmd_tickets_status(args):
                 entry["gk"] = gk
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
+                # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
+                # for the red `· W N!` footer signal and by block-dispatch-over-
+                # wdrain.sh (which reads ops_wait directly, not this bool).
+                entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -2854,6 +2858,8 @@ def cmd_tickets_status(args):
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
+                # #868: W-drain breach flag (same as the slice path above).
+                entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
@@ -6642,6 +6648,11 @@ from cli_skill_usage import (  # noqa: E402, F401
     scan_usage as scan_usage,
 )
 
+# --- #868: W-drain receipt CLI (block-dispatch-over-wdrain.sh companion).
+from cli_wdrain import (  # noqa: E402
+    cmd_wdrain_pass as cmd_wdrain_pass,
+)
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -7466,6 +7477,18 @@ def main():
     p_su.add_argument("--days", type=int, default=60,
                       help="Window in days (default 60)")
 
+    # --- #868: W-drain receipt for block-dispatch-over-wdrain.sh gate ------
+    p_wdrain = sub.add_parser(
+        "wdrain-pass",
+        help="Record a W-drain receipt after validating per-member verdicts "
+             "(unblocks block-dispatch-over-wdrain.sh for 24h working time, #868)")
+    p_wdrain.add_argument("--record", action="store_true",
+                          help="Validate verdicts and write the receipt")
+    p_wdrain.add_argument("--verdicts-file", dest="verdicts_file",
+                          help="Tab-separated verdicts file (#N<TAB>action<TAB>citation)")
+    p_wdrain.add_argument("--cwd", default=None,
+                          help="Override cwd for cache key resolution")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -7600,6 +7623,7 @@ SUBCOMMANDS = {
     "model-audit": cmd_model_audit,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
+    "wdrain-pass": cmd_wdrain_pass,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

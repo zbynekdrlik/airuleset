@@ -48,13 +48,12 @@ FLEET_PUSH_PUBKEY = (
 
 # The webterm david lane pubkey — the key the webterm david gateway uses to
 # loopback-ssh between david1-4 accounts on subdev.  Read from subdev's
-# ``~david1/.ssh/authorized_keys`` (the ``webterm_david@subdev`` entry placed
-# there by the manual go-live, 2026-09-04).
-#
-# NOTE: if this is None, the lockout guard REFUSES to write the desired set
-# for david1-4 (a test pins this — fill it from the committed source or the
-# live box, then remove the None guard).
-WEBTERM_DAVID_LANE_PUBKEY = None  # placeholder — see dispatch note
+# ``~david1/.ssh/authorized_keys`` (the ``webterm_david@subdev #612`` entry,
+# manual go-live 2026-09-04; fingerprint verified 2026-09-05).
+WEBTERM_DAVID_LANE_PUBKEY = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOTvH3uji2CCX/+2QAiE3UWS0GzCz"
+    "++pRQ2t6cf+CmQd webterm_david@subdev #612"
+)
 
 
 def _key_blob(line):
@@ -103,8 +102,7 @@ def _fingerprint(line, run=None):
 
 def desired_keys_for_user(user):
     """Return the SORTED list of authorized_keys lines for a webterm-only
-    account.  Raises ValueError if the desired set is incomplete (e.g. a
-    placeholder pubkey is still None)."""
+    account.  Raises ValueError for a non-webterm-only user."""
     from cli_fleet import WEBTERM_ONLY_USERS
     if user not in WEBTERM_ONLY_USERS:
         raise ValueError("not a webterm-only user: %r" % user)
@@ -116,11 +114,6 @@ def desired_keys_for_user(user):
 
     # david1-4 get the lane key
     if user.startswith("david") and user[5:].isdigit():
-        if WEBTERM_DAVID_LANE_PUBKEY is None:
-            raise ValueError(
-                "WEBTERM_DAVID_LANE_PUBKEY is None — cannot build a "
-                "complete desired set for %r" % user
-            )
         keys.append(WEBTERM_DAVID_LANE_PUBKEY)
 
     # Sort by blob for deterministic output

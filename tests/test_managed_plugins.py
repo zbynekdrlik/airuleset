@@ -880,6 +880,101 @@ class TestStaleInstallPathHealing(TestCase):
                          "is stale")
 
 
+def _write_marketplace_registry(claude_dir: Path, name_path_map: dict):
+    """Write a fake known_marketplaces.json.
+
+    ``name_path_map`` is ``{"marketplace-name": "/install/location", ...}``.
+    Shape matches the REAL file observed on dev1:
+    ``{"name": {"source": {...}, "installLocation": "/path/...",
+    "lastUpdated": "..."}}``.
+    """
+    reg_dir = claude_dir / "plugins"
+    reg_dir.mkdir(parents=True, exist_ok=True)
+    data = {}
+    for name, path in name_path_map.items():
+        data[name] = {
+            "source": {"source": "github", "repo": f"example/{name}"},
+            "installLocation": path,
+            "lastUpdated": "2026-01-01T00:00:00.000Z",
+        }
+    (reg_dir / "known_marketplaces.json").write_text(json.dumps(data))
+
+
+class TestStaleMarketplaceHealing(TestCase):
+    """#845 continuation: after an account rename, known_marketplaces.json
+    keeps a stale installLocation for each marketplace.
+    ensure_marketplace_registered() runs `claude plugin marketplace add`
+    which does NOT rewrite the stale path — so plugin install fails
+    "marketplace directory does not exist".  The heal must drop stale
+    marketplace entries so registration re-adds them fresh."""
+
+    def test_stale_install_location_dropped(self):
+        """RED: a marketplace entry with a nonexistent installLocation
+        must be dropped so ensure_marketplace_registered re-adds it."""
+        d = Path(tempfile.mkdtemp())
+        _write_marketplace_registry(d, {
+            "claude-plugins-official": "/nonexistent/old-home/.claude/plugins/"
+                                       "marketplaces/claude-plugins-official",
+            "caveman": "/nonexistent/old-home/.claude/plugins/"
+                       "marketplaces/caveman",
+        })
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            healed = cli_caveman_plugins._heal_stale_marketplace_registry()
+        self.assertEqual(healed, {"claude-plugins-official", "caveman"})
+        # After healing, the file should exist but with those entries removed.
+        mp_path = d / "plugins" / "known_marketplaces.json"
+        data = json.loads(mp_path.read_text())
+        self.assertEqual(data, {},
+                         "stale marketplace entries must be removed")
+
+    def test_valid_install_location_kept(self):
+        """A marketplace entry whose installLocation EXISTS on disk must
+        NOT be touched.  Registry file must NOT be rewritten."""
+        d = Path(tempfile.mkdtemp())
+        valid_dir = d / "plugins" / "marketplaces" / "claude-plugins-official"
+        valid_dir.mkdir(parents=True)
+        _write_marketplace_registry(d, {
+            "claude-plugins-official": str(valid_dir),
+        })
+        mp_path = d / "plugins" / "known_marketplaces.json"
+        bytes_before = mp_path.read_bytes()
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            healed = cli_caveman_plugins._heal_stale_marketplace_registry()
+        self.assertEqual(healed, set())
+        self.assertEqual(mp_path.read_bytes(), bytes_before,
+                         "registry must NOT be rewritten when all "
+                         "installLocations are valid")
+
+    def test_malformed_json_untouched(self):
+        """Malformed known_marketplaces.json must be left untouched,
+        never crash install."""
+        d = Path(tempfile.mkdtemp())
+        mp_dir = d / "plugins"
+        mp_dir.mkdir(parents=True)
+        mp_path = mp_dir / "known_marketplaces.json"
+        bad_content = b"{{not valid json"
+        mp_path.write_bytes(bad_content)
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            healed = cli_caveman_plugins._heal_stale_marketplace_registry()
+        self.assertEqual(healed, set())
+        self.assertEqual(mp_path.read_bytes(), bad_content,
+                         "malformed JSON must be left byte-identical")
+
+    def test_no_tmp_litter_after_heal(self):
+        """The heal must not leave orphaned *.tmp files in the plugins dir
+        (atomic write: tmpfile is either replaced or cleaned up)."""
+        d = Path(tempfile.mkdtemp())
+        _write_marketplace_registry(d, {
+            "claude-plugins-official": "/nonexistent/old/.claude/plugins/"
+                                       "marketplaces/claude-plugins-official",
+        })
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            cli_caveman_plugins._heal_stale_marketplace_registry()
+        tmp_files = list((d / "plugins").glob("*.tmp"))
+        self.assertEqual(tmp_files, [],
+                         "no orphaned *.tmp files must remain after heal")
+
+
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
     """#273: a still-failing plugin install (after correct marketplace
     registration) must fail the target's deploy loudly (non-zero exit),

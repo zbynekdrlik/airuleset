@@ -95,6 +95,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "runner-checkout", "user-cache", "claude-version", "oneoff-venv",
     # #862 — superseded gh-runner bin.<ver>/externals.<ver> version dirs:
     "runner-superseded",
+    # #849 — disposable CC runtime metadata (tasks, debug, shell-snapshots):
+    "claude-metadata",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -114,6 +116,8 @@ LOCK_NAME = ".lock"
 LOG_MAX_BYTES = 512 * 1024                  # self-bounding (#834 review-bite 7)
 MIN_DRAIN_INTERVAL_S = 10 * 60              # du-heavy ladder runs at most this often
 UPLOADS_MAX_AGE_DAYS = 14
+UPLOADS_KEEP_MARKERS = (".airuleset-keep", ".no-sweep")  # #861 opt-out
+DELETIONS_JOURNAL_PREFIX = "deletions-"                   # #861 durable journal
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS = 7        # owner-authorised pressure path (#834 rung e)
 TOOLCHAIN_DIRS = ("Android", ".gradle", ".android")
 TOOLCHAIN_PROC_RE = "gradle|java|emulator|qemu-system"
@@ -147,6 +151,10 @@ ONEOFF_VENV_MIN_AGE_DAYS = 2
 ONEOFF_VENV_NAME_RE = _re.compile(r"^(lint|ruff|mcp)[-]?\d+$")
 ONEOFF_VENV_TMP_RE = _re.compile(r"^lintvenv-")
 
+# #849 — disposable CC runtime metadata dirs under ~/.claude/
+CLAUDE_METADATA_SUBDIRS = ("tasks", "debug", "shell-snapshots")
+CLAUDE_METADATA_MIN_AGE_DAYS = 7
+
 
 def _dbg(msg):
     """A single best-effort stderr breadcrumb (comprehensive-logging.md — never
@@ -167,6 +175,25 @@ def _guard_dir(home=None):
 
 def _log_path(home=None):
     return str(_guard_dir(home) / LOG_NAME)
+
+
+def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level):
+    """Append one deletion record to the durable monthly journal (#861).
+    ``~/.claude/disk-guard/deletions-YYYYMM.jsonl`` — append-only, monthly
+    files. The guard NEVER deletes or truncates these (they are outside
+    ``RECLAIMABLE_CLASSES``). Best-effort: a write failure is logged, never
+    a reason to skip the deletion itself."""
+    try:
+        gd = _guard_dir(home)
+        gd.mkdir(parents=True, exist_ok=True)
+        month = time.strftime("%Y%m", time.gmtime(now))
+        jp = gd / ("%s%s.jsonl" % (DELETIONS_JOURNAL_PREFIX, month))
+        entry = {"ts": now, "rung": rung, "path": path,
+                 "bytes": nbytes, "mtime": mtime, "level": level}
+        with open(jp, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        _dbg("could not write deletion journal: %r" % e)
 
 
 def _human(n):
@@ -205,21 +232,25 @@ def _log_line(now, action, path, nbytes, reason):
 
 def _append_log(log_path, lines):
     """Append `lines` to the decision log, best-effort, self-bounding: when the
-    file exceeds LOG_MAX_BYTES it is truncated to its most recent half in place
-    (a pressure guard whose OWN log grows unbounded is self-defeating)."""
+    file exceeds LOG_MAX_BYTES it is ROTATED to ``<path>.1`` (one generation)
+    so the last run's full log always stays readable (#861 — the old in-place
+    truncation destroyed the earlier half, losing deletion records within hours).
+    Rotation happens BEFORE the append so the new lines start a fresh file.
+    """
     if not lines or not log_path:
         return
     try:
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        # Rotate BEFORE appending so new lines start a fresh file
+        if p.exists() and p.stat().st_size > LOG_MAX_BYTES:
+            rotated = Path(log_path + ".1")
+            try:
+                os.replace(str(p), str(rotated))
+            except OSError as e:
+                _dbg("log rotation rename failed: %r" % e)
         with open(p, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
-        if p.stat().st_size > LOG_MAX_BYTES:
-            data = p.read_bytes()[-(LOG_MAX_BYTES // 2):]
-            nl = data.find(b"\n")
-            if nl != -1:
-                data = data[nl + 1:]
-            p.write_bytes(b"# --- disk-guard.log rotated in place ---\n" + data)
     except OSError as e:
         print("  disk-guard: could not write log %s: %s" % (log_path, e), file=sys.stderr)
 
@@ -309,22 +340,78 @@ def _largest_live_scratch_changed(home, lls):
 # --------------------------------------------------------------------------- #
 # NEW planners (uploads, toolchain)
 # --------------------------------------------------------------------------- #
+def _uploads_dir_has_keep_marker(dirpath):
+    """Check whether `dirpath` contains a keep marker (#861). Fail-safe: if
+    the marker cannot be stat'd (e.g. permissions) → return True (KEEP,
+    never delete possibly-live data)."""
+    for marker_name in UPLOADS_KEEP_MARKERS:
+        marker = os.path.join(dirpath, marker_name)
+        try:
+            os.lstat(marker)
+            return True   # marker exists
+        except FileNotFoundError:
+            continue       # not in this dir, try next name
+        except OSError:
+            return True    # fail-safe KEEP: can't stat → assume protected
+    return False
+
+
 def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAYS,
                            uploads_dir=None):
     """Own-home ``~/uploads`` files older than `max_age_days` (#834 rung d — the
     upload inbox is a delivery CHANNEL, not storage; consumed recordings/dumps
     age out). Rows ``{cls, path, size, age_days, reason}`` — ``reason`` is None
     for a genuine candidate, else why it was kept. No ``~/uploads`` at all is
-    simply nothing to do, not an error."""
+    simply nothing to do, not an error.
+
+    #861: subtrees containing a ``.airuleset-keep`` or ``.no-sweep`` marker
+    file are PROTECTED — every file under such a subtree gets
+    ``reason="protected by <marker>"``. Fail-safe: unreadable marker → KEEP.
+    """
     now = time.time() if now is None else now
     up = Path(uploads_dir) if uploads_dir else (Path(home or os.path.expanduser("~")) / "uploads")
     if not up.is_dir():
         return []
     cutoff = max_age_days * 86400
     out = []
+    # Track which directories have a keep marker (cache for efficiency)
+    _keep_cache = {}  # dirpath -> bool
+
+    def _is_protected(dirpath):
+        """Check if dirpath, the uploads root, or any ancestor between them
+        has a keep marker. Caches per directory."""
+        dp = os.path.normpath(dirpath)
+        up_norm = os.path.normpath(str(up))
+        if dp in _keep_cache:
+            return _keep_cache[dp]
+        # Build the chain from dirpath up to AND INCLUDING the uploads root
+        chain = []
+        cur = dp
+        while cur != up_norm and len(cur) > len(up_norm):
+            chain.append(cur)
+            cur = os.path.dirname(cur)
+        # Include the uploads root itself (#861 review: a marker at the root
+        # must protect the entire tree)
+        chain.append(up_norm)
+        # Check from shallowest (closest to root) to deepest for cache reuse
+        for d in reversed(chain):
+            parent = os.path.dirname(d)
+            if parent in _keep_cache and _keep_cache[parent]:
+                _keep_cache[d] = True
+                continue
+            if _uploads_dir_has_keep_marker(d):
+                _keep_cache[d] = True
+            else:
+                _keep_cache[d] = False
+        return _keep_cache.get(dp, False)
+
     try:
         for dirpath, _dirs, files in os.walk(up, onerror=lambda e: None):
+            protected = _is_protected(dirpath)
             for f in files:
+                # Skip the marker files themselves
+                if f in UPLOADS_KEEP_MARKERS:
+                    continue
                 fp = os.path.join(dirpath, f)
                 try:
                     st = os.lstat(fp)
@@ -338,8 +425,11 @@ def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAY
                     continue
                 age = now - st.st_mtime
                 row = {"cls": "uploads", "path": fp, "size": st.st_size,
-                       "age_days": age / 86400.0, "reason": None}
-                if age < cutoff:
+                       "age_days": age / 86400.0, "mtime": st.st_mtime,
+                       "reason": None}
+                if protected:
+                    row["reason"] = "protected by keep marker (#861)"
+                elif age < cutoff:
                     row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, max_age_days)
                 out.append(row)
     except OSError as e:
@@ -1278,6 +1368,104 @@ def discover_oneoff_venvs(home=None, now=None, min_age_days=ONEOFF_VENV_MIN_AGE_
     return out
 
 
+def _metadata_child_newest_mtime(entry):
+    """Newest mtime inside a dir child (subtree walk), or the entry's own
+    mtime for a file. A dir whose files are actively written (e.g.
+    ``tasks/<uuid>/*.highwatermark``) will read fresh even though the dir's
+    OWN mtime was set at creation (Fable review finding 1)."""
+    cpath = str(entry)
+    if not entry.is_dir():
+        return os.lstat(cpath).st_mtime
+    newest = os.lstat(cpath).st_mtime
+    try:
+        for dp, _dirs, files in os.walk(cpath, onerror=lambda _e: None):
+            for f in files:
+                try:
+                    mt = os.lstat(os.path.join(dp, f)).st_mtime
+                    if mt > newest:
+                        newest = mt
+                except OSError:
+                    pass  # airuleset:script-ok individual file stat in a best-effort subtree walk
+    except OSError:
+        pass  # airuleset:script-ok unreadable subdir in a best-effort walk — falls back to dir mtime
+    return newest
+
+
+_SESSION_UUID_RE_META = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _metadata_session_live(name, home, now, proc_dir=None):
+    """True (KEEP) when a tasks/ or shell-snapshots/ child whose name is a
+    session uuid is live or undeterminable — reuses the #863 authoritative
+    registry check. Non-uuid names return False (no liveness gate needed)."""
+    if not _SESSION_UUID_RE_META.match(name):
+        return False
+    try:
+        from cli_scratch_sweep import _session_uuid_live
+        return _session_uuid_live("-metadata-", name, home, now, proc_dir)
+    except Exception:
+        return True          # fail-safe KEEP on any import/call error
+
+
+def discover_stale_claude_metadata(home=None, now=None,
+                                   min_age_days=CLAUDE_METADATA_MIN_AGE_DAYS,
+                                   proc_dir=None):
+    """Per-child sweep of ``~/.claude/tasks/``, ``~/.claude/debug/``, and
+    ``~/.claude/shell-snapshots/`` (#849 ask 3).
+
+    ``tasks/`` and ``shell-snapshots/`` children are session-uuid dirs — a
+    LIVE session's entry is KEPT unconditionally via the #863 session liveness
+    check (Fable review finding 1). Each child is aged by its NEWEST SUBTREE
+    mtime (not the dir's own mtime). ``debug/`` is genuinely disposable (no
+    session binding). Never follows symlinks. Returns
+    ``[{cls:"claude-metadata", path, bytes, reason}]``."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    cutoff = min_age_days * 86400
+    out = []
+    session_keyed = {"tasks", "shell-snapshots"}
+    for subdir in CLAUDE_METADATA_SUBDIRS:
+        d = Path(home) / ".claude" / subdir
+        if not d.is_dir():
+            continue
+        is_session_dir = subdir in session_keyed
+        try:
+            for entry in sorted(d.iterdir()):
+                cpath = str(entry)
+                if entry.is_symlink():
+                    out.append({"cls": "claude-metadata", "path": cpath,
+                                "bytes": 0,
+                                "reason": "symlink — never followed"})
+                    continue
+                if is_session_dir and _metadata_session_live(
+                        entry.name, home, now, proc_dir):
+                    out.append({"cls": "claude-metadata", "path": cpath,
+                                "bytes": 0,
+                                "reason": "live session %s — kept" % entry.name})
+                    continue
+                try:
+                    newest_mt = _metadata_child_newest_mtime(entry)
+                except OSError as e:
+                    out.append({"cls": "claude-metadata", "path": cpath,
+                                "bytes": 0,
+                                "reason": "could not stat: %s" % e})
+                    continue
+                age = now - newest_mt
+                size = _safe_dir_size(cpath) if entry.is_dir() else (
+                    os.lstat(cpath).st_size if os.path.exists(cpath) else 0)
+                row = {"cls": "claude-metadata", "path": cpath, "bytes": size,
+                       "reason": None}
+                if age < cutoff:
+                    row["reason"] = ("too recent (%.1fd < %dd)"
+                                     % (age / 86400.0, min_age_days))
+                out.append(row)
+        except OSError as e:
+            out.append({"cls": "claude-metadata", "path": None,
+                        "reason": "could not walk %s: %s" % (d, e)})
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # rung PLANNERS (adapters over the existing per-class discovery functions)
 # --------------------------------------------------------------------------- #
@@ -1304,6 +1492,9 @@ def _plan_scratch(home, now, scratch_rows=None):
                 else (discover_claude_scratch_candidates(now=now, home=home) or []))
         for r in rows:
             actions.append(_row_to_action("scratch", r, "delete"))
+            # #849 ask 2: stale scratchpad children inside a LIVE/UNDET session
+            for child in r.get("stale_children", []):
+                actions.append(_row_to_action("scratch", child, "delete"))
     except Exception as e:
         actions.append({"cls": "scratch", "path": "-", "bytes": 0, "kind": "skip",
                         "reason": "scratch discovery error: %r" % e})
@@ -1354,6 +1545,11 @@ def _plan_cli_versions(home, now):
 def _plan_uploads(home, now):
     return [_row_to_action("uploads", r, "delete")
             for r in discover_stale_uploads(home=home, now=now)]
+
+
+def _plan_claude_metadata(home, now):
+    return [_norm_action("claude-metadata", r, "delete")
+            for r in discover_stale_claude_metadata(home=home, now=now)]
 
 
 def _plan_transcripts(home, now):
@@ -1456,6 +1652,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
+        ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
@@ -1705,6 +1902,14 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
             rung_lines.append(_log_line(now, verb, path, planned,
                                         "freed~=%s %s" % (freed, a.get("why") or reason or "")))
+            # #861: durable deletions journal — every ACTED (non-dry-run)
+            # deletion is recorded in a monthly JSONL file the guard never
+            # deletes (outside RECLAIMABLE_CLASSES).
+            if not dry_run:
+                _append_deletion_journal(
+                    home, now, rung=_label, path=path, nbytes=planned,
+                    mtime=a.get("mtime", 0),
+                    level=status.get("level", "drain"))
             rung_freed += (freed or 0)
             rung_acted += 1
         logs.extend(rung_lines)
@@ -1744,24 +1949,70 @@ def _ranked_consumers(home, now):
     return ranked
 
 
-def escalate(status, home, now, dry_run):
+def _collect_top_consumers(home, now, limit=5):
+    """Default implementation for the escalation's top-N path-level detail
+    (#849 ask 5). Runs the CHEAP planners and returns top consumers."""
+    all_actions = []
+    for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
+                        ("uploads", lambda: _plan_uploads(home, now)),
+                        ("cli-version", lambda: _plan_cli_versions(home, now)),
+                        ("scratch", lambda: _plan_scratch(home, now)),
+                        ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
+                        ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
+                        ("claude-version", lambda: _plan_claude_versions(home, now)),
+                        ("user-cache", lambda: _plan_user_cache(home, now))):
+        try:
+            all_actions.extend(plan())
+        except Exception as e:
+            _dbg("top-consumers %s failed: %r" % (label, e))
+    return _top_consumers_by_path(all_actions, limit=limit)
+
+
+def _top_consumers_by_path(actions, limit=5):
+    """Top-N reclaimable candidates by bytes, from a FLAT action list (#849
+    ask 5). Only actionable candidates (kind != skip/report, reason == None)
+    are considered. Returns ``[(path, bytes)]`` sorted descending."""
+    candidates = []
+    for a in actions:
+        if a.get("kind") in ("skip", "report"):
+            continue
+        if a.get("reason") is not None:
+            continue
+        candidates.append((a.get("path", "-"), a.get("bytes", 0) or 0))
+    candidates.sort(key=lambda t: t[1], reverse=True)
+    return candidates[:limit]
+
+
+def escalate(status, home, now, dry_run, top_consumers_fn=None):
     """Machine-channel LOUD escalation at ≥90 % after the drain, deduped ONCE
     per box per day via a world-readable ``/tmp`` marker (so N stream users on
     subdev do not each alarm). No Discord ping in this lane — the owner-facing
-    daily ❓ is #841; the red footer segment IS the in-session surface."""
+    daily ❓ is #841; the red footer segment IS the in-session surface.
+    #849 ask 5: also names the top-5 consumers by PATH for actionability.
+    ``top_consumers_fn`` is injectable for testing (default collects from the
+    existing planners)."""
     marker = "/tmp/airuleset-disk-guard-escalated-%s" % time.strftime(
         "%Y%m%d", time.gmtime(now))
     if os.path.exists(marker):
         return []
     ranked = _ranked_consumers(home, now)
     summary = ", ".join("%s=%s" % (c, _human(b)) for c, b in ranked[:6]) or "(none own-home)"
+    # #849 ask 5: path-level top-N detail for actionability
+    if top_consumers_fn is not None:
+        top = top_consumers_fn(home, now, limit=5)
+    else:
+        top = _collect_top_consumers(home, now, limit=5)
+    top_detail = ", ".join("%s=%s" % (p, _human(b)) for p, b in top) if top else ""
+    esc_parts = ["dim=%s still-critical after drain; reclaimable-own-home: %s"
+                 % (status["dim"], summary)]
+    if top_detail:
+        esc_parts.append("top-5-by-path: %s" % top_detail)
     line = _log_line(now, "ESCALATE", socket.gethostname(),
-                     status["worst_pct"],
-                     "dim=%s still-critical after drain; reclaimable-own-home: %s"
-                     % (status["dim"], summary))
+                     status["worst_pct"], "; ".join(esc_parts))
     _append_log(_log_path(home), [line])
     print("disk-guard ESCALATE (%s): still %d%% (%s) after drain — %s"
-          % (socket.gethostname(), status["worst_pct"], status["dim"], summary),
+          % (socket.gethostname(), status["worst_pct"], status["dim"],
+             summary + ((" | " + top_detail) if top_detail else "")),
           file=sys.stderr)
     if not dry_run:
         try:
