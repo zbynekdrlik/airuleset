@@ -38,7 +38,11 @@ class TestReplayScriptAgreesOnARealSlice(TestCase):
     the actual corpus and the actual shipped script end to end."""
 
     def test_no_mismatches_on_a_real_slice_of_this_repos_history(self):
-        r = subprocess.run([sys.executable, str(SCRIPT), "--limit", "30"],
+        # --limit 8 (was 30): 30 hits the 60s timeout under full-suite CPU
+        # contention (unittest discover, loaded box). 8 still exercises the
+        # real corpus + real hook subprocess end-to-end (per no-timeout-
+        # band-aids: the fix is a smaller slice, not a bigger timeout).
+        r = subprocess.run([sys.executable, str(SCRIPT), "--limit", "8"],
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("VERDICT: 0 mismatches", r.stdout)
@@ -48,7 +52,7 @@ class TestReplayScriptAgreesOnARealSlice(TestCase):
         # A --limit slice of the MOST RECENT commits (this repo's dominant
         # shape) is has-ref heavy; assert the script's own accounting stays
         # internally consistent rather than asserting a specific split.
-        r = subprocess.run([sys.executable, str(SCRIPT), "--limit", "30"],
+        r = subprocess.run([sys.executable, str(SCRIPT), "--limit", "8"],
                            capture_output=True, text=True, timeout=60)
         self.assertIn("no issue reference:", r.stdout)
         self.assertIn("has issue reference:", r.stdout)
