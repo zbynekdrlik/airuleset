@@ -105,7 +105,8 @@ class TestOpus5BanLineup(TestCase):
         self.assertNotIn("Opus 5 + Sonnet 5 default; Fable 5 AUTO-escalates", t)
 
     def test_directive_recorded_verbatim(self):
-        t = read(MODULE)
+        # #859: verbatim quotes moved to the history file; check the union
+        t = read(MODULE) + "\n" + read(".claude/rules-reference/model-awareness-history.md")
         # 2026-08-13 directives stay as history:
         self.assertIn("intenet je plny obrovskej nespokojnosti s opus 5", t)
         self.assertIn("hlavne nie ze pouzijes sonnet na zlozite veci", t)
@@ -748,7 +749,8 @@ class TestUltracodeStandingDefault(TestCase):
     these lock the policy PROSE."""
 
     def test_tooling_records_the_2026_08_30_reversal_verbatim(self):
-        t = read(TOOLING)
+        # #859: verbatim quote moved to the history file; check the union
+        t = read(TOOLING) + "\n" + read(".claude/rules-reference/claude-code-tooling-history.md")
         self.assertIn(
             "Chcel by som este aby sa claude v targetoch nespustali s zapnutym "
             "ultracode ale s effort high", t)
