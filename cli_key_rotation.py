@@ -211,7 +211,9 @@ def _build_ssh_cmd(entry: dict, identity: str, command: str,
                       if host == _SUBDEV_HOST else host)
         gk_cmd = "ssh -o BatchMode=yes %s@%s '%s'" % (
             user, inner_host, inner_cmd)
-        # The outer ssh to gatekeeper uses the caller's identity
+        # The outer ssh to gatekeeper uses the caller's identity.
+        # Synthetic dict mirrors gk's REMOTE_HOSTS entry (cli_fleet.py);
+        # if gk ever gains a host_keys pin there, add it here too.
         cmd = ["ssh"]
         cmd.extend(cli_remote.host_key_check_opts(
             {"host": _GK_HOST, "user": "gatekeeper"}))
@@ -403,7 +405,15 @@ def phase_verify(new_key_path: str,
         user = entry.get("admin_user") or entry.get("user", "")
         expected = "OK-%s" % user
 
-        # Build verify command
+        # Build verify command.
+        # ASYMMETRY vs _build_ssh_cmd: verify DELIBERATELY uses -J (ProxyJump),
+        # NOT the nested-SSH form that phase_add uses.  At verify time the ADD
+        # phase has already installed the new key on root@subdev, so -J +
+        # IdentitiesOnly with new_key_path proves the new key authenticates
+        # END-TO-END (the outer leg to gatekeeper@gk also works — gk is itself
+        # an ADD target).  The nested form would authenticate the inner leg
+        # with gk's own subdev_admin and prove nothing about the new key.
+        # Do NOT "unify onto _build_ssh_cmd" without preserving this.  #870.
         import cli_remote
         verify_argv = ["ssh"]
         verify_argv.extend(cli_remote.host_key_check_opts(entry))

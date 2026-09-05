@@ -241,6 +241,34 @@ class TestPhaseAdd(unittest.TestCase):
         self.assertIn("root@", inner_cmd)
         self.assertIn("BatchMode=yes", inner_cmd)
 
+    def test_gk_hop_alias_with_real_subdev_host(self):
+        """The SSH config alias fires ONLY when host == _SUBDEV_HOST.
+
+        Fable review MEDIUM finding: the fixture host 10.0.0.4 never
+        triggers the alias branch. This test uses the REAL _SUBDEV_HOST
+        IP so the alias conditional fires and the inner command uses
+        'root@subdev' instead of 'root@<IP>'.  #870 F1 review fix.
+        """
+        entry = {"name": "subdev", "host": kr._SUBDEV_HOST,
+                 "admin_user": "root",
+                 "identity": "~/.secrets/gatekeeper_access_ed25519"}
+        cmd = kr._build_ssh_cmd(entry, "~/.secrets/gk",
+                                "echo test", via_gk_hop=True)
+        inner = cmd[-1]
+        # Inner ssh must use the alias, NOT the IP
+        self.assertIn("root@%s" % kr._SUBDEV_SSH_CONFIG_ALIAS, inner)
+        self.assertNotIn(kr._SUBDEV_HOST, inner)
+
+    def test_gk_hop_no_alias_for_non_subdev(self):
+        """A non-subdev host going via gk hop keeps its original host."""
+        entry = {"name": "other", "host": "10.99.99.99",
+                 "admin_user": "root",
+                 "identity": "~/.secrets/gk"}
+        cmd = kr._build_ssh_cmd(entry, "~/.secrets/gk",
+                                "echo test", via_gk_hop=True)
+        inner = cmd[-1]
+        self.assertIn("root@10.99.99.99", inner)
+
 
 class TestPhaseVerify(unittest.TestCase):
 
