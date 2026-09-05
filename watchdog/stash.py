@@ -1316,7 +1316,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 # would revive the wrapped reclaim for ALL these prefixes) is tracked in #506.
 _JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ",
                          "bounce-backstop: ", "gk-request backstop: ",
-                         "stuck-check: ")
+                         "stuck-check: ", "goal-guard: ")
 
 JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
 JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
