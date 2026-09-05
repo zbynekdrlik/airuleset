@@ -6294,6 +6294,12 @@ MAINTAINER_GH_LOGIN = "zbynekdrlik"
 # and preserves; stream-A-own vs stream-B-own is deliberately not distinguished.
 STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"
 
+# #888: the airuleset repo is NOT in the App's installation list (its
+# contents:write permission would give every stream push access to
+# airuleset's code). App-token streams file airuleset tickets via
+# gk-request --repo, never direct gh issue create.
+AIRULESET_RELAY_REPO = "zbynekdrlik/airuleset"
+
 
 def _current_user() -> str:
     """The invoking box's UNIX account from the UNSPOOFABLE uid (airuleset#839).
