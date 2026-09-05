@@ -450,14 +450,21 @@ def _heal_stale_plugin_registry(registry_path: Path = None) -> set:
                 del plugins[key]
     if healed:
         new_content = json.dumps(data, indent=2) + "\n"
+        tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
             os.write(fd, new_content.encode())
             os.close(fd)
             os.replace(tmp, path)
+            tmp = None  # replaced successfully — no orphan
         except OSError as e:
             print(f"    warning: could not write healed registry {path} "
                   f"({e}) -- install loop continues", file=sys.stderr)
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:  # airuleset:script-ok best-effort orphan cleanup
+                    pass
             return set()
     return healed
 
@@ -520,15 +527,22 @@ def _heal_stale_marketplace_registry(registry_path: Path = None) -> set:
                   f"(installLocation {install_loc!r} does not exist)")
     if healed:
         new_content = json.dumps(data, indent=2) + "\n"
+        tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
             os.write(fd, new_content.encode())
             os.close(fd)
             os.replace(tmp, path)
+            tmp = None  # replaced successfully — no orphan
         except OSError as e:
             print(f"    warning: could not write healed marketplace "
                   f"registry {path} ({e}) -- install loop continues",
                   file=sys.stderr)
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:  # airuleset:script-ok best-effort orphan cleanup
+                    pass
             return set()
     return healed
 

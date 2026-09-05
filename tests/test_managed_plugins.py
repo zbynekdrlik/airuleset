@@ -960,13 +960,19 @@ class TestStaleMarketplaceHealing(TestCase):
         self.assertEqual(mp_path.read_bytes(), bad_content,
                          "malformed JSON must be left byte-identical")
 
-    def test_atomic_write(self):
-        """The healed file must be written atomically (tmpfile + os.replace)."""
-        import inspect
-        src = inspect.getsource(
-            cli_caveman_plugins._heal_stale_marketplace_registry)
-        self.assertIn("tempfile.mkstemp", src)
-        self.assertIn("os.replace", src)
+    def test_no_tmp_litter_after_heal(self):
+        """The heal must not leave orphaned *.tmp files in the plugins dir
+        (atomic write: tmpfile is either replaced or cleaned up)."""
+        d = Path(tempfile.mkdtemp())
+        _write_marketplace_registry(d, {
+            "claude-plugins-official": "/nonexistent/old/.claude/plugins/"
+                                       "marketplaces/claude-plugins-official",
+        })
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            cli_caveman_plugins._heal_stale_marketplace_registry()
+        tmp_files = list((d / "plugins").glob("*.tmp"))
+        self.assertEqual(tmp_files, [],
+                         "no orphaned *.tmp files must remain after heal")
 
 
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
