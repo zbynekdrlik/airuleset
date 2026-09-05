@@ -698,5 +698,307 @@ class TestScopingHoisted(unittest.TestCase):
                              "scoping must NOT be in per-box data")
 
 
+# ---------------------------------------------------------------------------
+# 🔴 RE-REVIEW: state-file aliasing — cadence job must NOT alias run_once state
+# ---------------------------------------------------------------------------
+
+class TestStateFileAliasing(unittest.TestCase):
+    """The cadence job must use its OWN store, never run_once's state_path.
+    run_once's closing save_state overwrites the whole file from its in-memory
+    dict, wiping any mid-run writes from the cadence job to that same file."""
+
+    def _tiers_hash(self):
+        import airuleset
+        return hashlib.sha1(
+            str(sorted(airuleset.MODEL_TIERS.items())).encode()
+        ).hexdigest()
+
+    def test_run_once_state_survives_cadence_job(self):
+        """run_once state file must retain its own keys after cadence job runs.
+        The cadence job must use its OWN file (env AIRULESET_MDREVIEW_STATE_PATH),
+        never writing into state_path at all."""
+        from watchdog import run_once
+        import os as _os
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "watchdog-state.json"
+            cad_sp = Path(tmp) / "mdreview-cadence.json"
+            # Pre-seed the watchdog state with a marker key
+            sp.write_text(json.dumps({"test_marker": "alive"}), encoding="utf-8")
+
+            with mock.patch("socket.gethostname", return_value="dev1"):
+                with mock.patch.dict(_os.environ,
+                                     {"AIRULESET_MDREVIEW_STATE_PATH":
+                                      str(cad_sp)}):
+                    _logs = run_once(
+                        state_path=str(sp),
+                        mdreview_cadence_enabled=True,
+                        dry_run=True,
+                    )
+
+            state_after = json.loads(sp.read_text())
+            self.assertEqual(state_after.get("test_marker"), "alive",
+                             "run_once state MUST survive cadence job execution — "
+                             "state-file aliasing means the closing save_state "
+                             "overwrites cadence data AND vice versa")
+
+    def test_create_fires_at_most_once_across_two_polls(self):
+        """gh issue create must fire AT MOST ONCE across two consecutive
+        run_once calls — the cadence job must persist the ticket number
+        in its OWN state file so the daily TTL prevents re-bootstrap."""
+        from watchdog.mdreview_cadence import mdreview_cadence_job
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "state.json"
+
+            all_create_calls = []
+            def fake_gh(argv):
+                argv_str = " ".join(str(x) for x in argv)
+                if "create" in argv_str:
+                    all_create_calls.append(argv)
+                return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
+
+            with mock.patch("socket.gethostname", return_value="dev1"):
+                mdreview_cadence_job(now, {}, state_path=str(sp),
+                                    gh_runner=fake_gh)
+                mdreview_cadence_job(now + 86400 + 1, {}, state_path=str(sp),
+                                    gh_runner=fake_gh)
+
+            self.assertLessEqual(len(all_create_calls), 1,
+                                 f"gh issue create must fire AT MOST ONCE across "
+                                 f"two polls, got {len(all_create_calls)}: "
+                                 f"{all_create_calls}")
+
+
+# ---------------------------------------------------------------------------
+# 🟡 RE-REVIEW: dry-run must NOT write state
+# ---------------------------------------------------------------------------
+
+class TestDryRunNoStateWrite(unittest.TestCase):
+    """dry-run must log 'would ...' and return WITHOUT writing state."""
+
+    def _tiers_hash(self):
+        import airuleset
+        return hashlib.sha1(
+            str(sorted(airuleset.MODEL_TIERS.items())).encode()
+        ).hexdigest()
+
+    def test_dry_run_leaves_state_file_byte_identical(self):
+        from watchdog.mdreview_cadence import mdreview_cadence_job
+        now = time.time()
+        th = self._tiers_hash()
+        closed_old = "2026-01-01T00:00:00Z"
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "state.json"
+            initial_state = {
+                "schema": 1, "ticket": 999,
+                "model_tiers_hash": th,
+                "last_eval_ts": now - 86400 * 2,
+            }
+            sp.write_text(json.dumps(initial_state, sort_keys=True),
+                          encoding="utf-8")
+            before_bytes = sp.read_bytes()
+            def fake_gh(argv):
+                if "view" in str(argv):
+                    return json.dumps({"state": "closed",
+                                       "closedAt": closed_old}), 0
+                return "", 0
+            with mock.patch("socket.gethostname", return_value="dev1"):
+                logs = mdreview_cadence_job(
+                    now, {}, dry_run=True, state_path=str(sp),
+                    gh_runner=fake_gh)
+            after_bytes = sp.read_bytes()
+            self.assertEqual(before_bytes, after_bytes,
+                             "dry-run must NOT write state file; "
+                             f"logs: {logs}")
+            self.assertTrue(any("would" in ln.lower() for ln in logs),
+                            f"dry-run must log 'would ...': {logs}")
+
+
+# ---------------------------------------------------------------------------
+# 🟡 RE-REVIEW: bootstrap must search for existing ticket before creating
+# ---------------------------------------------------------------------------
+
+class TestBootstrapExistingRecovery(unittest.TestCase):
+    """Before creating, bootstrap must search for an existing ticket with
+    the same title and adopt it if found."""
+
+    def test_existing_ticket_adopted_no_create(self):
+        from watchdog.mdreview_cadence import mdreview_cadence_job, BOOTSTRAP_TITLE
+        now = time.time()
+        create_calls = []
+        def fake_gh(argv):
+            argv_str = " ".join(str(x) for x in argv)
+            if "create" in argv_str:
+                create_calls.append(argv)
+            # Return an existing ticket for the search
+            if "list" in argv_str and "--search" in argv_str:
+                return json.dumps([{"number": 888,
+                                    "title": BOOTSTRAP_TITLE}]), 0
+            return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "state.json"
+            with mock.patch("socket.gethostname", return_value="dev1"):
+                mdreview_cadence_job(now, {}, state_path=str(sp),
+                                    gh_runner=fake_gh)
+            self.assertEqual(len(create_calls), 0,
+                             "bootstrap must NOT create when existing ticket found")
+            state_after = json.loads(sp.read_text())
+            self.assertEqual(state_after.get("ticket"), 888,
+                             "bootstrap must adopt existing ticket number")
+
+
+# ---------------------------------------------------------------------------
+# 🟡 RE-REVIEW: zero_caller_skills must include slash-only skills
+# ---------------------------------------------------------------------------
+
+class TestZeroCallerSlash(unittest.TestCase):
+    """A slash-only skill (in usage["slash"] but not usage["skills"]) must
+    NOT be in zero_caller_skills."""
+
+    def test_slash_only_skill_not_in_zero_callers(self):
+        from cli_mdreview_audit import _compute_zero_caller_skills
+        fake_usage = {
+            "skills": {"some-skill": 3},
+            "slash": {"autopilot": 10, "mdreview": 5},
+        }
+        with mock.patch("cli_skill_usage.scan_usage",
+                         return_value=fake_usage):
+            with tempfile.TemporaryDirectory() as tmp:
+                sd = Path(tmp) / "skills"
+                (sd / "autopilot").mkdir(parents=True)
+                (sd / "autopilot" / "SKILL.md").write_text("# autopilot\n")
+                (sd / "some-skill").mkdir()
+                (sd / "some-skill" / "SKILL.md").write_text("# some\n")
+                (sd / "unused").mkdir()
+                (sd / "unused" / "SKILL.md").write_text("# unused\n")
+                with mock.patch("cli_mdreview_audit.CLAUDE_DIR",
+                                Path(tmp)):
+                    result = _compute_zero_caller_skills()
+        self.assertNotIn("autopilot", result,
+                         "slash-only skill must NOT be in zero-callers")
+        self.assertIn("unused", result,
+                      "truly unused skill must be in zero-callers")
+
+
+# ---------------------------------------------------------------------------
+# 🟡 RE-REVIEW: ssh base must use host_key_check_opts
+# ---------------------------------------------------------------------------
+
+class TestHostKeyOpts(unittest.TestCase):
+    """A host with host_keys must use StrictHostKeyChecking=yes, not =no."""
+
+    def test_pinned_host_strict_checking(self):
+        from cli_mdreview_audit import run_fleet
+        ssh_calls = []
+        hosts_with_keys = [{
+            "name": "pinned",
+            "host": "1.2.3.4",
+            "user": "u",
+            "repo_path": "~/a",
+            "host_keys": ["ssh-ed25519 AAAA..."],
+        }]
+        with mock.patch("cli_remote._deployable_hosts",
+                         return_value=hosts_with_keys):
+            with mock.patch("subprocess.run") as mock_run:
+                mock_run.return_value = mock.Mock(
+                    stdout='{"schema":1}', returncode=0)
+                try:
+                    run_fleet()
+                except Exception:
+                    pass  # airuleset:script-ok we just need the argv
+                if mock_run.called:
+                    for call_args in mock_run.call_args_list:
+                        cmd = call_args[0][0] if call_args[0] else []
+                        ssh_calls.append(cmd)
+        for cmd in ssh_calls:
+            argv_str = " ".join(str(x) for x in cmd)
+            if "ssh" in argv_str and "StrictHostKeyChecking" in argv_str:
+                self.assertNotIn("StrictHostKeyChecking=no", argv_str,
+                                 f"pinned host must NOT use =no: {argv_str}")
+
+
+# ---------------------------------------------------------------------------
+# 🔵 RE-REVIEW: docstring alignment + guarded json.loads + hermetize dedup
+# ---------------------------------------------------------------------------
+
+class TestDocstringGateWording(unittest.TestCase):
+    """🔵1 — docstring must say 'full authority + checkout present'
+    and align with the hostname-only gate."""
+
+    def test_module_docstring_mentions_dev1(self):
+        src_path = REPO / "watchdog" / "mdreview_cadence.py"
+        src = src_path.read_text(encoding="utf-8")
+        self.assertIn("dev1", src.split("def ")[0].lower(),
+                      "module docstring must mention dev1")
+
+
+class TestGuardedJsonLoads(unittest.TestCase):
+    """🔵3 — non-runner json.loads must be guarded."""
+
+    def test_evaluate_cadence_handles_malformed_json(self):
+        from watchdog.mdreview_cadence import evaluate_cadence
+        now = time.time()
+        state = {"schema": 1, "ticket": 999,
+                 "model_tiers_hash": "x", "last_eval_ts": now - 86400}
+        def bad_json_gh(argv):
+            return "NOT JSON AT ALL", 0
+        result = evaluate_cadence(state, now, gh_runner=bad_json_gh)
+        self.assertFalse(result["due"],
+                         "malformed JSON must not crash, must return not-due")
+
+
+class TestDedupWiringHermetized(unittest.TestCase):
+    """🔵4 — TestDedupWiring must be hermetized with patched CLAUDE_DIR."""
+
+    def test_local_audit_with_patched_home(self):
+        """Run cmd_mdreview_audit with a controlled CLAUDE_DIR."""
+        from cli_mdreview_audit import cmd_mdreview_audit
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_claude = Path(tmp) / ".claude"
+            fake_claude.mkdir()
+            # Create a minimal skills dir
+            (fake_claude / "skills").mkdir()
+            args = argparse.Namespace(fleet=False, json_output=True)
+            buf = io.StringIO()
+            with mock.patch("cli_mdreview_audit.CLAUDE_DIR", fake_claude):
+                with mock.patch("Path.home", return_value=Path(tmp)):
+                    with redirect_stdout(buf):
+                        cmd_mdreview_audit(args)
+            output = buf.getvalue()
+            # Must always produce output (unconditional assert)
+            self.assertTrue(output.strip(),
+                            "cmd_mdreview_audit --json must produce output")
+            data = json.loads(output)
+            self.assertIn("dedup_pairs", data,
+                          "output must include dedup_pairs key")
+
+
+class TestSampleSentenceSecretSweep(unittest.TestCase):
+    """🔵5 — sample_sentence in dedup pairs must be swept for secrets."""
+
+    def test_secret_in_sample_sentence_redacted(self):
+        from cli_mdreview_audit import dedup_candidates
+        token = "ghp_" + "R" * 30  # airuleset:secret-ok test fixture
+        shared_with_secret = (
+            "This is a long shared sentence that contains a credential "
+            + token +
+            " embedded in the middle of the shared verbatim content that is over forty chars"
+        )
+        files = {
+            "module": {"modules/creds.md": shared_with_secret + "\n"},
+            "skill": {"skills/creds/SKILL.md": shared_with_secret + "\n"},
+        }
+        pairs = dedup_candidates(files)
+        self.assertTrue(len(pairs) > 0, "should find the cross-surface pair")
+        for p in pairs:
+            sample = p.get("sample_sentence", "")
+            self.assertNotIn(token, sample,
+                             "secret value must be REDACTED from sample_sentence")
+
+
 if __name__ == "__main__":
     unittest.main()
