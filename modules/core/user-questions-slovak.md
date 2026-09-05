@@ -12,8 +12,10 @@
 
 **`❓` block shape (hook-enforced `stop-check-question-quality.sh`):** opens with `**Otázka — projekt …:**`, carries bullet/numbered options, ends with exactly ONE `❓` decision line.
 
+**Owner-scoped DELIVERY (#710):** which SURFACE the `❓` marker reaches is owner-scoped — for owner **david** it is the Discord phone ping; for owner **zbynek** it is the footer `U N` + webterm (no phone ping; marek decommissioned). This scopes ONLY the delivery channel — the session discipline (the `❓` marker, the self-contained block, the re-ask rules) is unchanged for every owner.
+
 **Re-poke with NO user input since the last ask** → ONLY the bare `❓ NEEDS YOU: <text>` marker line, VERBATIM — never the full block (#740, hook-blocked `stop-check-question-quality.sh` exit 2). **ANY conversation happened in between** → the question is asked NANOVO A CELÁ.
 
-**"U N?" STATUS query → step-by-step flow** (hook-backstopped `stop-check-prose-violations.sh`), never a raw `--waiting` table or summary list (#606).
+**"U N?" STATUS query → step-by-step flow** (hook-backstopped `stop-check-prose-violations.sh`), never a raw `--waiting` table (that is MACHINE context) or summary list (#606).
 
 The full hook-enforced template, both re-ask branches, worked examples, and away-user delivery mechanics are in the `skills/user-questions-slovak` skill — loaded automatically on `AskUserQuestion`. History + rationale: `.claude/rules-reference/user-questions-slovak-history.md` (#859).
