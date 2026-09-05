@@ -2497,6 +2497,44 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
             % (loc, sid, open_n, authority, len(attempts_state[sid])))
 
 
+_GOAL_GUARD_CATEGORY = "goal-guard"
+_GOAL_GUARD_FLOOR_S = 24 * 3600
+
+
+def _goal_guard_decide(sid, payload, template_line, state, now, loc,
+                       dry_run=False, mark_state=None):
+    """#878 — for a LIVE, ARMED loop with a FOREIGN condition that lacks the
+    `❓ NEEDS YOU` detection token while a LASTQF exists (a delivered unanswered
+    question sitting), decide to emit a one-time `goal-guard:` nudge. Returns a
+    decision-log line, or None (no action). Never auto-types /goal. Gated at
+    ≤1/24h per sid via its own state namespace (simple dict, not nudge_gate —
+    the function is a pure helper with no import of nudge_gate).
+
+    `mark_state` defaults to `"set"` (armed); `"cleared"` skips entirely (#170)."""
+    if mark_state is not None and mark_state != "set":
+        return None
+    verdict = _classify_armed_condition(payload, template_line)
+    if verdict != "foreign":
+        return None
+    norm = _goal_condition_norm(payload)
+    if "❓ NEEDS YOU" in norm or "NEEDS YOU" in (norm or ""):
+        return None
+    lastqf = Path("/tmp/claude-discord-lastq-%s" % sid)
+    if not lastqf.exists():
+        return None
+    gg = state.setdefault("goal_guard_ts", {})
+    last = gg.get(sid)
+    if (isinstance(last, (int, float))
+            and 0 <= (now - last) < _GOAL_GUARD_FLOOR_S):
+        return None
+    gg[sid] = now
+    if dry_run:
+        return ("goal-guard %s sid=%s -> FOREIGN condition without blocked-❓ "
+                "capability, LASTQF present — would nudge (dry-run)" % (loc, sid))
+    return ("goal-guard %s sid=%s -> FOREIGN condition without blocked-❓ "
+            "capability, LASTQF present — nudge sent" % (loc, sid))
+
+
 def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
                        obligation_fn, requests_path, attempts_state):
     """#675 -- re-arm a loop CC cleared on a TRANSIENT auth failure (the newest
@@ -2860,6 +2898,15 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                                      attempts_state)
             if sr:
                 logs.append(sr)
+            # #878 — goal-guard rider: an ALIVE armed loop with a FOREIGN
+            # condition that lacks the blocked-❓ capability while a LASTQF
+            # exists gets a one-time nudge (≤1/24h). Never auto-types /goal.
+            payload = mark.get("payload") if isinstance(mark, dict) else None
+            gg = _goal_guard_decide(sid, payload,
+                                    (rearm_fn or _default_rearm_fn)(cwd)[0],
+                                    state, now, loc, dry_run)
+            if gg:
+                logs.append(gg)
             continue
         if armed is None:
             # #524 -- undeterminable footer (busy / chrome / dialog -> None):
