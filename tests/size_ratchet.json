@@ -28,7 +28,7 @@
     "cli_push_gate.py": 218,
     "cli_quals.py": 2295,
     "cli_quals_cmd.py": 988,
-    "cli_remote.py": 1524,
+    "cli_remote.py": 1525,
     "cli_resource_guards.py": 375,
     "cli_scratch_sweep.py": 1853,
     "cli_skill_usage.py": 315,
