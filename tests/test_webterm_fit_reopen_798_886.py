@@ -13,7 +13,6 @@ forces xterm to re-measure before the fit runs.
 RED tests: assert the transform pins top (row 0 safe under sub-pixel perturbation)
 and that activate() contains a re-measure kick.
 """
-import re
 import shutil
 import sys
 import unittest
@@ -22,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cli_webterm as w  # noqa: E402
-from test_webterm import _FIT_HARNESS, _extract_js_function, _run_fit_harness  # noqa: E402
+from test_webterm import _extract_js_function, _run_fit_harness  # noqa: E402
 
 
 def _inv():
@@ -71,9 +70,6 @@ class TestStretchOriginPinsTop798(unittest.TestCase):
         out = _run_fit_harness(self.html, vw=959, vh=602)
         self.assertTrue(out["ok"])
         self.assertTrue(out["stretched"])
-        # Parse the frame transform to compute the visual grid top
-        # Grid is centered in the iframe: top = (vh - gridH) / 2
-        grid_top = (out["availH"] - out["gridH"]) / 2
         # With origin '0 0' + translate, the grid top should be
         # pinned at 0 (top of slot). With 50% 50%, it's a knife-edge.
         # Simulate a +0.3px perturbation (real-world font metric variance):
