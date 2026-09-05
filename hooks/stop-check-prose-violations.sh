@@ -880,7 +880,12 @@ fi
 #   (2) an https?:// URL anywhere in the message;
 #   (3) NO ❓ NEEDS YOU / ❓ ASKED marker.
 # Any conjunct absent → pass. Conjunct (2) keeps doctrine/hook-editing
-# sessions that merely QUOTE the string from tripping.
+# sessions that merely QUOTE the string from tripping (when no URL
+# is present). Accepted residual: a report that quotes the CONCRETE
+# digit form (endpoint-ttl=600s + jednorazové) AND carries a URL
+# (PR/globe line) over-blocks — remedy: quote as endpoint-ttl=<N>s
+# in doctrine prose. Over-block direction, safe for an irreversible
+# loss gate (#634).
 SHOW_TTL=$(msg_has "$MSG" -qiE "endpoint-ttl=[0-9]+s" && echo 1 || echo 0)
 SHOW_ONESHOT=$(msg_has "$MSG" -qi "jednorazov" && echo 1 || echo 0)
 SHOW_HAS_URL=$(msg_has "$MSG" -qiE "https?://" && echo 1 || echo 0)

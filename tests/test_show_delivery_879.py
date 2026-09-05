@@ -123,5 +123,27 @@ class TestSecretShowDelivery(unittest.TestCase):
                          f"stderr={r.stderr[:300]}")
 
 
+class TestShowDiscriminatorSourceLock(unittest.TestCase):
+    """#879 source-lock: the hook's discriminator tokens must stay in
+    cli_vault.py's show print line — a rewording there silently disarms
+    the gate (#498 class)."""
+
+    def test_cli_vault_show_print_carries_discriminator(self):
+        """The show print line in cli_vault.py carries both tokens."""
+        vault = (ROOT / "cli_vault.py").read_text()
+        # Find lines with the show-only parenthetical
+        show_lines = [ln for ln in vault.splitlines()
+                      if "jednorazov" in ln.lower()]
+        self.assertTrue(show_lines,
+                        "cli_vault.py must contain 'jednorazov' "
+                        "(the show-only discriminator)")
+        # At least one of those lines also carries endpoint-ttl=
+        has_ttl = any("endpoint-ttl=" in ln for ln in show_lines)
+        self.assertTrue(has_ttl,
+                        "the cli_vault.py line with 'jednorazov' must "
+                        "also carry 'endpoint-ttl=' — the hook depends "
+                        "on their co-occurrence")
+
+
 if __name__ == "__main__":
     unittest.main()
