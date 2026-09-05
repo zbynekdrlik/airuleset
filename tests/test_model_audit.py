@@ -94,14 +94,14 @@ class TestAuditModelFloats(TestCase):
 
     def test_flags_banned_main_and_sub(self):
         panes = [("%p1", "/a"), ("%p2", "/b")]
-        # /a main is floated to 5.1 (BANNED); /a has a sub on opus-4-8 (BANNED,
-        # superseded); /b main on the allowlisted sonnet (ok).
+        # /a main is floated to 5.0 (retired, off-allowlist); /a has a sub on
+        # opus-4-8 (BANNED, superseded); /b main on the allowlisted sonnet (ok).
         model_of = {
-            "/x/a.jsonl": "claude-fable-5-1",
+            "/x/a.jsonl": "claude-fable-5",
             "/x/a.jsonl#sub0": "claude-opus-4-8",
             "/x/b.jsonl": "claude-sonnet-5",
         }
-        find = self._fake_find({"/a": "claude-fable-5-1", "/b": "claude-sonnet-5"})
+        find = self._fake_find({"/a": "claude-fable-5", "/b": "claude-sonnet-5"})
         read = lambda p: model_of.get(str(p), "")  # noqa: E731
         subs = lambda main: [str(main) + "#sub0"] if str(main).endswith("a.jsonl") else []  # noqa: E731
 
@@ -109,7 +109,7 @@ class TestAuditModelFloats(TestCase):
                                                   subagent_iter=subs)
         by = {(r["cwd"], r["kind"]): r for r in recs}
         self.assertTrue(by[("/a", "main")]["banned"])
-        self.assertEqual(by[("/a", "main")]["model"], "claude-fable-5-1")
+        self.assertEqual(by[("/a", "main")]["model"], "claude-fable-5")
         self.assertTrue(by[("/a", "sub")]["banned"])
         self.assertFalse(by[("/b", "main")]["banned"])
 
@@ -205,8 +205,8 @@ class TestSubagentRecencyWindow(TestCase):
             _write_transcript(Path(main_path), "claude-sonnet-5")
             recent = os.path.join(subdir, "recent.jsonl")
             old = os.path.join(subdir, "old.jsonl")
-            _write_transcript(Path(recent), "claude-fable-5-1")  # BANNED
-            _write_transcript(Path(old), "claude-fable-5-1")     # BANNED, stale
+            _write_transcript(Path(recent), "claude-opus-5")  # BANNED
+            _write_transcript(Path(old), "claude-opus-5")     # BANNED, stale
             now = time.time()
             os.utime(recent, (now, now))
             three_days_ago = now - 3 * 86400
@@ -254,8 +254,13 @@ class TestAuditTolerantPredicate(TestCase):
         self.assertTrue(
             airuleset.is_banned_model("claude-haiku-4-5-20251001"))
 
-    def test_fable_5_1_still_banned_by_audit_predicate(self):
-        self.assertTrue(airuleset.is_banned_model_for_audit("claude-fable-5-1"))
+    def test_fable_5_1_allowed_by_audit_predicate(self):
+        # #894: claude-fable-5-1 is now the allowed Fable tier.
+        self.assertFalse(airuleset.is_banned_model_for_audit("claude-fable-5-1"))
+
+    def test_fable_5_0_banned_by_audit_predicate(self):
+        # #894: claude-fable-5 (5.0) is retired from the lineup.
+        self.assertTrue(airuleset.is_banned_model_for_audit("claude-fable-5"))
 
     def test_bare_alias_still_banned_by_audit_predicate(self):
         self.assertTrue(airuleset.is_banned_model_for_audit("fable"))

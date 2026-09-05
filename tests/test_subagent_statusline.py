@@ -37,7 +37,7 @@ class TestShortModel(unittest.TestCase):
         cases = {
             "claude-opus-4-8": "opus-4.8",
             "claude-sonnet-5": "sonnet-5",
-            "claude-fable-5-1": "fable-5",
+            "claude-fable-5-1": "fable-5.1",
             "claude-haiku-4-5": "haiku-4.5",
             "claude-opus-5": "opus-5",
         }
@@ -46,7 +46,7 @@ class TestShortModel(unittest.TestCase):
 
     def test_context_window_suffix_is_stripped(self):
         self.assertEqual(ss.short_model("claude-opus-4-8[1m]"), "opus-4.8")
-        self.assertEqual(ss.short_model("claude-fable-5-1[1m]"), "fable-5")
+        self.assertEqual(ss.short_model("claude-fable-5-1[1m]"), "fable-5.1")
 
     def test_missing_or_bad_model_is_empty(self):
         for bad in (None, "", "   ", 123, {}):
