@@ -2222,22 +2222,25 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None):
                                      status["worst_pct"],
                                      "gk-request failed: %s" % (
                                          getattr(r, "stderr", "") or "")[:200]))
+            else:
+                # #895 F5 fix: write the dedup marker ONLY on success —
+                # a transient failure must not suppress the next day's retry.
+                try:
+                    fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+                    os.write(fd, (line + "\n").encode("utf-8"))
+                    os.close(fd)
+                    try:
+                        os.chmod(marker, 0o666)
+                    except OSError:
+                        pass      # airuleset:script-ok best-effort chmod
+                except FileExistsError:
+                    _dbg("severe marker won by another user this poll — deduped")
+                except OSError as e:
+                    _dbg("severe marker write failed: %r" % e)
         except Exception as e:
             _dbg("severe ticket error: %r" % e)
             logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
                                  status["worst_pct"], "error: %r" % e))
-        try:
-            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-            os.write(fd, (line + "\n").encode("utf-8"))
-            os.close(fd)
-            try:
-                os.chmod(marker, 0o666)
-            except OSError:
-                pass          # airuleset:script-ok best-effort chmod
-        except FileExistsError:
-            _dbg("severe marker won by another user this poll — deduped")
-        except OSError as e:
-            _dbg("severe marker write failed: %r" % e)
     return logs
 
 

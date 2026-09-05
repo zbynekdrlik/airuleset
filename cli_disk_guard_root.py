@@ -72,9 +72,19 @@ DRAIN_TIMER_PATH = "/etc/systemd/system/airuleset-disk-guard-root-drain.timer"
 DRAIN_LOG_PATH = "/run/airuleset/disk-guard-root-drain.log"
 
 # #895: accounts to SKIP when cleaning cross-user caches (paused = #851).
-# Maintained here as a simple tuple; the root drain script skips these HOME dirs.
-# Updated at push time via provision; a stale list errs toward keeping (safe).
-PAUSED_ACCOUNTS = ("simap1",)
+# DERIVED from cli_fleet.REMOTE_HOSTS at render time (F3 review fix) so adding
+# a paused account to the fleet config automatically skips it in the drain.
+def _paused_accounts():
+    """The set of paused account usernames, derived from the fleet config."""
+    try:
+        import cli_fleet
+        return tuple(sorted({h["user"] for h in cli_fleet.REMOTE_HOSTS
+                             if h.get("paused") and h.get("user")}))
+    except Exception:
+        return ("simap1",)     # fail-safe fallback — errs toward keeping (safe)
+
+
+PAUSED_ACCOUNTS = _paused_accounts()
 
 # Playwright: keep ONLY the newest revision per family per account.
 # tmp: regular files in /tmp older than 2 days.
@@ -325,6 +335,13 @@ def render_drain_script():
         "[ \"$p\" = \"$u\" ] && return 0; done; return 1; }\n"
         "_log() { echo \"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ) $*\" >> \"$log\"; }\n"
         "_act() {\n"
+        "    # F1 review fix: TOCTOU symlink-swap guard — refuse to delete a\n"
+        "    # symlink (a user-writable dir can swap a real entry for a symlink\n"
+        "    # to /usr/lib or another account between plan and act).\n"
+        "    if [ -L \"$1\" ]; then\n"
+        "        _log \"SKIP-SYMLINK $1 ($2) — refusing to delete a symlink\"\n"
+        "        return 0\n"
+        "    fi\n"
         "    if [ -n \"$dry\" ]; then\n"
         "        _log \"WOULD-DELETE $1 ($2)\"\n"
         "    else\n"
@@ -373,7 +390,14 @@ def render_drain_script():
         "            rev=\"${BASH_REMATCH[2]}\"\n"
         "            kept=${newest_rev[$fam]:-0}\n"
         "            if [ \"$rev\" -lt \"$kept\" ]; then\n"
-        "                _act \"${d%%/}\" \"playwright-old $fam rev $rev < $kept\"\n"
+        "                # F4 review fix: keep revisions younger than 30d (may\n"
+        "                # be in use by a pinned playwright version)\n"
+        "                age_d=$(( ( $(date -u +%%s) - $(stat -c %%Y \"${d%%/}\" 2>/dev/null || echo 0) ) / 86400 ))\n"
+        "                if [ \"$age_d\" -lt 30 ]; then\n"
+        "                    _log \"SKIP ${d%%/} playwright $fam rev $rev — younger than 30d\"\n"
+        "                    continue\n"
+        "                fi\n"
+        "                _act \"${d%%/}\" \"playwright-old $fam rev $rev < $kept age=${age_d}d\"\n"
         "            fi\n"
         "        fi\n"
         "    done\n"
@@ -393,14 +417,20 @@ def render_drain_script():
         "    done\n"
         "done\n"
         "\n"
-        "# --- rung (d): redundant pull tgz archives ---\n"
+        "# --- rung (d): redundant pull tgz archives (F2 review: skip paused) ---\n"
         "_log \"RUNG-D redundant pull tgz archives\"\n"
-        "find /home -name '*.tgz' -type f -mmin +%d -print0 2>/dev/null | "
+        "for home in /home/*; do\n"
+        "    [ -d \"$home\" ] || continue\n"
+        "    u=$(basename \"$home\")\n"
+        "    _is_paused \"$u\" && { _log \"SKIP-D $home (paused #851)\"; continue; }\n"
+        "    find \"$home\" -name '*.tgz' -type f -not -type l -mmin +%d "
+        "-print0 2>/dev/null | "
         "while IFS= read -r -d '' f; do\n"
-        "    stem=\"${f%%.tgz}\"\n"
-        "    if [ -d \"$stem\" ]; then\n"
-        "        _act \"$f\" \"tgz-redundant extracted=$stem\"\n"
-        "    fi\n"
+        "        stem=\"${f%%.tgz}\"\n"
+        "        if [ -d \"$stem\" ]; then\n"
+        "            _act \"$f\" \"tgz-redundant extracted=$stem\"\n"
+        "        fi\n"
+        "    done\n"
         "done\n"
         "\n"
         "_log \"DRAIN COMPLETE\"\n"
