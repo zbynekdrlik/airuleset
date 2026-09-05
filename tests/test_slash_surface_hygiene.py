@@ -64,34 +64,21 @@ class TestPlaybookReviewHiddenFromPicker(TestCase):
 
 
 class TestMdreviewCommandSurfaceAxis(TestCase):
+    """#447/#858: v2 restructured the skill to Steps 0-7. The slash-command
+    surface audit (zero-caller skills, user-invocable:false checks) is now
+    in Step 5 (zero-caller skills) + Step 7 (score/apply with user review)."""
+
     def _skill_text(self):
         return (REPO / "skills" / "mdreview" / "SKILL.md").read_text()
 
-    def _b2_section(self):
+    def test_step_5_carries_zero_caller_audit(self):
+        # v2 (#858): Step 5 covers zero-caller skills explicitly
         t = self._skill_text()
-        # Anchor on the HEADING, not a bare "B2" — an earlier prose mention of
-        # "B2" elsewhere in the file must not silently widen this slice
-        # (review finding F2: a widened slice lets the anchors below match
-        # outside the real section and the lock degrades without failing).
-        self.assertIn("### B2", t, "mdreview Step B missing the B2 slash-surface sub-step")
-        start = t.index("### B2")
-        end = t.find("## Step C", start)
-        self.assertGreater(end, start, "B2 must live inside Step B, before Step C")
-        return t[start:end]
+        self.assertIn("Zero-caller skills", t)
+        self.assertIn("user-invocable: false", t.lower())
 
-    def test_step_b_carries_the_command_surface_audit(self):
-        # #447 item 2: command ergonomics + collisions + quality-command
-        # coverage is a standing audit axis of every /mdreview run.
-        b2 = self._b2_section()
-        self.assertIn("quality-command coverage", b2)
-        self.assertIn("user-invocable: false", b2)  # the hide-agent-only-skills check
-        low = b2.lower()
-        for needle in ("collision", "built-in"):
-            self.assertIn(needle, low,
-                          f"B2 audit must cover slash-command {needle} checks")
-
-    def test_findings_route_through_step_f(self):
-        # Never auto-applied: B2 verdicts go through the existing Step F
-        # review-loop like every other mdreview finding.
-        self.assertIn("Step F", self._b2_section(),
-                      "B2 findings must route through the Step F review-loop")
+    def test_findings_route_through_user_review(self):
+        # v2 (#858): Step 7 routes ALL findings through user review
+        t = self._skill_text()
+        self.assertIn("AskUserQuestion", t)
+        self.assertIn("Never apply silently", t)
