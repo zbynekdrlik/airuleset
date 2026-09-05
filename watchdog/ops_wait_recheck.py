@@ -620,9 +620,9 @@ _NUDGE_TAIL = " Label mení supervisor s dôkazom, nikdy automaticky."
 # #843: the `--bounces` pointer is wired into the I trigger (compact: the
 # session reads round3!-tagged members from its own `slice-quals --bounces`).
 _I_TRIGGER = (
-    "I=%d: `slice-quals --audit` + `--bounces` #843, re-audituj tvary "
-    "(gated → W; owner → U #601; gk-close → needs-gatekeeper #636; "
-    "acceptance → U #622); dispatchovateľná ostáva I.")
+    "I=%d: `slice-quals --audit` + `--bounces` #843, re-audituj "
+    "(gated → ops-wait W; needs-owner-action U #601; gk-close → "
+    "needs-gatekeeper #636; acceptance → U #622); ostáva I.")
 
 # The W→I trigger (#547/#588/#607): re-check the parked external events. COUNT
 # only -- the members + their stale!/recheck!/gk-handoff! tags are in the
