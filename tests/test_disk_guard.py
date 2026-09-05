@@ -1993,3 +1993,114 @@ def test_top_consumers_survives_non_drain_poll(tmp_path):
     assert "top_consumers" in cached, (
         "#892: top_consumers must be carried forward on a non-drain poll, "
         "not erased by write_status_cache")
+
+
+# --------------------------------------------------------------------------- #
+# #895 — status.json shape regression lock
+# --------------------------------------------------------------------------- #
+_REQUIRED_STATUS_KEYS = {"worst_pct", "dim", "level", "ts", "mounts"}
+
+
+def test_status_json_shape_lock_required_keys():
+    """#895: disk_status() must always produce ALL required keys."""
+    sv = statvfs_map({"/": (85, 20)})
+    dev = dev_map({"/": 1})
+    st = dg.disk_status(statvfs_fn=sv, dev_fn=dev, mounts=("/",), now=5000.0)
+    for k in _REQUIRED_STATUS_KEYS:
+        assert k in st, "#895: disk_status() must always include key %r" % k
+    assert isinstance(st["mounts"], list)
+    assert isinstance(st["worst_pct"], int)
+    assert isinstance(st["ts"], float)
+
+
+def test_status_json_shape_lock_top_consumers_present_on_cold_start(tmp_path):
+    """#895 regression: on a COLD START (no prior cache, non-drain poll at
+    e.g. 60%), status.json must STILL contain top_consumers (as an empty
+    list) so downstream readers never see a missing key."""
+    gd = tmp_path / ".claude" / "disk-guard"
+    assert not gd.exists(), "precondition: no prior cache"
+    dg.run_disk_guard(
+        now=5000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (60, 10)}),
+        dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: 1000, mounts=("/",))
+    cached = json.loads((gd / "status.json").read_text())
+    for k in _REQUIRED_STATUS_KEYS:
+        assert k in cached, "#895: status.json must include %r" % k
+    assert "top_consumers" in cached, (
+        "#895: top_consumers must be present even on a cold-start non-drain poll")
+    assert isinstance(cached["top_consumers"], list)
+
+
+def test_status_json_shape_lock_top_consumers_item_shape(tmp_path):
+    """#895: when top_consumers is populated (post-drain), each item must
+    have 'path' and 'bytes' keys."""
+    gd = tmp_path / ".claude" / "disk-guard"
+    gd.mkdir(parents=True, exist_ok=True)
+    status = {
+        "worst_pct": 92, "dim": "bytes", "level": "critical",
+        "mounts": [{"mount": "/", "worst_pct": 92}], "ts": 5000.0,
+        "top_consumers": [
+            {"path": "/tmp/big", "bytes": 500_000_000},
+            {"path": "/home/x", "bytes": 200_000_000},
+        ],
+        "top_consumers_ts": 5000.0,
+    }
+    dg.write_status_cache(status, path=str(gd / "status.json"))
+    cached = json.loads((gd / "status.json").read_text())
+    for item in cached["top_consumers"]:
+        assert "path" in item and "bytes" in item, (
+            "#895: each top_consumers item must have 'path' and 'bytes'")
+
+
+# --------------------------------------------------------------------------- #
+# #895 — >=95% severe escalation (auto-ticket, no Discord ping)
+# --------------------------------------------------------------------------- #
+def test_severe_ticket_fires_at_95_pct(tmp_path):
+    """#895: file_severe_ticket fires at >=95% and produces a SEVERE-TICKET log."""
+    marker = dg._severe_ticket_marker(5000.0)
+    if os.path.exists(marker):
+        os.unlink(marker)
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    status = {"worst_pct": 96, "dim": "bytes"}
+    top = [("/tmp/big", 500_000_000)]
+    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, top,
+                                 dry_run=True, run_fn=fake_run)
+    assert any("SEVERE-TICKET" in ln for ln in logs), (
+        "#895: file_severe_ticket must produce a SEVERE-TICKET log line")
+
+
+def test_severe_ticket_skips_below_95(tmp_path):
+    """#895: file_severe_ticket must NOT fire below 95%."""
+    status = {"worst_pct": 93, "dim": "bytes"}
+    logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, [],
+                                 dry_run=True)
+    assert not logs, "#895: no severe ticket below 95%"
+
+
+def test_severe_ticket_daily_dedup(tmp_path):
+    """#895: a second call on the same day must be deduped by the marker."""
+    marker = dg._severe_ticket_marker(5000.0)
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        os.write(fd, b"test\n")
+        os.close(fd)
+        status = {"worst_pct": 97, "dim": "bytes"}
+        logs = dg.file_severe_ticket(status, str(tmp_path), 5000.0, [],
+                                     dry_run=False)
+        assert not logs, "#895: severe ticket must be deduped by daily marker"
+    finally:
+        if os.path.exists(marker):
+            os.unlink(marker)
+
+
+def test_severe_ticket_source_has_gk_request():
+    """#895: file_severe_ticket source must reference gk-request."""
+    import inspect
+    src = inspect.getsource(dg.file_severe_ticket)
+    assert "gk-request" in src
