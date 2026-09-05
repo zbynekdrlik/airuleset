@@ -14,7 +14,7 @@
     "cli_context_baseline.py": 695,
     "cli_deployer_glue.py": 375,
     "cli_disk_guard_root.py": 547,
-    "cli_drop_gateway.py": 589,
+    "cli_drop_gateway.py": 675,
     "cli_filedrop_watchdog.py": 532,
     "cli_fleet.py": 735,
     "cli_key_rotation.py": 670,

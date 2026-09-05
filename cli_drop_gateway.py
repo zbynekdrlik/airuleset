@@ -24,7 +24,7 @@ imported LAZILY inside the reconcile command so there is no import-order couplin
 
 Both target boxes ALREADY run a cloudflared tunnel fronting `newlevel.media`
 subdomains (spinbike UUID 4093c494…, subdev/david UUID 1564fe31…), so the fix
-adds ONE drop-host ingress → 127.0.0.1:DROP_PORT to each EXISTING tunnel — no new
+adds ONE drop-host ingress → 127.0.0.1:<drop-port> to each EXISTING tunnel — no new
 tunnel is created (that would need dev2's origin cert, #635).
 """
 import os
@@ -35,29 +35,30 @@ from pathlib import Path
 # #433 self-contained leaf: same directory, identical value as airuleset.REPO_DIR.
 REPO_DIR = Path(__file__).resolve().parent
 
-# ONE fixed loopback port the public drop lane binds. A managed cloudflared
-# tunnel ingress fronts a public hostname onto 127.0.0.1:DROP_PORT, so the
-# ephemeral vault/upload/show server binds THIS port (never a random one) on the
-# public lane. Distinct from filedrop 8788, upload 8799-8819, secret 8830-8849,
-# show 8850-8869 — it sits in the gap at 8828. One human does one action at a
-# time, so request/show/upload share this port sequentially (a busy port is a
-# clean refuse, never a silent wrong bind).
-DROP_PORT = 8828
+# Per-account loopback port range for the public drop lane (#889). Each account
+# on a shared box gets its own port, so concurrent ephemeral servers (upload,
+# secret show, secret request) never collide. Range 8870-8889 sits above show's
+# 8850-8869 and below no other airuleset range. Distinct from filedrop 8788,
+# upload 8799-8819, secret 8830-8849, show 8850-8869.
+DROP_PORT_BASE = 8870
+DROP_PORT_MAX = 8889
 
 # Flat single-level drop hostnames. Single-level is LOAD-BEARING: Cloudflare
 # Universal SSL for newlevel.media is `*.newlevel.media` (ONE level), so a
 # 2-level `drop.david.newlevel.media` would have NO valid edge cert and would
 # silently break the mandatory TLS. Every existing host (zbynek/david/spinbike
 # .newlevel.media) is single-level, confirming the cert shape.
+# Naming: `drop-<box>.newlevel.media` on single-account boxes,
+# `drop-<box>-<account>.newlevel.media` on shared boxes (#889).
 DROP_HOST_SPINBIKE = "drop-spinbike.newlevel.media"
-DROP_HOST_DAVID = "drop-david.newlevel.media"
+DROP_HOST_DAVID = "drop-david.newlevel.media"  # grandfathered for david1
 
 # The go-live marker a `drop-gateway --apply` writes once a box's drop lane is
 # LIVE (ingress reconciled + tunnel restarted). The CLI's public channel is
 # available IFF this file exists — so `--public` and the no-tailscale
 # auto-fallback never advertise a URL that would 404 before go-live.
 #
-# PER-UNIX-ACCOUNT (#664 review B-M2): the loopback origin 127.0.0.1:DROP_PORT is
+# PER-UNIX-ACCOUNT (#664 review B-M2): the loopback origin 127.0.0.1:<drop-port> is
 # box-wide, but this marker lives in the invoking account's own home. On subdev
 # the tunnel + config + `--user` unit belong to david1, so `drop-gateway --apply`
 # runs there; a SIBLING account (david2, …) that should also use the lane needs
@@ -69,26 +70,28 @@ _CFDIR = Path.home() / ".cloudflared"
 
 
 class DropLane:
-    """One box's public-TLS drop lane: the flat public hostname, the EXISTING
-    cloudflared tunnel it rides (uuid + config path + restart unit), and whether
-    Cloudflare Access fronts it. `access=True` = double protection Access+token
-    (the no-tailscale CLIENT case, David → subdev); `access=False` = token-only
-    TLS (the no-tailscale owner BOX, spinbike).
+    """One account's public-TLS drop lane (#889): the flat public hostname, a
+    per-account loopback port, the EXISTING cloudflared tunnel it rides (uuid +
+    config path + restart unit), and whether Cloudflare Access fronts it.
+
+    `access=True` = double protection Access+token (external-dev accounts:
+    david, dominika); `access=False` = token-only TLS (owner/trusted accounts).
 
     `gateway_account` (#838): the unix account that OWNS this lane's tunnel
-    config + restart unit on this box. `DROP_LANES` is nodename-keyed, so on a
-    SHARED box (subdev) both the gateway account (david1) AND its SIBLING
-    accounts (david2, …, whose drop marker is seeded per the #786 runbook but
-    whose own `~/.cloudflared/config.yml` never exists — the tunnel lives under
-    the gateway) resolve to the SAME lane. A sibling account has nothing to
-    re-assert at install time, so `reconcile_drop_ingress_on_install` diverts it
-    to a benign no-op. `None` = no sibling concept — the invoking account always
-    owns the tunnel (spinbike, single-account boxes) → today's behaviour, so
-    #826's loud failure stays intact on the tunnel-owning account."""
+    config + restart unit on the box. On a SHARED box (subdev) multiple accounts
+    ride the SAME tunnel: the `gateway_account` owns the config + unit, siblings
+    share it. `DROP_LANES` is `(nodename, username)`-keyed (#889), so each
+    account resolves to its OWN lane with its OWN port — eliminating the shared-
+    port contention that blocked david3's `secret show` when david1's upload held
+    the port. A sibling account has nothing to re-assert at install time, so
+    `reconcile_drop_ingress_on_install` diverts it to a benign no-op.
+    `None` = the invoking account always owns the tunnel (single-account boxes)
+    → #826's loud failure stays intact on the tunnel-owning account."""
 
-    def __init__(self, host, tunnel_uuid, tunnel_config, tunnel_service,
+    def __init__(self, host, port, tunnel_uuid, tunnel_config, tunnel_service,
                  tunnel_system_unit, access, gateway_account=None):
         self.host = host
+        self.port = port
         self.tunnel_uuid = tunnel_uuid
         self.tunnel_config = tunnel_config
         self.tunnel_service = tunnel_service
@@ -100,69 +103,113 @@ class DropLane:
         self.gateway_account = gateway_account
 
 
-# Per-box drop lanes, keyed by os.uname().nodename — the SAME box-identity
-# mechanism cli_webterm_profiles.profile_for_host uses (username is useless here:
-# spinbike/dev1/dev2 all share the unix user `newlevel`).
+# Per-account drop lanes (#889), keyed by (nodename, username) — each account
+# gets its OWN hostname + loopback port, eliminating the shared-port contention
+# that blocked sibling accounts when one held the port (the david1/david3 live
+# incident). On single-account boxes the tuple key is the ONLY representation
+# (no bare-nodename fallback — the registry is an EXPLICIT allowlist).
+#
+# TUNNEL TOPOLOGY on subdev: david1-4 ride the david tunnel (1564fe31), marek
+# rides the marek tunnel (1e9555d1), dominika rides the dominika tunnel
+# (7792f710). montalu1-8 and miva1 ride the david tunnel (provisioned at
+# go-live). The gateway_account of each shared tunnel is the tunnel OWNER.
+_SUBDEV_DAVID_TUNNEL = "1564fe31-a95f-4053-93d4-baff2b8a6e97"
+_SUBDEV_DAVID_SERVICE = "webterm-david-tunnel.service"
+
 DROP_LANES = {
-    # no-tailscale BOX — rides the existing spinbike SITE tunnel (a SYSTEM unit
-    # that also serves the live spinbike.sk website; the augmentation preserves
-    # every existing ingress). Owner-only ops → token-only TLS, no Access.
-    "spinbike": DropLane(
-        host=DROP_HOST_SPINBIKE,
+    # --- spinbike (single-account, SYSTEM unit, no Access) ---
+    ("spinbike", "newlevel"): DropLane(
+        host=DROP_HOST_SPINBIKE, port=8828,
         tunnel_uuid="4093c494-b31d-4eb7-8fcb-6c5948f5d4b2",
         tunnel_config=_CFDIR / "config.yml",
         tunnel_service="spinbike-tunnel.service",
-        tunnel_system_unit=True,
-        access=False),
-    # no-tailscale CLIENT (David's laptop) → subdev; rides the existing david
-    # tunnel, behind Cloudflare Access (email OTP) = double protection. The
-    # tunnel config + `--user` unit belong to the gateway account david1 (#838):
-    # sibling accounts (david2, …) share the lane by nodename but own no config,
-    # so their install-time ingress re-assert is a benign no-op.
-    "subdev": DropLane(
-        host=DROP_HOST_DAVID,
-        tunnel_uuid="1564fe31-a95f-4053-93d4-baff2b8a6e97",
+        tunnel_system_unit=True, access=False),
+
+    # --- subdev / david tunnel (david1-4) ---
+    ("subdev", "david1"): DropLane(
+        host=DROP_HOST_DAVID, port=8870,
+        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
         tunnel_config=_CFDIR / "config.yml",
-        tunnel_service="webterm-david-tunnel.service",
-        tunnel_system_unit=False,
-        access=True,
+        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_system_unit=False, access=True,
         gateway_account="david1"),
+    ("subdev", "david2"): DropLane(
+        host="drop-subdev-david2.newlevel.media", port=8871,
+        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
+        tunnel_config=_CFDIR / "config.yml",
+        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_system_unit=False, access=True,
+        gateway_account="david1"),
+    ("subdev", "david3"): DropLane(
+        host="drop-subdev-david3.newlevel.media", port=8872,
+        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
+        tunnel_config=_CFDIR / "config.yml",
+        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_system_unit=False, access=True,
+        gateway_account="david1"),
+    ("subdev", "david4"): DropLane(
+        host="drop-subdev-david4.newlevel.media", port=8873,
+        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
+        tunnel_config=_CFDIR / "config.yml",
+        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_system_unit=False, access=True,
+        gateway_account="david1"),
+
+    # --- subdev / marek tunnel ---
+    ("subdev", "marek"): DropLane(
+        host="drop-subdev-marek.newlevel.media", port=8874,
+        tunnel_uuid="1e9555d1-4d19-4e86-8064-361506fbc2cd",
+        tunnel_config=_CFDIR / "config.yml",
+        tunnel_service="webterm-marek-tunnel.service",
+        tunnel_system_unit=False, access=False,
+        gateway_account="marek"),
+
+    # --- subdev / dominika tunnel ---
+    ("subdev", "dominika"): DropLane(
+        host="drop-subdev-dominika.newlevel.media", port=8875,
+        tunnel_uuid="7792f710-16fb-41da-b46d-1d7b1cd0f8a6",
+        tunnel_config=_CFDIR / "config.yml",
+        tunnel_service="webterm-dominika-tunnel.service",
+        tunnel_system_unit=False, access=True,
+        gateway_account="dominika"),
+    # NOTE: simap1 is PAUSED (#851) — no entry. montalu1-8 and miva1 ride the
+    # david tunnel once provisioned (go-live step, same gateway_account shape).
 }
 
-# Access spec for the drop-david host — reconciled via cli_webterm_access.
-# apply_profile (same shape as WEBTERM_ACCESS_APPS). Owner + David: either may
-# deliver a secret/file to david1/2. `allowed_emails` IS the whole authorization
-# (deny-by-default).
+# Access specs for Access-gated drop hostnames — reconciled via
+# cli_webterm_access.apply_profile (same shape as WEBTERM_ACCESS_APPS).
+# `allowed_emails` IS the whole authorization (deny-by-default).
 DROP_ACCESS_APPS = {
     DROP_HOST_DAVID: {
         "hostname": DROP_HOST_DAVID,
-        "name": "drop — david",
+        "name": "drop — david1",
         "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
         "session_duration": "24h",
     },
-}
-
-
-def drop_lane_for_box(nodename=None):
-    """The DropLane for THIS box (os.uname().nodename), or None."""
-    node = nodename or os.uname().nodename
-    return DROP_LANES.get(node)
-
-
-# Unix accounts whose CONSUMER (the human who opens the one-shot URL) has NO
-# tailscale, so the public-TLS drop lane is the DEFAULT delivery channel — even
-# without an explicit --public (#786). Keyed on (nodename, unix-account): subdev
-# hosts david1/david2 (consumer = David's tailscale-less laptop) ALONGSIDE
-# marek/montalu whose consumers DO have tailscale, so the force is per-ACCOUNT,
-# never per-box. This ONLY flips the default from private → public; the live
-# go-live marker + registered-lane gates in `resolve_public_lane` are unchanged,
-# so it can never invent a lane, route to a foreign marker, or fire where there
-# is no live drop lane. Root cause it closes: the channel decision used to key
-# purely on the BOX's own tailscale interface, so a session had to remember
-# --public by hand for every david* delivery, and kept not remembering it.
-NO_TAILSCALE_CONSUMER_ACCOUNTS = {
-    ("subdev", "david1"),
-    ("subdev", "david2"),
+    "drop-subdev-david2.newlevel.media": {
+        "hostname": "drop-subdev-david2.newlevel.media",
+        "name": "drop — david2",
+        "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
+        "session_duration": "24h",
+    },
+    "drop-subdev-david3.newlevel.media": {
+        "hostname": "drop-subdev-david3.newlevel.media",
+        "name": "drop — david3",
+        "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
+        "session_duration": "24h",
+    },
+    "drop-subdev-david4.newlevel.media": {
+        "hostname": "drop-subdev-david4.newlevel.media",
+        "name": "drop — david4",
+        "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
+        "session_duration": "24h",
+    },
+    "drop-subdev-dominika.newlevel.media": {
+        "hostname": "drop-subdev-dominika.newlevel.media",
+        "name": "drop — dominika",
+        "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
+        "session_duration": "24h",
+    },
 }
 
 
@@ -174,21 +221,32 @@ def _current_username():
     return pwd.getpwuid(os.geteuid()).pw_name
 
 
-def consumer_forces_public(nodename=None, username=None):
-    """True when THIS (box, unix-account) has a no-tailscale CONSUMER, so the
-    public drop lane is the default even without an explicit --public (#786).
+def drop_lane_for_account(nodename=None, username=None):
+    """The DropLane for THIS (box, account), or None (#889).
 
-    Keys on the invoking unix account, NOT the box: subdev hosts david1/david2
-    (consumer = David's tailscale-less laptop) alongside marek/montalu (consumers
-    who DO have tailscale). Fail-safe: any error resolving the username → False
-    (today's box-driven behaviour), never a spurious public force."""
+    Resolves by `(nodename, username)` — each account has its own lane with its
+    own hostname and port. Falls back to `_current_username()` when username is
+    None; fail-safe: any error resolving the username → None (no lane, never a
+    wrong lane).
+    """
     node = nodename or os.uname().nodename
     if username is None:
         try:
             username = _current_username()
         except Exception:
-            return False
-    return (node, username) in NO_TAILSCALE_CONSUMER_ACCOUNTS
+            return None
+    return DROP_LANES.get((node, username))
+
+
+def drop_lane_for_box(nodename=None):
+    """DEPRECATED: backward-compatible wrapper for callers that resolve by
+    nodename only. Returns the first matching lane for this box, or None.
+    New callers should use `drop_lane_for_account()` instead."""
+    node = nodename or os.uname().nodename
+    for (n, _u), lane in DROP_LANES.items():
+        if n == node:
+            return lane
+    return None
 
 
 def public_url_line(host, token):
@@ -198,7 +256,7 @@ def public_url_line(host, token):
             "jednorazový token]" % (host, token))
 
 
-def write_drop_marker(host, port=DROP_PORT, path=None):
+def write_drop_marker(host, port=DROP_PORT_BASE, path=None):
     """Record that a live drop lane exists on this box (host + loopback port).
 
     Written with `O_NOFOLLOW` + mode 0600 (the repo's #271 sensitive-write
@@ -241,29 +299,24 @@ def read_drop_marker(path=None):
     return host, port
 
 
-def resolve_public_lane(want_public, have_encrypted_private, marker_path=None,
-                        nodename=None, username=None):
-    """(host, port) for the public drop lane, or None.
+def resolve_public_lane(want_public=True, have_encrypted_private=None,
+                        marker_path=None, nodename=None, username=None):
+    """(host, port) for the public drop lane, or None (#889: public is the
+    DEFAULT for every account — `want_public` and `have_encrypted_private` are
+    accepted but IGNORED for backward compatibility).
 
     The host+port are the AUTHORITATIVE values from the git-controlled
-    `DROP_LANES` registry (`drop_lane_for_box`), NEVER the marker's own strings
-    (#664 review A-M2): the marker is a per-box go-live FLAG, so a credential
-    URL is never routed to a mutable/foreign marker host. A marker whose `host`
-    disagrees with this box's registered lane (a stale copy from a home-dir
-    migration, or a planted file) is refused outright.
+    `DROP_LANES` registry (`drop_lane_for_account`), NEVER the marker's own
+    strings (#664 review A-M2): the marker is a per-account go-live FLAG, so a
+    credential URL is never routed to a mutable/foreign marker host. A marker
+    whose `host` disagrees with this account's registered lane (a stale copy
+    from a home-dir migration, or a planted file) is refused outright.
 
-    The lane is used when this box HAS a registered drop lane, a matching live
-    marker exists, AND any of: the caller asked for it (`--public`); THIS
-    (box, invoking unix-account) has a no-tailscale CONSUMER so the public lane
-    is the default (`consumer_forces_public` — the #786 fix for david* accounts);
-    OR there is no encrypted private lane available (the no-tailscale auto-fallback
-    — the ticket's channel order: tailscale → public). A box WITH an encrypted
-    private lane, NO `--public`, and a NON-consumer account keeps today's behaviour
-    untouched (None). No marker / no registered lane / a mismatched marker → None,
-    so the consumer force (like `--public`) degrades to today's private path rather
-    than a 404 or a wrong-host URL — it flips only the DEFAULT, never invents a lane.
+    The lane is used when this account HAS a registered drop lane AND a matching
+    live marker exists. No marker / no registered lane / a mismatched marker →
+    None, and the caller prints a loud refuse pointing at the go-live step.
     """
-    lane = drop_lane_for_box(nodename)
+    lane = drop_lane_for_account(nodename, username)
     if lane is None:
         return None
     marker = read_drop_marker(marker_path)
@@ -272,10 +325,7 @@ def resolve_public_lane(want_public, have_encrypted_private, marker_path=None,
     marker_host, _marker_port = marker
     if marker_host != lane.host:                # stale / foreign marker — refuse
         return None
-    if (want_public or consumer_forces_public(nodename, username)
-            or not have_encrypted_private):
-        return lane.host, DROP_PORT             # authoritative, from the registry
-    return None
+    return lane.host, lane.port                 # authoritative, from the registry
 
 
 _CATCHALL_RE = re.compile(r"^(\s*)-\s*service:\s*http_status:404\s*$")
@@ -286,7 +336,7 @@ def _drop_ingress_already_present(config_text, drop_host):
                           config_text))
 
 
-def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT):
+def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT_BASE):
     """`config_text` with a drop-host ingress inserted BEFORE the catch-all 404,
     preserving EVERY existing ingress entry.
 
@@ -378,16 +428,19 @@ def _reconcile_access(lane, dry_run):
                                     "; ".join(res.get("actions") or []) or "-")
 
 
+def _lanes_for_box(nodename):
+    """All DropLane entries for this box, as a list of ((node, user), lane)."""
+    return [((n, u), lane) for (n, u), lane in DROP_LANES.items() if n == nodename]
+
+
 def cmd_drop_gateway(args):
-    """Reconcile THIS box's public-TLS drop lane (#664). DEFAULT is DRY-RUN (no
+    """Reconcile THIS box's public-TLS drop lanes (#889). DEFAULT is DRY-RUN (no
     writes, prints the plan) — the `cmd_webterm_access` pattern.
 
     `--apply`: idempotently augment the box's EXISTING cloudflared tunnel config
-    with the drop ingress (preserving every existing entry), reconcile the
-    Cloudflare Access app for an access-gated lane, restart the tunnel, then
-    write the go-live marker. DNS (a flat CNAME → `<uuid>.cfargotunnel.com`) is a
-    documented manual runbook step — no DNS helper exists in this repo, and #635
-    already treats the DNS cutover as manual.
+    with ALL per-account drop ingresses for this box (preserving every existing
+    entry), reconcile Access apps, restart the tunnel, then write the go-live
+    marker for the invoking account. DNS (flat CNAMEs) is a manual runbook step.
 
     Injectable for offline tests: `run` (systemctl), `marker_path`, `nodename`.
     """
@@ -396,94 +449,117 @@ def cmd_drop_gateway(args):
     marker_path = getattr(args, "_marker_path", None)
     dry_run = getattr(args, "dry_run", False) or not getattr(args, "apply", False)
 
-    lane = drop_lane_for_box(nodename)
-    if lane is None:
-        node = nodename or os.uname().nodename
-        print("drop-gateway: this box (%s) has no declared drop lane — nothing "
-              "to do (drop lanes exist for: %s)."
-              % (node, ", ".join(sorted(DROP_LANES))))
+    node = nodename or os.uname().nodename
+    box_lanes = _lanes_for_box(node)
+    if not box_lanes:
+        print("drop-gateway: this box (%s) has no declared drop lanes — nothing "
+              "to do (drop lanes exist for boxes: %s)."
+              % (node, ", ".join(sorted({n for (n, _u) in DROP_LANES}))))
         return 0
 
+    # Use the first lane to read the tunnel config (all lanes on a box share
+    # the same tunnel config via gateway_account).
+    _key0, lane0 = box_lanes[0]
+
     mode = "DRY-RUN (no writes)" if dry_run else "APPLY"
-    print("drop-gateway [%s] host=%s tunnel=%s config=%s"
-          % (mode, lane.host, lane.tunnel_uuid, lane.tunnel_config))
+    print("drop-gateway [%s] box=%s lanes=%d tunnel=%s config=%s"
+          % (mode, node, len(box_lanes), lane0.tunnel_uuid, lane0.tunnel_config))
 
     try:
-        config_text = Path(lane.tunnel_config).read_text(encoding="utf-8")
+        config_text = Path(lane0.tunnel_config).read_text(encoding="utf-8")
     except OSError as e:
         print("drop-gateway: cannot read tunnel config %s: %s"
-              % (lane.tunnel_config, e), file=sys.stderr)
+              % (lane0.tunnel_config, e), file=sys.stderr)
         return 1
 
-    # Refuse to edit a config that is NOT this lane's tunnel (m1): the augmenter
-    # and the restart both trust `lane.tunnel_config`, so a mismatched `tunnel:`
-    # would graft the drop ingress onto the wrong tunnel.
+    # Refuse to edit a config that is NOT this lane's tunnel (m1).
     cfg_uuid = _config_tunnel_uuid(config_text)
-    if cfg_uuid is not None and cfg_uuid != lane.tunnel_uuid:
+    if cfg_uuid is not None and cfg_uuid != lane0.tunnel_uuid:
         print("drop-gateway: %s declares tunnel %s, not this lane's %s — refusing "
               "to edit the wrong tunnel's config"
-              % (lane.tunnel_config, cfg_uuid, lane.tunnel_uuid), file=sys.stderr)
+              % (lane0.tunnel_config, cfg_uuid, lane0.tunnel_uuid), file=sys.stderr)
         return 1
 
-    try:
-        augmented = render_drop_ingress_augmentation(config_text, lane.host)
-    except ValueError as e:
-        print("drop-gateway: %s" % e, file=sys.stderr)
-        return 1
+    # Add ALL per-account ingress lines for this box.
+    augmented = config_text
+    added_hosts = []
+    for (_n, _u), lane in box_lanes:
+        try:
+            new = render_drop_ingress_augmentation(augmented, lane.host, lane.port)
+        except ValueError as e:
+            print("drop-gateway: %s" % e, file=sys.stderr)
+            return 1
+        if new != augmented:
+            added_hosts.append("%s -> http://127.0.0.1:%d" % (lane.host, lane.port))
+        augmented = new
 
     changed = augmented != config_text
-    print("  ingress: %s"
-          % ("ADD %s -> http://127.0.0.1:%d" % (lane.host, DROP_PORT) if changed
-             else "already present (idempotent no-op)"))
+    if added_hosts:
+        for h in added_hosts:
+            print("  ingress: ADD %s" % h)
+    else:
+        print("  ingress: all %d hosts already present (idempotent no-op)"
+              % len(box_lanes))
 
     if dry_run:
-        print("  access:  %s" % _reconcile_access(lane, dry_run=True)[1])
-        print("  DNS (manual runbook): CNAME %s -> %s.cfargotunnel.com (proxied)"
-              % (lane.host, lane.tunnel_uuid))
+        for (_n, _u), lane in box_lanes:
+            print("  access:  [%s] %s" % (_u, _reconcile_access(lane, dry_run=True)[1]))
+            print("  DNS (manual runbook): CNAME %s -> %s.cfargotunnel.com (proxied)"
+                  % (lane.host, lane.tunnel_uuid))
         print("  (dry-run — nothing changed; re-run with --apply)")
         return 0
 
     if changed:
-        Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
+        Path(lane0.tunnel_config).write_text(augmented, encoding="utf-8")
         print("  wrote %s (drop ingress added, existing entries preserved)"
-              % lane.tunnel_config)
+              % lane0.tunnel_config)
 
-    # Restart whenever the config changed OR the lane is not yet LIVE (marker
-    # absent) — so a re-run AFTER a failed restart (config already carries the
-    # ingress from the prior run, `changed=False`) still restarts, instead of
-    # writing the LIVE marker over a tunnel that never reloaded the ingress
-    # (#664 review C1). A fully-live idempotent re-run skips the (prod) restart.
+    # Restart whenever the config changed OR the invoking account's lane is not
+    # yet LIVE (marker absent) — so a re-run AFTER a failed restart still
+    # restarts, instead of writing the LIVE marker over a tunnel that never
+    # reloaded (#664 review C1).
+    # Resolve the invoking account's OWN lane for the marker write.
+    try:
+        me = _current_username()
+    except Exception:
+        me = None
+    my_lane = drop_lane_for_account(node, me) if me else lane0
+
     if changed or read_drop_marker(marker_path) is None:
-        argv = _restart_argv(lane)
+        argv = _restart_argv(lane0)
         try:
-            r = run(argv, capture_output=True, text=True, env=_restart_env(lane))
+            r = run(argv, capture_output=True, text=True, env=_restart_env(lane0))
             rc = getattr(r, "returncode", 1)
         except Exception as e:                         # pragma: no cover - defensive
             print("  tunnel restart errored (%s) — config written; restart %s "
-                  "by hand" % (e, lane.tunnel_service), file=sys.stderr)
+                  "by hand" % (e, lane0.tunnel_service), file=sys.stderr)
             return 1
         if rc != 0:
             print("  tunnel restart FAILED (%s): %s"
                   % (" ".join(argv), (getattr(r, "stderr", "") or "").strip()),
                   file=sys.stderr)
             return 1
-        print("  restarted %s" % lane.tunnel_service)
+        print("  restarted %s" % lane0.tunnel_service)
 
-    access_ok, access_msg = _reconcile_access(lane, dry_run=False)
-    print("  access:  %s" % access_msg)
-    if not access_ok:
-        # An access-gated lane's Access IS the promised double protection —
-        # refuse to mark it LIVE without it (#664 review B-M3).
+    # Reconcile Access for ALL access-gated lanes on this box.
+    access_failed = False
+    for (_n, _u), lane in box_lanes:
+        access_ok, access_msg = _reconcile_access(lane, dry_run=False)
+        print("  access:  [%s] %s" % (_u, access_msg))
+        if not access_ok and lane.access:
+            access_failed = True
+    if access_failed:
         print("  NOT marking LIVE — Access reconcile did not succeed on an "
               "access-gated lane; fix the token/app and re-run --apply",
               file=sys.stderr)
         return 1
 
-    write_drop_marker(lane.host, DROP_PORT, path=marker_path)
-    print("  marker written (%s) — public drop lane is now LIVE on this box"
-          % (marker_path or DROP_MARKER))
-    print("  DNS: ensure CNAME %s -> %s.cfargotunnel.com (proxied) exists"
-          % (lane.host, lane.tunnel_uuid))
+    write_drop_marker(my_lane.host, my_lane.port, path=marker_path)
+    print("  marker written (%s) — public drop lane is now LIVE for %s on this box"
+          % (marker_path or DROP_MARKER, me or "this account"))
+    for (_n, _u), lane in box_lanes:
+        print("  DNS: ensure CNAME %s -> %s.cfargotunnel.com (proxied) exists"
+              % (lane.host, lane.tunnel_uuid))
     return 0
 
 
@@ -530,9 +606,10 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
     """
     run = run or __import__("subprocess").run
     try:
-        lane = drop_lane_for_box(nodename)
+        node = nodename or os.uname().nodename
+        lane = drop_lane_for_account(node, username)
         if lane is None:
-            return True                         # no drop lane on this box — benign no-op (ok)
+            return True                         # no drop lane for this account — benign no-op
         if read_drop_marker(marker_path) is None:
             return True                         # lane never went live — nothing to preserve (ok)
         if lane.gateway_account is not None:
@@ -562,15 +639,22 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
                   "live drop lane, FAILING the install (#826)"
                   % lane.tunnel_config, file=sys.stderr)
             return False
-        try:
-            augmented = render_drop_ingress_augmentation(config_text, lane.host)
-        except ValueError:
-            print("  drop-gateway: %s has no catch-all — cannot heal a live drop "
-                  "lane, FAILING the install (#826)"
-                  % lane.tunnel_config, file=sys.stderr)
-            return False
+        # Re-assert ALL lanes on this box that share this tunnel (the gateway
+        # account's install pass heals every sibling's ingress).
+        augmented = config_text
+        for (_n, _u), box_lane in _lanes_for_box(node):
+            if box_lane.tunnel_uuid != lane.tunnel_uuid:
+                continue  # different tunnel — skip
+            try:
+                augmented = render_drop_ingress_augmentation(
+                    augmented, box_lane.host, box_lane.port)
+            except ValueError:
+                print("  drop-gateway: %s has no catch-all — cannot heal a live "
+                      "drop lane, FAILING the install (#826)"
+                      % lane.tunnel_config, file=sys.stderr)
+                return False
         if augmented == config_text:
-            return True                         # ingress already present — no restart
+            return True                         # all ingresses already present — no restart
         Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
         argv = _restart_argv(lane)
         r = run(argv, capture_output=True, text=True, env=_restart_env(lane))
