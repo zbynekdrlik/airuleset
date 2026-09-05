@@ -444,7 +444,7 @@
     "tests/test_webterm_lane_parity_684.py": 210,
     "tests/test_webterm_loopback_hardening_663.py": 285,
     "tests/test_webterm_marek.py": 596,
-    "tests/test_webterm_only.py": 752,
+    "tests/test_webterm_only.py": 811,
     "tests/test_webterm_per_human_tabs.py": 295,
     "tests/test_webterm_profiles.py": 246,
     "tests/test_webterm_pwa.py": 201,
