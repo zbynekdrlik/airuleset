@@ -1,12 +1,6 @@
 {
-  "airuleset.py": {
-    "lines": 7158
-  },
-  "cli_webterm_only.py": {
-    "lines": 585
-  },
   "files": {
-    "airuleset.py": 7158,
+    "airuleset.py": 7161,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -44,7 +38,7 @@
     "cli_webterm_gateway.py": 1177,
     "cli_webterm_lane.py": 413,
     "cli_webterm_marek.py": 256,
-    "cli_webterm_only.py": 585,
+    "cli_webterm_only.py": 595,
     "cli_webterm_profiles.py": 503,
     "cli_webterm_pwa.py": 217,
     "cli_webterm_tunnel.py": 180,
@@ -513,7 +507,7 @@
   "functions": {
     "airuleset.py::_notify_run_card": 288,
     "airuleset.py::cmd_gk_request": 209,
-    "airuleset.py::cmd_install": 690,
+    "airuleset.py::cmd_install": 693,
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 229,
     "airuleset.py::cmd_watchdog": 250,
@@ -556,8 +550,5 @@
     ".claude/rules/internals-tests.md": 51098,
     ".claude/rules/internals-watchdog.md": 51200,
     ".claude/rules/internals-webterm.md": 51200
-  },
-  "tests/test_webterm_only.py": {
-    "lines": 752
   }
 }

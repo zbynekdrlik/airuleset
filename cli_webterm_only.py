@@ -27,7 +27,6 @@ SAFETY invariants (test-locked):
     never the raw base64 blob.
   * PUBLIC keys only — no private key material ever touches this module.
 """
-import getpass
 import os
 import subprocess
 import sys
@@ -155,7 +154,11 @@ def manage_webterm_only_keys(
     Returns a dict: ``{"action": "no-op"|"updated"|"error", ...}``.
     """
     run = run or subprocess.run
-    user = user or getpass.getuser()
+    # #869 review CRITICAL-1: never getpass.getuser() (reads $USER, spoofable
+    # per #839); use pwd.getpwuid for the un-spoofable identity.
+    if user is None:
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
     if ssh_dir is None:
         ssh_dir = os.path.expanduser("~/.ssh")
     if log_dir is None:
@@ -479,18 +482,25 @@ def cmd_webterm_only(args):
 
 
 def _cmd_webterm_only_audit():
-    """Read-only fleet audit: ssh to each webterm-only target and audit keys."""
+    """Read-only LOCAL audit: check THIS account's authorized_keys against
+    the desired set.  Does NOT ssh — run it on the target box itself (via
+    ``cmd_install`` or manually).  A fleet-wide audit runs it on each box
+    through the deploy loop's existing connection."""
+    import pwd
+    user = pwd.getpwuid(os.getuid()).pw_name
     from cli_fleet import WEBTERM_ONLY_USERS
-    print("webterm-only audit: %d accounts" % len(WEBTERM_ONLY_USERS))
-    for user in sorted(WEBTERM_ONLY_USERS):
-        result = audit_webterm_only_keys(user)
-        findings = result.get("findings", [])
-        if findings:
-            print("  %s: %d finding(s)" % (user, len(findings)))
-            for f in findings:
-                print("    - %s" % f)
-        else:
-            print("  %s: OK" % user)
+    if user not in WEBTERM_ONLY_USERS:
+        print("webterm-only audit: %s is not a webterm-only user — nothing to audit" % user)
+        return
+    print("webterm-only audit: %s" % user)
+    result = audit_webterm_only_keys(user)
+    findings = result.get("findings", [])
+    if findings:
+        print("  %d finding(s):" % len(findings))
+        for f in findings:
+            print("    - %s" % f)
+    else:
+        print("  OK — authorized_keys matches desired set")
 
 
 def _cmd_webterm_only_apply_sshd(dry_run=False):
@@ -524,7 +534,7 @@ def _cmd_webterm_only_apply_sshd(dry_run=False):
         "DROPIN_EOF\n"
         "chmod 644 \"$TMPF\"\n"
         "if sshd -t -f /etc/ssh/sshd_config 2>&1; then\n"
-        "  # Validate with the new file in place (test config)\n"
+        "  # Baseline OK — now apply and re-validate\n"
         "  BACKUP=\"${DROPIN}.airuleset-prev\"\n"
         "  [ -f \"$DROPIN\" ] && cp \"$DROPIN\" \"$BACKUP\"\n"
         "  mv \"$TMPF\" \"$DROPIN\"\n"
@@ -582,4 +592,4 @@ def _cmd_webterm_only_apply_sshd(dry_run=False):
     if r.returncode != 0:
         print("FAILED: exit %d" % r.returncode, file=sys.stderr)
         sys.exit(1)
-    print("SUCCESS: sshd drop-in applied and verified")
+    print("SUCCESS: sshd drop-in applied (read-back above — verify manually)")

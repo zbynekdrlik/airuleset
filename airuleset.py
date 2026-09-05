@@ -1192,7 +1192,10 @@ def cmd_install(args):
         if _conf_path.exists() and _conf_path.read_text() == _conf_content:
             print(f"  No change: {_conf_path}")
         else:
-            _conf_path.write_text(_conf_content, encoding="utf-8")
+            # Atomic write via tmp + os.replace (#869 review MINOR-8)
+            _conf_tmp = _conf_path.with_suffix(".conf.tmp")
+            _conf_tmp.write_text(_conf_content, encoding="utf-8")
+            os.replace(str(_conf_tmp), str(_conf_path))
             print(f"  Updated:   {_conf_path}")
     except Exception as e:
         print(f"  subdev accounts conf error (non-fatal): {e}", file=sys.stderr)

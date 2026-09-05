@@ -159,23 +159,40 @@ try:
 except OSError:
     pass
 
+# Hardcoded fallback — MUST match SUBDEV_ACCOUNTS_FALLBACK in
+# cli_webterm_only.py (test-locked). Used when conf absent AND as the
+# CEILING: conf can only NARROW (match/subset), never WIDEN (#869 review).
+_SUBDEV_ACCOUNTS_HARDCODED = {
+    "montalu1": "default", "montalu2": "default",
+    "montalu3": "default", "montalu4": "default",
+    "montalu5": "default", "montalu6": "default",
+    "montalu7": "default", "montalu8": "default",
+    "marek": "gatekeeper_access_ed25519",
+    "david1": "gatekeeper_access_ed25519",
+    "david2": "gatekeeper_access_ed25519",
+    "david3": "gatekeeper_access_ed25519",
+    "david4": "gatekeeper_access_ed25519",
+    "dominika": "gatekeeper_access_ed25519",
+    "simap1": "gatekeeper_access_ed25519",
+    "miva1": "gatekeeper_access_ed25519",
+}
 if not _SUBDEV_ACCOUNTS:
-    # Hardcoded fallback — MUST match SUBDEV_ACCOUNTS_FALLBACK in
-    # cli_webterm_only.py (test-locked).
-    _SUBDEV_ACCOUNTS = {
-        "montalu1": "default", "montalu2": "default",
-        "montalu3": "default", "montalu4": "default",
-        "montalu5": "default", "montalu6": "default",
-        "montalu7": "default", "montalu8": "default",
-        "marek": "gatekeeper_access_ed25519",
-        "david1": "gatekeeper_access_ed25519",
-        "david2": "gatekeeper_access_ed25519",
-        "david3": "gatekeeper_access_ed25519",
-        "david4": "gatekeeper_access_ed25519",
-        "dominika": "gatekeeper_access_ed25519",
-        "simap1": "gatekeeper_access_ed25519",
-        "miva1": "gatekeeper_access_ed25519",
-    }
+    _SUBDEV_ACCOUNTS = dict(_SUBDEV_ACCOUNTS_HARDCODED)
+else:
+    # INTERSECT with hardcoded: conf can only match/narrow, never widen.
+    # A conf user NOT in hardcoded is dropped. A conf key_req weaker than
+    # hardcoded (default < gatekeeper) is overridden to the hardcoded req.
+    _safe = {}
+    for _u, _k in _SUBDEV_ACCOUNTS.items():
+        if _u not in _SUBDEV_ACCOUNTS_HARDCODED:
+            continue  # conf cannot ADD users
+        _hk = _SUBDEV_ACCOUNTS_HARDCODED[_u]
+        # "default" is weaker than any named key — take the STRONGER
+        if _k == "default" and _hk != "default":
+            _safe[_u] = _hk  # override conf's weak "default"
+        else:
+            _safe[_u] = _k
+    _SUBDEV_ACCOUNTS = _safe
 
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
