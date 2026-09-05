@@ -24,6 +24,10 @@ Requires=local-fs.target
 
 [Service]
 Type=oneshot
+# #866: Pin this boot-time oneshot to nice 0 — ensures the symlink-flip
+# script itself runs at normal priority. The interactive session's nice is
+# pinned separately by the managed launch script's `renice 0 -p $$`.
+Nice=0
 # Type=oneshot defaults TimeoutStartSec to infinity; this unit is ordered
 # Before=sysinit.target ssh.service, so an unbounded hang here would block
 # boot -- and therefore ssh -- fleet-wide. A failed/timed-out unit does NOT

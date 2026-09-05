@@ -5612,6 +5612,9 @@ def cmd_watchdog(args):
                     # this user's own home); left False in run_once unit tests so
                     # the real statvfs/drain never touches a developer box.
                     disk_guard_enabled=True,
+                    # Job 42 (#866) — NICE-CHECK SELF-CHECK. Enabled on every
+                    # real poll; left False in run_once unit tests.
+                    nice_check_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
