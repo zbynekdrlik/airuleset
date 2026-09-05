@@ -515,8 +515,8 @@
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
     "working_time.py": 78,
-    "cli_key_rotation.py": 579,
-    "tests/test_key_rotation.py": 548
+    "cli_key_rotation.py": 670,
+    "tests/test_key_rotation.py": 715
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,

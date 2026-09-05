@@ -3,22 +3,29 @@
 Three-phase state machine for rotating the fleet push ssh key:
 
   ADD     — append the NEW pubkey to every target's authorized_keys using the
-            OLD identity (idempotent by blob; reuses ``_key_blob``/``_fingerprint``
-            from ``cli_webterm_only``, ``host_key_check_opts`` + the ssh runner
-            from ``cli_remote``; never rewrites the whole file — append-one-line
-            shape, same as ``cli_owner_keys``).
+            entry's OWN identity (the ``identity`` field from REMOTE_HOSTS, or
+            the old default key for no-identity entries; sshpass-only entries
+            without ANY key identity are FAILED with a clear message — the
+            rotation needs a key path, not a password).  Idempotent by blob;
+            reuses ``_key_blob`` from ``cli_webterm_only``,
+            ``host_key_check_opts`` from ``cli_remote``.
   VERIFY  — ``ssh -i <new> -o IdentitiesOnly=yes -o BatchMode=yes user@host
             'echo OK-$(whoami)'`` and records ``verified_at`` + ``verify_output``
             ONLY on exit 0 AND output == ``OK-<user>``.
-  REMOVE  — deletes exactly the old blob's line and REFUSES (per host, hard
-            invariant, not a flag) any host lacking ``verified_at``; also
-            refuses when the new key file is absent.
+  REMOVE  — authenticates with the NEW key (not the old identity — the
+            standard rotation pattern: deleting the old key over a session
+            authenticated by the new key makes lockout physically impossible
+            per host); deletes exactly the old blob's line and REFUSES (per
+            host, hard invariant, not a flag) any host lacking ``verified_at``.
+            Also refuses when the new key file is absent.
 
 State file default ``~/.claude/key-rotation/airuleset_push_ed25519.json``
 (atomic write, mode 0600 via ``_write_0600``).
 
-``is_paused`` hosts → ``skipped: "paused #851"`` + printed ``Rotation-debt:``
-line.  dev1 (``newlevel@dev1``) untouched unless ``--include-dev1`` (F3 flag).
+``is_paused`` hosts (checked LIVE in ALL three phases) → ``skipped`` +
+printed ``Rotation-debt:`` line; ``skipped`` is CLEARED on a successful add
+after an unpause.  dev1 (``newlevel@dev1``) untouched unless ``--include-dev1``
+(F3 flag).
 
 Pure leaf: lazy ``import cli_fleet``/``import cli_remote`` inside functions
 (the L-E convention); stdlib only.
@@ -49,6 +56,12 @@ OLD_FLEET_PUSH_PUBKEY = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGyVa+vk1mN9ZDh9VeBCOGx4r1OVGmcb5n67md"
     "t+R3Q/ gatekeeper-access dev1->odoo-gatekeeper"
 )
+
+# The default ssh key — used for REMOTE_HOSTS entries with no `identity`
+# field. These are the sshpass/default-key hosts (dev2, montalu1-8,
+# forestshop). ADD authenticates with this key (it IS authorized on those
+# targets alongside the password).
+_DEFAULT_SSH_KEY = "~/.ssh/id_ed25519"
 
 # dev1 tailscale IP — excluded by default (included only with --include-dev1,
 # F3 flag)
@@ -93,16 +106,27 @@ def save_state(state: Dict[str, Any], state_file: Optional[str] = None):
 # ---------------------------------------------------------------------------
 
 def _host_key(entry: dict) -> str:
-    """A unique key for a REMOTE_HOSTS/guard entry: ``user@host``."""
-    return "%s@%s" % (entry.get("user") or entry.get("admin_user", ""),
-                      entry.get("host", ""))
+    """A unique key for a REMOTE_HOSTS/guard entry: ``user@host``.
+
+    Prefers ``admin_user`` over ``user`` so root@subdev entries from
+    SHARED_STREAM_GUARD_HOSTS + DISK_GUARD_ROOT_HOSTS key consistently."""
+    user = entry.get("admin_user") or entry.get("user", "")
+    return "%s@%s" % (user, entry.get("host", ""))
 
 
-def _rotation_targets(include_dev1: bool = False, host_filter: Optional[str] = None):
+def _entry_identity(entry: dict) -> str:
+    """The ssh identity for an entry: its own ``identity`` field, or the
+    account default key for no-identity entries.  Never returns empty."""
+    return entry.get("identity") or _DEFAULT_SSH_KEY
+
+
+def _rotation_targets(include_dev1: bool = False,
+                      host_filter: Optional[str] = None):
     """Yield ``(host_key, entry, via_gk_hop)`` for every rotation target.
 
-    Includes all REMOTE_HOSTS entries + root@subdev from
-    SHARED_STREAM_GUARD_HOSTS. Excludes dev1 unless ``include_dev1``.
+    Includes all REMOTE_HOSTS entries + root@subdev/root@gk from
+    SHARED_STREAM_GUARD_HOSTS and DISK_GUARD_ROOT_HOSTS. Excludes dev1
+    unless ``include_dev1``.  Deduplicates by ``user@host``.
     If ``host_filter`` is given, yields only matching ``host_key``s.
     """
     import cli_fleet
@@ -120,15 +144,25 @@ def _rotation_targets(include_dev1: bool = False, host_filter: Optional[str] = N
             continue
         yield hk, entry, False
 
-    # root@subdev via gk hop
+    # root@subdev (SHARED_STREAM_GUARD_HOSTS) via gk hop
     for guard in cli_fleet.SHARED_STREAM_GUARD_HOSTS:
-        hk = "%s@%s" % (guard.get("admin_user", "root"), guard.get("host", ""))
+        hk = _host_key(guard)
         if hk in seen:
             continue
         seen.add(hk)
         if host_filter and hk != host_filter:
             continue
-        yield hk, guard, True
+        yield hk, guard, True  # always via gk hop
+
+    # R2 fix: root@gk (DISK_GUARD_ROOT_HOSTS) — DIRECT, no hop
+    for guard in cli_fleet.DISK_GUARD_ROOT_HOSTS:
+        hk = _host_key(guard)
+        if hk in seen:
+            continue
+        seen.add(hk)
+        if host_filter and hk != host_filter:
+            continue
+        yield hk, guard, False  # direct connection
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +176,7 @@ def _ssh_identity_opts(identity_path: str) -> list:
 
 
 def _build_ssh_cmd(entry: dict, identity: str, command: str,
-                   via_gk_hop: bool = False, run=None) -> list:
+                   via_gk_hop: bool = False) -> list:
     """Build an ssh argv for ``entry`` authenticating with ``identity``.
 
     For ``via_gk_hop=True`` (root@subdev), routes through the gk jump host.
@@ -185,10 +219,10 @@ def _append_pubkey_command(pubkey_blob: str) -> str:
     """Shell command to idempotently append a pubkey to authorized_keys.
 
     Same shape as cli_owner_keys: grep-before-append, never truncates,
-    trailing-newline guard.
+    trailing-newline guard.  The ``echo ADDED-OK`` is INSIDE the else
+    branch of the grep so it prints ONLY when a new line was actually
+    appended (Y3 fix: rc==0 without ADDED-OK = already present).
     """
-    # The whole pubkey line is single-quoted in the script, so escape
-    # any embedded single quotes (should not happen with ssh keys, but safe).
     safe_key = pubkey_blob.replace("'", "'\\''")
     blob = _key_blob(pubkey_blob)
     if not blob:
@@ -201,9 +235,12 @@ def _append_pubkey_command(pubkey_blob: str) -> str:
         "[ ! -s ~/.ssh/authorized_keys ] || "
         "[ -z \"$(tail -c 1 ~/.ssh/authorized_keys)\" ] || "
         "printf '\\n' >> ~/.ssh/authorized_keys; "
-        "grep -qF -- '%s' ~/.ssh/authorized_keys || "
-        "printf '%%s\\n' '%s' >> ~/.ssh/authorized_keys; "
-        "echo ADDED-OK"
+        "if grep -qF -- '%s' ~/.ssh/authorized_keys; then "
+        "  echo ALREADY-PRESENT; "
+        "else "
+        "  printf '%%s\\n' '%s' >> ~/.ssh/authorized_keys; "
+        "  echo ADDED-OK; "
+        "fi"
     ) % (safe_blob, safe_key)
 
 
@@ -213,7 +250,12 @@ def phase_add(new_pubkey: str, old_identity: str,
               host_filter: Optional[str] = None,
               dry_run: bool = False,
               run=None) -> Dict[str, Any]:
-    """ADD phase: append the new pubkey to every target's authorized_keys."""
+    """ADD phase: append the new pubkey to every target's authorized_keys.
+
+    Uses each entry's OWN identity (Y1 fix).  Checks ``is_paused`` LIVE
+    (Y2 fix) and clears a stale ``skipped`` marker on successful add.
+    Requires ``ADDED-OK`` or ``ALREADY-PRESENT`` in output (Y3 fix).
+    """
     import cli_fleet
 
     state = load_state(state_file)
@@ -229,7 +271,7 @@ def phase_add(new_pubkey: str, old_identity: str,
                            "added_at": host_state["added_at"]}
             continue
 
-        # Paused?
+        # Paused? (Y2: checked LIVE in every phase)
         if cli_fleet.is_paused(entry):
             reason = cli_fleet.paused_reason(entry)
             host_state["skipped"] = "paused #851"
@@ -242,24 +284,32 @@ def phase_add(new_pubkey: str, old_identity: str,
             results[hk] = {"action": "dry-run"}
             continue
 
+        # Y1: use the entry's own identity (not a hardcoded global)
+        identity = _entry_identity(entry)
+
         # Build and run the append command
         cmd_str = _append_pubkey_command(new_pubkey)
-        argv = _build_ssh_cmd(entry, old_identity, cmd_str,
-                              via_gk_hop=via_gk, run=run)
+        argv = _build_ssh_cmd(entry, identity, cmd_str,
+                              via_gk_hop=via_gk)
         rc, stdout, stderr = _run_ssh(argv, run=run)
 
+        # Y3: require explicit evidence marker
         if rc == 0 and "ADDED-OK" in stdout:
             host_state["added_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                    time.gmtime())
+            # Y2: clear stale skipped marker from a prior paused state
+            host_state.pop("skipped", None)
             state[hk] = host_state
             results[hk] = {"action": "added"}
-        elif rc == 0 and "ADDED-OK" not in stdout:
-            # grep matched = already present (no ADDED-OK printed)
+        elif rc == 0 and "ALREADY-PRESENT" in stdout:
             host_state["added_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                    time.gmtime())
+            host_state.pop("skipped", None)
             state[hk] = host_state
             results[hk] = {"action": "added (was already present)"}
         else:
+            # Y3: rc==0 without evidence = FAILED (garbled output, restricted
+            # shell, MOTD-only — never record added_at without evidence)
             results[hk] = {"action": "FAILED", "rc": rc,
                            "stderr": stderr[:200]}
 
@@ -279,7 +329,12 @@ def phase_verify(new_key_path: str,
                  host_filter: Optional[str] = None,
                  dry_run: bool = False,
                  run=None) -> Dict[str, Any]:
-    """VERIFY phase: prove the new key works for every target."""
+    """VERIFY phase: prove the new key works for every target.
+
+    Checks ``is_paused`` LIVE (Y2 fix).
+    """
+    import cli_fleet
+
     state = load_state(state_file)
     results = {}
 
@@ -292,7 +347,14 @@ def phase_verify(new_key_path: str,
                            "verified_at": host_state["verified_at"]}
             continue
 
-        # Paused / skipped?
+        # Y2: check is_paused LIVE (not stale skipped marker only)
+        if cli_fleet.is_paused(entry):
+            results[hk] = {"action": "skipped",
+                           "reason": cli_fleet.paused_reason(entry)}
+            continue
+
+        # Stale skipped marker from a prior paused state (host unpaused
+        # but ADD not re-run yet)
         if host_state.get("skipped"):
             results[hk] = {"action": "skipped",
                            "reason": host_state["skipped"]}
@@ -351,25 +413,30 @@ def phase_verify(new_key_path: str,
 def _remove_blob_command(old_blob: str) -> str:
     """Shell command to remove EXACTLY the old blob's line from
     authorized_keys. Uses grep -v (safe: keeps every other line untouched).
-    Writes to a temp then mv — atomic, never truncates in-place."""
+    Writes to a temp then mv — atomic, never truncates in-place.
+
+    B4 fix: if the old key is the ONLY line, refuse explicitly rather than
+    letting grep -v exit 1 under set -e (which would leave a stale tmp).
+    """
     safe_blob = old_blob.replace("'", "'\\''")
     return (
         "set -e; "
         "AK=~/.ssh/authorized_keys; "
-        "if grep -qF -- '%s' \"$AK\" 2>/dev/null; then "
+        "if ! grep -qF -- '%s' \"$AK\" 2>/dev/null; then "
+        "  echo ALREADY-ABSENT; "
+        "elif [ \"$(grep -cF -- '%s' \"$AK\")\" = \"$(wc -l < \"$AK\" | tr -d ' ')\" ]; then "
+        "  echo REFUSED-ONLY-KEY; "
+        "else "
         "  TMP=\"${AK}.rotation-tmp\"; "
         "  grep -vF -- '%s' \"$AK\" > \"$TMP\"; "
         "  chmod 600 \"$TMP\"; "
         "  mv \"$TMP\" \"$AK\"; "
         "  echo REMOVED-OK; "
-        "else "
-        "  echo ALREADY-ABSENT; "
         "fi"
-    ) % (safe_blob, safe_blob)
+    ) % (safe_blob, safe_blob, safe_blob)
 
 
 def phase_remove(old_pubkey: str, new_key_path: str,
-                 old_identity: str,
                  state_file: Optional[str] = None,
                  include_dev1: bool = False,
                  host_filter: Optional[str] = None,
@@ -379,7 +446,15 @@ def phase_remove(old_pubkey: str, new_key_path: str,
 
     HARD INVARIANT: refuses any host lacking ``verified_at``.
     Also refuses when ``new_key_path`` does not exist on disk.
+
+    R1 fix: authenticates with the NEW key (not the old identity) — removing
+    the old key over a session authenticated by the new one makes lockout
+    physically impossible per host (the standard rotation pattern).
+
+    Y2 fix: checks ``is_paused`` LIVE.
     """
+    import cli_fleet
+
     # Gate: new key file MUST exist
     expanded_new = os.path.expanduser(new_key_path)
     if not os.path.isfile(expanded_new):
@@ -404,7 +479,13 @@ def phase_remove(old_pubkey: str, new_key_path: str,
                            "removed_at": host_state["removed_at"]}
             continue
 
-        # Paused / skipped?
+        # Y2: check is_paused LIVE
+        if cli_fleet.is_paused(entry):
+            results[hk] = {"action": "skipped",
+                           "reason": cli_fleet.paused_reason(entry)}
+            continue
+
+        # Stale skipped marker
         if host_state.get("skipped"):
             results[hk] = {"action": "skipped",
                            "reason": host_state["skipped"]}
@@ -422,16 +503,25 @@ def phase_remove(old_pubkey: str, new_key_path: str,
             continue
 
         cmd_str = _remove_blob_command(old_blob)
-        argv = _build_ssh_cmd(entry, old_identity, cmd_str,
-                              via_gk_hop=via_gk, run=run)
+        # R1: authenticate with the NEW key (lockout-safe by construction)
+        argv = _build_ssh_cmd(entry, new_key_path, cmd_str,
+                              via_gk_hop=via_gk)
         rc, stdout, stderr = _run_ssh(argv, run=run)
 
-        if rc == 0 and ("REMOVED-OK" in stdout or "ALREADY-ABSENT" in stdout):
+        if rc == 0 and "REMOVED-OK" in stdout:
             host_state["removed_at"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             state[hk] = host_state
-            results[hk] = {"action": "removed" if "REMOVED-OK" in stdout
-                           else "already-absent"}
+            results[hk] = {"action": "removed"}
+        elif rc == 0 and "ALREADY-ABSENT" in stdout:
+            host_state["removed_at"] = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            state[hk] = host_state
+            results[hk] = {"action": "already-absent"}
+        elif rc == 0 and "REFUSED-ONLY-KEY" in stdout:
+            results[hk] = {"action": "REFUSED",
+                           "reason": "old key is the only line — refusing "
+                                     "removal to prevent lockout"}
         else:
             results[hk] = {"action": "FAILED", "rc": rc,
                            "stderr": stderr[:200]}
@@ -516,7 +606,9 @@ def cmd_key_rotation(args):
             with open(pub_path, "r", encoding="utf-8") as fh:
                 new_pubkey = fh.read().strip()
 
-    # Old identity for add/remove phases — today's fleet push key
+    # Old identity for add phase — each entry's own identity is used (Y1),
+    # but the CLI default for entries without an identity field is the
+    # account's default key
     old_identity = "~/.secrets/gatekeeper_access_ed25519"
 
     if phase == "add":
@@ -558,7 +650,6 @@ def cmd_key_rotation(args):
         report = phase_remove(
             old_pubkey=OLD_FLEET_PUSH_PUBKEY,
             new_key_path=new_key,
-            old_identity=old_identity,
             state_file=state_file,
             include_dev1=include_dev1,
             host_filter=host_filter,

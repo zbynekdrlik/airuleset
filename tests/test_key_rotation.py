@@ -119,6 +119,8 @@ class TestPhaseAdd(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", _TEST_GUARDS)
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS)
     def test_add_appends_to_all_targets(self):
@@ -135,6 +137,7 @@ class TestPhaseAdd(unittest.TestCase):
         added = [h for h, r in results.items() if "added" in r["action"]]
         self.assertEqual(len(added), 3, added)
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", _TEST_GUARDS)
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS)
     def test_add_idempotent(self):
@@ -151,6 +154,7 @@ class TestPhaseAdd(unittest.TestCase):
             if r["action"] != "skipped":
                 self.assertIn("already", r["action"], "%s: %s" % (hk, r))
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", _TEST_GUARDS)
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS)
     def test_paused_host_skipped_and_debt(self):
@@ -163,6 +167,7 @@ class TestPhaseAdd(unittest.TestCase):
         self.assertEqual(report["results"][paused_key]["action"], "skipped")
         self.assertIn(paused_key, report["debt_hosts"])
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", [
         {"name": "dev1", "host": "100.104.8.125", "user": "newlevel"},
@@ -177,6 +182,7 @@ class TestPhaseAdd(unittest.TestCase):
                               state_file=self.state_file, run=run)
         self.assertNotIn("newlevel@100.104.8.125", report["results"])
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", [
         {"name": "dev1", "host": "100.104.8.125", "user": "newlevel"},
@@ -192,6 +198,7 @@ class TestPhaseAdd(unittest.TestCase):
                               include_dev1=True, run=run)
         self.assertIn("newlevel@100.104.8.125", report["results"])
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", _TEST_GUARDS)
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS)
     def test_gk_hop_for_root_subdev(self):
@@ -228,6 +235,7 @@ class TestPhaseVerify(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_verify_records_on_correct_output(self):
@@ -245,6 +253,7 @@ class TestPhaseVerify(unittest.TestCase):
         self.assertEqual(state["gatekeeper@10.0.0.1"]["verify_output"],
                          "OK-gatekeeper")
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_verify_fails_on_wrong_output(self):
@@ -262,6 +271,7 @@ class TestPhaseVerify(unittest.TestCase):
         self.assertNotIn("verified_at",
                          state.get("gatekeeper@10.0.0.1", {}))
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_verify_fails_on_nonzero_exit(self):
@@ -291,6 +301,7 @@ class TestPhaseRemove(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_remove_refused_before_verify(self):
@@ -307,7 +318,6 @@ class TestPhaseRemove(unittest.TestCase):
         report = kr.phase_remove(
             old_pubkey=kr.OLD_FLEET_PUSH_PUBKEY,
             new_key_path=self.new_key_path,
-            old_identity="~/.secrets/gk",
             state_file=self.state_file, run=run,
         )
         for hk, r in report["results"].items():
@@ -316,6 +326,7 @@ class TestPhaseRemove(unittest.TestCase):
         # No ssh calls should have been made
         self.assertEqual(len(calls), 0, "ssh calls made despite refusal")
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_remove_succeeds_after_verify(self):
@@ -335,13 +346,13 @@ class TestPhaseRemove(unittest.TestCase):
         report = kr.phase_remove(
             old_pubkey=kr.OLD_FLEET_PUSH_PUBKEY,
             new_key_path=self.new_key_path,
-            old_identity="~/.secrets/gk",
             state_file=self.state_file, run=run,
         )
         for hk, r in report["results"].items():
             self.assertEqual(r["action"], "removed", "%s: %s" % (hk, r))
         self.assertEqual(len(calls), 2)
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:1])
     def test_remove_refuses_when_new_key_absent(self):
@@ -354,7 +365,6 @@ class TestPhaseRemove(unittest.TestCase):
         report = kr.phase_remove(
             old_pubkey=kr.OLD_FLEET_PUSH_PUBKEY,
             new_key_path="/nonexistent/key",
-            old_identity="~/.secrets/gk",
             state_file=self.state_file,
         )
         self.assertIn("error", report)
@@ -405,6 +415,7 @@ class TestDryRun(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_dry_run_makes_no_ssh_calls(self):
@@ -418,6 +429,7 @@ class TestDryRun(unittest.TestCase):
         )
         self.assertEqual(len(calls), 0, "dry-run made ssh calls")
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_dry_run_does_not_write_state(self):
@@ -452,6 +464,7 @@ class TestSummaryNoSecrets(unittest.TestCase):
         # Pubkey blobs in the summary ARE fine (public material) — no assertion
         # against them.
 
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:2])
     def test_add_output_has_no_private_key(self):
@@ -489,16 +502,32 @@ class TestFleetPubkeysTuple(unittest.TestCase):
         self.assertGreaterEqual(len(wto.FLEET_PUSH_PUBKEYS), 1)
         self.assertEqual(wto.FLEET_PUSH_PUBKEY, wto.FLEET_PUSH_PUBKEYS[0])
 
-    def test_lockout_guard_accepts_any_member(self):
-        """The lockout guard passes when ANY member blob is in desired set."""
-        # Build a desired set containing only the OLD key (member 0)
-        old_blob = wto._key_blob(wto.FLEET_PUSH_PUBKEYS[0])
-        self.assertIsNotNone(old_blob)
-        # The guard in _build_desired_set checks FLEET_PUSH_PUBKEYS blobs
-        desired_blobs = {old_blob}
-        fleet_blobs = {wto._key_blob(k) for k in wto.FLEET_PUSH_PUBKEYS}
-        has_fleet = bool(fleet_blobs & desired_blobs)
-        self.assertTrue(has_fleet)
+    def test_lockout_guard_real_function_one_member(self):
+        """Y4: the REAL manage_webterm_only_keys passes with a 2-member
+        tuple even when only member 0's blob is in the desired set."""
+        tmpdir = tempfile.mkdtemp()
+        ssh_dir = os.path.join(tmpdir, ".ssh")
+        os.makedirs(ssh_dir)
+        log_dir = os.path.join(tmpdir, "log")
+        os.makedirs(log_dir)
+        ak = os.path.join(ssh_dir, "authorized_keys")
+        # Write ONLY the old key (member 0) — the guard must still pass
+        with open(ak, "w") as f:
+            f.write(wto.FLEET_PUSH_PUBKEYS[0] + "\n")
+        # Patch FLEET_PUSH_PUBKEYS to have 2 members (old + a fake new)
+        fake_new = "ssh-ed25519 AAAAFakeNewKey test-new"
+        two_member = (wto.FLEET_PUSH_PUBKEYS[0], fake_new)
+        with mock.patch.object(wto, "FLEET_PUSH_PUBKEYS", two_member):
+            r = wto.manage_webterm_only_keys(
+                user="dominika", ssh_dir=ssh_dir,
+                run=lambda *a, **kw: SimpleNamespace(
+                    returncode=0, stdout="", stderr=""),
+                log_dir=log_dir,
+            )
+        # Should NOT be an error — the guard accepted the old member
+        self.assertNotEqual(r["action"], "error", r)
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_lockout_guard_refuses_empty_fleet(self):
         """The lockout guard refuses a desired set missing ALL fleet blobs."""
@@ -506,6 +535,144 @@ class TestFleetPubkeysTuple(unittest.TestCase):
         fleet_blobs = {wto._key_blob(k) for k in wto.FLEET_PUSH_PUBKEYS}
         has_fleet = bool(fleet_blobs & desired_blobs)
         self.assertFalse(has_fleet)
+
+
+class TestDiskGuardRootCoverage(unittest.TestCase):
+    """R2: DISK_GUARD_ROOT_HOSTS entries are rotation targets."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.state_file = os.path.join(self.tmpdir, "state.json")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [
+        {"name": "gk", "host": "10.0.0.99", "admin_user": "root",
+         "identity": "~/.secrets/gatekeeper_access_ed25519"},
+    ])
+    @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:1])
+    def test_disk_guard_root_host_included(self):
+        """root@gk from DISK_GUARD_ROOT_HOSTS is a rotation target."""
+        run, calls = _make_runner()
+        report = kr.phase_add(
+            new_pubkey=FIXTURE_NEW_PUBKEY,
+            old_identity="~/.secrets/gk",
+            state_file=self.state_file, run=run,
+        )
+        self.assertIn("root@10.0.0.99", report["results"])
+        self.assertIn("added", report["results"]["root@10.0.0.99"]["action"])
+
+
+class TestLivePausedInAllPhases(unittest.TestCase):
+    """Y2: is_paused checked LIVE in verify and remove too."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.state_file = os.path.join(self.tmpdir, "state.json")
+        # Host that was NOT paused during add but IS paused now
+        self.paused_after_add = [
+            {"name": "gk", "host": "10.0.0.1", "user": "gatekeeper",
+             "identity": "~/.secrets/gatekeeper_access_ed25519",
+             "paused": "owner paused after add"},
+        ]
+        state = {
+            "gatekeeper@10.0.0.1": {
+                "added_at": "2026-09-01T00:00:00Z",
+                "verified_at": "2026-09-01T01:00:00Z",
+                "verify_output": "OK-gatekeeper",
+            },
+        }
+        with open(self.state_file, "w") as fh:
+            json.dump(state, fh)
+        # Write a fixture new key
+        self.new_key = os.path.join(self.tmpdir, "new_key")
+        with open(self.new_key, "w") as fh:
+            fh.write("fake key")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
+    def test_verify_skips_newly_paused_host(self):
+        """verify checks is_paused LIVE, not stale state."""
+        # Override state to have ONLY added_at (not yet verified)
+        verify_state = {
+            "gatekeeper@10.0.0.1": {
+                "added_at": "2026-09-01T00:00:00Z",
+            },
+        }
+        with open(self.state_file, "w") as fh:
+            json.dump(verify_state, fh)
+        with mock.patch("cli_fleet.REMOTE_HOSTS", self.paused_after_add):
+            run, calls = _make_verify_runner()
+            report = kr.phase_verify(
+                new_key_path=self.new_key,
+                state_file=self.state_file, run=run,
+            )
+        r = report["results"]["gatekeeper@10.0.0.1"]
+        self.assertEqual(r["action"], "skipped")
+        self.assertEqual(len(calls), 0, "should not ssh a paused host")
+
+    @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
+    def test_remove_skips_newly_paused_host(self):
+        """remove checks is_paused LIVE, not stale state."""
+        with mock.patch("cli_fleet.REMOTE_HOSTS", self.paused_after_add):
+            run, calls = _make_remove_runner()
+            report = kr.phase_remove(
+                old_pubkey=kr.OLD_FLEET_PUSH_PUBKEY,
+                new_key_path=self.new_key,
+                state_file=self.state_file, run=run,
+            )
+        r = report["results"]["gatekeeper@10.0.0.1"]
+        self.assertEqual(r["action"], "skipped")
+        self.assertEqual(len(calls), 0)
+
+
+class TestRemoveUsesNewKey(unittest.TestCase):
+    """R1: REMOVE authenticates with the NEW key, not the old identity."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.state_file = os.path.join(self.tmpdir, "state.json")
+        self.new_key = os.path.join(self.tmpdir, "new_key")
+        with open(self.new_key, "w") as fh:
+            fh.write("fake key")
+        state = {
+            "gatekeeper@10.0.0.1": {
+                "added_at": "2026-09-01T00:00:00Z",
+                "verified_at": "2026-09-01T01:00:00Z",
+                "verify_output": "OK-gatekeeper",
+            },
+        }
+        with open(self.state_file, "w") as fh:
+            json.dump(state, fh)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", [])
+    @mock.patch("cli_fleet.DISK_GUARD_ROOT_HOSTS", [])
+    @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS[:1])
+    def test_remove_ssh_uses_new_key_identity(self):
+        """R1: the remove ssh authenticates with the new key path."""
+        run, calls = _make_remove_runner()
+        kr.phase_remove(
+            old_pubkey=kr.OLD_FLEET_PUSH_PUBKEY,
+            new_key_path=self.new_key,
+            state_file=self.state_file, run=run,
+        )
+        self.assertEqual(len(calls), 1)
+        argv = calls[0][0]
+        # The -i flag should point to the NEW key, not the old identity
+        i_idx = argv.index("-i")
+        self.assertEqual(argv[i_idx + 1], self.new_key)
 
 
 class TestOldPubkeyConsistency(unittest.TestCase):
