@@ -322,41 +322,11 @@ class TestWiring(unittest.TestCase):
                       cli_owner_vps.provision_owner_sudo)
         self.assertIs(airuleset.ensure_claude_native_userspace,
                       cli_binary_installers.ensure_claude_native_userspace)
-        # cli_remote._deliver_secret_to_hosts: assertIs can fail under
-        # unittest discover when import ordering causes cli_remote to be
-        # loaded as a second module instance (issue 875 Pass B — intermittent,
-        # depends on filesystem listing order + sys.path manipulation in test
-        # modules + deferred `import airuleset` chains in watchdog).
-        # Verify the facade contract: the re-exported name resolves to the
-        # CURRENT cli_remote attribute (same __qualname__ + __module__),
-        # proving the from-import captured the right function even if the
-        # cli_remote module object in sys.modules was later replaced.
-        a_fn = airuleset._deliver_secret_to_hosts
-        c_fn = cli_remote._deliver_secret_to_hosts
-        if a_fn is not c_fn:
-            # Fallback: verify they share origin (same source function,
-            # different module instance due to import-order instability).
-            import warnings
-            warnings.warn(
-                "cli_remote module identity split under discover "
-                "(issue 875) — fallback contract check used",
-                stacklevel=1)
-            self.assertEqual(
-                a_fn.__qualname__, c_fn.__qualname__,
-                "facade re-export qualname mismatch: "
-                f"{a_fn.__qualname__!r} vs {c_fn.__qualname__!r}")
-            self.assertEqual(
-                a_fn.__module__, c_fn.__module__,
-                "facade re-export module mismatch: "
-                f"{a_fn.__module__!r} vs {c_fn.__module__!r}")
-            # Y1 review finding: also check co_filename to distinguish a
-            # duplicate module instance (same source file) from a
-            # functools.wraps wrapper (different source file).
-            self.assertEqual(
-                a_fn.__code__.co_filename, c_fn.__code__.co_filename,
-                "facade re-export source file mismatch: "
-                f"{a_fn.__code__.co_filename!r} vs "
-                f"{c_fn.__code__.co_filename!r}")
+        # #875 Pass B: strict assertIs restored — the root cause (sys.path
+        # leak in test_account_limit_backoff.py) is fixed by removing the repo
+        # root from sys.path after its imports complete.
+        self.assertIs(airuleset._deliver_secret_to_hosts,
+                      cli_remote._deliver_secret_to_hosts)
 
     def test_cmd_install_invokes_provision_owner_sudo(self):
         import inspect
