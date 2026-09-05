@@ -351,6 +351,7 @@ def _measure_repo_ceilings():
 
     total = 0
     count = 0
+    missing_modules = []
     for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
@@ -363,6 +364,10 @@ def _measure_repo_ceilings():
                 print(f"  warning: could not stat {mod_path}",
                       file=sys.stderr)
             count += 1
+        else:
+            missing_modules.append(line)
+            print(f"  warning: missing profile module {line}",
+                  file=sys.stderr)
 
     skills_dir = REPO_DIR / "skills"
     skill_data = measure_skills(skills_dir)
@@ -491,20 +496,28 @@ def run_fleet(runner=None):
     boxes = []
     failed = []
 
+    # Local box in-process (design: "Local box in-process")
+    if not runner:
+        local_data = measure_box()
+        boxes.append(local_data)
+
     for host in hosts:
-        name = host.get("name", host.get("addr", "unknown"))
+        name = host.get("name", host.get("host", "unknown"))
         try:
             if runner:
                 stdout, rc = runner(host)
             else:
-                addr = host.get("addr", "")
+                addr = host.get("host", "")
                 user = host.get("user", "newlevel")
+                repo_path = host.get("repo_path",
+                                     "~/devel/airuleset")
                 ssh_base = ["ssh", "-o", "BatchMode=yes",
                             "-o", "ConnectTimeout=10",
                             "-o", "StrictHostKeyChecking=no",
                             f"{user}@{addr}"]
                 cmd = ssh_base + [
-                    "python3", "~/devel/airuleset/airuleset.py",
+                    "python3",
+                    f"{repo_path}/airuleset.py",
                     "context-baseline", "--json"
                 ]
                 result = subprocess.run(

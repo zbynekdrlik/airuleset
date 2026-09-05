@@ -44,7 +44,7 @@ FIXTURE_SLASH_RECORD = json.dumps({
     "timestamp": _recent_ts(),
     "message": {
         "role": "user",
-        "content": "<command-name>review</command-name>",
+        "content": "<command-name>/review</command-name>",
     },
 })
 

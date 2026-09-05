@@ -25,11 +25,6 @@ _SKILL_PREFILTER = '"Skill"'
 _SLASH_PREFILTER = '<command-name>'
 
 
-def bytes_to_tokens(b):
-    """tokens = bytes // 4 — shared with cli_context_baseline."""
-    return b // 4
-
-
 def scan_usage(days=DEFAULT_DAYS, projects_dir=None):
     """Scan ~/.claude/projects/*/*.jsonl for Skill tool_use and slash commands.
 
@@ -104,6 +99,8 @@ def scan_usage(days=DEFAULT_DAYS, projects_dir=None):
                         # Skill tool_use: assistant message with tool_use
                         if has_skill and role == "assistant":
                             for item in msg.get("content", []):
+                                if not isinstance(item, dict):
+                                    continue
                                 if (item.get("type") == "tool_use"
                                         and item.get("name") == "Skill"):
                                     inp = item.get("input", {})
@@ -161,10 +158,11 @@ def scan_usage(days=DEFAULT_DAYS, projects_dir=None):
 
 
 def _extract_slash(text, session_id, slash_dict):
-    """Extract <command-name>X</command-name> from text."""
+    """Extract <command-name>X</command-name> from text.
+    Real transcripts carry the leading slash (e.g. /compact), strip it."""
     import re
     for m in re.finditer(r'<command-name>([^<]+)</command-name>', text):
-        name = m.group(1).strip()
+        name = m.group(1).strip().lstrip("/")
         if name:
             entry = slash_dict.setdefault(
                 name, {"calls": 0, "sessions": set()})
@@ -206,19 +204,22 @@ def run_fleet(days=DEFAULT_DAYS, runner=None):
     failed = []
 
     for host in hosts:
-        name = host.get("name", host.get("addr", "unknown"))
+        name = host.get("name", host.get("host", "unknown"))
         try:
             if runner:
                 stdout, rc = runner(host)
             else:
-                addr = host.get("addr", "")
+                addr = host.get("host", "")
                 user = host.get("user", "newlevel")
+                repo_path = host.get("repo_path",
+                                     "~/devel/airuleset")
                 ssh_base = ["ssh", "-o", "BatchMode=yes",
                             "-o", "ConnectTimeout=10",
                             "-o", "StrictHostKeyChecking=no",
                             f"{user}@{addr}"]
                 cmd = ssh_base + [
-                    "python3", "~/devel/airuleset/airuleset.py",
+                    "python3",
+                    f"{repo_path}/airuleset.py",
                     "skill-usage", "--json",
                     "--days", str(days)
                 ]
