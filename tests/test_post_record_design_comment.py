@@ -71,7 +71,8 @@ GOOD_BODY_NO_ARCH = (
     "Root cause: the retry loop never reset its backoff counter after a "
     "successful call. Chosen approach: reset the counter on the first "
     "success after any failure. Rejected alternative: replacing the whole "
-    "backoff strategy with a token bucket -- too big a change for this bug."
+    "backoff strategy with a token bucket -- too big a change for this bug.\n"
+    "Shared-benefit: n/a — scoped retry-loop fix, single module"
 )
 
 # #414 -- same content, PLUS the Triage:/Architektúra: shape now ALSO
@@ -107,7 +108,8 @@ GOOD_BODY_NONTRIVIAL_NO_ARCH = (
     "small. Chosen approach: Approach 1, the polling timer -- the queue "
     "volume does not justify a dedicated process yet. Rejected alternative: "
     "Approach 2, the dedicated daemon -- too much operational overhead for "
-    "the current volume."
+    "the current volume.\n"
+    "Shared-benefit: n/a — queue-watcher is project-internal"
 )
 
 BAD_BODY = "still looking into this, will update soon"
@@ -141,7 +143,8 @@ ALL_THREE_SHAPES_BODY = (
     "Triage: trivial\n\n"
     "Architektúra: structure -- a single retry-loop function, no new "
     "process or service. Framework: reused the existing retry module "
-    "directly, no new machinery needed."
+    "directly, no new machinery needed.\n"
+    "Shared-benefit: n/a — scoped retry-loop fix, single module"
 )
 
 

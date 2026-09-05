@@ -454,8 +454,14 @@ round-scope dispatch lock) — and releases it the moment that cycle's push has 
    change) requires the fuller depth #414 restored: **2-3 considered approaches with their
    trade-offs**, not one, PLUS an `Architektúra:` section (structure/topology + the framework used,
    OR an evidenced why-none-fits from an actually-read source — `architecture-first.md`'s
-   framework-first rule). `hooks/block-commit-without-design.sh` mechanically checks BOTH
-   (`design_gate.classify_triage_and_approaches`/`classify_architecture_section`) before your first
+   framework-first rule). **Every design comment ALSO carries a `Shared-benefit:` line (#877) —
+   UNCONDITIONAL (trivial tickets included): disposition of whether the change benefits beyond the
+   requesting client/stream ("shared — mechanism/data to company_base" / "single-client — MIVA
+   report format" / "n/a — single-file typo, reason"). Bare `n/a` without a reason is rejected.
+   Origin: SK holidays implemented as MIVA-only seed, celostatne data (odoo-erp issue 6252).**
+   `hooks/block-commit-without-design.sh` mechanically checks ALL THREE
+   (`design_gate.classify_triage_and_approaches`/`classify_architecture_section`/
+   `classify_shared_benefit`) before your first
    commit for that member goes through, and tells you exactly what's missing if it doesn't. For a
    genuinely NON-TRIVIAL member, go deeper BEFORE coding: dispatch your own design/hard-debug
    consult (the gated `fable-advisor` agent, or a fresh no-`model`-param dispatch that inherits
@@ -585,8 +591,11 @@ push / PR / merge / deploy, never that backup.
    production-classified code is itself a FINDING, never a mitigation — a YES to any of these
    blocks the verdict at the same severity as a correctness bug.
    **The reviewer's brief MUST include the REPO'S LENS LIST (#843).** Load
-   `.claude/rules/gk-review-lenses.md` from the TARGET repo when present; else the built-in six:
-   security / correctness / test-integrity / evidence-integrity / design-doctrine / process. The
+   `.claude/rules/gk-review-lenses.md` from the TARGET repo when present; else the built-in seven:
+   security / correctness / test-integrity / evidence-integrity / design-doctrine / process /
+   shared-benefit (a change whose benefit extends beyond the requesting client implemented as
+   single-client is a FINDING at correctness severity; the diff's placement must match the design
+   comment's `Shared-benefit:` disposition — #877). The
    review output is a `Self-review:` fenced Markdown table — one row per lens with a verdict + a
    `file:line` evidence citation (an `n/a` row needs a reason). This table is the machine-readable
    artifact the hand-off comment carries. **For a NON-TRIVIAL diff the table is produced BY the

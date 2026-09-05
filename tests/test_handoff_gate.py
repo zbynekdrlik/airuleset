@@ -73,6 +73,7 @@ class TestValidateTable(unittest.TestCase):
         "| evidence-integrity | pass | f:4 |\n"
         "| design-doctrine | pass | f:5 |\n"
         "| process | pass | f:6 |\n"
+        "| shared-benefit | pass | f:7 |\n"
     )
 
     def test_all_covered(self):
