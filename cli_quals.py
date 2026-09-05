@@ -999,6 +999,28 @@ TACIT_WINDOW_WORKING_S = 3 * 24 * 3600
 # confirm the reminder was SENT before any close).
 _FINAL_REMINDER_RX = re.compile(r"(?im)^[ \t]*Acceptance-reminder[ \t]*:")
 
+# #881 — the convergence-clock parking marker: `Ops-wait-target: <event> by
+# <YYYY-MM-DD>`. Line-anchored (^), colon-required, mirroring #818's
+# `Acceptance-reminder:` family. A date-less marker is NOT valid (an event
+# without a date is the indefinite parking #881 attacks). The required
+# ` by YYYY-MM-DD` tail is the falsifiable convergence clock — when the
+# self-declared date passes, the member tags `converge!`. A hyphenated
+# derivative (`Ops-wait-target-draft:`) does NOT match because the regex
+# requires `[ \t]*:` immediately after the name (no `-`). Mid-line prose
+# mentions are excluded by `^`. Matched case-insensitively.
+_OPS_WAIT_TARGET_RX = re.compile(
+    r"(?im)^[ \t]*Ops-wait-target[ \t]*:[ \t]*(?P<event>\S[^\n]*?)"
+    r"[ \t]+by[ \t]+(?P<date>\d{4}-\d{2}-\d{2})[ \t.]*$"
+)
+
+# #881 — the age ceiling: a W member older than this many calendar days with
+# no valid FUTURE-dated target tags `converge!`. 14 days halves the observed
+# multi-week rot horizon (montalu3, 4 weeks) while sitting an order of
+# magnitude past every existing cadence (24h push, 3d tacit), so it catches
+# only genuine rot, never legitimate week-scale evidence collection. A valid
+# future target SUPPRESSES the ceiling.
+OPS_WAIT_CONVERGE_AGE_D = 14
+
 
 def _comment_is_final_reminder(body):
     """True iff `body` carries the #818 line-anchored `Acceptance-reminder:`
@@ -1006,6 +1028,17 @@ def _comment_is_final_reminder(body):
     if not isinstance(body, str) or not body.strip():
         return False
     return bool(_FINAL_REMINDER_RX.search(body))
+
+
+def _comment_ops_wait_target(body):
+    """#881: extract the `Ops-wait-target: <event> by <YYYY-MM-DD>` date from
+    `body`, or None if no valid marker is present. Returns the date string
+    (YYYY-MM-DD) only — the event text is for human reading, not machine use.
+    None/empty/non-str → None."""
+    if not isinstance(body, str) or not body.strip():
+        return None
+    m = _OPS_WAIT_TARGET_RX.search(body)
+    return m.group("date") if m else None
 
 
 def _parse_iso_ts(s):
@@ -1073,11 +1106,13 @@ def _norm_ages(res):
         # the in-place default is safe + idempotent, never a copy-on-read
         # dependency (review 🔵 B).
         res.setdefault("own_final_reminder", None)
+        res.setdefault("own_target", None)           # #881
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
                 "own_cited": res[0], "own_oldest": None,
-                "own_final_reminder": None}
+                "own_final_reminder": None,
+                "own_target": None}
     return None
 
 
@@ -1134,6 +1169,8 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     if not isinstance(comments, list):
         return None
     own_ts = any_ts = own_cited = own_oldest = own_final_reminder = None
+    own_target = None                                # #881: newest valid target date
+    own_target_ts = 0                                # comment ts of the winning target
     for c in comments:
         if not isinstance(c, dict):
             continue
@@ -1158,9 +1195,19 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
             if _comment_is_final_reminder(body) and (
                     own_final_reminder is None or ts > own_final_reminder):
                 own_final_reminder = ts
+            # #881: the newest own comment (by ts) carrying a valid
+            # `Ops-wait-target: <event> by <date>` marker. Newest
+            # comment-ts wins (revising a target = posting a newer
+            # comment), NOT the date inside the marker.
+            tgt = _comment_ops_wait_target(body)
+            if tgt is not None:
+                if own_target is None or ts > own_target_ts:
+                    own_target = tgt
+                    own_target_ts = ts
     return {"own": own_ts, "any": any_ts,
             "own_cited": own_cited, "own_oldest": own_oldest,
-            "own_final_reminder": own_final_reminder}
+            "own_final_reminder": own_final_reminder,
+            "own_target": own_target}
 
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
@@ -1486,6 +1533,76 @@ def _gk_handoff_ops_wait_flagged(rows):
         if ("ops-wait" in names
                 and _GK_HANDOFF_BOUNCE_OVERRIDE not in names
                 and any(lb in names for lb in _GK_HANDOFF_LABELS)):
+            flagged.add(number)
+    return flagged
+
+
+def _converge_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
+    """#881: the set of ops-wait (W) member numbers to tag `converge!` — a
+    parked ticket that must issue a CONVERGENCE VERDICT (close / unpark /
+    re-lane / re-target-with-citation / owner-digest) instead of another
+    freshness push.
+
+    Two prongs (OR):
+    1. TARGET-MISS: the newest valid own `Ops-wait-target:` marker's date
+       has PASSED (< today, Europe/Bratislava calendar date).
+    2. AGE CEILING: no valid FUTURE-dated target exists AND createdAt age
+       > OPS_WAIT_CONVERGE_AGE_D (14 days). A valid future target
+       SUPPRESSES the ceiling — the session's declared expectation is
+       respected.
+
+    Fail-safe (#539/#570 bias): gh error / missing data → UNTAGGED."""
+    from datetime import datetime, timezone
+    if now is None:
+        now = time.time()
+    today_str = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
+    flagged = set()
+    for number, row in (rows or {}).items():
+        if not isinstance(row, dict):
+            continue
+        res = ages_fn(number) if ages_fn else None
+        res = _norm_ages(res)
+        if res is None:
+            continue                                 # gh error -> fail-safe
+        own_target = res.get("own_target")
+        # Prong 1: target-miss — the declared date has passed.
+        if own_target is not None and own_target < today_str:
+            flagged.add(number)
+            continue
+        # Prong 2: age ceiling — no valid future target + old ticket.
+        if own_target is not None and own_target >= today_str:
+            continue                                 # future target suppresses
+        # own_target is None — no marker at all.
+        created_ts = _parse_iso_ts(row.get("createdAt"))
+        if created_ts is None:
+            continue                                 # unparseable -> fail-safe
+        age_days = (now - created_ts) / 86400
+        if age_days > OPS_WAIT_CONVERGE_AGE_D:
+            flagged.add(number)
+    return flagged
+
+
+def _no_target_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
+    """#881: the set of ops-wait (W) member numbers to tag `no-target!` — a
+    parked ticket with NO valid `Ops-wait-target:` marker on any own comment.
+
+    Fires IMMEDIATELY on park (no grace period): parking requires a target
+    marker; its absence is the defect the tag surfaces. A member that also
+    tags `converge!` is NOT excluded — `converge!` subsumes `no-target!`
+    (the verdict includes setting a target), but both are surface-level tags
+    here; the composition layer decides precedence.
+
+    Fail-safe: gh error / comment fetch failure → UNTAGGED."""
+    flagged = set()
+    for number, row in (rows or {}).items():
+        if not isinstance(row, dict):
+            continue
+        res = ages_fn(number) if ages_fn else None
+        res = _norm_ages(res)
+        if res is None:
+            continue                                 # gh error -> fail-safe
+        own_target = res.get("own_target")
+        if own_target is None:
             flagged.add(number)
     return flagged
 

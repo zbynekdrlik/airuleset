@@ -4897,6 +4897,10 @@ def _watchdog_ops_wait_fetch(cwd):
                         # dropped the false "remind DNES" nudge), so it is
                         # deliberately NOT parsed here (the #753 no-dead-parse rule).
                         "tacit_close": "tacit-close?" in reason,
+                        # #881: convergence tags consumed by the job-20 nudge's
+                        # CONVERGE and NO-TARGET clauses.
+                        "converge": "converge!" in reason,
+                        "no_target": "no-target!" in reason,
                         "title": title})
     return members
 
