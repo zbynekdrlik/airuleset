@@ -617,10 +617,12 @@ _NUDGE_TAIL = " Label mení supervisor s dôkazom, nikdy automaticky."
 # + a shape hint -- the #578 named audit moved SESSION-side, out of the keystroke
 # payload, #714). "re-audituj" is the stable token the wiring test keys on.
 # `%d` = the I count.
+# #843: the `--bounces` pointer is wired into the I trigger (compact: the
+# session reads round3!-tagged members from its own `slice-quals --bounces`).
 _I_TRIGGER = (
-    "I=%d: spusti `slice-quals --audit`, re-audituj tvary (gated → ops-wait W; "
-    "owner-otázka/krok → needs-owner-action U #601/#607; gk-close → "
-    "needs-gatekeeper #636; acceptance → U #622); len dispatchovateľná ostáva I.")
+    "I=%d: `slice-quals --audit` + `--bounces` #843, re-audituj "
+    "(gated → ops-wait W; needs-owner-action U #601; gk-close → "
+    "needs-gatekeeper #636; acceptance → U #622); ostáva I.")
 
 # The W→I trigger (#547/#588/#607): re-check the parked external events. COUNT
 # only -- the members + their stale!/recheck!/gk-handoff! tags are in the

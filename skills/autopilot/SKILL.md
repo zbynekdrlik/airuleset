@@ -595,6 +595,12 @@ gap in either.
      the very NEXT batch, then the normal queue resumes (the user's flow: "dokonči rozrobený →
      sprav gatekeeper ticket → pokračuj v ostatných"). The worker removes the `prio:bounce` label
      at its done-point, so a resolved bounce leaves the lane automatically.
+     **`round3!`-tagged bounce ticket (#843):** `slice-quals --bounces` tags a `prio:bounce` member
+     at bounce round ≥ 3 as `round3!`. A `round3!` member gets a GATED `fable-advisor` DESIGN
+     CONSULT (digest of ALL prior gk findings for that ticket) BEFORE the worker re-implements —
+     the digest goes into the worker's dispatch prompt. The worker's own CYCLE step 6 review then
+     runs at the escalated tier (fable-gate OPEN → `fable-advisor`, CLOSED → `claude-opus-4-6`),
+     and `--reviewed-by-tier` on `airuleset.py handoff` records which tier actually ran.
    - **Grow greedily** by adding more open backlog issues that EACH pass the **bundling gate** vs the
      seed and the batch-so-far:
        • each member ≤ ~300 LoC estimated, AND cumulative batch ≤ ~600 LoC, AND ≤ 4 issues (keep the
