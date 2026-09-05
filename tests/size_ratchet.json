@@ -390,7 +390,7 @@
     "tests/test_shadow_ugrep_reaper.py": 354,
     "tests/test_shared_benefit.py": 149,
     "tests/test_show_delivery_879.py": 149,
-    "tests/test_situational_injection.py": 742,
+    "tests/test_situational_injection.py": 751,
     "tests/test_size_ratchet.py": 788,
     "tests/test_slash_surface_hygiene.py": 84,
     "tests/test_soniox_provisioning.py": 780,
