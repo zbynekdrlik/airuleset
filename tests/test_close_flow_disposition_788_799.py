@@ -144,7 +144,7 @@ class TestStatuslineTacitTerminal(unittest.TestCase):
         text = STATUS_DEEP2.read_text(encoding="utf-8")
         line = _line_with(
             text, "Tacit terminál — W-push NIE JE donekonečna (#799")
-        self.assertIn("skills/odoo-discuss-xmlrpc/handover-compose.md", line)
+        self.assertIn("skills/odoo-client-messaging/handover-compose.md", line)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: odoo-client-messaging
-description: Channel-agnostic client messaging guidance for Odoo sub-dev streams. airuleset owns the STATE MACHINE (labels, U/W partition, tacit/stale, acceptance markers) and the COMPOSE doctrine (owner approval, identity signature, family batching) in the companion handover-compose.md. The project owns the CHANNEL (task chatter, Discuss, etc.) and MECHANISM (transport, scripts). For odoo-erp channel specifics see its own .claude/rules/odoo-task-sync.md.
+description: "Channel-agnostic client messaging for Odoo sub-dev streams — state machine (U/W partition, tacit/stale, acceptance markers) + compose doctrine (owner approval, signature, family batching)."
 user-invocable: false
 ---
 

@@ -175,7 +175,7 @@ class TestViewImageUrlsSkillSection(_Teeth, TestCase):
         self._teeth("mail.message` 1742799", "ir.attachment` 13204", "#709")
 
     def test_recipe_pointer(self):
-        self._teeth("full XML-RPC recipe", "odoo-discuss-xmlrpc", "read-with-attachments.md")
+        self._teeth("full XML-RPC recipe", "odoo-client-messaging", "read-with-attachments.md")
 
     def test_anti_pattern_present(self):
         self._teeth('"spracoval som správu"', "attachment_ids", "banned")
