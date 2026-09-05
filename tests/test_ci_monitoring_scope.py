@@ -39,7 +39,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CI_MONITORING = REPO / "modules" / "core" / "ci-monitoring.md"
 TEST_STRICTNESS = REPO / "modules" / "ci" / "test-strictness.md"
+# #859 batch 4a: stub + companion = full governance text
 ASK_BEFORE_ASSUMING = REPO / "modules" / "core" / "ask-before-assuming.md"
+ASK_BEFORE_DEEP = REPO / "skills" / "ask-before-assuming-deep" / "DEEP.md"
 PLAYBOOK = REPO / ".claude" / "rules" / "airuleset-internals.md"
 
 
@@ -105,7 +107,8 @@ class TestDuplicatesLiveInTheirOwningModule(unittest.TestCase):
 
     def test_want_me_to_wait_is_owned_by_ask_before_assuming(self):
         self.assertNotIn("want me to wait", _text(CI_MONITORING).lower())
-        self.assertIn('"Should I monitor CI?"', _text(ASK_BEFORE_ASSUMING))
+        self.assertIn('"Should I monitor CI?"',
+                      _text(ASK_BEFORE_ASSUMING) + "\n" + _text(ASK_BEFORE_DEEP))
 
     def test_never_blindly_rerun_stays_here(self):
         """1/8 bare models still rerun first — no other module owns this."""

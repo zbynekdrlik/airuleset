@@ -57,9 +57,18 @@ def read(rel):
 
 
 ADVISOR = "skills/fable-advisor/SKILL.md"
-MODULE = "modules/core/model-awareness.md"
+# #859 batch 4a: model-awareness re-tiered — stub + companion = the full
+# governance text these locks assert on (the stub alone is enforcement-core).
+MODULE_STUB = "modules/core/model-awareness.md"
+MODULE_DEEP = "skills/model-awareness-deep/DEEP.md"
+MODULE = MODULE_STUB  # back-compat alias; tests that need the full text read both
 TOOLING = "modules/core/claude-code-tooling.md"
 TOOLING_WF = "skills/claude-code-workflows/DEEP.md"  # #859 batch 3: Workflow detail
+
+
+def _full_module():
+    """Return stub + companion combined (the full governance text)."""
+    return read(MODULE_STUB) + "\n" + read(MODULE_DEEP)
 
 
 class TestOpus5BanLineup(TestCase):
@@ -79,7 +88,7 @@ class TestOpus5BanLineup(TestCase):
         return ""
 
     def test_model_awareness_active_policy_header(self):
-        t = read(MODULE)
+        t = _full_module()
         # #715 revision (2026-08-26): PER-PHASE tiering, FLEET-WIDE — the
         # design + review PHASES run gated Fable, the implementation worker
         # runs Opus 4.6 / Sonnet 5 and NEVER Fable. Header asserted as
@@ -107,7 +116,7 @@ class TestOpus5BanLineup(TestCase):
 
     def test_directive_recorded_verbatim(self):
         # #859: verbatim quotes moved to the history file; check the union
-        t = read(MODULE) + "\n" + read(".claude/rules-reference/model-awareness-history.md")
+        t = _full_module() + "\n" + read(".claude/rules-reference/model-awareness-history.md")
         # 2026-08-13 directives stay as history:
         self.assertIn("intenet je plny obrovskej nespokojnosti s opus 5", t)
         self.assertIn("hlavne nie ze pouzijes sonnet na zlozite veci", t)
@@ -143,7 +152,7 @@ class TestOpus5BanLineup(TestCase):
         # DESIGN phase before implementation, the REVIEW phase before
         # integration). The implementing worker is NEVER Fable. Tie-break kept
         # (unsure -> it DOES -> gets the Fable design + review phases).
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("JUDGMENT-CONTENT test", t)
         self.assertIn("PHASE selector", t)
         self.assertIn("the DESIGN phase", t)
@@ -167,7 +176,7 @@ class TestOpus5BanLineup(TestCase):
         # dated history (do not assert its absence -- it is preserved), so lock
         # the LIVE fleet-wide statement + the abolition, and assert the old
         # airuleset-majority BULLET phrasing is gone as live policy.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("FLEET-WIDE", t)
         self.assertRegex(
             t, r"airuleset[^\n]*Fable-MAJORITY[^\n]*exception is ABOLISHED")
@@ -183,10 +192,10 @@ class TestOpus5BanLineup(TestCase):
         # would dead-letter mid-week). Fail-safe CLOSED semantics are locked
         # separately in test_usage_cache.py and must NOT change.
         self.assertEqual(FABLE_GATE_PCT, 90)
-        self.assertIn("raised 80→90", read(MODULE))
+        self.assertIn("raised 80→90", _full_module())
 
     def test_opus_5_is_banned_and_alias_named(self):
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("BANNED", t)
         self.assertIn("`claude-opus-5`", t)
         # the alias must be named as resolving to the banned model, so no
@@ -200,7 +209,7 @@ class TestOpus5BanLineup(TestCase):
         # criteria). It STILL never runs Fable -- the implementing worker never
         # carries a model:"fable" override, on any repo. #715's flat
         # "implementation = Opus 4.6" default is retired.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn(
             "IMPLEMENTATION (the actual work) = Sonnet 5 by DEFAULT for a "
             "settled-design ticket", t)
@@ -238,7 +247,7 @@ class TestOpus5BanLineup(TestCase):
         # banned and 4.6 has NO param alias, so 4.6 can ONLY be reached by the
         # pin (dispatch AS-IS), never by a param -- which also makes the
         # fail-safe direction UP (forget-to-classify -> Opus 4.6, never lower).
-        t = read(MODULE)
+        t = _full_module()
         # anchored to the IMPLEMENTATION bullet's own line for teeth (#498):
         impl_line = self._impl_bullet_line(t)
         self.assertIn("dispatching the pinned `sonnet-implementer` agent", impl_line)
@@ -248,7 +257,7 @@ class TestOpus5BanLineup(TestCase):
             "frontmatter stays pinned `model: claude-opus-4-6`", impl_line)
 
     def test_sonnet_never_complex(self):
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("Sonnet 5 is never used for anything complex", t)
         self.assertIn("when in doubt, Opus 4.6", t)
 
@@ -256,7 +265,7 @@ class TestOpus5BanLineup(TestCase):
         # #715 (2026-08-26): the gate guards EVERY automatic Fable dispatch --
         # now the design-phase consult + the review-phase pass. Older gate-role
         # phrasings stay retired.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("airuleset.py fable-gate", t)
         self.assertIn("guards EVERY automatic Fable dispatch", t)
         self.assertNotIn("guards the HARD-only Fable escalation", t)
@@ -272,7 +281,7 @@ class TestOpus5BanLineup(TestCase):
         # ROZHODNUTE mapping mechanics), so the module must document the
         # REAL mechanisms: agent-definition frontmatter full id, Workflow
         # opts.model full name, or inheritance -- never the `opus` alias.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("model: claude-opus-4-6", t)
         self.assertIn("opts.model: 'claude-opus-4-6'", t)
         self.assertIn("never the `opus` alias", t)
@@ -282,7 +291,7 @@ class TestOpus5BanLineup(TestCase):
         # judgment-content test does) -- they still classify design DEPTH
         # (the autopilot skill's design-triage step reuses exactly this
         # taxonomy), so the enumeration must survive, demoted explicitly.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("no longer the Fable selector", t)
         self.assertIn(
             "Architecture / design / synthesis of a genuinely COMPLEX or cross-cutting", t)
@@ -293,12 +302,12 @@ class TestOpus5BanLineup(TestCase):
         self.assertRegex(t, r"(?i)sub-dev[^\n]*(hand-off|review|submission)")
 
     def test_circling_valve_survives_without_opus_5(self):
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("CIRCLING", t)
         self.assertIn("OBSERVED circling", t)
 
     def test_fable_consult_shape_survives(self):
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("digest in, decision out", t)
         self.assertIn("re-reads the full conversation context every turn", t)
         # #690 (2026-08-25): a DISPATCHED, fresh-context Fable worker is a
@@ -309,12 +318,12 @@ class TestOpus5BanLineup(TestCase):
         self.assertNotIn("sanctioned ONLY for genuinely HARD", t)
 
     def test_behavior_header_is_fable_and_opus_4_8(self):
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("Fable 5 / Opus 4.6 behavior", t)
         self.assertNotIn("Opus 5 / Fable 5 behavior (primary + escalation)", t)
 
     def test_main_session_clauses_survive(self):
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn(
             "MAIN interactive session runs whatever the user set via `/model`", t)
         self.assertIn("NEVER recommend switching it, in either direction", t)
@@ -323,7 +332,7 @@ class TestOpus5BanLineup(TestCase):
         # #455 (2026-08-14): Sonnet 5 is now the LIGHT / mechanical tier
         # ("moze byt aj sonnet 5 vyuzivany") -- an explicit dispatch target,
         # not merely a fallback for when 4.6 is unreachable.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn("2026-08-14 refinement explicitly REHABILITATED", t)
         self.assertIn("dispatch the pinned **`sonnet-mechanical`** agent at `low`", t)
         self.assertIn("moze byt aj sonnet 5 vyuzivany", t)
@@ -333,7 +342,7 @@ class TestOpus5BanLineup(TestCase):
     def test_hard_rule_never_model_less_dispatch(self):
         # #455 (2026-08-14): the load-bearing HARD RULE -- a model-less
         # subagent dispatch inherits the Fable main, which is the burn.
-        t = read(MODULE)
+        t = _full_module()
         self.assertIn(
             "NEVER dispatch a subagent without an EXPLICIT PINNED AGENT TYPE", t)
         self.assertIn("INHERITS the caller's model", t)
@@ -525,8 +534,13 @@ class TestDispatchSurfacesRewritten(TestCase):
         # which resolves to BANNED Opus 5 AND overrode the frontmatter pin. The
         # trap-warning must sit next to the explicit-model mandate on EVERY
         # surface that carries it.
-        for path in (MODULE, TOOLING, "agents/autopilot-worker.md"):
-            norm = " ".join(read(path).split())
+        # #859 batch 4a: MODULE is the stub; use full module for assertions
+        for path, text in (
+            (MODULE, _full_module()),
+            (TOOLING, read(TOOLING)),
+            ("agents/autopilot-worker.md", read("agents/autopilot-worker.md")),
+        ):
+            norm = " ".join(text.split())
             self.assertIn("live gk incident 2026-08-14", norm,
                           "%s: missing gk-incident citation" % path)
             self.assertIn('model: "opus"', norm, "%s: missing the opus trap" % path)
@@ -534,7 +548,7 @@ class TestDispatchSurfacesRewritten(TestCase):
                           "%s: missing banned-Opus-5 warning" % path)
         # model-awareness spells out the exact resolution: no param at all,
         # for ANY tier, since #871:
-        m = " ".join(read(MODULE).split())
+        m = " ".join(_full_module().split())
         self.assertIn('Passing `model: "opus"` was NEVER correct', m)
         self.assertIn(
             "the ONLY way to reach ANY tier is dispatching the named PINNED "
@@ -773,7 +787,7 @@ class TestUltracodeStandingDefault(TestCase):
         self.assertIn("single-worker only when the task genuinely cannot parallelize", t)
 
     def test_module_effort_baseline_is_high_no_ultracode(self):
-        m = read(MODULE)
+        m = _full_module()
         self.assertIn(
             "managed MAIN-session baseline is `high` with NO standing ultracode "
             "launch flag", m)
