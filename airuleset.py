@@ -326,6 +326,18 @@ from cli_drop_gateway import (  # noqa: E402  #664 public-TLS drop lane
     cmd_drop_gateway as cmd_drop_gateway,
 )
 
+# --- webterm-only SSH access management (#869): key manager + sshd provisioning
+# + subdev accounts conf rendering. Wired into cmd_install + CLI subcommand. ---
+from cli_webterm_only import (  # noqa: E402, F401
+    manage_webterm_only_keys as manage_webterm_only_keys,
+    render_subdev_accounts_conf as render_subdev_accounts_conf,
+    render_sshd_dropin as render_sshd_dropin,
+    audit_webterm_only_keys as audit_webterm_only_keys,
+    cmd_webterm_only as cmd_webterm_only,
+    SSHD_DROPIN_PATH as SSHD_DROPIN_PATH,
+    SUBDEV_ACCOUNTS_FALLBACK as SUBDEV_ACCOUNTS_FALLBACK,
+)
+
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
@@ -1157,6 +1169,33 @@ def cmd_install(args):
         provision_owner_sudo()
     except Exception as e:
         print(f"  owner-sudo provisioning error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3b-quinque. Webterm-only SSH key management (#869): manage the
+    # authorized_keys for webterm-only accounts (david1-4, dominika).
+    # ACTIVE ONLY when getpass.getuser() is a webterm-only user — every
+    # other account gets a no-op (test-locked). Non-fatal. ---
+    try:
+        result = manage_webterm_only_keys()
+        if result["action"] != "skipped":
+            print("  webterm-only keys: %s — %s" % (
+                result.get("user", "?"), result["action"]))
+    except Exception as e:
+        print(f"  webterm-only keys error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3b-sexte. Render subdev accounts conf (#869): the SINGLE source for
+    # block-subdev-ssh-misuse.sh + block-destructive-remote.sh — no Python
+    # import per Bash call. Written on EVERY install so the hooks always have
+    # a fresh copy. ---
+    try:
+        _conf_content = render_subdev_accounts_conf()
+        _conf_path = CLAUDE_DIR / "airuleset-subdev-accounts.conf"
+        if _conf_path.exists() and _conf_path.read_text() == _conf_content:
+            print(f"  No change: {_conf_path}")
+        else:
+            _conf_path.write_text(_conf_content, encoding="utf-8")
+            print(f"  Updated:   {_conf_path}")
+    except Exception as e:
+        print(f"  subdev accounts conf error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
@@ -6662,6 +6701,18 @@ def main():
     p_wacc.add_argument("--profile", default=None,
                         help="limit to one profile (default: every declared profile)")
 
+    p_wto = sub.add_parser(
+        "webterm-only",
+        help="#869: manage webterm-only SSH access (key management, sshd drop-in)")
+    p_wto.add_argument("--audit", dest="wt_action", action="store_const",
+                        const="audit",
+                        help="read-only fleet audit of authorized_keys")
+    p_wto.add_argument("--apply-sshd", dest="wt_action", action="store_const",
+                        const="apply-sshd",
+                        help="render + apply sshd Match drop-in on subdev")
+    p_wto.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="with --apply-sshd: print the script, don't execute")
+
     p_dg = sub.add_parser(
         "drop-gateway",
         help="#664: reconcile THIS box's public-TLS drop lane — add a drop-host "
@@ -7082,6 +7133,7 @@ SUBCOMMANDS = {
     "goal-roster": cmd_goal_roster,
     "fable-gate": cmd_fable_gate,
     "webterm-access": cmd_webterm_access,
+    "webterm-only": cmd_webterm_only,
     "drop-gateway": cmd_drop_gateway,
     "disk-guard-root": cmd_disk_guard_root,
     "burn": cmd_burn,

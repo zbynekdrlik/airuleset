@@ -140,6 +140,43 @@ GATEKEEPER_KEY_BASENAME = "gatekeeper_access_ed25519"
 # (the marek/david1-family operator identity) — root@subdev uses its OWN key,
 # never that one.
 SUBDEV_ADMIN_KEY_BASENAME = "subdev_admin"
+
+# --- #869: read the subdev accounts conf rendered by cmd_install ---
+# Format: user<TAB>key-basename per line.  Falls back to hardcoded when
+# the conf is absent (fail-safe: never "allow all").
+_SUBDEV_CONF = os.path.expanduser("~/.claude/airuleset-subdev-accounts.conf")
+_SUBDEV_ACCOUNTS = {}  # user -> key-basename
+try:
+    if os.path.isfile(_SUBDEV_CONF):
+        with open(_SUBDEV_CONF, "r") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if not _line or _line.startswith("#"):
+                    continue
+                _parts = _line.split("\t", 1)
+                if len(_parts) == 2:
+                    _SUBDEV_ACCOUNTS[_parts[0]] = _parts[1]
+except OSError:
+    pass
+
+if not _SUBDEV_ACCOUNTS:
+    # Hardcoded fallback — MUST match SUBDEV_ACCOUNTS_FALLBACK in
+    # cli_webterm_only.py (test-locked).
+    _SUBDEV_ACCOUNTS = {
+        "montalu1": "default", "montalu2": "default",
+        "montalu3": "default", "montalu4": "default",
+        "montalu5": "default", "montalu6": "default",
+        "montalu7": "default", "montalu8": "default",
+        "marek": "gatekeeper_access_ed25519",
+        "david1": "gatekeeper_access_ed25519",
+        "david2": "gatekeeper_access_ed25519",
+        "david3": "gatekeeper_access_ed25519",
+        "david4": "gatekeeper_access_ed25519",
+        "dominika": "gatekeeper_access_ed25519",
+        "simap1": "gatekeeper_access_ed25519",
+        "miva1": "gatekeeper_access_ed25519",
+    }
+
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 # ssh/scp/rsync/sftp flags that take a SEPARATE-token value (so the walk that
@@ -359,8 +396,8 @@ def check_target(user, host, tokens, label):
                                  .rstrip("/")) == SUBDEV_ADMIN_KEY_BASENAME):
             return None
         return ("%s to subdev with NO user specified (implicit current "
-                "shell user) — must be montalu[12345678] / marek / "
-                "david[1234] / simap1 / miva1"
+                "shell user) — must be a registered subdev account "
+                "(see ~/.claude/airuleset-subdev-accounts.conf)"
                 % label)
     if user == "root":
         # #68: the gatekeeper VPS's own sanctioned root@subdev identity.
@@ -368,16 +405,18 @@ def check_target(user, host, tokens, label):
             return None
         return ("%s as root@subdev without -i .../%s"
                 % (label, SUBDEV_ADMIN_KEY_BASENAME))
-    if user in ("montalu1", "montalu2", "montalu3", "montalu4",
-                "montalu5", "montalu6", "montalu7", "montalu8"):
+    # #869: derive the allow-list from the conf (or hardcoded fallback)
+    if user not in _SUBDEV_ACCOUNTS:
+        return "%s as unauthorized user '%s'@subdev" % (label, user)
+    key_req = _SUBDEV_ACCOUNTS[user]
+    if key_req == "default":
+        # montalu family — no identity requirement
         return None
-    if user in ("marek", "david1", "david2", "david3", "david4",
-               "simap1", "miva1"):
-        if has_gatekeeper_key(tokens):
-            return None
-        return ("%s as %s@subdev without -i .../%s"
-                % (label, user, GATEKEEPER_KEY_BASENAME))
-    return "%s as unauthorized user '%s'@subdev" % (label, user)
+    # Requires the gatekeeper key (marek/david1-4/dominika/simap1/miva1)
+    if has_gatekeeper_key(tokens):
+        return None
+    return ("%s as %s@subdev without -i .../%s"
+            % (label, user, GATEKEEPER_KEY_BASENAME))
 
 
 def check_segment(segment):

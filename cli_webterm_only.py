@@ -164,6 +164,12 @@ def manage_webterm_only_keys(
 
     result = {"action": "error", "user": user}
 
+    # 0. GATE: skip non-webterm-only accounts (#869 no-op guarantee, test-locked)
+    from cli_fleet import WEBTERM_ONLY_USERS
+    if user not in WEBTERM_ONLY_USERS:
+        result["action"] = "skipped"
+        return result
+
     # 1. Render desired content
     try:
         desired_content = render_authorized_keys(user)
@@ -440,3 +446,140 @@ def audit_webterm_only_keys(user, ssh_dir=None, run=None):
             result["findings"].append("MISSING key: comment=%r" % comment)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# CLI subcommand (#869 lane 2)
+# ---------------------------------------------------------------------------
+
+def cmd_webterm_only(args):
+    """CLI: ``airuleset.py webterm-only [--audit | --apply-sshd] [--dry-run]``
+
+    --audit:      read-only fleet audit of authorized_keys for each
+                  webterm-only user (requires ssh to subdev).
+    --apply-sshd: render + apply the sshd Match drop-in on subdev
+                  (over ssh -J <gk hop> root@subdev, ``sshd -t``
+                  BEFORE reload, fail = restore + NO reload).
+    --dry-run:    with --apply-sshd, print the exact script without
+                  executing it.
+    """
+    action = getattr(args, "wt_action", None)
+    dry_run = getattr(args, "dry_run", False)
+
+    if action == "audit":
+        _cmd_webterm_only_audit()
+    elif action == "apply-sshd":
+        _cmd_webterm_only_apply_sshd(dry_run=dry_run)
+    else:
+        # Default: print usage summary
+        print("webterm-only: use --audit or --apply-sshd")
+        print("  --audit       read-only fleet audit of authorized_keys")
+        print("  --apply-sshd  render + apply sshd Match drop-in on subdev")
+        print("  --dry-run     (with --apply-sshd) print script, don't run")
+
+
+def _cmd_webterm_only_audit():
+    """Read-only fleet audit: ssh to each webterm-only target and audit keys."""
+    from cli_fleet import WEBTERM_ONLY_USERS
+    print("webterm-only audit: %d accounts" % len(WEBTERM_ONLY_USERS))
+    for user in sorted(WEBTERM_ONLY_USERS):
+        result = audit_webterm_only_keys(user)
+        findings = result.get("findings", [])
+        if findings:
+            print("  %s: %d finding(s)" % (user, len(findings)))
+            for f in findings:
+                print("    - %s" % f)
+        else:
+            print("  %s: OK" % user)
+
+
+def _cmd_webterm_only_apply_sshd(dry_run=False):
+    """Render + apply the sshd Match drop-in on subdev.
+
+    The script:
+    1. Renders the drop-in content.
+    2. Over ``ssh -J <gk hop> root@subdev``:
+       a. Writes a temp file.
+       b. ``sshd -t`` validates BEFORE moving into place.
+       c. If valid, ``mv`` + ``systemctl reload sshd``.
+       d. If invalid, REMOVE temp + NO reload.
+    3. Read-back: ``sshd -T -C user=<each>`` to verify the Match applies.
+    """
+    content = render_sshd_dropin()
+    dropin_path = SSHD_DROPIN_PATH
+
+    # The gk hop for root@subdev
+    gk_host = "100.90.94.41"
+    subdev_host = "100.118.174.27"
+    subdev_admin_key = "~/.secrets/subdev_admin_ed25519"
+
+    # Build the remote script
+    script = (
+        "set -euo pipefail\n"
+        "DROPIN='%(path)s'\n"
+        "TMPF=\"${DROPIN}.airuleset-new\"\n"
+        "trap 'rm -f \"$TMPF\"' EXIT\n"
+        "cat > \"$TMPF\" <<'DROPIN_EOF'\n"
+        "%(content)s"
+        "DROPIN_EOF\n"
+        "chmod 644 \"$TMPF\"\n"
+        "if sshd -t -f /etc/ssh/sshd_config 2>&1; then\n"
+        "  # Validate with the new file in place (test config)\n"
+        "  BACKUP=\"${DROPIN}.airuleset-prev\"\n"
+        "  [ -f \"$DROPIN\" ] && cp \"$DROPIN\" \"$BACKUP\"\n"
+        "  mv \"$TMPF\" \"$DROPIN\"\n"
+        "  if sshd -t -f /etc/ssh/sshd_config 2>&1; then\n"
+        "    systemctl reload sshd\n"
+        "    echo 'APPLIED: %(path)s reloaded'\n"
+        "  else\n"
+        "    echo 'RESTORE: sshd -t failed after mv; restoring' >&2\n"
+        "    [ -f \"$BACKUP\" ] && mv \"$BACKUP\" \"$DROPIN\" || rm -f \"$DROPIN\"\n"
+        "    echo 'RESTORED — NO reload' >&2\n"
+        "    exit 1\n"
+        "  fi\n"
+        "else\n"
+        "  echo 'PRE-CHECK FAILED: sshd -t failed before any change' >&2\n"
+        "  exit 1\n"
+        "fi\n"
+    ) % {"path": dropin_path, "content": content}
+
+    # Read-back verification commands
+    from cli_fleet import WEBTERM_ONLY_USERS
+    readback = ""
+    for user in sorted(WEBTERM_ONLY_USERS):
+        readback += (
+            "echo '--- sshd -T -C user=%s ---'\n"
+            "sshd -T -C user=%s 2>&1 | grep -i 'passwordauthentication\\|"
+            "kbdinteractiveauthentication\\|authorizedkeysfile' || true\n"
+        ) % (user, user)
+
+    full_script = script + readback
+
+    ssh_cmd = (
+        "ssh -o StrictHostKeyChecking=no -o BatchMode=yes "
+        "-i %(admin_key)s "
+        "-J gatekeeper@%(gk)s "
+        "root@%(subdev)s"
+    ) % {"admin_key": subdev_admin_key, "gk": gk_host, "subdev": subdev_host}
+
+    if dry_run:
+        print("DRY RUN: would execute over: %s" % ssh_cmd)
+        print("--- script ---")
+        print(full_script)
+        print("--- end script ---")
+        return
+
+    print("Applying sshd drop-in via: %s" % ssh_cmd)
+    import shlex
+    r = subprocess.run(
+        shlex.split(ssh_cmd),
+        input=full_script,
+        capture_output=True, text=True, timeout=60,
+    )
+    print(r.stdout)
+    if r.stderr:
+        print(r.stderr, file=sys.stderr)
+    if r.returncode != 0:
+        print("FAILED: exit %d" % r.returncode, file=sys.stderr)
+        sys.exit(1)
+    print("SUCCESS: sshd drop-in applied and verified")

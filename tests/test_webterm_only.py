@@ -670,16 +670,82 @@ class TestConfRendering(unittest.TestCase):
 class TestHookConfReading(unittest.TestCase):
     """block-subdev-ssh-misuse.sh must read the conf file and include dominika."""
 
-    def test_hook_allows_dominika_with_gatekeeper_key(self):
-        """With a conf file present, the hook must recognize dominika."""
-        # This test exercises the hook as a subprocess with a fixture conf.
-        # For now we test that the conf is parseable and the fallback includes
-        # dominika.
+    def test_fallback_includes_dominika(self):
+        """The hardcoded fallback must include dominika (#869)."""
         self.assertIn("dominika", cli_webterm_only.SUBDEV_ACCOUNTS_FALLBACK)
         self.assertEqual(
             cli_webterm_only.SUBDEV_ACCOUNTS_FALLBACK["dominika"],
             "gatekeeper_access_ed25519",
         )
+
+    def test_hook_allows_dominika_with_conf_and_key(self):
+        """With a conf file, the hook allows dominika@subdev with the gk key."""
+        import subprocess
+        hook_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "hooks", "block-subdev-ssh-misuse.sh",
+        )
+        if not os.path.exists(hook_path):
+            self.skipTest("hook not found")
+
+        with tempfile.TemporaryDirectory() as td:
+            # Write a fixture conf file
+            conf_dir = os.path.join(td, ".claude")
+            os.makedirs(conf_dir)
+            conf_path = os.path.join(conf_dir, "airuleset-subdev-accounts.conf")
+            conf = cli_webterm_only.render_subdev_accounts_conf()
+            with open(conf_path, "w") as f:
+                f.write(conf)
+
+            # Build a command that would be ssh dominika@subdev with the gk key
+            cmd = (
+                "ssh -i ~/.secrets/gatekeeper_access_ed25519 "
+                "dominika@100.118.174.27 ls"
+            )
+            payload = '{"tool_input": {"command": "%s"}}' % cmd
+
+            r = subprocess.run(
+                ["bash", hook_path],
+                input=payload, capture_output=True, text=True,
+                env={**os.environ, "HOME": td},
+                timeout=15,
+            )
+            # Exit 0 = allowed (not exit 2 = blocked)
+            self.assertEqual(
+                r.returncode, 0,
+                "Hook blocked dominika with gk key: %s" % r.stderr,
+            )
+
+    def test_hook_blocks_unknown_user_with_conf(self):
+        """With a conf file, the hook blocks an unknown user."""
+        import subprocess
+        hook_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "hooks", "block-subdev-ssh-misuse.sh",
+        )
+        if not os.path.exists(hook_path):
+            self.skipTest("hook not found")
+
+        with tempfile.TemporaryDirectory() as td:
+            conf_dir = os.path.join(td, ".claude")
+            os.makedirs(conf_dir)
+            conf_path = os.path.join(conf_dir, "airuleset-subdev-accounts.conf")
+            conf = cli_webterm_only.render_subdev_accounts_conf()
+            with open(conf_path, "w") as f:
+                f.write(conf)
+
+            cmd = "ssh hacker@100.118.174.27 ls"
+            payload = '{"tool_input": {"command": "%s"}}' % cmd
+
+            r = subprocess.run(
+                ["bash", hook_path],
+                input=payload, capture_output=True, text=True,
+                env={**os.environ, "HOME": td},
+                timeout=15,
+            )
+            # Exit 2 = blocked
+            self.assertEqual(r.returncode, 2,
+                             "Hook should block unknown user 'hacker'")
 
 
 if __name__ == "__main__":
