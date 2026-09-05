@@ -202,19 +202,39 @@ class TestPhaseAdd(unittest.TestCase):
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", _TEST_GUARDS)
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS)
     def test_gk_hop_for_root_subdev(self):
-        """(h) root@subdev ssh goes through -J gatekeeper@<gk>."""
+        """(h) root@subdev ssh uses NESTED ssh through gatekeeper, not -J.
+
+        ProxyJump (-J) would tunnel TCP but auth from dev1's key, which
+        root@subdev doesn't have. The nested form lets gatekeeper auth
+        with its own ~/.ssh/config Host subdev identity.  #870 F1 fix.
+        """
         run, calls = _make_runner()
         kr.phase_add(new_pubkey=FIXTURE_NEW_PUBKEY,
                      old_identity="~/.secrets/gk",
                      state_file=self.state_file, run=run)
-        # Find the call for root@10.0.0.4
-        root_calls = [c for c in calls if "root@10.0.0.4" in c[0]]
-        self.assertTrue(root_calls, "no call for root@subdev")
-        argv = root_calls[0][0]
-        self.assertIn("-J", argv)
-        # The -J arg is the next element after -J
-        j_idx = argv.index("-J")
-        self.assertIn("gatekeeper@", argv[j_idx + 1])
+        # Find the nested-ssh call: outer target is gatekeeper@ AND
+        # the command string (last element) contains inner ssh to root@
+        nested_calls = []
+        for c in calls:
+            argv = c[0]
+            # Outer target is gatekeeper@ (positional arg, not in a flag)
+            has_gk_target = any(
+                a.startswith("gatekeeper@") and not a.startswith("-")
+                for a in argv
+            )
+            # Inner command contains root@10.0.0.4
+            has_inner_root = "root@10.0.0.4" in argv[-1] if argv else False
+            if has_gk_target and has_inner_root:
+                nested_calls.append(c)
+        self.assertTrue(nested_calls, "no nested-ssh call through gatekeeper")
+        argv = nested_calls[0][0]
+        # Must NOT use ProxyJump
+        self.assertNotIn("-J", argv)
+        # The inner command (last argv element) is a nested ssh
+        inner_cmd = argv[-1]
+        self.assertIn("ssh", inner_cmd)
+        self.assertIn("root@10.0.0.4", inner_cmd)
+        self.assertIn("BatchMode=yes", inner_cmd)
 
 
 class TestPhaseVerify(unittest.TestCase):

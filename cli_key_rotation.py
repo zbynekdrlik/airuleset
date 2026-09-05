@@ -179,7 +179,13 @@ def _build_ssh_cmd(entry: dict, identity: str, command: str,
                    via_gk_hop: bool = False) -> list:
     """Build an ssh argv for ``entry`` authenticating with ``identity``.
 
-    For ``via_gk_hop=True`` (root@subdev), routes through the gk jump host.
+    For ``via_gk_hop=True`` (root@subdev), uses NESTED SSH through gatekeeper:
+    ``ssh gatekeeper@gk 'ssh root@subdev <command>'``.  ProxyJump (-J) would
+    tunnel TCP but authenticate from dev1's key, which root@subdev doesn't
+    have — only gatekeeper's own ``~/.ssh/subdev_admin`` (configured in gk's
+    ``~/.ssh/config Host subdev``) is authorized.  The nested form lets
+    gatekeeper authenticate with its own key.  #870 F1 fix.
+
     Reuses ``host_key_check_opts`` from ``cli_remote`` for pinned hosts.
     """
     import cli_remote
@@ -187,13 +193,27 @@ def _build_ssh_cmd(entry: dict, identity: str, command: str,
     user = entry.get("admin_user") or entry.get("user", "")
     host = entry.get("host", "")
 
+    if via_gk_hop:
+        # Nested SSH: dev1 -> gatekeeper -> root@subdev.
+        # The inner command runs on gatekeeper, which has its own
+        # ~/.ssh/config Host subdev with the right identity file.
+        # Quote the inner command for the gatekeeper shell.
+        inner_cmd = command.replace("'", "'\\''")
+        gk_cmd = "ssh -o BatchMode=yes %s@%s '%s'" % (user, host, inner_cmd)
+        # The outer ssh to gatekeeper uses the caller's identity
+        cmd = ["ssh"]
+        cmd.extend(cli_remote.host_key_check_opts(
+            {"host": _GK_HOST, "user": "gatekeeper"}))
+        cmd.extend(["-o", "BatchMode=yes"])
+        cmd.extend(_ssh_identity_opts(identity))
+        cmd.append("gatekeeper@%s" % _GK_HOST)
+        cmd.append(gk_cmd)
+        return cmd
+
     cmd = ["ssh"]
     cmd.extend(cli_remote.host_key_check_opts(entry))
     cmd.extend(["-o", "BatchMode=yes"])
     cmd.extend(_ssh_identity_opts(identity))
-
-    if via_gk_hop:
-        cmd.extend(["-J", "gatekeeper@%s" % _GK_HOST])
 
     cmd.append("%s@%s" % (user, host))
     cmd.append(command)
