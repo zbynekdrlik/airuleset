@@ -356,6 +356,7 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
 # right seam (not an at-runtime AUTHORITY_BY_USER lookup a bash hook can't do).
 BOX_CLASS_PATH = "~/.claude/airuleset-box-class"
 SHARED_STREAM = "shared-stream"
+CONTROLLER = "controller"  # #870 F3: resource-gated box class (4 GB cx23)
 
 # argv[0]-anchored heavy build/VM daemon signatures. Anchored EXACTLY like the
 # #776 SHADOW_UGREP_SIGNATURE (argv[0] basename), so a process merely QUOTING a
@@ -425,12 +426,13 @@ def _heavy_build_kind(args):
 def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
                        dry_run=False, box_class_fn=None):
     """Find + SIGKILL heavy build-toolchain / VM daemons (Gradle/Kotlin/aapt2/
-    qemu) — KILL ON SIGHT, no age/CPU gate — but ONLY on a shared-stream box.
+    qemu) — KILL ON SIGHT, no age/CPU gate — on a shared-stream OR controller
+    box (#870: controller is a 4 GB cx23, same resource constraint).
 
-    Off a shared-stream box (or when the box-class cannot be read) this kills
-    NOTHING and returns []. On a shared-stream box the fail-safe construction
-    mirrors shadow_ugrep_reaper (#776) exactly: `ps_fetch` returning None (or
-    raising) means "could not read → kill nothing"; a malformed row is skipped;
+    Off a resource-gated box (or when the box-class cannot be read) this kills
+    NOTHING and returns []. On a gated box the fail-safe construction mirrors
+    shadow_ugrep_reaper (#776) exactly: `ps_fetch` returning None (or raising)
+    means "could not read → kill nothing"; a malformed row is skipped;
     `kill_fn=None` (an unwired seam) logs "would kill" and kills nothing;
     `dry_run` logs and kills nothing; and a pre-kill TOCTOU re-verify of the
     pid's live cmdline (`verify_fn`, default reads /proc) means a pid reused by
@@ -438,9 +440,15 @@ def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
     `ps_fetch` reuses the Job-37 read shape (pid, etimes, cputimes, args) — the
     heavy reaper reads only pid + args (a build daemon is banned at ANY age, so
     etimes/cputimes are ignored). Returns the journal log lines; NEVER pings."""
-    # The box-class gate is FIRST — a non-shared-stream box (dev1/dev2/gk) never
-    # even reads its process table here.
-    if not is_shared_stream_box(box_class_fn):
+    # The box-class gate is FIRST — a non-gated box (dev1/dev2/gk) never even
+    # reads its process table here.
+    if box_class_fn is None:
+        box_class_fn = default_box_class
+    try:
+        bc = box_class_fn()
+    except Exception:
+        bc = None
+    if bc not in (SHARED_STREAM, CONTROLLER):
         return []
     if ps_fetch is None:
         ps_fetch = default_ps_fetch

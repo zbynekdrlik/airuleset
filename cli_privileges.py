@@ -326,9 +326,11 @@ PRIVILEGES: List[Privilege] = [
     Privilege(
         name="soniox_source",
         kind=KIND_API_TOKEN,
-        local_path="~/devel/voiceagent/.env",
+        local_path="~/.secrets/soniox.env",
         reach="Soniox API key source (the origin file soniox provisioning "
-              "reads and fans out to fleet targets)",
+              "reads and fans out to fleet targets; #870 F3: controller box "
+              "sources from ~/.secrets/soniox.env, dev1 falls back to "
+              "~/devel/voiceagent/.env via SONIOX_KEY_SOURCE fallback chain)",
         rotation="new Soniox key on the new box; fan out via push",
         must_move=True,
         used_by=("cli_remote.py:99 (SONIOX_KEY_SOURCE)",),

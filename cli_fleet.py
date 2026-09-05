@@ -17,6 +17,11 @@ tuple, a user->profile map) plus a couple of trivial dict-accessor helpers
 pure leaf of the dependency DAG.
 """
 
+# #870 F3: controller cutover flag. When False (the dev1-safe default), all
+# cutover code is DORMANT — zero runtime change. Commit B (the first push
+# FROM the controller box) flips this to True.
+CONTROLLER_CUTOVER_DONE = False
+
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
 REMOTE_HOSTS = [
@@ -379,6 +384,27 @@ REMOTE_HOSTS = [
 ]
 
 
+def _append_dev1_if_cutover():
+    """Conditionally add dev1 as a deploy TARGET when the cutover is done.
+
+    Called at module-load time AND available for tests to re-invoke after
+    patching CONTROLLER_CUTOVER_DONE. When False, a no-op."""
+    if CONTROLLER_CUTOVER_DONE and not any(
+            h.get("name") == "dev1" for h in REMOTE_HOSTS):
+        REMOTE_HOSTS.append({
+            "name": "dev1",
+            "host": "100.104.8.125",
+            "user": "newlevel",
+            "repo_path": "~/devel/airuleset",
+            "identity": "~/.secrets/airuleset_push_ed25519",
+            "owner_vps": True,
+            "soniox": True,
+        })
+
+
+_append_dev1_if_cutover()
+
+
 def is_paused(remote):
     """True if a REMOTE_HOSTS entry carries a `"paused": "<why + date>"`
     marker (#851) -- an account the owner has frozen (a customer/access
@@ -418,8 +444,8 @@ AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
     # marek — DEV STREAM cancelled (#882, odoo-erp#6257) but webterm OBSERVER
     # lane survives (owner scope correction 2026-09-05). Least-privilege
-    # fork-no-merge (dominika model #867): she is not a real hand-off stream,
-    # so WEBTERM_OBSERVER_USERS excludes her from stream provisioning consumers.
+    # fork-no-merge (dominika model #867): he is not a real hand-off stream,
+    # so WEBTERM_OBSERVER_USERS excludes him from stream provisioning consumers.
     "marek": "fork-no-merge",
     # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
     # moved to the numbered block below; the OS account `david` is gone.
@@ -561,7 +587,7 @@ WEBTERM_OBSERVER_USERS = frozenset({"dominika", "marek"})
 # keys quarantined), sshd Match drop-in disables password auth.
 # Test-locked: subset of subdev REMOTE_HOSTS users.
 WEBTERM_ONLY_USERS = frozenset({
-    "david1", "david2", "david3", "david4", "dominika", "marek",
+    "david1", "david2", "david3", "david4", "dominika",
 })
 
 

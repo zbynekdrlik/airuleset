@@ -2497,6 +2497,85 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
             % (loc, sid, open_n, authority, len(attempts_state[sid])))
 
 
+def _goal_guard_decide(sid, payload, template_line, state, now, loc,
+                       mark_state=None):
+    """#878 — for a LIVE, ARMED loop with a FOREIGN condition that lacks the
+    `❓ NEEDS YOU` detection token while a LASTQF exists (a delivered unanswered
+    question sitting), decide whether to emit a `goal-guard:` nudge. Returns a
+    decision-log line when the nudge SHOULD be attempted, or None (no action).
+    Pure decision helper — the CALLER handles nudge_gate, delivery, and dry-run.
+
+    `mark_state` defaults to `"set"` (armed); `"cleared"` skips entirely (#170)."""
+    if mark_state is not None and mark_state != "set":
+        return None
+    verdict = _classify_armed_condition(payload, template_line)
+    if verdict != "foreign":
+        return None
+    norm = _goal_condition_norm(payload)
+    if norm and "NEEDS YOU" in norm:
+        return None
+    lastqf = Path("/tmp/claude-discord-lastq-%s" % sid)
+    if not lastqf.exists():
+        return None
+    return ("goal-guard %s sid=%s -> FOREIGN condition without blocked-❓ "
+            "capability, LASTQF present" % (loc, sid))
+
+
+_GOAL_GUARD_TEXT = (
+    "goal-guard: your armed /goal condition lacks the blocked-on-❓ (A) "
+    "clause — a delivered unanswered question will not hold the loop. "
+    "If this is the autopilot loop, re-arm the canonical template via "
+    "`python3 ~/devel/airuleset/airuleset.py goal-arm --self`. "
+    "If the short goal is deliberate, say so."
+)
+
+
+def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
+                        sleep_fn, dry_run, projects_dir):
+    """#878 — delivery half of the goal-guard rider. Called when
+    `_goal_guard_decide` returned a truthy decision. Handles nudge_gate,
+    recent-human, boundary classification, keystroke delivery, and mark_sent.
+    Returns a list of decision-log lines (may be empty)."""
+    logs = []
+    if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
+        logs.append("goal-guard %s sid=%s -> hold:cadence-gate" % (loc, sid))
+        return logs
+    if dry_run:
+        logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
+                     % (loc, sid))
+        return logs
+    tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+    tpath = tinfo[0] if tinfo else None
+    if tpath:
+        rh, _rr = watchdog._goal_autoarm_recent_human_activity(
+            sid, tpath, now, window_s=GOAL_LANE_LIVE_CONVO_S,
+            pane_target=pid, run=run)
+        if rh:
+            logs.append("goal-guard %s sid=%s -> skip:recent-human"
+                         % (loc, sid))
+            return logs
+    kind, draft = watchdog._classify_boundary(captured)
+    if kind == "no-input-line":
+        logs.append("goal-guard %s sid=%s -> skip:stopped-pane"
+                     % (loc, sid))
+        return logs
+    if kind == "busy" or _ops_wait_recheck._pane_busy_waiting(captured):
+        logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
+        return logs
+    if draft:
+        logs.append("goal-guard %s sid=%s -> skip:draft" % (loc, sid))
+        return logs
+    ok = _send_goal_verified(pid, _GOAL_GUARD_TEXT, run,
+                             captured=captured, sleep_fn=sleep_fn,
+                             verify_armed=False)
+    if ok:
+        _nudge_gate.mark_sent(state, sid, "goal-guard", now)
+        logs.append("goal-guard %s sid=%s -> sent" % (loc, sid))
+    else:
+        logs.append("goal-guard %s sid=%s -> send-failed" % (loc, sid))
+    return logs
+
+
 def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
                        obligation_fn, requests_path, attempts_state):
     """#675 -- re-arm a loop CC cleared on a TRANSIENT auth failure (the newest
@@ -2860,6 +2939,21 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                                      attempts_state)
             if sr:
                 logs.append(sr)
+            # #878 — goal-guard rider: an ALIVE armed loop with a FOREIGN
+            # condition that lacks the blocked-❓ capability while a LASTQF
+            # exists gets a one-time nudge (≤1/24h). Never auto-types /goal.
+            payload = mark.get("payload") if isinstance(mark, dict) else None
+            gg = _goal_guard_decide(sid, payload,
+                                    (rearm_fn or _default_rearm_fn)(cwd)[0],
+                                    state, now, loc,
+                                    mark_state=(mark.get("state")
+                                                if isinstance(mark, dict)
+                                                else None))
+            if gg:
+                logs.append(gg)
+                logs += _goal_guard_deliver(
+                    sid, pid, captured, cwd, state, now, loc, run,
+                    sleep_fn, dry_run, projects_dir)
             continue
         if armed is None:
             # #524 -- undeterminable footer (busy / chrome / dialog -> None):
