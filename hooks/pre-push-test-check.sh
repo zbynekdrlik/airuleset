@@ -168,6 +168,30 @@ if printf '%s' "$BRANCH_DIFF_ADDED" \
     INLINE_TEST_ADDED=1
 fi
 
+# #856: A test commit whose diff only flips the POLARITY of an existing inline
+# assert (e.g. `assert!(x)` → `assert!(!x)`) has the `assert!` keyword on an
+# UNCHANGED line, so the inline-test regex above misses it. The commit SUBJECT
+# (`test(`, `test:`, or the `[red]` tag — the repo's own regression-test-first
+# convention) is a reliable signal. Check commit subjects in the branch range
+# to recognise such test commits for Gate 1.
+# Note: extending inline detection to count MODIFIED lines inside #[test]
+# regions via hunk-context parsing was rejected — too complex and FP-prone.
+# Accepted residual: the subject signal is forgeable and unlogged — a `test:`-
+# titled commit with zero test content bypasses both gates more cheaply than
+# the audited `[no-test:]` path. This is the same class as the existing inline
+# regex (any added `assert!` line satisfies it), and a forged `[red]` subject
+# is a dishonesty no path check catches.
+TEST_SUBJECT_RE='^test[:(]|\[red\]'
+if [ "$INLINE_TEST_ADDED" = "0" ]; then
+    BRANCH_SUBJECTS=$(git log --pretty='%s' "${BASE_REF}..HEAD" 2>/dev/null || echo "")
+    # INLINE_TEST_ADDED is overloaded here for a non-inline (subject) signal;
+    # it means "test evidence found in the branch" for Gate 1's purpose.
+    if printf '%s\n' "$BRANCH_SUBJECTS" \
+        | grep -qiE "$TEST_SUBJECT_RE"; then
+        INLINE_TEST_ADDED=1
+    fi
+fi
+
 # Gate 1: Feature code changed but no test files (path-named OR inline)
 if [ -n "$FEATURE_CHANGES" ] && [ -z "$TEST_CHANGES" ] && [ "$INLINE_TEST_ADDED" = "0" ]; then
     echo ""
@@ -204,6 +228,17 @@ if [ -n "$COMMITS" ]; then
         # Does this commit add/modify a test file (by PATH)?
         if echo "$FILES" | grep -qiE '(test|spec|e2e|playwright)'; then
             SEEN_TEST_COMMIT=1
+        fi
+        # #856: Recognise a test commit by its SUBJECT — `test(`, `test:`, or
+        # the `[red]` tag. A polarity-flip RED commit (flipping an existing
+        # assert's operand) has the `assert!` keyword on an UNCHANGED line, so
+        # neither the PATH nor the INLINE regex fires. The subject prefix and
+        # tag are the repo's own regression-test-first convention.
+        # Uses $TEST_SUBJECT_RE (defined above Gate 1) — lockstep, not a copy.
+        if [ "$SEEN_TEST_COMMIT" = "0" ]; then
+            if echo "$SUBJECT" | grep -qiE "$TEST_SUBJECT_RE"; then
+                SEEN_TEST_COMMIT=1
+            fi
         fi
         # …or add INLINE tests in a non-test-named source file? Rust's dominant pattern is
         # `#[cfg(test)] mod tests { #[test] fn … }` living INSIDE the source file (.rs),
