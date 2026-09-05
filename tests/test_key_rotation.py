@@ -675,6 +675,39 @@ class TestRemoveUsesNewKey(unittest.TestCase):
         self.assertEqual(argv[i_idx + 1], self.new_key)
 
 
+class TestNewPubkeyPresent(unittest.TestCase):
+    """F1 PREP: FLEET_PUSH_PUBKEYS has 2 members; member [1] is the new key."""
+
+    def test_tuple_has_two_members(self):
+        """FLEET_PUSH_PUBKEYS must hold exactly 2 members during F1 rotation."""
+        self.assertEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
+                         "F1 PREP: new pubkey not yet appended as member [1]")
+
+    def test_new_key_comment(self):
+        """Member [1] carries the airuleset-push@airuleset #870 comment."""
+        self.assertGreaterEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
+                                "need member [1] to test its comment")
+        new = wto.FLEET_PUSH_PUBKEYS[1]
+        self.assertIn("airuleset-push@airuleset", new)
+
+    def test_new_key_parses_as_ed25519(self):
+        """Member [1] is a valid ssh-ed25519 pubkey."""
+        self.assertGreaterEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
+                                "need member [1] to test its format")
+        new = wto.FLEET_PUSH_PUBKEYS[1]
+        self.assertTrue(new.startswith("ssh-ed25519 "),
+                        "expected ssh-ed25519 prefix")
+        parts = new.split()
+        self.assertGreaterEqual(len(parts), 2, "need at least type + blob")
+        blob = parts[1]
+        # Verify it base64-decodes (valid blob)
+        import base64
+        try:
+            base64.b64decode(blob)
+        except Exception:
+            self.fail("member [1] blob is not valid base64: %s" % blob)
+
+
 class TestOldPubkeyConsistency(unittest.TestCase):
     """Lock: OLD_FLEET_PUSH_PUBKEY matches FLEET_PUSH_PUBKEYS[0]."""
 
