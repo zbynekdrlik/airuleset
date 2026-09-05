@@ -869,6 +869,27 @@ if [ "$CRED_ESCAPE_MISSING" = "1" ] && { { [ "$SK_CRED_VN_MATCH" = "1" ] && [ "$
     add_hard "Priama žiadosť o hodnotu credentialu v chate (SK) — použi 'airuleset.py secret request'/'secret exec', nikdy nežiadaj vloženie sem"
 fi
 
+# Check for a `secret show` one-shot URL delivered WITHOUT a ❓ marker
+# (#879, owner directive 2026-09-05). The one-shot URL is perishable
+# (default TTL 600 s) — delivering it as a bare report line is silent
+# loss for an away owner (it scrolls off, expires, and the credential
+# is never picked up). The ❓ marker routes it to the phone/footer U.
+# 3-conjunct, fail-safe PASS: block only when ALL of:
+#   (1) endpoint-ttl=<N>s AND jednorazov — the show-only discriminator
+#       (cli_vault.py:584; `secret request` prints keep= instead);
+#   (2) an https?:// URL anywhere in the message;
+#   (3) NO ❓ NEEDS YOU / ❓ ASKED marker.
+# Any conjunct absent → pass. Conjunct (2) keeps doctrine/hook-editing
+# sessions that merely QUOTE the string from tripping.
+SHOW_TTL=$(msg_has "$MSG" -qiE "endpoint-ttl=[0-9]+s" && echo 1 || echo 0)
+SHOW_ONESHOT=$(msg_has "$MSG" -qi "jednorazov" && echo 1 || echo 0)
+SHOW_HAS_URL=$(msg_has "$MSG" -qiE "https?://" && echo 1 || echo 0)
+SHOW_HAS_Q=$(msg_has "$MSG" -qiE "❓ NEEDS YOU|❓ ASKED" && echo 1 || echo 0)
+if [ "$SHOW_TTL" = "1" ] && [ "$SHOW_ONESHOT" = "1" ] && [ "$SHOW_HAS_URL" = "1" ] && [ "$SHOW_HAS_Q" = "0" ]; then
+    echo "VIOLATION: A \`secret show\` one-shot URL was delivered WITHOUT a ❓ marker. An away owner will never see it (it scrolls off, the TTL expires, the credential is lost). Deliver the URL inside a self-contained \`**Otázka — projekt …:**\` block ending \`❓ NEEDS YOU:\` (or \`❓ ASKED:\` if continuing other work) and label the ticket \`needs-owner-action\`. See receive-files-via-upload-url.md §'Delivering a CREDENTIAL TO the Owner' (#879)." >&2
+    add_hard "One-shot credential URL (secret show) delivered without ❓ marker — use the ❓/needs-owner-action delivery path (#879)"
+fi
+
 # Check for "say go / ready to proceed" prose questions
 if msg_has "$MSG_NOGOAL" -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when you are|ready for.?next|ready to execute"; then
     echo "VIOLATION: You asked the user to 'say go' or confirm proceed in prose. The plan is approved — chain directly to the next step without asking. See ask-before-assuming.md pre-answered table." >&2

@@ -69,9 +69,7 @@ def _run_hook(msg, *, session_id=None):
         },
         "transcript_path": "/dev/null",
         "tool_input": {},
-        "conversation": [
-            {"role": "assistant", "message": msg},
-        ],
+        "last_assistant_message": msg,
     })
     with tempfile.TemporaryDirectory() as tmp_home:
         env = {
@@ -95,30 +93,33 @@ class TestSecretShowDelivery(unittest.TestCase):
         r = _run_hook(SECRET_SHOW_IN_REPORT)
         self.assertIn("secret show", r.stderr.lower(),
                        "expected a secret-show block reason on stderr")
-        self.assertNotEqual(r.returncode, 0,
-                            "hook must block (exit 2) a secret show URL "
-                            "delivered without ❓")
+        # The hook signals a block via {"decision":"block"} on stdout,
+        # NOT via exit code (exit 0 is always returned).
+        self.assertIn('"decision"', r.stdout,
+                      "hook must output a block decision JSON for a "
+                      "secret show URL delivered without ❓")
+        out = json.loads(r.stdout)
+        self.assertEqual(out.get("decision"), "block")
 
     def test_green_show_output_in_question_passes(self):
         """A secret show URL inside a ❓ block → passes."""
         r = _run_hook(SECRET_SHOW_IN_QUESTION)
-        # The hook should not block this — rc 0.
-        self.assertEqual(r.returncode, 0,
+        self.assertNotIn('"block"', r.stdout,
                          f"hook must pass when ❓ marker present; "
                          f"stderr={r.stderr[:300]}")
 
     def test_green_doctrine_discussion_passes(self):
         """Quoting the discriminator in prose with no URL → passes."""
         r = _run_hook(DOCTRINE_DISCUSSION)
-        self.assertEqual(r.returncode, 0,
+        self.assertNotIn('"block"', r.stdout,
                          f"hook must pass doctrine discussion; "
                          f"stderr={r.stderr[:300]}")
 
     def test_green_secret_request_output_passes(self):
-        """`secret request` output (no jednorazové) → passes."""
+        """`secret request` output (no jednorazove) → passes."""
         r = _run_hook(SECRET_REQUEST_OUTPUT)
-        self.assertEqual(r.returncode, 0,
-                         f"hook must pass secret request output; "
+        self.assertNotIn('"block"', r.stdout,
+                         f"hook must pass for request output; "
                          f"stderr={r.stderr[:300]}")
 
 
