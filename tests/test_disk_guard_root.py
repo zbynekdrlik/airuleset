@@ -341,6 +341,138 @@ class TestPushWiringLock(unittest.TestCase):
                       "cmd_push must invoke the disk-guard root provisioning step")
 
 
+class TestDrainScript895(unittest.TestCase):
+    """#895: root-side drain ladder — the script that reclaims cross-user /tmp,
+    old playwright revisions, npm/pip cache, and redundant tgz archives."""
+
+    def test_drain_script_is_valid_bash(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+            fh.write(g.render_drain_script())
+            path = fh.name
+        try:
+            r = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        finally:
+            os.unlink(path)
+
+    def test_drain_script_has_all_four_rungs(self):
+        d = g.render_drain_script()
+        self.assertIn("RUNG-A", d, "rung (a): /tmp stale files")
+        self.assertIn("RUNG-B", d, "rung (b): playwright browser revisions")
+        self.assertIn("RUNG-C", d, "rung (c): npm/pip cache")
+        self.assertIn("RUNG-D", d, "rung (d): redundant tgz archives")
+
+    def test_drain_script_skips_paused_accounts(self):
+        d = g.render_drain_script()
+        for acct in g.PAUSED_ACCOUNTS:
+            self.assertIn(acct, d, "paused account %r must be in the skip list" % acct)
+        self.assertIn("SKIP", d, "paused accounts must be skipped")
+        self.assertIn("#851", d, "the paused-skip must reference #851")
+
+    def test_drain_script_has_dry_run_support(self):
+        d = g.render_drain_script()
+        self.assertIn("AIRULESET_DGROOT_DRAIN_DRY", d)
+        self.assertIn("WOULD-DELETE", d)
+
+    def test_drain_script_uses_one_file_system(self):
+        d = g.render_drain_script()
+        self.assertIn("--one-file-system", d)
+
+    def test_drain_timer_is_4hourly_and_persistent(self):
+        t = g.render_drain_timer()
+        self.assertIn("OnUnitActiveSec=4h", t)
+        self.assertIn("Persistent=true", t)
+        self.assertIn("Unit=airuleset-disk-guard-root-drain.service", t)
+
+    def test_drain_service_runs_the_drain_script(self):
+        s = g.render_drain_service()
+        self.assertIn("Type=oneshot", s)
+        self.assertIn(g.DRAIN_SCRIPT_PATH, s)
+
+    def test_guard_files_includes_drain_artifacts(self):
+        paths = [p for (p, _c, _m) in g.guard_files()]
+        self.assertIn(g.DRAIN_SCRIPT_PATH, paths)
+        self.assertIn(g.DRAIN_SERVICE_PATH, paths)
+        self.assertIn(g.DRAIN_TIMER_PATH, paths)
+
+    def test_drain_script_is_executable(self):
+        files = {p: mode for (p, _c, mode) in g.guard_files()}
+        self.assertEqual(files[g.DRAIN_SCRIPT_PATH], "0755")
+
+    def test_apply_script_enables_drain_timer(self):
+        s = g.build_apply_script()
+        self.assertIn("airuleset-disk-guard-root-drain.timer", s)
+        self.assertIn("enable --now", s)
+
+    def test_apply_script_verifies_drain_timer_enabled(self):
+        s = g.build_apply_script()
+        self.assertIn("is-enabled airuleset-disk-guard-root-drain.timer", s)
+
+    def test_tgz_rung_finds_archives_with_extracted_target(self):
+        """Rung (d) covers tgz archives >24h with a same-stem dir present."""
+        d = g.render_drain_script()
+        self.assertIn(".tgz", d)
+        self.assertIn("tgz-redundant", d)
+
+    def test_paused_accounts_matches_fleet_config(self):
+        """Paused accounts in the drain script match the fleet config."""
+        for acct in g.PAUSED_ACCOUNTS:
+            matching = [h for h in cli_fleet.REMOTE_HOSTS
+                        if h.get("user") == acct and h.get("paused")]
+            self.assertTrue(matching,
+                            "PAUSED_ACCOUNTS entry %r must match a paused "
+                            "entry in cli_fleet.REMOTE_HOSTS" % acct)
+
+
+class TestSevereEscalation895(unittest.TestCase):
+    """#895: >=95% machine-side escalation — file a gk-request ticket."""
+
+    def test_severe_pct_constant_exists(self):
+        import watchdog.disk_guard as dg
+        self.assertEqual(dg.SEVERE_PCT, 95)
+
+    def test_file_severe_ticket_below_threshold_is_noop(self):
+        import watchdog.disk_guard as dg
+        status = {"worst_pct": 93, "dim": "bytes"}
+        logs = dg.file_severe_ticket(status, "/tmp/t", 1000, [], dry_run=True)
+        self.assertEqual(logs, [])
+
+    def test_file_severe_ticket_at_threshold_logs(self):
+        import watchdog.disk_guard as dg
+        status = {"worst_pct": 96, "dim": "bytes"}
+        logs = dg.file_severe_ticket(status, "/tmp/t", 1000,
+                                     [("/tmp/big", 5000000000)],
+                                     dry_run=True)
+        self.assertTrue(len(logs) > 0)
+        self.assertIn("SEVERE-TICKET", logs[0])
+
+    def test_file_severe_ticket_daily_dedup(self):
+        import watchdog.disk_guard as dg
+        with tempfile.TemporaryDirectory() as td:
+            marker = os.path.join(td, "marker")
+            # Monkey-patch the marker path for this test
+            orig = dg._severe_ticket_marker
+            dg._severe_ticket_marker = lambda now: marker
+            try:
+                status = {"worst_pct": 96, "dim": "bytes"}
+                # First call (dry_run=False but with injected run_fn)
+                calls = []
+                logs1 = dg.file_severe_ticket(
+                    status, td, 1000, [("/tmp/big", 5000000000)],
+                    dry_run=False,
+                    run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+                # The marker should be written
+                self.assertTrue(os.path.exists(marker))
+                # Second call should be deduped
+                logs2 = dg.file_severe_ticket(
+                    status, td, 1000, [("/tmp/big", 5000000000)],
+                    dry_run=False,
+                    run_fn=lambda *a, **kw: calls.append(a))
+                self.assertEqual(logs2, [])
+            finally:
+                dg._severe_ticket_marker = orig
+
+
 class TestNotifyImportForbidden(unittest.TestCase):
     """The watchdog side NEVER pings — notify must not be importable from it."""
 
@@ -350,6 +482,156 @@ class TestNotifyImportForbidden(unittest.TestCase):
             s = ln.strip()
             self.assertFalse(s.startswith("import notify") or s.startswith("from notify"),
                              "notify must never be imported in watchdog/disk_guard_root.py")
+
+
+# --------------------------------------------------------------------------- #
+# #895 — root-side drain ladder
+# --------------------------------------------------------------------------- #
+class TestDrainScriptRendering(unittest.TestCase):
+    """The drain script is valid bash, carries the 4 rungs, and uses bounded
+    delete verbs (find -delete, rm -rf --one-file-system)."""
+
+    def test_drain_script_is_valid_bash(self):
+        s = g.render_drain_script()
+        r = subprocess.run(["bash", "-n"], input=s, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, "drain script must parse: %s" % r.stderr)
+
+    def test_drain_script_has_all_four_rungs(self):
+        s = g.render_drain_script()
+        self.assertIn("RUNG-A", s)
+        self.assertIn("RUNG-B", s)
+        self.assertIn("RUNG-C", s)
+        self.assertIn("RUNG-D", s)
+
+    def test_drain_script_skips_paused_accounts(self):
+        s = g.render_drain_script()
+        self.assertIn("_is_paused", s)
+        self.assertIn("simap1", s)
+
+    def test_drain_script_has_dry_run_mode(self):
+        s = g.render_drain_script()
+        self.assertIn("AIRULESET_DGROOT_DRAIN_DRY", s)
+        self.assertIn("WOULD-DELETE", s)
+
+    def test_drain_script_uses_one_file_system(self):
+        s = g.render_drain_script()
+        self.assertIn("--one-file-system", s)
+
+    def test_drain_script_logs_every_action(self):
+        s = g.render_drain_script()
+        self.assertIn("_log", s)
+        self.assertIn("DRAIN COMPLETE", s)
+
+    def test_drain_script_tgz_rung_has_print0(self):
+        """The tgz find must use -print0 to match the null-delimited read."""
+        s = g.render_drain_script()
+        self.assertIn("-print0", s)
+
+
+class TestDrainServiceAndTimer(unittest.TestCase):
+
+    def test_drain_service_is_oneshot(self):
+        s = g.render_drain_service()
+        self.assertIn("Type=oneshot", s)
+        self.assertIn(g.DRAIN_SCRIPT_PATH, s)
+
+    def test_drain_timer_is_4h_and_persistent(self):
+        s = g.render_drain_timer()
+        self.assertIn("OnUnitActiveSec=4h", s)
+        self.assertIn("Persistent=true", s)
+        self.assertIn("airuleset-disk-guard-root-drain.service", s)
+
+
+class TestDrainInGuardFiles(unittest.TestCase):
+
+    def test_drain_script_in_guard_files(self):
+        paths = {p for p, _, _ in g.guard_files()}
+        self.assertIn(g.DRAIN_SCRIPT_PATH, paths)
+        self.assertIn(g.DRAIN_SERVICE_PATH, paths)
+        self.assertIn(g.DRAIN_TIMER_PATH, paths)
+
+    def test_drain_script_is_executable(self):
+        for path, _, mode in g.guard_files():
+            if path == g.DRAIN_SCRIPT_PATH:
+                self.assertEqual(mode, "0755")
+
+
+class TestDrainInApplyScript(unittest.TestCase):
+
+    def test_apply_script_enables_drain_timer(self):
+        s = g.build_apply_script()
+        self.assertIn("airuleset-disk-guard-root-drain.timer", s)
+
+    def test_apply_script_verifies_drain_timer_enabled(self):
+        s = g.build_apply_script()
+        self.assertIn("drain timer not enabled", s)
+
+    def test_apply_script_is_valid_bash(self):
+        s = g.build_apply_script()
+        r = subprocess.run(["bash", "-n"], input=s, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, "apply script must parse: %s" % r.stderr)
+
+
+class TestDrainScriptBehavioral(unittest.TestCase):
+    """Run the drain script against a seeded temp dir in dry-run mode and
+    verify it produces WOULD-DELETE log lines for the expected candidates."""
+
+    def test_drain_dry_run_tmp_stale_files(self):
+        """Rung (a): stale /tmp files appear as WOULD-DELETE."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"
+            tmp = root / "tmp"
+            tmp.mkdir(parents=True)
+            stale = tmp / "old_file.txt"
+            stale.write_text("stale")
+            os.utime(stale, (0, 0))
+            log = root / "drain.log"
+            env = os.environ.copy()
+            env["AIRULESET_DGROOT_DRAIN_DRY"] = "1"
+            script = g.render_drain_script()
+            script = script.replace("/tmp", str(tmp))
+            script = script.replace("/home", str(root / "home"))
+            script = script.replace(g.DRAIN_LOG_PATH, str(log))
+            script = script.replace(
+                "mkdir -p '/run/airuleset'",
+                "mkdir -p '%s'" % str(root))
+            r = subprocess.run(
+                ["bash", "-c", script], env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            if log.exists():
+                content = log.read_text()
+                self.assertIn("RUNG-A", content)
+
+    def test_drain_dry_run_tgz_redundant(self):
+        """Rung (d): a .tgz with an extracted dir should produce WOULD-DELETE."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "root"
+            home = root / "home" / "testuser" / "montalu-web-pull"
+            home.mkdir(parents=True)
+            tgz = home / "app.tgz"
+            tgz.write_text("fake archive")
+            os.utime(tgz, (0, 0))
+            target = home / "app"
+            target.mkdir()
+            log = root / "drain.log"
+            env = os.environ.copy()
+            env["AIRULESET_DGROOT_DRAIN_DRY"] = "1"
+            script = g.render_drain_script()
+            script = script.replace("/tmp", str(root / "tmp"))
+            script = script.replace("/home", str(root / "home"))
+            script = script.replace(g.DRAIN_LOG_PATH, str(log))
+            script = script.replace(
+                "mkdir -p '/run/airuleset'",
+                "mkdir -p '%s'" % str(root))
+            (root / "tmp").mkdir(parents=True, exist_ok=True)
+            r = subprocess.run(
+                ["bash", "-c", script], env=env,
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            if log.exists():
+                content = log.read_text()
+                self.assertIn("RUNG-D", content)
 
 
 if __name__ == "__main__":

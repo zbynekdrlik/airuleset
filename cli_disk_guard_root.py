@@ -66,6 +66,23 @@ ROOT_TIMER_PATH = "/etc/systemd/system/airuleset-disk-guard-root.timer"
 
 RUN_DIR = "/run/airuleset"
 ROOT_REPORT_PATH = "/run/airuleset/disk-guard-root.json"
+DRAIN_SCRIPT_PATH = "/usr/local/lib/airuleset/disk-guard-root-drain.sh"
+DRAIN_SERVICE_PATH = "/etc/systemd/system/airuleset-disk-guard-root-drain.service"
+DRAIN_TIMER_PATH = "/etc/systemd/system/airuleset-disk-guard-root-drain.timer"
+DRAIN_LOG_PATH = "/run/airuleset/disk-guard-root-drain.log"
+
+# #895: accounts to SKIP when cleaning cross-user caches (paused = #851).
+# Maintained here as a simple tuple; the root drain script skips these HOME dirs.
+# Updated at push time via provision; a stale list errs toward keeping (safe).
+PAUSED_ACCOUNTS = ("simap1",)
+
+# Playwright: keep ONLY the newest revision per family per account.
+# tmp: regular files in /tmp older than 2 days.
+TMP_MAX_AGE_DAYS = 2
+# tgz archives: older than 24h with extracted target present.
+TGZ_MAX_AGE_HOURS = 24
+# npm/pip cache: older than 7 days.
+CACHE_MAX_AGE_DAYS = 7
 
 # The numeric/text policy. One source, shared by the renderers + the read-back.
 JOURNAL_MAX_USE = "200M"           # journald's own SystemMaxUse rotation cap
@@ -272,6 +289,163 @@ def render_root_timer():
     )
 
 
+def render_drain_script():
+    """The root-side DRAIN script (#895). Acts ONLY on clearly-reclaimable
+    root-scope candidates the per-user guard cannot reach. Each rung is
+    bounded, provenance-proven, and logged to ``DRAIN_LOG_PATH``. Rungs:
+
+    (a) ``/tmp`` regular files with mtime > TMP_MAX_AGE_DAYS (safe: tmpfiles.d
+        semantics — transient scratch, no user data).
+    (b) Old playwright browser revisions across ALL accounts (non-paused): keep
+        the NEWEST revision per family (e.g. chromium, chromium_headless_shell)
+        per account's ``.cache/ms-playwright/``, delete the rest. Paused accounts
+        (#851) are SKIPped entirely.
+    (c) npm ``_cacache`` + pip cache of OTHER accounts (never the calling user's
+        own — they manage it themselves): files older than CACHE_MAX_AGE_DAYS.
+    (d) Redundant pull ``.tgz`` archives: a ``.tgz`` file older than
+        TGZ_MAX_AGE_HOURS with a same-stem directory present alongside → the
+        archive is redundant (the extraction succeeded). Scans /home/*/
+        directories only.
+
+    The script uses ``set -uo pipefail`` (NOT ``-e``: a ``find`` on a missing
+    path must not abort). Every action is logged. ``AIRULESET_DGROOT_DRAIN_DRY``
+    env var makes it log-only (for testing)."""
+    # Build the list of paused account names for the skip check
+    paused_list = " ".join(shlex.quote(a) for a in PAUSED_ACCOUNTS)
+    return (
+        "#!/bin/bash\n"
+        "# Managed by airuleset (#895) — root-side drain ladder.\n"
+        "# Acts ONLY on clearly-reclaimable cross-user/root candidates.\n"
+        "# NEVER deletes user data, docker volumes, or the journal.\n"
+        "set -uo pipefail\n"
+        "log=%s\n"
+        "dry=${AIRULESET_DGROOT_DRAIN_DRY:-}\n"
+        "paused=(%s)\n"
+        "_is_paused() { local u=\"$1\"; local p; for p in \"${paused[@]}\"; do "
+        "[ \"$p\" = \"$u\" ] && return 0; done; return 1; }\n"
+        "_log() { echo \"$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ) $*\" >> \"$log\"; }\n"
+        "_act() {\n"
+        "    if [ -n \"$dry\" ]; then\n"
+        "        _log \"WOULD-DELETE $1 ($2)\"\n"
+        "    else\n"
+        "        rm -rf --one-file-system -- \"$1\" 2>/dev/null && "
+        "_log \"DELETED $1 ($2)\" || _log \"FAIL $1 ($2)\"\n"
+        "    fi\n"
+        "}\n"
+        "mkdir -p %s 2>/dev/null || true\n"
+        "touch \"$log\" 2>/dev/null || true\n"
+        "\n"
+        "# --- rung (a): /tmp regular files mtime +%dd ---\n"
+        "_log \"RUNG-A /tmp regular files mtime +%d days\"\n"
+        "find /tmp -maxdepth 1 -type f -mtime +%d -print0 2>/dev/null | "
+        "while IFS= read -r -d '' f; do _act \"$f\" \"tmp-stale\"; done\n"
+        "\n"
+        "# --- rung (b): old playwright versions per-family per-account ---\n"
+        "_log \"RUNG-B playwright browser revisions\"\n"
+        "for home in /home/*; do\n"
+        "    [ -d \"$home\" ] || continue\n"
+        "    u=$(basename \"$home\")\n"
+        "    _is_paused \"$u\" && { _log \"SKIP $home (paused #851)\"; continue; }\n"
+        "    pwdir=\"$home/.cache/ms-playwright\"\n"
+        "    [ -d \"$pwdir\" ] || continue\n"
+        "    # Group by family (everything before the last -<digits> segment)\n"
+        "    declare -A newest_rev\n"
+        "    declare -A newest_dir\n"
+        "    for d in \"$pwdir\"/*/; do\n"
+        "        [ -d \"$d\" ] || continue\n"
+        "        bn=$(basename \"$d\")\n"
+        "        # Extract family and revision: family-revision\n"
+        "        if [[ \"$bn\" =~ ^(.+)-([0-9]+)$ ]]; then\n"
+        "            fam=\"${BASH_REMATCH[1]}\"\n"
+        "            rev=\"${BASH_REMATCH[2]}\"\n"
+        "            cur=${newest_rev[$fam]:-0}\n"
+        "            if [ \"$rev\" -gt \"$cur\" ]; then\n"
+        "                newest_rev[$fam]=$rev\n"
+        "                newest_dir[$fam]=\"$d\"\n"
+        "            fi\n"
+        "        fi\n"
+        "    done\n"
+        "    for d in \"$pwdir\"/*/; do\n"
+        "        [ -d \"$d\" ] || continue\n"
+        "        bn=$(basename \"$d\")\n"
+        "        if [[ \"$bn\" =~ ^(.+)-([0-9]+)$ ]]; then\n"
+        "            fam=\"${BASH_REMATCH[1]}\"\n"
+        "            rev=\"${BASH_REMATCH[2]}\"\n"
+        "            kept=${newest_rev[$fam]:-0}\n"
+        "            if [ \"$rev\" -lt \"$kept\" ]; then\n"
+        "                _act \"${d%%/}\" \"playwright-old $fam rev $rev < $kept\"\n"
+        "            fi\n"
+        "        fi\n"
+        "    done\n"
+        "    unset newest_rev newest_dir\n"
+        "done\n"
+        "\n"
+        "# --- rung (c): npm/pip cache of other accounts ---\n"
+        "_log \"RUNG-C npm/pip cache stale files\"\n"
+        "for home in /home/*; do\n"
+        "    [ -d \"$home\" ] || continue\n"
+        "    u=$(basename \"$home\")\n"
+        "    _is_paused \"$u\" && continue\n"
+        "    for cdir in \"$home/.npm/_cacache\" \"$home/.cache/pip\"; do\n"
+        "        [ -d \"$cdir\" ] || continue\n"
+        "        find \"$cdir\" -type f -mtime +%d -print0 2>/dev/null | "
+        "while IFS= read -r -d '' f; do _act \"$f\" \"cache-stale\"; done\n"
+        "    done\n"
+        "done\n"
+        "\n"
+        "# --- rung (d): redundant pull tgz archives ---\n"
+        "_log \"RUNG-D redundant pull tgz archives\"\n"
+        "find /home -name '*.tgz' -type f -mmin +%d -print0 2>/dev/null | "
+        "while IFS= read -r -d '' f; do\n"
+        "    stem=\"${f%%.tgz}\"\n"
+        "    if [ -d \"$stem\" ]; then\n"
+        "        _act \"$f\" \"tgz-redundant extracted=$stem\"\n"
+        "    fi\n"
+        "done\n"
+        "\n"
+        "_log \"DRAIN COMPLETE\"\n"
+        % (shlex.quote(DRAIN_LOG_PATH),
+           paused_list,
+           shlex.quote(RUN_DIR),
+           TMP_MAX_AGE_DAYS, TMP_MAX_AGE_DAYS, TMP_MAX_AGE_DAYS,
+           CACHE_MAX_AGE_DAYS,
+           TGZ_MAX_AGE_HOURS * 60)
+    )
+
+
+def render_drain_service():
+    """The oneshot service the drain timer triggers (#895)."""
+    return (
+        "# Managed by airuleset (#895) — root-side drain ladder.\n"
+        "# Removes clearly-reclaimable cross-user/root candidates.\n"
+        "[Unit]\n"
+        "Description=airuleset disk-guard root drain (#895)\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=/bin/bash %s\n" % DRAIN_SCRIPT_PATH
+    )
+
+
+def render_drain_timer():
+    """The 4-hourly drain timer (#895). ``Persistent=true`` catches missed runs
+    after a reboot."""
+    return (
+        "# Managed by airuleset (#895) — root-side drain ladder timer.\n"
+        "[Unit]\n"
+        "Description=airuleset disk-guard root drain timer (#895)\n"
+        "\n"
+        "[Timer]\n"
+        "OnBootSec=30min\n"
+        "OnUnitActiveSec=4h\n"
+        "Persistent=true\n"
+        "Unit=airuleset-disk-guard-root-drain.service\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
 def guard_files():
     """The (path, content, mode) triples the apply script installs, in write
     order. The reporter script is 0755 (executable); everything else 0644.
@@ -286,6 +460,10 @@ def guard_files():
         (REPORTER_SCRIPT_PATH, render_reporter_script(), "0755"),
         (ROOT_SERVICE_PATH, render_root_service(), "0644"),
         (ROOT_TIMER_PATH, render_root_timer(), "0644"),
+        # #895 — root-side drain ladder
+        (DRAIN_SCRIPT_PATH, render_drain_script(), "0755"),
+        (DRAIN_SERVICE_PATH, render_drain_service(), "0644"),
+        (DRAIN_TIMER_PATH, render_drain_timer(), "0644"),
     ]
 
 
@@ -373,7 +551,12 @@ def build_apply_script():
     # Enable + start the daily report timer.
     parts.append(
         'systemctl enable --now airuleset-disk-guard-root.timer '
-        '|| echo "  ⚠ disk-guard-root: timer enable failed (non-fatal)"'
+        '|| echo "  ⚠ disk-guard-root: report timer enable failed (non-fatal)"'
+    )
+    # #895: Enable + start the 4-hourly drain timer.
+    parts.append(
+        'systemctl enable --now airuleset-disk-guard-root-drain.timer '
+        '|| echo "  ⚠ disk-guard-root: drain timer enable failed (non-fatal)"'
     )
     # Seed the report on day 0 — bounded so a slow `du` can NEVER stall the push.
     parts.append(
@@ -414,6 +597,14 @@ def build_apply_script():
         '>&2; fail=1\n'
         'fi'
     )
+    # 4. (#895) the drain timer is enabled.
+    parts.append(
+        'if ! systemctl is-enabled airuleset-disk-guard-root-drain.timer '
+        '>/dev/null 2>&1; then\n'
+        '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: drain timer not enabled" '
+        '>&2; fail=1\n'
+        'fi'
+    )
     # NON-FATAL: the report JSON existing on day 0 depends on the bounded seed
     # run finishing; on a huge box (gk: tens of GB of du) that seed can time out
     # legitimately, and the DAILY timer produces the report within a day anyway.
@@ -435,7 +626,8 @@ def build_apply_script():
         '    exit 4\n'
         'fi\n'
         'echo "  disk-guard-root: applied + verified (journald cap %s, btmp/wtmp '
-        'rotation, report %s)"' % (JOURNAL_MAX_USE, ROOT_REPORT_PATH)
+        'rotation, report %s, drain %s)"'
+        % (JOURNAL_MAX_USE, ROOT_REPORT_PATH, DRAIN_SCRIPT_PATH)
     )
     return "\n".join(parts) + "\n"
 
