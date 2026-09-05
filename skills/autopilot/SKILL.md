@@ -982,7 +982,11 @@ gap in either.
    > 1. For each worker (any order), spot-check its evidence against its own worktree: `git -C
    >    <worktree-path> log --oneline` / `git -C <worktree-path> diff <base>` — confirm the
    >    claimed commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review`
-   >    results genuinely exist on that branch before trusting it enough to merge.
+   >    results genuinely exist on that branch before trusting it enough to merge. **Review-tier
+   >    consistency (#876):** a returned lane whose evidence block lacks `reviewed-by-tier:` or
+   >    whose tier is inconsistent with the gate state is NOT integrated — dispatch the review
+   >    yourself (run `fable-gate`, dispatch `fable-advisor` at OPEN / model-less consult at
+   >    CLOSED over the branch diff) and record the miss as a comment on the ticket.
    > 2. **BEFORE each `--no-ff` merge, ASSERT the shared checkout's HEAD is still the integration
    >    target** — `git symbolic-ref --short HEAD` MUST print exactly `main` (local-merge repo) or
    >    `dev` (`dev`→`main` PR repo). If it names a `worktree-agent-*`/`worktree-issue-*` branch
