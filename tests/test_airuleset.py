@@ -14576,6 +14576,13 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         payload = json.dumps({"tool_input": {"command": command}})
         env = dict(os.environ)
+        # Use a clean HOME so the hook falls back to its hardcoded allowlist
+        # instead of reading the real ~/.claude/airuleset-subdev-accounts.conf
+        # (which may be missing users like marek — #869 conf divergence).
+        if "HOME" not in (env_extra or {}):
+            fake_home = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, fake_home, ignore_errors=True)
+            env["HOME"] = fake_home
         if env_extra:
             env.update(env_extra)
         return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
