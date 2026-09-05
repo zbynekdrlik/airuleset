@@ -444,8 +444,8 @@ AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
     # marek — DEV STREAM cancelled (#882, odoo-erp#6257) but webterm OBSERVER
     # lane survives (owner scope correction 2026-09-05). Least-privilege
-    # fork-no-merge (dominika model #867): she is not a real hand-off stream,
-    # so WEBTERM_OBSERVER_USERS excludes her from stream provisioning consumers.
+    # fork-no-merge (dominika model #867): he is not a real hand-off stream,
+    # so WEBTERM_OBSERVER_USERS excludes him from stream provisioning consumers.
     "marek": "fork-no-merge",
     # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
     # moved to the numbered block below; the OS account `david` is gone.
@@ -587,7 +587,7 @@ WEBTERM_OBSERVER_USERS = frozenset({"dominika", "marek"})
 # keys quarantined), sshd Match drop-in disables password auth.
 # Test-locked: subset of subdev REMOTE_HOSTS users.
 WEBTERM_ONLY_USERS = frozenset({
-    "david1", "david2", "david3", "david4", "dominika", "marek",
+    "david1", "david2", "david3", "david4", "dominika",
 })
 
 

@@ -67,9 +67,14 @@ class TestMarekLanePresent882(unittest.TestCase):
         self.assertEqual(result, "marek",
                          "profile_for_host must resolve marek account (#882)")
 
-    def test_in_webterm_only_users(self):
-        self.assertIn("marek", cli_fleet.WEBTERM_ONLY_USERS,
-                      "marek must be webterm-only (#882)")
+    def test_not_in_webterm_only_users(self):
+        # #882 integration review: owner's #869 ruling ("direct SSH fallback
+        # len owner + marek") means marek is NOT webterm-only — he keeps direct
+        # SSH access. He IS in WEBTERM_OBSERVER_USERS (no stream provisioning).
+        self.assertNotIn("marek", cli_fleet.WEBTERM_ONLY_USERS,
+                         "marek must NOT be webterm-only (#869 ruling)")
+        self.assertIn("marek", cli_fleet.WEBTERM_OBSERVER_USERS,
+                      "marek must stay in WEBTERM_OBSERVER_USERS")
 
 
 if __name__ == "__main__":
