@@ -153,7 +153,7 @@
     "tests/test_discuss_template_grant_799.py": 129,
     "tests/test_discuss_thread_doctrine_728.py": 234,
     "tests/test_discuss_thread_reference_657.py": 333,
-    "tests/test_disk_guard.py": 1636,
+    "tests/test_disk_guard.py": 1921,
     "tests/test_disk_guard_root.py": 356,
     "tests/test_disk_guard_root_finding.py": 290,
     "tests/test_disk_hygiene_513.py": 500,
