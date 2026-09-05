@@ -102,8 +102,7 @@ def _fingerprint(line, run=None):
 
 def desired_keys_for_user(user):
     """Return the SORTED list of authorized_keys lines for a webterm-only
-    account.  Raises ValueError if the desired set is incomplete (e.g. a
-    placeholder pubkey is still None)."""
+    account.  Raises ValueError for a non-webterm-only user."""
     from cli_fleet import WEBTERM_ONLY_USERS
     if user not in WEBTERM_ONLY_USERS:
         raise ValueError("not a webterm-only user: %r" % user)
