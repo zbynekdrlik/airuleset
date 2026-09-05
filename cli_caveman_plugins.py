@@ -664,7 +664,7 @@ def setup_managed_plugins() -> bool:
     else:
         print("    settings.json: already correct")
 
-    healed_markets = _heal_stale_marketplace_registry()
+    _heal_stale_marketplace_registry()
     _heal_stale_plugin_registry()
 
     market_ok = {}
