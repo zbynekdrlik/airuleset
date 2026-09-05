@@ -1,6 +1,6 @@
 ---
 name: autopilot-dialog
-description: "Usage: /autopilot-dialog. Thin alias for `/autopilot dialog` — runs TODAY's full interactive start-of-run flow (Step 1b skip-review/add-skip picker + Step 1c close-obsolete picker) before printing the /goal line. Exists so literal /autopilot-dialog works even though /autopilot dialog is the same thing (#52)."
+description: Autopilot dialog mode — interactive issue selection with the user present. Use when the user wants to pick issues interactively.
 argument-hint: ""
 user-invocable: true
 disable-model-invocation: true

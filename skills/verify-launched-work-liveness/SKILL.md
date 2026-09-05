@@ -1,6 +1,6 @@
 ---
 name: verify-launched-work-liveness
-description: Poll launched long-running work (background Bash, builds, dispatched subagents/workflows) for REAL liveness on a bounded cadence — a dead process sends no "done". Load whenever you launch anything long-running and end a turn ⏳ WORKING.
+description: Poll launched long-running work for REAL liveness — a dead process sends no done. Load when launching anything long-running.
 user-invocable: false
 ---
 

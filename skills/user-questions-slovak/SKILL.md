@@ -1,6 +1,6 @@
 ---
 name: user-questions-slovak
-description: Full template, worked examples, and the away-user delivery mechanism for every question this repo puts to the user — the detailed companion to `modules/core/user-questions-slovak.md`'s always-on core (Slovak requirement + self-contained gate). Auto-loads the moment you call the `AskUserQuestion` tool; load it explicitly before composing a prose `❓` marker question too, since a plain-text question never triggers that auto-load.
+description: Full template and worked examples for every question put to the user — Slovak, self-contained, no jargon. Auto-loads on AskUserQuestion.
 user-invocable: false
 ---
 

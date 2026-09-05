@@ -1,6 +1,6 @@
 ---
 name: subagent-type-discipline
-description: Never invent Agent tool subagent_type names — use only the types listed in the Agent tool's own description, or general-purpose. Load before dispatching any Agent/Task subagent, especially when plugin/mode branding (caveman, superpowers) might tempt inventing a plugin-prefixed agent name.
+description: Never invent Agent subagent_type names — use only listed types or general-purpose. Least tool authority for the task.
 user-invocable: false
 ---
 
