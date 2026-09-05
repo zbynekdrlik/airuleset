@@ -108,6 +108,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-discuss-archive.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-unscoped-tmux-kill.sh",
             "timeout": 5
           },

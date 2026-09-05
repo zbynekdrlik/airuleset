@@ -206,37 +206,38 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   YOUR stream's word, never the wrong person's.
 
 - **Closure protokol — dodané + JEDNA pripomienka → ticho = akceptované → close
-  (airuleset #799, owner 2026-09-01).** Dodané + overené (#446) a klient
-  nepotvrdzuje → NEpushuj donekonečna (#570/#753); closure má TERMINÁLNY stav:
-  (1) JEDNA vecná pripomienka v #607 pracovnom okne; (2) ticho **N = 3 PRACOVNÉ
-  dni** po nej (víkendovo-vedomé per #607 `working_time`; ticho = žiadna správa
-  ANI #745 emoji reakcia — over reakcie pred closure); (3) POSTni closing nótu
-  (#627 — POSLEDNÁ správa vlákna, nikdy klientovo mlčanie); (4) close s citáciou
-  `Acceptance-tacit: <msg-id doručenia> / <msg-id pripomienky>` + `Discuss-closed:
-  msg <id>`; (5) thread disposition NEhardcoduj ako „archív" — deferuj ju na #788
-  TTL-hide bullet nižšie. `stale!` eskalácia (#570) KONČÍ týmto closure, nie ďalším
-  pushom. `Acceptance-tacit:` je DÔKAZ, nie dispozícia — close nesie AJ #627
-  dispozíciu (`Discuss-defer:` / `Discuss-closed: msg <id>`), ako #755. Klient
-  odpovie KÝM okno beží → NEuzatváraj tacitne: reaguj (#625); potvrdzuje → close
-  cez #755, NOVÁ téma → peeluj ju per #728 KRÁTKOU šablónovou redirect odpoveďou.
-  **Dva mechanické typy majú STANDING template grant:** finálna pripomienka +
-  closing nóta citujú `airuleset:owner-approved template:final-reminder` /
-  `template:closing-note` (owner schváli ŠABLÓNU raz; ref voliteľný) namiesto
-  per-message; nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
+  (#799, owner 2026-09-01).** Dodané + overené (#446), klient nepotvrdzuje →
+  NEpushuj donekonečna (#570/#753); closure: (1) JEDNA vecná pripomienka v #607
+  pracovnom okne; (2) ticho **N = 3 PRACOVNÉ dni** (víkendovo-vedomé; ticho =
+  žiadna správa ANI #745 reakcia); (3) closing nóta (#627 — POSLEDNÁ správa);
+  (4) close `Acceptance-tacit: <msg-id doručenia>/<pripomienky>` +
+  `Discuss-closed: msg <id>`; (5) thread disposition → #788 TTL-hide nižšie.
+  `stale!` (#570) KONČÍ týmto closure. `Acceptance-tacit:` je DÔKAZ, nie
+  dispozícia — close nesie AJ #627 dispozíciu, ako #755. Klient odpovie KÝM
+  okno beží → reaguj (#625); potvrdzuje → #755, NOVÁ téma → #728 redirect.
+  **STANDING template grant:** finálna pripomienka + closing nóta citujú
+  `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
+  nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
-  (airuleset #788, owner 2026-08-31 „radsej davat vlakno schovat … na napr. 10h").**
-  Keď #627 closing nóta landne, NEARCHIVUJ — ARMuj vláknu TTL self-hide (po čase
-  samo zmizne členom, HISTÓRIA ostáva dohľadateľná). Mechanizmus HOTOVÝ + RELEASED
-  (odoo-erp issue 5630, release 19.0.2.230.0, `company_base` — presné API tam):
-  helper `_company_base_schedule_close_hide()` + ICP `mail.closed_thread_hide_hours`
-  (default 10) poháňa natívny `unpin_dt`, NIKDY `active=False`. Archivácia
-  (`active=False`) ostáva LEN ako fallback / gk cleanup, nikdy default.
-  **Disarm-on-reply (odoo-erp#5630 delegoval SEM):** klientska odpoveď v ARMnutom
-  okne DISARMuje hide — zlož / nere-armuj marker EXPLICITNE (nikdy sa nespoliehaj
-  na `last_interest_dt` race). Odpoveď zachytí jej vlastná notifikácia + #625
-  react-first duty, takže vlákno s čerstvou aktivitou nikdy ticho nezmizne; re-arm
-  až po skutočnom uzavretí. Model dáva len primitív; policy je #788.
+  (#788; #853 compliance).**
+  Po #627 closing nóte ARMuj TTL self-hide. Hide arming je **POVINNÝ** krok —
+  closing nóta bez arm-u = nedokončený close. **Archivácia (`active=False`) =
+  disposition MIS-SHAPE** (trieda #601) — NIKDY default/fallback.
+  HOOK-ENFORCED (`hooks/block-discuss-archive.sh`, #853): `action_archive`/
+  `toggle_active`/`active=False` BLOKOVANÝ na `shared-stream` boxoch.
+  Bypass: `# airuleset:discuss-archive-ok <reason>`.
+  **Self-service arm (odoo-erp issue 5946, release 2.238.0):** stream si hide
+  armne SÁM cez `/json/2` — `schedule_close_hide_guarded(channel_id, hours=None)`.
+  Guard: internal user + member/creator + sub-thread. **Kým release s metódou
+  nie je na PROD, `GATEKEEPER-ACTION:` ostáva arm path.**
+  Mechanizmus (#5630): `_company_base_schedule_close_hide()` + ICP
+  `mail.closed_thread_hide_hours` (default 10h) poháňa `unpin_dt`, NIKDY
+  `active=False`.
+  **Disarm-on-reply (#5630→SEM):** klientska odpoveď DISARMuje hide — zlož
+  marker EXPLICITNE (nikdy `last_interest_dt` race); re-arm až po uzavretí.
+  **Per-stream sweep:** stream pravidelne auditne SVOJE vlákna — hotová téma
+  s closing nótou → hide arm; bez nóty → nóta + arm; živá → nechať.
 
 - **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
   closing note lands in that thread — the LAST message in the thread is ALWAYS
