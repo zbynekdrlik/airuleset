@@ -274,12 +274,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   landne, session ju v **TOM ISTOM cykle** cituje na VŠETKÝCH ticketoch a zavrie
   ich — NIKDY nečaká na per-ticket udalosť (14× sa to nestalo, montalu3: dôkaz už
   ležal vo vlákne, necitovaný). Každý close nesie **`Acceptance-cited: vlákno
-  „<meno>" (discuss.channel_<N>) / msg <id> / <kto> <kedy>`**. **`Acceptance-cited:` je DÔKAZ,
-  NIKDY dispozícia:** close nesie VŽDY AJ #627 dispozíciu — `Discuss-defer:` pre
-  ne-posledný, `Discuss-closed: msg <id>` pre POSLEDNÝ (ktorý postne zavieraciu
-  nótu). Rodina NIKDY nezavrie len citáciou — inak posledná správa ostane
-  klientova a #627 padne. `discuss_close_guard.py` ostáva **NEDOTKNUTÝ**: close
-  len s `Acceptance-cited:` bez #627 dispozície správne BLOKUJE (#516). Batchovanie
+  „<meno>" (discuss.channel_<N>) / msg <id> / <kto> <kedy>`**. **`Acceptance-cited:` je DÔKAZ
+  aj dispozícia (#891 channel-agnostic reversal):** `Acceptance-cited:` slúži ako
+  channel-agnostic close marker (nahrádza `Discuss-closed:` pre task-chatter akceptáciu).
+  Rodina STÁLE nesie citáciu na VŠETKÝCH ticketoch; `Acceptance-defer:` pre ne-posledný.
+  Batchovanie
   draftov rodiny je v `modules/core/statusline-vocabulary.md` (#755/#606).
 
 - **One thread = one topic — now the WHOLE lifecycle, not just addressing

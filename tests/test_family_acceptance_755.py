@@ -32,7 +32,7 @@ from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 VOCAB = ROOT / "modules" / "core" / "statusline-vocabulary.md"
 
 sys.path.insert(0, str(ROOT))
@@ -79,17 +79,20 @@ class FamilyAcceptanceBulletInHandoverCompose(TestCase):
         self.assertIn("ĽUDSKÝ ÚSUDOK", w)
         self.assertIn("NIKDY kódová detekcia", w)
 
-    def test_acceptance_cited_is_evidence_not_disposition(self):
+    def test_acceptance_cited_is_evidence_and_disposition(self):
         w = self._window()
         self.assertIn("Acceptance-cited:", w,
                       "the falsifiable citation format must be named")
-        self.assertIn("DÔKAZ, NIKDY dispozícia", w,
-                      "must state Acceptance-cited is evidence, never a disposition")
-        # a family close STILL carries its #627 disposition; the last ticket
-        # posts the closing note (Discuss-closed), non-last defers.
-        self.assertIn("Discuss-defer:", w)
-        self.assertIn("Discuss-closed:", w)
-        self.assertIn("NEDOTKNUTÝ", w,
+        # #891: Acceptance-cited: is now BOTH evidence AND disposition
+        # (channel-agnostic reversal — it replaces Discuss-closed: for
+        # task-chatter-based acceptance; the old "DÔKAZ nie dispozícia"
+        # constraint was channel-specific to Discuss)
+        self.assertIn("DÔKAZ aj dispozícia", w,
+                      "must state Acceptance-cited is evidence AND disposition (#891)")
+        # #891: the family bullet now uses channel-agnostic markers
+        self.assertIn("Acceptance-defer:", w,
+                      "non-last family members use Acceptance-defer:")
+        self.assertIn("channel-agnostic", w,
                       "must state discuss_close_guard.py stays untouched")
 
     def test_back_citation_same_cycle_close(self):
@@ -141,18 +144,17 @@ class FamilyBatchingClauseInStatuslineVocabulary(TestCase):
         self.assertIn("#754", w)
 
 
-class CloseGuardTreatsAcceptanceCitedAsEvidenceNotDisposition(TestCase):
-    """REGRESSION LOCK for design decision (b): `discuss_close_guard.py` stays
-    untouched -- a thread-bound close carrying ONLY `Acceptance-cited:` (no
-    #627 disposition) MUST still be BLOCKED. If someone ever added
-    Acceptance-cited to `has_disposition`, a family could close every ticket
-    by citation and never post the closing note, breaking the #627 "last
-    message is always ours" invariant. This test has real behavioral teeth."""
+class AccCitedDisposition891(TestCase):
+    """#891 REVERSAL: `Acceptance-cited:` is now a channel-agnostic DISPOSITION
+    (evidence AND disposition in one marker), replacing the #755 separation
+    that was Discuss-channel-specific. A thread-bound close carrying
+    `Acceptance-cited:` IS now allowed — the marker covers both the closing
+    evidence and the disposition in the channel-agnostic model."""
 
     def _issue_json(self, body):
         return '{"body": %s, "comments": []}' % _jsonstr(body)
 
-    def test_thread_bound_acceptance_cited_only_is_blocked(self):
+    def test_thread_bound_acceptance_cited_only_is_allowed(self):
         body = (
             "Rodinný close.\n"
             "Akceptačné vlákno: https://erp.montalu.cloud/odoo/discuss"
@@ -160,13 +162,12 @@ class CloseGuardTreatsAcceptanceCitedAsEvidenceNotDisposition(TestCase):
             'Acceptance-cited: vlákno "Zákaznícke e-maily 1" '
             "(discuss.channel_288) / msg 1739648 / Špetta 2026-08-29\n"
         )
-        # thread-bound via the deep-URL token, NO Discuss-closed/Discuss-defer.
+        # thread-bound via the deep-URL token; Acceptance-cited IS the disposition
         self.assertTrue(dcg.is_thread_bound(body))
-        self.assertFalse(dcg.has_disposition(body),
-                         "Acceptance-cited: must NOT count as a disposition")
-        self.assertEqual(dcg.evaluate_close(self._issue_json(body)),
-                         "thread-bound-no-closing-note",
-                         "a family close with only Acceptance-cited must BLOCK")
+        self.assertTrue(dcg.has_disposition(body),
+                        "Acceptance-cited: must count as a disposition (#891)")
+        self.assertIsNone(dcg.evaluate_close(self._issue_json(body)),
+                          "a close with Acceptance-cited must be ALLOWED (#891)")
 
     def test_family_close_with_defer_disposition_is_allowed(self):
         body = (

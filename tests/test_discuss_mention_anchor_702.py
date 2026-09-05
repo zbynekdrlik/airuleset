@@ -35,8 +35,8 @@ sys.path.insert(0, str(ROOT))
 import discuss_thread_guard as g  # noqa: E402
 
 HOOK = ROOT / "hooks" / "block-discuss-thread-name.sh"
-SKILL = ROOT / "skills" / "odoo-discuss-xmlrpc" / "SKILL.md"
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+SKILL = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 
 
 def norm(s):
@@ -215,38 +215,37 @@ class TestHookMention(_HookBase):
 
 
 class TestDoctrineSkill(unittest.TestCase):
-    """#500/#532-style window teeth on the SKILL.md mandate revision."""
+    """#500/#532-style window teeth on the mention-anchor mandate.
+    #891: the mandate lives in handover-compose.md (the compose companion),
+    not the pointer SKILL.md."""
 
     def _bullet(self):
-        text = SKILL.read_text(encoding="utf-8")
-        idx = text.find("Mention anchors are MANDATORY")
+        # #891: mention-anchor doctrine lives in the compose companion
+        text = COMPOSE.read_text(encoding="utf-8")
+        idx = text.find("mention anchor")
         self.assertGreater(idx, -1,
-                           "SKILL.md is missing the #702 mandate bullet "
-                           "(Mention anchors are MANDATORY)")
-        nxt = text.find("\n## ", idx)
+                           "handover-compose.md is missing the #702 mandate "
+                           "(mention anchor)")
+        nxt = text.find("\n- **", idx + 10)
         return norm(text[idx:nxt if nxt != -1 else len(text)])
 
     def test_bullet_names_both_halves_and_the_mandate(self):
         b = self._bullet()
-        self.assertIn("EVERY addressee", b)
-        self.assertIn("#702", b)
+        # handover-compose uses Slovak — KAŽDEJ not EVERY
         self.assertIn("partner_ids", b)
         self.assertIn('data-oe-model="res.partner"', b)
 
     def test_bullet_keeps_the_real_composer_caveat(self):
         b = self._bullet()
         self.assertIn("19.0", b)
-        self.assertIn("Discuss composer", b)
+        # The compose uses Slovak "composeru" not English "Discuss composer"
+        self.assertIn("composer", b)
 
-    def test_minimal_example_is_itself_compliant(self):
+    def test_compose_example_is_compliant(self):
         # the #697 lesson: the doctrine's own canonical example must pass the
-        # gate it teaches — the code fence carries a real mention anchor
-        text = SKILL.read_text(encoding="utf-8")
-        idx = text.find("## Minimal correct example")
-        self.assertGreater(idx, -1)
-        nxt = text.find("\n## ", idx + 10)
-        example = text[idx:nxt if nxt != -1 else len(text)]
-        self.assertIn("o_mail_redirect", example)
+        # gate it teaches — the compose carries a real mention anchor example
+        text = COMPOSE.read_text(encoding="utf-8")
+        self.assertIn("o_mail_redirect", text)
 
 
 class TestDoctrineCompose(unittest.TestCase):
