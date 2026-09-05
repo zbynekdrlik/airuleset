@@ -99,6 +99,19 @@ class TestClassifySharedBenefit(unittest.TestCase):
         ok, reason = dg.classify_shared_benefit(body)
         self.assertFalse(ok)
 
+    def test_empty_bold_header_fails(self):
+        """Regression: **Shared-benefit:** with no value must fail (B1 fix)."""
+        body = GOOD_BASE + "\n**Shared-benefit:**"
+        ok, reason = dg.classify_shared_benefit(body)
+        self.assertFalse(ok, "empty bold header must be rejected")
+        self.assertIn("empty", reason)
+
+    def test_bare_stars_value_fails(self):
+        """Regression: Shared-benefit: ** must fail (stars-only value, B1)."""
+        body = GOOD_BASE + "\nShared-benefit: **"
+        ok, reason = dg.classify_shared_benefit(body)
+        self.assertFalse(ok, "stars-only value must be rejected")
+
     def test_na_with_dash_reason_passes(self):
         body = GOOD_BASE + "\nShared-benefit: n/a - pure airuleset tooling change"
         ok, reason = dg.classify_shared_benefit(body)

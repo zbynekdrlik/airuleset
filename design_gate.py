@@ -757,6 +757,8 @@ def classify_shared_benefit(body):
     val = m.group("val").strip()
     # Strip bold markers leaking from `**Shared-benefit:** n/a` (Y1).
     val = val.strip("*").strip()
+    if not val:
+        return False, "Shared-benefit: value is empty"
     # Bare negative (n/a, no, nie, none, -) with no trailing reason.
     if _SB_BARE_NA_RE.match(val):
         return False, "Shared-benefit: bare n/a without a reason"
