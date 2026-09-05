@@ -4,6 +4,7 @@ Hermetic: uses fake $HOME tmpdirs and run= recorder fakes — no network,
 no real ssh, no real authorized_keys touched.
 """
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -118,23 +119,81 @@ class TestDesiredKeysForUser(unittest.TestCase):
         # Must have at least 3 keys (fleet + 2 owner)
         self.assertGreaterEqual(len(keys), 3)
 
-    def test_david_needs_lane_key(self):
-        """david1 raises ValueError when WEBTERM_DAVID_LANE_PUBKEY is None."""
-        with mock.patch.object(cli_webterm_only, "WEBTERM_DAVID_LANE_PUBKEY",
-                               None):
-            with self.assertRaises(ValueError) as cm:
-                cli_webterm_only.desired_keys_for_user("david1")
-            self.assertIn("None", str(cm.exception))
+    def test_david_lane_key_is_set(self):
+        """WEBTERM_DAVID_LANE_PUBKEY must be a real key, not None."""
+        self.assertIsNotNone(
+            cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY,
+            "WEBTERM_DAVID_LANE_PUBKEY is still None — fill it (#869 lane 3)",
+        )
+        self.assertTrue(
+            cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY.startswith(
+                "ssh-ed25519 "
+            ),
+            "WEBTERM_DAVID_LANE_PUBKEY must be a public key",
+        )
 
-    def test_david_with_lane_key(self):
-        """david1 includes lane key when set."""
-        fake_lane = "ssh-ed25519 AAAAFakeLaneKeyBlob webterm_david@subdev"
-        with mock.patch.object(cli_webterm_only, "WEBTERM_DAVID_LANE_PUBKEY",
-                               fake_lane):
-            keys = cli_webterm_only.desired_keys_for_user("david1")
-            blobs = {cli_webterm_only._key_blob(k) for k in keys}
-            self.assertIn(cli_webterm_only._key_blob(fake_lane), blobs)
-            self.assertIn(FLEET_BLOB, blobs)
+    def test_david1_desired_keys_complete(self):
+        """david1 gets fleet + owner + lane key, sorted by blob."""
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        # fleet push key
+        self.assertIn(FLEET_BLOB, blobs)
+        # lane key
+        lane_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY
+        )
+        self.assertIn(lane_blob, blobs)
+        # owner keys (at least 2)
+        from cli_owner_keys import OWNER_PUBKEYS
+        for ok in OWNER_PUBKEYS:
+            self.assertIn(cli_webterm_only._key_blob(ok), blobs)
+        # total = fleet(1) + owner(2) + lane(1) = 4
+        self.assertEqual(len(keys), 4)
+        # sorted by blob
+        key_blobs = [cli_webterm_only._key_blob(k) for k in keys]
+        self.assertEqual(key_blobs, sorted(key_blobs))
+
+    def test_david_lane_key_fingerprint(self):
+        """The committed lane key blob fingerprint must match the known
+        value read from subdev's david1 authorized_keys (2026-09-05)."""
+        key = cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY
+        expected_fp = "SHA256:/gg9gan6/75TqYfpVqOMFQ2XuugDEexnr1dqOI0oZ3g"
+        # Try ssh-keygen first
+        try:
+            r = subprocess.run(
+                ["ssh-keygen", "-lf", "-"],
+                input=key.strip() + "\n",
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and expected_fp in r.stdout:
+                return  # fingerprint verified via ssh-keygen
+        except FileNotFoundError:
+            # ssh-keygen not on PATH — fall through to blob check
+            print("  ssh-keygen not found, using blob fallback",
+                  file=sys.stderr)
+        # Fallback: assert the exact blob string
+        expected_blob = (
+            "AAAAC3NzaC1lZDI1NTE5AAAAIOTvH3uji2CCX/+2QAiE3UWS0GzCz"
+            "++pRQ2t6cf+CmQd"
+        )
+        actual_blob = cli_webterm_only._key_blob(key)
+        self.assertEqual(
+            actual_blob, expected_blob,
+            "Lane key blob does not match the known subdev value",
+        )
+
+    def test_dominika_does_not_get_david_lane_key(self):
+        """dominika is webterm-only but NOT a david lane — she must NOT
+        receive WEBTERM_DAVID_LANE_PUBKEY."""
+        keys = cli_webterm_only.desired_keys_for_user("dominika")
+        lane_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY
+        )
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertNotIn(
+            lane_blob, blobs,
+            "dominika must NOT receive the david lane key",
+        )
 
     def test_keys_sorted_by_blob(self):
         """Desired keys must be sorted by blob for deterministic output."""
