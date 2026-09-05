@@ -5282,7 +5282,7 @@ def _watchdog_release_state_fetch(cwd):
             r = subprocess.run(
                 ["gh", "pr", "list", "--repo", repo, "--state", "open",
                  "--base", base,
-                 "--json", "number,statusCheckRollup,mergeable",
+                 "--json", "number,statusCheckRollup,mergeable,updatedAt",
                  "--limit", "3"],
                 capture_output=True, text=True, timeout=15)
         except Exception:
@@ -5350,7 +5350,7 @@ def _watchdog_release_state_fetch(cwd):
             r = subprocess.run(
                 ["gh", "run", "list", "--repo", repo, "-w", shadow_wf,
                  "--branch", staging, "--limit", "1",
-                 "--json", "status,conclusion,databaseId"],
+                 "--json", "status,conclusion,databaseId,updatedAt"],
                 capture_output=True, text=True, timeout=15)
         except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
             shadow_run = None
