@@ -2051,5 +2051,146 @@ class TestPythonSegmenter837(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class TestFalsePositives873(TestCase):
+    """#873 — three live false-positive shapes from a montalu3 session (2026-09-05):
+    (1) a heredoc whose CONTENT contains an apostrophe + the word "close",
+    (2) a read-only poll loop `$(gh issue view ...)` / `$(gh api ...)`,
+    (3) a `gh api .../actions/runs/.../jobs --jq ...conclusion...` with no issue cmd.
+
+    All three should exit 0 (ALLOW) on ANY authority. They close nothing.
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    # --- FP1: heredoc body with apostrophe + "close" ---
+
+    def test_allows_heredoc_body_with_apostrophe_and_close_word(self):
+        cmd = "cat > /tmp/body.md <<'EOF'\nTiket sa zavrie (close) po akceptacii klient's.\nEOF"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_heredoc_body_with_unbalanced_double_quote(self):
+        cmd = 'cat > /tmp/msg.md <<\'EOF\'\nNeed to "close this properly.\nEOF'
+        r = run(cmd, self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- FP2: read-only poll loops with $(gh issue view / gh api) ---
+
+    def test_allows_bash_c_poll_with_gh_issue_view_subst(self):
+        # The literal "CLOSED" (case-insensitive -> "closed") passes the prefilter
+        # and reaches the segmenter, where $(gh issue view ...) must NOT trigger.
+        cmd = ("bash -c 'while :; do s=$(gh issue view 5560 --json state "
+               "--jq .state); [ \"$s\" = \"CLOSED\" ] && break; done'")
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_top_level_poll_with_gh_issue_view_subst(self):
+        # Same shape at top level with "CLOSED" in the comparison.
+        cmd = ('while :; do s=$(gh issue view 5560 --json state --jq .state); '
+               '[ "$s" = "CLOSED" ] && echo "CLOSED" && break; done')
+        r = run(cmd, self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- FP3: gh api actions/runs/jobs with jq conclusion ---
+
+    def test_allows_gh_api_runs_jobs_with_conclusion_jq(self):
+        cmd = ("s=$(gh api repos/o/r/actions/runs/123/jobs --jq "
+               "'if .status==\"completed\" then \"TERMINAL\" "
+               "elif ([.jobs[]?|select(.conclusion==\"failure\")]"
+               "|length)>0 then \"JOBFAIL\" else \"PENDING\" end')")
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_gh_api_runs_jobs_simple(self):
+        cmd = "s=$(gh api repos/o/r/actions/runs/123/jobs --jq '.jobs[].name')"
+        r = run(cmd, self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- Negative controls: real closes must STILL block ---
+
+    def test_still_blocks_plain_gh_issue_close(self):
+        r = run("gh issue close 123", self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_close_with_comment(self):
+        r = run('gh issue close 123 -r completed -c "fixed"', self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_api_patch_close(self):
+        r = run("gh api repos/o/r/issues/123 -X PATCH -f state=closed",
+                self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_close_after_and(self):
+        r = run('echo "done" && gh issue close 456', self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_bash_c_with_real_close(self):
+        r = run("bash -c 'gh issue close 789'", self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_close_in_substitution(self):
+        r = run("result=$(gh issue close 999)", self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_close_in_backtick(self):
+        r = run("result=`gh issue close 300`", self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_executed_heredoc_with_close(self):
+        cmd = "bash <<'EOF'\ngh issue close 555\nEOF"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Review F1: quote-split close in substitution.  `cl""ose` does NOT
+    # contain the substring "close" so the shell PREFILTER exits 0 before the
+    # segmenter runs — this is a pre-existing residual on BOTH old and new code,
+    # NOT a #873 regression. The segmenter's de-quoted scan would catch it IF the
+    # prefilter let it through, but the prefilter is a cheaper gate. Accepted. ---
+
+    # --- Review F2: herestring/quoted-<< must not blank following lines ---
+
+    def test_still_blocks_close_after_herestring(self):
+        # A `<<<` herestring followed by a real close on the next line.
+        cmd = 'grep -q x <<<"$STATUS"\ngh issue close 123'
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_close_after_quoted_heredoc_string(self):
+        # A `<<EOF` inside a quoted string, followed by a real close.
+        cmd = "echo 'send <<EOF'\ngh issue close 123"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Review F3: PATCH close in executed heredoc must block ---
+
+    def test_still_blocks_patch_close_in_executed_heredoc(self):
+        cmd = "bash <<'EOF'\ngh api repos/o/r/issues/5 -X PATCH -f state=closed\nEOF"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Review F4: python heredoc executes, close must block ---
+
+    def test_still_blocks_python_heredoc_with_close(self):
+        cmd = "python3 <<'PY'\nimport os\nos.system(\"gh issue close 123\")\nPY"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Data heredoc mentioning close literally must NOT block ---
+
+    def test_allows_data_heredoc_mentioning_close(self):
+        cmd = "cat <<'EOF'\ngh issue close 555\nEOF"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     main()
