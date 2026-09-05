@@ -100,8 +100,10 @@ class TestViewportExactFill700(unittest.TestCase):
                                    delta=1.5, msg="%s: EXACT horizontal fill" % tag)
             self.assertAlmostEqual(out["gridH"] * out["frameScaleY"], out["availH"],
                                    delta=1.5, msg="%s: EXACT vertical fill" % tag)
-            # centered-origin scaling is what lands the grid on the frame edges
-            self.assertEqual(out["frameOrigin"], "50% 50%", tag)
+            # #798 REOPEN: origin '0 0' + translate pins row 0 at the top
+            # (the old '50% 50%' center-scale had exactly 0px margin at medium
+            # viewports, clipping row 0 on sub-pixel rounding)
+            self.assertEqual(out["frameOrigin"], "0 0", tag)
             # the child screen is NEVER transformed (#678 mouse hit-test)
             self.assertEqual(out["scaleX"], 1, "%s: child screen untouched" % tag)
             self.assertEqual(out["scaleY"], 1, "%s: child screen untouched" % tag)

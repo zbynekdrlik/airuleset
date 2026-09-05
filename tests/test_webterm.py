@@ -90,7 +90,11 @@ const screenEl = {
     const m = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(this.style.transform || '');
     const sx = m ? parseFloat(m[1]) : 1, sy = m ? parseFloat(m[2]) : 1;
     const n = natural(term);
-    return { width: n.width*sx, height: n.height*sy };
+    const w = n.width*sx, h = n.height*sy;
+    // #798 REOPEN: stretchFrameToFill now reads g.top/g.left for the translate
+    // computation. Model the real centered layout (flex centre in the container):
+    const top = (VH - h) / 2, left = (VW - w) / 2;
+    return { width: w, height: h, top: top, left: left, x: left, y: top };
   },
 };
 const doc = {
@@ -123,9 +127,12 @@ term.resize(300, 80);                     // simulate ttyd's own FitAddon firing
 const r = screenEl.getBoundingClientRect();   // FINAL size (reflects lineHeight/letterSpacing fill + any transform)
 const sm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(screenEl.style.transform || '');
 const fm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(frameEl.style.transform || '');   // #700
+// #798 REOPEN: the new translate+scale transform shape -- extract the translate values too
+const ftm = /translate\(\s*([\d.e+-]+)px\s*,\s*([\d.e+-]+)px\s*\)/.exec(frameEl.style.transform || '');
 process.stdout.write(JSON.stringify({
   ok, filled, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
   stretched, frameScaleX: fm ? parseFloat(fm[1]) : 1, frameScaleY: fm ? parseFloat(fm[2]) : 1,
+  frameTranslateX: ftm ? parseFloat(ftm[1]) : 0, frameTranslateY: ftm ? parseFloat(ftm[2]) : 0,
   frameOrigin: frameEl.style.transformOrigin || '', frameTransform: frameEl.style.transform || '',
   fontSize: term.options.fontSize, baseFont,
   scaleX: sm ? parseFloat(sm[1]) : 1,
