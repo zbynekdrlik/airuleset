@@ -228,7 +228,7 @@ elif tier_val == "claude-opus-4-6":
     elif gate_open is True:
         verdict = "BLOCK_DOWNTIER"
     elif gate_open is False:
-        pass  # Gate CLOSED + opus — pass.
+        pass  # Gate CLOSED + claude-opus-4-6 is correct — pass.
     elif gate_open is None:
         verdict = "PASS_NO_GATE"
 
