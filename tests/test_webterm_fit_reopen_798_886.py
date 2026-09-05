@@ -70,33 +70,24 @@ class TestStretchOriginPinsTop798(unittest.TestCase):
         out = _run_fit_harness(self.html, vw=959, vh=602)
         self.assertTrue(out["ok"])
         self.assertTrue(out["stretched"])
-        # With origin '0 0' + translate, the grid top should be
-        # pinned at 0 (top of slot). With 50% 50%, it's a knife-edge.
-        # Simulate a +0.3px perturbation (real-world font metric variance):
-        perturbed_grid_h = out["gridH"] + 0.3
-        perturbed_grid_top = (out["availH"] - perturbed_grid_h) / 2
-        # Under the old 50% 50% origin, visual top after scale:
-        # cy + (perturbed_top - cy) * sy, where cy = availH/2
-        cy = out["availH"] / 2
-        sy = out["frameScaleY"]
-        visual_top_center = cy + (perturbed_grid_top - cy) * sy
-        # Under the correct '0 0' + translate(ty=-g.top*sy):
-        # visual top = 0 by construction (g.top * sy cancelled by translate)
-        visual_top_pinned = 0.0
-        # The test: assert the SHIPPED code pins top >= 0
-        # Parse the actual transform to determine which origin is used
-        origin = out["frameOrigin"]
-        if "50%" in origin:
-            # Old center origin — visual top is the knife-edge
-            visual_top = visual_top_center
-        else:
-            # New '0 0' origin — visual top is pinned
-            visual_top = visual_top_pinned
-        self.assertGreaterEqual(
-            visual_top, -0.1,
-            "At 959x602 with +0.3px perturbation, the grid visual top "
-            "must be >= -0.1px (row 0 visible). Got %.2f with origin '%s'"
-            % (visual_top, origin))
+        # The origin MUST be '0 0' (not '50% 50%'), locked by the structural test
+        self.assertEqual(out["frameOrigin"], "0 0",
+                         "stretchFrameToFill must use origin '0 0'")
+        # Y1 (review finding): NUMERIC lock on the translate arithmetic.
+        # ty = -g.top * sy where g.top = (availH - gridH) / 2 (centered)
+        # => frameTranslateY ~ -((availH - gridH) / 2) * frameScaleY
+        expected_ty = -((out["availH"] - out["gridH"]) / 2) * out["frameScaleY"]
+        self.assertAlmostEqual(
+            out["frameTranslateY"], expected_ty, delta=0.5,
+            msg="ty must pin grid top at slot top: expected %.2f, got %.2f"
+            % (expected_ty, out["frameTranslateY"]))
+        # tx = (availW - sx*gridW)/2 - g.left*sx where g.left = (availW - gridW)/2
+        expected_tx = ((out["availW"] - out["frameScaleX"] * out["gridW"]) / 2
+                       - ((out["availW"] - out["gridW"]) / 2) * out["frameScaleX"])
+        self.assertAlmostEqual(
+            out["frameTranslateX"], expected_tx, delta=0.5,
+            msg="tx must center grid: expected %.2f, got %.2f"
+            % (expected_tx, out["frameTranslateX"]))
 
 
 class TestHiddenTabRevealKick886(unittest.TestCase):
@@ -112,13 +103,14 @@ class TestHiddenTabRevealKick886(unittest.TestCase):
         hidden->visible transition — a genuine fontSize option change
         (fs+1 then fs) forces xterm to re-measure cell metrics."""
         fn = _extract_js_function(self.html, "activate")
-        # The kick should be present in activate: either directly or
-        # via a helper called from activate
-        # Look for evidence of a fontSize kick pattern
-        self.assertTrue(
-            "fontSize" in fn or "__wtKick" in fn or "remeasure" in fn,
-            "activate() must contain a fontSize re-measure kick for "
-            "hidden->visible tab transitions (#886)")
+        # B4 (review finding): lock the double-set shape, not just the word.
+        # The kick must bump fontSize UP and then RESTORE it — both assignments.
+        self.assertIn("fontSize", fn,
+                      "activate() must reference fontSize for the kick")
+        self.assertRegex(fn, r"fontSize\s*=\s*_fs\s*\+\s*1",
+                         "activate() must bump fontSize up (fs+1)")
+        self.assertRegex(fn, r"fontSize\s*=\s*_fs\b(?!\s*\+)",
+                         "activate() must restore fontSize to original")
 
 
 if __name__ == "__main__":

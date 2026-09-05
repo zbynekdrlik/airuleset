@@ -503,9 +503,11 @@ function fillFixedGrid(win) {
 // (clientY - rect.top)/cssCellHeight mapping stays exact at every row.
 // win.innerWidth/innerHeight stay the LAYOUT size and a parent-side style
 // change can never re-fire the child's ResizeObserver -> no feedback loop. The
-// grid is flex-CENTERED in the child, so scaling about the frame center lands
-// the grid edges exactly on the frame edges; the scaled letterbox spills
-// OUTSIDE the frame box and #frames{overflow:hidden} clips it. Capped
+// #798 REOPEN: origin '0 0' + translate pins the grid top at the slot top
+// (row 0 always visible) and centres horizontally; sub-pixel error lands at the
+// bottom (a hairline letterbox), never at the top (where it would clip row 0).
+// The residual letterbox spills OUTSIDE the frame box and
+// #frames{overflow:hidden} clips it. Capped
 // (WT_FRAME_FILL_MAX_STRETCH) so a pathological viewport keeps a bounded
 // letterbox instead of distorting; an already-exact grid gets 'none' (no
 // pointless compositing layer).
