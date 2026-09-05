@@ -180,7 +180,7 @@ class TestDoctrineUpdates(unittest.TestCase):
     def test_self_service_recipe_present(self):
         compose = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "skills", "odoo-discuss-xmlrpc", "handover-compose.md",
+            "skills", "odoo-client-messaging", "handover-compose.md",
         )
         with open(compose) as f:
             text = f.read()
@@ -189,7 +189,7 @@ class TestDoctrineUpdates(unittest.TestCase):
     def test_archive_named_as_mis_shape(self):
         compose = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "skills", "odoo-discuss-xmlrpc", "handover-compose.md",
+            "skills", "odoo-client-messaging", "handover-compose.md",
         )
         with open(compose) as f:
             text = f.read()
@@ -198,7 +198,7 @@ class TestDoctrineUpdates(unittest.TestCase):
     def test_hide_arming_mandatory(self):
         compose = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "skills", "odoo-discuss-xmlrpc", "handover-compose.md",
+            "skills", "odoo-client-messaging", "handover-compose.md",
         )
         with open(compose) as f:
             text = f.read()
@@ -208,7 +208,7 @@ class TestDoctrineUpdates(unittest.TestCase):
     def test_per_stream_sweep_line(self):
         compose = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "skills", "odoo-discuss-xmlrpc", "handover-compose.md",
+            "skills", "odoo-client-messaging", "handover-compose.md",
         )
         with open(compose) as f:
             text = f.read()

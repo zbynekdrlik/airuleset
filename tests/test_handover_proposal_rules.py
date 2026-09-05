@@ -34,17 +34,17 @@ from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
-SKILL = ROOT / "skills" / "odoo-discuss-xmlrpc" / "SKILL.md"
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+SKILL = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 COMP_LOGGING = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
 PROCESS_SUBDEV = ROOT / "skills" / "process-subdev" / "SKILL.md"
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
 
-NEEDLE = "Composing the client handover PROD Discuss proposal"
+NEEDLE = "Composing the client handover proposal"
 HANDOVER_TOPIC = "odoo-discuss-handover"
-COMPOSE_BODY_REL = "skills/odoo-discuss-xmlrpc/handover-compose.md"
-SKILL_BODY_REL = "skills/odoo-discuss-xmlrpc/SKILL.md"
+COMPOSE_BODY_REL = "skills/odoo-client-messaging/handover-compose.md"
+SKILL_BODY_REL = "skills/odoo-client-messaging/SKILL.md"
 
 
 def read(p):
@@ -234,7 +234,7 @@ class TestCoFitSizeGuard(TestCase):
                                env=dict(os.environ, TMPDIR=td))
         self.assertEqual(r.returncode, 0, "injector hook must never block: %r" % r.stderr)
         # both co-firing bodies must be present — neither deferred over the real budget
-        self.assertIn("Odoo Discuss over XML-RPC", r.stdout,
+        self.assertIn("Odoo Client Messaging", r.stdout,
                       "the odoo message_post recipe DEFERRED — a co-firing body over-grew MAX_TOTAL")
         self.assertIn("Comprehensive Logging", r.stdout,
                       "comprehensive-logging did not inject on a .py message_post write")
@@ -707,7 +707,7 @@ class TestSkillPointsAtIdentityAndUrlRule(TestCase):
         # the recipe already routes message-body composition to the companion —
         # no new (budget-consuming) pointer is added
         self.assertIn("handover-compose.md", self.t)
-        self.assertIn("its message body must follow the canonical cross-stream rules", self.t)
+        self.assertIn("cross-stream rules for COMPOSE", self.t)
 
     def test_recipe_does_not_restate_the_signature_form(self):
         # the operative `ZbynekAI <N>` form + its derivation live ONLY in the

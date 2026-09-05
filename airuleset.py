@@ -372,7 +372,7 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
                # banned); hidden on-demand, deploys everywhere at zero
                # slash-noise cost, description-triggered when a session
                # posts to an Odoo Discuss channel over XML-RPC.
-               "odoo-discuss-xmlrpc",
+               "odoo-discuss-xmlrpc", "odoo-client-messaging",
                # #569 (2026-08-19) — thin wrapper over `airuleset.py
                # onboard-project`; all onboarding logic lives in the CLI
                # (cli_onboard.py), the skill just invokes + reports. Deploys
@@ -5719,6 +5719,10 @@ def cmd_watchdog(args):
                     # TTL. Enabled on every real poll; left False in
                     # run_once unit tests.
                     mdreview_cadence_enabled=True,
+                    # Jobs 44+45 (#885) — PRIORITY POLICY + ORPHAN POLL
+                    # REAPER. Enabled on every real poll; left False in
+                    # run_once unit tests.
+                    priority_policy_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
@@ -6527,15 +6531,12 @@ def cmd_upload(args):
     # FRESH here (unsandboxed) so it always reflects the current network.
     ips = bind_ips()
 
-    # Public-TLS drop lane (#664/#786): channel order tailscale -> public. On a
-    # box with a LIVE drop lane AND (--public OR the invoking account has a
-    # no-tailscale consumer — #786, david1/david2 -> David's laptop — OR no
-    # tailscale), bind loopback on the fixed drop port a managed cloudflared tunnel
-    # fronts and advertise ONE public HTTPS URL — never an scp/ssh -L ask.
-    from filedrop import _is_tailscale
+    # Public-TLS drop lane (#889): public HTTPS is the DEFAULT for every account.
+    # When a registered lane + live marker exist, bind loopback on the per-account
+    # drop port a managed cloudflared tunnel fronts and advertise ONE public HTTPS
+    # URL — never an scp/ssh -L ask.
     import cli_drop_gateway as _dg
-    have_tailscale = any(_is_tailscale(ip) for ip in ips)
-    public_lane = _dg.resolve_public_lane(getattr(args, "public", False), have_tailscale)
+    public_lane = _dg.resolve_public_lane()
     if public_lane:
         public_host, port = public_lane
         if getattr(args, "port", None):

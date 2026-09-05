@@ -510,7 +510,7 @@ if [ "$DISCUSS_ANCHOR" = "1" ]; then
         BARE_THREAD_RX='(vl[áa]kn[a-z]*|kan[áa]l[a-z]*|(^|[^[:alnum:]])channel)[[:space:]:#-]*[0-9]{2,}|(^|[^[:alnum:]])ch[0-9]{2,}'
         BARE_THREAD=$(LC_ALL=C.UTF-8 msg_has "$MSG_BARE" -qiE "$BARE_THREAD_RX" && echo 1 || echo 0)
         if [ "$BARE_THREAD" = "1" ]; then
-            echo "VIOLATION: Your message names an Odoo Discuss thread by a BARE id (e.g. „vlákno 288\") with no clickable deep URL. The owner manages many client threads and cannot decode a bare channel id — the same rule as '#N always carries its title'. Name the thread AND give its clickable deep URL, e.g.: vlákno „<presný názov N>\" — https://<instancia>/odoo/discuss?active_id=discuss.channel_<N>. See modules/core/issue-reference-context.md + skills/odoo-discuss-xmlrpc/handover-compose.md (#657 — extends #650 name-in-question + #595 deep-link URLs)." >&2
+            echo "VIOLATION: Your message names an Odoo Discuss thread by a BARE id (e.g. „vlákno 288\") with no clickable deep URL. The owner manages many client threads and cannot decode a bare channel id — the same rule as '#N always carries its title'. Name the thread AND give its clickable deep URL, e.g.: vlákno „<presný názov N>\" — https://<instancia>/odoo/discuss?active_id=discuss.channel_<N>. See modules/core/issue-reference-context.md + skills/odoo-client-messaging/handover-compose.md (#657 — extends #650 name-in-question + #595 deep-link URLs)." >&2
             add_hard "Owner-facing Odoo Discuss thread referenced by a BARE id with no clickable deep URL (discuss.channel_<N>) — give the thread name + its deep URL (#657)."
         fi
     fi

@@ -1928,6 +1928,11 @@ from watchdog import nice_check as nice_check  # noqa: E402,F401
 # cycle; imports NO notify — lock-tested).
 from watchdog import mdreview_cadence as mdreview_cadence  # noqa: E402,F401
 
+# #885 — Jobs 44+45, priority policy enforcer + orphan bg-poll-loop reaper
+# (stdlib-only + deferred watchdog.reaper imports; no top-level watchdog
+# import → no cycle; WRITE-side complement of Job 42's read-only nice_check).
+from watchdog import priority_policy as priority_policy  # noqa: E402,F401
+
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
 # `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
@@ -2077,8 +2082,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              resource_guard_gk_request=None,
              u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
              nice_check_enabled=False,
-             mdreview_cadence_enabled=False):
-    """Scan every `claude` pane once. 43 numbered jobs per poll — 37 LIVE and 6
+             mdreview_cadence_enabled=False,
+             priority_policy_enabled=False):
+    """Scan every `claude` pane once. 45 numbered jobs per poll — 39 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2777,6 +2783,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           CLOSE or MODEL_TIERS hash change → runs mdreview-audit --fleet,
           REOPENs the pinned ticket + posts summary. Imports NO notify.
           `watchdog/mdreview_cadence.py`'s docstring is the SSOT.
+      (44) PRIORITY POLICY ENFORCER (#885), gated on
+          `priority_policy_enabled` (True in cmd_watchdog, left False in
+          unit tests). Renices Chrome/Playwright, MCP node servers to
+          nice 10 (+ionice idle for Chrome), yielding CPU to the interactive
+          CLI. WRITE-side complement of Job 42's read-only nice_check.
+          Reuses `reaper_ps_fetch`; never Discord (#546).
+          `watchdog/priority_policy.py`'s docstring is the SSOT.
+      (45) ORPHAN BG-POLL-LOOP REAPER (#885), gated on
+          `reaper_ps_fetch is not None` (same as Jobs 37/38). Finds dead
+          sessions' bash poll loops (ppid chain → init, poll-loop argv
+          signature, target confirmed terminal via gh) and SIGKILLs them.
+          Conservative: never kills a loop with a live Claude ancestor.
+          Max 3 gh API calls/cycle. Never Discord (#546).
+          `watchdog/priority_policy.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4637,6 +4657,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
          lambda: mdreview_cadence.mdreview_cadence_job(
              now, dry_run=dry_run),
          "mdreview-cadence error")
+
+    # Job 44 (#885) — PRIORITY POLICY ENFORCER. Gated on
+    # `priority_policy_enabled` (cmd_watchdog passes True; left False in
+    # unit tests so no real /proc or renice ever runs). Renices Chrome/MCP
+    # processes to yield CPU to the interactive CLI. WRITE-side complement
+    # of Job 42's read-only nice_check. Reuses `reaper_ps_fetch` for the
+    # process-table read. Log-only (journal), never Discord (#546).
+    _add("priority_policy", lambda: priority_policy_enabled,
+         lambda: priority_policy.priority_policy_job(
+             ps_fetch=reaper_ps_fetch, dry_run=dry_run),
+         "priority-policy error")
+
+    # Job 45 (#885) — ORPHAN BG-POLL-LOOP REAPER. Gated on
+    # `reaper_ps_fetch is not None` (same as Jobs 37/38 — wired =
+    # cmd_watchdog passes the real ps reader). Finds dead sessions' bash
+    # poll loops (PPID chain → init, poll target terminal) and SIGKILLs
+    # them. Conservative: never kills a loop with a live Claude ancestor.
+    # Log-only (journal), never Discord (#546).
+    _add("orphan_poll_reaper", lambda: reaper_ps_fetch is not None,
+         lambda: priority_policy.orphan_poll_reaper(
+             ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
+             dry_run=dry_run),
+         "orphan-poll-reaper error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

@@ -475,24 +475,25 @@ if [ "$_d_run_gate" = "1" ]; then
             if [ -n "$_D_BLOCK_NUM" ]; then
                 cat >&2 <<MSG
 
-🚫 BLOCKED: this ticket has a bound Odoo Discuss thread (a Discuss-thread: line
-OR a discuss.channel_<N> deep URL on the ticket — the URL alone binds, #695)
-but carries no closing-note evidence — closing it now would leave
-the client thread with our message (or their question) as the LAST message, then
-silence (airuleset #627, owner directive 2026-08-22).
+🚫 BLOCKED: this ticket has a bound client acceptance thread
+(a Discuss-thread:/Acceptance-thread: line, or a discuss.channel_<N> deep URL
+on the ticket — the URL alone binds, #695) but carries no closing-note
+evidence — closing it now would leave the client thread with our message (or
+their question) as the LAST message, then silence (airuleset #627/#891).
 
-Whoever closes the ticket carries the obligation — it FOLLOWS THE TICKET to its
-current owner, never the author. Before this ticket is closed, the sub-dev that
-CURRENTLY owns the thread must post a closing note INTO that Odoo Discuss thread
-("všetko vyriešené, tému uzatvárame"), so the LAST message in the thread is
-always from the sub-dev — then record the evidence on THIS ticket. Add ONE of:
+Whoever closes the ticket carries the obligation — it FOLLOWS THE TICKET to
+its current owner, never the author. Before this ticket is closed, post a
+closing note via the project's own client channel mechanism, then record the
+evidence on THIS ticket. Add ONE of:
 
   • the closing note was posted (this is the LAST ticket bound to the thread):
-      gh issue comment ${_D_BLOCK_NUM} --body "Discuss-closed: msg <message-id>  (thread <channel-id>)"
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id>"
+    (legacy: Discuss-closed: msg <message-id> also accepted)
 
   • the thread STAYS OPEN because sibling tickets remain (the closing note goes
     at the LAST close, not here — name the still-open siblings):
-      gh issue comment ${_D_BLOCK_NUM} --body "Discuss-defer: siblings #<A> #<B> still open — note goes at the last close"
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-defer: siblings #<A> #<B> still open"
+    (legacy: Discuss-defer: also accepted)
 
 Then re-run the close.
 
@@ -503,8 +504,9 @@ Both paths:
     gatekeeper's close then finds the evidence. The gatekeeper does NOT post to
     the client thread — the stream that owns the thread does.
 
-How to compose + post the closing note (body_is_html, owner on partner_ids,
-the identity signature "<MarekAI|ZbynekAI> <N>", #641): skills/odoo-discuss-xmlrpc/handover-compose.md.
+How to compose + post the closing note (identity signature, owner approval,
+per project channel — odoo-erp: task chatter per .claude/rules/odoo-task-sync.md):
+skills/odoo-client-messaging/handover-compose.md.
 
 Bypass (rare, logged, ONLY a genuine non-client / meta ticket that merely names
 these markers in prose): put  airuleset:discuss-close-ok  in the close command.

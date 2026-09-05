@@ -38,7 +38,7 @@ from unittest import TestCase, main
 ROOT = Path(__file__).resolve().parent.parent
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
 STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
-COMPANION = ROOT / "skills" / "odoo-discuss-xmlrpc" / "read-reactions.md"
+COMPANION = ROOT / "skills" / "odoo-client-messaging" / "read-reactions.md"
 COMP_LOGGING = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
@@ -225,7 +225,7 @@ class TestTriggerRow(TestCase):
         # `mail_message_reaction` — the pattern MUST fire on it too, or writing
         # the psql fallback script never surfaces this recipe.
         self.assertIn("mail_message_reaction", pattern)
-        self.assertEqual(body, "skills/odoo-discuss-xmlrpc/read-reactions.md")
+        self.assertEqual(body, "skills/odoo-client-messaging/read-reactions.md")
 
     def test_recipe_reads_guest_id(self):
         # review finding: a Discuss GUEST reacts with partner_id=False + a set

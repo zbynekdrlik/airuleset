@@ -228,7 +228,7 @@ repo's own CLAUDE.md / playbook is what names the command.
      `agents/autopilot-worker.md` uses, never a hand-fired `reply`/`PushNotification`.
      When the release tail includes a client-facing PROD Discuss handover
      message, COMPOSE it per the canonical cross-stream rules in the
-     `odoo-discuss-xmlrpc` skill's `handover-compose.md` companion (the single
+     `odoo-client-messaging` skill's `handover-compose.md` companion (the single
      source of truth for handover-proposal completeness, deep-link URL, and
      owner membership).
      THEN post the review verdict + merge evidence, DROP whichever hand-off label was

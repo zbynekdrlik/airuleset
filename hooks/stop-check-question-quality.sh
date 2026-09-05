@@ -437,7 +437,7 @@ fi
 # thread (#650). Owner incident (montalu1, 2026-08-24): an approval ping to
 # SEND a client Discuss message into an EXISTING thread named its target only
 # by a generic description ("výrobné vlákno"), not the exact quoted name — the
-# prose rule (skills/odoo-discuss-xmlrpc/handover-compose.md #632, in the
+# prose rule (skills/odoo-client-messaging/handover-compose.md #632, in the
 # tool-call-gate #596/#609/#628 family) failed AGAIN. This is the CHAT-surface
 # escalation: the $BLOCK validated here IS the phone ping, so the name the owner
 # reads is checked at the exact place it must appear.
@@ -547,7 +547,7 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
         reference)
             REASON="Your ❓ block references an OLD question by allusion (\"pýtal som sa skôr\" / \"ako som spomínal\" / \"jediné otvorené rozhodnutie je X\") instead of restating it. If a conversation happened since it was last asked, this is a NEW ask — write the FULL self-contained block again (briefing + options + decision); the away user cannot see your history. A byte-identical VERBATIM repeat of the SAME still-blocked question is fine and does not hit this check.${TEMPLATE}" ;;
         thread)
-            REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — a per #657 pridaj aj deep URL …/odoo/discuss?active_id=discuss.channel_<N> (samotný deep URL tiež stačí) — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-discuss-xmlrpc/handover-compose.md (#632/#650/#697)." ;;
+            REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — a per #657 pridaj aj deep URL …/odoo/discuss?active_id=discuss.channel_<N> (samotný deep URL tiež stačí) — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-client-messaging/handover-compose.md (#632/#650/#697)." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0

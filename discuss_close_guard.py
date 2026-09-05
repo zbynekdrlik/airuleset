@@ -96,6 +96,16 @@ _THREAD_RE = re.compile(_MARK_OPEN + r"Discuss-thread" + _MARK_TAIL)
 _CLOSED_RE = re.compile(_MARK_OPEN + r"Discuss-closed" + _MARK_TAIL)
 _DEFER_RE = re.compile(_MARK_OPEN + r"Discuss-defer" + _MARK_TAIL)
 
+# #891 — channel-agnostic acceptance markers. airuleset owns the STATE
+# MACHINE (labels, U/W partition, tacit/stale), the project owns the CHANNEL
+# (task chatter, Discuss, etc.). Both Discuss messages and task-chatter
+# messages are Odoo `mail.message` records, so `Acceptance-cited: msg <id>`
+# is channel-invariant. Legacy `Discuss-*` markers are kept forever (existing
+# closed tickets must stay valid).
+_ACC_THREAD_RE = re.compile(_MARK_OPEN + r"Acceptance-thread" + _MARK_TAIL)
+_ACC_CITED_RE = re.compile(_MARK_OPEN + r"Acceptance-cited" + _MARK_TAIL)
+_ACC_DEFER_RE = re.compile(_MARK_OPEN + r"Acceptance-defer" + _MARK_TAIL)
+
 # #695 — SECOND binding recognition: the `discuss.channel_<N>` deep-link token.
 # The manual `Discuss-thread:` mark is opt-in, and the exact stream that forgot
 # the #627 doctrine forgets the mark too — so four odoo-erp tickets closed
@@ -135,17 +145,27 @@ def collect_text(data):
 
 def is_thread_bound(text):
     """True iff the ticket carries a binding: the line-anchored
-    `Discuss-thread: <value>` mark OR (#695) a `discuss.channel_<N>` deep-link
-    token anywhere in the ticket text — the #657-mandated form owner-facing
-    prose must already carry, so a ticket whose stream forgot the manual mark
-    is still recognised."""
-    return bool(_THREAD_RE.search(text) or _DEEP_URL_RE.search(text))
+    `Discuss-thread: <value>` or `Acceptance-thread: <value>` mark, OR (#695)
+    a `discuss.channel_<N>` deep-link token anywhere in the ticket text — the
+    #657-mandated form owner-facing prose must already carry, so a ticket whose
+    stream forgot the manual mark is still recognised."""
+    return bool(
+        _THREAD_RE.search(text)
+        or _ACC_THREAD_RE.search(text)
+        or _DEEP_URL_RE.search(text)
+    )
 
 
 def has_disposition(text):
-    """True iff the ticket carries a `Discuss-closed:` OR `Discuss-defer:`
-    disposition line with a real value."""
-    return bool(_CLOSED_RE.search(text) or _DEFER_RE.search(text))
+    """True iff the ticket carries a disposition line with a real value —
+    either the legacy `Discuss-closed:`/`Discuss-defer:` OR the
+    channel-agnostic `Acceptance-cited:`/`Acceptance-defer:` (#891)."""
+    return bool(
+        _CLOSED_RE.search(text)
+        or _DEFER_RE.search(text)
+        or _ACC_CITED_RE.search(text)
+        or _ACC_DEFER_RE.search(text)
+    )
 
 
 def evaluate_close(issue_json_text):

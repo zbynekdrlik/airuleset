@@ -539,9 +539,17 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
 
     def test_all_three_new_topics_have_a_trigger_row(self):
         bodies = {r[3] for r in load_conf()}
-        for skill in ["cloudflare-api-tokens", "claude-code-log", "odoo-discuss-xmlrpc"]:
+        # odoo-discuss-xmlrpc's trigger row TOPIC name is unchanged, but its
+        # body now points at the renamed skill dir (odoo-client-messaging,
+        # issue 891) — map each topic to the body path it actually loads.
+        expected_body = {
+            "cloudflare-api-tokens": "skills/cloudflare-api-tokens/SKILL.md",
+            "claude-code-log": "skills/claude-code-log/SKILL.md",
+            "odoo-discuss-xmlrpc": "skills/odoo-client-messaging/SKILL.md",
+        }
+        for skill, body in expected_body.items():
             self.assertIn(
-                f"skills/{skill}/SKILL.md",
+                body,
                 bodies,
                 f"{skill} has no automatic load trigger — #95 item 12 root-cause pass",
             )
@@ -570,8 +578,9 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
             )
         )
         self.assertIsNotNone(ctx, "writing a message_post call must load the odoo recipe")
-        # a string that exists ONLY in odoo-discuss-xmlrpc' own body
-        self.assertIn("Odoo Discuss over XML-RPC", ctx)
+        # a string that exists ONLY in odoo-client-messaging's own body
+        # (the skill renamed from odoo-discuss-xmlrpc, issue 891)
+        self.assertIn("Odoo Client Messaging — Channel-Agnostic Guidance", ctx)
 
     def test_claude_code_log_export_prompt_injects_the_skill(self):
         r = self._prompt("Please export this session as HTML so I can share it")
