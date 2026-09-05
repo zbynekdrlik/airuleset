@@ -71,6 +71,11 @@ _DEV1_HOST = "100.104.8.125"
 _GK_HOST = "100.90.94.41"
 _SUBDEV_HOST = "100.118.174.27"
 
+# gk's ~/.ssh/config uses "Host subdev" (with IdentityFile
+# ~/.ssh/subdev_admin), so the nested ssh must use the HOSTNAME not the
+# IP to match the config and pick up the right key.  #870 F1 fix.
+_SUBDEV_SSH_CONFIG_ALIAS = "subdev"
+
 
 # ---------------------------------------------------------------------------
 # State file I/O
@@ -199,7 +204,13 @@ def _build_ssh_cmd(entry: dict, identity: str, command: str,
         # ~/.ssh/config Host subdev with the right identity file.
         # Quote the inner command for the gatekeeper shell.
         inner_cmd = command.replace("'", "'\\''")
-        gk_cmd = "ssh -o BatchMode=yes %s@%s '%s'" % (user, host, inner_cmd)
+        # Use the SSH config alias so gatekeeper's ~/.ssh/config Host
+        # subdev entry matches and picks up IdentityFile subdev_admin.
+        # The raw IP (100.118.174.27) doesn't match and auth fails.
+        inner_host = (_SUBDEV_SSH_CONFIG_ALIAS
+                      if host == _SUBDEV_HOST else host)
+        gk_cmd = "ssh -o BatchMode=yes %s@%s '%s'" % (
+            user, inner_host, inner_cmd)
         # The outer ssh to gatekeeper uses the caller's identity
         cmd = ["ssh"]
         cmd.extend(cli_remote.host_key_check_opts(
