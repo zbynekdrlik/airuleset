@@ -271,10 +271,17 @@ def _ops_wait_sfx(cache):
     user's answer (#510). Its OWN bucket (pattern `skip K` / `U N`), grey (245,
     the exclusion-badge family — not this box's urgent workable), hidden at 0.
 
+    #868: when `wdrain_over` is True (|W| > OPS_WAIT_WDRAIN_THRESHOLD), render
+    red (196) with a trailing `!` — the breach-only footer signal that the
+    W-drain gate is blocking implementation dispatches.
+
     Schema-compatible: a stale/legacy cache written before #510 carries no
-    `ops_wait` key, so `.get(...)` is None → hidden (never a crash, never W 0)."""
+    `ops_wait` key, so `.get(...)` is None → hidden (never a crash, never W 0).
+    A legacy cache without `wdrain_over` renders grey (never a crash)."""
     w = cache.get("ops_wait")
     if isinstance(w, int) and w > 0:
+        if cache.get("wdrain_over") is True:
+            return " \033[38;5;196m· W %d!\033[0m" % w
         return " \033[38;5;245m· W %d\033[0m" % w
     return ""
 
