@@ -4,11 +4,13 @@ Nine cases from the design comment — synthetic payload + transcript fixtures,
 isolated $HOME / /tmp state.
 """
 
+import glob
 import json
 import os
 import subprocess
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -74,7 +76,9 @@ def _worktree_return_msg(*, reviewed_by_tier=None, extra_lines=""):
     return "\n".join(lines)
 
 
-def _base_payload(msg, *, transcript_path="", session_id="test-sess-876"):
+def _base_payload(msg, *, transcript_path="", session_id=None):
+    if session_id is None:
+        session_id = "test-876-" + uuid.uuid4().hex
     return {
         "agent_type": "autopilot-worker",
         "session_id": session_id,
@@ -161,10 +165,20 @@ class TestReviewTierHook(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="review-tier-876-")
         self.home = os.path.join(self.tmpdir, "home")
         os.makedirs(self.home, exist_ok=True)
+        # Unique session id per test to avoid once-per state collision (#494).
+        self.sid = "test-876-" + uuid.uuid4().hex
+        # Register cleanup for any state files this session creates.
+        self.addCleanup(self._cleanup_state_files)
 
-    def tearDown(self):
+    def _cleanup_state_files(self):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        # airuleset:script-ok test teardown cleanup — best-effort removal
+        for f in glob.glob("/tmp/airuleset-reviewtier-*%s*" % self.sid):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass  # airuleset:script-ok test cleanup, file may already be gone
 
     # Case 1: OPEN + fable dispatch + fable line => pass
     def test_case1_open_fable_dispatch_fable_line_passes(self):
@@ -177,7 +191,8 @@ class TestReviewTierHook(unittest.TestCase):
 
         msg = _worktree_return_msg(
             reviewed_by_tier="claude-fable-5 gate:OPEN")
-        payload = _base_payload(msg, transcript_path=transcript)
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         # Should NOT produce a block decision.
@@ -192,7 +207,8 @@ class TestReviewTierHook(unittest.TestCase):
                          transcript)
 
         msg = _worktree_return_msg(reviewed_by_tier=None)
-        payload = _base_payload(msg, transcript_path=transcript)
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         self.assertIn('"decision"', out)
@@ -211,7 +227,8 @@ class TestReviewTierHook(unittest.TestCase):
 
         msg = _worktree_return_msg(
             reviewed_by_tier="claude-fable-5 gate:OPEN")
-        payload = _base_payload(msg, transcript_path=transcript)
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         self.assertIn('"decision"', out)
@@ -229,7 +246,8 @@ class TestReviewTierHook(unittest.TestCase):
 
         msg = _worktree_return_msg(
             reviewed_by_tier="claude-opus-4-6 gate:OPEN")
-        payload = _base_payload(msg, transcript_path=transcript)
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         self.assertIn('"decision"', out)
@@ -247,7 +265,8 @@ class TestReviewTierHook(unittest.TestCase):
 
         msg = _worktree_return_msg(
             reviewed_by_tier="claude-opus-4-6 gate:CLOSED")
-        payload = _base_payload(msg, transcript_path=transcript)
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         if out:
@@ -257,7 +276,7 @@ class TestReviewTierHook(unittest.TestCase):
     def test_case6_incomplete_return_skipped(self):
         # Test with ISOLATION FAILED.
         msg = "ISOLATION FAILED: /home/newlevel/devel/airuleset main"
-        payload = _base_payload(msg)
+        payload = _base_payload(msg, session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
@@ -266,14 +285,14 @@ class TestReviewTierHook(unittest.TestCase):
         msg2 = ("issues: #876\n"
                 "UNVERIFIED: cannot test\n"
                 "branch: worktree-agent-xyz")
-        payload2 = _base_payload(msg2)
+        payload2 = _base_payload(msg2, session_id=self.sid)
         rc2, out2, err2 = _run_hook(payload2, home_dir=self.home)
         self.assertEqual(rc2, 0)
         self.assertEqual(out2, "")
 
         # Test with question marker.
         msg3 = "issues: #876\nbranch: worktree-agent-xyz\n❓ NEEDS YOU: question"
-        payload3 = _base_payload(msg3)
+        payload3 = _base_payload(msg3, session_id=self.sid)
         rc3, out3, err3 = _run_hook(payload3, home_dir=self.home)
         self.assertEqual(rc3, 0)
         self.assertEqual(out3, "")
@@ -282,7 +301,8 @@ class TestReviewTierHook(unittest.TestCase):
     def test_case7_unreadable_transcript_passes(self):
         msg = _worktree_return_msg(
             reviewed_by_tier="claude-fable-5 gate:OPEN")
-        payload = _base_payload(msg, transcript_path="/nonexistent/path.jsonl")
+        payload = _base_payload(msg, transcript_path="/nonexistent/path.jsonl",
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         # Should pass (no block) with a log line on stderr.
@@ -298,7 +318,8 @@ class TestReviewTierHook(unittest.TestCase):
 
         msg = _worktree_return_msg(
             reviewed_by_tier="claude-opus-4-6 trivial-diff gate:n/a")
-        payload = _base_payload(msg, transcript_path=transcript)
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
         rc, out, err = _run_hook(payload, home_dir=self.home)
         self.assertEqual(rc, 0)
         if out:
@@ -311,9 +332,9 @@ class TestReviewTierHook(unittest.TestCase):
                          transcript)
 
         msg = _worktree_return_msg(reviewed_by_tier=None)
-        sid = "once-per-test-876"
+        # Use self.sid (unique per test run) for once-per testing.
         payload = _base_payload(msg, transcript_path=transcript,
-                                session_id=sid)
+                                session_id=self.sid)
 
         # First stop — should block.
         rc1, out1, _ = _run_hook(payload, home_dir=self.home)
