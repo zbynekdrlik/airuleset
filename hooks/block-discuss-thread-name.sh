@@ -243,7 +243,7 @@ mention anchor. Embed, for EVERY addressee, the anchor the Odoo composer emits:
   <a href="/odoo/res.partner/<id>" class="o_mail_redirect" data-oe-id="<id>" data-oe-model="res.partner">@Meno</a>
 
 (verify the exact attribute set against a real mention posted through the 19.0
-composer — skills/odoo-discuss-xmlrpc/SKILL.md), then re-run. This gates only a
+composer — skills/odoo-client-messaging/SKILL.md), then re-run. This gates only a
 discuss.channel message_post by a sub-dev stream — a create / rename and a
 non-stream user are never affected. Bypass (rare, logged, only for a genuine
 internal post where no addressee needs a mention): put
@@ -323,7 +323,7 @@ This is the same logged-falsifiable-claim model as Discuss-closed: /
 Self-service-checked: -- a bare "airuleset:owner-approved" with no reference is
 NOT accepted. How to compose + present the message to the owner for approval
 (complete proposal in the chat, per-person address register, react to the
-client's previous answer first): skills/odoo-discuss-xmlrpc/handover-compose.md.
+client's previous answer first): skills/odoo-client-messaging/handover-compose.md.
 
 This gates only a discuss.channel message_post by a sub-dev stream -- a create /
 rename and a non-stream user are never affected. Bypass (rare, logged, only for
@@ -350,7 +350,7 @@ the promised digest e-mail did not exist yet, thread 263).
 
 Future-promise phrase(s) found: ${MATCHED}
 
-Pick ONE of the two legal paths (skills/odoo-discuss-xmlrpc/handover-compose.md,
+Pick ONE of the two legal paths (skills/odoo-client-messaging/handover-compose.md,
 section „Len minulé, overené udalosti"):
 
   • RUN the artifact NOW (your own authority, or GATEKEEPER-ACTION: if only gk
@@ -394,7 +394,7 @@ because the rule was only in a skill the stream never loaded (#609). The require
 identity token depends on WHOSE stream this is (#641): a marek-owned stream signs
 "MarekAI <N>", every other stream the default "ZbynekAI <N>" -- so signing the
 wrong person's name is blocked, not accepted. The canonical rule + a copy-paste
-template are in skills/odoo-discuss-xmlrpc/handover-compose.md.
+template are in skills/odoo-client-messaging/handover-compose.md.
 
 This gates only a discuss.channel message_post by a sub-dev stream — a create /
 rename and a non-stream user are never affected. Bypass (rare, logged, only for
@@ -426,7 +426,7 @@ Why: without the trailing number the owner cannot tell which subdev owns the
 thread (montalu2 shipped the un-numbered form on PROD twice); a too-long name is
 truncated behind the Odoo Discuss sidebar's first page, hiding the number.
 The owner-approval ping must already carry a compliant proposed name — see
-skills/odoo-discuss-xmlrpc/handover-compose.md.
+skills/odoo-client-messaging/handover-compose.md.
 
 This gates only a CREATE. A message_post to an EXISTING channel and a rename
 (write) are never blocked. Bypass (rare, logged, only for a legacy thread the

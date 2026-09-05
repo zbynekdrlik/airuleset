@@ -61,7 +61,7 @@ if re.search(r'action_archive', cmd, re.IGNORECASE):
         "\n🚫 BLOCKED: discuss.channel action_archive is banned on stream boxes.\n"
         "Use the sanctioned TTL self-hide instead:\n"
         "  schedule_close_hide_guarded(channel_id, hours=None) via /json/2\n"
-        "(see skills/odoo-discuss-xmlrpc/handover-compose.md, #788/#853).\n"
+        "(see skills/odoo-client-messaging/handover-compose.md, #788/#853).\n"
         "Bypass (rare): # airuleset:discuss-archive-ok <reason>\n",
         file=sys.stderr,
     )
@@ -73,7 +73,7 @@ if re.search(r'toggle_active', cmd, re.IGNORECASE):
         "\n🚫 BLOCKED: discuss.channel toggle_active is banned on stream boxes.\n"
         "Use the sanctioned TTL self-hide instead:\n"
         "  schedule_close_hide_guarded(channel_id, hours=None) via /json/2\n"
-        "(see skills/odoo-discuss-xmlrpc/handover-compose.md, #788/#853).\n"
+        "(see skills/odoo-client-messaging/handover-compose.md, #788/#853).\n"
         "Bypass (rare): # airuleset:discuss-archive-ok <reason>\n",
         file=sys.stderr,
     )
@@ -87,7 +87,7 @@ if re.search(r"""['"]active['"]\s*:\s*(False|false)\b""", cmd) or \
         "\n🚫 BLOCKED: setting discuss.channel active=False is banned on stream boxes.\n"
         "Use the sanctioned TTL self-hide instead:\n"
         "  schedule_close_hide_guarded(channel_id, hours=None) via /json/2\n"
-        "(see skills/odoo-discuss-xmlrpc/handover-compose.md, #788/#853).\n"
+        "(see skills/odoo-client-messaging/handover-compose.md, #788/#853).\n"
         "Bypass (rare): # airuleset:discuss-archive-ok <reason>\n",
         file=sys.stderr,
     )
