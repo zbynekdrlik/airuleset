@@ -1835,3 +1835,146 @@ class TestEscalationTop5Paths849:
         src = inspect.getsource(dg.escalate)
         assert "top-5-by-path" in src, \
             "escalate() must include top-5-by-path detail"
+
+
+# --------------------------------------------------------------------------- #
+# #892 — 90-95% band cadence tier + playwright rung + claude-version >=
+# --------------------------------------------------------------------------- #
+_NOW_892 = 100_000.0
+
+
+def test_critical_band_90_94_runs_with_shorter_cadence(tmp_path):
+    """#892: at 92% with a last-drain 150s ago (> 120s critical interval,
+    < 600s normal interval), the drain MUST run — the guard should not
+    cadence-gate at the normal 600s in the footer-red band."""
+    _seed_last_drain(tmp_path, _NOW_892 - 150)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    logs = dg.run_disk_guard(
+        now=_NOW_892, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (92, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop)
+    assert ran["drained"] is True, (
+        "#892: at 92%% with drain 150s ago, the shorter critical-band "
+        "cadence (120s) should allow the drain to run")
+    assert not any("cadence-gated" in ln for ln in logs)
+
+
+def test_drain_band_85_still_cadence_gated_at_150s(tmp_path):
+    """#892: at 85% with a last-drain 150s ago, the normal 600s cadence
+    gate should STILL block the drain (the shorter cadence is only for
+    the 90-94% critical band)."""
+    _seed_last_drain(tmp_path, _NOW_892 - 150)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    logs = dg.run_disk_guard(
+        now=_NOW_892, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop)
+    assert ran["drained"] is False, (
+        "#892: at 85%% with drain 150s ago, the normal 600s cadence "
+        "should still gate the drain")
+    assert any("cadence-gated" in ln for ln in logs)
+
+
+def test_claude_version_keeps_staged_newer_version(tmp_path):
+    """#892: a version dir NEWER than the running version must be kept
+    (it is a staged self-update), not deleted."""
+    vdir = tmp_path / ".local" / "share" / "claude" / "versions"
+    vdir.mkdir(parents=True)
+    # Running version
+    (vdir / "2.1.258").mkdir()
+    (vdir / "2.1.258" / "claude").write_text("binary")
+    # Staged newer version — MUST be kept
+    (vdir / "2.1.260").mkdir()
+    (vdir / "2.1.260" / "claude").write_text("binary")
+    # Old version — should be deleted
+    (vdir / "2.1.255").mkdir()
+    (vdir / "2.1.255" / "claude").write_text("binary")
+
+    rows = dg.discover_stale_claude_versions(
+        home=str(tmp_path),
+        running_fn=lambda: "2.1.258",
+        versions_dir=str(vdir))
+    by_path = {os.path.basename(r["path"]): r for r in rows if r.get("path")}
+    # The newer version must be a SKIP (staged), not a delete
+    assert "2.1.260" in by_path, "the newer version dir must appear in results"
+    assert by_path["2.1.260"].get("kind") == "skip" or by_path["2.1.260"].get("reason") is not None, (
+        "#892: a staged newer version (2.1.260 > running 2.1.258) must be "
+        "KEPT, not deleted — it is a pending self-update")
+
+
+def test_playwright_browser_rung_discovers_stale_revisions(tmp_path):
+    """#892: the new playwright-browser rung must discover stale browser
+    revisions under ~/.cache/ms-playwright/ and keep only the highest
+    per family."""
+    pw_dir = tmp_path / ".cache" / "ms-playwright"
+    pw_dir.mkdir(parents=True)
+    old_mtime = _NOW_892 - (45 * 86400)  # 45 days old
+    # Two chromium revisions
+    (pw_dir / "chromium-1100").mkdir()
+    (pw_dir / "chromium-1100" / "chrome-linux").mkdir()
+    os.utime(pw_dir / "chromium-1100", (old_mtime, old_mtime))
+    (pw_dir / "chromium-1140").mkdir()
+    (pw_dir / "chromium-1140" / "chrome-linux").mkdir()
+    # A headless shell family — separate from chromium
+    (pw_dir / "chromium_headless_shell-1100").mkdir()
+    os.utime(pw_dir / "chromium_headless_shell-1100", (old_mtime, old_mtime))
+    (pw_dir / "chromium_headless_shell-1140").mkdir()
+
+    # The function must exist and discover the stale ones
+    assert hasattr(dg, "discover_stale_playwright_browsers"), (
+        "#892: discover_stale_playwright_browsers must exist in disk_guard")
+    rows = dg.discover_stale_playwright_browsers(
+        home=str(tmp_path), now=_NOW_892)
+    by_path = {os.path.basename(r.get("path", "")): r for r in rows}
+    # The older chromium revision (>30d) should be a delete candidate
+    assert "chromium-1100" in by_path, "old chromium revision must be discovered"
+    assert by_path["chromium-1100"].get("reason") is None, (
+        "#892: chromium-1100 (old, superseded by -1140) should be deletable")
+    # The newest chromium revision should be kept
+    assert "chromium-1140" in by_path, "current chromium revision must be discovered"
+    assert by_path["chromium-1140"].get("reason") is not None, (
+        "#892: chromium-1140 (newest) must be kept")
+
+
+def test_top_consumers_survives_non_drain_poll(tmp_path):
+    """#892: after a drain writes top_consumers to status.json, a
+    subsequent non-drain poll (at 85%) must carry it forward, not erase it."""
+    # Seed a status cache WITH top_consumers (as if a drain just wrote it)
+    gd = tmp_path / ".claude" / "disk-guard"
+    gd.mkdir(parents=True, exist_ok=True)
+    status_with_top = {
+        "worst_pct": 85, "dim": "bytes", "level": "drain",
+        "mounts": [{"mount": "/", "worst_pct": 85}], "ts": _NOW_892 - 60,
+        "top_consumers": [
+            {"path": str(tmp_path / "big"), "bytes": 1_000_000}
+        ],
+        "top_consumers_ts": _NOW_892 - 60,
+    }
+    (gd / "status.json").write_text(json.dumps(status_with_top))
+
+    # Run a non-drain poll at 85% (level=drain, but cadence-gated)
+    _seed_last_drain(tmp_path, _NOW_892 - 5)  # very recent drain = cadence-gated
+    dg.run_disk_guard(
+        now=_NOW_892, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: 1000, mounts=("/",))
+
+    # The top_consumers key must survive
+    cached = json.loads((gd / "status.json").read_text())
+    assert "top_consumers" in cached, (
+        "#892: top_consumers must be carried forward on a non-drain poll, "
+        "not erased by write_status_cache")
