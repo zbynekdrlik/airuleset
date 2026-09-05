@@ -64,9 +64,9 @@ class TestStretchOriginPinsTop798(unittest.TestCase):
 
     @unittest.skipIf(shutil.which("node") is None, "node not available")
     def test_grid_top_safe_under_perturbation_at_959x602(self):
-        """At the owner's reopened viewport (959x602), the grid visual top
-        must stay >= 0 even under a +0.3px perturbation of grid height
-        (sub-pixel font metric simulation)."""
+        """At the #798 viewport (959px wide, 602px slot = 639-37 tabbar), the
+        transform arithmetic must pin row 0 at the slot top (ty cancels
+        g.top*sy exactly)."""
         out = _run_fit_harness(self.html, vw=959, vh=602)
         self.assertTrue(out["ok"])
         self.assertTrue(out["stretched"])

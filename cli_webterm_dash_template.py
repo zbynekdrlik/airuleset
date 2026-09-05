@@ -552,7 +552,7 @@ function stretchFrameToFill(win) {
 // pixels before AND after a shrink transform on the clipped child). This layer instead
 // GROWS the iframe's real CSS layout box (which the child sees as win.innerHeight) to
 // COVER the grid's own extent -- so the child paints ALL 51 rows with NO internal clip
-// -- then applies a parent UNIFORM down-scale (origin '50% 0', top-centre) to fit that
+// -- then applies a parent UNIFORM down-scale (origin '0 0' + translateX) to fit that
 // fully-painted box back into the slot: row 0 pinned at the slot top, the whole grid
 // visible. Proven live (real ttyd 1.7.4 + tmux + headless Chromium at 723x312): box
 // grown 312->366, scale 0.8525, the whole grid maps to parent y 41.3..345.6 inside the
