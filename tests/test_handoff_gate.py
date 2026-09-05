@@ -182,7 +182,7 @@ class TestLensProseFile880(unittest.TestCase):
                               "Missing canonical lens '%s'" % canon)
 
     def test_prose_lenses_validate_against_valid_table(self):
-        """A valid 6-lens self-review table must pass validation even when
+        """A valid 7-lens self-review table must pass validation even when
         the lenses doc is prose-format."""
         with tempfile.TemporaryDirectory() as td:
             d = os.path.join(td, ".claude", "rules")
@@ -199,6 +199,7 @@ class TestLensProseFile880(unittest.TestCase):
                 "| evidence-integrity | pass | f:4 |\n"
                 "| design-doctrine | pass | f:5 |\n"
                 "| process | pass | f:6 |\n"
+                "| shared-benefit | pass | f:7 |\n"
             )
             ok, reason = airuleset._validate_self_review_table(table, lenses)
             self.assertTrue(ok, "Valid table rejected: %s" % reason)
