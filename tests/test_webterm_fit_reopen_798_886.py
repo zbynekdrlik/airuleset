@@ -43,9 +43,12 @@ class TestStretchOriginPinsTop798(unittest.TestCase):
         so the grid top is pinned by construction (a single product, not a
         cancellation of two large centered terms)."""
         fn = _extract_js_function(self.html, "stretchFrameToFill")
-        # Must use origin '0 0' or '0px 0px' — never '50% 50%'
-        self.assertNotIn("50% 50%", fn,
-                         "stretchFrameToFill must not use 50% 50% origin "
+        # Check the CODE lines only (strip comments) for the old origin
+        code_lines = [ln for ln in fn.splitlines()
+                      if not ln.strip().startswith("//")]
+        code_only = "\n".join(code_lines)
+        self.assertNotIn("50% 50%", code_only,
+                         "stretchFrameToFill code must not use 50% 50% origin "
                          "(row 0 lands at exactly 0px margin, sub-pixel "
                          "rounding clips it)")
         self.assertIn("'0 0'", fn,

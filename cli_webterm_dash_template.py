@@ -199,6 +199,23 @@ function activate(idx) {
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
   current = idx;
+  // #886: force xterm to re-measure cell metrics on a hidden->visible transition.
+  // A preloaded tab (display:none) has xterm with stale zero-layout metrics. On
+  // first activation, term.resize(176,51) may be a no-op (same dimensions) and
+  // fontSize=F may be a no-op (same value), so xterm never re-measures its stale
+  // metrics and the fill pipeline runs on stale dimensions. A genuine fontSize
+  // option change (fs+1 then fs) is xterm's public, version-stable re-measure
+  // trigger; it forces fresh cell metrics + resizes .xterm-screen, which fires
+  // the existing per-child ResizeObserver -> the full 4-layer pass runs on honest
+  // dimensions. Guarded: only kick when the tab has a connected term.
+  try {
+    const _f = made[idx], _w = _f && _f.contentWindow;
+    if (_w && _w.term && typeof _w.term.options === 'object') {
+      const _fs = _w.term.options.fontSize || 13;
+      _w.term.options.fontSize = _fs + 1;
+      _w.term.options.fontSize = _fs;
+    }
+  } catch (e) { /* cross-origin or term not ready — applyFixedGrid retries */ }
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
   focusTerminal(made[idx], idx);             // #661: type immediately after a switch
   reviveTerminal(made[idx], idx);            // #673: auto-reconnect a slept tab, no manual Enter
@@ -503,9 +520,24 @@ function stretchFrameToFill(win) {
   if (!g.width || !g.height || !availW || !availH) return false;
   const sx = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availW / g.width));
   const sy = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availH / g.height));
-  fr.style.transformOrigin = '50% 50%';
-  fr.style.transform = (sx <= 1.0005 && sy <= 1.0005)
-    ? 'none' : 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  // #798 REOPEN: origin '0 0' + explicit translate, matching reconcileFrameFit's
+  // pattern (layers 3 and 4 now share one origin). The old '50% 50%' center-scale
+  // placed the grid visual top at EXACTLY 0px margin at medium viewports (a
+  // cancellation of two large centered terms) -- any sub-pixel font metric
+  // rounding pushed it negative and #frames{overflow:hidden} clipped row 0. With
+  // '0 0' the grid top is pinned at 0 by construction (a single product: the
+  // translate cancels g.top*sy exactly). Sub-pixel error moves to the BOTTOM edge
+  // (a hairline letterbox -- the safe failure direction).
+  fr.style.transformOrigin = '0 0';
+  if (sx <= 1.0005 && sy <= 1.0005) {
+    fr.style.transform = 'none';
+  } else {
+    // ty pins the grid top at the slot top (row 0 always visible);
+    // tx centres the grid horizontally in the slot.
+    const ty = -g.top * sy;
+    const tx = (availW - sx * g.width) / 2 - g.left * sx;
+    fr.style.transform = 'translate(' + tx.toFixed(1) + 'px, ' + ty.toFixed(1) + 'px) scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  }
   return true;
 }
 // #798 OVER-FIT (fourth layer): fitFixedGrid floors the font at 6px, so on a viewport
