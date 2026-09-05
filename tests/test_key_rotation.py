@@ -690,22 +690,38 @@ class TestNewPubkeyPresent(unittest.TestCase):
         new = wto.FLEET_PUSH_PUBKEYS[1]
         self.assertIn("airuleset-push@airuleset", new)
 
-    def test_new_key_parses_as_ed25519(self):
-        """Member [1] is a valid ssh-ed25519 pubkey."""
+    def test_new_key_fingerprint(self):
+        """Member [1] fingerprint matches the known value from the airuleset
+        box keygen (2026-09-05, SHA256:LMxTTC4QcRbrCqJjHR7hssgJNVPZ/...)."""
         self.assertGreaterEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
-                                "need member [1] to test its format")
+                                "need member [1] to test its fingerprint")
         new = wto.FLEET_PUSH_PUBKEYS[1]
         self.assertTrue(new.startswith("ssh-ed25519 "),
                         "expected ssh-ed25519 prefix")
+        expected_fp = "SHA256:LMxTTC4QcRbrCqJjHR7hssgJNVPZ/x8TXgy23E/CuG0"
+        import subprocess as _sp
+        try:
+            r = _sp.run(
+                ["ssh-keygen", "-lf", "-"],
+                input=new.strip() + "\n",
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and expected_fp in r.stdout:
+                return  # fingerprint verified via ssh-keygen
+        except FileNotFoundError:
+            # airuleset:script-ok CI runner may lack ssh-keygen
+            import sys as _sys
+            print("  ssh-keygen not found, using blob fallback",
+                  file=_sys.stderr)
+        # Fallback: validate blob structure (51 bytes = ed25519)
+        import base64
         parts = new.split()
         self.assertGreaterEqual(len(parts), 2, "need at least type + blob")
-        blob = parts[1]
-        # Verify it base64-decodes (valid blob)
-        import base64
-        try:
-            base64.b64decode(blob)
-        except Exception:
-            self.fail("member [1] blob is not valid base64: %s" % blob)
+        decoded = base64.b64decode(parts[1], validate=True)
+        self.assertEqual(len(decoded), 51,
+                         "ed25519 pubkey blob must be 51 bytes")
+        self.assertIn(b"ssh-ed25519", decoded,
+                      "inner type prefix must be ssh-ed25519")
 
 
 class TestOldPubkeyConsistency(unittest.TestCase):

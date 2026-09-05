@@ -136,8 +136,10 @@ class TestDesiredKeysForUser(unittest.TestCase):
         """david1 gets fleet + owner + lane key, sorted by blob."""
         keys = cli_webterm_only.desired_keys_for_user("david1")
         blobs = {cli_webterm_only._key_blob(k) for k in keys}
-        # fleet push key
+        # fleet push keys (old + new during F1 rotation)
         self.assertIn(FLEET_BLOB, blobs)
+        for fpk in cli_webterm_only.FLEET_PUSH_PUBKEYS:
+            self.assertIn(cli_webterm_only._key_blob(fpk), blobs)
         # lane key
         lane_blob = cli_webterm_only._key_blob(
             cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY
