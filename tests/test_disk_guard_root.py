@@ -457,7 +457,7 @@ class TestSevereEscalation895(unittest.TestCase):
                 status = {"worst_pct": 96, "dim": "bytes"}
                 # First call (dry_run=False but with injected run_fn)
                 calls = []
-                logs1 = dg.file_severe_ticket(
+                dg.file_severe_ticket(
                     status, td, 1000, [("/tmp/big", 5000000000)],
                     dry_run=False,
                     run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})())

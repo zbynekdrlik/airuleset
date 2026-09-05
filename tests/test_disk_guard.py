@@ -2058,7 +2058,6 @@ def test_status_json_shape_lock_top_consumers_item_shape(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_severe_ticket_fires_at_95_pct(tmp_path):
     """#895: file_severe_ticket fires at >=95% and produces a SEVERE-TICKET log."""
-    import time as _time
     marker = dg._severe_ticket_marker(5000.0)
     if os.path.exists(marker):
         os.unlink(marker)
@@ -2086,7 +2085,6 @@ def test_severe_ticket_skips_below_95(tmp_path):
 
 def test_severe_ticket_daily_dedup(tmp_path):
     """#895: a second call on the same day must be deduped by the marker."""
-    import time as _time
     marker = dg._severe_ticket_marker(5000.0)
     try:
         fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
