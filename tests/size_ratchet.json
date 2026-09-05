@@ -254,7 +254,7 @@
     "tests/test_merge_drivers.py": 431,
     "tests/test_model_audit.py": 263,
     "tests/test_model_float_audit_job.py": 143,
-    "tests/test_model_tiering.py": 783,
+    "tests/test_model_tiering.py": 784,
     "tests/test_module_machinery_offload.py": 71,
     "tests/test_nice_pin.py": 191,
     "tests/test_no_conflict_markers.py": 72,
