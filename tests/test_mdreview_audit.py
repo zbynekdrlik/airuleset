@@ -543,7 +543,7 @@ class TestCadenceJob(unittest.TestCase):
                                        "closedAt": closed_old}), 0
                 return "", 0
             with mock.patch("socket.gethostname", return_value="dev1"):
-                logs = mdreview_cadence_job(
+                mdreview_cadence_job(
                     now, {}, dry_run=True, state_path=str(sp),
                     gh_runner=fake_gh)
             reopen_calls = [c for c in gh_calls if "reopen" in str(c)]
@@ -571,7 +571,7 @@ class TestCadenceJob(unittest.TestCase):
                                 return_value=[]):
                     with mock.patch("cli_mdreview_audit.run_fleet",
                                     side_effect=RuntimeError("audit boom")):
-                        logs = mdreview_cadence_job(
+                        mdreview_cadence_job(
                             now, {}, state_path=str(sp),
                             gh_runner=fake_gh)
             state_after = json.loads(sp.read_text())
@@ -598,7 +598,7 @@ class TestBootstrapWiring(unittest.TestCase):
                 gh_calls.append(argv)
                 return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
             with mock.patch("socket.gethostname", return_value="dev1"):
-                logs = mdreview_cadence_job(
+                mdreview_cadence_job(
                     now, {}, state_path=str(sp), gh_runner=fake_gh)
             create_calls = [c for c in gh_calls if "create" in str(c)]
             self.assertGreater(len(create_calls), 0,

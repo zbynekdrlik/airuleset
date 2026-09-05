@@ -5671,6 +5671,10 @@ def cmd_watchdog(args):
                     # Job 42 (#866) — NICE-CHECK SELF-CHECK. Enabled on every
                     # real poll; left False in run_once unit tests.
                     nice_check_enabled=True,
+                    # Job 43 (#858) — MDREVIEW CADENCE. Dev1-gated, daily
+                    # TTL. Enabled on every real poll; left False in
+                    # run_once unit tests.
+                    mdreview_cadence_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

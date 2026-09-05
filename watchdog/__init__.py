@@ -4631,7 +4631,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # notify. On due: runs mdreview-audit → REOPENs the pinned ticket.
     _add("mdreview_cadence", lambda: mdreview_cadence_enabled,
          lambda: mdreview_cadence.mdreview_cadence_job(
-             now, state, dry_run=dry_run),
+             now, state, dry_run=dry_run,
+             state_path=state_path),
          "mdreview-cadence error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE

@@ -302,25 +302,23 @@ def memory_candidates(memory_dir):
             if cls is None:
                 continue
 
-            # Truncate line for output — NEVER print credential values
-            safe_line = stripped[:200]
+            safe_line = stripped
             if is_cred:
-                # Redact any token-like substrings
                 safe_line = re.sub(
                     r"[A-Za-z0-9_\-]{20,}", "<REDACTED>", safe_line)
                 s_count += 1
+            safe_line = safe_line[:200]
 
             entry = {"line": safe_line, "file": str(fpath)}
 
             if cls == "R":
-                # Propose a target surface
                 target = _propose_target(stripped)
                 entry["target"] = target
                 r_items.append(entry)
-                candidates.append({**entry, "classification": "R"})
+                candidates.append({**entry, "class": "R"})
             else:
                 p_items.append(entry)
-                candidates.append({**entry, "classification": "P"})
+                candidates.append({**entry, "class": "P"})
 
     return {
         "R": r_items,
@@ -350,54 +348,137 @@ def _propose_target(text):
     return "managed module"
 
 
+# -- dedup surface collection -----------------------------------------------
+
+def _collect_dedup_surfaces(project_dirs=None):
+    """Read actual file texts into surface buckets for dedup_candidates."""
+    surfaces = {"modules": {}, "skills": {}, "rules": {}, "projects": {}}
+
+    if cli_context_baseline.CLAUDE_MD.exists():
+        files, _ = cli_context_baseline.resolve_imports_recursive(
+            cli_context_baseline.CLAUDE_MD)
+        for fpath in files:
+            try:
+                text = Path(fpath).read_text(encoding="utf-8", errors="replace")
+                surfaces["modules"][fpath] = text
+            except OSError:
+                pass  # airuleset:script-ok unreadable resolved module
+
+    skills_dir = CLAUDE_DIR / "skills"
+    if skills_dir.is_dir():
+        for entry in sorted(skills_dir.iterdir()):
+            skill_file = entry / "SKILL.md"
+            if skill_file.exists():
+                try:
+                    text = skill_file.read_text(encoding="utf-8",
+                                                errors="replace")
+                    surfaces["skills"][str(skill_file)] = text
+                except OSError:
+                    pass  # airuleset:script-ok unreadable skill
+
+    for pd in (project_dirs or []):
+        pd = Path(pd)
+        ao_rules = cli_context_baseline.always_on_rule_files(pd)
+        for r in ao_rules:
+            try:
+                text = r.read_text(encoding="utf-8", errors="replace")
+                surfaces["rules"][str(r)] = text
+            except OSError:
+                pass  # airuleset:script-ok unreadable rule
+
+        proj_claude = pd / "CLAUDE.md"
+        if proj_claude.exists():
+            try:
+                text = proj_claude.read_text(encoding="utf-8",
+                                             errors="replace")
+                surfaces["projects"][str(proj_claude)] = text
+            except OSError:
+                pass  # airuleset:script-ok unreadable project CLAUDE.md
+
+    return surfaces
+
+
+def _compute_zero_caller_skills(days=90):
+    """Return list of skill names with 0 calls in the given window."""
+    try:
+        import cli_skill_usage
+        usage = cli_skill_usage.scan_usage(days=days)
+    except Exception:
+        return []  # airuleset:script-ok scan_usage unavailable
+
+    skills_dir = CLAUDE_DIR / "skills"
+    if not skills_dir.is_dir():
+        return []
+
+    all_skills = set()
+    for entry in sorted(skills_dir.iterdir()):
+        if (entry / "SKILL.md").exists():
+            all_skills.add(entry.name)
+
+    called_skills = set(usage.get("skills", {}).keys())
+    zero_callers = sorted(all_skills - called_skills)
+    return zero_callers
+
+
+def _scan_memory_all():
+    """Scan all project memory directories. Returns aggregated result."""
+    mem_dir = CLAUDE_DIR / "projects"
+    mem_result = {"R": [], "P": [], "S_flag_count": 0, "candidates": []}
+    if mem_dir.is_dir():
+        for pdir in sorted(mem_dir.iterdir()):
+            mem_sub = pdir / "memory"
+            if mem_sub.is_dir():
+                sub_result = memory_candidates(mem_sub)
+                mem_result["R"].extend(sub_result["R"])
+                mem_result["P"].extend(sub_result["P"])
+                mem_result["S_flag_count"] += sub_result["S_flag_count"]
+                mem_result["candidates"].extend(sub_result["candidates"])
+    return mem_result
+
+
 # -- run_fleet --------------------------------------------------------------
 
-def run_fleet(runner=None):
+def run_fleet(runner=None, fleet_runner=None):
     """Run mdreview-audit --json on every deployable host.
 
-    runner: callable(host_entry) -> (stdout_str, returncode) for testing.
+    runner: legacy alias for fleet_runner (backward compat).
+    fleet_runner: callable(host_entry) -> (stdout_str, returncode).
     """
     import datetime
     import subprocess
     import cli_remote
+
+    if fleet_runner is None and runner is not None:
+        fleet_runner = runner
 
     hosts = cli_remote._deployable_hosts()
     boxes = []
     failed = []
 
     import socket
-    # Local box in-process
-    if not runner:
+    if not fleet_runner:
         by_host, _ = cli_context_baseline._load_registry()
         local_hostname = socket.gethostname()
         local_projects = by_host.get(local_hostname, [])
         inv = inventory_box(local_projects)
-        mem_dir = CLAUDE_DIR / "projects"
-        mem_result = {"R": [], "P": [], "S_flag_count": 0, "candidates": []}
-        if mem_dir.is_dir():
-            for pdir in sorted(mem_dir.iterdir()):
-                mem_sub = pdir / "memory"
-                if mem_sub.is_dir():
-                    sub_result = memory_candidates(mem_sub)
-                    mem_result["R"].extend(sub_result["R"])
-                    mem_result["P"].extend(sub_result["P"])
-                    mem_result["S_flag_count"] += sub_result["S_flag_count"]
-                    mem_result["candidates"].extend(sub_result["candidates"])
+        mem_result = _scan_memory_all()
+        surfaces = _collect_dedup_surfaces(local_projects)
+        pairs = dedup_candidates(surfaces)
+        zero_callers = _compute_zero_caller_skills()
 
         boxes.append({
             "host": local_hostname,
             "inventory": inv,
-            "dedup_pairs": [],  # dedup requires reading file contents
+            "dedup_pairs": pairs,
             "memory": mem_result,
-            "zero_caller_skills": [],
-            "scoping": scoping_matrix(),
+            "zero_caller_skills": zero_callers,
         })
 
     for host in hosts:
         name = host.get("name", host.get("host", "unknown"))
         try:
-            if runner:
-                stdout, rc = runner(host)
+            if fleet_runner:
+                stdout, rc = fleet_runner(host)
             else:
                 addr = host.get("host", "")
                 user = host.get("user", "newlevel")
@@ -431,6 +512,7 @@ def run_fleet(runner=None):
         "date": datetime.date.today().isoformat(),
         "boxes": boxes,
         "failed": failed,
+        "scoping": scoping_matrix(),
     }
     return result_data
 
@@ -468,29 +550,19 @@ def cmd_mdreview_audit(args):
     project_dirs = by_host.get(hostname, [])
 
     inv = inventory_box(project_dirs)
-
-    # Memory scan
-    mem_dir = CLAUDE_DIR / "projects"
-    mem_result = {"R": [], "P": [], "S_flag_count": 0, "candidates": []}
-    if mem_dir.is_dir():
-        for pdir in sorted(mem_dir.iterdir()):
-            mem_sub = pdir / "memory"
-            if mem_sub.is_dir():
-                sub_result = memory_candidates(mem_sub)
-                mem_result["R"].extend(sub_result["R"])
-                mem_result["P"].extend(sub_result["P"])
-                mem_result["S_flag_count"] += sub_result["S_flag_count"]
-                mem_result["candidates"].extend(sub_result["candidates"])
+    mem_result = _scan_memory_all()
+    surfaces = _collect_dedup_surfaces(project_dirs)
+    pairs = dedup_candidates(surfaces)
+    zero_callers = _compute_zero_caller_skills()
 
     data = {
         "schema": 1,
         "host": hostname,
         "date": datetime.date.today().isoformat(),
         "inventory": inv,
-        "dedup_pairs": [],
+        "dedup_pairs": pairs,
         "memory": mem_result,
-        "zero_caller_skills": [],
-        "scoping": scoping_matrix(),
+        "zero_caller_skills": zero_callers,
     }
 
     if getattr(args, "json_output", False):

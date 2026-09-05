@@ -8,7 +8,7 @@ DUE when:
   (b) sha1(sorted(MODEL_TIERS.items())) != stored snapshot (model-generation).
 
 On due: run mdreview-audit --fleet --json -> artifact -> REOPEN ticket + comment.
-Failure -> journal line, state NOT advanced.
+Failure -> journal line, hash NOT advanced (daily TTL IS advanced per finding 7).
 
 Imports NO notify — the lock-test in test_mdreview_audit.py verifies this.
 """
@@ -16,11 +16,14 @@ Imports NO notify — the lock-test in test_mdreview_audit.py verifies this.
 import hashlib
 import json
 import os
+import socket
 from pathlib import Path
 
 CADENCE_DAYS = 30
 CADENCE_SECONDS = CADENCE_DAYS * 86400
 DAILY_TTL_S = 86400
+
+_REPO_SLUG = "zbynekdrlik/airuleset"
 
 STATE_PATH = Path.home() / ".claude" / "mdreview-cadence.json"
 
@@ -76,7 +79,9 @@ def evaluate_cadence(state, now, gh_runner=None):
 
     if gh_runner:
         stdout, rc = gh_runner(
-            ["gh", "issue", "view", str(ticket), "--json", "state,closedAt"])
+            ["gh", "issue", "view", str(ticket),
+             "-R", _REPO_SLUG,
+             "--json", "state,closedAt"])
         if rc != 0:
             return {"due": False, "reason": "gh-error"}
         try:
@@ -86,7 +91,9 @@ def evaluate_cadence(state, now, gh_runner=None):
     else:
         import subprocess
         result = subprocess.run(
-            ["gh", "issue", "view", str(ticket), "--json", "state,closedAt"],
+            ["gh", "issue", "view", str(ticket),
+             "-R", _REPO_SLUG,
+             "--json", "state,closedAt"],
             capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return {"due": False, "reason": "gh-error"}
@@ -121,7 +128,10 @@ def evaluate_cadence(state, now, gh_runner=None):
 
 
 def act_on_due(ticket, reason, audit_data, gh_runner=None):
-    """REOPEN the ticket + post a summary comment."""
+    """REOPEN the ticket + post a summary comment.
+
+    Returns True on success, False on gh failure.
+    """
     summary_lines = [f"mdreview due ({reason})", ""]
     for box in audit_data.get("boxes", []):
         mem = box.get("memory", {})
@@ -136,23 +146,41 @@ def act_on_due(ticket, reason, audit_data, gh_runner=None):
     comment_body = "\n".join(summary_lines)
 
     if gh_runner:
-        gh_runner(["gh", "issue", "reopen", str(ticket)])
-        gh_runner(["gh", "issue", "comment", str(ticket),
-                   "--body", comment_body])
+        _out, rc1 = gh_runner(
+            ["gh", "issue", "reopen", str(ticket), "-R", _REPO_SLUG])
+        if rc1 != 0:
+            return False
+        _out, rc2 = gh_runner(
+            ["gh", "issue", "comment", str(ticket),
+             "-R", _REPO_SLUG,
+             "--body", comment_body])
+        if rc2 != 0:
+            return False
+        return True
     else:
         import subprocess
-        subprocess.run(["gh", "issue", "reopen", str(ticket)],
-                       capture_output=True, text=True, timeout=30)
-        subprocess.run(["gh", "issue", "comment", str(ticket),
-                        "--body", comment_body],
-                       capture_output=True, text=True, timeout=30)
+        r1 = subprocess.run(
+            ["gh", "issue", "reopen", str(ticket), "-R", _REPO_SLUG],
+            capture_output=True, text=True, timeout=30)
+        if r1.returncode != 0:
+            return False
+        r2 = subprocess.run(
+            ["gh", "issue", "comment", str(ticket),
+             "-R", _REPO_SLUG,
+             "--body", comment_body],
+            capture_output=True, text=True, timeout=30)
+        if r2.returncode != 0:
+            return False
+        return True
 
 
 def bootstrap_ticket(gh_runner=None):
     """One-time bootstrap: create the pinned recurring ticket.
     Returns the new ticket number (int) or None."""
     body = "\n".join(BOOTSTRAP_BODY_LINES)
-    argv = ["gh", "issue", "create", "-t", BOOTSTRAP_TITLE, "--body", body]
+    argv = ["gh", "issue", "create",
+            "-R", _REPO_SLUG,
+            "-t", BOOTSTRAP_TITLE, "--body", body]
 
     if gh_runner:
         stdout, _rc = gh_runner(argv)
@@ -169,15 +197,45 @@ def bootstrap_ticket(gh_runner=None):
 
 
 def mdreview_cadence_job(now, state, dry_run=False,
-                         state_path=None, gh_runner=None):
+                         state_path=None, gh_runner=None,
+                         fleet_runner=None):
     """Job 43 entry point. Called from run_once. Returns log lines."""
     logs = []
+
+    if socket.gethostname() != "dev1":
+        logs.append("mdreview-cadence: skip (not dev1)")
+        return logs
 
     cad_state = _load_state(state_path)
     last_eval = cad_state.get("last_eval_ts", 0)
     if now - last_eval < DAILY_TTL_S:
         logs.append("mdreview-cadence: ttl-skip")
         return logs
+
+    ticket = cad_state.get("ticket")
+    if not ticket:
+        if dry_run:
+            logs.append("mdreview-cadence: would bootstrap (dry-run)")
+            cad_state["last_eval_ts"] = now
+            _save_state(cad_state, state_path)
+            return logs
+        new_num = bootstrap_ticket(gh_runner=gh_runner)
+        if new_num:
+            cad_state["ticket"] = new_num
+            cad_state["model_tiers_hash"] = _model_tiers_hash()
+            cad_state["last_eval_ts"] = now
+            cad_state["schema"] = 1
+            _save_state(cad_state, state_path)
+            logs.append(f"mdreview-cadence: bootstrapped #{new_num}")
+        else:
+            logs.append("mdreview-cadence: bootstrap failed")
+            cad_state["last_eval_ts"] = now
+            _save_state(cad_state, state_path)
+        return logs
+
+    if not cad_state.get("model_tiers_hash"):
+        cad_state["model_tiers_hash"] = _model_tiers_hash()
+        _save_state(cad_state, state_path)
 
     result = evaluate_cadence(cad_state, now, gh_runner=gh_runner)
 
@@ -187,7 +245,6 @@ def mdreview_cadence_job(now, state, dry_run=False,
         _save_state(cad_state, state_path)
         return logs
 
-    ticket = cad_state.get("ticket")
     reason = result["reason"]
     logs.append(f"mdreview-cadence: due({reason})")
 
@@ -199,23 +256,25 @@ def mdreview_cadence_job(now, state, dry_run=False,
 
     try:
         import cli_mdreview_audit
-        data = cli_mdreview_audit.run_fleet(
-            runner=gh_runner if callable(gh_runner) else None)
+        data = cli_mdreview_audit.run_fleet(fleet_runner=fleet_runner)
         artifact_path = cli_mdreview_audit.save_artifact(data)
         logs.append(f"mdreview-cadence: artifact {artifact_path}")
     except Exception as e:
         logs.append(f"mdreview-cadence: audit failed: {e!r}")
+        cad_state["last_eval_ts"] = now
+        _save_state(cad_state, state_path)
         return logs
 
-    try:
-        act_on_due(ticket, reason, data, gh_runner=gh_runner)
+    ok = act_on_due(ticket, reason, data, gh_runner=gh_runner)
+    if ok:
         logs.append(f"mdreview-cadence: reopened #{ticket}")
-    except Exception as e:
-        logs.append(f"mdreview-cadence: reopen failed: {e!r}")
-        return logs
+        cad_state["model_tiers_hash"] = _model_tiers_hash()
+        cad_state["last_eval_ts"] = now
+        _save_state(cad_state, state_path)
+        logs.append("mdreview-cadence: state advanced")
+    else:
+        logs.append("mdreview-cadence: reopen failed")
+        cad_state["last_eval_ts"] = now
+        _save_state(cad_state, state_path)
 
-    cad_state["model_tiers_hash"] = _model_tiers_hash()
-    cad_state["last_eval_ts"] = now
-    _save_state(cad_state, state_path)
-    logs.append("mdreview-cadence: state advanced")
     return logs

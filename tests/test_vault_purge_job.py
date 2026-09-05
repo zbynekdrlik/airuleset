@@ -291,9 +291,15 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # disk_guard_enabled=False, so the closing `):` moved off
                # that line onto the new one; the anchor grew a last line,
                # the mutation target vault_purge=None is untouched.
+               # #858 re-pin: mdreview_cadence_enabled=False (job 43's
+               # mdreview cadence gate) was appended on a NEW trailing
+               # line after nice_check_enabled=False, so the closing `):`
+               # moved off that line onto the new one; the anchor grew a
+               # last line, the mutation target vault_purge=None is untouched.
                "             u_fetch=None, reconcile_fetch=None, "
                "disk_guard_enabled=False,\n"
-               "             nice_check_enabled=False):")
+               "             nice_check_enabled=False,\n"
+               "             mdreview_cadence_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
