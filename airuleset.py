@@ -433,6 +433,8 @@ from cli_caveman_plugins import (  # noqa: E402, F401
     _plugin_registry_keys,
     _load_plugin_registry,
     _heal_stale_plugin_registry,
+    _heal_stale_marketplace_registry,
+    heal_stale_plugin_registries,
     _managed_plugin_built,
     _playwright_browsers_installed,
     ensure_playwright_browsers,
@@ -1421,6 +1423,17 @@ def cmd_install(args):
     except Exception as e:                             # pragma: no cover - defensive
         print(f"  drop-gateway ingress re-assert error (non-fatal): {e}",
               file=sys.stderr)
+
+    # --- 5d. heal stale plugin registries (#845 lane 3) ---
+    # Both installed_plugins.json and known_marketplaces.json can carry
+    # absolute home-dir paths that become stale after an account rename
+    # (#537).  The heal must run BEFORE any ensure_marketplace_registered()
+    # or `claude plugin install` call — i.e. before step 6
+    # (maybe_setup_caveman) and step 6b (setup_managed_plugins).
+    try:
+        heal_stale_plugin_registries()
+    except Exception as e:
+        print(f"  registry heal error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
     # A still-failing plugin install (after correct marketplace registration)

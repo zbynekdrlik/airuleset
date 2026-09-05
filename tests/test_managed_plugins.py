@@ -808,6 +808,9 @@ class TestStaleInstallPathHealing(TestCase):
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
                 m.patch("subprocess.run", side_effect=fake_run):
+            # Heal runs at cmd_install level before setup_managed_plugins
+            # (#845 lane 3 — the heal moved to a pre-phase entry point).
+            airuleset.heal_stale_plugin_registries()
             ok = airuleset.setup_managed_plugins()
         self.assertTrue(ok)
         install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
@@ -973,6 +976,124 @@ class TestStaleMarketplaceHealing(TestCase):
         tmp_files = list((d / "plugins").glob("*.tmp"))
         self.assertEqual(tmp_files, [],
                          "no orphaned *.tmp files must remain after heal")
+
+
+class TestHealOrderingBeforeCaveman(TestCase):
+    """#845 lane 3: both registry heals must run BEFORE maybe_setup_caveman()
+    so a stale caveman marketplace entry is dropped before the first
+    `ensure_marketplace_registered("caveman")` + `plugin install` call.
+
+    On v0.1.150 the heal ran only inside setup_managed_plugins() (step 6b)
+    which is AFTER maybe_setup_caveman() (step 6) — so a stale pre-rename
+    `caveman` entry was still present when caveman installed, and it failed
+    'marketplace directory does not exist'."""
+
+    def test_stale_caveman_marketplace_healed_before_install(self):
+        """RED on current code: a stale `caveman` marketplace entry must be
+        GONE before `claude plugin marketplace add caveman` runs.  We
+        simulate the cmd_install plugin-phase sequence: heal → caveman →
+        managed plugins.  The heal must remove the stale `caveman` entry
+        BEFORE setup_caveman's `claude plugin` calls."""
+        calls = []
+
+        d = Path(tempfile.mkdtemp())
+        # Write a stale caveman marketplace entry.
+        _write_marketplace_registry(d, {
+            "caveman": "/nonexistent/old-home/.claude/plugins/"
+                       "marketplaces/caveman",
+        })
+        # Write a valid plugin registry so setup_caveman sees
+        # _caveman_plugin_built() = False (no entry → triggers install).
+        reg_dir = d / "plugins"
+        reg_dir.mkdir(parents=True, exist_ok=True)
+        (reg_dir / "installed_plugins.json").write_text('{"plugins":{}}')
+        settings_path = d / "settings.json"
+
+        mp_path = d / "plugins" / "known_marketplaces.json"
+
+        # Track when the marketplace file changes (stale entry removed).
+        heal_happened_before_install = [None]  # None = not determined yet
+
+        def tracking_run(argv, **kwargs):
+            argv_list = list(argv)
+            # Check: is this a `claude plugin` call?
+            if (len(argv_list) >= 2 and argv_list[0] == "claude"
+                    and argv_list[1] == "plugin"):
+                # At this point, the stale entry should already be gone.
+                mp_data = (json.loads(mp_path.read_text())
+                           if mp_path.exists() else {})
+                heal_happened_before_install[0] = "caveman" not in mp_data
+            calls.append(argv_list)
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=tracking_run):
+            # Simulate the cmd_install plugin-phase ordering:
+            # step 5d: heal FIRST
+            airuleset.heal_stale_plugin_registries()
+            # step 6: caveman
+            airuleset.maybe_setup_caveman()
+
+        self.assertTrue(
+            heal_happened_before_install[0],
+            "The stale `caveman` marketplace entry must be removed BEFORE "
+            "the first `claude plugin` subprocess call in setup_caveman(). "
+            "heal_stale_plugin_registries() must precede "
+            "maybe_setup_caveman() — #845 lane 3.")
+
+    def test_heal_idempotent_second_run_prints_nothing(self):
+        """After a successful heal, a second call to
+        heal_stale_plugin_registries() must print nothing and change
+        nothing."""
+        d = Path(tempfile.mkdtemp())
+        # Write stale entries for both registries.
+        _write_marketplace_registry(d, {
+            "caveman": "/nonexistent/old/.claude/plugins/marketplaces/caveman",
+        })
+        stale_paths = {k: "/nonexistent/old/.claude/plugins/cache/"
+                       + k.replace("@", "/")
+                       for k in airuleset.MANAGED_PLUGINS}
+        _write_plugin_registry_with_paths(d, stale_paths)
+
+        with m.patch.object(airuleset, "CLAUDE_DIR", d):
+            # First run heals.
+            cli_caveman_plugins.heal_stale_plugin_registries()
+            # Capture second run's output.
+            buf = StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = buf
+            try:
+                cli_caveman_plugins.heal_stale_plugin_registries()
+            finally:
+                sys.stdout = old_stdout
+            second_output = buf.getvalue()
+
+        self.assertEqual(second_output, "",
+                         "Second heal_stale_plugin_registries() call must "
+                         "print nothing — idempotent, no changes")
+
+    def test_heal_entry_point_exists(self):
+        """The public heal_stale_plugin_registries() must exist and be
+        re-exported from airuleset.py."""
+        self.assertTrue(
+            hasattr(cli_caveman_plugins, "heal_stale_plugin_registries"),
+            "heal_stale_plugin_registries must exist in cli_caveman_plugins")
+        self.assertTrue(
+            hasattr(airuleset, "heal_stale_plugin_registries"),
+            "heal_stale_plugin_registries must be re-exported from airuleset")
+
+    def test_cmd_install_calls_heal_before_caveman(self):
+        """The cmd_install source must call heal_stale_plugin_registries()
+        BEFORE maybe_setup_caveman() — an ordering lock."""
+        src = inspect.getsource(airuleset.cmd_install)
+        # Use the CALL forms (with parens) to skip comment mentions.
+        heal_idx = src.index("heal_stale_plugin_registries()")
+        caveman_idx = src.index("maybe_setup_caveman()")
+        self.assertLess(
+            heal_idx, caveman_idx,
+            "heal_stale_plugin_registries() must appear BEFORE "
+            "maybe_setup_caveman() in cmd_install source — #845 lane 3")
 
 
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):

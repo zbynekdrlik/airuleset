@@ -547,6 +547,22 @@ def _heal_stale_marketplace_registry(registry_path: Path = None) -> set:
     return healed
 
 
+def heal_stale_plugin_registries(
+    plugin_registry_path: Path = None,
+    marketplace_registry_path: Path = None,
+) -> tuple:
+    """Run BOTH registry heals once — idempotent, prints only when something
+    changed.  Must be called BEFORE any ``ensure_marketplace_registered()``
+    or ``claude plugin install`` call (i.e. before ``maybe_setup_caveman()``
+    and before ``setup_managed_plugins()``), so stale pre-rename entries are
+    gone before the first consumer reads the registry.
+
+    Returns ``(healed_plugins, healed_marketplaces)`` — two sets."""
+    mp = _heal_stale_marketplace_registry(marketplace_registry_path)
+    pp = _heal_stale_plugin_registry(plugin_registry_path)
+    return (pp, mp)
+
+
 def _managed_plugin_built(key: str) -> bool:
     """True iff claude's OWN plugin registry (installed_plugins.json) has
     an entry for this plugin key — never a proxy for it.
@@ -678,8 +694,12 @@ def setup_managed_plugins() -> bool:
     else:
         print("    settings.json: already correct")
 
-    _heal_stale_marketplace_registry()
-    _heal_stale_plugin_registry()
+    # NOTE: both registry heals (_heal_stale_marketplace_registry +
+    # _heal_stale_plugin_registry) are now called ONCE at the start of the
+    # plugin phase via heal_stale_plugin_registries() — BEFORE
+    # maybe_setup_caveman() and before this function — so they are not
+    # called here.  See #845 lane 3: the heal must precede the FIRST
+    # ensure_marketplace_registered / plugin install call (in setup_caveman).
 
     market_ok = {}
     for key in MANAGED_PLUGINS:
