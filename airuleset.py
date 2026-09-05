@@ -3183,11 +3183,12 @@ _LENS_ID_RE = re.compile(r'^[a-z][a-z0-9-]+$')
 def _load_lens_list(repo_root=None):
     """Load the repo's lens list or fall back to the built-in default.
 
-    The lens list is at .claude/rules/gk-review-lenses.md.  Lines matching
-    the lens-id shape (^[a-z][a-z0-9-]+$) are extracted; prose paragraphs,
-    markdown tables, headers (### section) and code blocks are ignored.
-    If the file is absent or yields zero valid ids, falls back to
-    HANDOFF_DEFAULT_LENSES (#880)."""
+    The lens list is at .claude/rules/gk-review-lenses.md.  Only lines
+    matching the lens-id shape (^[a-z][a-z0-9-]+$) are extracted — a bare
+    id-shaped line anywhere (including inside a code block) is treated as
+    a lens id; prose paragraphs, markdown tables and headers are filtered
+    out by the shape check.  If the file is absent or yields zero valid
+    ids, falls back to HANDOFF_DEFAULT_LENSES (#880)."""
     if repo_root:
         p = os.path.join(repo_root, ".claude", "rules",
                          "gk-review-lenses.md")

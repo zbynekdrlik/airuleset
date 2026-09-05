@@ -226,8 +226,8 @@ class TestLsRemoteRefPick880(unittest.TestCase):
         # call uses the explicit refs/heads/ prefix.
         import inspect
         src = inspect.getsource(airuleset.cmd_handoff)
-        # The ls-remote call must use "refs/heads/" prefix, not bare branch.
-        self.assertIn("refs/heads/", src,
+        # The ls-remote call must use "refs/heads/" + branch, not bare branch.
+        self.assertIn('"refs/heads/" + branch', src,
                       "cmd_handoff ls-remote call must use explicit "
                       "refs/heads/ prefix to avoid matching wip refs")
 
