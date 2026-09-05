@@ -336,6 +336,11 @@ class TestWiring(unittest.TestCase):
         if a_fn is not c_fn:
             # Fallback: verify they share origin (same source function,
             # different module instance due to import-order instability).
+            import warnings
+            warnings.warn(
+                "cli_remote module identity split under discover "
+                "(issue 875) — fallback contract check used",
+                stacklevel=1)
             self.assertEqual(
                 a_fn.__qualname__, c_fn.__qualname__,
                 "facade re-export qualname mismatch: "
@@ -344,6 +349,14 @@ class TestWiring(unittest.TestCase):
                 a_fn.__module__, c_fn.__module__,
                 "facade re-export module mismatch: "
                 f"{a_fn.__module__!r} vs {c_fn.__module__!r}")
+            # Y1 review finding: also check co_filename to distinguish a
+            # duplicate module instance (same source file) from a
+            # functools.wraps wrapper (different source file).
+            self.assertEqual(
+                a_fn.__code__.co_filename, c_fn.__code__.co_filename,
+                "facade re-export source file mismatch: "
+                f"{a_fn.__code__.co_filename!r} vs "
+                f"{c_fn.__code__.co_filename!r}")
 
     def test_cmd_install_invokes_provision_owner_sudo(self):
         import inspect
