@@ -46,8 +46,6 @@ import cli_webterm_profiles as profiles
 APP_NAMES = {
     profiles.OWNER: ("Webterm", "Webterm"),
     profiles.DAVID: ("Webterm david", "david"),
-    # #612 scope-add 2026-08-24: the third per-developer gateway
-    # (marek.newlevel.media) — its own installed app, distinct from david's.
     profiles.MAREK: ("Webterm marek", "marek"),
 }
 

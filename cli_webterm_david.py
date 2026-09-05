@@ -3,7 +3,8 @@
 The public per-developer gateway for `david.newlevel.media`, provisioned on the
 subdev VPS as the `david1` account. #665: this module is now THIN — the render +
 setup skeleton lives in the shared parameterized provisioner `cli_webterm_lane`
-(one engine for david + marek + any future developer); here only david's per-user
+(one engine for david + dominika + any future developer; marek decommissioned
+#882); here only david's per-user
 constants (the source of truth tests patch) + a `_spec()` factory + public-API
 wrappers delegating to that engine.
 
@@ -83,7 +84,7 @@ _DAVID_GO_LIVE = (
     "    4. AUTH (#612 owner directive): NO password. Put a Cloudflare Access\n"
     "       email-OTP app in front — set WEBTERM_ACCESS_APPS['david'] allow-list\n"
     "       and run `airuleset.py webterm-access --apply`. Adding a person\n"
-    "       (marek) is one more e-mail in that list. No credential is delivered.\n"
+    "       is one more e-mail in that list. No credential is delivered.\n"
     % (w.webterm_runtime_socket_abs(WEBTERM_DAVID_GATEWAY_SOCK_BASENAME),
        profiles.WEBTERM_DAVID_IDENTITY))
 

@@ -109,8 +109,11 @@ class TestAuthorityCoversNewNames(TestCase):
                     old, airuleset.AUTHORITY_BY_USER,
                     "%s renamed away — stale AUTHORITY_BY_USER row" % old)
 
-    def test_marek_authority_unchanged_and_no_marek1(self):
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
+    def test_marek_observer_lane_882(self):
+        # marek DEV STREAM cancelled #882 but webterm observer lane survives;
+        # fork-no-merge (least-privilege, dominika model #867).
+        self.assertIn("marek", airuleset.AUTHORITY_BY_USER)
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "fork-no-merge")
         self.assertNotIn("marek1", airuleset.AUTHORITY_BY_USER)
 
 

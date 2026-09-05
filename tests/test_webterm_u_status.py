@@ -360,11 +360,10 @@ class TestUCollectOwnerGating(unittest.TestCase):
 
     def test_owner_gateway_unit_enables_u_collect_david_marek_do_not(self):
         import cli_webterm_david as dv
-        import cli_webterm_marek as mk
+        # #882: marek webterm module deleted
         owner_unit = w._render_webterm_gateway_unit("127.0.0.1", access_mode=True)
         self.assertIn("--u-collect", owner_unit)                    # owner gateway: on
         self.assertNotIn("--u-collect", dv.render_david_gateway_unit())   # david: off
-        self.assertNotIn("--u-collect", mk.render_marek_gateway_unit())   # marek: off
 
     def test_ssh_read_identity_decision_matches_interactive(self):
         # #677 review 🔵3: _ssh_read_prefix is a non-interactive variant, but its

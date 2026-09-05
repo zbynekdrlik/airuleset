@@ -291,9 +291,10 @@ SIGNATURE_WORD = "ZbynekAI"
 # consulted via `signature_word`, which is only ever called for a user that
 # already has a `cli_aliases.stream_number` (the gate is silent otherwise), and
 # admin/stepan/marek all resolve stream_number None. So the conflation never bites.
-_OWNER_SIGNATURE_WORD = {
-    "marek": "MarekAI",
-}
+# marek entry restored (#882 scope correction, 2026-09-05: DEV STREAM
+# cancelled but marek as a HUMAN survives — montalu4's own handover account
+# (odoo-erp issue 3864) still uses "Marek AI - odovzdávky" display name).
+_OWNER_SIGNATURE_WORD = {"marek": "MarekAI"}
 
 
 def _stream_owner(user):

@@ -14,7 +14,9 @@ class TestAuthorityResolution(TestCase):
         # map with the OS account (runbook-537 step 8, live in-place usermod).
         self.assertEqual(airuleset.AUTHORITY_BY_USER["david1"], "fork-no-merge")
         self.assertNotIn("david", airuleset.AUTHORITY_BY_USER)
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
+        # marek — DEV STREAM cancelled (#882) but webterm OBSERVER lane
+        # survives; fork-no-merge (least-privilege, dominika model #867).
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "fork-no-merge")
         # montalu1 (was montalu; #537 live rename 2026-08-19): same
         # branch-merge profile as the base. The OLD unix name's row left the
         # map with the OS account (runbook-537 step 8, live in-place usermod).
@@ -182,7 +184,8 @@ class TestAuthorityResolution(TestCase):
         # `--stream-label` early-return branches would silently hijack this test
         # unless pinned False (the established `m.Mock(...)`-args gotcha this
         # repo's own dev rules already document for exactly this shape).
-        with m.patch.object(airuleset, "_current_user", return_value="marek"):
+        # marek removed #882; use montalu1 (branch-merge) instead
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
             with m.patch("builtins.print") as p:
                 airuleset.cmd_authority(
                     m.Mock(explain=False, maintainer_login=False,
@@ -400,9 +403,8 @@ class TestBoxAuthorityFailSafe(TestCase):
 
     def test_box_authority_reduced_stream_uses_the_map(self):
         import watchdog as wd
-        # A registered reduced stream keeps its own profile (proves the map ROW is
-        # read, not just the fail-safe) — a DISTINCT value, not fork-no-merge.
-        with m.patch.object(airuleset, "_current_user", return_value="marek"):
+        # marek removed #882; use montalu1 (branch-merge) instead
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
             self.assertEqual(wd._box_authority(), "branch-merge")
 
 

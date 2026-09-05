@@ -44,7 +44,7 @@ import cli_webterm_lane as lane          # noqa: E402
 import cli_webterm_profiles as profiles  # noqa: E402
 import cli_webterm_pwa as pwa            # noqa: E402
 import cli_webterm_david as dv           # noqa: E402
-import cli_webterm_marek as mk           # noqa: E402
+import cli_webterm_marek as mk           # noqa: E402, F401 — #882 scope correction: lane restored
 
 
 def _inv(ids):
@@ -63,22 +63,15 @@ class TestUTenantSets703(unittest.TestCase):
         # codex-bridge = newlevel@dev2 (the OWNER's account) — cross-tenant.
         self.assertNotIn(profiles.CODEX_ID, ids)
 
-    def test_marek_set_excludes_owner_account_boxes(self):
-        # #787: montalu2-subdev joined marek's u_tenant set alongside montalu4.
-        # owner-req 2026-09-03: miva1-subdev + gatekeeper were ADDED as TABS but
-        # are CROSS-TENANT (miva1 = a separate developer's stream, notify-routed
-        # to the OWNER; gatekeeper = an owner-realm account), so NEITHER carries
-        # u_tenant — the set is UNCHANGED at the four within-tenant accounts.
+    def test_marek_set_includes_montalu_streams_882(self):
+        # #882 scope correction: marek's tenant set includes his montalu streams
+        # (montalu1/2/4 + forestshop) but NOT owner-realm boxes (dev1/dev2/gk)
+        # and NOT cross-tenant observe tabs (miva1).
         ids = {e["id"] for e in profiles.u_tenant_entries(profiles.MAREK)}
-        self.assertEqual(ids, {profiles.MAREK_ID, "montalu2-subdev",
-                               "montalu4-subdev", profiles.MAREK_FORESTSHOP_ID})
-        # dev1/dev2 = newlevel@ (the OWNER's account) — cross-tenant.
-        self.assertNotIn("dev1", ids)
-        self.assertNotIn("dev2", ids)
-        # miva1-subdev = a DIFFERENT developer's stream; gatekeeper = the
-        # owner-realm gk account — both observe-only tabs, never u_tenant.
-        self.assertNotIn("miva1-subdev", ids)
-        self.assertNotIn("gatekeeper", ids)
+        for within in ("montalu1-subdev", "montalu2-subdev", "montalu4-subdev", "forestshop"):
+            self.assertIn(within, ids, "%s should be within-tenant" % within)
+        for cross in ("dev1", "dev2", "gatekeeper", "miva1-subdev"):
+            self.assertNotIn(cross, ids, "%s should be cross-tenant" % cross)
 
     def test_no_owner_account_entry_is_ever_u_tenant(self):
         # CROSS-TENANT REFUSAL: an inventory entry whose TARGET account is the
@@ -113,7 +106,8 @@ class TestUTenantSets703(unittest.TestCase):
             self.assertEqual(profiles.u_tenant_entries("david"), [])
 
     def test_every_collected_entry_is_local_or_explicit_identity(self):
-        for profile in (profiles.DAVID, profiles.MAREK):
+        # #882: marek webterm module deleted — test david only
+        for profile in (profiles.DAVID,):
             entries = profiles.u_tenant_entries(profile)
             self.assertTrue(entries)                       # non-vacuous
             for e in entries:
@@ -180,16 +174,12 @@ class TestLaneArtifactsScopedU703(unittest.TestCase):
 
     def test_lane_gateway_units_carry_u_lane_and_never_u_collect(self):
         d_unit = dv.render_david_gateway_unit()
-        m_unit = mk.render_marek_gateway_unit()
+        # #882: marek webterm module deleted — test david only
         d_exec = next(ln for ln in d_unit.splitlines()
                       if ln.startswith("ExecStart="))
-        m_exec = next(ln for ln in m_unit.splitlines()
-                      if ln.startswith("ExecStart="))
         self.assertIn("--u-lane david", d_exec)
-        self.assertIn("--u-lane marek", m_exec)
         # the owner-only cross-tenant flag stays OUT of every lane unit
         self.assertNotIn("--u-collect", d_unit)
-        self.assertNotIn("--u-collect", m_unit)
 
     def test_owner_unit_still_u_collect_never_u_lane(self):
         unit = w._render_webterm_gateway_unit("127.0.0.1", access_mode=True)
@@ -221,6 +211,7 @@ class TestScopedCollector703(unittest.TestCase):
         # End-to-end through the REAL collect_fleet_u with a recording `run`:
         # no owner-account target is ever contacted and the sshpass
         # shared-password branch never fires from the lane path.
+        # #882: changed from marek (decommissioned) to david lane.
         calls = []
 
         def fake_run(argv, **k):
@@ -231,10 +222,7 @@ class TestScopedCollector703(unittest.TestCase):
                 m.patch.object(w, "CLAUDE_DIR", Path(tmp)), \
                 m.patch.object(w, "_box_u_count", return_value=0), \
                 m.patch.object(w.subprocess, "run", fake_run):
-            # patch _box_u_count so marek's `local` entry does NOT read the test
-            # runner's real ~/.claude/tickets-status (hermetic; assertion below
-            # is about ssh targets, which a local entry never contacts anyway).
-            rc = w.cmd_webterm_u_collect(["--lane", "marek"])
+            rc = w.cmd_webterm_u_collect(["--lane", "david"])
         self.assertEqual(rc, 0)
         self.assertTrue(calls)                              # non-vacuous
         for argv in calls:
@@ -370,9 +358,10 @@ class TestReadPrefixHostKeys703(unittest.TestCase):
     public-DNS): strict verification, never the TOFU =no posture there."""
 
     def test_pinned_entry_uses_strict_pin_never_tofu(self):
-        entry = {"identity": "~/.secrets/webterm_marek_ed25519",
-                 "host": profiles.MAREK_FORESTSHOP_HOST,
-                 "host_keys": profiles.MAREK_FORESTSHOP_HOST_KEYS}
+        # #882: marek constants removed; inline test values for the general shape
+        entry = {"identity": "~/.secrets/webterm_test_ed25519",
+                 "host": "test-host.example.com",
+                 "host_keys": ["ssh-ed25519 AAAA_test_key"]}
         joined = " ".join(w._ssh_read_prefix(entry))
         self.assertIn("StrictHostKeyChecking=yes", joined)
         self.assertNotIn("StrictHostKeyChecking=no", joined)

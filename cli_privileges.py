@@ -164,16 +164,7 @@ PRIVILEGES: List[Privilege] = [
         must_move=True,
         used_by=("cli_webterm_profiles.py:96 (WEBTERM_DAVID_IDENTITY)",),
     ),
-    Privilege(
-        name="webterm_marek_ed25519",
-        kind=KIND_SSH_KEY,
-        local_path="~/.secrets/webterm_marek_ed25519",
-        reach="dedicated webterm-provisioning ssh key for marek@subdev",
-        rotation="new keypair on the new box, authorize for marek@subdev, "
-                 "remove dev1's old key",
-        must_move=True,
-        used_by=("cli_webterm_profiles.py:186 (WEBTERM_MAREK_IDENTITY)",),
-    ),
+    # #882: webterm_marek_ed25519 entry removed (marek webterm module deleted)
     Privilege(
         name="cloudflare-newlevel-access",
         kind=KIND_API_TOKEN,
