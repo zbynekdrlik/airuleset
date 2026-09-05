@@ -15198,6 +15198,10 @@ class TestCompletionReportClientAppArtifacts(TestCase):
     still-current artifact URL must be REPEATED, never back-referenced."""
 
     MODULE = airuleset.REPO_DIR / "modules" / "core" / "completion-report.md"
+    DEEP = airuleset.REPO_DIR / "skills" / "completion-report-deep" / "DEEP.md"
+
+    def _combined(self):
+        return self.MODULE.read_text(encoding="utf-8") + "\n" + self.DEEP.read_text(encoding="utf-8")
 
     def test_module_exists_and_in_profile(self):
         self.assertTrue(self.MODULE.exists())
@@ -15205,33 +15209,28 @@ class TestCompletionReportClientAppArtifacts(TestCase):
         self.assertIn("modules/core/completion-report.md", entries)
 
     def test_broadens_the_globe_requirement_past_deploy_shaped(self):
-        t = self.MODULE.read_text(encoding="utf-8")
+        t = self._combined()
         self.assertIn("every user-facing artifact this work produced or affects", t)
 
     def test_names_both_demo_and_apk_for_client_app_projects(self):
-        t = self.MODULE.read_text(encoding="utf-8")
+        t = self._combined()
         for phrase in ("client-app project", "\U0001F310 Demo:",
                        "\U0001F4F1 <platform>:", "APK/IPA/signed binary",
                        "every ticket that touched the app"):
             self.assertIn(phrase, t, phrase)
 
     def test_bans_back_referencing_a_still_current_artifact_url(self):
-        t = self.MODULE.read_text(encoding="utf-8")
+        t = self._combined()
         self.assertIn("search the transcript for an artifact URL", t)
         self.assertIn("REPEAT it in the report", t)
 
     def test_template_carries_demo_and_apk_example_lines(self):
-        t = self.MODULE.read_text(encoding="utf-8")
+        t = self._combined()
         self.assertIn("\U0001F310 Demo: <url>", t)
         self.assertIn("\U0001F4F1 APK:  <url>", t)
 
     def test_reserves_apk_marker_exclusively_like_globe(self):
-        # Adversarial-review finding (#265): the hook's localhost-ban widening
-        # claims BOTH markers are used EXCLUSIVELY for a presented artifact
-        # URL "per completion-report.md" — that claim was false for 📱 until
-        # this bullet existed (📱 could plausibly decorate an unrelated
-        # "mobile" sentence). Locks the reservation that makes it true.
-        t = self.MODULE.read_text(encoding="utf-8")
+        t = self._combined()
         self.assertIn("installable-build DOWNLOAD URL only", t)
         self.assertIn("never a decorative", t)
 
