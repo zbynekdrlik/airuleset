@@ -447,7 +447,7 @@
     "tests/test_webterm_ctrlbw_darkening.py": 960,
     "tests/test_webterm_david.py": 364,
     "tests/test_webterm_dominika.py": 506,
-    "tests/test_webterm_fit_reopen_798_886.py": 125,
+    "tests/test_webterm_fit_reopen_798_886.py": 155,
     "tests/test_webterm_gateway.py": 1094,
     "tests/test_webterm_lane.py": 130,
     "tests/test_webterm_lane_parity_684.py": 210,
