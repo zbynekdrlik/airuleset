@@ -28,6 +28,9 @@ sys.path.insert(0, str(ROOT))
 
 COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
+# #859 batch 3: the deep W-bullet state-machine detail (incl. the #799 tacit
+# terminal clause this class locks) moved to this companion.
+STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 
 
 def _norm_window(text, start_token, end_marker="\n- **"):
@@ -125,8 +128,11 @@ class Test788DispositionBullet(unittest.TestCase):
 
 class TestStatuslineTacitTerminal(unittest.TestCase):
     def test_W_bullet_names_tacit_terminal(self):
-        line = _line_with(STATUS.read_text(encoding="utf-8"), "`· W N` (#510")
-        self.assertTrue(line, "the `· W N` bullet must be a single line")
+        # #859 batch 3: moved to companion
+        text = STATUS_DEEP2.read_text(encoding="utf-8")
+        line = _line_with(
+            text, "Tacit terminál — W-push NIE JE donekonečna (#799")
+        self.assertTrue(line, "the tacit-terminal clause must be a single line")
         for tok in ("Tacit terminál", "#799", "Acceptance-tacit:",
                     "N=3 pracovné dni", "tacitným uzavretím",
                     "NIE JE donekonečna"):
@@ -134,7 +140,10 @@ class TestStatuslineTacitTerminal(unittest.TestCase):
                           "W bullet lost tacit-terminal token %r" % tok)
 
     def test_points_at_handover_compose_for_mechanics(self):
-        line = _line_with(STATUS.read_text(encoding="utf-8"), "`· W N` (#510")
+        # #859 batch 3: moved to companion
+        text = STATUS_DEEP2.read_text(encoding="utf-8")
+        line = _line_with(
+            text, "Tacit terminál — W-push NIE JE donekonečna (#799")
         self.assertIn("skills/odoo-discuss-xmlrpc/handover-compose.md", line)
 
 

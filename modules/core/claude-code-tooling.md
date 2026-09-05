@@ -2,6 +2,8 @@
 
 Use built-in Claude Code features that accelerate autonomous work. Suggest them proactively when relevant.
 
+History + rationale: `.claude/rules-reference/claude-code-tooling-history.md` (#859).
+
 #### Auto Mode (Shift+Tab in CLI)
 
 Permission-classifier that auto-approves safe commands and pauses on risky ones. Preferred over `--dangerously-skip-permissions`. Enable at the start of any long agentic session.
