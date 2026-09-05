@@ -2,7 +2,6 @@
 must probe whether the box can reach airuleset issues and print a LOUD
 finding when it cannot (HTTP 403 = expected on an App-token box that
 uses the relay path)."""
-import subprocess
 import sys
 import unittest
 from pathlib import Path
