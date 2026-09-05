@@ -53,7 +53,7 @@ class TestModelAwarenessConversion(TestCase):
 
     # --- core enforcement stays in the module ---
     def test_tier_table_stays(self):
-        self.assertIn("claude-fable-5", self.module)
+        self.assertIn("claude-fable-5-1", self.module)
         self.assertIn("claude-opus-4-6", self.module)
 
     def test_banned_opus5_stays(self):

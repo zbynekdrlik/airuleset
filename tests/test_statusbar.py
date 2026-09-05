@@ -2312,7 +2312,7 @@ class ContextCostSegment(unittest.TestCase):
         # fable cache_read $1.0/Mtok * 570,000 = $0.57 exactly — the example
         # in the cost-fix package's own spec.
         seg = statusbar.context_cost_segment(
-            self._payload("claude-fable-5[1m]", cr=570000))
+            self._payload("claude-fable-5-1[1m]", cr=570000))
         self.assertIn("ctx 570K", seg)
         self.assertIn("$0.57", seg)
 

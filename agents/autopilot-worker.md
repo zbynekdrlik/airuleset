@@ -98,7 +98,7 @@ from validated inputs, stamping `Verified-at-UTC` + `HEAD:` at compose time (liv
 `  [--root-cause "<lens> — <why my self-review missed it>"]`
 `  [--closes-finding "<id> — <evidence>"]`
 `  [--prevencia-read "<path to the Prevencia rule file>"]`
-`  [--reviewed-by-tier "claude-fable-5 | claude-opus-4-6"]`
+`  [--reviewed-by-tier "claude-fable-5-1 | claude-opus-4-6"]`
 Round ≥ 2 REQUIRES `--root-cause`, `--prevencia-read`, and `--reviewed-by-tier`; the CLI refuses
 without them. `--closes-finding` is repeatable (one per id from the newest gk verdict). The hook
 `block-handoff-without-composer.sh` blocks a raw `READY-FOR-REVIEW` comment post on a reduced-

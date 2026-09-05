@@ -39,7 +39,7 @@ class TestModelFloatAuditJob(TestCase):
     def test_allowlisted_models_silent(self):
         panes = [("%p", "/ok")]
         find = _find({"/ok": 1})
-        models = {"/t/ok.jsonl": "claude-fable-5",
+        models = {"/t/ok.jsonl": "claude-fable-5-1",
                   "/t/ok.jsonl.sub": "claude-sonnet-5"}
         read = lambda p: models.get(str(p), "")  # noqa: E731
         out = model_float_audit_job(0.0, {}, panes, "/proj", read, find,

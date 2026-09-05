@@ -290,7 +290,7 @@ class TestCostUnitWeighting(unittest.TestCase):
         now = datetime.datetime.now(UTC)
         with TemporaryDirectory() as root:
             _write_main(root, "a", "s1", [_usage_line(now, model="claude-haiku-4-5", cr=1000)])
-            _write_main(root, "b", "s1", [_usage_line(now, model="claude-fable-5", cr=1000)])
+            _write_main(root, "b", "s1", [_usage_line(now, model="claude-fable-5-1", cr=1000)])
             data = burn.scan_split(root, hours=12, now=now,
                                    repo_resolver=lambda cwd: None)
         self.assertEqual(data["projects"]["a"]["main"]["units"],

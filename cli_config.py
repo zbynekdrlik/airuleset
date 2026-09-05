@@ -295,7 +295,7 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       function's own `promptSuggestionEnabled` bullet documents for a different
       key.
 
-    - `model = MANAGED_MODEL` (Fable 5.0 = `claude-fable-5[1m]` — user
+    - `model = MANAGED_MODEL` (Fable 5.0 = `claude-fable-5-1[1m]` — user
       directive 2026-08-13, Opus 5 banned; Fable 5.1 ALSO banned per the
       owner directive 2026-09-04, #871) is the default MAIN-session model on
       every managed box — see MANAGED_MODEL's own comment for the history.

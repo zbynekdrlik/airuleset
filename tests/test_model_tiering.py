@@ -11,7 +11,7 @@ fleet target") -> **2026-08-26 revision #715**: that whole-worker Fable +
 boundary moves AGAIN, to a PER-PHASE split, FLEET-WIDE. The lineup these
 assertions lock:
 
-  main session managed default = Fable 5 (claude-fable-5[1m], MANAGED_MODEL)
+  main session managed default = Fable 5 (claude-fable-5-1[1m], MANAGED_MODEL)
   design + review PHASES       = Fable 5 through the budget gate, FLEET-WIDE
                                  (the JUDGMENT-CONTENT test is now a PHASE
                                  selector: a non-trivial ticket gets a Fable
@@ -347,7 +347,7 @@ class TestWorkflowStageTiering(TestCase):
 
     def test_judgment_stages_gate_fable_closed_opus_4_8(self):
         t = read(TOOLING)
-        self.assertIn("`opts.model: 'claude-fable-5'`", t)
+        self.assertIn("`opts.model: 'claude-fable-5-1'`", t)
         self.assertIn("ONLY when the budget gate is OPEN", t)
         # #715 (2026-08-26): the Fable stages are the DESIGN + REVIEW (+
         # synthesis / adversarial-verify) PHASES -- an IMPLEMENTATION/EXECUTION
@@ -634,6 +634,7 @@ class TestOpus5GrepGate(TestCase):
     def _line_is_ban_prose(line):
         return ("BANNED" in line or "banned" in line
                 or "zakázan" in line or "zakazan" in line
+                or "retired" in line or "superseded" in line
                 or "anthropic.com/news/claude-opus-5" in line)
 
     def test_claude_opus_5_absent_from_dispatch_surfaces(self):
@@ -706,18 +707,34 @@ class TestOpus5GrepGate(TestCase):
         # reappear as a live pin/dispatch value.
         self.assertEqual(self._grep("claude-opus-4-8"), [])
 
-    def test_claude_fable_5_1_absent_from_dispatch_surfaces(self):
-        # #871: Fable 5.1 (claude-fable-5-1) is BANNED, same class as Opus 5
-        # -- it must never appear as a live pin/dispatch value either.
-        self.assertEqual(self._grep("claude-fable-5-1"), [])
+    def test_claude_fable_5_0_absent_from_dispatch_surfaces(self):
+        # #894 (revises #871): Fable 5.0 (claude-fable-5) is retired from the
+        # lineup — it must not appear as a live pin/dispatch value anywhere.
+        # Fable 5.1 (claude-fable-5-1) is the current tier.
+        import re
+        bare_50_re = re.compile(r"claude-fable-5(?!-)")
+        violations = []
+        for f in self._files():
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for i, line in enumerate(text.splitlines(), 1):
+                if not bare_50_re.search(line):
+                    continue
+                if self._line_is_ban_prose(line):
+                    continue
+                violations.append(
+                    "%s:%d: %s" % (f.relative_to(ROOT), i,
+                                   line.strip()[:100]))
+        self.assertEqual(violations, [])
 
     def test_no_bare_alias_model_param_any_family(self):
         # #871: a dispatch NEVER carries a `model` param at all now -- the
         # opus-alias-only check above predates the exact-id allowlist; this
         # extends the SAME shape to the other three families (fable/sonnet/
         # haiku), since a bare alias floats to whatever ships next in its
-        # family exactly like `opus` floated to Opus 5 (the live #871 finding:
-        # `fable` silently became the banned claude-fable-5-1).
+        # family exactly like `opus` floated to Opus 5 (#871 architecture).
         bare_alias = re.compile(
             r"""model:\s*["']?(fable|sonnet|haiku)["']?(?![\w-])""")
         opts_alias = re.compile(

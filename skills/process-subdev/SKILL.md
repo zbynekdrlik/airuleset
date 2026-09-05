@@ -145,7 +145,7 @@ repo's own CLAUDE.md / playbook is what names the command.
    2026-07-24: maximum scrutiny on sub-dev submissions before anything approaches
    prod).** Run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE per processing
    run: OPEN → the cold-review/verdict stages dispatch the `fable-advisor` agent (NO
-   `model` param — its frontmatter pins `claude-fable-5`) at `effort:
+   `model` param — its frontmatter pins `claude-fable-5-1`) at `effort:
    xhigh`; CLOSED → `claude-opus-4-6` (agent-definition frontmatter / Workflow
    `opts.model: 'claude-opus-4-6'` / inheritance — a dispatch NEVER carries a `model`
    alias param, #871; Opus 5 and every bare alias are BANNED) — never a cheaper tier for the

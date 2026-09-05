@@ -9,7 +9,7 @@ their accounts (montalu5 started 2026-08-12, david 2026-08-13 15:06). Once
 argv forever; a rewritten on-disk launcher only affects the NEXT launch, and
 `-c` alone continues the prior transcript's model (only an explicit --model
 forces it). The on-disk launcher + MANAGED_MODEL on all accounts now bake
-claude-fable-5[1m]; montalu6 (started 2026-08-15) runs fable-5 correctly, so the
+claude-fable-5-1[1m]; montalu6 (started 2026-08-15) runs fable-5 correctly, so the
 CURRENT code does not launch opus-5 -- the two offenders were pre-ban ghosts
 self-healing at their next natural relaunch.
 
@@ -76,7 +76,7 @@ class TestBannedPredicateItself(TestCase):
         # ids (+ the Fable main [1m] form) clear the predicate. claude-opus-4-8
         # is the SUPERSEDED predecessor (renamed to claude-opus-4-6) and is
         # correctly BANNED now -- see test_superseded_opus_4_8_is_now_banned.
-        for ok in ("claude-fable-5[1m]", "claude-fable-5",
+        for ok in ("claude-fable-5-1[1m]", "claude-fable-5-1",
                    "claude-opus-4-6[1m]", "claude-opus-4-6",
                    "claude-sonnet-5", "claude-haiku-4-5"):
             self.assertFalse(airuleset.is_banned_model(ok),

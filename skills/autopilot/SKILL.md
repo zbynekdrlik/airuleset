@@ -665,7 +665,7 @@ gap in either.
    batch (the gate guards EVERY automatic Fable dispatch — this DESIGN-phase consult and the later
    REVIEW-phase pass reuse the SAME gate result, see the Model bullet in Step 2). Gate OPEN → dispatch ONE read-only
    `subagent_type: "fable-advisor"` agent per member (no `model` param — its frontmatter pins
-   `claude-fable-5`, #871; the built-in `Plan` agent type is retired for this dispatch since it has
+   `claude-fable-5-1`, #871; the built-in `Plan` agent type is retired for this dispatch since it has
    no pinned tier and a `model` param on it is now blocked outright); gate CLOSED → do NOT spend a
    new gated dispatch (a model-less dispatch would inherit the Fable main — exactly what a CLOSED
    gate says there is no headroom for): hold the design synthesis in the main session itself (the
