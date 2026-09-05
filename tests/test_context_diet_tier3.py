@@ -263,9 +263,9 @@ class TestNudgeModuleContextCost(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
 
     def test_prints_context_cost_on_module_path(self):
-        r = self._run_hook(os.path.join(REPO_DIR, "modules/core/test.md"))
-        # May print nothing if context-baseline --raw-bytes is unavailable
-        # but must always exit 0
+        result = self._run_hook(os.path.join(REPO_DIR, "modules/core/test.md"))
+        # Must always exit 0 (non-blocking)
+        self.assertEqual(result.returncode, 0)
 
 
 # --- A4: CLAUDE.md context-cost paragraph ---
