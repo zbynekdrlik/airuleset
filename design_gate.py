@@ -719,6 +719,60 @@ def classify_architecture_section(body):
 
 
 # --------------------------------------------------------------------------- #
+# #877 -- Shared-benefit: line. Owner directive (2026-09-05, the SK holidays
+# incident): every design comment must carry a `Shared-benefit:` disposition
+# — "the mechanism is shared (where)" OR "single-client (why)" OR
+# "n/a — <reason>". UNCONDITIONAL (no trivial exemption): shared-benefit
+# risk ANTI-CORRELATES with design complexity — the incident was a trivial
+# data seed scoped to one client when the data was nationwide. Same shape-
+# not-content contract as every other classifier in this module.
+# --------------------------------------------------------------------------- #
+
+_SB_LINE_RE = re.compile(
+    # Leading-bullet prefix class mirroring _TRIAGE_LINE_RE / _ARCH_HEADER_RE
+    # (the MINOR-3 lesson).
+    r"(?m)^[ \t>*#-]*\**[ \t]*Shared-?[ \t]?benefit\**[ \t]*:[ \t]*(?P<val>.+?)[ \t]*$",
+    re.IGNORECASE,
+)
+# A bare negative token with no trailing reason — the exact "rubber-stamp"
+# shape `completion-report.md`'s `✅ Výstup:` line (#446) also rejects.
+_SB_BARE_NA_RE = re.compile(
+    r"^(?:n/?a|nie|no|none|-)$",
+    re.IGNORECASE,
+)
+
+
+def classify_shared_benefit(body):
+    """Heuristic verdict for #877: does `body` carry a `Shared-benefit:`
+    (or `Shared benefit:`) line with a non-empty, non-bare-n/a value?
+    Returns `(ok: bool, reason: str)`, same contract as the other
+    classifiers in this module. A SHAPE check — it verifies the line is
+    present and not a bare dismissal, never whether the engineering
+    judgment behind the disposition is actually correct."""
+    text = (body or "").strip()
+    m = _SB_LINE_RE.search(text)
+    if not m:
+        return False, ("missing: Shared-benefit: line "
+                       "(disposition — shared/single-client/n/a — reason)")
+    val = m.group("val").strip()
+    if not val:
+        return False, "Shared-benefit: value is empty"
+    # A bare negative (n/a, no, nie, none, -) with no trailing reason.
+    # First check the WHOLE value as-is — a lone "-" is bare by itself.
+    if _SB_BARE_NA_RE.match(val):
+        return False, "Shared-benefit: bare n/a without a reason"
+    # Split on common reason separators (— / - / , / ;) and check whether
+    # the part BEFORE the first separator is a bare negative AND the part
+    # AFTER is empty or whitespace-only (e.g. "n/a" alone with no separator).
+    parts = re.split(r"\s*[—\-,;]\s*", val, maxsplit=1)
+    stem = parts[0].strip()
+    tail = parts[1].strip() if len(parts) > 1 else ""
+    if _SB_BARE_NA_RE.match(stem) and len(tail) < 5:
+        return False, "Shared-benefit: bare n/a without a reason"
+    return True, "ok"
+
+
+# --------------------------------------------------------------------------- #
 # #414 -- Triage: line + (for a non-trivial ticket) 2-3 considered
 # approaches with trade-offs. Restores the interactive-`/brainstorming`-era
 # design depth the owner reported degrading to a single paragraph once
