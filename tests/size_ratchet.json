@@ -355,7 +355,7 @@
     "tests/test_repeat_question_block_740.py": 220,
     "tests/test_repeat_question_semantic_878.py": 236,
     "tests/test_replay_backlog_marker_corpus.py": 60,
-    "tests/test_replay_design_gate_commit_corpus.py": 195,
+    "tests/test_replay_design_gate_commit_corpus.py": 199,
     "tests/test_reply_grace.py": 643,
     "tests/test_repo_health_owner_guard_717.py": 283,
     "tests/test_report_reconcile.py": 525,
