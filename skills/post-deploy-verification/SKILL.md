@@ -1,6 +1,6 @@
 ---
 name: post-deploy-verification
-description: Three-layer post-deploy verification (liveness, version-match via DOM read, functional Playwright E2E) required after every deployment before reporting success. Load after any deploy, before declaring it verified.
+description: Three-layer post-deploy verification: liveness, version-match via DOM read, functional Playwright E2E. Load after any deploy.
 user-invocable: false
 ---
 

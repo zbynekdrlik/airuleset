@@ -33,6 +33,11 @@ import statusbar  # noqa: E402
 
 SKILL = airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md"
 VOCAB = airuleset.REPO_DIR / "modules" / "core" / "statusline-vocabulary.md"
+# #859 batch 3: the deep W-bullet state-machine detail (incl. the #539
+# acceptance side-branches and #622 queued-acceptance clauses this suite
+# locks) moved to this companion.
+VOCAB_DEEP2 = (airuleset.REPO_DIR / "skills" / "statusline-vocabulary-deep"
+               / "DEEP-2.md")
 
 
 def _labels(*names):
@@ -63,7 +68,8 @@ class DoctrineNamesAcceptanceSideBranches(unittest.TestCase):
                         "(go-live) branch (#539)")
 
     def test_vocab_names_both_side_branches(self):
-        t = self._norm(VOCAB.read_text(encoding="utf-8")).lower()
+        # #859 batch 3: moved to companion
+        t = self._norm(VOCAB_DEEP2.read_text(encoding="utf-8")).lower()
         self.assertTrue("fix-class" in t,
                         "statusline-vocabulary.md must NAME the fix-class branch (#539)")
         self.assertTrue("no-thread" in t or "no thread" in t,
@@ -76,7 +82,7 @@ class DoctrineNamesAcceptanceSideBranches(unittest.TestCase):
         # The mechanism the doctrine prescribes: supervisor-set ops-wait WITH
         # evidence = W even before any thread is sent. Assert the tie in each
         # file (never auto-labelled — the supervisor sets AND clears it).
-        for f in (SKILL, VOCAB):
+        for f in (SKILL, VOCAB_DEEP2):  # #859 batch 3: moved to companion
             t = self._norm(f.read_text(encoding="utf-8")).lower()
             i = t.find("fix-class")
             self.assertGreaterEqual(i, 0)
@@ -566,7 +572,7 @@ class DoctrineNamesQueuedAcceptanceBranch(unittest.TestCase):
                       '"otázky na mňa?" answered by #606 step-by-step (#622)')
 
     def test_vocab_names_queued_branch(self):
-        t = self._norm(VOCAB)
+        t = self._norm(VOCAB_DEEP2)  # #859 batch 3: moved to companion
         i = t.find("queued = u (#622")
         self.assertGreaterEqual(i, 0,
                                 "statusline-vocabulary.md must name the #622 "

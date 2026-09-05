@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO))
 import watchdog.ops_wait_recheck as owr  # noqa: E402
 
 STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 
 FLEET_FINDER = "24h-push kontrakt (#607)"
 # co-tokens UNIQUE to the #607 fleet sentence within the W bullet's single line:
@@ -48,7 +49,7 @@ class FleetRuleContentLock(unittest.TestCase):
     """statusline-vocabulary.md W bullet carries the #607 24h-push kontrakt."""
 
     def test_status_W_bullet_carries_607_contract(self):
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3
         line = _line_with(text, FLEET_FINDER)
         self.assertTrue(line, "W bullet must carry the #607 24h-push kontrakt")
         for tok in FLEET_TOKENS:
@@ -58,7 +59,7 @@ class FleetRuleContentLock(unittest.TestCase):
     def test_607_finder_is_unique_on_the_line(self):
         # #578 teeth rule: the finder must occur exactly once across the whole
         # W-bullet line so a partial revert of the #607 clause genuinely fails.
-        text = STATUS.read_text(encoding="utf-8")
+        text = STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3
         self.assertEqual(text.count(FLEET_FINDER), 1,
                          "the #607 finder must be unique (partial-revert teeth)")
 

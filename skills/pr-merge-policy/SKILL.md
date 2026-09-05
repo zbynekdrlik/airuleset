@@ -1,6 +1,6 @@
 ---
 name: pr-merge-policy
-description: Full dev-to-main PR merge procedure — default auto-merge when all gates are green, the manual-merge marker opt-out, scope for reduced-authority streams, and the non-negotiable absolutes. Load when opening, gating, or merging a PR.
+description: Full dev-to-main PR merge procedure — default auto-merge, manual-marker opt-out, reduced-authority scope. Load when merging.
 user-invocable: false
 ---
 

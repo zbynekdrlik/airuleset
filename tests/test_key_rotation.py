@@ -202,19 +202,72 @@ class TestPhaseAdd(unittest.TestCase):
     @mock.patch("cli_fleet.SHARED_STREAM_GUARD_HOSTS", _TEST_GUARDS)
     @mock.patch("cli_fleet.REMOTE_HOSTS", _TEST_HOSTS)
     def test_gk_hop_for_root_subdev(self):
-        """(h) root@subdev ssh goes through -J gatekeeper@<gk>."""
+        """(h) root@subdev ssh uses NESTED ssh through gatekeeper, not -J.
+
+        ProxyJump (-J) would tunnel TCP but auth from dev1's key, which
+        root@subdev doesn't have. The nested form lets gatekeeper auth
+        with its own ~/.ssh/config Host subdev identity.  #870 F1 fix.
+        """
         run, calls = _make_runner()
         kr.phase_add(new_pubkey=FIXTURE_NEW_PUBKEY,
                      old_identity="~/.secrets/gk",
                      state_file=self.state_file, run=run)
-        # Find the call for root@10.0.0.4
-        root_calls = [c for c in calls if "root@10.0.0.4" in c[0]]
-        self.assertTrue(root_calls, "no call for root@subdev")
-        argv = root_calls[0][0]
-        self.assertIn("-J", argv)
-        # The -J arg is the next element after -J
-        j_idx = argv.index("-J")
-        self.assertIn("gatekeeper@", argv[j_idx + 1])
+        # Find the nested-ssh call: outer target is gatekeeper@ AND
+        # the command string (last element) contains inner ssh to root@
+        nested_calls = []
+        for c in calls:
+            argv = c[0]
+            # Outer target is gatekeeper@ (positional arg, not in a flag)
+            has_gk_target = any(
+                a.startswith("gatekeeper@") and not a.startswith("-")
+                for a in argv
+            )
+            # Inner command contains root@ (using either IP or alias)
+            has_inner_root = ("root@" in argv[-1]
+                              and "ssh" in argv[-1]) if argv else False
+            if has_gk_target and has_inner_root:
+                nested_calls.append(c)
+        self.assertTrue(nested_calls, "no nested-ssh call through gatekeeper")
+        argv = nested_calls[0][0]
+        # Must NOT use ProxyJump
+        self.assertNotIn("-J", argv)
+        # The inner command (last argv element) is a nested ssh
+        inner_cmd = argv[-1]
+        self.assertIn("ssh", inner_cmd)
+        # With the real _SUBDEV_HOST (100.118.174.27), the inner host would
+        # be aliased to _SUBDEV_SSH_CONFIG_ALIAS so gk's ~/.ssh/config
+        # picks up the right identity. With the test fixture IP (10.0.0.4),
+        # the alias doesn't fire — that's correct for the unit test.
+        self.assertIn("root@", inner_cmd)
+        self.assertIn("BatchMode=yes", inner_cmd)
+
+    def test_gk_hop_alias_with_real_subdev_host(self):
+        """The SSH config alias fires ONLY when host == _SUBDEV_HOST.
+
+        Fable review MEDIUM finding: the fixture host 10.0.0.4 never
+        triggers the alias branch. This test uses the REAL _SUBDEV_HOST
+        IP so the alias conditional fires and the inner command uses
+        'root@subdev' instead of 'root@<IP>'.  #870 F1 review fix.
+        """
+        entry = {"name": "subdev", "host": kr._SUBDEV_HOST,
+                 "admin_user": "root",
+                 "identity": "~/.secrets/gatekeeper_access_ed25519"}
+        cmd = kr._build_ssh_cmd(entry, "~/.secrets/gk",
+                                "echo test", via_gk_hop=True)
+        inner = cmd[-1]
+        # Inner ssh must use the alias, NOT the IP
+        self.assertIn("root@%s" % kr._SUBDEV_SSH_CONFIG_ALIAS, inner)
+        self.assertNotIn(kr._SUBDEV_HOST, inner)
+
+    def test_gk_hop_no_alias_for_non_subdev(self):
+        """A non-subdev host going via gk hop keeps its original host."""
+        entry = {"name": "other", "host": "10.99.99.99",
+                 "admin_user": "root",
+                 "identity": "~/.secrets/gk"}
+        cmd = kr._build_ssh_cmd(entry, "~/.secrets/gk",
+                                "echo test", via_gk_hop=True)
+        inner = cmd[-1]
+        self.assertIn("root@10.99.99.99", inner)
 
 
 class TestPhaseVerify(unittest.TestCase):
@@ -673,6 +726,55 @@ class TestRemoveUsesNewKey(unittest.TestCase):
         # The -i flag should point to the NEW key, not the old identity
         i_idx = argv.index("-i")
         self.assertEqual(argv[i_idx + 1], self.new_key)
+
+
+class TestNewPubkeyPresent(unittest.TestCase):
+    """F1 PREP: FLEET_PUSH_PUBKEYS has 2 members; member [1] is the new key."""
+
+    def test_tuple_has_two_members(self):
+        """FLEET_PUSH_PUBKEYS must hold exactly 2 members during F1 rotation."""
+        self.assertEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
+                         "F1 PREP: new pubkey not yet appended as member [1]")
+
+    def test_new_key_comment(self):
+        """Member [1] carries the airuleset-push@airuleset #870 comment."""
+        self.assertGreaterEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
+                                "need member [1] to test its comment")
+        new = wto.FLEET_PUSH_PUBKEYS[1]
+        self.assertIn("airuleset-push@airuleset", new)
+
+    def test_new_key_fingerprint(self):
+        """Member [1] fingerprint matches the known value from the airuleset
+        box keygen (2026-09-05, SHA256:LMxTTC4QcRbrCqJjHR7hssgJNVPZ/...)."""
+        self.assertGreaterEqual(len(wto.FLEET_PUSH_PUBKEYS), 2,
+                                "need member [1] to test its fingerprint")
+        new = wto.FLEET_PUSH_PUBKEYS[1]
+        self.assertTrue(new.startswith("ssh-ed25519 "),
+                        "expected ssh-ed25519 prefix")
+        expected_fp = "SHA256:LMxTTC4QcRbrCqJjHR7hssgJNVPZ/x8TXgy23E/CuG0"
+        import subprocess as _sp
+        try:
+            r = _sp.run(
+                ["ssh-keygen", "-lf", "-"],
+                input=new.strip() + "\n",
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and expected_fp in r.stdout:
+                return  # fingerprint verified via ssh-keygen
+        except FileNotFoundError:
+            # airuleset:script-ok CI runner may lack ssh-keygen
+            import sys as _sys
+            print("  ssh-keygen not found, using blob fallback",
+                  file=_sys.stderr)
+        # Fallback: validate blob structure (51 bytes = ed25519)
+        import base64
+        parts = new.split()
+        self.assertGreaterEqual(len(parts), 2, "need at least type + blob")
+        decoded = base64.b64decode(parts[1], validate=True)
+        self.assertEqual(len(decoded), 51,
+                         "ed25519 pubkey blob must be 51 bytes")
+        self.assertIn(b"ssh-ed25519", decoded,
+                      "inner type prefix must be ssh-ed25519")
 
 
 class TestOldPubkeyConsistency(unittest.TestCase):

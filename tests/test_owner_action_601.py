@@ -38,6 +38,12 @@ from watchdog import ops_wait_recheck  # noqa: E402
 
 SKILL = airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md"
 VOCAB = airuleset.REPO_DIR / "modules" / "core" / "statusline-vocabulary.md"
+# #859 batch 3: the deep U/W state-machine detail (incl. the #601 clauses this
+# class locks) moved to these companions.
+VOCAB_DEEP1 = (airuleset.REPO_DIR / "skills" / "statusline-vocabulary-deep"
+               / "DEEP-1.md")
+VOCAB_DEEP2 = (airuleset.REPO_DIR / "skills" / "statusline-vocabulary-deep"
+               / "DEEP-2.md")
 
 
 def _labels(*names):
@@ -262,7 +268,7 @@ def _norm_window(text, start_token, end_marker="\n- **"):
 
 class OwnerActionDoctrineLock(unittest.TestCase):
     def test_status_U_bullet_carries_601_clause(self):
-        text = VOCAB.read_text(encoding="utf-8")
+        text = VOCAB_DEEP1.read_text(encoding="utf-8")  # #859 batch 3: moved to companion
         line = _line_with(text, STATUS_U_FINDER)
         self.assertTrue(line, "the STATUS U bullet must carry the #601 clause")
         for tok in U_TOKENS:
@@ -270,7 +276,7 @@ class OwnerActionDoctrineLock(unittest.TestCase):
                             "STATUS U bullet lost the #601 token %r" % tok)
 
     def test_status_W_bullet_carries_601_misshape_clause(self):
-        text = VOCAB.read_text(encoding="utf-8")
+        text = VOCAB_DEEP2.read_text(encoding="utf-8")  # #859 batch 3: moved to companion
         line = _line_with(text, STATUS_W_FINDER)
         self.assertTrue(line, "the STATUS W bullet must carry the #601 clause")
         for tok in W_TOKENS:
@@ -287,7 +293,8 @@ class OwnerActionDoctrineLock(unittest.TestCase):
                             "autopilot SKILL lost the #601 token %r" % tok)
 
     def test_doctrine_states_owner_is_not_a_third_party_on_all_surfaces(self):
-        for path in (VOCAB, SKILL):
+        # #859 batch 3: the VOCAB-side clauses moved to companions
+        for path in (VOCAB_DEEP1, VOCAB_DEEP2, SKILL):
             t = " ".join(path.read_text(encoding="utf-8").split()).lower()
             self.assertIn("needs-owner-action", t)
             self.assertIn("owner", t)
