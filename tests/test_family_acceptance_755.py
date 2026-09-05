@@ -93,7 +93,7 @@ class FamilyAcceptanceBulletInHandoverCompose(TestCase):
         self.assertIn("Acceptance-defer:", w,
                       "non-last family members use Acceptance-defer:")
         self.assertIn("channel-agnostic", w,
-                      "must state discuss_close_guard.py stays untouched")
+                      "must state channel-agnostic acceptance markers (#891)")
 
     def test_back_citation_same_cycle_close(self):
         w = self._window()
