@@ -75,6 +75,20 @@ From the artifact's zero-caller list (skill-usage 90d fleet window):
 - Ask the user per candidate: retire (delete) / keep (with reason) / convert to `paths:` rule
 - User-invocable: false skills with zero model invocations are agent-only dead code
 
+## Step 5b — /skill-doctor: per-skill health (#893)
+
+Run `/skill-doctor` once on the current box (non-interactive: `echo '/skill-doctor' | claude -p`). Install-shape signals (context cost, duplicates, plugin wiring) are fleet-invariant — airuleset manages them identically, so one box answers for all. The 7-day token attribution is per-machine usage and stays a SECONDARY signal.
+
+**Consume (unique signals /skill-doctor provides):**
+- **Per-skill context cost** (~N tokens/turn for description listing) — rank skills by always-on cost; top-cost skills are first candidates to slim descriptions or convert to `paths:` rules. Feeds the #857 context ceiling.
+- **7-day token attribution** — heavy body cost + rare fleet use = slim/convert candidate. SECONDARY signal only; never a retirement basis alone.
+- **Duplicate detection** — same skill loaded from multiple sources is an install-wiring BUG to fix, not just a finding to report.
+- **Plugin freshness** — cross-check with the artifact's fleet usage (Step 5) before disabling; per-machine recency alone never disables a plugin.
+
+**Ignore (dedup with Step 5):** the `uses`/`last used` columns and the "N skills loaded but never invoked" footer. The artifact's fleet 90-day `skill-usage` data (Step 5) is the sole authority for zero-caller retirement decisions — never use /skill-doctor's per-machine 7-day window for that.
+
+If `/skill-doctor` is unavailable (CC < v2.1.252), skip this step with a logged note — never block the review.
+
 ## Step 6 — Live web research (AXIS 1–3, extends the artifact)
 
 WebSearch + WebFetch, queries built from the live model:
