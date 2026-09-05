@@ -14733,11 +14733,11 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             'sshpass -p newlevel ssh -o StrictHostKeyChecking=no montalu1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_blocks_marek_after_decommission_882(self):
-        # marek removed from the hardcoded allowlist (#882, decommissioned)
+    def test_allows_marek_with_gatekeeper_identity_882(self):
+        # #882 scope correction: marek@subdev restored (observer lane).
         r = self._run(
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 marek@subdev "ls"')
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_david1_with_gatekeeper_identity(self):
         # david renamed to david1 (#537 live rename 2026-08-21) — the hook
@@ -14774,12 +14774,12 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run("scp file.txt montalu1@subdev:/tmp/")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_blocks_rsync_marek_after_decommission_882(self):
-        # marek removed from allowlist (#882)
+    def test_allows_rsync_marek_882(self):
+        # #882 scope correction: marek@subdev restored (observer lane).
         r = self._run(
             "rsync -avz -e 'ssh -i ~/.secrets/gatekeeper_access_ed25519' "
             "./local/ marek@subdev:/remote/")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     # --- non-subdev traffic is completely untouched ----------------------
 
