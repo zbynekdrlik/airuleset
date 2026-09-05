@@ -109,6 +109,28 @@ class TestClassifySharedBenefit(unittest.TestCase):
         ok, reason = dg.classify_shared_benefit(body)
         self.assertTrue(ok, reason)
 
+    # YELLOW-1: bold-form bare n/a must still be rejected
+    def test_bold_bare_na_fails(self):
+        body = GOOD_BASE + "\n**Shared-benefit:** n/a"
+        ok, reason = dg.classify_shared_benefit(body)
+        self.assertFalse(ok, "bold bare n/a should be rejected")
+
+    def test_bold_bare_nie_fails(self):
+        body = GOOD_BASE + "\n**Shared-benefit:** nie"
+        ok, reason = dg.classify_shared_benefit(body)
+        self.assertFalse(ok, "bold bare nie should be rejected")
+
+    # YELLOW-3: boundary tests for the len(tail) < 5 threshold
+    def test_na_with_3char_reason_fails(self):
+        body = GOOD_BASE + "\nShared-benefit: n/a — abc"
+        ok, reason = dg.classify_shared_benefit(body)
+        self.assertFalse(ok, "3-char reason should be rejected (< 5)")
+
+    def test_na_with_5char_reason_passes(self):
+        body = GOOD_BASE + "\nShared-benefit: n/a — abcde"
+        ok, reason = dg.classify_shared_benefit(body)
+        self.assertTrue(ok, reason)
+
 
 if __name__ == "__main__":
     unittest.main()

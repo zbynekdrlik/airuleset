@@ -3149,6 +3149,7 @@ def cmd_gk_request(args):
 HANDOFF_DEFAULT_LENSES = [
     "security", "correctness", "test-integrity",
     "evidence-integrity", "design-doctrine", "process",
+    "shared-benefit",  # #877 — fleet-wide, unconditional
 ]
 
 # Receipt directory for the hook to verify.

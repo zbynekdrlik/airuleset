@@ -755,6 +755,10 @@ def classify_shared_benefit(body):
         return False, ("missing: Shared-benefit: line "
                        "(disposition — shared/single-client/n/a — reason)")
     val = m.group("val").strip()
+    # Strip leading/trailing markdown bold markers that leak from bold
+    # header forms like `**Shared-benefit:** n/a` — the regex admits `**`
+    # before the colon but the trailing `**` glues into val (YELLOW-1).
+    val = val.strip("*").strip()
     if not val:
         return False, "Shared-benefit: value is empty"
     # A bare negative (n/a, no, nie, none, -) with no trailing reason.
@@ -763,7 +767,7 @@ def classify_shared_benefit(body):
         return False, "Shared-benefit: bare n/a without a reason"
     # Split on common reason separators (— / - / , / ;) and check whether
     # the part BEFORE the first separator is a bare negative AND the part
-    # AFTER is empty or whitespace-only (e.g. "n/a" alone with no separator).
+    # AFTER has fewer than 5 chars (too short to be a real reason).
     parts = re.split(r"\s*[—\-,;]\s*", val, maxsplit=1)
     stem = parts[0].strip()
     tail = parts[1].strip() if len(parts) > 1 else ""
