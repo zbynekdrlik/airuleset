@@ -27,7 +27,7 @@
     "cli_quals_cmd.py": 988,
     "cli_remote.py": 1413,
     "cli_resource_guards.py": 375,
-    "cli_scratch_sweep.py": 1505,
+    "cli_scratch_sweep.py": 1801,
     "cli_skill_usage.py": 315,
     "cli_target_purge.py": 892,
     "cli_tmux_provisioning.py": 2005,
@@ -462,7 +462,7 @@
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_worktree_write_guard.py": 416,
     "tests/test_wrapped_draft.py": 627,
-    "watchdog/__init__.py": 4606,
+    "watchdog/__init__.py": 4608,
     "watchdog/burn_jobs.py": 338,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
@@ -525,7 +525,7 @@
     "cli_vault.py::cmd_secret": 228,
     "cli_worktree_sweep.py::purge_merged_lane_targets": 219,
     "cli_worktree_sweep.py::sweep_stale_worktrees": 203,
-    "watchdog/__init__.py::run_once": 2567,
+    "watchdog/__init__.py::run_once": 2569,
     "watchdog/cards.py::card_reconcile": 326,
     "watchdog/cards.py::report_reconcile": 225,
     "watchdog/compact.py::deliver_compact": 299,
@@ -552,7 +552,7 @@
     ".claude/rules/internals-skills-modules.md": 51200,
     ".claude/rules/internals-statusbar.md": 51200,
     ".claude/rules/internals-tests.md": 51098,
-    ".claude/rules/internals-watchdog.md": 51200,
+    ".claude/rules/internals-watchdog.md": 52000,
     ".claude/rules/internals-webterm.md": 51200
   }
 }

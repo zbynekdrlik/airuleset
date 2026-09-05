@@ -79,11 +79,31 @@ def _claude_scratch_root(tmp_dir=None, uid=None) -> Path:
 
 
 def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
-                                       min_age_days=None, proc_dir=None):
+                                       min_age_days=None, proc_dir=None, home=None):
     """Every direct child (file OR directory) of THIS account's OWN
     `/tmp/claude-<uid>/` scratch root that is safe to reclaim -- #355. A
     list of dicts `{"path", "reason", "size"?, "age_days"?}` -- `reason` is
     `None` for a genuine candidate, else WHY it was excluded.
+
+    #863 -- GRANULARITY. A cwd-key directory (`<root>/<encoded-cwd>`) that
+    holds uuid-shaped `<session-uuid>` subdirs is DESCENDED: each session
+    subdir is its OWN candidate (age = newest mtime in THAT subtree,
+    liveness = `_session_liveness` -- a live-process fd on the subtree, the
+    AUTHORITATIVE sessions registry mapping the uuid to a live pid (the only
+    signal that survives a `claude -c` resume, #863), OR a fresh transcript; an
+    UNDETERMINABLE liveness is KEPT but never counted as a live session), so a
+    DEAD session is
+    swept even while a LIVE sibling in the same cwd-key keeps writing.
+    Backward-compat: a cwd-key with NO uuid children (only non-uuid session
+    names) keeps today's exact whole-cwd-key handling; a non-uuid entry
+    directly under a cwd-key that DOES have uuid siblings, and a loose
+    file/symlink at the scratch root, likewise keep today's whole-entry
+    handling. A per-session row additionally carries `uuid`, `cwd_key`, and
+    `live` (True when the session was kept as live -- the visibility signal
+    the disk-guard reads for `largest_live_scratch`). The empty cwd-key dir
+    left after its last dead session is swept is removed in
+    `sweep_claude_scratch`. `home` locates `~/.claude/projects/<cwd-key>/
+    <uuid>.jsonl` for the transcript signal (defaults to `~`).
 
     Safety criteria (NON-NEGOTIABLE):
       - the root must be NAMED `claude-<N>` where N is LITERALLY
@@ -116,12 +136,14 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
 
     Known, deliberate residuals (round 1/round 2 adversarial review,
     THEORETICAL, none closed under the FREEZE -- no new watchdog job):
-      - finding 4: a session tmux-parked idle for MORE than `min_age_days`
-        with no cwd/fd currently held inside its own tree can still have
-        real (non-empty) scratch data reclaimed -- the live-use check
-        only sees processes ACTIVELY holding a reference, and mtime only
-        sees recent writes, neither of which "this session is parked but
-        will resume" can express. Same residual every mtime-based ager in
+      - finding 4 (NARROWED by #863's sessions-registry signal): a session
+        whose PROCESS IS GONE (hence absent from the registry) that a human
+        intends to `claude --resume` later, idle for MORE than `min_age_days`
+        with no cwd/fd held inside its tree, can still have real scratch data
+        reclaimed -- the registry/live-use checks see only a RUNNING process,
+        and mtime only recent writes, neither of which "this dead session will
+        be resumed" can express. A LIVE session (registry- or fd-present, or a
+        fresh transcript) is now always kept, even mid-resume. Same residual every mtime-based ager in
         this repo accepts. A parked session whose tree stayed EMPTY the
         whole time hits the SAME gap through the empty-tree fallback
         above (round-2 finding F2) -- strictly weaker (zero bytes lost;
@@ -157,8 +179,271 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
     out = []
     for name in names:
         p = root / name
-        out.append(_classify_scratch_entry(p, now, min_age_days, proc_dir))
+        # A loose file / symlink at the scratch root -> today's whole-entry
+        # handling. A DIRECTORY child is a cwd-key dir: descend to per-session
+        # granularity IFF it holds any uuid-shaped session subdir (#863).
+        if p.is_symlink() or not p.is_dir():
+            out.append(_classify_scratch_entry(p, now, min_age_days, proc_dir))
+            continue
+        try:
+            children = sorted(os.listdir(p))
+        except OSError:
+            # unreadable cwd-key dir -> fall back to whole-entry handling
+            out.append(_classify_scratch_entry(p, now, min_age_days, proc_dir))
+            continue
+        if not any(_SESSION_UUID_RE.match(c) for c in children):
+            # no session-uuid subdirs -> today's exact whole-cwd-key handling
+            out.append(_classify_scratch_entry(p, now, min_age_days, proc_dir))
+            continue
+        for c in children:
+            cp = p / c
+            if _SESSION_UUID_RE.match(c):
+                out.append(_classify_scratch_session(
+                    cp, cwd_key=name, uuid=c, now=now,
+                    min_age_days=min_age_days, proc_dir=proc_dir, home=home))
+            else:
+                # a non-uuid entry directly under a cwd-key -> whole-entry
+                out.append(_classify_scratch_entry(cp, now, min_age_days, proc_dir))
 
+    return out
+
+
+# A standard v4-shaped session uuid, the harness's own `<cwd-key>/<session-id>`
+# directory name (#863).
+_SESSION_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+# A session whose transcript jsonl was written within this many seconds is
+# treated as LIVE regardless of any process-fd signal (#863).
+SCRATCH_SESSION_LIVE_MTIME_S = 10 * 60
+
+
+# Tri-state session liveness (#863). A determinable POSITIVE signal, a
+# determinable NEGATIVE (dead), or UNDETERMINABLE (kept, but never counted as a
+# real live session in the disk-guard's largest_live_scratch -- review 5).
+_SESS_LIVE = "live"
+_SESS_DEAD = "dead"
+_SESS_UNDET = "undeterminable"
+
+
+def _proc_readable(proc_dir) -> bool:
+    """True iff `/proc` (or the injected `proc_dir`) is a readable, listable
+    directory -- the precondition for a determinable liveness verdict. When
+    this is False, a positive `_target_in_live_use` was a FAIL-SAFE True
+    (undeterminable), not a genuine live signal (#863 review 5)."""
+    try:
+        proc = Path(proc_dir) if proc_dir is not None else Path("/proc")
+        if not proc.is_dir():
+            return False
+        os.listdir(proc)
+        return True
+    except OSError:
+        return False
+
+
+def _session_registry_signal(cwd_key, uuid, home, now, proc_dir) -> str:
+    """Tri-state liveness of session `<uuid>` from the AUTHORITATIVE sessions
+    registry (`~/.claude/sessions/*.json` -> {"pid","sessionId"}) plus the
+    transcript-mtime backstop (#863). A registry record whose `sessionId`
+    matches this uuid and whose `/proc/<pid>` exists => `_SESS_LIVE` -- the ONLY
+    signal that survives a `claude -c` resume (the process holds an fd on a NEW
+    uuid dir, not its sessionId, so the /proc-fd scan misses the real
+    scratchpad session). A matching record with a DEAD pid is not-live by this
+    signal. Fail-safe: any registry read/parse error => `_SESS_UNDET` (KEEP) --
+    a record we cannot read might be THIS uuid's. A missing registry/transcript
+    is simply no evidence (`_SESS_DEAD`); a MISSING registry DIRECTORY is not an
+    error (the box may have none), so it is no-evidence, never undeterminable."""
+    try:
+        proc = Path(proc_dir) if proc_dir is not None else Path("/proc")
+        sdir = _claude_sessions_dir(home)
+        try:
+            reg_names = os.listdir(sdir)
+        except OSError:
+            reg_names = []
+        had_corrupt = False
+        for rn in reg_names:
+            if not rn.endswith(".json"):
+                continue
+            try:
+                data = json.loads((sdir / rn).read_text())
+            except (OSError, ValueError):
+                # Fable review 2 blue 1: a single corrupt registry file must
+                # NOT disable the whole rung -- keep scanning for a genuine
+                # match (a corrupt file only poisons the verdict when no
+                # readable record decides it).
+                had_corrupt = True
+                continue
+            if not isinstance(data, dict) or data.get("sessionId") != uuid:
+                continue
+            pid = data.get("pid")
+            try:
+                if pid is not None and (proc / str(int(pid))).exists():
+                    return _SESS_LIVE
+            except (TypeError, ValueError, OSError):
+                return _SESS_UNDET
+            # a matching record with a DEAD pid -> keep scanning (a duplicate
+            # live record could exist), then the transcript backstop decides.
+        tpath = _claude_projects_dir(home) / cwd_key / ("%s.jsonl" % uuid)
+        try:
+            if tpath.exists() and (now - os.lstat(tpath).st_mtime) < SCRATCH_SESSION_LIVE_MTIME_S:
+                return _SESS_LIVE
+        except OSError:
+            return _SESS_UNDET
+        # A corrupt file that we skipped (no match found among readable
+        # files) MIGHT have been this uuid's record -- fail-safe UNDET/KEEP.
+        return _SESS_UNDET if had_corrupt else _SESS_DEAD
+    except OSError:
+        return _SESS_UNDET
+
+
+def _session_uuid_live(cwd_key, uuid, home, now, proc_dir) -> bool:
+    """True (KEEP) iff session `<uuid>` is live OR its liveness is
+    UNDETERMINABLE -- the fail-safe bool the classifier's subtree check ORs
+    against (#863). The authoritative registry rule lives in
+    `_session_registry_signal`; a determinable DEAD verdict is the only False.
+    (SCRATCH_SESSION_LIVE_MTIME_S stays at 10 min, NOT widened to the age floor:
+    the registry keeps a live session regardless of transcript mtime, so the
+    mtime window is only a backstop for a session with no registry record --
+    widening it would merely duplicate the age floor while reclaiming less.)"""
+    return _session_registry_signal(cwd_key, uuid, home, now, proc_dir) != _SESS_DEAD
+
+
+def _session_liveness(cp, cwd_key, uuid, home, now, proc_dir) -> str:
+    """Tri-state liveness of a `<cwd_key>/<uuid>` scratch SUBTREE (#863) -- the
+    combined verdict `_classify_scratch_session` and the drain TOCTOU re-check
+    both use. `_SESS_LIVE`: a determinable positive signal (a live process holds
+    an fd inside the subtree; the registry maps uuid->a live pid; or a fresh
+    transcript). `_SESS_DEAD`: determinable, no live signal. `_SESS_UNDET`: the
+    liveness signals could not be read (no /proc, a registry error) -- KEPT, but
+    never counted as a real live session (review 5)."""
+    proc_ok = _proc_readable(proc_dir)
+    if proc_ok and _target_in_live_use(cp, proc_dir=proc_dir):
+        return _SESS_LIVE
+    sig = _session_registry_signal(cwd_key, uuid, home, now, proc_dir)
+    if sig == _SESS_LIVE:
+        return _SESS_LIVE
+    if sig == _SESS_UNDET or not proc_ok:
+        return _SESS_UNDET
+    return _SESS_DEAD
+
+
+def _scratch_stat(p):
+    """(size_bytes, newest_mtime) with the #355 empty-tree mtime fallback --
+    shared by the whole-entry and per-session classifiers. Raises OSError on a
+    stat failure (the caller turns that into a KEEP row)."""
+    if p.is_dir():
+        size_bytes, newest_mtime = _dir_stats(p)
+        if newest_mtime is None:
+            # #355 adversarial-review finding 1 (MAJOR, live-confirmed on
+            # dev1): the harness pre-creates <cwd>/<session>/scratchpad EMPTY
+            # at session start, before a live session has written anything --
+            # an empty tree must NEVER read as "infinitely stale" (unlike
+            # #315's target/ purge, where an empty target/ genuinely has zero
+            # bytes to protect). Fall back to the DIRECTORY's OWN mtime so a
+            # tree created seconds ago stays protected by the age floor.
+            newest_mtime = os.lstat(p).st_mtime
+    else:
+        st = os.lstat(p)
+        size_bytes, newest_mtime = st.st_size, st.st_mtime
+    return size_bytes, newest_mtime
+
+
+def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, home):
+    """Per-session (#863) classification of a `<cwd-key>/<session-uuid>` subdir.
+    LIVENESS FIRST (tri-state `_session_liveness`): a genuinely LIVE session (a
+    live process fd on the subtree, the AUTHORITATIVE sessions registry mapping
+    the uuid to a live pid, or a fresh transcript) is KEPT UNCONDITIONALLY --
+    even at critical/>=95 %, independent of the age floor -- and marked
+    `live=True` (the visibility signal the disk-guard's `largest_live_scratch`
+    reads). An UNDETERMINABLE liveness is ALSO kept but marked `live=False`
+    (review 5: never named as a real live session). Otherwise the ordinary #355
+    age floor applies. Fail-safe: unresolvable liveness never sweeps."""
+    entry = {"path": str(cp), "reason": None, "uuid": uuid,
+             "cwd_key": cwd_key, "live": False}
+    if cp.is_symlink():
+        entry["reason"] = "symlink entry -- never followed, never deleted through"
+        return entry
+    try:
+        size_bytes, newest_mtime = _scratch_stat(cp)
+    except OSError as e:
+        entry["reason"] = "could not stat: %s" % e
+        return entry
+    entry["size"] = size_bytes
+    entry["age_days"] = (now - newest_mtime) / 86400.0
+    liveness = _session_liveness(cp, cwd_key, uuid, home, now, proc_dir)
+    if liveness == _SESS_LIVE:
+        entry["live"] = True
+        entry["reason"] = ("live session %s -- kept unconditionally "
+                           "(visibility only)" % uuid)
+        return entry
+    if liveness == _SESS_UNDET:
+        entry["reason"] = "liveness undeterminable -- kept"
+        return entry
+    if entry["age_days"] < min_age_days:
+        entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
+        return entry
+    return entry   # reason stays None -- dead + old -> genuine candidate
+
+
+def scratch_session_live_recheck(path, home=None, now=None, proc_dir=None) -> bool:
+    """TOCTOU pre-delete liveness re-check for the disk-guard scratch drain
+    executor (#863 review 4). Returns True (REFUSE the delete) iff `path` is a
+    `<cwd_key>/<session-uuid>` per-session scratch dir that is now LIVE or
+    UNDETERMINABLE (`_session_liveness` != dead) -- a session that raced live
+    (a `claude --resume <uuid>`) since plan time. A path that is NOT a
+    per-session uuid dir returns False (a whole-cwd-key / loose-file / wt-* /
+    tmp-stray delete is out of scope here and proceeds). Fail-safe: for a uuid
+    path, any error -> True (KEEP)."""
+    import time as _time
+    now = _time.time() if now is None else now
+    try:
+        p = Path(path)
+        if not _SESSION_UUID_RE.match(p.name):
+            return False
+    except Exception:
+        # Fable review 2 blue 2: a path we cannot even classify should
+        # refuse the delete (fail-safe KEEP), not allow it.
+        return True
+    try:
+        return _session_liveness(p, p.parent.name, p.name, home, now, proc_dir) != _SESS_DEAD
+    except Exception:
+        return True
+
+
+def _remove_empty_cwd_key_dirs(cwd_key_dirs, uid=None, dry_run=False):
+    """rmdir each EMPTY cwd-key dir in `cwd_key_dirs` (absolute paths) -- the
+    dirs a session was ACTUALLY removed from THIS run, never an unrelated empty
+    dir (#863 review 3; the #355 "created seconds ago must stay protected"
+    principle). Empty only, never recursive, never a symlink, only THIS
+    account's own dirs. Returns result rows for logging; a `(dry-run)` row acts
+    on nothing."""
+    uid = os.getuid() if uid is None else uid
+    out = []
+    for d in sorted(set(str(x) for x in cwd_key_dirs)):
+        p = Path(d)
+        try:
+            if p.is_symlink() or not p.is_dir():
+                continue
+            if os.stat(str(p)).st_uid != uid:
+                continue
+            if any(True for _ in os.scandir(p)):
+                continue   # not empty -- a live/other session still lives here
+        except OSError:
+            continue
+        row = {"path": str(p), "size": 0, "removed": False,
+               "reason": "empty cwd-key dir"}
+        if dry_run:
+            row["reason"] = "empty cwd-key dir (dry-run)"
+            out.append(row)
+            continue
+        try:
+            os.rmdir(p)
+            row["removed"] = True
+            row["reason"] = "removed empty cwd-key dir"
+        except OSError as e:
+            row["reason"] = "empty cwd-key rmdir failed: %s" % e
+        out.append(row)
     return out
 
 
@@ -176,24 +461,11 @@ def _classify_scratch_entry(p, now, min_age_days, proc_dir):
         entry["reason"] = "symlink entry -- never followed, never deleted through"
         return entry
     try:
-        if p.is_dir():
-            size_bytes, newest_mtime = _dir_stats(p)
-            if newest_mtime is None:
-                # #355 adversarial-review finding 1 (MAJOR, live-
-                # confirmed on dev1): the harness pre-creates
-                # <cwd>/<session>/scratchpad EMPTY at session start,
-                # before a live session has written anything -- an
-                # empty tree must NEVER read as "infinitely stale"
-                # (unlike #315's target/ purge, where an empty
-                # target/ genuinely has zero bytes to protect and
-                # "always reclaimable" is correct there). Fall back
-                # to the DIRECTORY's OWN mtime so a tree created
-                # seconds ago stays protected by the age floor
-                # exactly like a non-empty one would.
-                newest_mtime = os.lstat(p).st_mtime
-        else:
-            st = os.lstat(p)
-            size_bytes, newest_mtime = st.st_size, st.st_mtime
+        # `_scratch_stat` carries the #355 adversarial-review finding-1 empty-
+        # tree mtime fallback (an empty <cwd>/<session>/scratchpad the harness
+        # pre-creates must never read as "infinitely stale") -- shared with the
+        # #863 per-session classifier.
+        size_bytes, newest_mtime = _scratch_stat(p)
     except OSError as e:
         entry["reason"] = "could not stat: %s" % e
         return entry
@@ -296,7 +568,7 @@ def _log_claude_scratch_results(results, log_path, now, dry_run: bool):
 def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
                          now=None, log_path=None, state_path=None,
                          force: bool = False, min_age_days=None,
-                         candidates=None, proc_dir=None):
+                         candidates=None, proc_dir=None, home=None):
     """Reclaim every stale claude scratch/tmp path EITHER
     `discover_claude_scratch_candidates` (#355, `/tmp/claude-<uid>/*`) OR
     `discover_stray_worktree_tmp_candidates` (#380, top-level `/tmp/wt-*`)
@@ -343,7 +615,8 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
     if candidates is None:
         try:
             candidates = discover_claude_scratch_candidates(
-                tmp_dir, uid=uid, now=now, min_age_days=min_age_days, proc_dir=proc_dir)
+                tmp_dir, uid=uid, now=now, min_age_days=min_age_days,
+                proc_dir=proc_dir, home=home)
             candidates = candidates + discover_stray_worktree_tmp_candidates(
                 tmp_dir, uid=uid, now=now, min_age_days=min_age_days, proc_dir=proc_dir)
         except Exception as e:
@@ -390,6 +663,18 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
         except OSError as e:
             entry["reason"] = "delete failed: %s" % e
         results.append(entry)
+
+    # #863: a cwd-key dir emptied by sweeping its LAST dead session is inode
+    # litter -- rmdir it (empty only, and ONLY a cwd-key a per-session subtree
+    # was ACTUALLY removed from THIS run, never an unrelated empty dir -- #355
+    # "created seconds ago must stay protected", review 3). Skipped in dry-run;
+    # never on a discovery failure (nothing was swept from the scratch root).
+    if not dry_run and not discovery_failed:
+        removed_ck_dirs = {str(Path(r["path"]).parent) for r in results
+                           if r.get("removed") and r.get("uuid") and r.get("path")}
+        if removed_ck_dirs:
+            results.extend(_remove_empty_cwd_key_dirs(removed_ck_dirs, uid=uid,
+                                                      dry_run=dry_run))
 
     _log_claude_scratch_results(results, log_path, now, dry_run)
 
@@ -1015,6 +1300,17 @@ def _claude_projects_dir(home=None) -> Path:
     directory, one per encoded cwd (matches `encode_project_dir`)."""
     home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
     return home / ".claude" / "projects"
+
+
+def _claude_sessions_dir(home=None) -> Path:
+    """`~/.claude/sessions/` -- the AUTHORITATIVE per-session registry the
+    harness writes (one `<pid>.json` per live/resumed session, recording
+    `{"pid", "sessionId", ...}`). The ONLY liveness signal that survives a
+    `claude -c` resume -- the process then holds an fd on a NEW uuid dir, not
+    its sessionId, so the /proc-fd scan misses the real scratchpad session
+    (#863)."""
+    home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
+    return home / ".claude" / "sessions"
 
 
 def _min_size_bytes_env(explicit, env_key, default):

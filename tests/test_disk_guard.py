@@ -8,12 +8,33 @@ logged), and never deletes on uncertainty. These tests assert on PLANS and
 skip-reasons and injected seams — never on a real deletion path.
 """
 
+import json
 import os
 import types
+from pathlib import Path
 
 import watchdog.disk_guard as dg
 import cli_worktree_sweep as wt
+import cli_scratch_sweep as cs
 import statusbar
+
+
+def _mkfakeproc(root, entries):
+    """A fake `/proc`-shaped tree (same helper shape as test_fleet_hygiene.py —
+    this repo has no tests/__init__.py, so the small helper is duplicated
+    rather than cross-imported, an established convention)."""
+    proc = Path(root) / "proc"
+    proc.mkdir(parents=True, exist_ok=True)
+    for e in entries:
+        pdir = proc / e["pid"]
+        pdir.mkdir()
+        if e.get("cwd") is not None:
+            os.symlink(e["cwd"], pdir / "cwd")
+        fdd = pdir / "fd"
+        fdd.mkdir()
+        for i, target in enumerate(e.get("fds", [])):
+            os.symlink(target, fdd / str(i))
+    return str(proc)
 
 
 # --------------------------------------------------------------------------- #
@@ -1375,3 +1396,241 @@ def test_runner_superseded_keeps_staged_version_with_fewer_segments(tmp_path):
     by = {os.path.basename(r["path"]): r for r in rows if r.get("path")}
     assert by["bin.2.337"]["kind"] == "skip"
     assert by["bin.2.337"]["reason"] is not None
+
+
+# #863 — scratch rung at <cwd-key>/<session-uuid> granularity
+# --------------------------------------------------------------------------- #
+_NOW = 1_000_000_000.0
+_DAY = 86400.0
+_DEAD_UUID = "74e50984-1111-2222-3333-444444444444"
+_LIVE_UUID = "f219f0e3-5555-6666-7777-888888888888"
+
+
+def _mkfile(path, age_days, now=_NOW, nbytes=2048):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * nbytes)
+    mt = now - age_days * _DAY
+    os.utime(path, (mt, mt))
+
+
+def _scratch_cwd_key(root, uid):
+    r = Path(root) / ("claude-%d" % uid)
+    return r / "-home-gatekeeper-devel-odoo-odoo-erp"
+
+
+def test_scratch_per_session_dead_sibling_swept_while_live_sibling_kept(tmp_path):
+    """The #863 core: a DEAD session subtree is a genuine candidate even when a
+    LIVE sibling in the SAME cwd-key keeps it looking recent. Both are OLD by
+    mtime; the live one is held live by a process cwd, the dead one is not."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    dead = ck / _DEAD_UUID / "tasks" / "old.bin"
+    live = ck / _LIVE_UUID / "scratchpad" / "old.bin"
+    _mkfile(dead, age_days=30)
+    _mkfile(live, age_days=30)                      # OLD by mtime — kept only via liveness
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "606078", "cwd": str((ck / _LIVE_UUID).resolve())}])
+    rows = cs.discover_claude_scratch_candidates(
+        tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+        proc_dir=proc, home=str(tmp_path))
+    by = {r["uuid"]: r for r in rows if r.get("uuid")}
+    assert _DEAD_UUID in by and _LIVE_UUID in by, "each session-uuid is its own candidate"
+    assert by[_DEAD_UUID]["reason"] is None, "the dead session must be a genuine (sweepable) candidate"
+    assert by[_LIVE_UUID]["reason"] is not None, "the live sibling must be kept"
+    assert by[_LIVE_UUID]["live"] is True
+
+
+def test_scratch_live_session_never_swept_even_at_critical(tmp_path):
+    """A live session (recent transcript jsonl signal, no process cwd match) is
+    kept UNCONDITIONALLY — discovery carries no pressure level, so keeping is by
+    construction independent of critical/>=95%. Its subtree is OLD by mtime."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    live = ck / _LIVE_UUID / "scratchpad" / "old.bin"
+    _mkfile(live, age_days=30)
+    # fresh transcript for this uuid -> session-uuid liveness signal
+    tj = Path(tmp_path) / ".claude" / "projects" / "-home-gatekeeper-devel-odoo-odoo-erp" / ("%s.jsonl" % _LIVE_UUID)
+    _mkfile(tj, age_days=0)
+    proc = _mkfakeproc(tmp_path, [])                # NO process holds the subtree
+    rows = cs.discover_claude_scratch_candidates(
+        tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+        proc_dir=proc, home=str(tmp_path))
+    by = {r["uuid"]: r for r in rows if r.get("uuid")}
+    assert by[_LIVE_UUID]["reason"] is not None
+    assert by[_LIVE_UUID]["live"] is True, "a fresh transcript uuid signal must keep the session"
+
+
+def test_scratch_unresolvable_uuid_kept(tmp_path):
+    """Fail-safe: a session whose liveness cannot be resolved (no readable /proc)
+    is KEPT, never swept — even though it is old and no live signal exists."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    sess = ck / _DEAD_UUID / "tasks" / "old.bin"
+    _mkfile(sess, age_days=30)
+    rows = cs.discover_claude_scratch_candidates(
+        tmp_dir=str(tmp_path), uid=uid, now=_NOW, min_age_days=7,
+        proc_dir=str(tmp_path / "no-such-proc"), home=str(tmp_path))
+    by = {r["uuid"]: r for r in rows if r.get("uuid")}
+    assert by[_DEAD_UUID]["reason"] is not None, "unresolvable liveness must fail-safe to KEEP"
+    assert by[_DEAD_UUID]["live"] is False, "undeterminable liveness is NOT a real live session"
+    assert "undeterminable" in by[_DEAD_UUID]["reason"]
+
+
+def test_scratch_empty_cwd_key_removed_after_sweep(tmp_path):
+    """After the last dead session in a cwd-key is swept, the now-empty cwd-key
+    dir is removed too (inode hygiene)."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    dead = ck / _DEAD_UUID / "tasks" / "old.bin"
+    _mkfile(dead, age_days=30)
+    proc = _mkfakeproc(tmp_path, [])                # empty but readable /proc
+    cs.sweep_claude_scratch(
+        tmp_dir=str(tmp_path), uid=uid, dry_run=False, force=True, now=_NOW,
+        min_age_days=7, proc_dir=proc,
+        log_path=tmp_path / "log.log", state_path=tmp_path / "state.json")
+    assert not (ck / _DEAD_UUID).exists(), "the dead session subtree must be swept"
+    assert not ck.exists(), "the emptied cwd-key dir must be removed after the sweep"
+
+
+def test_status_records_largest_live_scratch(tmp_path):
+    """At >=80% pressure the guard records the largest LIVE session scratchpad it
+    kept into status.json (visibility only — never deleted, no ping)."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    big_live = ck / _LIVE_UUID / "scratchpad" / "big.bin"
+    small_dead = ck / _DEAD_UUID / "tasks" / "old.bin"
+    _mkfile(big_live, age_days=30, nbytes=9000)
+    _mkfile(small_dead, age_days=30, nbytes=100)
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "606078", "cwd": str((ck / _LIVE_UUID).resolve())}])
+
+    def _discover(now, home):
+        return cs.discover_claude_scratch_candidates(
+            tmp_dir=str(tmp_path), uid=uid, now=now, min_age_days=7,
+            proc_dir=proc, home=str(tmp_path))
+
+    def _noop_planners(_home, _now):
+        return [("noop", lambda: [])]
+
+    dg.run_disk_guard(
+        now=_NOW, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (96, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: uid or 1000, mounts=("/",),
+        planners_fn=_noop_planners, scratch_discover_fn=_discover)
+    status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    lls = status.get("largest_live_scratch")
+    assert lls is not None, "status.json must record the largest live scratch"
+    assert _LIVE_UUID in lls["path"], "the LIVE session must be the one recorded, not the dead one"
+    assert lls["bytes"] == 9000
+
+
+def test_session_uuid_live_registry_resumed_session(tmp_path):
+    """#863 : a resumed (`claude -c`) session's process holds an fd on a NEW
+    uuid dir, not its sessionId, so the /proc-fd scan misses the real scratchpad
+    session. The AUTHORITATIVE signal is the sessions registry
+    (`~/.claude/sessions/*.json` -> {"pid","sessionId"}): a record for this uuid
+    whose /proc/<pid> exists => live, even with an OLD transcript and no fd."""
+    home = tmp_path / "home"
+    sdir = home / ".claude" / "sessions"
+    sdir.mkdir(parents=True)
+    (sdir / ("%d.json" % os.getpid())).write_text(
+        json.dumps({"pid": os.getpid(), "sessionId": _LIVE_UUID}))
+    proc = _mkfakeproc(tmp_path, [{"pid": str(os.getpid()), "cwd": str(tmp_path)}])
+    _mkfile(home / ".claude" / "projects" / "-home-x" / ("%s.jsonl" % _LIVE_UUID),
+            age_days=30)
+    assert cs._session_uuid_live("-home-x", _LIVE_UUID, str(home), _NOW, proc) is True
+    (sdir / "deadrec.json").write_text(
+        json.dumps({"pid": 999999999, "sessionId": _DEAD_UUID}))
+    _mkfile(home / ".claude" / "projects" / "-home-x" / ("%s.jsonl" % _DEAD_UUID),
+            age_days=30)
+    assert cs._session_uuid_live("-home-x", _DEAD_UUID, str(home), _NOW, proc) is False
+
+
+def test_scratch_unrelated_empty_cwd_key_survives_sweep(tmp_path):
+    """#863 : the empty-cwd-key rmdir removes ONLY the cwd-key dir a session was
+    actually swept from THIS run -- never an unrelated empty cwd-key dir (the
+    #355 'created seconds ago must stay protected' principle)."""
+    uid = os.getuid()
+    root = Path(tmp_path) / ("claude-%d" % uid)
+    ck_swept = root / "-home-x-proj"
+    _mkfile(ck_swept / _DEAD_UUID / "tasks" / "old.bin", age_days=30)
+    ck_unrelated = root / "-home-y-other"
+    ck_unrelated.mkdir(parents=True)
+    proc = _mkfakeproc(tmp_path, [])
+    cs.sweep_claude_scratch(
+        tmp_dir=str(tmp_path), uid=uid, dry_run=False, force=True, now=_NOW,
+        min_age_days=7, proc_dir=proc, home=str(tmp_path),
+        log_path=tmp_path / "l.log", state_path=tmp_path / "s.json")
+    assert not (ck_swept / _DEAD_UUID).exists(), "dead session swept"
+    assert not ck_swept.exists(), "the emptied cwd-key of the swept session removed"
+    assert ck_unrelated.exists(), "an unrelated empty cwd-key dir must survive"
+
+
+def test_drain_refuses_scratch_delete_when_recheck_says_live(tmp_path):
+    """#863 : the disk-guard drain executor re-checks per-session liveness
+    immediately before rmtree -- a session that raced live between plan and act
+    is refused (the sweep path already does this; the drain path did not)."""
+    sess = tmp_path / "claude-x" / "-home-x" / _DEAD_UUID
+    (sess / "tasks").mkdir(parents=True)
+    (sess / "tasks" / "f.bin").write_bytes(b"x" * 100)
+    a = {"cls": "scratch", "path": str(sess), "bytes": 100, "kind": "delete"}
+    # Fable review 2: _perform_action returns -1 (REFUSE signal) instead of
+    # raising, so execute_drain logs it as REFUSE, not FAIL.
+    result = dg._perform_action(a, scratch_live_fn=lambda p, n: True, now=_NOW)
+    assert result == -1, "a session that raced live must return -1 (REFUSE)"
+    assert sess.exists(), "a refused session must NOT be deleted"
+    dg._perform_action(a, scratch_live_fn=lambda p, n: False, now=_NOW)
+    assert not sess.exists(), "a genuinely dead session is deleted normally"
+
+
+def test_largest_live_scratch_single_discovery_and_change_only_log(tmp_path, monkeypatch):
+    """#863 : at >=80% the largest-live-scratch visibility must NOT run a SECOND
+    full scratch discovery every poll -- the drain SHARES the one it already did
+    -- and the LIVE-SCRATCH log line is written only when the value CHANGES."""
+    uid = os.getuid()
+    ck = _scratch_cwd_key(tmp_path, uid)
+    _mkfile(ck / _LIVE_UUID / "scratchpad" / "big.bin", age_days=30, nbytes=5000)
+    proc = _mkfakeproc(tmp_path, [
+        {"pid": "42", "cwd": str((ck / _LIVE_UUID).resolve())}])
+    calls = {"n": 0}
+    real = cs.discover_claude_scratch_candidates
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(tmp_dir=str(tmp_path), uid=uid, now=k.get("now"),
+                    min_age_days=7, proc_dir=proc, home=str(tmp_path))
+
+    monkeypatch.setattr(cs, "discover_claude_scratch_candidates", _counting)
+    log = tmp_path / ".claude" / "disk-guard" / "disk-guard.log"
+    kw = dict(now=_NOW, home=str(tmp_path), dry_run=True,
+              statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
+              geteuid_fn=lambda: uid or 1000, mounts=("/",))
+    dg.run_disk_guard(**kw)
+    assert calls["n"] == 1, "exactly ONE scratch discovery per drain poll"
+    assert log.exists() and log.read_text().count("LIVE-SCRATCH") == 1
+    dg.run_disk_guard(**kw)
+    assert log.read_text().count("LIVE-SCRATCH") == 1, \
+        "an unchanged largest_live_scratch must not log a second LIVE-SCRATCH line"
+
+
+def test_no_scratch_discovery_at_healthy_pressure(tmp_path):
+    """Fable review round 2 RED: at healthy pressure (<80%), the du-heavy
+    scratch discovery must NEVER run -- it is gated on the same pressure
+    floor as the drain itself. A box at 40% must not walk /tmp every 60s."""
+    uid = os.getuid()
+    calls = {"n": 0}
+
+    def _counting_discover(now, home):
+        calls["n"] += 1
+        return []
+
+    dg.run_disk_guard(
+        now=_NOW, home=str(tmp_path), dry_run=False,
+        statvfs_fn=statvfs_map({"/": (40, 20)}), dev_fn=dev_map({"/": 1}),
+        geteuid_fn=lambda: uid or 1000, mounts=("/",),
+        scratch_discover_fn=_counting_discover)
+    assert calls["n"] == 0, \
+        "scratch discovery must NOT run at healthy pressure (<80%%)"
+    status = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert "largest_live_scratch" not in status, \
+        "no largest_live_scratch at healthy pressure"
