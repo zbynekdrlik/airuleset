@@ -331,7 +331,7 @@
     "tests/test_prose_gate_output_line.py": 263,
     "tests/test_prose_gate_pipeline_race.py": 380,
     "tests/test_prose_gate_prod_capitulation.py": 356,
-    "tests/test_prose_gate_retry_state.py": 499,
+    "tests/test_prose_gate_retry_state.py": 516,
     "tests/test_prose_gate_slovak_approval.py": 322,
     "tests/test_prose_gate_u_summary.py": 247,
     "tests/test_prose_gate_undeterminable.py": 423,

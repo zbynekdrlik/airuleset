@@ -38,6 +38,7 @@ hook never touches it, so the write is inert; it is restored to its prior
 content on teardown either way.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -178,10 +179,26 @@ class TestBookkeepingNeverSuppressesTheVerdict(_HookCase):
 
 class TestUnknownSessionIsNotAThrottleBucket(_HookCase):
 
+    # Every test here mutates the ONE box-wide SHARED_BUCKET path, and
+    # pytest-xdist's default `--dist load` scatters this class's tests across
+    # worker processes -- a sibling's write ("5\n" / MAX_RETRIES) landing
+    # between another test's write and read is the Pass A flake of 2026-09-05.
+    # A cross-PROCESS flock serializes the class under any dist mode; the
+    # LIFO addCleanup order runs _restore BEFORE the unlock, so the bucket is
+    # back to its prior content while the lock is still held.
+    _LOCK_PATH = "/tmp/airuleset-stop-block-unknown.test-lock"
+
     def setUp(self):
+        self._lockf = open(self._LOCK_PATH, "a")
+        fcntl.flock(self._lockf, fcntl.LOCK_EX)
+        self.addCleanup(self._unlock)
         self._prior = (SHARED_BUCKET.read_text()
                        if SHARED_BUCKET.exists() else None)
         self.addCleanup(self._restore)
+
+    def _unlock(self):
+        fcntl.flock(self._lockf, fcntl.LOCK_UN)
+        self._lockf.close()
 
     def _restore(self):
         if self._prior is None:
