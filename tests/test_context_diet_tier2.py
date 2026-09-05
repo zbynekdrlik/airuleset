@@ -275,5 +275,136 @@ class TestClaudeCodeToolingConversion(TestCase):
         self.assertIn("claude-code-tooling-history.md", self.module)
 
 
+# ===== Batch 2 — deeper top-6 pass + new modules =====
+
+
+class TestModelAwarenessB2(TestCase):
+    """model-awareness.md batch 2: 2026-09-04 owner directive → history."""
+
+    def setUp(self):
+        self.module = _read("modules/core/model-awareness.md")
+        self.history = (REF / "model-awareness-history.md").read_text(encoding="utf-8")
+
+    def test_fable51_ban_directive_in_history(self):
+        self.assertIn("Znova mam extremne zle vysleddky", self.history)
+
+    def test_fable51_ban_directive_not_in_module(self):
+        self.assertNotIn("Znova mam extremne zle vysleddky", self.module)
+
+    def test_721_burn_narrative_not_in_module(self):
+        self.assertNotIn("burn only SHIFTED, it did not shrink", self.module)
+
+    def test_fable51_ban_rule_stays(self):
+        self.assertIn("Fable 5.1", self.module)
+        self.assertIn("BANNED fleet-wide", self.module)
+
+
+class TestMessageStatusMarkerConversion(TestCase):
+    """message-status-marker.md: incident narratives → history."""
+
+    def setUp(self):
+        self.module = _read("modules/core/message-status-marker.md")
+        self.history = (REF / "message-status-marker-history.md").read_text(
+            encoding="utf-8"
+        )
+
+    # --- moved content at NEW location ---
+    def test_740_incident_in_history(self):
+        self.assertIn("miva1 re-emitted ONE question", self.history)
+
+    def test_791_verbatim_in_history(self):
+        self.assertIn("Nech nie je rozdiel medzi nocou a dnom", self.history)
+
+    def test_codex_bridge_in_history(self):
+        self.assertIn("codex-bridge", self.history)
+
+    def test_400_backstory_in_history(self):
+        self.assertIn("permanent no-op #400", self.history)
+
+    # --- moved content NOT in module ---
+    def test_740_incident_not_in_module(self):
+        self.assertNotIn("miva1 re-emitted ONE question", self.module)
+
+    def test_791_verbatim_not_in_module(self):
+        self.assertNotIn("Nech nie je rozdiel medzi nocou a dnom", self.module)
+
+    # --- core stays ---
+    def test_three_markers_stay(self):
+        for m in ("NEEDS YOU", "WORKING", "DONE"):
+            self.assertIn(m, self.module)
+
+    def test_banned_section_stays(self):
+        self.assertIn("stop-check-status-marker.sh", self.module)
+
+    def test_pointer_exists(self):
+        self.assertIn("message-status-marker-history.md", self.module)
+
+
+class TestMilestoneNotificationsConversion(TestCase):
+    """milestone-notifications.md: #134 incident + alert retirement → history."""
+
+    def setUp(self):
+        self.module = _read("modules/core/milestone-notifications.md")
+        self.history = (REF / "milestone-notifications-history.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_134_incident_in_history(self):
+        self.assertIn("85 merged PRs", self.history)
+
+    def test_546_retirement_in_history(self):
+        self.assertIn("owner-suppressed at", self.history)
+
+    def test_134_incident_not_in_module(self):
+        self.assertNotIn("85 merged PRs", self.module)
+
+    # core stays
+    def test_enforcement_stays(self):
+        self.assertIn("ENFORCED, not advisory", self.module)
+
+    def test_anti_patterns_stay(self):
+        self.assertIn("Anti-patterns", self.module)
+
+    def test_pointer_exists(self):
+        self.assertIn("milestone-notifications-history.md", self.module)
+
+
+class TestCIMonitoringConversion(TestCase):
+    """ci-monitoring.md: probe results + measurement stories → history."""
+
+    def setUp(self):
+        self.module = _read("modules/core/ci-monitoring.md")
+        self.history = (REF / "ci-monitoring-history.md").read_text(encoding="utf-8")
+
+    def test_110_probes_in_history(self):
+        self.assertIn("8 of 8 probes", self.history)
+
+    def test_gh_run_watch_measurement_in_history(self):
+        self.assertIn("71 API calls", self.history)
+
+    def test_owner_quote_in_history(self):
+        self.assertIn("preco monitoring nespravis", self.history)
+
+    def test_110_probes_not_in_module(self):
+        self.assertNotIn("8 of 8 probes", self.module)
+
+    def test_gh_run_watch_stats_not_in_module(self):
+        self.assertNotIn("71 API calls", self.module)
+
+    # core stays
+    def test_all_jobs_rule_stays(self):
+        self.assertIn("ALL jobs must pass", self.module)
+        self.assertIn("Never stop at partial green", self.module)
+
+    def test_poll_recipe_stays(self):
+        self.assertIn("AIRULESET_POLL_BUDGET_S", self.module)
+
+    def test_deploy_watch_stays(self):
+        self.assertIn("DEPLOY_JOB_RE", self.module)
+
+    def test_pointer_exists(self):
+        self.assertIn("ci-monitoring-history.md", self.module)
+
+
 if __name__ == "__main__":
     main()

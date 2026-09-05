@@ -85,7 +85,7 @@ This OVERRIDES the generic "ask for prod DB access / an SSH tunnel" tool-request
 
 **A prod-STATE READ is NOT a genuinely-un-exercisable pre-prod CODE PATH.** A code PATH the pre-prod envs cannot exercise (a dead upstream feed, logic only a real prod event triggers) stays a legitimate `UNVERIFIED: <path>` the gatekeeper verifies on prod at release (`skills/process-subdev`). A prod-STATE READ has a self-service answer, so "can't verify prod state" written as a hand-off or a bounce is itself a FINDING, not an honest UNVERIFIED.
 
-Mechanically gated on BOTH sides: `hooks/block-gk-request-without-selfservice.sh` BLOCKS a gk action request without a `Self-service-checked:` line; `hooks/stop-check-prose-violations.sh` blocks an owner-facing "cannot verify on PROD" claim without a self-service attempt or explicit `UNVERIFIED:`. History + rationale — mechanization incidents (#516/#608): `.claude/rules-reference/autonomous-verification-history.md` (#859).
+Mechanically gated on BOTH sides: `hooks/block-gk-request-without-selfservice.sh` BLOCKS a gk action request without a `Self-service-checked:` line; the OWNER-CHAT path is now ALSO hook-gated (#608) — `hooks/stop-check-prose-violations.sh` blocks an owner-facing "cannot verify on PROD" claim without a self-service attempt or explicit `UNVERIFIED:`. History + rationale — mechanization incidents (#516/#608): `.claude/rules-reference/autonomous-verification-history.md` (#859).
 
 #### Banned hand-off phrases (intent — all rewordings apply)
 

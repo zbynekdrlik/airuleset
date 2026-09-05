@@ -85,7 +85,9 @@ class TestCiMonitoringDurationSplit(TestCase):
         t = read("modules/core/ci-monitoring.md")
         self.assertNotIn("corroborated by", t)
         self.assertIn("#29193", t)
-        self.assertIn("OPPOSITE failure mode", t)
+        # "OPPOSITE failure mode" archaeology moved to history (#859 batch 2)
+        hist = read(".claude/rules-reference/ci-monitoring-history.md")
+        self.assertIn("OPPOSITE failure mode", hist)
 
     def test_does_not_overclaim_confirmed_when_not_live_reproduced(self):
         # The old text asserted "This is confirmed CC behavior" outright.
