@@ -109,6 +109,8 @@ LOCK_NAME = ".lock"
 LOG_MAX_BYTES = 512 * 1024                  # self-bounding (#834 review-bite 7)
 MIN_DRAIN_INTERVAL_S = 10 * 60              # du-heavy ladder runs at most this often
 UPLOADS_MAX_AGE_DAYS = 14
+UPLOADS_KEEP_MARKERS = (".airuleset-keep", ".no-sweep")  # #861 opt-out
+DELETIONS_JOURNAL_PREFIX = "deletions-"                   # #861 durable journal
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS = 7        # owner-authorised pressure path (#834 rung e)
 TOOLCHAIN_DIRS = ("Android", ".gradle", ".android")
 TOOLCHAIN_PROC_RE = "gradle|java|emulator|qemu-system"
@@ -153,6 +155,25 @@ def _log_path(home=None):
     return str(_guard_dir(home) / LOG_NAME)
 
 
+def _append_deletion_journal(home, now, rung, path, nbytes, mtime, level):
+    """Append one deletion record to the durable monthly journal (#861).
+    ``~/.claude/disk-guard/deletions-YYYYMM.jsonl`` — append-only, monthly
+    files. The guard NEVER deletes or truncates these (they are outside
+    ``RECLAIMABLE_CLASSES``). Best-effort: a write failure is logged, never
+    a reason to skip the deletion itself."""
+    try:
+        gd = _guard_dir(home)
+        gd.mkdir(parents=True, exist_ok=True)
+        month = time.strftime("%Y%m", time.gmtime(now))
+        jp = gd / ("%s%s.jsonl" % (DELETIONS_JOURNAL_PREFIX, month))
+        entry = {"ts": now, "rung": rung, "path": path,
+                 "bytes": nbytes, "mtime": mtime, "level": level}
+        with open(jp, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        _dbg("could not write deletion journal: %r" % e)
+
+
 def _human(n):
     try:
         n = float(n)
@@ -189,21 +210,25 @@ def _log_line(now, action, path, nbytes, reason):
 
 def _append_log(log_path, lines):
     """Append `lines` to the decision log, best-effort, self-bounding: when the
-    file exceeds LOG_MAX_BYTES it is truncated to its most recent half in place
-    (a pressure guard whose OWN log grows unbounded is self-defeating)."""
+    file exceeds LOG_MAX_BYTES it is ROTATED to ``<path>.1`` (one generation)
+    so the last run's full log always stays readable (#861 — the old in-place
+    truncation destroyed the earlier half, losing deletion records within hours).
+    Rotation happens BEFORE the append so the new lines start a fresh file.
+    """
     if not lines or not log_path:
         return
     try:
         p = Path(log_path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        # Rotate BEFORE appending so new lines start a fresh file
+        if p.exists() and p.stat().st_size > LOG_MAX_BYTES:
+            rotated = Path(log_path + ".1")
+            try:
+                os.replace(str(p), str(rotated))
+            except OSError as e:
+                _dbg("log rotation rename failed: %r" % e)
         with open(p, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
-        if p.stat().st_size > LOG_MAX_BYTES:
-            data = p.read_bytes()[-(LOG_MAX_BYTES // 2):]
-            nl = data.find(b"\n")
-            if nl != -1:
-                data = data[nl + 1:]
-            p.write_bytes(b"# --- disk-guard.log rotated in place ---\n" + data)
     except OSError as e:
         print("  disk-guard: could not write log %s: %s" % (log_path, e), file=sys.stderr)
 
@@ -273,22 +298,74 @@ def write_status_cache(status, home=None, path=None):
 # --------------------------------------------------------------------------- #
 # NEW planners (uploads, toolchain)
 # --------------------------------------------------------------------------- #
+def _uploads_dir_has_keep_marker(dirpath):
+    """Check whether `dirpath` or ANY ancestor up to (but not including) the
+    uploads root contains a keep marker (#861). Fail-safe: if the marker or
+    its parent cannot be stat'd → return True (KEEP, never delete)."""
+    # Check the dir itself for a marker
+    for marker_name in UPLOADS_KEEP_MARKERS:
+        marker = os.path.join(dirpath, marker_name)
+        try:
+            if os.path.exists(marker):
+                return True
+        except OSError:
+            return True  # fail-safe KEEP on stat error
+    return False
+
+
 def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAYS,
                            uploads_dir=None):
     """Own-home ``~/uploads`` files older than `max_age_days` (#834 rung d — the
     upload inbox is a delivery CHANNEL, not storage; consumed recordings/dumps
     age out). Rows ``{cls, path, size, age_days, reason}`` — ``reason`` is None
     for a genuine candidate, else why it was kept. No ``~/uploads`` at all is
-    simply nothing to do, not an error."""
+    simply nothing to do, not an error.
+
+    #861: subtrees containing a ``.airuleset-keep`` or ``.no-sweep`` marker
+    file are PROTECTED — every file under such a subtree gets
+    ``reason="protected by <marker>"``. Fail-safe: unreadable marker → KEEP.
+    """
     now = time.time() if now is None else now
     up = Path(uploads_dir) if uploads_dir else (Path(home or os.path.expanduser("~")) / "uploads")
     if not up.is_dir():
         return []
     cutoff = max_age_days * 86400
     out = []
+    # Track which directories have a keep marker (cache for efficiency)
+    _keep_cache = {}  # dirpath -> bool
+
+    def _is_protected(dirpath):
+        """Check if dirpath or any of its ancestors (up to but not including
+        the uploads root) has a keep marker. Caches per directory."""
+        dp = os.path.normpath(dirpath)
+        up_norm = os.path.normpath(str(up))
+        if dp in _keep_cache:
+            return _keep_cache[dp]
+        # Walk from dirpath up to the uploads root
+        chain = []
+        cur = dp
+        while cur != up_norm and len(cur) > len(up_norm):
+            chain.append(cur)
+            cur = os.path.dirname(cur)
+        # Check from shallowest (closest to root) to deepest for cache reuse
+        for d in reversed(chain):
+            parent = os.path.dirname(d)
+            if parent in _keep_cache and _keep_cache[parent]:
+                _keep_cache[d] = True
+                continue
+            if _uploads_dir_has_keep_marker(d):
+                _keep_cache[d] = True
+            else:
+                _keep_cache[d] = False
+        return _keep_cache.get(dp, False)
+
     try:
         for dirpath, _dirs, files in os.walk(up, onerror=lambda e: None):
+            protected = _is_protected(dirpath)
             for f in files:
+                # Skip the marker files themselves
+                if f in UPLOADS_KEEP_MARKERS:
+                    continue
                 fp = os.path.join(dirpath, f)
                 try:
                     st = os.lstat(fp)
@@ -303,7 +380,9 @@ def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAY
                 age = now - st.st_mtime
                 row = {"cls": "uploads", "path": fp, "size": st.st_size,
                        "age_days": age / 86400.0, "reason": None}
-                if age < cutoff:
+                if protected:
+                    row["reason"] = "protected by keep marker (#861)"
+                elif age < cutoff:
                     row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, max_age_days)
                 out.append(row)
     except OSError as e:
@@ -1255,6 +1334,14 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
             rung_lines.append(_log_line(now, verb, path, planned,
                                         "freed~=%s %s" % (freed, a.get("why") or reason or "")))
+            # #861: durable deletions journal — every ACTED (non-dry-run)
+            # deletion is recorded in a monthly JSONL file the guard never
+            # deletes (outside RECLAIMABLE_CLASSES).
+            if not dry_run:
+                _append_deletion_journal(
+                    home, now, rung=_label, path=path, nbytes=planned,
+                    mtime=a.get("mtime", 0),
+                    level=status.get("level", "drain"))
             rung_freed += (freed or 0)
             rung_acted += 1
         logs.extend(rung_lines)

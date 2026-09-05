@@ -11,8 +11,6 @@ import json
 import os
 import time
 
-import pytest
-
 import watchdog.disk_guard as dg
 
 
@@ -164,7 +162,7 @@ def test_execute_drain_appends_deletion_journal_every_rung(tmp_path):
     recheck_calls = iter([90, 70])  # above target, then below
     log_path = str(guard_dir / dg.LOG_NAME)
 
-    logs = dg.execute_drain(
+    dg.execute_drain(
         status={"worst_pct": 90, "dim": "bytes", "level": "drain",
                 "mounts": [{"mount": "/", "worst_pct": 90}]},
         home=home,
