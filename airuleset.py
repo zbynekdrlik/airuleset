@@ -6563,6 +6563,26 @@ from cli_onboard import (  # noqa: E402
     cmd_onboard_project as cmd_onboard_project,
 )
 
+# --- #857: context-baseline + skill-usage CLI leaves ---
+from cli_context_baseline import (  # noqa: E402, F401
+    cmd_context_baseline as cmd_context_baseline,
+    measure_box as measure_box,
+    measure_skills as measure_skills,
+    resolve_imports_recursive as resolve_imports_recursive,
+    always_on_rule_files as always_on_rule_files,
+    bytes_to_tokens as bytes_to_tokens,
+    check_ratchet as check_ratchet,
+    update_ratchet as update_ratchet,
+    push_summary_line as push_summary_line,
+    _measure_repo_ceilings as _measure_repo_ceilings,
+    load_ratchet as load_ratchet,
+    save_ratchet as save_ratchet,
+)
+from cli_skill_usage import (  # noqa: E402, F401
+    cmd_skill_usage as cmd_skill_usage,
+    scan_usage as scan_usage,
+)
+
 
 # ---------------------------------------------------------------------------
 # Main
@@ -7337,6 +7357,34 @@ def main():
     p_goalinv.add_argument(
         "--json", action="store_true", help="Print the inventory as JSON")
 
+    # --- #857: context-baseline + skill-usage ---
+    p_cb = sub.add_parser(
+        "context-baseline",
+        help="Measure always-on context per box/project (#857)")
+    p_cb.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_cb.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+    p_cb.add_argument("--project", action="append", default=None,
+                      help="Project directory to measure (repeatable)")
+    p_cb.add_argument("--check", action="store_true",
+                      help="Check repo against ratchet ceilings (exit 1 if over)")
+    p_cb.add_argument("--update-ratchet", dest="update_ratchet",
+                      action="store_true",
+                      help="Update ratchet ceilings (only lowers by default)")
+    p_cb.add_argument("--allow-raise", dest="allow_raise", default=None,
+                      help="Allow raising a ceiling (must give a reason)")
+
+    p_su = sub.add_parser(
+        "skill-usage",
+        help="Scan transcript jsonl for Skill tool_use + slash commands (#857)")
+    p_su.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_su.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+    p_su.add_argument("--days", type=int, default=60,
+                      help="Window in days (default 60)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -7467,6 +7515,8 @@ SUBCOMMANDS = {
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
     "model-audit": cmd_model_audit,
+    "context-baseline": cmd_context_baseline,
+    "skill-usage": cmd_skill_usage,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
