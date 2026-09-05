@@ -39,7 +39,7 @@ class TestWorkflowCostDiscipline(TestCase):
         self.assertIn("salvage-before-discarding-work.md", t)
 
     def test_tiering_still_names_a_miss_and_keeps_lookups_light(self):
-        t = read("modules/core/model-awareness.md")
+        t = read("skills/model-awareness-deep/DEEP.md")
         # The self-audit must still name a tiering MISS (inverted under max-performance).
         self.assertIn("tiering MISS", t)
         # Mechanical lookups stay on a light/low tier under EVERY policy. The

@@ -285,19 +285,19 @@ class TestModelAwarenessInjection(_InjectorTestBase):
         )
 
     def test_workflow_injects(self):
-        """Workflow tool fires model-awareness-deep (sole row on Workflow)."""
+        """Workflow tool fires claude-code-workflows-tool + model-awareness-deep."""
         sid = uuid.uuid4().hex
         out = self._run_injector(
             "Workflow",
             {"scriptPath": "/tmp/test.js"},
             session_id=sid,
         )
-        self.assertIn("JUDGMENT-CONTENT test", out)
+        self.assertIn("JUDGMENT-CONTENT", out)
 
     def test_unrelated_bash_does_not_inject(self):
         sid = uuid.uuid4().hex
         out = self._run_injector("Bash", {"command": "ls -la"}, session_id=sid)
-        self.assertNotIn("JUDGMENT-CONTENT test", out)
+        self.assertNotIn("JUDGMENT-CONTENT", out)
 
 
 class TestGhCliRecipesInjection(_InjectorTestBase):

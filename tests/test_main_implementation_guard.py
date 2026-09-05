@@ -2518,11 +2518,9 @@ class TestWiringAndSkill(unittest.TestCase):
         self.assertIn("fable-advisor", airuleset.SKILL_NAMES)
 
     def test_model_awareness_points_at_the_enforcement(self):
-        txt = (REPO / "modules" / "core" / "model-awareness.md").read_text()
+        txt = (REPO / "skills" / "model-awareness-deep" / "DEEP.md").read_text()
         self.assertIn("block-main-implementation.sh", txt)
         self.assertIn("fable-advisor", txt)
-        # the generalization itself must be documented, not just the old
-        # Fable-only behavior
         self.assertIn("#54", txt)
         self.assertRegex(txt, r"(?i)armed[^\n]*(/goal|goal)")
 

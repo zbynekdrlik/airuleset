@@ -188,9 +188,9 @@ class TestHandoverTriggerRow(TestCase):
         self.assertIn("odoo-discuss-xmlrpc", self.by_topic)
         self.assertEqual(self.by_topic["odoo-discuss-xmlrpc"][3], SKILL_BODY_REL)
 
-    def test_topics_still_unique(self):
-        topics = [r[0] for r in self.rows]
-        self.assertEqual(len(topics), len(set(topics)), "duplicate topic in table")
+    def test_topic_tool_pairs_still_unique(self):
+        pairs = [(r[0], r[1]) for r in self.rows]
+        self.assertEqual(len(pairs), len(set(pairs)), "duplicate (topic, tool) in table")
 
     def test_pattern_has_the_recall_arm(self):
         # F3: a klient×vlákno/Discuss proximity arm beyond the odovzd/handover family
