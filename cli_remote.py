@@ -1178,12 +1178,12 @@ def _deploy_to_all_remotes(failed, auth_failed):
             shutil.rmtree(control_dir, ignore_errors=True)
 
 
-def _runner_shape_env(base_env, repo_dir):
+def _runner_shape_env(base_env, repo_dir, tmp_home):
     """Build a CI-mirroring env dict with a fresh HOME (#875).
 
-    Returns ``(env_dict, tmp_home_path)``. The caller must keep the tmp home
-    alive until the subprocess finishes (the TemporaryDirectory context
-    manager that owns it lives in cmd_push's own ``with`` block).
+    ``tmp_home`` is a CALLER-OWNED directory (a TemporaryDirectory context
+    manager in ``_run_pass_a``'s own ``with`` block, so it is cleaned up
+    when the pass finishes — never leaked).
 
     The fresh HOME is seeded with a minimal ``.gitconfig`` carrying the same
     two ``safe.directory`` entries the CI workflow sets (ci.yml L58/L64) —
@@ -1191,12 +1191,13 @@ def _runner_shape_env(base_env, repo_dir):
     subprocess dies ``fatal: detected dubious ownership`` (the #683 run-3
     debug, internals-ci.md).
     """
-    import tempfile
-    tmp_home = tempfile.mkdtemp(prefix="airuleset-runner-home-")
     env = dict(base_env)
     env["HOME"] = tmp_home
     env["XDG_CONFIG_HOME"] = str(Path(tmp_home) / ".config")
     env["XDG_CACHE_HOME"] = str(Path(tmp_home) / ".cache")
+    # Strip PYTEST_ADDOPTS so a dev-shell override never de-mirrors Pass A
+    # from CI (F3, #875 review).
+    env.pop("PYTEST_ADDOPTS", None)
     # Seed .gitconfig with the safe.directory entries CI sets.
     gitconfig = Path(tmp_home) / ".gitconfig"
     gitconfig.write_text(
@@ -1205,7 +1206,69 @@ def _runner_shape_env(base_env, repo_dir):
         "\tdirectory = %s\n"
         % (str(repo_dir), str(repo_dir / ".git"))
     )
-    return env, tmp_home
+    return env
+
+
+def _run_pass_a(repo_dir):
+    """Run the CI-mirroring hermetic pytest subset under a clean HOME (#875).
+
+    Returns the subprocess returncode. Prints wall time and pytest version.
+    All temp dirs are owned by this function's own context managers — nothing
+    is leaked (F1, #875 review).
+    """
+    import subprocess
+    import tempfile
+    import time as _time_mod
+    with tempfile.TemporaryDirectory() as _rescue_a, \
+            tempfile.TemporaryDirectory() as _lock_a, \
+            tempfile.TemporaryDirectory() as _suite_a, \
+            tempfile.TemporaryDirectory(prefix="airuleset-runner-home-") as _home_a:
+        base = dict(os.environ)
+        base["AIRULESET_DRAFT_RESCUE_DIR"] = str(
+            Path(_rescue_a) / "draft-rescue")
+        base["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
+        base["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
+            Path(_lock_a) / "autopilot-lock")
+        base["AIRULESET_SESSION_STATUS_DIR"] = str(
+            Path(_lock_a) / "session-status")
+        base["AIRULESET_CONTENT_DEDUP_DIR"] = str(
+            Path(_lock_a) / "content-dedup")
+        base["AIRULESET_GOAL_ROSTER_PATH"] = str(
+            Path(_lock_a) / "goal-roster.json")
+        base["AIRULESET_MDREVIEW_STATE_PATH"] = str(
+            Path(_lock_a) / "mdreview-cadence.json")
+        base["AIRULESET_RESURRECT_ACTION"] = ""
+        base["TMPDIR"] = str(_suite_a)
+        env = _runner_shape_env(base, repo_dir, _home_a)
+        # Build the CI argv from the deny-list.
+        ci_result = subprocess.run(
+            [sys.executable, str(repo_dir / "scripts" / "ci_pytest_args.py"),
+             str(repo_dir / ".github" / "box-bound-tests.txt")],
+            capture_output=True, text=True, cwd=str(repo_dir),
+        )
+        if ci_result.returncode != 0:
+            print("  PASS A FAILED: ci_pytest_args.py error: %s"
+                  % ci_result.stderr.strip(), file=sys.stderr)
+            return 1
+        deny_args = [a for a in ci_result.stdout.strip().split("\n") if a]
+        argv = [
+            sys.executable, "-m", "pytest", "tests/",
+            *deny_args,
+            "-p", "no:cacheprovider",
+            "-o", "addopts=",
+            "-q",
+        ]
+        t0 = _time_mod.monotonic()
+        result = subprocess.run(argv, cwd=str(repo_dir), env=env)
+        wall = _time_mod.monotonic() - t0
+        # Pytest version diagnostic (dev1 vs CI's pinned 8.3.2).
+        try:
+            import importlib.metadata
+            _pv = importlib.metadata.version("pytest")
+        except Exception:  # noqa: BLE001 — diagnostic only
+            _pv = "unknown"
+        print("  Pass A: wall %.1fs, pytest %s" % (wall, _pv))
+    return result.returncode
 
 
 def cmd_push(args):
@@ -1246,57 +1309,8 @@ def cmd_push(args):
     # test failures BEFORE they burn a 15-min CI cycle. Pass B (the existing
     # unittest run) follows only when Pass A is green.
     import tempfile
-    import time as _time_mod
     print("Running Pass A (runner-shape, clean HOME, CI hermetic subset)...")
-    with tempfile.TemporaryDirectory() as _rescue_a, \
-            tempfile.TemporaryDirectory() as _lock_a, \
-            tempfile.TemporaryDirectory() as _suite_a:
-        pass_a_base = dict(os.environ)
-        pass_a_base["AIRULESET_DRAFT_RESCUE_DIR"] = str(
-            Path(_rescue_a) / "draft-rescue")
-        pass_a_base["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
-        pass_a_base["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
-            Path(_lock_a) / "autopilot-lock")
-        pass_a_base["AIRULESET_SESSION_STATUS_DIR"] = str(
-            Path(_lock_a) / "session-status")
-        pass_a_base["AIRULESET_CONTENT_DEDUP_DIR"] = str(
-            Path(_lock_a) / "content-dedup")
-        pass_a_base["AIRULESET_GOAL_ROSTER_PATH"] = str(
-            Path(_lock_a) / "goal-roster.json")
-        pass_a_base["AIRULESET_MDREVIEW_STATE_PATH"] = str(
-            Path(_lock_a) / "mdreview-cadence.json")
-        pass_a_base["AIRULESET_RESURRECT_ACTION"] = ""
-        pass_a_base["TMPDIR"] = str(_suite_a)
-        pass_a_env, _pass_a_home = _runner_shape_env(pass_a_base, REPO_DIR)
-        # Build the CI argv from the deny-list.
-        _ci_args_result = subprocess.run(
-            [sys.executable, str(REPO_DIR / "scripts" / "ci_pytest_args.py"),
-             str(REPO_DIR / ".github" / "box-bound-tests.txt")],
-            capture_output=True, text=True, cwd=str(REPO_DIR),
-        )
-        if _ci_args_result.returncode != 0:
-            print("  PASS A FAILED: ci_pytest_args.py error: %s"
-                  % _ci_args_result.stderr.strip(), file=sys.stderr)
-            sys.exit(1)
-        _deny_args = [a for a in _ci_args_result.stdout.strip().split("\n") if a]
-        _pass_a_argv = [
-            sys.executable, "-m", "pytest", "tests/",
-            *_deny_args,
-            "-p", "no:cacheprovider",
-            "-o", "addopts=",
-            "-q",
-        ]
-        _t0 = _time_mod.monotonic()
-        _pass_a_result = subprocess.run(
-            _pass_a_argv, cwd=str(REPO_DIR), env=pass_a_env,
-        )
-        _pass_a_wall = _time_mod.monotonic() - _t0
-        # Print pytest version for diagnostics (dev1 vs CI's pinned 8.3.2).
-        print("  Pass A: wall %.1fs, pytest %s" % (
-            _pass_a_wall,
-            pass_a_env.get("_PYTEST_VERSION", "unknown"),
-        ))
-    if _pass_a_result.returncode != 0:
+    if _run_pass_a(REPO_DIR) != 0:
         print("  PASS A FAILED (runner-shape, clean HOME) — refusing to push. "
               "The CI hermetic subset is red under a runner-like env.",
               file=sys.stderr)

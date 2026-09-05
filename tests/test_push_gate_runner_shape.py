@@ -103,14 +103,26 @@ class TestPassAEnvHomeIsFreshTmp(unittest.TestCase):
     existing AIRULESET_* / TMPDIR overrides present."""
 
     def test_pass_a_env_home_is_fresh_tmp(self):
-        calls = []
+        # Capture env and .gitconfig content AT CALL TIME (inside the mock),
+        # because _run_pass_a's TemporaryDirectory cleans the home after
+        # the subprocess finishes — inspecting post-return would see a
+        # deleted dir (F1, #875 review fix).
+        captured = {}
         _real_run = subprocess.run
 
         def _capture(cmd, **kw):
             if (isinstance(cmd, list) and len(cmd) >= 2
                     and "ci_pytest_args" in str(cmd[1])):
                 return _real_run(cmd, **kw)
-            calls.append((cmd, kw))
+            if (isinstance(cmd, list) and len(cmd) > 2
+                    and cmd[1] == "-m" and cmd[2] == "pytest"
+                    and "env" not in captured):
+                env = kw.get("env", {})
+                captured["env"] = dict(env)
+                home = env.get("HOME", "")
+                gc = Path(home) / ".gitconfig"
+                captured["gitconfig_exists"] = gc.exists()
+                captured["gitconfig_text"] = gc.read_text() if gc.exists() else ""
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
         with mock.patch("subprocess.run", side_effect=_capture):
@@ -127,35 +139,27 @@ class TestPassAEnvHomeIsFreshTmp(unittest.TestCase):
                             except SystemExit:
                                 pass  # noqa: expected in test harness
 
-        # Find the Pass A call
-        pass_a_calls = [
-            (cmd, kw) for cmd, kw in calls
-            if isinstance(cmd, list) and len(cmd) > 2
-            and cmd[1] == "-m" and cmd[2] == "pytest"
-        ]
-
-        self.assertGreaterEqual(len(pass_a_calls), 1,
-                                "No Pass A pytest call found")
-
-        env = pass_a_calls[0][1].get("env", {})
+        self.assertIn("env", captured, "No Pass A pytest call captured")
+        env = captured["env"]
 
         # HOME must not be the real HOME
         real_home = os.environ.get("HOME", "")
         self.assertNotEqual(env.get("HOME", real_home), real_home,
                             "Pass A HOME must be a fresh tmp dir, not the real HOME")
 
-        # The tmp HOME dir must exist and contain .gitconfig with safe.directory
-        pass_a_home = env["HOME"]
-        gitconfig = Path(pass_a_home) / ".gitconfig"
-        self.assertTrue(gitconfig.exists(),
+        # .gitconfig must exist and contain safe.directory (captured at call time)
+        self.assertTrue(captured["gitconfig_exists"],
                         "Pass A HOME must contain .gitconfig")
-        gc_text = gitconfig.read_text()
-        self.assertIn("safe", gc_text)
-        self.assertIn("directory", gc_text)
+        self.assertIn("safe", captured["gitconfig_text"])
+        self.assertIn("directory", captured["gitconfig_text"])
 
         # Existing env overrides must be present
         self.assertIn("TMPDIR", env, "TMPDIR override must be present in Pass A")
         self.assertIn("AIRULESET_DRAFT_RESCUE_DIR", env)
+
+        # PYTEST_ADDOPTS must NOT leak into Pass A (F3, #875 review)
+        self.assertNotIn("PYTEST_ADDOPTS", env,
+                         "PYTEST_ADDOPTS must be stripped from Pass A env")
 
 
 class TestPassAFailureBlocksPush(unittest.TestCase):
