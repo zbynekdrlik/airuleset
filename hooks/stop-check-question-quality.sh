@@ -251,7 +251,7 @@ LASTQ_REFS="/tmp/claude-lastq-refs-${SID}"
 if [ -n "$MARKER_RAW" ] && [ -f "$LASTQF" ]; then
     # 🟡4: capture the full owner/repo#N token when present so odoo-erp#356
     # and bare #356 do NOT conflate to the same key.
-    ASKED_REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    ASKED_REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '(([A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
     if [ -n "$ASKED_REFS" ] && [ -f "$LASTQ_REFS" ]; then
         STORED_REFS=$(cat "$LASTQ_REFS" 2>/dev/null || echo "")
         if [ -n "$STORED_REFS" ] && [ "$ASKED_REFS" = "$STORED_REFS" ]; then
@@ -559,7 +559,7 @@ fi
 # same-question key. Written on every PASSING full-block/ASKED question so the
 # sidecar is always current.
 if [ -z "$VIOLATION" ] && [ -n "$MARKER_RAW" ]; then
-    _REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    _REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '(([A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
     if [ -n "$_REFS" ]; then
         printf '%s' "$_REFS" > "/tmp/claude-lastq-refs-${SID}" 2>/dev/null || true
     fi

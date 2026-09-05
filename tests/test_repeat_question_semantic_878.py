@@ -215,19 +215,21 @@ class SidecarLifecycle(_GateBase):
         refs_path = Path("/tmp/claude-lastq-refs-%s" % sid)
         msg = (
             "**Otazka — projekt montalu (automatizacia):** "
-            "Ticket odoo-erp/odoo-erp#356 a #789 cakaju.\n\n"
+            "Ticket odoo-erp#356 a lokálny #356 sú rôzne.\n\n"
             "- A (odporucam)\n- B\n\n"
-            "❓ NEEDS YOU: rozhodnutie o odoo-erp/odoo-erp#356 a #789?"
+            "❓ NEEDS YOU: rozhodnutie o odoo-erp#356 a #356?"
         )
         r = self._run(msg, sid)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
-        if refs_path.exists():
-            content = refs_path.read_text().strip()
-            # The two refs should be distinct tokens, not both "#356"
-            tokens = content.split()
-            self.assertEqual(len(set(tokens)), len(tokens),
-                             "cross-repo refs should produce distinct keys: %s"
-                             % content)
+        self.assertTrue(refs_path.exists(),
+                        "sidecar must be written for a turn with #N refs")
+        content = refs_path.read_text().strip()
+        tokens = content.split()
+        self.assertEqual(len(tokens), 2,
+                         "should have 2 distinct tokens, got: %s" % content)
+        self.assertEqual(len(set(tokens)), 2,
+                         "cross-repo refs must produce distinct keys: %s"
+                         % content)
 
 
 if __name__ == "__main__":

@@ -2531,7 +2531,7 @@ _GOAL_GUARD_TEXT = (
 
 
 def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
-                        sleep_fn, dry_run, projects_dir, send_fn=None):
+                        sleep_fn, dry_run, projects_dir):
     """#878 — delivery half of the goal-guard rider. Called when
     `_goal_guard_decide` returned a truthy decision. Handles nudge_gate,
     recent-human, boundary classification, keystroke delivery, and mark_sent.
