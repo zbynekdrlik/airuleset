@@ -624,7 +624,8 @@ def bootstrap(root: Path) -> None:
         # CLAUDE_CONFIG_DIR is set — copy the real one so the session does not
         # hit fresh onboarding. MCP servers are stripped: they are identical
         # across conditions and only add startup cost and noise.
-        top = json.loads((Path.home() / ".claude.json").read_text())
+        top_path = Path.home() / ".claude.json"
+        top = json.loads(top_path.read_text()) if top_path.is_file() else {}
         top["mcpServers"] = {}
         top["projects"] = {}
         (cfg / ".claude.json").write_text(json.dumps(top))

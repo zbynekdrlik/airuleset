@@ -845,8 +845,11 @@ def test_write_architecture_ablated_claude_md_returns_touched_and_stripped_count
 def test_bootstrap_builds_condition_c_alongside_a_and_b(tmp_path):
     """bootstrap() reads the REAL ~/.claude — a real profile must exist on
     this box (true for every managed box, and this session's own)."""
-    if not (Path.home() / ".claude" / "settings.json").is_file():
+    real = Path.home() / ".claude"
+    if not (real / "settings.json").is_file():
         pytest.skip("no real ~/.claude/settings.json on this box")
+    if not (real / "CLAUDE.md").is_file():
+        pytest.skip("no real ~/.claude/CLAUDE.md on this box")
     root = tmp_path / "ab95"
     ab.bootstrap(root)
     assert (root / "config-C" / "CLAUDE.md").is_file()
