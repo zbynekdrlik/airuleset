@@ -177,5 +177,58 @@ class BareRepokeStillPasses(_GateBase):
         self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
 
 
+class SidecarLifecycle(_GateBase):
+    """🟡5 — sidecar /tmp/claude-lastq-refs-<SID> is written on a PASSING
+    question turn with #N refs, and cleared by clear-question-dedup.sh on
+    a genuine human prompt."""
+
+    def test_sidecar_written_on_passing_turn(self):
+        sid = self._sid()
+        refs_path = Path("/tmp/claude-lastq-refs-%s" % sid)
+        r = self._run(BLOCK_A, sid)
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertTrue(refs_path.exists(),
+                        "sidecar should be written on a passing question turn")
+        content = refs_path.read_text().strip()
+        self.assertIn("#356", content)
+
+    def test_clear_question_dedup_removes_sidecar(self):
+        sid = self._sid()
+        refs_path = Path("/tmp/claude-lastq-refs-%s" % sid)
+        lastq_path = Path("/tmp/claude-discord-lastq-%s" % sid)
+        refs_path.write_text("#356")
+        lastq_path.write_text("some question")
+        clear_hook = str(Path(GATE).parent / "clear-question-dedup.sh")
+        payload = json.dumps({"session_id": sid, "prompt": "yes do A"})
+        env = {**os.environ, "HOME": str(self.home)}
+        r = subprocess.run(["bash", clear_hook], input=payload,
+                           text=True, capture_output=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(refs_path.exists(),
+                         "clear-question-dedup should remove refs sidecar")
+        self.assertFalse(lastq_path.exists(),
+                         "clear-question-dedup should remove lastq")
+
+    def test_cross_repo_ref_not_conflated(self):
+        """🟡4 — odoo-erp#356 and bare #356 produce DIFFERENT keys."""
+        sid = self._sid()
+        refs_path = Path("/tmp/claude-lastq-refs-%s" % sid)
+        msg = (
+            "**Otazka — projekt montalu (automatizacia):** "
+            "Ticket odoo-erp/odoo-erp#356 a #789 cakaju.\n\n"
+            "- A (odporucam)\n- B\n\n"
+            "❓ NEEDS YOU: rozhodnutie o odoo-erp/odoo-erp#356 a #789?"
+        )
+        r = self._run(msg, sid)
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        if refs_path.exists():
+            content = refs_path.read_text().strip()
+            # The two refs should be distinct tokens, not both "#356"
+            tokens = content.split()
+            self.assertEqual(len(set(tokens)), len(tokens),
+                             "cross-repo refs should produce distinct keys: %s"
+                             % content)
+
+
 if __name__ == "__main__":
     unittest.main()

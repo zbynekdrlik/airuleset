@@ -249,7 +249,9 @@ fi
 # ❓ ASKED shape (not a bare re-poke — those pass at the byte-match above).
 LASTQ_REFS="/tmp/claude-lastq-refs-${SID}"
 if [ -n "$MARKER_RAW" ] && [ -f "$LASTQF" ]; then
-    ASKED_REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    # 🟡4: capture the full owner/repo#N token when present so odoo-erp#356
+    # and bare #356 do NOT conflate to the same key.
+    ASKED_REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
     if [ -n "$ASKED_REFS" ] && [ -f "$LASTQ_REFS" ]; then
         STORED_REFS=$(cat "$LASTQ_REFS" 2>/dev/null || echo "")
         if [ -n "$STORED_REFS" ] && [ "$ASKED_REFS" = "$STORED_REFS" ]; then
@@ -262,7 +264,7 @@ if [ -n "$MARKER_RAW" ] && [ -f "$LASTQF" ]; then
                     QH=""
                     if type _qhash >/dev/null 2>&1; then QH=$(_qhash "$MARKER_RAW"); fi
                     _delivery_log_blocked_repeat "$QH"
-                    printf '%s\n' "Otázka k rovnakým ticketom (#N sada: ${ASKED_REFS}) už bola doručená a je nezodpovedaná (qhash ${QH:-?}) — nesie ju footer U N + label needs-answer. Preformulovaný blok je stále tá istá otázka. Zmaž riadok \`❓ ASKED:\` / celý \`**Otázka — projekt …**\` blok a ukonči ťah len \`⏳ WORKING\` / \`✅ DONE\` podľa reálneho stavu ostatnej práce (#878)." >&2
+                    printf '%s\n' "Otázka k rovnakým ticketom (#N sada: ${ASKED_REFS}) už bola doručená a je nezodpovedaná (qhash ${QH:-?}) — nesie ju footer U N + label needs-answer. Preformulovaný blok je stále tá istá otázka. Zmaž riadok \`❓ ASKED:\` / celý \`**Otázka — projekt …**\` blok a ukonči ťah len \`⏳ WORKING\` / \`✅ DONE\` podľa reálneho stavu ostatnej práce. Ak je to SKUTOČNE NOVÁ (druhá) otázka k tomu istému ticketu, ponechaj label \`needs-answer\` + napíš novú otázku ako \`gh issue comment <N>\` a doruč ju až po zodpovedaní prvej; teraz ukonči len holým markerom (#878)." >&2
                     exit 2
                 fi
                 rm -f "$RETRY_FILE" 2>/dev/null || true
@@ -557,7 +559,7 @@ fi
 # same-question key. Written on every PASSING full-block/ASKED question so the
 # sidecar is always current.
 if [ -z "$VIOLATION" ] && [ -n "$MARKER_RAW" ]; then
-    _REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
+    _REFS=$(printf '%s' "$MARKER_RAW" | { grep -oE '([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[0-9]{1,5}\b' || true; } | sort -u | tr '\n' ' ' | sed 's/ $//')
     if [ -n "$_REFS" ]; then
         printf '%s' "$_REFS" > "/tmp/claude-lastq-refs-${SID}" 2>/dev/null || true
     fi
