@@ -161,7 +161,7 @@ class TestPre742DoctrineStillIntact(_CompanionBase):
 
     def test_closing_paragraph_survives(self):
         self.assertIn(
-            "Every thread this file governs still follows the existing channel",
+            "Every thread this file governs follows the project's own channel placement rule",
             self.t)
         self.assertIn("Ask the owner ONE decision at a time", self.t)
 
