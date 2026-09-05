@@ -225,16 +225,25 @@ def _parse_gh_args(args):
 # heredoc body lines become separate command segments whose content can contain
 # unbalanced quotes / close-related keywords, causing shlex ValueError or false
 # substitution matches. Strip them BEFORE segmentation.
+# `(?<!<)<<(?!<)` excludes herestrings (`<<<`): a herestring `<<<` has `<<`
+# followed by another `<`, and `(?!<)` rejects it; `(?<!<)` rejects a `<<` at
+# position 1-2. The `\s*$` anchor requires the delimiter to be the last token
+# on the line; `cat <<EOF > /tmp/out` (redirect after delimiter) does NOT match
+# — that is a safe-direction over-block (FP recurs for that operand order, but
+# no wrong-ALLOW; documented residual F6).
 _HEREDOC_OP_RE = re.compile(
-    r"<<-?\s*['\"]?([A-Za-z_][A-Za-z_0-9]*|\\?[^\s;&|()<>]+)['\"]?\s*$",
+    r"(?<!<)<<(?!<)-?\s*['\"]?([A-Za-z_][A-Za-z_0-9]*|\\?[^\s;&|()<>]+)['\"]?\s*$",
     re.MULTILINE,
 )
 # Non-executing heredoc consumers: the heredoc body is DATA, not code.
+# #873 F4: python3/python/perl/ruby/node REMOVED — for those consumers,
+# heredoc stdin IS the program (they execute it), so their body must be
+# scanned for close phrases. The deny-by-default posture means an unlisted
+# consumer's body is scanned, which is the safe direction.
 _DATA_HEREDOC_CONSUMERS = {
     "cat", "tee", "dd", ":", "true", "echo", "printf", "write", "wc",
     "sort", "head", "tail", "grep", "sed", "awk", "tr", "base64",
-    "openssl", "sha256sum", "md5sum", "jq", "python3", "python", "perl",
-    "ruby", "node",
+    "openssl", "sha256sum", "md5sum", "jq",
 }
 
 
@@ -269,21 +278,37 @@ def _strip_heredoc_bodies(text, close_phrase_re):
             is_data = consumer.lower() in _DATA_HEREDOC_CONSUMERS or consumer == ""
             # Skip body lines until terminator
             body_lines = []
+            body_blanked_indices = []  # track which output indices were blanked
             i += 1
+            found_terminator = False
             while i < len(lines):
                 if lines[i].strip() == delim or lines[i].lstrip("\t") == delim:
                     out.append(lines[i])  # keep terminator
+                    found_terminator = True
                     break
                 body_lines.append(lines[i])
-                out.append("")  # blank the body line
+                body_blanked_indices.append(len(out))
+                out.append("")  # blank the body line (tentative)
                 i += 1
-            else:
-                # unterminated heredoc — already consumed all lines
-                pass
+            if not found_terminator:
+                # #873 F2 fix: unterminated "heredoc" = the `<<` was not a real
+                # heredoc operator (a quoted `<<EOF` string, a herestring that
+                # slipped the negative lookbehind, or a genuinely unterminated
+                # heredoc). RESTORE the blanked lines so the original fail-closed
+                # behavior is preserved — blanking everything after a false match
+                # is a wrong-ALLOW.
+                for idx, orig_line in zip(body_blanked_indices, body_lines):
+                    out[idx] = orig_line
+                body_lines = []  # nothing was really a heredoc body
             if not is_data and body_lines:
-                # Executing consumer — check the body for a close phrase
+                # Executing consumer — check the body for a close phrase AND
+                # the PATCH close form (#873 F3: a `gh api PATCH state=closed`
+                # inside `bash <<EOF` was invisible to `_is_patch_close(cmd)`
+                # which runs on the STRIPPED text).
                 body_text = "\n".join(body_lines)
                 if close_phrase_re.search(body_text.replace("\\", "").replace('"', "").replace("'", "")):
+                    has_interp = True
+                if _is_patch_close(body_text):
                     has_interp = True
         else:
             out.append(lines[i])
@@ -320,8 +345,13 @@ def analyze(cmd):
         raw = seg.replace("\\", "")   # de-backslashed raw for the substitution scans
 
         # Nested-close smuggle in a value / substitution (quoted or not).
-        if (_SUBST_CLOSE_RE.search(raw) or _FUNSUB_CLOSE_RE.search(raw)
-                or _BACKTICK_CLOSE_RE.search(raw)):
+        # #873 F1 fix: also scan a de-quoted copy so `$(gh issue cl""ose N)` and
+        # `$(gh issue clo'se' N)` are caught — the raw-text `\bclose\b` misses a
+        # quote-split keyword, but the de-quoted text collapses to `close`.
+        raw_dq = raw.replace('"', "").replace("'", "")
+        if (_SUBST_CLOSE_RE.search(raw) or _SUBST_CLOSE_RE.search(raw_dq)
+                or _FUNSUB_CLOSE_RE.search(raw) or _FUNSUB_CLOSE_RE.search(raw_dq)
+                or _BACKTICK_CLOSE_RE.search(raw) or _BACKTICK_CLOSE_RE.search(raw_dq)):
             has_interp = True
 
         try:

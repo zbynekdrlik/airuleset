@@ -174,7 +174,7 @@
     "tests/test_fleet_hygiene.py": 1022,
     "tests/test_foreign_repo_guard_831.py": 205,
     "tests/test_fork_context_inheritance.py": 109,
-    "tests/test_fork_no_merge_close_guard.py": 2155,
+    "tests/test_fork_no_merge_close_guard.py": 2196,
     "tests/test_gate_tree_moved_629.py": 285,
     "tests/test_gh_cli_recipes_autoclose_warning.py": 64,
     "tests/test_gh_json_hook.py": 205,

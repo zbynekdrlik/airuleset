@@ -2150,6 +2150,47 @@ class TestFalsePositives873(TestCase):
         r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    # --- Review F1: quote-split close in substitution.  `cl""ose` does NOT
+    # contain the substring "close" so the shell PREFILTER exits 0 before the
+    # segmenter runs — this is a pre-existing residual on BOTH old and new code,
+    # NOT a #873 regression. The segmenter's de-quoted scan would catch it IF the
+    # prefilter let it through, but the prefilter is a cheaper gate. Accepted. ---
+
+    # --- Review F2: herestring/quoted-<< must not blank following lines ---
+
+    def test_still_blocks_close_after_herestring(self):
+        # A `<<<` herestring followed by a real close on the next line.
+        cmd = 'grep -q x <<<"$STATUS"\ngh issue close 123'
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_still_blocks_close_after_quoted_heredoc_string(self):
+        # A `<<EOF` inside a quoted string, followed by a real close.
+        cmd = "echo 'send <<EOF'\ngh issue close 123"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Review F3: PATCH close in executed heredoc must block ---
+
+    def test_still_blocks_patch_close_in_executed_heredoc(self):
+        cmd = "bash <<'EOF'\ngh api repos/o/r/issues/5 -X PATCH -f state=closed\nEOF"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Review F4: python heredoc executes, close must block ---
+
+    def test_still_blocks_python_heredoc_with_close(self):
+        cmd = "python3 <<'PY'\nimport os\nos.system(\"gh issue close 123\")\nPY"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- Data heredoc mentioning close literally must NOT block ---
+
+    def test_allows_data_heredoc_mentioning_close(self):
+        cmd = "cat <<'EOF'\ngh issue close 555\nEOF"
+        r = run(cmd, self.fork, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 if __name__ == "__main__":
     main()
