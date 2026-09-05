@@ -98,22 +98,9 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635; marek = +1 line
         "session_duration": "24h",
     },
-    # marek.newlevel.media — the THIRD per-developer gateway (#612 scope-add
-    # 2026-08-24, owner: "dohodli sme sa na zbynek…, david…, marek…!!!"). marek's
-    # e-mail is his real box account (drlik.marek@gmail.com — the same drlik.*
-    # gmail family as the owner's, evidenced in the statusbar/caveman tests);
-    # adjustable in this one line + `webterm-access --apply`. Deny-by-default: this
-    # list IS the whole authorization, so a WRONG address only locks marek out (the
-    # safe direction) — but confirm it with the owner as a HARD go-live gate (#612
-    # R1 review 🟡): a genuinely attacker-controlled address would be an open door.
-    # Adding another person is one more e-mail.
-    "marek": {
-        "hostname": "marek.newlevel.media",
-        "name": "webterm — marek",
-        # repo-evidenced (marek's real box account) — CONFIRM with owner at go-live (R1 🟡)
-        "allowed_emails": ["drlik.marek@gmail.com"],
-        "session_duration": "24h",
-    },
+    # marek realm REMOVED (#882, 2026-09-05: stream decommissioned, odoo-erp#6257).
+    # Ops: the Access app + tunnel + DNS for marek.newlevel.media should be torn
+    # down by the gatekeeper (not this repo's code).
     # dominika.newlevel.media — the FOURTH webterm gateway (#867 scope-add
     # 2026-09-04, owner request: "pridat noveho webterm uzivatela dominika, email
     # nika.sarikova@gmail.com"). The e-mail is owner-PROVIDED verbatim in the

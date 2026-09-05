@@ -175,12 +175,14 @@ class TestDominikaFleetEntry(unittest.TestCase):
     must never merge/deploy/close."""
 
     def test_dominika_remote_host_registered_marek_shape(self):
+        # #882: marek@subdev removed — compare against david1@subdev instead
+        # (same subdev VPS, same operator gk_access key pattern)
         import cli_fleet
         e = next(h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "dominika@subdev")
-        marek = next(h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "marek@subdev")
-        self.assertEqual(e["host"], marek["host"])          # same subdev VPS
+        david1 = next(h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "david1@subdev")
+        self.assertEqual(e["host"], david1["host"])         # same subdev VPS
         self.assertEqual(e["user"], "dominika")
-        self.assertEqual(e["identity"], marek["identity"])  # operator gk_access key
+        self.assertEqual(e["identity"], david1["identity"]) # operator gk_access key
         self.assertEqual(e["repo_path"], "~/devel/airuleset")
 
     def test_dominika_is_reduced_never_full(self):
