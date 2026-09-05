@@ -3177,11 +3177,17 @@ def _parse_gk_findings(comment_body):
     return ids
 
 
+_LENS_ID_RE = re.compile(r'^[a-z][a-z0-9-]+$')
+
+
 def _load_lens_list(repo_root=None):
     """Load the repo's lens list or fall back to the built-in default.
 
-    The lens list is at .claude/rules/gk-review-lenses.md — one lens per
-    non-empty, non-comment line."""
+    The lens list is at .claude/rules/gk-review-lenses.md.  Lines matching
+    the lens-id shape (^[a-z][a-z0-9-]+$) are extracted; prose paragraphs,
+    markdown tables, headers (### section) and code blocks are ignored.
+    If the file is absent or yields zero valid ids, falls back to
+    HANDOFF_DEFAULT_LENSES (#880)."""
     if repo_root:
         p = os.path.join(repo_root, ".claude", "rules",
                          "gk-review-lenses.md")
@@ -3190,7 +3196,7 @@ def _load_lens_list(repo_root=None):
                 lenses = []
                 for line in f:
                     line = line.strip()
-                    if line and not line.startswith("#"):
+                    if _LENS_ID_RE.match(line):
                         lenses.append(line)
                 if lenses:
                     return lenses
@@ -3334,7 +3340,7 @@ def cmd_handoff(args):
 
     # Verify HEAD is on the remote branch.
     R = ["-R", repo] if repo else []
-    ls_r = _run(["git", "ls-remote", "origin", branch])
+    ls_r = _run(["git", "ls-remote", "origin", "refs/heads/" + branch])
     if ls_r.returncode != 0:
         print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
         return 1
