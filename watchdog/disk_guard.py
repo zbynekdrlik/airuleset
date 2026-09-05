@@ -97,6 +97,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "runner-superseded",
     # #849 — disposable CC runtime metadata (tasks, debug, shell-snapshots):
     "claude-metadata",
+    # #892 — stale playwright browser revisions:
+    "playwright-browser",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -150,6 +152,19 @@ ONEOFF_VENV_MIN_AGE_DAYS = 2
 # one-off numbered venvs: `~/.venvs/lint-3907`, `ruff31522`, `mcp-4574`, … + `/tmp/lintvenv-*`
 ONEOFF_VENV_NAME_RE = _re.compile(r"^(lint|ruff|mcp)[-]?\d+$")
 ONEOFF_VENV_TMP_RE = _re.compile(r"^lintvenv-")
+
+# #892 — third cadence tier for the 90-94 % footer-red band. The full ladder
+# runs at this shorter interval (not every-poll, which at 90 % steady-state
+# ×12 accounts on subdev would be unsustainable du-load, but fast enough that
+# the guard visibly acts). 95 %+ stays every-poll (emergency).
+CRITICAL_DRAIN_INTERVAL_S = 2 * 60
+
+# #892 — playwright browser revision dirs under ~/.cache/ms-playwright/
+PLAYWRIGHT_CACHE_DIR = ".cache/ms-playwright"
+PLAYWRIGHT_MIN_AGE_DAYS = 30
+# Parse `<family>-<revision>`: the family is everything before the LAST
+# `-<digits>` segment, the revision is the trailing digits.
+PLAYWRIGHT_FAMILY_RE = _re.compile(r"^(.+)-(\d+)$")
 
 # #849 — disposable CC runtime metadata dirs under ~/.claude/
 CLAUDE_METADATA_SUBDIRS = ("tasks", "debug", "shell-snapshots")
@@ -1306,14 +1321,134 @@ def discover_stale_claude_versions(home=None, running_fn=None, dir_stats_fn=None
                         "reason": "running version %r matches no version dir — kept (fail-safe)"
                         % running})
         return out
+    # #892: parse the running version tuple so we can keep >= (staged updates)
+    running_tuple = _runner_version_tuple(running)
     for entry in version_dirs:
         if entry.name in protected:
             out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
                         "kind": "skip", "reason": "running version %s — kept" % entry.name})
             continue
+        # #892: keep any version >= running (a staged self-update). Only delete
+        # versions STRICTLY older than the running one. Unparseable → keep (fail-safe).
+        entry_tuple = _runner_version_tuple(entry.name)
+        if entry_tuple is not None and running_tuple is not None:
+            if _runner_version_tuple_ge(entry_tuple, running_tuple):
+                out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                            "kind": "skip",
+                            "reason": "version %s >= running %s — staged update, kept (#892)"
+                            % (entry.name, running)})
+                continue
+        elif entry_tuple is None:
+            out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                        "kind": "skip",
+                        "reason": "version %s unparseable — kept (fail-safe)" % entry.name})
+            continue
         out.append({"cls": "claude-version", "path": str(entry),
                     "bytes": _safe_dir_size(str(entry), dir_stats_fn), "kind": "delete",
                     "reason": None})
+    return out
+
+
+def _target_in_live_use_pw(path):
+    """True when ``path`` has an open file descriptor by ANY process — a browser
+    revision dir mid-E2E-run must never be deleted. Reuses the same /proc scan
+    the scratch rung uses (deferred import). Fail-safe True on any error."""
+    try:
+        from cli_scratch_sweep import _target_in_live_use
+        return _target_in_live_use(path)
+    except Exception:
+        return True          # fail-safe KEEP on any import/call error
+
+
+def discover_stale_playwright_browsers(home=None, now=None,
+                                       min_age_days=PLAYWRIGHT_MIN_AGE_DAYS,
+                                       dir_stats_fn=None, live_check_fn=None):
+    """#892: stale playwright browser revision dirs under
+    ``~/.cache/ms-playwright/<family>-<revision>/``. Per FAMILY (e.g.
+    ``chromium``, ``chromium_headless_shell``, ``firefox``, ``webkit``), keep the
+    HIGHEST-numbered revision; delete only dirs that are strictly lower-numbered,
+    older than ``min_age_days`` mtime, not a symlink, and not live (open fd).
+    Unparseable name / single revision in a family / any walk error → keep with
+    reason. Returns ``[{cls:"playwright-browser", path, bytes, reason}]``.
+
+    The family is parsed as everything before the LAST ``-<digits>`` segment
+    (so ``chromium_headless_shell-1140`` → family ``chromium_headless_shell``,
+    revision 1140 — never confused with ``chromium-1140``).
+
+    Safety: never calls ``npx`` (network fetch risk under a timer); never
+    resolves "the pinned revision" from node_modules (unbounded search on a
+    multi-project box). The highest-revision-per-family heuristic is safe
+    because a downgrade is not a normal playwright workflow, and the age gate
+    provides an additional buffer."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    live_fn = live_check_fn or _target_in_live_use_pw
+    pw = Path(home) / PLAYWRIGHT_CACHE_DIR
+    if not pw.is_dir():
+        return []
+    cutoff = min_age_days * 86400
+    # Phase 1: discover all <family>-<revision> dirs and group by family
+    families = {}   # family_name → [(revision_int, entry_path)]
+    out = []
+    try:
+        for entry in sorted(pw.iterdir()):
+            if entry.is_symlink():
+                out.append({"cls": "playwright-browser", "path": str(entry),
+                            "bytes": 0, "reason": "symlink — never followed"})
+                continue
+            if not entry.is_dir():
+                continue
+            m = PLAYWRIGHT_FAMILY_RE.match(entry.name)
+            if m is None:
+                out.append({"cls": "playwright-browser", "path": str(entry),
+                            "bytes": 0,
+                            "reason": "unparseable name %r — kept (fail-safe)" % entry.name})
+                continue
+            family = m.group(1)
+            rev = int(m.group(2))
+            families.setdefault(family, []).append((rev, entry))
+    except OSError as e:
+        return [{"cls": "playwright-browser", "path": None,
+                 "reason": "could not walk %s: %s" % (pw, e)}]
+    # Phase 2: per family, keep highest revision; delete strictly-lower + old
+    for family, members in sorted(families.items()):
+        if len(members) <= 1:
+            for _rev, entry in members:
+                out.append({"cls": "playwright-browser", "path": str(entry),
+                            "bytes": 0,
+                            "reason": "single revision in family %s — kept" % family})
+            continue
+        highest_rev = max(r for r, _e in members)
+        for rev, entry in members:
+            epath = str(entry)
+            if rev == highest_rev:
+                out.append({"cls": "playwright-browser", "path": epath,
+                            "bytes": 0,
+                            "reason": "newest revision %d in family %s — kept" % (rev, family)})
+                continue
+            # Check age
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError as e:
+                out.append({"cls": "playwright-browser", "path": epath,
+                            "bytes": 0,
+                            "reason": "could not stat: %s" % e})
+                continue
+            if age < cutoff:
+                out.append({"cls": "playwright-browser", "path": epath,
+                            "bytes": _safe_dir_size(epath, dir_stats_fn),
+                            "reason": "too recent (%.1fd < %dd) — kept" % (age / 86400.0, min_age_days)})
+                continue
+            # Check live use
+            if live_fn(epath):
+                out.append({"cls": "playwright-browser", "path": epath,
+                            "bytes": _safe_dir_size(epath, dir_stats_fn),
+                            "reason": "in live use (open fd) — kept"})
+                continue
+            # Reclaimable
+            out.append({"cls": "playwright-browser", "path": epath,
+                        "bytes": _safe_dir_size(epath, dir_stats_fn),
+                        "kind": "delete", "reason": None})
     return out
 
 
@@ -1631,6 +1766,11 @@ def _plan_claude_versions(home, now):
             for r in discover_stale_claude_versions(home=home)]
 
 
+def _plan_playwright_browsers(home, now):
+    return [_norm_action("playwright-browser", r, "delete")
+            for r in discover_stale_playwright_browsers(home=home, now=now)]
+
+
 def _plan_oneoff_venvs(home, now):
     return [_norm_action("oneoff-venv", r, "delete")
             for r in discover_oneoff_venvs(home=home, now=now)]
@@ -1649,6 +1789,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("runner-update", lambda: _plan_runner_update(home, now)),
         ("runner-superseded", lambda: _plan_superseded_runner_versions(home, now)),
         ("claude-version", lambda: _plan_claude_versions(home, now)),
+        ("playwright-browser", lambda: _plan_playwright_browsers(home, now)),
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
@@ -1949,17 +2090,19 @@ def _ranked_consumers(home, now):
     return ranked
 
 
-def _collect_top_consumers(home, now, limit=5):
+def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
     """Default implementation for the escalation's top-N path-level detail
-    (#849 ask 5). Runs the CHEAP planners and returns top consumers."""
+    (#849 ask 5). Runs the CHEAP planners and returns top consumers.
+    #892: accepts pre-computed `scratch_rows` to avoid a doubled du-heavy walk."""
     all_actions = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
                         ("uploads", lambda: _plan_uploads(home, now)),
                         ("cli-version", lambda: _plan_cli_versions(home, now)),
-                        ("scratch", lambda: _plan_scratch(home, now)),
+                        ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
                         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
                         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
                         ("claude-version", lambda: _plan_claude_versions(home, now)),
+                        ("playwright-browser", lambda: _plan_playwright_browsers(home, now)),
                         ("user-cache", lambda: _plan_user_cache(home, now))):
         try:
             all_actions.extend(plan())
@@ -2159,16 +2302,22 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         return ["disk-guard: status error: %r" % e]
     geteuid_fn = geteuid_fn or os.geteuid
     is_root = geteuid_fn() == 0
-    # #863 review 2: whether a per-user drain runs THIS poll. The
+    # #863 review 2 + #892: whether a per-user drain runs THIS poll. The
     # largest_live_scratch visibility discovery (a du-heavy walk) runs at most
     # ONCE per drain and ONLY when a drain runs (gated on the SAME cadence as
     # the drain -- not a second full discovery every poll in the 80-95 % band),
     # and its rows are SHARED with the scratch drain planner below.
+    # #892: third cadence tier — in the 90-94 % footer-red band, the WHOLE
+    # ladder runs with a shorter interval (CRITICAL_DRAIN_INTERVAL_S = 120 s)
+    # instead of the normal 600 s. 95 %+ stays every-poll (unchanged).
+    effective_interval = min_drain_interval_s
+    if effective_interval is None and CRITICAL_PCT <= status["worst_pct"] < DISK_CRITICAL_PCT:
+        effective_interval = CRITICAL_DRAIN_INTERVAL_S
     will_drain = ((not is_root)
                   and status["level"] not in ("ok", "notice")
                   and _cadence_allows_drain(
                       status["worst_pct"],
-                      _drain_due(home, now, min_drain_interval_s),
+                      _drain_due(home, now, effective_interval),
                       dry_run=dry_run))
     scratch_rows = None
     if will_drain:
@@ -2188,6 +2337,15 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                     _append_log(_log_path(home), [line])
         except Exception as e:
             logs.append("disk-guard: largest-live-scratch error: %r" % e)
+    # #892: carry forward top_consumers from the prior cache on non-drain polls
+    # (the every-poll status write would erase it otherwise). A drain poll writes
+    # fresh top_consumers AFTER the drain (below).
+    if not will_drain:
+        prior = _read_status_cache(home)
+        if isinstance(prior, dict) and "top_consumers" in prior:
+            status["top_consumers"] = prior["top_consumers"]
+            if "top_consumers_ts" in prior:
+                status["top_consumers_ts"] = prior["top_consumers_ts"]
     try:
         write_status_cache(status, home=home)
     except Exception as e:
@@ -2264,6 +2422,23 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             except Exception as e:
                 logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
+        # #892: write top_consumers into the status cache AFTER the drain, so a
+        # stream user sees what to clean even before escalation. The pre-drain
+        # write_status_cache already ran; this is a SECOND write carrying
+        # top_consumers + its own ts. Non-drain polls carry it forward above.
+        # Only on the DEFAULT planners path (an injected planners_fn = test;
+        # _collect_top_consumers would re-discover scratch, doubling the du walk).
+        if planners_fn is None:
+            try:
+                top = _collect_top_consumers(home, now, limit=3, scratch_rows=scratch_rows)
+                post["top_consumers"] = [{"path": p, "bytes": b} for p, b in top]
+                post["top_consumers_ts"] = now
+                # Carry forward largest_live_scratch if computed this poll
+                if "largest_live_scratch" in status:
+                    post["largest_live_scratch"] = status["largest_live_scratch"]
+                write_status_cache(post, home=home)
+            except Exception as e:
+                logs.append("disk-guard: top-consumers post-drain write error: %r" % e)
         if post["level"] == "critical":
             logs += escalate(post, home, now, dry_run)
     finally:

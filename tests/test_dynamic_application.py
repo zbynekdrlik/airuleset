@@ -123,8 +123,7 @@ class TestPathRuleConversions(TestCase):
 class TestModelCombinationFixes(TestCase):
     def test_main_session_is_users_model_choice_not_hardcoded_opus(self):
         t = read("modules/core/model-awareness.md")
-        self.assertIn("MAIN interactive session runs whatever the user set via `/model`",
-                      t)
+        self.assertIn("main model is the user's call", t)
         self.assertNotIn("The primary Claude Code agent runs **Opus 4.8**", t)
 
     def test_unverified_community_numbers_are_labelled(self):
