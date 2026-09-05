@@ -85,6 +85,24 @@ def _is_chrome_family(args):
     return os.path.basename(toks[0]) in _CHROME_BASENAMES
 
 
+def _looks_like_claude_cli(cmdline):
+    """True iff cmdline looks like a Claude CLI process.
+
+    Two shapes: (1) any token's basename is 'claude' (the bin-symlink);
+    (2) the cmdline contains 'claude-code/cli' (the npm-shape, where
+    basename is 'cli.js' — #885 F2/F3 review finding).  Over-match is
+    the fail-safe direction (not-MCP / not-orphan).
+    """
+    if not cmdline:
+        return False
+    toks = cmdline.split()
+    if any(os.path.basename(t) == "claude" for t in toks[:5]):
+        return True
+    if "claude-code/" in cmdline or "claude-code\\" in cmdline:
+        return True
+    return False
+
+
 def _is_mcp_node(args, parent_cmdline=None):
     """True iff args is a node process whose parent is a Claude CLI.
 
@@ -98,14 +116,15 @@ def _is_mcp_node(args, parent_cmdline=None):
     base = os.path.basename(toks[0])
     if base not in ("node", "nodejs"):
         return False
-    # Must NOT itself be the Claude CLI (basename 'claude' or cli.js)
-    if any("claude" in os.path.basename(t) for t in toks[:3]):
+    # Must NOT itself be the Claude CLI.  Two shapes: the bin-symlink
+    # `node .../claude` (basename 'claude') and the npm-shape
+    # `node .../claude-code/cli.js` (#885 F3 review finding).
+    if _looks_like_claude_cli(args):
         return False
-    # Parent must be a Claude CLI
+    # Parent must be a Claude CLI — same two-shape check.
     if not parent_cmdline:
         return False
-    ptoks = (parent_cmdline or "").split()
-    if ptoks and any("claude" in os.path.basename(t) for t in ptoks[:3]):
+    if _looks_like_claude_cli(parent_cmdline):
         return True
     return False
 
@@ -155,12 +174,18 @@ def priority_policy_job(ps_fetch=None, renice_fn=None, ionice_fn=None,
     for reading current nice.  `parent_cmdline_fn(ppid)` returns the parent's
     cmdline for MCP-node structural match.
 
-    All seams injectable; None = do not mutate (log 'not wired').
+    All seams injectable; `renice_fn=None` / `ionice_fn=None` means use
+    the real defaults (`os.setpriority` / `ionice`).  Pass a recorder
+    lambda in tests. `dry_run=True` logs "would renice" and never mutates.
     Returns journal log lines.  Never pings Discord.
     """
     if ps_fetch is None:
         from watchdog.reaper import default_ps_fetch
         ps_fetch = default_ps_fetch
+    if renice_fn is None:
+        renice_fn = _default_renice_fn
+    if ionice_fn is None:
+        ionice_fn = _default_ionice_fn
     if verify_fn is None:
         verify_fn = _default_cmdline_reader
     if stat_reader is None:
@@ -297,9 +322,12 @@ def _is_poll_loop_signature(args):
         return False
     if os.path.basename(toks[0]) not in _SHELL_BASENAMES:
         return False
-    lower = (args or "").lower()
-    has_loop = any(kw in lower for kw in _LOOP_KEYWORDS)
-    has_sleep = "sleep" in lower
+    # Tokenized keyword match (#885 F6: substring `"for" in lower` also
+    # matches `--format`/`before`/`info`).  Split on whitespace + shell
+    # metacharacters for a cleaner match.
+    tokens = set(re.split(r"[\s;|&(){}'\"]+", (args or "").lower()))
+    has_loop = bool(tokens & _LOOP_KEYWORDS)
+    has_sleep = "sleep" in tokens
     has_gh = ("gh run view" in args or "gh pr view" in args
               or "gh pr checks" in args or "gh api" in args)
     return has_loop and has_sleep and has_gh
@@ -344,10 +372,11 @@ def _is_orphan(pid, stat_reader=None, cmdline_reader=None):
             pcmd = cmdline_reader(parent)
         except Exception:
             return False
-        if pcmd:
-            ptoks = pcmd.split()
-            if ptoks and any("claude" in os.path.basename(t) for t in ptoks[:3]):
-                return False  # live claude ancestor → not orphan
+        if _looks_like_claude_cli(pcmd):
+            # Uses the shared two-shape match (bin-symlink basename 'claude'
+            # OR npm-shape 'claude-code/' in path — #885 F2 review finding).
+            # Over-match is the fail-safe not-orphan direction.
+            return False  # live claude ancestor → not orphan
         current = parent
     return False  # too many hops → fail-safe not orphan
 

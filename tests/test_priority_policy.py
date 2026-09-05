@@ -84,6 +84,13 @@ class TestMcpNodeClassifier(unittest.TestCase):
             "node /usr/lib/claude/cli.js --model fable",
             parent_cmdline="bash"))
 
+    def test_claude_cli_npm_shape_not_matched(self):
+        """The npm-shape CLI (basename cli.js, path contains claude-code)
+        must NOT match even with a claude parent (#885 F3)."""
+        self.assertFalse(_is_mcp_node(
+            "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume",
+            parent_cmdline="claude --model fable"))
+
     def test_no_parent_cmdline(self):
         self.assertFalse(_is_mcp_node("node server.js", parent_cmdline=None))
 
@@ -214,7 +221,14 @@ class TestPriorityPolicyJob(unittest.TestCase):
         self.assertEqual(calls["renice"], [])
         self.assertTrue(any("DRY-RUN" in ln for ln in logs))
 
-    def test_unwired_renice_fn(self):
+    def test_default_renice_fn_is_wired(self):
+        """renice_fn=None defaults to the real os.setpriority, not 'not wired'.
+        F1 review finding: the job must NOT ship inert (#885)."""
+        from watchdog.priority_policy import _default_renice_fn  # noqa: F401
+        self.assertIs(priority_policy_job.__defaults__[1], None,
+                      "renice_fn param default must be None (resolved to real at call)")
+        # Verify the resolution: calling with renice_fn=None on a DRY-RUN
+        # should show DRY-RUN, not 'not wired'.
         ps = self._make_ps([(100, 3600, 10, "chrome --headless")])
         stat = self._make_stat({100: 0}, {100: 1})
         def parent_cmd(pid):
@@ -222,9 +236,11 @@ class TestPriorityPolicyJob(unittest.TestCase):
 
         logs = priority_policy_job(
             ps_fetch=ps, renice_fn=None,
-            stat_reader=stat, parent_cmdline_fn=parent_cmd)
+            stat_reader=stat, parent_cmdline_fn=parent_cmd,
+            dry_run=True)
 
-        self.assertTrue(any("not wired" in ln for ln in logs))
+        self.assertTrue(any("DRY-RUN" in ln for ln in logs))
+        self.assertFalse(any("not wired" in ln for ln in logs))
 
     def test_toctou_reused_pid_skipped(self):
         """pid reused by a non-chrome process → no renice."""
@@ -341,6 +357,22 @@ class TestIsOrphan(unittest.TestCase):
             100: "100 (bash) S 50 100 100 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0",
         }
         cmd_map = {50: "claude --model fable"}
+
+        self.assertFalse(_is_orphan(
+            100,
+            stat_reader=lambda p: stat_map[p],
+            cmdline_reader=lambda p: cmd_map.get(p, "")))
+
+    def test_parented_by_npm_shape_claude(self):
+        """ppid chain: pid 100 -> ppid 50 (node .../claude-code/cli.js).
+        Must detect as parented, not orphan (#885 F2: basename cli.js
+        doesn't contain 'claude', but full cmdline does)."""
+        stat_map = {
+            100: "100 (bash) S 50 100 100 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0",
+        }
+        cmd_map = {
+            50: "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume"
+        }
 
         self.assertFalse(_is_orphan(
             100,
