@@ -1,6 +1,6 @@
 ---
 name: onboard-project
-description: Onboard a project under airuleset management the ONE maintained way — idempotent CLI that ensures git repo + GitHub remote + two/three-branch convention + .gitignore hygiene + CLAUDE.md/Playbook-router + foundation & notification tickets + machine-readable registry entry. Also the read-only --audit drift check. Load when the user says "onboard <project>", "add <project> under management / as a target", "put X under airuleset", or "which managed projects have drifted / audit the registry".
+description: Onboard a project under airuleset — git repo + GitHub remote + branch convention + CLAUDE.md + foundation tickets + registry. Use when the user says "onboard <project>" or "audit the registry".
 user-invocable: true
 ---
 

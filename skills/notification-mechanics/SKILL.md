@@ -1,7 +1,8 @@
 ---
 name: notification-mechanics
-description: Internal mechanics of the Discord/phone device-ping pipeline — the API-error watchdog, per-owner thread + DISCORD_MIRROR routing, and the /autopilot per-ticket card's field-by-field composition. Load when authoring or debugging the notify hooks/watchdog, or to understand exactly how a specific ping was routed or composed.
+description: Discord/phone pipeline internals — API-error watchdog, per-owner thread routing, per-ticket card composition. Load when debugging notify.
 user-invocable: false
+disable-model-invocation: true
 ---
 
 ### Notification Mechanics — Moved From `milestone-notifications.md`

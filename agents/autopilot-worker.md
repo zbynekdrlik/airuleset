@@ -355,7 +355,7 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
 - **Your LAST act before returning is a durable `LANE-RETURN:` comment on the ticket (#844) —
   AFTER your final commit + wip-backup push, so the head sha you cite is real.** Post
   `gh issue comment <N> --body "LANE-RETURN: branch <worktree-branch> head <sha> worktree <path>
-  version <v> — <one-line evidence: RED sha → GREEN sha, local verify green>"` for EVERY member.
+  version <v> reviewed-by-tier: <tier> gate:<state> — <one-line evidence: RED sha → GREEN sha, local verify green>"` for EVERY member.
   WHY: the #844 bounded live-hold cap can force a `/compact` on the supervisor while your lane is
   live, and the residual case (a lane-completion notification lost to CC's own overflow
   auto-compact) must lose NOTHING — the supervisor's post-compact reconcile rider integrates your
@@ -589,7 +589,11 @@ push / PR / merge / deploy, never that backup.
    security / correctness / test-integrity / evidence-integrity / design-doctrine / process. The
    review output is a `Self-review:` fenced Markdown table — one row per lens with a verdict + a
    `file:line` evidence citation (an `n/a` row needs a reason). This table is the machine-readable
-   artifact the hand-off comment carries (NO second dispatch — step 6 IS the self-review).
+   artifact the hand-off comment carries. **For a NON-TRIVIAL diff the table is produced BY the
+   dispatched `fable-advisor` (gate OPEN) or the model-less Opus consult (CLOSED) — an in-context
+   pass by YOU satisfies step 6 only for a DECLARED trivial diff, and the declaration is falsifiable
+   (#876, SubagentStop-enforced by `subagent-stop-check-review-tier.sh`).** Record the tier on the
+   evidence block's `reviewed-by-tier:` line.
    **Bounce round ≥ 2 escalation (#843).** When the ticket carries `prio:bounce` or a prior gk
    bounce comment exists (derive the round from `slice-quals --bounces`), run `fable-gate` ONCE:
    OPEN → dispatch the pinned `fable-advisor` for the review; CLOSED → fresh-context consult
@@ -754,6 +758,7 @@ plan: <per issue, N/N acceptance-criteria items fulfilled — your own self-audi
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a".>
 review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
+reviewed-by-tier: claude-fable-5|claude-opus-4-6 [trivial-diff] gate:<OPEN|CLOSED|n/a> — the tier that produced the Self-review table (#876, SubagentStop-enforced by subagent-stop-check-review-tier.sh)
 achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into your ticket's own run-card at its integration cycle>
 worktree: <your worktree's absolute path>
 branch: <your worktree branch name (the EXACT name, #503 case 1) — the supervisor merges directly from this ref; also state the refs/autopilot-wip/<branch> durability backup you pushed to origin>

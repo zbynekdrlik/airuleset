@@ -1,6 +1,6 @@
 ---
 name: deliver-files-as-urls
-description: Deliver any file the user needs (recording, screenshot, export, log bundle) as a clickable LAN URL via airuleset.py share — never a /tmp path. Load whenever producing a file the user needs to open or download.
+description: Deliver files as clickable LAN URLs via airuleset.py share — never /tmp paths. Load when producing a file the user needs.
 user-invocable: false
 ---
 

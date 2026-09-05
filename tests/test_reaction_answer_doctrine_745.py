@@ -37,6 +37,7 @@ from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 COMPANION = ROOT / "skills" / "odoo-discuss-xmlrpc" / "read-reactions.md"
 COMP_LOGGING = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
@@ -113,7 +114,9 @@ class TestStatuslineWBulletCarries745(_Teeth, TestCase):
     AND every dispatched worker (#104)."""
 
     def setUp(self):
-        self.text = read(STATUS)
+        # #859 batch 3: the #745 clause moved out of the always-on module into
+        # the on-demand DEEP-2 companion.
+        self.text = read(STATUS_DEEP2)
 
     def test_745_clause_present_on_the_W_bullet_line(self):
         # the whole W bullet is ONE physical line; the clause + its operative
@@ -128,7 +131,7 @@ class TestStatuslineWBulletCarries745(_Teeth, TestCase):
     def test_745_finder_is_unique(self):
         # #578 whole-line teeth rule: a partial revert of the #745 clause must
         # genuinely fail — the finder occurs exactly once in the whole module.
-        self.assertEqual(read(STATUS).count(FINDER_745), 1,
+        self.assertEqual(read(STATUS_DEEP2).count(FINDER_745), 1,
                          "the #745 finder must be unique (partial-revert teeth)")
 
     def test_745_names_the_selfservice_read_path(self):

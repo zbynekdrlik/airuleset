@@ -1,6 +1,6 @@
 ---
 name: local-builds
-description: Local Build Policy tiers 0/1/2 — what may compile locally, cheap-check pre-push gate, cross-compile cookbook, target/ purge rules. Load BEFORE running or considering a local build (cargo build/test, npm build, docker build, tauri/trunk), when the tier0 build hook blocks a command, when toggling /fast-iterate, or when auditing build-artifact disk usage.
+description: Local build policy tiers 0/1/2 — cargo compilation gates, cross-compile cookbook, target/ purge. Load before any local build.
 user-invocable: false
 ---
 

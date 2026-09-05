@@ -268,11 +268,17 @@ class TestClaudeCodeToolingConversion(TestCase):
     def test_goal_stays(self):
         self.assertIn("Autonomous Goals", self.module)
 
-    def test_ground_once_rule_stays(self):
-        self.assertIn("Ground ONCE, pass a digest", self.module)
+    def test_ground_once_rule_in_companion(self):
+        # #859 batch 3: moved to skills/claude-code-workflows/DEEP.md
+        companion = _read("skills/claude-code-workflows/DEEP.md")
+        self.assertIn("Ground ONCE, pass a digest", companion)
 
     def test_pointer_exists(self):
         self.assertIn("claude-code-tooling-history.md", self.module)
+
+    def test_workflows_companion_pointer(self):
+        # #859 batch 3: module carries pointer to companion
+        self.assertIn("skills/claude-code-workflows/DEEP.md", self.module)
 
 
 # ===== Batch 2 — deeper top-6 pass + new modules =====
