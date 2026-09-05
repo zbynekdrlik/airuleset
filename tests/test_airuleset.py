@@ -959,11 +959,15 @@ class TestDiscordNotifyHooks(TestCase):
 
     def test_governance_no_hand_fired_per_merge_ping(self):
         # pr-merge-policy.md must NOT instruct an active per-merge device ping
-        # (contradicts the mobile model); milestone-notifications.md must state it
+        # (contradicts the mobile model); milestone-notifications.md must state
+        # the model, and the "do NOT hand-fire" instruction itself now lives in
+        # its situational companion (#859 diet batch 4c moved the operative
+        # body there, leaving a stub + pointer in the always-on module).
         mn = (airuleset.REPO_DIR / "modules" / "core" / "milestone-notifications.md").read_text()
+        mn_deep = (airuleset.REPO_DIR / "skills" / "milestone-notifications-deep" / "DEEP.md").read_text()
         pm = (airuleset.REPO_DIR / "modules" / "core" / "pr-merge-policy.md").read_text()
         self.assertIn("Mobile-App Model", mn)
-        self.assertIn("do NOT call the discord `reply` tool or `PushNotification`", mn)
+        self.assertIn("do NOT call the discord `reply` tool or `PushNotification`", mn_deep)
         self.assertNotIn("Send the milestone ping", pm)
 
     def test_governance_final_done_only_discipline(self):
@@ -15466,10 +15470,14 @@ class TestCiMonitoringPollSnippetSelfBounds(TestCase):
     whether the tool timeout was ever set."""
 
     def _extract_snippet(self):
+        # #859 diet batch 4c moved the operative recipe out of the always-on
+        # module into its situational companion; the module itself is now a
+        # pointer stub with no fenced code left in it.
         import re
-        text = (airuleset.REPO_DIR / "modules" / "core" / "ci-monitoring.md").read_text()
+        text = (airuleset.REPO_DIR / "skills" / "ci-monitoring-deep" / "DEEP.md").read_text()
         m = re.search(r"```bash\n(.*?)\n\s*```", text, re.S)
-        self.assertIsNotNone(m, "the DEADLINE= poll snippet must exist in ci-monitoring.md")
+        self.assertIsNotNone(m, "the DEADLINE= poll snippet must exist in "
+                              "skills/ci-monitoring-deep/DEEP.md")
         return m.group(1)
 
     def _run_snippet(self, gh_stub_body, extra_env=None, sleep_interval="0.2"):
@@ -15600,20 +15608,40 @@ class TestCiMonitoringJqFilterHasRealTeeth(TestCase):
     payloads via stdin -- proving both branch selection AND branch order.
     """
 
-    def _extract_block(self, index):
-        # ci-monitoring.md has THREE fenced blocks: [0] ```bash foreground
-        # loop, [1] bare ``` background waiter, [2] ```bash #588 deploy-watch
-        # (its own coverage is test_deploy_watch_recipe.py). This class locks
-        # [0]/[1] (the `--jq` shapes); splitting on the literal fence marker
-        # avoids the bare-fence ambiguity a non-greedy regex would hit.
-        text = (airuleset.REPO_DIR / "modules" / "core" / "ci-monitoring.md").read_text()
+    # #859 diet batch 4c moved the operative recipes out of the always-on
+    # ci-monitoring.md module into its situational companion (the module
+    # itself is now a pointer stub). The companion carries THREE fenced
+    # blocks: a ```bash foreground loop, a bare ``` background waiter, and
+    # a ```bash #588 deploy-watch block (its own coverage is
+    # test_deploy_watch_recipe.py) -- but rather than lock their POSITION
+    # (fragile if the companion's own prose ever grows another fenced
+    # example), locate the two this class needs by a content marker unique
+    # to each, so a re-ordering or an inserted block never silently
+    # mis-targets the wrong snippet.
+    _DEEP_PATH = ("skills", "ci-monitoring-deep", "DEEP.md")
+
+    def _extract_all_blocks(self):
+        text = (airuleset.REPO_DIR.joinpath(*self._DEEP_PATH)).read_text()
         parts = text.split("```")
         self.assertEqual(len(parts), 7,
-                          "expected exactly three fenced blocks in ci-monitoring.md")
-        code = parts[1 + index * 2]
-        if code.startswith("bash\n"):
-            code = code[len("bash\n"):]
-        return code.strip("\n")
+                          "expected exactly three fenced blocks in "
+                          "skills/ci-monitoring-deep/DEEP.md")
+        blocks = []
+        for i in range(1, len(parts), 2):
+            code = parts[i]
+            if code.startswith("bash\n"):
+                code = code[len("bash\n"):]
+            blocks.append(code.strip("\n"))
+        return blocks
+
+    def _extract_block_containing(self, marker):
+        blocks = self._extract_all_blocks()
+        matches = [b for b in blocks if marker in b]
+        self.assertEqual(
+            len(matches), 1,
+            "expected exactly one fenced block containing %r in "
+            "skills/ci-monitoring-deep/DEEP.md, found %d" % (marker, len(matches)))
+        return matches[0]
 
     def _extract_real_jq_filter(self, snippet):
         """Runs `snippet` with a stub `gh` on PATH that captures the REAL
@@ -15721,7 +15749,8 @@ class TestCiMonitoringJqFilterHasRealTeeth(TestCase):
     ]
 
     def test_foreground_loop_jq_filter(self):
-        snippet = self._extract_block(0)
+        # `DEADLINE=` appears only in the foreground bounded poll loop block.
+        snippet = self._extract_block_containing("DEADLINE=")
         self.assertIn("--jq", snippet)
         filt = self._extract_real_jq_filter(snippet)
         for payload, expected in self.CASES:
@@ -15729,7 +15758,9 @@ class TestCiMonitoringJqFilterHasRealTeeth(TestCase):
                               "payload: " + payload)
 
     def test_background_waiter_jq_filter(self):
-        snippet = self._extract_block(1)
+        # `AIRULESET_LONG_POLL_BUDGET_S` appears only in the background
+        # waiter block (the foreground loop's own budget var has no `LONG`).
+        snippet = self._extract_block_containing("AIRULESET_LONG_POLL_BUDGET_S")
         self.assertIn("--jq", snippet)
         filt = self._extract_real_jq_filter(snippet)
         for payload, expected in self.CASES:
