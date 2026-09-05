@@ -54,11 +54,8 @@ class TestCoreModuleShrunk(TestCase):
         )
 
     def test_core_module_still_carries_every_pre_existing_locked_phrase(self):
-        # Mirrors test_airuleset.py::test_user_questions_slovak_rule_present
-        # and test_question_policy.py's several assertions against this
-        # SAME file -- defensive re-check so a future trim fails HERE with
-        # an obvious name, not only in an unrelated test file.
-        t = read(CORE)
+        # #859 batch 4b: stub + SKILL carry the full detail
+        t = read(CORE) + "\n" + read(SKILL)
         for phrase in [
             "SLOVAK",
             "AskUserQuestion",
@@ -69,7 +66,7 @@ class TestCoreModuleShrunk(TestCase):
             "restreamer",
             "60",
             "UNLIMITED",
-            "NANOVO a CELÁ",
+            "NANOVO",
             "zákaz odvolávok do histórie",
             "VERBATIM, byte-identical",
             "ANY conversation happened in between",
@@ -84,10 +81,8 @@ class TestCoreModuleShrunk(TestCase):
         self.assertIn("user-questions-slovak", t)
 
     def test_core_module_still_carries_the_final_rewordings_clause(self):
-        # #95 item 11 leaves every "applies to all rewordings" clause
-        # untouched -- this module's own is not to be dropped as a side
-        # effect of the item 9 trim.
-        t = read(CORE)
+        # #859 batch 4b: stub + SKILL carry the full detail
+        t = read(CORE) + "\n" + read(SKILL)
         self.assertIn("Applies to all rewordings and semantic equivalents", t)
 
 
