@@ -38,7 +38,7 @@ from unittest import TestCase, main
 ROOT = Path(__file__).resolve().parent.parent
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
 STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
-COMPANION = ROOT / "skills" / "odoo-discuss-xmlrpc" / "read-reactions.md"
+COMPANION = ROOT / "skills" / "odoo-client-messaging" / "read-reactions.md"
 COMP_LOGGING = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
