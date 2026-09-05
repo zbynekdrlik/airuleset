@@ -17,6 +17,11 @@ tuple, a user->profile map) plus a couple of trivial dict-accessor helpers
 pure leaf of the dependency DAG.
 """
 
+# #870 F3: controller cutover flag. When False (the dev1-safe default), all
+# cutover code is DORMANT — zero runtime change. Commit B (the first push
+# FROM the controller box) flips this to True.
+CONTROLLER_CUTOVER_DONE = False
+
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
 REMOTE_HOSTS = [
@@ -379,6 +384,26 @@ REMOTE_HOSTS = [
                     "prístup — NEliečiť, NEdeployovať"),
     },
 ]
+
+
+def _append_dev1_if_cutover():
+    """Conditionally add dev1 as a deploy TARGET when the cutover is done.
+
+    Called at module-load time AND available for tests to re-invoke after
+    patching CONTROLLER_CUTOVER_DONE. When False, a no-op."""
+    if CONTROLLER_CUTOVER_DONE:
+        REMOTE_HOSTS.append({
+            "name": "dev1",
+            "host": "100.104.8.125",
+            "user": "newlevel",
+            "repo_path": "~/devel/airuleset",
+            "identity": "~/.secrets/airuleset_push_ed25519",
+            "owner_vps": True,
+            "soniox": True,
+        })
+
+
+_append_dev1_if_cutover()
 
 
 def is_paused(remote):

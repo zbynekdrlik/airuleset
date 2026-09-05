@@ -96,7 +96,14 @@ REMOTE_DEPLOY_TIMEOUT_S = 1800
 
 # --- #275: deliver the meeting-analysis Soniox key to every subdev stream
 # account, sourced from dev1's own local voiceagent checkout ------------------
-SONIOX_KEY_SOURCE = Path.home() / "devel" / "voiceagent" / ".env"
+# #870 F3: on the controller box, source from ~/.secrets/soniox.env first;
+# fall back to the dev1-era voiceagent checkout path for backward compat.
+_SONIOX_CONTROLLER_PATH = Path.home() / ".secrets" / "soniox.env"
+_SONIOX_LEGACY_PATH = Path.home() / "devel" / "voiceagent" / ".env"
+SONIOX_KEY_SOURCE = (
+    _SONIOX_CONTROLLER_PATH if _SONIOX_CONTROLLER_PATH.is_file()
+    else _SONIOX_LEGACY_PATH
+)
 
 # #659/#669: the headless CLAUDE_CODE_OAUTH_TOKEN delivery leg that once lived
 # here was REMOVED per the owner ruling (#659 ROZHODNUTÉ, 2026-08-24): login/
@@ -1178,6 +1185,30 @@ def _deploy_to_all_remotes(failed, auth_failed):
             shutil.rmtree(control_dir, ignore_errors=True)
 
 
+def _push_origin_guard():
+    """#870 F3: push-origin guard. When CONTROLLER_CUTOVER_DONE is True, push
+    is allowed ONLY from the controller box (box-class marker == "controller"
+    AND unix user == "airuleset"). When False, this is a no-op."""
+    import cli_fleet
+    if not cli_fleet.CONTROLLER_CUTOVER_DONE:
+        return
+    import getpass
+    from watchdog.reaper import default_box_class
+    box_class = default_box_class()
+    unix_user = getpass.getuser()
+    if os.environ.get("AIRULESET_CONTROLLER_OVERRIDE") == "1":
+        print("  ⚠ CONTROLLER_OVERRIDE=1: push-origin guard bypassed "
+              f"(box_class={box_class!r}, user={unix_user!r})",
+              file=sys.stderr)
+    elif box_class != "controller" or unix_user != "airuleset":
+        print(f"  ✘ Push REFUSED: this box (class={box_class!r}, "
+              f"user={unix_user!r}) is not the controller. "
+              "Push is allowed only from airuleset@controller (#870). "
+              "Override: AIRULESET_CONTROLLER_OVERRIDE=1",
+              file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -1189,6 +1220,8 @@ def cmd_push(args):
     flow — this in-process gate is what actually protects it (issue #7)."""
     import subprocess
     import airuleset  # #433 L-E: cmd_install resident + REMOTE_HOSTS in cli_fleet, via facade
+
+    _push_origin_guard()
 
     # 0a. Lint the whole repo — fail-closed before any push/deploy. Unlike the
     # PreToolUse hook (which lints only the files a real `git push` command

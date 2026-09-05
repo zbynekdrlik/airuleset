@@ -262,6 +262,27 @@ EOF
   esac
 fi
 
+# ======================= RULE C — controller push-origin (#870 F3) =========
+# When CONTROLLER_CUTOVER_DONE is True, block `airuleset.py push` from a
+# non-controller box. When the flag is False (the dev1-safe commit-A
+# default), this is a no-op. The python3 -c import runs ONLY when CMD
+# already passed the "airuleset" prefilter below (line ~305), so zero cost
+# for non-airuleset commands.
+case "$CMD" in *airuleset*)
+  _CUTOVER_DONE="$(python3 -c 'import sys; sys.path.insert(0,"'"$REPO_DIR"'"); from cli_fleet import CONTROLLER_CUTOVER_DONE; print(int(CONTROLLER_CUTOVER_DONE))' 2>/dev/null || echo 0)"
+  if [ "$_CUTOVER_DONE" = "1" ]; then
+    _BOX_CLASS="$(cat "${HOME:-/nonexistent}/.claude/airuleset-box-class" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    if [ "$_BOX_CLASS" != "controller" ]; then
+      case "$CMD" in
+        *"airuleset.py push"*|*"airuleset.py"*" push"*)
+          echo "[block-foreign-airuleset-write:ruleC] push from non-controller box blocked (class=$_BOX_CLASS)" >&2
+          exit 2 ;;
+      esac
+    fi
+  fi
+  ;;
+esac
+
 # ======================= RULE A — foreign session ==========================
 # Bash-only: a git write / airuleset.py push arrives only as a Bash command.
 [ -z "$CMD" ] && exit 0

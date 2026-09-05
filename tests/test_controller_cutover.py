@@ -36,7 +36,7 @@ class TestPushOriginGuard(unittest.TestCase):
         import cli_remote
 
         with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", True), \
-             mock.patch("cli_remote.default_box_class", return_value="workstation"), \
+             mock.patch("watchdog.reaper.default_box_class", return_value="workstation"), \
              mock.patch("getpass.getuser", return_value="newlevel"), \
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AIRULESET_CONTROLLER_OVERRIDE", None)
@@ -50,7 +50,7 @@ class TestPushOriginGuard(unittest.TestCase):
         import cli_remote
 
         with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", True), \
-             mock.patch("cli_remote.default_box_class", return_value="controller"), \
+             mock.patch("watchdog.reaper.default_box_class", return_value="controller"), \
              mock.patch("getpass.getuser", return_value="airuleset"), \
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AIRULESET_CONTROLLER_OVERRIDE", None)
@@ -62,7 +62,7 @@ class TestPushOriginGuard(unittest.TestCase):
         import cli_remote
 
         with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", True), \
-             mock.patch("cli_remote.default_box_class", return_value="workstation"), \
+             mock.patch("watchdog.reaper.default_box_class", return_value="workstation"), \
              mock.patch("getpass.getuser", return_value="newlevel"), \
              mock.patch.dict(os.environ, {"AIRULESET_CONTROLLER_OVERRIDE": "1"}):
             cli_remote._push_origin_guard()
@@ -81,7 +81,6 @@ class TestRemoteHostsDev1Entry(unittest.TestCase):
 
     def test_dev1_present_when_true(self):
         """When True, dev1 entry must exist with correct identity."""
-        import importlib
         import cli_fleet
         saved = cli_fleet.REMOTE_HOSTS[:]
         saved_flag = cli_fleet.CONTROLLER_CUTOVER_DONE
