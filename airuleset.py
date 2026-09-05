@@ -6301,6 +6301,36 @@ STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"
 AIRULESET_RELAY_REPO = "zbynekdrlik/airuleset"
 
 
+def _probe_relay_repo_reach(*, run_fn=None) -> str:
+    """#888: install-time probe — on an App-token box, verify whether this
+    box can directly reach airuleset issues.  Returns a non-empty LOUD
+    finding string when it cannot (the expected state: the relay path is
+    required), or "" when reachable or when this is not an App-token box.
+    Transport errors → "" (fail-open, never a false finding).
+
+    ``run_fn`` is an injectable seam for tests (default: subprocess.run).
+    """
+    if not _is_gh_app_token_box():
+        return ""
+    import subprocess as _sp
+    _run = run_fn or _sp.run
+    try:
+        r = _run(
+            ["gh", "api", f"repos/{AIRULESET_RELAY_REPO}/issues?per_page=1"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return ""  # transport error — fail open
+    if r.returncode == 0:
+        return ""  # reachable — no finding
+    return (
+        f"CONFORMANCE FINDING (#888): App-token box cannot directly reach "
+        f"{AIRULESET_RELAY_REPO} issues (HTTP non-200). "
+        f"Use gk-request --repo {AIRULESET_RELAY_REPO} for airuleset ticket filing "
+        f"(AIRULESET_RELAY_REPO relay path)."
+    )
+
+
 def _current_user() -> str:
     """The invoking box's UNIX account from the UNSPOOFABLE uid (airuleset#839).
 
