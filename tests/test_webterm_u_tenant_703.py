@@ -44,7 +44,7 @@ import cli_webterm_lane as lane          # noqa: E402
 import cli_webterm_profiles as profiles  # noqa: E402
 import cli_webterm_pwa as pwa            # noqa: E402
 import cli_webterm_david as dv           # noqa: E402
-# #882: marek webterm module deleted
+import cli_webterm_marek as mk           # noqa: E402, F401 — #882 scope correction: lane restored
 
 
 def _inv(ids):
@@ -63,14 +63,21 @@ class TestUTenantSets703(unittest.TestCase):
         # codex-bridge = newlevel@dev2 (the OWNER's account) — cross-tenant.
         self.assertNotIn(profiles.CODEX_ID, ids)
 
-    # #882: test_marek_set_excludes_owner_account_boxes removed (marek webterm module deleted)
+    def test_marek_set_includes_montalu_streams_882(self):
+        # #882 scope correction: marek's tenant set includes his montalu streams
+        # (montalu1/2/4 + forestshop) but NOT owner-realm boxes (dev1/dev2/gk)
+        # and NOT cross-tenant observe tabs (miva1).
+        ids = {e["id"] for e in profiles.u_tenant_entries(profiles.MAREK)}
+        for within in ("montalu1-subdev", "montalu2-subdev", "montalu4-subdev", "forestshop"):
+            self.assertIn(within, ids, "%s should be within-tenant" % within)
+        for cross in ("dev1", "dev2", "gatekeeper", "miva1-subdev"):
+            self.assertNotIn(cross, ids, "%s should be cross-tenant" % cross)
 
     def test_no_owner_account_entry_is_ever_u_tenant(self):
         # CROSS-TENANT REFUSAL: an inventory entry whose TARGET account is the
         # owner's (`newlevel`) must never be marked u_tenant — its
         # ~/.claude/tickets-status caches aggregate the OWNER's sessions.
-        # #882: marek webterm module deleted — test david only
-        for profile in (profiles.DAVID,):
+        for profile in (profiles.DAVID, profiles.MAREK):
             for e in profiles.profile_inventory(profile, []):
                 if e.get("user") == "newlevel":
                     self.assertIsNot(e.get("u_tenant"), True, e["id"])

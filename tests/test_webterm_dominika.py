@@ -49,9 +49,9 @@ class TestProfileForHostAccountAware(unittest.TestCase):
     def test_subdev_default_is_still_david(self):
         self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
 
-    def test_subdev_marek_account_falls_to_david_after_882(self):
-        # marek profile removed (#882); marek account now falls through to david
-        self.assertEqual(p.profile_for_host("subdev", account="marek"), p.DAVID)
+    def test_subdev_marek_account_resolves_marek(self):
+        # #882 scope correction: marek lane RESTORED (observer, not dev stream).
+        self.assertEqual(p.profile_for_host("subdev", account="marek"), p.MAREK)
 
     def test_dev1_is_owner_regardless_of_account(self):
         self.assertEqual(p.profile_for_host("dev1", account="dominika"), p.OWNER)

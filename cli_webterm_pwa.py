@@ -46,7 +46,7 @@ import cli_webterm_profiles as profiles
 APP_NAMES = {
     profiles.OWNER: ("Webterm", "Webterm"),
     profiles.DAVID: ("Webterm david", "david"),
-    # marek profile REMOVED (#882, 2026-09-05: stream decommissioned)
+    profiles.MAREK: ("Webterm marek", "marek"),
 }
 
 # The canonical PWA asset FILENAMES this module writes into a dash dir. The

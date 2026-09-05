@@ -226,7 +226,8 @@ def webterm_inventory(profile=profiles.OWNER):
     airuleset facade (test-patchable)."""
     if profile == profiles.DAVID:
         return profiles.david_inventory()
-    # marek profile REMOVED (#882)
+    if profile == profiles.MAREK:
+        return profiles.marek_inventory()
     if profile == profiles.DOMINIKA:
         return profiles.dominika_inventory()
     import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
@@ -666,12 +667,17 @@ WEBTERM_DASHBOARD_TABS = {
         "david1-subdev", "david2-subdev", "david3-subdev",
         "miva1-subdev", "spinbike-vps",
     ],
-    # marek.newlevel.media -- Marek's set (owner #661 rework 2026-08-25; #787
-    # doplnenie 2026-08-31 added montalu2; owner request 2026-09-03 added
-    # miva1 + gatekeeper as OBSERVE tabs): his own subdev account first
-    # (default-active tab), his montalu2 stream, the miva1 subdev stream, his
-    # montalu4 stream, his `marek` tmux sessions on dev1 + dev2, the gk box,
-    # marek lane REMOVED (#882, 2026-09-05: stream decommissioned)
+    # marek.newlevel.media -- Marek's OBSERVER set (#882 scope correction
+    # 2026-09-05: DEV STREAM cancelled but webterm dashboard survives; owner
+    # "potrebujem aby marek mal prístup aj k m1"). marek-subdev LOCAL tab
+    # REMOVED (his cancelled stream session); montalu1-subdev ADDED per owner
+    # request. Remaining: his montalu streams (montalu1/2/4), miva1, dev1/dev2,
+    # gatekeeper, forestshop.
+    "marek": [
+        "montalu1-subdev", "montalu2-subdev",
+        "miva1-subdev", "montalu4-subdev",
+        "dev1", "dev2", "gatekeeper", "forestshop",
+    ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
     # ids david1..4 + codex-bridge) and does NOT consume this list; this records
@@ -1664,7 +1670,9 @@ def maybe_setup_webterm():
     if prof == profiles.DAVID:
         import cli_webterm_david
         return cli_webterm_david.setup_webterm_david_service()
-    # marek webterm lane REMOVED (#882, 2026-09-05: stream decommissioned)
+    if prof == profiles.MAREK:
+        import cli_webterm_marek
+        return cli_webterm_marek.setup_webterm_marek_service()
     if prof == profiles.DOMINIKA:
         import cli_webterm_dominika
         return cli_webterm_dominika.setup_webterm_dominika_service()

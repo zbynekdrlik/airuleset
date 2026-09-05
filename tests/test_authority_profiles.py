@@ -14,8 +14,9 @@ class TestAuthorityResolution(TestCase):
         # map with the OS account (runbook-537 step 8, live in-place usermod).
         self.assertEqual(airuleset.AUTHORITY_BY_USER["david1"], "fork-no-merge")
         self.assertNotIn("david", airuleset.AUTHORITY_BY_USER)
-        # marek REMOVED (#882, 2026-09-05: decommissioned)
-        self.assertNotIn("marek", airuleset.AUTHORITY_BY_USER)
+        # marek — DEV STREAM cancelled (#882) but webterm OBSERVER lane
+        # survives; fork-no-merge (least-privilege, dominika model #867).
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "fork-no-merge")
         # montalu1 (was montalu; #537 live rename 2026-08-19): same
         # branch-merge profile as the base. The OLD unix name's row left the
         # map with the OS account (runbook-537 step 8, live in-place usermod).

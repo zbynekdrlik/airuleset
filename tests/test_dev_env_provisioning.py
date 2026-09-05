@@ -1377,16 +1377,16 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
 
     def test_a_healthy_account_is_never_skipped(self):
         # control: nothing failed this run -- both phases must run normally
-        # for every account, exactly as before.
+        # for every non-observer account. #882 scope correction: marek is now a
+        # webterm observer (soniox skipped), so use montalu4 as the test subject.
         import unittest.mock as m
         calls = []
         args = m.Mock()
         fake_hosts = [
-            {"name": "marek@subdev", "host": "9.9.9.9", "user": "marek",
-             "repo_path": "~/devel/airuleset",
-             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+            {"name": "montalu4@subdev", "host": "9.9.9.9", "user": "montalu4",
+             "repo_path": "~/devel/airuleset"},
         ]
-        fake_authority = {"marek": "branch-merge"}
+        fake_authority = {"montalu4": "branch-merge"}
         with m.patch("subprocess.run", side_effect=self._fake_run(calls, {})), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
@@ -1394,8 +1394,8 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=fake"):
             airuleset.cmd_push(args)   # must NOT raise
-        marek_calls = [c for c in calls if any("marek@" in str(a) for a in c)]
-        self.assertEqual(len(marek_calls), 2)
+        m4_calls = [c for c in calls if any("montalu4@" in str(a) for a in c)]
+        self.assertEqual(len(m4_calls), 2)
 
     def test_a_remote_command_failure_is_not_treated_as_an_auth_failure(self):
         # rc != 0 with no "Permission denied" in stderr means auth SUCCEEDED

@@ -98,9 +98,15 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635
         "session_duration": "24h",
     },
-    # marek realm REMOVED (#882, 2026-09-05: stream decommissioned, odoo-erp#6257).
-    # Ops: the Access app + tunnel + DNS for marek.newlevel.media should be torn
-    # down by the gatekeeper (not this repo's code).
+    # marek.newlevel.media — Marek's webterm OBSERVER gateway (#882 scope
+    # correction 2026-09-05: DEV STREAM cancelled, dashboard survives).
+    "marek": {
+        "hostname": "marek.newlevel.media",
+        "name": "webterm — marek",
+        # repo-evidenced (marek's real box account) — CONFIRM with owner at go-live (R1)
+        "allowed_emails": ["drlik.marek@gmail.com"],
+        "session_duration": "24h",
+    },
     # dominika.newlevel.media — the FOURTH webterm gateway (#867 scope-add
     # 2026-09-04, owner request: "pridat noveho webterm uzivatela dominika, email
     # nika.sarikova@gmail.com"). The e-mail is owner-PROVIDED verbatim in the

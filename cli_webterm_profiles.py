@@ -230,33 +230,29 @@ MAREK_FORESTSHOP_HOST_KEYS = [
 
 
 def marek_inventory():
-    """marek's SCOPED session set (#661 rework, owner ruling 2026-08-25; #787
-    doplnenie 2026-08-31 added montalu2; owner request 2026-09-03 added
-    miva1 + gatekeeper) — EIGHT entries, in the owner-defined tab order
+    """marek's SCOPED OBSERVER session set (#882 scope correction 2026-09-05:
+    DEV STREAM cancelled but webterm dashboard survives; owner "potrebujem aby
+    marek mal prístup aj k m1") — EIGHT entries, in the owner-defined tab order
     (WEBTERM_DASHBOARD_TABS["marek"]):
 
-      1. marek-subdev — his own tmux group, a LOCAL attach (the gateway runs as
-         marek; no ssh, no key — unchanged from #612);
+      1. montalu1-subdev — his first montalu stream, ssh over loopback with the
+         dedicated key (#882 scope correction: owner requested m1 access);
       2. montalu2-subdev — his second montalu stream (#787), ssh over loopback
          with the dedicated key — mirrors montalu4-subdev exactly except for
          the account name;
       3. miva1-subdev — an OBSERVE tab (owner request 2026-09-03): the miva1
-         subdev stream, ssh over loopback with the dedicated key. Mirrors the
-         montalu2/4 loopback shape but is CROSS-TENANT (NO u_tenant): miva1 is
-         a SEPARATE external sub-dev stream (notify routes it to the OWNER,
-         not marek's realm), so marek observes it, never a within-tenant read;
+         subdev stream, ssh over loopback with the dedicated key. CROSS-TENANT
+         (NO u_tenant): miva1 is a SEPARATE external sub-dev stream;
       4. montalu4-subdev — his montalu stream, ssh over loopback with the
          dedicated key (the david1..4 shape);
       5./6. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
-         ssh newlevel@<tailscale IP> with the dedicated key (codex-bridge is
-         the cross-box precedent);
+         ssh newlevel@<tailscale IP> with the dedicated key;
       7. gatekeeper — an OBSERVE tab (owner request 2026-09-03): the gk box,
-         ssh gatekeeper@<gk tailscale IP> with the dedicated key, attaching the
-         OWNER's gk session group (preferred="zbynek"). NO u_tenant (owner-realm
-         account, same as dev1/dev2, #703); no #680 host-key pin (tailscale,
-         like dev1/dev2);
+         ssh gatekeeper@<gk tailscale IP> with the dedicated key;
       8. forestshop — his VPS's principal account admin@forestshop-dev with the
-         dedicated key + the #679 strict host-key pin (the owner `sb` shape).
+         dedicated key + the #679 strict host-key pin.
+
+    marek-subdev LOCAL tab REMOVED (#882: his cancelled dev stream session).
 
     This — and ONLY this — is what marek's ttyd is launched against, so it is
     his full connect allowlist: no other stream's id, no david id, and no other
@@ -265,15 +261,16 @@ def marek_inventory():
     sshpass shared-password branch and never touches the gatekeeper key."""
     return [
         {
-            "id": MAREK_ID,
-            "label": "marek@subdev",
+            "id": "montalu1-subdev",
+            "label": "montalu1@subdev",
             "kind": "stream",
-            "local": True,
-            "host": None,
-            "user": MAREK_GATEWAY_USER,
-            "identity": None,
-            "preferred": MAREK_GATEWAY_USER,   # the local `marek` tmux group
-            # #703: marek's OWN gateway account — a LOCAL within-tenant read.
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu1",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": "montalu1",
+            # #882 scope correction: owner requested m1 access — montalu1 is
+            # within marek's montalu tenant.
             "u_tenant": True,
         },
         {

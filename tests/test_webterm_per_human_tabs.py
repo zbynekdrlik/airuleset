@@ -93,12 +93,16 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         for excluded in ZBYNEK_EXCLUDED:
             self.assertNotIn(excluded, got)
 
-    def test_marek_lane_removed_882(self):
-        # marek decommissioned (#882, 2026-09-05): no WEBTERM_DASHBOARD_TABS
-        # entry, no marek_inventory, no profile constant.
-        self.assertNotIn("marek", w.WEBTERM_DASHBOARD_TABS)
-        self.assertFalse(hasattr(profiles, "marek_inventory"))
-        self.assertFalse(hasattr(profiles, "MAREK"))
+    def test_marek_observer_lane_882(self):
+        # marek DEV STREAM cancelled (#882) but webterm OBSERVER dashboard
+        # survives (owner scope correction 2026-09-05). Tab set has montalu1
+        # (owner requested m1 access) but NOT marek-subdev (dead stream).
+        self.assertIn("marek", w.WEBTERM_DASHBOARD_TABS)
+        tabs = w.WEBTERM_DASHBOARD_TABS["marek"]
+        self.assertIn("montalu1-subdev", tabs)
+        self.assertNotIn("marek-subdev", tabs)
+        self.assertTrue(hasattr(profiles, "marek_inventory"))
+        self.assertTrue(hasattr(profiles, "MAREK"))
 
     def test_david_domain_shows_only_david_accounts(self):
         inv = _owner_inv()
@@ -116,6 +120,26 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
             profiles.dominika_inventory(), w.WEBTERM_DASHBOARD_TABS["dominika"])]
         self.assertEqual(got, ["montalu5-subdev", "miva1-subdev"])
         self.assertEqual(w.WEBTERM_DASHBOARD_TABS["dominika"], got)
+
+    def test_marek_lane_render_alias_order_882(self):
+        # #882 scope correction: marek's OBSERVER set — montalu1/2, miva1,
+        # montalu4, dev1, dev2, gatekeeper, forestshop. marek-subdev REMOVED.
+        got = [e["id"] for e in w.entries_for_tab_list(
+            profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
+        self.assertEqual(got, [
+            "montalu1-subdev", "montalu2-subdev",
+            "miva1-subdev", "montalu4-subdev",
+            "dev1", "dev2", "gatekeeper", "forestshop",
+        ])
+        html = w.render_dashboard_html(
+            profiles.marek_inventory(), ttyd_base="/t", human="marek",
+            term_grid=(176, 51))
+        aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
+        # montalu1->m1, montalu2->m2, miva1->miva, montalu4->m4, dev1, dev2,
+        # gatekeeper->gk, forestshop->fs — from the SINGLE #592 cli_aliases source.
+        self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "dev1", "dev2", "gk", "fs"])
+        # No marek-subdev (dead stream) on the dashboard.
+        self.assertNotIn('title="marek@subdev"', html)
 
     def test_dominika_lane_render_alias_order_and_exclusions(self):
         # The prod dominika-lane render path: her scoped inventory + human="dominika".
@@ -178,12 +202,11 @@ class TestConnectAllowlistUnchanged(unittest.TestCase):
     def test_connect_allowlist_stays_full_fleet(self):
         # #661 is VISIBILITY, not an auth boundary: the inventory that feeds the
         # connect allowlist is NOT filtered — the owner keeps reachability.
-        # marek-subdev removed from fleet #882.
+        # marek-subdev is back in the fleet (#882 scope correction: lane restored).
         inv = _owner_inv()
         ids = {e["id"] for e in inv}
-        for foreign in ("stepan-forestshop-dev", "david3-subdev"):
-            self.assertIn(foreign, ids)
-        self.assertNotIn("marek-subdev", ids)
+        for present in ("stepan-forestshop-dev", "david3-subdev", "marek-subdev"):
+            self.assertIn(present, ids)
 
 
 class TestDavidProfileOwnDomain(unittest.TestCase):

@@ -81,8 +81,19 @@ REMOTE_HOSTS = [
         "user": "montalu4",
         "repo_path": "~/devel/airuleset",
     },
-    # marek@subdev — REMOVED (#882, 2026-09-05, owner GO odoo-erp#6257):
-    # stream decommissioned, Hetzner server+DNS destroyed, account locked/nologin.
+    {
+        # marek@subdev — webterm OBSERVER lane account (#882 scope correction,
+        # 2026-09-05: DEV STREAM cancelled but webterm dashboard survives per
+        # owner ruling "potrebujem aby marek mal prístup aj k m1"). NOT a dev
+        # stream: no stream:marek slice, no tmux stream session, no soniox;
+        # registered here so `push` reaches the account and runs
+        # `maybe_setup_webterm`. Shell restored from nologin for the lane.
+        "name": "marek@subdev",
+        "host": "100.118.174.27",
+        "user": "marek",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
     {
         # dominika -- webterm OBSERVER account (airuleset#867, 2026-09-04, owner
         # request). NOT a dev stream: she runs ONLY the dominika webterm gateway
@@ -405,7 +416,11 @@ def paused_reason(remote):
 # `full` is granted ONLY via the registries below. Only the user adds markers.
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
-    # marek — REMOVED (#882, 2026-09-05): stream decommissioned (odoo-erp#6257).
+    # marek — DEV STREAM cancelled (#882, odoo-erp#6257) but webterm OBSERVER
+    # lane survives (owner scope correction 2026-09-05). Least-privilege
+    # fork-no-merge (dominika model #867): she is not a real hand-off stream,
+    # so WEBTERM_OBSERVER_USERS excludes her from stream provisioning consumers.
+    "marek": "fork-no-merge",
     # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
     # moved to the numbered block below; the OS account `david` is gone.
     # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
@@ -529,7 +544,7 @@ FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
 # AUTHORITY_BY_USER (test-locked): an observer is a classified reduced account
 # MINUS stream provisioning, not a third authority tier — resolve_authority still
 # returns its fork-no-merge (harmless: an observer authors/works no ticket).
-WEBTERM_OBSERVER_USERS = frozenset({"dominika"})
+WEBTERM_OBSERVER_USERS = frozenset({"dominika", "marek"})
 
 
 # Webterm-ONLY accounts (#869, owner directive 2026-09-04): these users access
@@ -546,7 +561,7 @@ WEBTERM_OBSERVER_USERS = frozenset({"dominika"})
 # keys quarantined), sshd Match drop-in disables password auth.
 # Test-locked: subset of subdev REMOTE_HOSTS users.
 WEBTERM_ONLY_USERS = frozenset({
-    "david1", "david2", "david3", "david4", "dominika",
+    "david1", "david2", "david3", "david4", "dominika", "marek",
 })
 
 
