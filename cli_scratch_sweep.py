@@ -349,6 +349,51 @@ def _scratch_stat(p):
     return size_bytes, newest_mtime
 
 
+SCRATCHPAD_CHILD_MIN_AGE_DAYS = 2
+
+
+def discover_stale_scratchpad_children(session_path, now, min_age_days=None,
+                                       proc_dir=None):
+    """Per-child aging INSIDE a live session's ``scratchpad/`` (#849 ask 2).
+    Each top-level child of ``<session>/scratchpad/`` is aged independently:
+    if its newest mtime exceeds ``min_age_days`` AND ``_target_in_live_use``
+    is False, it is a genuine candidate (reason=None). Returns
+    ``[{path, size, reason, cls}]``. Symlinks never followed. A missing or
+    unreadable ``scratchpad/`` is simply nothing to do."""
+    min_age_days = min_age_days if min_age_days is not None else SCRATCHPAD_CHILD_MIN_AGE_DAYS
+    sp = Path(session_path) / "scratchpad"
+    if not sp.is_dir() or sp.is_symlink():
+        return []
+    cutoff = min_age_days * 86400
+    out = []
+    try:
+        children = sorted(os.listdir(sp))
+    except OSError:
+        return []
+    for name in children:
+        child = sp / name
+        if child.is_symlink():
+            out.append({"path": str(child), "size": 0, "cls": "scratch",
+                        "reason": "symlink -- never followed"})
+            continue
+        try:
+            size_bytes, newest_mtime = _scratch_stat(child)
+        except OSError as e:
+            out.append({"path": str(child), "size": 0, "cls": "scratch",
+                        "reason": "could not stat: %s" % e})
+            continue
+        age = now - newest_mtime
+        if age < cutoff:
+            continue
+        if _target_in_live_use(child, proc_dir=proc_dir):
+            out.append({"path": str(child), "size": size_bytes, "cls": "scratch",
+                        "reason": "in live use (open fd / cwd) -- kept"})
+            continue
+        out.append({"path": str(child), "size": size_bytes, "cls": "scratch",
+                    "reason": None})
+    return out
+
+
 def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, home):
     """Per-session (#863) classification of a `<cwd-key>/<session-uuid>` subdir.
     LIVENESS FIRST (tri-state `_session_liveness`): a genuinely LIVE session (a
@@ -358,7 +403,10 @@ def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, ho
     `live=True` (the visibility signal the disk-guard's `largest_live_scratch`
     reads). An UNDETERMINABLE liveness is ALSO kept but marked `live=False`
     (review 5: never named as a real live session). Otherwise the ordinary #355
-    age floor applies. Fail-safe: unresolvable liveness never sweeps."""
+    age floor applies. Fail-safe: unresolvable liveness never sweeps.
+
+    #849 ask 2: a LIVE or UNDETERMINABLE session ALSO reports ``stale_children``
+    -- the individually-reclaimable old children inside its ``scratchpad/``."""
     entry = {"path": str(cp), "reason": None, "uuid": uuid,
              "cwd_key": cwd_key, "live": False}
     if cp.is_symlink():
@@ -376,9 +424,13 @@ def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, ho
         entry["live"] = True
         entry["reason"] = ("live session %s -- kept unconditionally "
                            "(visibility only)" % uuid)
+        entry["stale_children"] = discover_stale_scratchpad_children(
+            cp, now, proc_dir=proc_dir)
         return entry
     if liveness == _SESS_UNDET:
         entry["reason"] = "liveness undeterminable -- kept"
+        entry["stale_children"] = discover_stale_scratchpad_children(
+            cp, now, proc_dir=proc_dir)
         return entry
     if entry["age_days"] < min_age_days:
         entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
