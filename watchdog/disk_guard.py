@@ -2346,6 +2346,10 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             status["top_consumers"] = prior["top_consumers"]
             if "top_consumers_ts" in prior:
                 status["top_consumers_ts"] = prior["top_consumers_ts"]
+    # #895: top_consumers must ALWAYS be present in status.json (even on a
+    # cold-start non-drain poll) so downstream readers never see a missing key.
+    if "top_consumers" not in status:
+        status["top_consumers"] = []
     try:
         write_status_cache(status, home=home)
     except Exception as e:
