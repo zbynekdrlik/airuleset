@@ -423,7 +423,8 @@ class TestBounceQuals(unittest.TestCase):
         # Full authority = the core slice (same exclusions as tickets-status).
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
-        for u in ("david1", "marek", "montalu1", "montalu2", "montalu3",
+        # marek removed #882 (decommissioned)
+        for u in ("david1", "montalu1", "montalu2", "montalu3",
                   "montalu4", "david2", "david3", "david4"):
             self.assertIn("-label:stream:%s" % u, quals[0])
 

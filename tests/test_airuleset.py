@@ -11911,7 +11911,8 @@ class TestRemoteHosts(TestCase):
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
     # david streams — additional capacity for the same external developer,
     # same subdev box, same gatekeeper_access identity requirement as david1.
-    SUBDEV_USERS = {"marek", "david1", "simap1", "miva1",
+    # marek removed #882 (decommissioned)
+    SUBDEV_USERS = {"david1", "simap1", "miva1",
                     "david2", "david3", "david4"}
 
     def _subdev_entries(self):
@@ -11922,7 +11923,7 @@ class TestRemoteHosts(TestCase):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu1@subdev",
-                         "marek@subdev", "david1@subdev", "simap1@subdev",
+                         "david1@subdev", "simap1@subdev",
                          "montalu2@subdev", "montalu3@subdev",
                          "montalu4@subdev", "miva1@subdev",
                          "david2@subdev", "david3@subdev", "david4@subdev",
@@ -14732,10 +14733,11 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             'sshpass -p newlevel ssh -o StrictHostKeyChecking=no montalu1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_allows_marek_with_gatekeeper_identity(self):
+    def test_blocks_marek_after_decommission_882(self):
+        # marek removed from the hardcoded allowlist (#882, decommissioned)
         r = self._run(
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 marek@subdev "ls"')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     def test_allows_david1_with_gatekeeper_identity(self):
         # david renamed to david1 (#537 live rename 2026-08-21) — the hook
@@ -14772,11 +14774,12 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run("scp file.txt montalu1@subdev:/tmp/")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_allows_rsync_marek_with_identity(self):
+    def test_blocks_rsync_marek_after_decommission_882(self):
+        # marek removed from allowlist (#882)
         r = self._run(
             "rsync -avz -e 'ssh -i ~/.secrets/gatekeeper_access_ed25519' "
             "./local/ marek@subdev:/remote/")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     # --- non-subdev traffic is completely untouched ----------------------
 

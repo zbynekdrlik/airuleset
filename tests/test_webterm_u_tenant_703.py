@@ -204,6 +204,7 @@ class TestScopedCollector703(unittest.TestCase):
         # End-to-end through the REAL collect_fleet_u with a recording `run`:
         # no owner-account target is ever contacted and the sshpass
         # shared-password branch never fires from the lane path.
+        # #882: changed from marek (decommissioned) to david lane.
         calls = []
 
         def fake_run(argv, **k):
@@ -214,10 +215,7 @@ class TestScopedCollector703(unittest.TestCase):
                 m.patch.object(w, "CLAUDE_DIR", Path(tmp)), \
                 m.patch.object(w, "_box_u_count", return_value=0), \
                 m.patch.object(w.subprocess, "run", fake_run):
-            # patch _box_u_count so marek's `local` entry does NOT read the test
-            # runner's real ~/.claude/tickets-status (hermetic; assertion below
-            # is about ssh targets, which a local entry never contacts anyway).
-            rc = w.cmd_webterm_u_collect(["--lane", "marek"])
+            rc = w.cmd_webterm_u_collect(["--lane", "david"])
         self.assertEqual(rc, 0)
         self.assertTrue(calls)                              # non-vacuous
         for argv in calls:
@@ -353,9 +351,10 @@ class TestReadPrefixHostKeys703(unittest.TestCase):
     public-DNS): strict verification, never the TOFU =no posture there."""
 
     def test_pinned_entry_uses_strict_pin_never_tofu(self):
-        entry = {"identity": "~/.secrets/webterm_marek_ed25519",
-                 "host": profiles.MAREK_FORESTSHOP_HOST,
-                 "host_keys": profiles.MAREK_FORESTSHOP_HOST_KEYS}
+        # #882: marek constants removed; inline test values for the general shape
+        entry = {"identity": "~/.secrets/webterm_test_ed25519",
+                 "host": "test-host.example.com",
+                 "host_keys": ["ssh-ed25519 AAAA_test_key"]}
         joined = " ".join(w._ssh_read_prefix(entry))
         self.assertIn("StrictHostKeyChecking=yes", joined)
         self.assertNotIn("StrictHostKeyChecking=no", joined)
