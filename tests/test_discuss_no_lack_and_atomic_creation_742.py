@@ -30,7 +30,7 @@ from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 
 
 def read(p):

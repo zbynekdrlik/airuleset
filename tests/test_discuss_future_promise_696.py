@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 import discuss_thread_guard as g  # noqa: E402
 
 HOOK = ROOT / "hooks" / "block-discuss-thread-name.sh"
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 
 # The incident shape: signed, future-promise body ("Od zajtrajšieho…" carries
 # BOTH the `zajtrajš` stem and `bude pri`).

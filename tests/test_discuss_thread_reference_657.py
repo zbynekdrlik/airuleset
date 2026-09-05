@@ -44,7 +44,7 @@ from _hook_state_cleanup import sweep_session_files  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 DOCTRINE = ROOT / "modules" / "core" / "issue-reference-context.md"
-COMPOSE = ROOT / "skills" / "odoo-discuss-xmlrpc" / "handover-compose.md"
+COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
 
 
 def _run(msg):
