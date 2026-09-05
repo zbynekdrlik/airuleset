@@ -468,7 +468,7 @@
     "watchdog/decide.py": 791,
     "watchdog/discord_api.py": 187,
     "watchdog/discord_replies.py": 856,
-    "watchdog/disk_guard.py": 1576,
+    "watchdog/disk_guard.py": 1581,
     "watchdog/disk_guard_root.py": 274,
     "watchdog/goal.py": 4843,
     "watchdog/goal_scan.py": 672,

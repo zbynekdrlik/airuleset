@@ -299,17 +299,18 @@ def write_status_cache(status, home=None, path=None):
 # NEW planners (uploads, toolchain)
 # --------------------------------------------------------------------------- #
 def _uploads_dir_has_keep_marker(dirpath):
-    """Check whether `dirpath` or ANY ancestor up to (but not including) the
-    uploads root contains a keep marker (#861). Fail-safe: if the marker or
-    its parent cannot be stat'd → return True (KEEP, never delete)."""
-    # Check the dir itself for a marker
+    """Check whether `dirpath` contains a keep marker (#861). Fail-safe: if
+    the marker cannot be stat'd (e.g. permissions) → return True (KEEP,
+    never delete possibly-live data)."""
     for marker_name in UPLOADS_KEEP_MARKERS:
         marker = os.path.join(dirpath, marker_name)
         try:
-            if os.path.exists(marker):
-                return True
+            os.lstat(marker)
+            return True   # marker exists
+        except FileNotFoundError:
+            continue       # not in this dir, try next name
         except OSError:
-            return True  # fail-safe KEEP on stat error
+            return True    # fail-safe KEEP: can't stat → assume protected
     return False
 
 
@@ -335,18 +336,21 @@ def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAY
     _keep_cache = {}  # dirpath -> bool
 
     def _is_protected(dirpath):
-        """Check if dirpath or any of its ancestors (up to but not including
-        the uploads root) has a keep marker. Caches per directory."""
+        """Check if dirpath, the uploads root, or any ancestor between them
+        has a keep marker. Caches per directory."""
         dp = os.path.normpath(dirpath)
         up_norm = os.path.normpath(str(up))
         if dp in _keep_cache:
             return _keep_cache[dp]
-        # Walk from dirpath up to the uploads root
+        # Build the chain from dirpath up to AND INCLUDING the uploads root
         chain = []
         cur = dp
         while cur != up_norm and len(cur) > len(up_norm):
             chain.append(cur)
             cur = os.path.dirname(cur)
+        # Include the uploads root itself (#861 review: a marker at the root
+        # must protect the entire tree)
+        chain.append(up_norm)
         # Check from shallowest (closest to root) to deepest for cache reuse
         for d in reversed(chain):
             parent = os.path.dirname(d)
@@ -379,7 +383,8 @@ def discover_stale_uploads(home=None, now=None, max_age_days=UPLOADS_MAX_AGE_DAY
                     continue
                 age = now - st.st_mtime
                 row = {"cls": "uploads", "path": fp, "size": st.st_size,
-                       "age_days": age / 86400.0, "reason": None}
+                       "age_days": age / 86400.0, "mtime": st.st_mtime,
+                       "reason": None}
                 if protected:
                     row["reason"] = "protected by keep marker (#861)"
                 elif age < cutoff:
