@@ -530,7 +530,7 @@ class TestRegistryProjects(unittest.TestCase):
     ]
 
     def test_host_filter(self):
-        """Entries for dev1 return dev1 projects only."""
+        """Entries for dev1 return dev1 projects only, tilde-expanded."""
         import cli_context_baseline as cb
         with tempfile.TemporaryDirectory() as td:
             reg = Path(td) / "projects-registry.json"
@@ -538,11 +538,12 @@ class TestRegistryProjects(unittest.TestCase):
                            encoding="utf-8")
             dirs = cb._registry_projects_for_host("dev1",
                                                    registry_path=str(reg))
-        self.assertEqual(dirs, ["~/devel/camera-box",
-                                "~/devel/restreamer"])
+        home = str(Path.home())
+        self.assertEqual(dirs, [f"{home}/devel/camera-box",
+                                f"{home}/devel/restreamer"])
 
     def test_host_filter_dev2(self):
-        """Entries for dev2 return dev2 projects only."""
+        """Entries for dev2 return dev2 projects only, tilde-expanded."""
         import cli_context_baseline as cb
         with tempfile.TemporaryDirectory() as td:
             reg = Path(td) / "projects-registry.json"
@@ -550,8 +551,22 @@ class TestRegistryProjects(unittest.TestCase):
                            encoding="utf-8")
             dirs = cb._registry_projects_for_host("dev2",
                                                    registry_path=str(reg))
-        self.assertEqual(dirs, ["~/devel/bakerion-ai/repo",
-                                "~/devel/presenter/presenter-dev2"])
+        home = str(Path.home())
+        self.assertEqual(dirs, [f"{home}/devel/bakerion-ai/repo",
+                                f"{home}/devel/presenter/presenter-dev2"])
+
+    def test_tilde_expanded_not_literal(self):
+        """Paths are tilde-expanded, never literal ~ (RED 1 review)."""
+        import cli_context_baseline as cb
+        with tempfile.TemporaryDirectory() as td:
+            reg = Path(td) / "projects-registry.json"
+            reg.write_text(json.dumps(self.FIXTURE_REGISTRY),
+                           encoding="utf-8")
+            dirs = cb._registry_projects_for_host("dev1",
+                                                   registry_path=str(reg))
+        for d in dirs:
+            self.assertNotIn("~", d,
+                             "path must be tilde-expanded, not literal")
 
     def test_missing_registry(self):
         """Missing registry returns empty list."""
@@ -583,17 +598,20 @@ class TestFleetProjectArgs(unittest.TestCase):
     ]
 
     def test_remote_argv_carries_project_args(self):
-        """The remote ssh command includes --project for each
-        registry entry matching that host."""
+        """The remote ssh subprocess.run call includes --project
+        for each registry entry matching that host (YELLOW 2 fix).
+        Uses runner=None to exercise the real subprocess path, with
+        subprocess.run patched at the stdlib level."""
         import cli_context_baseline as cb
-        captured_hosts = []
+        import shlex
+        import subprocess as real_sp
 
-        def fake_runner(host):
-            captured_hosts.append(host)
-            name = host.get("name", "test")
-            return (json.dumps({
-                "schema": 1,
-                "host": name,
+        captured_cmds = []
+
+        def spy_run(cmd, **kwargs):
+            captured_cmds.append(list(cmd))
+            stdout = json.dumps({
+                "schema": 1, "host": "dev2",
                 "date": "2026-09-01",
                 "global": {"resolved_bytes": 100, "tokens": 25,
                             "modules": 1, "missing": []},
@@ -601,10 +619,12 @@ class TestFleetProjectArgs(unittest.TestCase):
                 "projects": [],
                 "mcp": {"estimate_bytes": 0, "servers": 0,
                          "estimate": True},
-            }), 0)
+            })
+            return real_sp.CompletedProcess(
+                cmd, 0, stdout=stdout, stderr="")
 
         fake_hosts = [
-            {"name": "dev2-host", "host": "100.82.64.27",
+            {"name": "dev2", "host": "100.82.64.27",
              "user": "newlevel", "repo_path": "~/devel/airuleset"},
         ]
 
@@ -614,13 +634,20 @@ class TestFleetProjectArgs(unittest.TestCase):
                            encoding="utf-8")
             with patch("cli_remote._deployable_hosts",
                        return_value=fake_hosts), \
-                 patch.object(cb, "_registry_projects_for_host",
-                              wraps=cb._registry_projects_for_host), \
-                 patch.object(cb, "REGISTRY_PATH", str(reg)):
-                data = cb.run_fleet(runner=fake_runner)
+                 patch.object(cb, "REGISTRY_PATH", str(reg)), \
+                 patch("subprocess.run", side_effect=spy_run):
+                # runner=None forces the real subprocess path
+                cb.run_fleet(runner=None)
 
-        # The runner was called, data has boxes
-        self.assertEqual(len(data["boxes"]), 1)
+        # Verify subprocess.run was called for the remote host
+        self.assertEqual(len(captured_cmds), 1)
+        cmd = captured_cmds[0]
+        # The cmd must contain --project with the dev2 project path
+        home = str(Path.home())
+        expected_path = shlex.quote(f"{home}/devel/bakerion-ai/repo")
+        self.assertIn("--project", cmd)
+        proj_idx = cmd.index("--project")
+        self.assertEqual(cmd[proj_idx + 1], expected_path)
 
     def test_missing_registry_flags_field(self):
         """When registry is missing, fleet JSON carries registry:missing."""
@@ -645,6 +672,32 @@ class TestFleetProjectArgs(unittest.TestCase):
             data = cb.run_fleet(runner=fake_runner)
 
         self.assertEqual(data.get("registry"), "missing")
+
+    def test_corrupt_registry_flags_field(self):
+        """When registry is corrupt, fleet JSON carries registry:corrupt
+        (BLUE 4 review fix)."""
+        import cli_context_baseline as cb
+
+        def fake_runner(host):
+            return (json.dumps({
+                "schema": 1, "host": "test",
+                "date": "2026-09-01",
+                "global": {"resolved_bytes": 0, "tokens": 0,
+                            "modules": 0, "missing": []},
+                "skills": {"count": 0, "desc_chars": 0, "per_skill": {}},
+                "projects": [],
+                "mcp": {"estimate_bytes": 0, "servers": 0,
+                         "estimate": True},
+            }), 0)
+
+        with tempfile.TemporaryDirectory() as td:
+            reg = Path(td) / "projects-registry.json"
+            reg.write_text("NOT VALID JSON{{{", encoding="utf-8")
+            with patch("cli_remote._deployable_hosts", return_value=[]), \
+                 patch.object(cb, "REGISTRY_PATH", str(reg)):
+                data = cb.run_fleet(runner=fake_runner)
+
+        self.assertEqual(data.get("registry"), "corrupt")
 
 
 class TestPushSummary(unittest.TestCase):

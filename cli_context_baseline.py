@@ -227,20 +227,39 @@ def measure_mcp():
 
 # -- Registry project lookup ---------------------------------------------
 
-def _registry_projects_for_host(hostname, registry_path=None):
-    """Return the list of project `path` values from projects-registry.json
-    whose `host` field matches `hostname`. Missing/unreadable registry
-    returns []. Never raises."""
+def _load_registry(registry_path=None):
+    """Load projects-registry.json and return (by_host_dict, status).
+    status is "ok", "missing", or "corrupt". by_host_dict maps hostname
+    to a list of expanded project path strings. Never raises."""
     reg_path = registry_path or REGISTRY_PATH
+    p = Path(reg_path)
+    if not p.exists():
+        return {}, "missing"
     try:
-        data = json.loads(Path(reg_path).read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
+        return {}, "corrupt"
     if not isinstance(data, list):
-        return []
-    return [e["path"] for e in data
-            if isinstance(e, dict) and e.get("host") == hostname
-            and e.get("path")]
+        return {}, "corrupt"
+    by_host = {}
+    for e in data:
+        if not isinstance(e, dict):
+            continue
+        host = e.get("host")
+        path = e.get("path")
+        if not host or not path:
+            continue
+        expanded = str(Path(path).expanduser())
+        by_host.setdefault(host, []).append(expanded)
+    return by_host, "ok"
+
+
+def _registry_projects_for_host(hostname, registry_path=None):
+    """Return the list of project path values from projects-registry.json
+    whose `host` field matches `hostname`. Tilde-expanded. Missing/unreadable
+    registry returns []. Never raises."""
+    by_host, _status = _load_registry(registry_path)
+    return by_host.get(hostname, [])
 
 
 # -- MEMORY.md measurement ----------------------------------------------
@@ -510,6 +529,7 @@ def run_fleet(runner=None):
     runner: callable(host_entry) -> (stdout_str, returncode) for testing.
     """
     import datetime
+    import shlex
     import socket
     import subprocess
     import cli_remote
@@ -518,13 +538,13 @@ def run_fleet(runner=None):
     boxes = []
     failed = []
 
-    # Load registry once for per-host project dirs (#857)
-    registry_missing = not Path(REGISTRY_PATH).exists()
+    # Load registry ONCE for per-host project dirs (#857, BLUE 5 review)
+    by_host, registry_status = _load_registry()
 
     # Local box in-process (design: "Local box in-process")
     if not runner:
         local_hostname = socket.gethostname()
-        local_projects = _registry_projects_for_host(local_hostname)
+        local_projects = by_host.get(local_hostname, [])
         local_data = measure_box(local_projects)
         boxes.append(local_data)
 
@@ -548,9 +568,10 @@ def run_fleet(runner=None):
                     "context-baseline", "--json"
                 ]
                 # Derive per-host project dirs from registry (#857)
-                host_projects = _registry_projects_for_host(name)
+                # shlex.quote each path for the remote shell (YELLOW 3)
+                host_projects = by_host.get(name, [])
                 for pd in host_projects:
-                    cmd.extend(["--project", pd])
+                    cmd.extend(["--project", shlex.quote(pd)])
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=30)
                 stdout = result.stdout
@@ -572,8 +593,8 @@ def run_fleet(runner=None):
         "boxes": boxes,
         "failed": failed,
     }
-    if registry_missing:
-        result_data["registry"] = "missing"
+    if registry_status != "ok":
+        result_data["registry"] = registry_status
     return result_data
 
 
