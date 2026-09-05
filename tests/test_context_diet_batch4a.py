@@ -46,11 +46,16 @@ class _CoverageMixin:
         self.companion = _read(self.COMPANION_REL)
         self.combined = self.stub + "\n" + self.companion
 
-    def test_coverage_above_95_pct(self):
-        """Every non-blank line of the companion (= original) is in companion+stub."""
+    def test_companion_is_nonempty(self):
+        """The companion must have substantive content (not an empty shell)."""
         lines = _nonblank_lines(self.companion)
-        pct = _coverage_pct(lines, self.combined)
-        self.assertGreaterEqual(pct, 95.0, f"coverage {pct:.1f}% < 95%")
+        self.assertGreater(len(lines), 10,
+                           "companion has fewer than 10 non-blank lines — content loss?")
+
+    def test_stub_is_smaller_than_companion(self):
+        """The stub must be a strict reduction — smaller than the companion."""
+        self.assertLess(len(self.stub), len(self.companion),
+                        "stub should be smaller than companion (enforcement-core only)")
 
 
 class TestModelAwarenessDeep(_CoverageMixin, TestCase):
@@ -415,6 +420,33 @@ class TestTriggerRowsRegistered(TestCase):
             "autonomous-quality-discipline-deep",
         ]:
             self.assertIn(topic, conf, f"Missing topic row: {topic}")
+
+
+class TestMaxBodySoftCap(TestCase):
+    """Near-MAX_BODY companions must stay under a soft cap (#576 precedent)."""
+
+    # inject-situational-rule.sh MAX_BODY=24000; soft cap = 23700 (300 B margin)
+    SOFT_CAP = 23700
+
+    def _companion_len(self, rel):
+        """Return the frontmatter-stripped body length (what the injector measures)."""
+        text = _read(rel)
+        # strip YAML frontmatter if present
+        if text.startswith("---"):
+            end = text.find("\n---\n", 3)
+            if end > 0:
+                text = text[end + 5:]
+        return len(text.strip())
+
+    def test_model_awareness_deep_under_cap(self):
+        sz = self._companion_len("skills/model-awareness-deep/DEEP.md")
+        self.assertLessEqual(sz, self.SOFT_CAP,
+                             f"model-awareness-deep {sz} > {self.SOFT_CAP}")
+
+    def test_ask_before_assuming_deep_under_cap(self):
+        sz = self._companion_len("skills/ask-before-assuming-deep/DEEP.md")
+        self.assertLessEqual(sz, self.SOFT_CAP,
+                             f"ask-before-assuming-deep {sz} > {self.SOFT_CAP}")
 
 
 if __name__ == "__main__":
