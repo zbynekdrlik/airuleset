@@ -2634,28 +2634,39 @@ def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
 
 def _answer_rearm_check_transcript(tpath, mark_ts):
     """#890 -- read the bounded transcript tail to detect the ANSWERED-❓ pattern:
-    the newest REAL assistant turn ended with `❓ NEEDS YOU`, and a genuine human
-    USER prompt (not a tool_result, not a machine prompt) followed it.
+    the newest REAL assistant turn has a `❓` marker (line-start, same `_MARKER_RX`
+    as `transcript_last_marker_bounded`), AND a genuine human USER prompt (not a
+    tool_result, not a known machine prompt) follows it.
 
-    Returns `(q_epoch, answered, owner_touched_goal)`:
-      * `q_epoch`: the JSONL timestamp of the ❓-ending assistant turn, or None.
-      * `answered`: True when a human user message followed the ❓ turn.
+    Returns `(q_idx, answered, owner_touched_goal)`:
+      * `q_idx`: the INDEX in the entries list of the ❓-marked assistant turn,
+        or None if no such turn found.
+      * `answered`: True when a human user message follows the ❓ turn.
       * `owner_touched_goal`: True when the owner's post-❓ text contains `/goal`
         (the #170 belt — the owner touching goal state ⇒ abstain).
 
     BOUNDED read: uses `_read_jsonl_byte_tail` (the #764 perf class), never a
-    whole-file scan. The ❓ turn is detected by the same `_entry_text` + `❓`
-    endswith the `transcript_last_marker_bounded` walk uses, so the recognition
-    is consistent. mark_ts is used to reject a stale ❓ from a previous arm
-    episode (fail-closed on unparseable mark_ts, the #764 point-4 shape)."""
+    whole-file scan. The ❓ turn is detected by `_MARKER_RX.match` on the last
+    ≤3 non-blank lines — the IDENTICAL walk `_last_marker_line_from_entries`
+    uses (review C1 fix: not `text.endswith("❓")`). mark_ts is used to reject
+    a stale ❓ from a previous arm episode (fail-closed on unparseable mark_ts,
+    the #764 point-4 shape).
+
+    MACHINE-PROMPT FILTERING (review M1): a plain-text user entry that matches
+    known machine-injected prefixes (watchdog keystroke nudges, continue prompts)
+    is NOT counted as a human answer — prevents the montalu6-class bulldoze."""
+    import re
     from watchdog.transcripts import _read_jsonl_byte_tail, _entry_text
     from watchdog import _SENTINELS
+    _marker_rx = re.compile(r"^\s*(⏳|✅|❓)")
     entries = _read_jsonl_byte_tail(tpath, 2_000_000, 200)
     if not entries:
         return None, False, False
-    # Walk backward to find the newest REAL assistant turn.
-    q_epoch = None
-    for entry in reversed(entries):
+    # Walk backward to find the newest REAL assistant turn with a ❓ marker.
+    q_idx = None
+    q_ts = None
+    for i in range(len(entries) - 1, -1, -1):
+        entry = entries[i]
         if not isinstance(entry, dict) or entry.get("type") != "assistant":
             continue
         if entry.get("isApiErrorMessage") is True:
@@ -2663,55 +2674,72 @@ def _answer_rearm_check_transcript(tpath, mark_ts):
         text = (_entry_text(entry) or "").strip()
         if text in _SENTINELS:
             continue  # synthetic/bookkeeping entry
-        # Found the newest real assistant turn.
-        if text.endswith("❓"):
-            # Extract the timestamp from the JSONL entry.
+        # Found the newest real assistant turn — check for ❓ marker.
+        nonblank = [ln for ln in text.splitlines() if ln.strip()]
+        found_q_marker = False
+        for ln in reversed(nonblank[-3:]):
+            m = _marker_rx.match(ln)
+            if m and m.group(1) == "❓":
+                found_q_marker = True
+                break
+            elif m:
+                break  # a different marker (⏳/✅) — not a ❓ turn
+        if found_q_marker:
+            q_idx = i
+            # Extract the timestamp for the episode guard.
             ts_str = entry.get("timestamp")
             if isinstance(ts_str, str):
                 try:
                     from datetime import datetime
-                    q_epoch = datetime.fromisoformat(
+                    q_ts = datetime.fromisoformat(
                         ts_str.replace("Z", "+00:00")).timestamp()
                 except (ValueError, TypeError):
-                    q_epoch = None
+                    q_ts = None
             elif isinstance(ts_str, (int, float)):
-                q_epoch = ts_str
+                q_ts = ts_str
         break  # stop at the newest real assistant turn either way
 
-    if q_epoch is None:
+    if q_idx is None or q_ts is None:
         return None, False, False
 
     # #764 point-4: fail CLOSED on unparseable mark_ts — a stale ❓ from a
-    # previous arm episode (mark_ts is the Goal set: marker's timestamp).
-    if not (isinstance(mark_ts, (int, float)) and q_epoch >= mark_ts):
+    # previous arm episode.
+    if not (isinstance(mark_ts, (int, float)) and q_ts >= mark_ts):
         return None, False, False
 
-    # Walk FORWARD from the ❓ entry to find a genuine human user message.
+    # Walk FORWARD from the ❓ entry (by INDEX, not timestamp — review C2 fix)
+    # to find a genuine human user message.
     answered = False
     owner_touched_goal = False
-    found_q = False
-    for entry in entries:
+    # Known machine-injected user-entry prefixes (M1 fix: a watchdog nudge or
+    # a /compact command is NOT a human answer).
+    _machine_prefixes = (
+        "continue", "lane-check:", "stuck-check:", "/compact",
+        "recheck:", "nudge:", "UNPARK-AUDIT:",
+    )
+    for entry in entries[q_idx + 1:]:
         if not isinstance(entry, dict):
             continue
-        if not found_q:
-            # Find the ❓ assistant entry by timestamp match.
-            if (entry.get("type") == "assistant"
-                    and _matches_epoch(entry, q_epoch)):
-                found_q = True
-            continue
-        # After the ❓ entry, look for a USER message.
         if entry.get("type") != "user":
             continue
         # A user entry with tool_result is NOT a human prompt.
-        content = entry.get("message", {}).get("content") if isinstance(
-            entry.get("message"), dict) else None
+        msg = entry.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
         if isinstance(content, list):
             if any(isinstance(b, dict) and b.get("type") == "tool_result"
                    for b in content):
                 continue  # tool_result — not a human prompt
-        # A plain-text user entry IS a human prompt.
+        # A plain-text user entry — check for machine shapes.
         text = (_entry_text(entry) or "").strip()
         if not text:
+            continue
+        # Filter known machine-injected prefixes.
+        is_machine = False
+        for pfx in _machine_prefixes:
+            if text.startswith(pfx):
+                is_machine = True
+                break
+        if is_machine:
             continue
         # Check for /goal in the user's text (#170 belt).
         if text.lstrip().startswith("/goal"):
@@ -2719,29 +2747,12 @@ def _answer_rearm_check_transcript(tpath, mark_ts):
         answered = True
         break
 
-    return q_epoch, answered, owner_touched_goal
-
-
-def _matches_epoch(entry, epoch):
-    """True when a JSONL entry's timestamp matches the given epoch (within 2s)."""
-    ts_str = entry.get("timestamp")
-    if isinstance(ts_str, str):
-        try:
-            from datetime import datetime
-            ets = datetime.fromisoformat(
-                ts_str.replace("Z", "+00:00")).timestamp()
-        except (ValueError, TypeError):
-            return False
-    elif isinstance(ts_str, (int, float)):
-        ets = ts_str
-    else:
-        return False
-    return abs(ets - epoch) < 2.0
+    return q_idx, answered, owner_touched_goal
 
 
 def _answer_rearm_decide(sid, cwd, tpath, mark, mark_ts, armed, now, loc,
                          dry_run, rearm_fn, obligation_fn, requests_path,
-                         answer_attempts_state, answer_handled_state):
+                         answer_attempts_state):
     """#890 -- re-arm a loop after the OWNER ANSWERED a `❓ NEEDS YOU`-blocked
     turn. CC's stop condition (A) disarmed the goal when the ❓ marker was
     present; the owner's answer resumes the session, but the goal is gone.
@@ -2770,14 +2781,11 @@ def _answer_rearm_decide(sid, cwd, tpath, mark, mark_ts, armed, now, loc,
     if mark is None or mark.get("state") != "set":
         return None
 
-    # Once-per-episode dedup: skip if we already handled this Q epoch.
-    q_epoch, answered, owner_touched_goal = _answer_rearm_check_transcript(
+    # Detect the answered-❓ pattern from the transcript.
+    q_idx, answered, owner_touched_goal = _answer_rearm_check_transcript(
         tpath, mark_ts)
-    if q_epoch is None:
+    if q_idx is None:
         return None  # no ❓ turn found, or stale ❓ from prior episode
-    prior_q = answer_handled_state.get(sid)
-    if isinstance(prior_q, (int, float)) and abs(prior_q - q_epoch) < 2.0:
-        return None  # same Q, already handled in a prior sweep
     if not answered:
         return None  # ❓ not yet answered — the awaiting-user veto should hold
     # #170 belt: the owner typed /goal after answering — abstain.
@@ -2817,9 +2825,11 @@ def _answer_rearm_decide(sid, cwd, tpath, mark, mark_ts, armed, now, loc,
     if dry_run:
         return ("answer-rearm %s sid=%s -> answered-❓ would record re-arm "
                 "(dry-run, open=%s authority=%s)" % (loc, sid, open_n, authority))
-    # Record the re-arm request.
+    # Record the re-arm request. Dedup is handled by the DOWNGRADE-REFUSED
+    # mechanism (a pending request of ANY origin blocks re-recording) + the
+    # rate limiter's min-gap (M2 fix: no consumed-epoch dedup that would lose
+    # a dropped/expired request forever).
     answer_attempts_state[sid] = pruned + [now]
-    answer_handled_state[sid] = q_epoch
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_ANSWER_REARM_ORIGIN, path=requests_path)
     return ("answer-rearm %s sid=%s -> answered-❓: recording re-arm (open=%s "
@@ -2897,9 +2907,6 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # dead-dark `attempts_state`). Reaped below exactly like `fulfilled_state`.
     auth_attempts_state = state.setdefault("goal_auth_rearm_attempts", {})
     answer_attempts_state = state.setdefault("goal_answer_rearm_attempts", {})
-    # #890 -- once-per-episode dedup for answer-rearm (stores the last handled
-    # Q epoch per sid, so the same answered-❓ is not re-recorded every sweep).
-    answer_handled_state = state.setdefault("goal_answer_rearm_handled", {})
     # #767 -- the per-episode 🏁 PROOF cache `{sid: {"mark_ts", "bts", "seen"}}`.
     # Written on ANY 🏁-after-mark sighting (both the fulfilled-rearm AND the #766
     # veto branch) so heavy post-achieve output that scrolls the 🏁 out of the
@@ -3081,18 +3088,31 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         if vetoed:
             continue
 
-        # #737 C -- a session PARKED on a ❓ question is ALIVE-waiting; never
-        # re-arm/ping/stale-replace it (see `_dark_awaiting_user_veto`). Placed
-        # BEFORE the mark-state / auth-rearm block below so it covers EVERY re-arm
-        # path -- auth-rearm (state!="set") AND the armed True/None/False branches
-        # -- so the "never re-arm an awaiting-user session" invariant is literal.
-        if _dark_awaiting_user_veto(tpath):
-            if confirm_state.pop(sid, None) is not None:
-                logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
-                            "(❓ marker, confirmation run reset)" % (loc, sid))
-            seen_state.pop(sid, None)
-            pinged_state.pop(sid, None)
-            continue
+        # #737 C / #890 -- a session PARKED on a ❓ question is ALIVE-waiting.
+        # The ORIGINAL #737 veto held unconditionally when the last assistant
+        # marker was ❓. #890 makes it ANSWER-AWARE: when the ❓ is present but
+        # a genuine human user message FOLLOWED it, the veto LIFTS — the owner
+        # answered, so the answer-rearm rider (below) should fire. The veto
+        # still holds for all NON-answer-rearm paths (auth-rearm, stale-rearm,
+        # dead-loop) when the ❓ is unanswered.
+        _awaiting_user = _dark_awaiting_user_veto(tpath)
+        if _awaiting_user:
+            # #890 -- peek at whether the ❓ was answered. If so, DON'T veto:
+            # let the flow proceed to the answer-rearm check below.
+            # (Use mark_ts from the current mark, which may not be read yet
+            # for the non-"set" branch; for the "set" branch, mark.get("ts").)
+            _ans_mark_ts = mark.get("ts") if isinstance(mark, dict) else None
+            _q_idx, _q_answered, _ = _answer_rearm_check_transcript(
+                tpath, _ans_mark_ts)
+            if not _q_answered:
+                if confirm_state.pop(sid, None) is not None:
+                    logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
+                                "(❓ marker, confirmation run reset)"
+                                % (loc, sid))
+                seen_state.pop(sid, None)
+                pinged_state.pop(sid, None)
+                continue
+            # ❓ was answered — lift the veto, let the flow proceed.
 
         armed = watchdog.pane_goal_armed(captured)
 
@@ -3121,14 +3141,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # #741/#890 WRITER-SIDE LATCH: a pending /compact for this session HOLDS
         # the dead-loop RE-ARM below (a re-arm WRITE schedules a next-batch /goal
         # for job 9 to type). Moved DOWN from its prior position (above marker
-        # reading) so RECOVERY-class origins (auth-rearm, fulfilled-rearm, answer-
-        # rearm) run ABOVE it — they only RECORD requests (file writes, not
-        # keystrokes); the hold was built for work-pushing nudges, not recovery
-        # recordings. The dead-loop machinery (confirmation + dark-rearm) stays
-        # BELOW. Placed AFTER the armed=True branch (stale-rearm is an alive-loop
-        # replace, not a dead-loop re-arm) and AFTER the armed=None branch.
-        # #890 also exempts fulfilled-rearm and answer-rearm (below the hold in
-        # the armed=False branch) by checking the origin class at their call sites.
+        # reading) so FOUR origins now run ABOVE it: auth-rearm (mark != "set"
+        # branch), stale-rearm (armed=True branch), fulfilled-rearm (armed=False
+        # branch, before the hold), and answer-rearm (armed=False branch, before
+        # the hold). All four only RECORD requests (file writes, not keystrokes);
+        # the hold was built for work-pushing nudges, not recordings. The dead-
+        # loop confirmation + dark-rearm machinery stays BELOW.
 
         if armed is True:
             seen_state.pop(sid, None)
@@ -3222,7 +3240,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         _arline = _answer_rearm_decide(
             sid, cwd, tpath, mark, mark_ts, armed, now, loc, dry_run,
             rearm_fn, obligation_fn, requests_path,
-            answer_attempts_state, answer_handled_state)
+            answer_attempts_state)
         if _arline:
             logs.append(_arline)
             # If a re-arm was recorded (not just a skip log), move on.
