@@ -1,6 +1,6 @@
 ---
 name: odoo-discuss-xmlrpc
-description: Post to Odoo Discuss channels via XML-RPC (discuss.channel.message_post). Load before writing or reviewing any Discuss message_post call.
+description: Post to Odoo Discuss via XML-RPC (discuss.channel.message_post); companion handover-compose.md for proposals. Load before any Discuss post.
 user-invocable: false
 ---
 

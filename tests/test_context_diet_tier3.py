@@ -159,10 +159,10 @@ class TestSituationalTriggerBindings(unittest.TestCase):
         t = _read("hooks/situational-triggers.conf")
         self.assertIn("statusline-deep-1-prompt\tUserPromptSubmit", t)
 
-    def test_ci_monitor_recipes_binding(self):
+    def test_ci_monitor_recipes_not_in_triggers(self):
+        # #859 batch 3: ci-monitoring recipes NOT re-tiered (functionally-executed by tests)
         t = _read("hooks/situational-triggers.conf")
-        self.assertIn("ci-monitor-recipes", t)
-        self.assertIn("skills/ci-monitor/recipes.md", t)
+        self.assertNotIn("ci-monitor-recipes", t)
 
     def test_receive_files_credentials_binding(self):
         t = _read("hooks/situational-triggers.conf")
