@@ -4629,10 +4629,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
 
     # Job 43 (#858) — MDREVIEW CADENCE. Dev1-gated, daily TTL, imports NO
     # notify. On due: runs mdreview-audit → REOPENs the pinned ticket.
+    # Uses its OWN durable state file (env seam AIRULESET_MDREVIEW_STATE_PATH),
+    # never run_once's state_path — #858 re-review state-file aliasing fix.
     _add("mdreview_cadence", lambda: mdreview_cadence_enabled,
          lambda: mdreview_cadence.mdreview_cadence_job(
-             now, state, dry_run=dry_run,
-             state_path=state_path),
+             now, dry_run=dry_run),
          "mdreview-cadence error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE

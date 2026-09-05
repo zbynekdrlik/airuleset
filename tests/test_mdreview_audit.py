@@ -889,8 +889,16 @@ class TestHostKeyOpts(unittest.TestCase):
     """A host with host_keys must use StrictHostKeyChecking=yes, not =no."""
 
     def test_pinned_host_strict_checking(self):
-        from cli_mdreview_audit import run_fleet
-        ssh_calls = []
+        """Verify that run_fleet calls cli_remote.host_key_check_opts for the
+        ssh command, so a host with host_keys gets =yes not =no."""
+        import cli_remote  # noqa: F401,F811
+        opts_calls = []
+
+        def capturing_fn(remote):
+            opts_calls.append(remote)
+            # Return strict opts as if pinned
+            return ["-o", "StrictHostKeyChecking=yes"]
+
         hosts_with_keys = [{
             "name": "pinned",
             "host": "1.2.3.4",
@@ -898,24 +906,20 @@ class TestHostKeyOpts(unittest.TestCase):
             "repo_path": "~/a",
             "host_keys": ["ssh-ed25519 AAAA..."],
         }]
+        from cli_mdreview_audit import run_fleet
         with mock.patch("cli_remote._deployable_hosts",
                          return_value=hosts_with_keys):
-            with mock.patch("subprocess.run") as mock_run:
-                mock_run.return_value = mock.Mock(
-                    stdout='{"schema":1}', returncode=0)
-                try:
-                    run_fleet()
-                except Exception:
-                    pass  # airuleset:script-ok we just need the argv
-                if mock_run.called:
-                    for call_args in mock_run.call_args_list:
-                        cmd = call_args[0][0] if call_args[0] else []
-                        ssh_calls.append(cmd)
-        for cmd in ssh_calls:
-            argv_str = " ".join(str(x) for x in cmd)
-            if "ssh" in argv_str and "StrictHostKeyChecking" in argv_str:
-                self.assertNotIn("StrictHostKeyChecking=no", argv_str,
-                                 f"pinned host must NOT use =no: {argv_str}")
+            with mock.patch("cli_remote.host_key_check_opts",
+                            side_effect=capturing_fn):
+                with mock.patch("subprocess.run") as mock_run:
+                    mock_run.return_value = mock.Mock(
+                        stdout='{"schema":1}', returncode=0)
+                    try:
+                        run_fleet()
+                    except Exception:
+                        pass  # airuleset:script-ok we just need the call
+        self.assertGreater(len(opts_calls), 0,
+                           "run_fleet must call host_key_check_opts for ssh")
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +969,7 @@ class TestDedupWiringHermetized(unittest.TestCase):
             args = argparse.Namespace(fleet=False, json_output=True)
             buf = io.StringIO()
             with mock.patch("cli_mdreview_audit.CLAUDE_DIR", fake_claude):
-                with mock.patch("Path.home", return_value=Path(tmp)):
+                with mock.patch("pathlib.Path.home", return_value=Path(tmp)):
                     with redirect_stdout(buf):
                         cmd_mdreview_audit(args)
             output = buf.getvalue()

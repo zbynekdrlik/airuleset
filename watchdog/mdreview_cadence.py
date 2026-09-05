@@ -1,7 +1,9 @@
 """watchdog/mdreview_cadence.py — Job 43, mdreview recurring cadence (#858).
 
-Dev1-gated (full authority + airuleset checkout present). Daily TTL in
-state["mdreview_cadence"]. Injected ``gh_runner`` seam.
+Dev1-gated (hostname gate: ``socket.gethostname() == "dev1"``).
+Own durable state in ``~/.claude/mdreview-cadence.json`` (env seam
+``AIRULESET_MDREVIEW_STATE_PATH`` for tests + ``cmd_push`` test_env).
+Injected ``gh_runner`` seam.
 
 DUE when:
   (a) pinned ticket CLOSED and closedAt >= 30 days ago, OR
@@ -25,7 +27,9 @@ DAILY_TTL_S = 86400
 
 _REPO_SLUG = "zbynekdrlik/airuleset"
 
-STATE_PATH = Path.home() / ".claude" / "mdreview-cadence.json"
+# Module default — overridden by AIRULESET_MDREVIEW_STATE_PATH env seam
+# in tests/conftest.py AND cli_remote.cmd_push's test_env (#804-(4) pattern).
+_DEFAULT_STATE_PATH = Path.home() / ".claude" / "mdreview-cadence.json"
 
 BOOTSTRAP_TITLE = "mdreview: recurring fleet-wide audit (pinned)"
 BOOTSTRAP_BODY_LINES = [
@@ -40,14 +44,29 @@ BOOTSTRAP_BODY_LINES = [
 ]
 
 
+def _state_path(override=None):
+    """Resolve the cadence state file path.
+
+    Priority: explicit override > env seam > module default.
+    The override is kept for backward compat with existing tests that pass
+    state_path directly; production uses the env seam.
+    """
+    if override:
+        return Path(override)
+    ovr = os.environ.get("AIRULESET_MDREVIEW_STATE_PATH", "")
+    if ovr:
+        return Path(ovr)
+    return _DEFAULT_STATE_PATH
+
+
 def _model_tiers_hash():
     import airuleset
     items = sorted(airuleset.MODEL_TIERS.items())
     return hashlib.sha1(str(items).encode("utf-8")).hexdigest()
 
 
-def _load_state(state_path=None):
-    p = Path(state_path or STATE_PATH)
+def _load_state(state_path_override=None):
+    p = _state_path(state_path_override)
     if not p.exists():
         return {}
     try:
@@ -56,8 +75,8 @@ def _load_state(state_path=None):
         return {}  # airuleset:script-ok corrupt/missing state file — start fresh
 
 
-def _save_state(data, state_path=None):
-    p = Path(state_path or STATE_PATH)
+def _save_state(data, state_path_override=None):
+    p = _state_path(state_path_override)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(p) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -97,7 +116,10 @@ def evaluate_cadence(state, now, gh_runner=None):
             capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return {"due": False, "reason": "gh-error"}
-        ticket_data = json.loads(result.stdout)
+        try:
+            ticket_data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {"due": False, "reason": "gh-parse-error"}
 
     state_val = (ticket_data.get("state") or "").upper()
 
@@ -176,17 +198,47 @@ def act_on_due(ticket, reason, audit_data, gh_runner=None):
 
 def bootstrap_ticket(gh_runner=None):
     """One-time bootstrap: create the pinned recurring ticket.
-    Returns the new ticket number (int) or None."""
-    body = "\n".join(BOOTSTRAP_BODY_LINES)
-    argv = ["gh", "issue", "create",
-            "-R", _REPO_SLUG,
-            "-t", BOOTSTRAP_TITLE, "--body", body]
+
+    Before creating, searches for an existing ticket with the exact title
+    to prevent duplicates on state loss. Returns the ticket number (int)
+    or None.
+    """
+    # 🟡 RE-REVIEW: search for existing ticket before creating
+    search_argv = ["gh", "issue", "list",
+                   "-R", _REPO_SLUG,
+                   "--search", f"{BOOTSTRAP_TITLE} in:title",
+                   "--state", "all",
+                   "--json", "number,title"]
 
     if gh_runner:
-        stdout, _rc = gh_runner(argv)
+        stdout, rc = gh_runner(search_argv)
     else:
         import subprocess
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(search_argv, capture_output=True,
+                                text=True, timeout=30)
+        stdout, rc = result.stdout, result.returncode
+
+    if rc == 0 and stdout.strip():
+        try:
+            existing = json.loads(stdout)
+            for item in existing:
+                if item.get("title") == BOOTSTRAP_TITLE:
+                    return int(item["number"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass  # airuleset:script-ok fall through to create
+
+    # No existing ticket found — create one
+    body = "\n".join(BOOTSTRAP_BODY_LINES)
+    create_argv = ["gh", "issue", "create",
+                   "-R", _REPO_SLUG,
+                   "-t", BOOTSTRAP_TITLE, "--body", body]
+
+    if gh_runner:
+        stdout, _rc = gh_runner(create_argv)
+    else:
+        import subprocess
+        result = subprocess.run(create_argv, capture_output=True,
+                                text=True, timeout=30)
         stdout = result.stdout
 
     import re as _re
@@ -196,10 +248,20 @@ def bootstrap_ticket(gh_runner=None):
     return None
 
 
-def mdreview_cadence_job(now, state, dry_run=False,
+def mdreview_cadence_job(now, _state=None, dry_run=False,
                          state_path=None, gh_runner=None,
                          fleet_runner=None):
-    """Job 43 entry point. Called from run_once. Returns log lines."""
+    """Job 43 entry point. Called from run_once.
+
+    Uses its OWN durable state file (resolved via ``state_path`` override >
+    env ``AIRULESET_MDREVIEW_STATE_PATH`` > module default), never run_once's
+    state_path. The ``_state`` param is UNUSED (kept for backward compat with
+    the run_once _add lambda shape which passes positional ``state``).
+    The ``state_path`` param is an explicit override for tests that pre-seed
+    their own state file; production uses the env seam (set in conftest.py +
+    cmd_push test_env).
+    Returns log lines.
+    """
     logs = []
 
     if socket.gethostname() != "dev1":
@@ -216,8 +278,6 @@ def mdreview_cadence_job(now, state, dry_run=False,
     if not ticket:
         if dry_run:
             logs.append("mdreview-cadence: would bootstrap (dry-run)")
-            cad_state["last_eval_ts"] = now
-            _save_state(cad_state, state_path)
             return logs
         new_num = bootstrap_ticket(gh_runner=gh_runner)
         if new_num:
@@ -250,8 +310,6 @@ def mdreview_cadence_job(now, state, dry_run=False,
 
     if dry_run:
         logs.append(f"mdreview-cadence: would reopen #{ticket} (dry-run)")
-        cad_state["last_eval_ts"] = now
-        _save_state(cad_state, state_path)
         return logs
 
     try:

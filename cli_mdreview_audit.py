@@ -234,13 +234,17 @@ def dedup_candidates(files_by_surface):
                            if len(hashes_a[h]) >= 120]
             if len(shared) >= 2 or long_shared:
                 sample = hashes_a[next(iter(shared))]
+                # 🔵5 RE-REVIEW: sweep sample_sentence for secrets
+                safe_sample = sample[:200]
+                for sp in _SECRET_PATTERNS:
+                    safe_sample = sp.sub("<REDACTED>", safe_sample)
                 pairs.append({
                     "surface_a": surf_a,
                     "path_a": path_a,
                     "surface_b": surf_b,
                     "path_b": path_b,
                     "shared_count": len(shared),
-                    "sample_sentence": sample[:200],
+                    "sample_sentence": safe_sample,
                 })
     return pairs
 
@@ -415,7 +419,10 @@ def _compute_zero_caller_skills(days=90):
         if (entry / "SKILL.md").exists():
             all_skills.add(entry.name)
 
-    called_skills = set(usage.get("skills", {}).keys())
+    # 🟡 RE-REVIEW: include slash-only skills — a skill invoked via /slash
+    # (usage["slash"]) is NOT zero-caller even if absent from usage["skills"].
+    called_skills = set(usage.get("skills", {}).keys()) | set(
+        usage.get("slash", {}).keys())
     zero_callers = sorted(all_skills - called_skills)
     return zero_callers
 
@@ -483,9 +490,11 @@ def run_fleet(runner=None, fleet_runner=None):
                 addr = host.get("host", "")
                 user = host.get("user", "newlevel")
                 repo_path = host.get("repo_path", "~/devel/airuleset")
+                # 🟡 RE-REVIEW finding 14: use host_key_check_opts
+                # so a host with host_keys gets StrictHostKeyChecking=yes.
+                hk_opts = cli_remote.host_key_check_opts(host)
                 ssh_base = ["ssh", "-o", "BatchMode=yes",
-                            "-o", "ConnectTimeout=10",
-                            "-o", "StrictHostKeyChecking=no",
+                            "-o", "ConnectTimeout=10"] + hk_opts + [
                             f"{user}@{addr}"]
                 cmd = ssh_base + [
                     "python3",
