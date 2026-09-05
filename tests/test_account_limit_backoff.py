@@ -17,8 +17,8 @@ import sys
 _repo_root = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, _repo_root)
 
-import watchdog as wd
-from watchdog import goal
+import watchdog as wd  # noqa: E402
+from watchdog import goal  # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
