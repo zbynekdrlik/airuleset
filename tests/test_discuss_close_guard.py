@@ -430,5 +430,135 @@ class TestHookIntegrationCompound(TestCase):
         self.assertIn("gh issue comment 4812", r.stderr)
 
 
+class TestAcceptanceMarkers(TestCase):
+    """#891 — channel-agnostic acceptance markers (Acceptance-thread/cited/defer)
+    must be recognised alongside the legacy Discuss-* markers."""
+
+    def test_acceptance_thread_binding_blocks_without_disposition(self):
+        self.assertIsNotNone(
+            g.evaluate_close(_issue(body="Acceptance-thread: task-42"))
+        )
+
+    def test_acceptance_thread_plus_acceptance_cited_is_allowed(self):
+        self.assertIsNone(
+            g.evaluate_close(
+                _issue(
+                    body="Acceptance-thread: task-42",
+                    comments=["Acceptance-cited: msg 1731999 task 42"],
+                )
+            )
+        )
+
+    def test_acceptance_thread_plus_acceptance_defer_is_allowed(self):
+        self.assertIsNone(
+            g.evaluate_close(
+                _issue(
+                    body="Acceptance-thread: task-42",
+                    comments=["Acceptance-defer: siblings issue 4812 still open"],
+                )
+            )
+        )
+
+    def test_legacy_discuss_thread_plus_acceptance_cited_is_allowed(self):
+        """A legacy Discuss-thread binding is satisfied by the new
+        Acceptance-cited disposition — cross-compatibility."""
+        self.assertIsNone(
+            g.evaluate_close(
+                _issue(
+                    body="Discuss-thread: 257",
+                    comments=["Acceptance-cited: msg 1731999"],
+                )
+            )
+        )
+
+    def test_acceptance_thread_plus_legacy_discuss_closed_is_allowed(self):
+        """The new binding is satisfied by a legacy disposition."""
+        self.assertIsNone(
+            g.evaluate_close(
+                _issue(
+                    body="Acceptance-thread: task-42",
+                    comments=["Discuss-closed: msg 1731999"],
+                )
+            )
+        )
+
+    def test_acceptance_markers_are_case_insensitive(self):
+        self.assertIsNotNone(
+            g.evaluate_close(_issue(body="acceptance-thread: task-42"))
+        )
+        self.assertIsNone(
+            g.evaluate_close(
+                _issue(
+                    body="acceptance-thread: task-42",
+                    comments=["acceptance-cited: msg 9"],
+                )
+            )
+        )
+
+    def test_acceptance_cited_needs_a_value(self):
+        self.assertIsNotNone(
+            g.evaluate_close(
+                _issue(body="Acceptance-thread: task-42\nAcceptance-cited:")
+            )
+        )
+
+    def test_acceptance_defer_needs_a_value(self):
+        self.assertIsNotNone(
+            g.evaluate_close(
+                _issue(body="Acceptance-thread: task-42\nAcceptance-defer:  ")
+            )
+        )
+
+
+class TestMarkerExactSet(TestCase):
+    """#891 recidivism guard — lock the exact set of markers the guard
+    recognises so a future channel-named marker (Task-closed:, Whatsapp-closed:)
+    forces a deliberate, reviewed edit."""
+
+    def test_binding_marker_names(self):
+        """The guard recognises exactly these binding markers (line-anchored)
+        plus the discuss.channel deep-URL auto-bind."""
+        # Recognised bindings
+        for marker in ("Discuss-thread:", "Acceptance-thread:"):
+            with self.subTest(marker=marker):
+                self.assertIsNotNone(
+                    g.evaluate_close(_issue(body=f"{marker} 42")),
+                    f"{marker} must be recognised as a binding",
+                )
+        # NOT recognised (channel-specific — rejected by design)
+        for marker in ("Task-thread:", "Whatsapp-thread:", "Email-thread:"):
+            with self.subTest(marker=marker):
+                self.assertIsNone(
+                    g.evaluate_close(_issue(body=f"{marker} 42")),
+                    f"{marker} must NOT be a binding (channel-specific)",
+                )
+
+    def test_disposition_marker_names(self):
+        """The guard recognises exactly these disposition markers."""
+        bound = "Discuss-thread: 257"
+        for marker in (
+            "Discuss-closed:",
+            "Discuss-defer:",
+            "Acceptance-cited:",
+            "Acceptance-defer:",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIsNone(
+                    g.evaluate_close(
+                        _issue(body=bound, comments=[f"{marker} evidence"])
+                    ),
+                    f"{marker} must be recognised as a disposition",
+                )
+        # NOT recognised
+        for marker in ("Task-closed:", "Whatsapp-closed:"):
+            with self.subTest(marker=marker):
+                self.assertIsNotNone(
+                    g.evaluate_close(
+                        _issue(body=bound, comments=[f"{marker} evidence"])
+                    ),
+                    f"{marker} must NOT be a disposition (channel-specific)",
+                )
+
+
 if __name__ == "__main__":
     main()
