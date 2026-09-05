@@ -336,11 +336,23 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
     today's gap-only behaviour). Both default None for legacy 5-arg callers
     (thresholds inactive → byte-identical to pre-#846).
 
+    #883: `last_action_ts` (epoch, or None when unmeasurable) is the gh-observed
+    last-action timestamp (max of shadow_run.updatedAt, cut_pr.updatedAt,
+    statusCheckRollup[].completedAt). When present and the release is STALLED
+    (in_flight + STALLED_STAGES), the nudge fires only after
+    `STALL_INACTIVITY_THRESHOLD_S` (30 min) of gh-observed inactivity, gated by
+    `max(last_stall_nudge, last_nudge)` for re-nudge cadence. The `inflight`
+    action carries `last_stall_nudge` forward so the stall re-nudge clock
+    survives the first_seen/last_nudge reset. When `last_action_ts` is None,
+    the stalled path falls back to the existing anchor behavior (#134
+    anti-silence). Default None for legacy callers (stall path inactive).
+
     The gap is "real" when `ahead >= min_ahead`. Below that (incl. ahead 0) is a
     drained/absent gap -> `clear` (pop the rec). A real gap with `in_flight` True
-    is `inflight` (reset first_seen=now, drop last_nudge -> once the release ends
-    and if a gap persists, a fresh cadence grace applies before nudging). A real
-    gap with `in_flight` False is a STALLED train: it nudges only when `now -
+    is `inflight` (reset first_seen=now, drop last_nudge, CARRY last_stall_nudge
+    -> once the release ends and if a gap persists, a fresh cadence grace applies
+    before nudging; the stall re-nudge clock survives via last_stall_nudge). A
+    real gap with `in_flight` False is a STALLED train: it nudges only when `now -
     (last_nudge or first_seen) >= cadence` — `first_seen` gives the initial grace
     (never nudge a gap that JUST appeared) and becomes the reping anchor via
     `last_nudge` afterwards. `last_nudge` is PRESERVED unchanged here (a "nudge"
@@ -412,17 +424,29 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
             inactivity = now - last_action_ts
             if inactivity < stall_thr:
                 return ("wait", new_rec, "stall-active")
-            # Inactivity met; check the re-nudge cadence via last_stall_nudge.
-            if (last_stall_nudge is not None
-                    and now - last_stall_nudge < cadence):
+            # Inactivity met; check the re-nudge cadence via the FRESHEST of
+            # last_stall_nudge and last_nudge — so #749's back-off (which
+            # advances last_nudge on a swallowed send) is effective on the
+            # stall path too, and an unmeasurable→measurable transition
+            # cannot double-nudge within the hour.
+            stall_anchor = max(t for t in (last_stall_nudge, last_nudge)
+                               if isinstance(t, (int, float))
+                               and not isinstance(t, bool)) if any(
+                isinstance(t, (int, float)) and not isinstance(t, bool)
+                for t in (last_stall_nudge, last_nudge)) else None
+            if stall_anchor is not None and now - stall_anchor < cadence:
                 return ("wait", new_rec, "stall-cadence")
             return ("nudge", new_rec, "stalled")
         # last_action_ts unmeasurable — fall through to the generic anchor
         # path (#134 anti-silence: unmeasurable degrades to current behavior,
         # never to permanent silence AND never to instant-nudge). The
-        # last_stall_nudge re-nudge gate still applies.
-        if (last_stall_nudge is not None
-                and now - last_stall_nudge < cadence):
+        # last_stall_nudge re-nudge gate still applies (freshest of both).
+        stall_anchor = max(t for t in (last_stall_nudge, last_nudge)
+                           if isinstance(t, (int, float))
+                           and not isinstance(t, bool)) if any(
+            isinstance(t, (int, float)) and not isinstance(t, bool)
+            for t in (last_stall_nudge, last_nudge)) else None
+        if stall_anchor is not None and now - stall_anchor < cadence:
             return ("wait", new_rec, "stall-cadence")
         # Fall through to the generic anchor below.
     # #846 continuation: time-based thresholds gate whether the gap is ripe.
