@@ -61,15 +61,15 @@ class TestBannedPredicateItself(TestCase):
             self.assertTrue(airuleset.is_banned_model(banned),
                             "%r should be BANNED" % banned)
 
-    def test_catches_every_fable_5_1_form(self):
-        # #871 — Fable 5.1 joins the ban: any fable-5-1 id AND the bare
-        # `fable` alias (the Agent `model` param floats it to LATEST = 5.1).
-        for banned in ("claude-fable-5-1", "claude-fable-5-1[1m]",
-                       "CLAUDE-FABLE-5-1", "'claude-fable-5-1'",
-                       " claude-fable-5-1 ", "claude-fable-5-1-20260901",
+    def test_catches_fable_5_0_and_bare_alias(self):
+        # #894: Fable 5.0 (claude-fable-5) is retired from the lineup.
+        # The bare `fable` alias is still banned (alias float vector).
+        for banned in ("claude-fable-5", "claude-fable-5[1m]",
+                       "CLAUDE-FABLE-5", "'claude-fable-5'",
+                       " claude-fable-5 ",
                        "fable", "fable[1m]", "FABLE", "'fable'", " fable "):
             self.assertTrue(airuleset.is_banned_model(banned),
-                            "%r should be BANNED (Fable 5.1 / bare alias)" % banned)
+                            "%r should be BANNED (Fable 5.0 / bare alias)" % banned)
 
     def test_clears_every_allowed_model(self):
         # #871: exact-id allowlist semantics -- only the CURRENT MODEL_TIERS
