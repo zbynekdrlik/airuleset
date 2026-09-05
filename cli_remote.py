@@ -1178,6 +1178,36 @@ def _deploy_to_all_remotes(failed, auth_failed):
             shutil.rmtree(control_dir, ignore_errors=True)
 
 
+def _runner_shape_env(base_env, repo_dir):
+    """Build a CI-mirroring env dict with a fresh HOME (#875).
+
+    Returns ``(env_dict, tmp_home_path)``. The caller must keep the tmp home
+    alive until the subprocess finishes (the TemporaryDirectory context
+    manager that owns it lives in cmd_push's own ``with`` block).
+
+    The fresh HOME is seeded with a minimal ``.gitconfig`` carrying the same
+    two ``safe.directory`` entries the CI workflow sets (ci.yml L58/L64) —
+    without them, every ``git -C <workspace>`` inside a relocated-HOME
+    subprocess dies ``fatal: detected dubious ownership`` (the #683 run-3
+    debug, internals-ci.md).
+    """
+    import tempfile
+    tmp_home = tempfile.mkdtemp(prefix="airuleset-runner-home-")
+    env = dict(base_env)
+    env["HOME"] = tmp_home
+    env["XDG_CONFIG_HOME"] = str(Path(tmp_home) / ".config")
+    env["XDG_CACHE_HOME"] = str(Path(tmp_home) / ".cache")
+    # Seed .gitconfig with the safe.directory entries CI sets.
+    gitconfig = Path(tmp_home) / ".gitconfig"
+    gitconfig.write_text(
+        "[safe]\n"
+        "\tdirectory = %s\n"
+        "\tdirectory = %s\n"
+        % (str(repo_dir), str(repo_dir / ".git"))
+    )
+    return env, tmp_home
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -1211,9 +1241,71 @@ def cmd_push(args):
         sys.exit(1)
     print("  Ruff clean.")
 
-    # 0b. Run the full test suite — fail-closed before any push/deploy.
-    print("Running test suite (fail-closed before push)...")
+    # 0b. Pass A — runner-shape: the CI-mirroring hermetic subset under a
+    # clean HOME, serial pytest, exact CI argv (#875). Catches env-coupled
+    # test failures BEFORE they burn a 15-min CI cycle. Pass B (the existing
+    # unittest run) follows only when Pass A is green.
     import tempfile
+    import time as _time_mod
+    print("Running Pass A (runner-shape, clean HOME, CI hermetic subset)...")
+    with tempfile.TemporaryDirectory() as _rescue_a, \
+            tempfile.TemporaryDirectory() as _lock_a, \
+            tempfile.TemporaryDirectory() as _suite_a:
+        pass_a_base = dict(os.environ)
+        pass_a_base["AIRULESET_DRAFT_RESCUE_DIR"] = str(
+            Path(_rescue_a) / "draft-rescue")
+        pass_a_base["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
+        pass_a_base["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
+            Path(_lock_a) / "autopilot-lock")
+        pass_a_base["AIRULESET_SESSION_STATUS_DIR"] = str(
+            Path(_lock_a) / "session-status")
+        pass_a_base["AIRULESET_CONTENT_DEDUP_DIR"] = str(
+            Path(_lock_a) / "content-dedup")
+        pass_a_base["AIRULESET_GOAL_ROSTER_PATH"] = str(
+            Path(_lock_a) / "goal-roster.json")
+        pass_a_base["AIRULESET_MDREVIEW_STATE_PATH"] = str(
+            Path(_lock_a) / "mdreview-cadence.json")
+        pass_a_base["AIRULESET_RESURRECT_ACTION"] = ""
+        pass_a_base["TMPDIR"] = str(_suite_a)
+        pass_a_env, _pass_a_home = _runner_shape_env(pass_a_base, REPO_DIR)
+        # Build the CI argv from the deny-list.
+        _ci_args_result = subprocess.run(
+            [sys.executable, str(REPO_DIR / "scripts" / "ci_pytest_args.py"),
+             str(REPO_DIR / ".github" / "box-bound-tests.txt")],
+            capture_output=True, text=True, cwd=str(REPO_DIR),
+        )
+        if _ci_args_result.returncode != 0:
+            print("  PASS A FAILED: ci_pytest_args.py error: %s"
+                  % _ci_args_result.stderr.strip(), file=sys.stderr)
+            sys.exit(1)
+        _deny_args = [a for a in _ci_args_result.stdout.strip().split("\n") if a]
+        _pass_a_argv = [
+            sys.executable, "-m", "pytest", "tests/",
+            *_deny_args,
+            "-p", "no:cacheprovider",
+            "-o", "addopts=",
+            "-q",
+        ]
+        _t0 = _time_mod.monotonic()
+        _pass_a_result = subprocess.run(
+            _pass_a_argv, cwd=str(REPO_DIR), env=pass_a_env,
+        )
+        _pass_a_wall = _time_mod.monotonic() - _t0
+        # Print pytest version for diagnostics (dev1 vs CI's pinned 8.3.2).
+        print("  Pass A: wall %.1fs, pytest %s" % (
+            _pass_a_wall,
+            pass_a_env.get("_PYTEST_VERSION", "unknown"),
+        ))
+    if _pass_a_result.returncode != 0:
+        print("  PASS A FAILED (runner-shape, clean HOME) — refusing to push. "
+              "The CI hermetic subset is red under a runner-like env.",
+              file=sys.stderr)
+        sys.exit(1)
+    print("  Pass A clean.")
+
+    # 0c. Pass B — Run the full test suite (existing) — fail-closed before
+    # any push/deploy.
+    print("Running Pass B (full test suite, real env)...")
     # #271: `deliver_with_stash`/`_send_goal_verified` persist non-empty
     # input-box content to `watchdog.draft_rescue_dir()` (default
     # `~/.claude/draft-rescue/`) BEFORE any keystroke — and the live

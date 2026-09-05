@@ -45,6 +45,7 @@ class TestPassAArgvMatchesCI(unittest.TestCase):
 
     def test_pass_a_argv_matches_ci(self):
         ci_args = _ci_pytest_args()
+        ci_args_output = "\n".join(ci_args) + "\n" if ci_args else ""
         expected_argv = [
             sys.executable, "-m", "pytest", "tests/",
             *ci_args,
@@ -54,8 +55,14 @@ class TestPassAArgvMatchesCI(unittest.TestCase):
         ]
 
         calls = []
+        _real_run = subprocess.run
 
         def _capture(cmd, **kw):
+            # Let the ci_pytest_args.py subprocess run for REAL so it
+            # produces the correct deny-list args.
+            if (isinstance(cmd, list) and len(cmd) >= 2
+                    and "ci_pytest_args" in str(cmd[1])):
+                return _real_run(cmd, **kw)
             calls.append((cmd, kw))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -98,8 +105,12 @@ class TestPassAEnvHomeIsFreshTmp(unittest.TestCase):
 
     def test_pass_a_env_home_is_fresh_tmp(self):
         calls = []
+        _real_run = subprocess.run
 
         def _capture(cmd, **kw):
+            if (isinstance(cmd, list) and len(cmd) >= 2
+                    and "ci_pytest_args" in str(cmd[1])):
+                return _real_run(cmd, **kw)
             calls.append((cmd, kw))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -154,8 +165,12 @@ class TestPassAFailureBlocksPush(unittest.TestCase):
 
     def test_pass_a_failure_blocks_push(self):
         call_order = []
+        _real_run = subprocess.run
 
         def _capture(cmd, **kw):
+            if (isinstance(cmd, list) and len(cmd) >= 2
+                    and "ci_pytest_args" in str(cmd[1])):
+                return _real_run(cmd, **kw)
             if isinstance(cmd, list) and len(cmd) > 2:
                 if cmd[1] == "-m" and cmd[2] == "pytest":
                     call_order.append("pass_a")
