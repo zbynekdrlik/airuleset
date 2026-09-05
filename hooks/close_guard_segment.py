@@ -98,18 +98,19 @@ _CLEAN_LITERAL_CLOSE_RE = re.compile(
     r"(?:^|[;&|\s(])(?:/\S+/)?gh\s+issue\s+close(?:\s|$)")
 
 # Nested-close smuggle via command substitution / funsub / backtick, scanned on the
-# RAW (de-backslashed) command — mirrors the current bash `$(`/`${ }`/backtick guards
-# (a `$(` or `${[ |]` carrying `gh<ws>`, or ANY backtick carrying `gh<ws>`). `[^)]*`/
-# `[^}]*` span newlines (no `.`), matching the bash `grep -z` behaviour.
-# ACCEPTED RESIDUAL (Fable review #837, IDENTICAL to the pre-#837 `\$\([^)]*gh` guard —
-# NOT a regression): a `)` before `gh` INSIDE a nested substitution
-# (`--comment "$( ( : ) && gh issue close 999 )"`) ends `[^)]*` early → the nested
-# close is missed. Modelling nested parens is the exact "regex can't parse bash" trap
-# this module bounds elsewhere via fail-closed; a confusion guard (not adversarial-
-# complete) accepts it, as the old hook did.
-_SUBST_CLOSE_RE = re.compile(r"\$\([^)]*gh\s", re.I)
-_FUNSUB_CLOSE_RE = re.compile(r"\$\{[\s|][^}]*gh\s", re.I)
-_BACKTICK_CLOSE_RE = re.compile(r"`[^`]*gh\s", re.I)
+# RAW (de-backslashed) command — mirrors the current bash `$(`/`${ }`/backtick guards.
+# `[^)]*`/`[^}]*` span newlines (no `.`), matching the bash `grep -z` behaviour.
+# #873: TIGHTENED to require BOTH `gh` AND `close` inside the substitution boundary.
+# The pre-#873 regex `\$\([^)]*gh\s` matched ANY `$(gh ...)` — `$(gh issue VIEW ...)`,
+# `$(gh api ...)`, `$(gh run view ...)` — false-blocking every command containing a
+# `$(gh <anything>)` substitution. Now requires `gh<ws>...close` inside the delimiter
+# pair, so `$(gh issue view ...)` and `$(gh api .../jobs --jq ...)` pass cleanly while
+# `$(gh issue close ...)` and `$(... && gh issue close N)` are still caught.
+# ACCEPTED RESIDUAL (IDENTICAL to pre-#837): a `)` before `gh` INSIDE a nested
+# substitution ends `[^)]*` early → the nested close is missed.
+_SUBST_CLOSE_RE = re.compile(r"\$\([^)]*(?:\S*/)?gh\s[^)]*\bclose\b", re.I)
+_FUNSUB_CLOSE_RE = re.compile(r"\$\{[\s|][^}]*(?:\S*/)?gh\s[^}]*\bclose\b", re.I)
+_BACKTICK_CLOSE_RE = re.compile(r"`[^`]*(?:\S*/)?gh\s[^`]*\bclose\b", re.I)
 
 # `gh api ... PATCH` close forms (faithful port of _is_patch_close_cmd). The state may
 # be VISIBLE (bare or value-quoted) or HIDDEN in the request body (--input / -F ...=@).
@@ -218,12 +219,88 @@ def _parse_gh_args(args):
     return positional, repo_clean, repo_glued, repo_flag
 
 
+# #873: heredoc operator pattern — detects `<<[-]?['"]?WORD['"]?` at the end of a
+# segment/line. The heredoc body is DATA for the enclosing shell — it is never
+# executed as top-level commands. `split_top_level` splits on bare newlines, so
+# heredoc body lines become separate command segments whose content can contain
+# unbalanced quotes / close-related keywords, causing shlex ValueError or false
+# substitution matches. Strip them BEFORE segmentation.
+_HEREDOC_OP_RE = re.compile(
+    r"<<-?\s*['\"]?([A-Za-z_][A-Za-z_0-9]*|\\?[^\s;&|()<>]+)['\"]?\s*$",
+    re.MULTILINE,
+)
+# Non-executing heredoc consumers: the heredoc body is DATA, not code.
+_DATA_HEREDOC_CONSUMERS = {
+    "cat", "tee", "dd", ":", "true", "echo", "printf", "write", "wc",
+    "sort", "head", "tail", "grep", "sed", "awk", "tr", "base64",
+    "openssl", "sha256sum", "md5sum", "jq", "python3", "python", "perl",
+    "ruby", "node",
+}
+
+
+def _strip_heredoc_bodies(text, close_phrase_re):
+    """Strip heredoc bodies from command text, returning (stripped_text, has_interp).
+
+    For non-executing consumers (cat/tee/etc.), the body is blanked entirely.
+    For executing consumers (bash/sh), the body is blanked but checked for a
+    `gh issue close` phrase — if found, has_interp is set True.
+    """
+    lines = text.split("\n")
+    out = []
+    has_interp = False
+    i = 0
+    while i < len(lines):
+        m = _HEREDOC_OP_RE.search(lines[i])
+        if m:
+            delim = m.group(1).strip("'\"\\")
+            out.append(lines[i])  # keep the operator line
+            # Determine the consumer: the first non-assignment token on this line
+            # before the `<<`. Take the portion before the heredoc operator.
+            prefix = lines[i][:m.start()].strip()
+            # Walk past env assignments and redirections to find the command word
+            consumer = ""
+            for tok in prefix.split():
+                if "=" in tok and not tok.startswith("-"):
+                    continue  # env assignment
+                if tok.startswith(">") or tok.startswith("<"):
+                    continue  # redirection
+                consumer = os.path.basename(tok)
+                break
+            is_data = consumer.lower() in _DATA_HEREDOC_CONSUMERS or consumer == ""
+            # Skip body lines until terminator
+            body_lines = []
+            i += 1
+            while i < len(lines):
+                if lines[i].strip() == delim or lines[i].lstrip("\t") == delim:
+                    out.append(lines[i])  # keep terminator
+                    break
+                body_lines.append(lines[i])
+                out.append("")  # blank the body line
+                i += 1
+            else:
+                # unterminated heredoc — already consumed all lines
+                pass
+            if not is_data and body_lines:
+                # Executing consumer — check the body for a close phrase
+                body_text = "\n".join(body_lines)
+                if close_phrase_re.search(body_text.replace("\\", "").replace('"', "").replace("'", "")):
+                    has_interp = True
+        else:
+            out.append(lines[i])
+        i += 1
+    return "\n".join(out), has_interp
+
+
 def analyze(cmd):
     """Return the derived-signal dict, or None on any internal failure (fail closed)."""
     # Strip backslash-newline line continuations before segmentation (bash removes
     # them; a segmenter must not split there and shlex must not read `\<nl>` as an
     # escaped newline). Advisor pitfall #2.
     cmd = cmd.replace("\\\n", "")
+
+    # #873: strip heredoc bodies BEFORE segmentation so their content (unbalanced
+    # quotes, close-like keywords) never reaches the segment analysis loop.
+    cmd, heredoc_interp = _strip_heredoc_bodies(cmd, _CLOSE_PHRASE_RE)
 
     segments = close_trigger.split_top_level(cmd)
 
@@ -316,6 +393,8 @@ def analyze(cmd):
 
     has_patch = _is_patch_close(cmd)
     if suspicious:
+        has_interp = True
+    if heredoc_interp:
         has_interp = True
 
     is_close = has_patch or n_close >= 1 or has_interp
