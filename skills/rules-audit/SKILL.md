@@ -59,7 +59,7 @@ done
 - [ ] For each violation, **file an alignment issue on that repo** (diff-scoped ≤20-min PR gate + weekly async, or async-only if covering tests are too slow) — do NOT edit the project's CI yourself ([[feedback-stay-in-repo-lane]]). Precedents: codex-bridge#119, bakerion-ai#341, spinbike#102, songplayer#123, devbridge#62, reaperiem#200.
 - [ ] Diff-scoped + ≤20-min + (weekly async or PR-only-with-skip) = compliant, no action.
 
-### 1. Size metric (tracked, never a target)
+### 1. Size metric (review-due trigger + one-way ratchet, never a target)
 - [ ] Resolved `~/.claude/CLAUDE.md` size (`wc -l` / `du -b`) — record it + Δ vs the previous audit. Review-due trigger + prioritizer (largest modules reviewed first), NOT a number to hit.
 - [ ] Which 5 modules contribute most tokens? (`wc -l modules/*/*.md | sort -rn | head -10`) — review order, not a cut list
 - [ ] Any SITUATIONAL module (fires only for one task-type/area)? Candidate for CONVERSION to skill / `paths:`-scoped rule / hook (mdreview axis 3) — never bare deletion

@@ -12,7 +12,7 @@ allowed-tools: Bash, Read, Edit, Write, WebSearch, WebFetch, Grep, Glob, AskUser
 
 ## Goal — CONTENT is the indicator, never line count (READ FIRST)
 
-**The goal is a regularly-REVIEWED, EFFECTIVE ruleset. Growth/size is NOT the indicator — CONTENT is** (the user's directive, 2026-07-09). Every rule here originates from a CONCRETE development problem the user actually hit; that work is never thrown away because a doc says "keep CLAUDE.md short". Size stays a tracked metric and a review-due trigger — never a target to hit.
+**The goal is a regularly-REVIEWED, EFFECTIVE ruleset. Growth/size is NOT the indicator — CONTENT is** (the user's directive, 2026-07-09). Every rule here originates from a CONCRETE development problem the user actually hit; that work is never thrown away because a doc says "keep CLAUDE.md short". Size is a review-due trigger + a one-way ratchet (ceiling only ever DOWN — `tests/context_ratchet.json`, #857); content is reduced by conversion (hook/paths-scoped rule/reference archive) and native-now evidence, never by deletion of solved problems.
 
 The review examines content along **three axes**:
 
@@ -213,7 +213,7 @@ caveman lite is active (strips articles/filler). Rules must lean on STRUCTURAL m
 
 ## Rules
 
-- **Content over line count.** The three axes (native-now / model-combination / dynamic application) are the review; size is a metric, never a target. Keep every rule that still helps; bare-cut ONLY proven-obsolete (native-now / hook-enforced / duplicate); situational rules CONVERT to on-demand surfaces verbatim. Deleting a working rule to save size is a regression.
+- **Content over line count.** The three axes (native-now / model-combination / dynamic application) are the review; size is a review-due trigger + a one-way ratchet (ceiling only ever DOWN — `tests/context_ratchet.json`, #857), never a target. Keep every rule that still helps; bare-cut ONLY proven-obsolete (native-now / hook-enforced / duplicate); situational rules CONVERT to on-demand surfaces verbatim. Deleting a working rule to save size is a regression.
 - Every proposed change cites a source URL (or hook key / duplicate file:line) captured THIS run. No evidence → no change. Uncertainty → keep.
 - Model generation is read from Environment ONCE (Step 0) — never hardcoded in a query.
 - Structural checks are owned by `rules-audit` (Step 1) — do NOT re-grep them here.
