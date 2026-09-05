@@ -391,7 +391,8 @@ def _append_dev1_if_cutover():
 
     Called at module-load time AND available for tests to re-invoke after
     patching CONTROLLER_CUTOVER_DONE. When False, a no-op."""
-    if CONTROLLER_CUTOVER_DONE:
+    if CONTROLLER_CUTOVER_DONE and not any(
+            h.get("name") == "dev1" for h in REMOTE_HOSTS):
         REMOTE_HOSTS.append({
             "name": "dev1",
             "host": "100.104.8.125",

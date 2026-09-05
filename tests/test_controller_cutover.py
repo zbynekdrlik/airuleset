@@ -25,10 +25,17 @@ class TestPushOriginGuard(unittest.TestCase):
     """(a) cmd_push push-origin guard — dormant when False, active when True."""
 
     def test_guard_noop_when_false(self):
-        """When CONTROLLER_CUTOVER_DONE is False, cmd_push does NOT check
-        box-class or user — it proceeds (we test that it doesn't sys.exit)."""
+        """When CONTROLLER_CUTOVER_DONE is False, _push_origin_guard is a
+        no-op — it returns immediately without reading box-class or user."""
         import cli_fleet
+        import cli_remote
         self.assertFalse(cli_fleet.CONTROLLER_CUTOVER_DONE)
+        # A poisoned box_class that would raise if called — proves the
+        # guard returns before reaching it. default_box_class is imported
+        # lazily inside the guard, so patch at the source module.
+        with mock.patch("watchdog.reaper.default_box_class",
+                        side_effect=AssertionError("should not be called")):
+            cli_remote._push_origin_guard()  # must not raise
 
     def test_guard_refuses_non_controller_when_true(self):
         """When True, a non-controller box (e.g. workstation) is refused."""
@@ -250,40 +257,102 @@ class TestSonioxKeySourceFallback(unittest.TestCase):
 
 
 class TestHookRuleC(unittest.TestCase):
-    """(f) block-foreign-airuleset-write.sh RULE C (shell test with mock env)."""
+    """(f) block-foreign-airuleset-write.sh RULE C — real subprocess tests.
 
-    def _run_hook_extract(self, cmd_text, box_class, cutover_done):
-        """Run the RULE C logic as a Python check (mirroring the bash)."""
-        if not cutover_done:
-            return 0
-        if box_class == "controller":
-            return 0
-        if "airuleset.py" in cmd_text and "push" in cmd_text:
-            return 2
-        return 0
+    The hook is driven as a real bash subprocess with a controlled HOME
+    (box-class marker) and a patched cli_fleet.py (cutover flag). This
+    catches shell-level bugs (unbound variables, quoting) that a Python
+    mirror cannot."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.td))
+        # Create a fake HOME with a box-class marker
+        self.fake_home = os.path.join(self.td, "home")
+        os.makedirs(os.path.join(self.fake_home, ".claude"))
+
+    def _set_box_class(self, cls):
+        bc_path = os.path.join(self.fake_home, ".claude", "airuleset-box-class")
+        Path(bc_path).write_text(cls + "\n")
+
+    def _run_hook(self, cmd_text, cutover_done=False, box_class="workstation",
+                  override=False):
+        """Run the REAL hook as a subprocess with controlled env."""
+        import json
+        import subprocess
+        self._set_box_class(box_class)
+
+        # Create a fake cli_fleet.py with the flag set
+        fake_repo = os.path.join(self.td, "repo")
+        os.makedirs(fake_repo, exist_ok=True)
+        Path(os.path.join(fake_repo, "cli_fleet.py")).write_text(
+            f"CONTROLLER_CUTOVER_DONE = {cutover_done}\n")
+
+        # Create a hooks/ dir with the real hook so readlink -f resolves
+        hooks_dir = os.path.join(fake_repo, "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        real_hook = os.path.join(REPO_DIR, "hooks",
+                                 "block-foreign-airuleset-write.sh")
+        fake_hook = os.path.join(hooks_dir,
+                                  "block-foreign-airuleset-write.sh")
+        # Copy the real hook so it can resolve its own repo dir
+        import shutil
+        shutil.copy2(real_hook, fake_hook)
+        # Also copy required python modules the hook might import
+        for py in ("foreign_repo_guard.py", "git_write_classify.py",
+                   "lib-presence.sh"):
+            src = os.path.join(REPO_DIR, "hooks", py)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(hooks_dir, py))
+
+        payload = json.dumps({
+            "tool_input": {"command": cmd_text},
+        })
+        env = dict(os.environ)
+        env["HOME"] = self.fake_home
+        if override:
+            env["AIRULESET_CONTROLLER_OVERRIDE"] = "1"
+        else:
+            env.pop("AIRULESET_CONTROLLER_OVERRIDE", None)
+        # Strip CLAUDE_PROJECT_DIR to avoid RULE A interference
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        result = subprocess.run(
+            ["bash", fake_hook],
+            input=payload, capture_output=True, text=True,
+            env=env, timeout=10,
+        )
+        return result.returncode
 
     def test_rule_c_noop_when_false(self):
-        """When CUTOVER_DONE is False, RULE C is a no-op."""
-        rc = self._run_hook_extract(
-            "python3 airuleset.py push", "workstation", False)
+        """When CUTOVER_DONE is False, an airuleset push command passes."""
+        rc = self._run_hook("python3 ~/devel/airuleset/airuleset.py push",
+                            cutover_done=False, box_class="workstation")
         self.assertEqual(rc, 0)
 
     def test_rule_c_blocks_push_from_non_controller(self):
-        """When True, push from a non-controller box is blocked."""
-        rc = self._run_hook_extract(
-            "python3 airuleset.py push", "workstation", True)
+        """When True, push from a non-controller box is blocked (exit 2)."""
+        rc = self._run_hook("python3 ~/devel/airuleset/airuleset.py push",
+                            cutover_done=True, box_class="workstation")
         self.assertEqual(rc, 2)
 
     def test_rule_c_allows_push_from_controller(self):
         """When True, push from controller box passes."""
-        rc = self._run_hook_extract(
-            "python3 airuleset.py push", "controller", True)
+        rc = self._run_hook("python3 ~/devel/airuleset/airuleset.py push",
+                            cutover_done=True, box_class="controller")
         self.assertEqual(rc, 0)
 
     def test_rule_c_allows_non_push_from_anywhere(self):
-        """Non-push commands pass regardless."""
-        rc = self._run_hook_extract(
-            "python3 airuleset.py install", "workstation", True)
+        """Non-push airuleset commands pass regardless of flag state."""
+        rc = self._run_hook(
+            "python3 ~/devel/airuleset/airuleset.py install",
+            cutover_done=True, box_class="workstation")
+        self.assertEqual(rc, 0)
+
+    def test_rule_c_override_bypasses(self):
+        """The AIRULESET_CONTROLLER_OVERRIDE=1 env var bypasses RULE C."""
+        rc = self._run_hook("python3 ~/devel/airuleset/airuleset.py push",
+                            cutover_done=True, box_class="workstation",
+                            override=True)
         self.assertEqual(rc, 0)
 
 

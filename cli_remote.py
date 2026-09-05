@@ -98,6 +98,11 @@ REMOTE_DEPLOY_TIMEOUT_S = 1800
 # account, sourced from dev1's own local voiceagent checkout ------------------
 # #870 F3: on the controller box, source from ~/.secrets/soniox.env first;
 # fall back to the dev1-era voiceagent checkout path for backward compat.
+# Note: this resolves at import time (is_file check). On dev1 the controller
+# path does not exist, so the legacy path is used — zero runtime change
+# pre-cutover. Creating ~/.secrets/soniox.env on dev1 would switch the source
+# before the cutover flag flips; this is accepted (file existence = the
+# de-facto second flag for soniox, documented here per Fable review).
 _SONIOX_CONTROLLER_PATH = Path.home() / ".secrets" / "soniox.env"
 _SONIOX_LEGACY_PATH = Path.home() / "devel" / "voiceagent" / ".env"
 SONIOX_KEY_SOURCE = (

@@ -356,6 +356,7 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
 # right seam (not an at-runtime AUTHORITY_BY_USER lookup a bash hook can't do).
 BOX_CLASS_PATH = "~/.claude/airuleset-box-class"
 SHARED_STREAM = "shared-stream"
+CONTROLLER = "controller"  # #870 F3: resource-gated box class (4 GB cx23)
 
 # argv[0]-anchored heavy build/VM daemon signatures. Anchored EXACTLY like the
 # #776 SHADOW_UGREP_SIGNATURE (argv[0] basename), so a process merely QUOTING a
@@ -447,7 +448,7 @@ def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
         bc = box_class_fn()
     except Exception:
         bc = None
-    if bc not in (SHARED_STREAM, "controller"):
+    if bc not in (SHARED_STREAM, CONTROLLER):
         return []
     if ps_fetch is None:
         ps_fetch = default_ps_fetch
