@@ -355,7 +355,7 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
 - **Your LAST act before returning is a durable `LANE-RETURN:` comment on the ticket (#844) —
   AFTER your final commit + wip-backup push, so the head sha you cite is real.** Post
   `gh issue comment <N> --body "LANE-RETURN: branch <worktree-branch> head <sha> worktree <path>
-  version <v> reviewed-by-tier <tier> gate:<state> — <one-line evidence: RED sha → GREEN sha, local verify green>"` for EVERY member.
+  version <v> reviewed-by-tier: <tier> gate:<state> — <one-line evidence: RED sha → GREEN sha, local verify green>"` for EVERY member.
   WHY: the #844 bounded live-hold cap can force a `/compact` on the supervisor while your lane is
   live, and the residual case (a lane-completion notification lost to CC's own overflow
   auto-compact) must lose NOTHING — the supervisor's post-compact reconcile rider integrates your

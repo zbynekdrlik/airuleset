@@ -96,7 +96,7 @@ def _gate_open_entry():
             "content": [
                 {
                     "type": "tool_result",
-                    "content": "fable-gate check: OPEN (15%)",
+                    "content": "OPEN fable=15% weekly=20% (< 90% gate)",
                 }
             ]
         }
@@ -110,7 +110,7 @@ def _gate_closed_entry():
             "content": [
                 {
                     "type": "tool_result",
-                    "content": "fable-gate check: CLOSED (92%)",
+                    "content": "CLOSED fable=92% weekly=95% (>= 90% gate)",
                 }
             ]
         }
@@ -348,6 +348,64 @@ class TestReviewTierHook(unittest.TestCase):
             self.assertNotIn('"block"', out2)
 
 
+    # Case 10: noise immunity — gate CLOSED + unrelated "OPEN" in transcript
+    def test_case10_noise_immunity_closed_with_unrelated_open(self):
+        """A gate-CLOSED result + an unrelated tool_result containing 'OPEN'
+        (e.g. from gh issue view --json state) must NOT false-trigger a
+        BLOCK_DOWNTIER. #876 Fable review RED fix."""
+        transcript = os.path.join(self.tmpdir, "transcript.jsonl")
+        _make_transcript([
+            _fable_gate_bash_entry(),
+            _gate_closed_entry(),
+            # An unrelated tool_result that contains "OPEN" — e.g. gh issue view.
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "content": '{"state": "OPEN", "title": "some issue"}',
+                        }
+                    ]
+                }
+            },
+        ], transcript)
+
+        msg = _worktree_return_msg(
+            reviewed_by_tier="claude-opus-4-6 gate:CLOSED")
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
+        rc, out, err = _run_hook(payload, home_dir=self.home)
+        self.assertEqual(rc, 0)
+        # Must NOT block — the OPEN is noise, the gate is CLOSED.
+        if out:
+            self.assertNotIn('"block"', out)
+
+    # Case 11: stage-2 block (BLOCK_NO_DISPATCH) also has once-per guard
+    def test_case11_stage2_block_once_per(self):
+        """BLOCK_NO_DISPATCH must also be non-wedging (once per session+issue).
+        #876 Fable review YELLOW fix."""
+        transcript = os.path.join(self.tmpdir, "transcript.jsonl")
+        _make_transcript([_fable_gate_bash_entry(), _gate_open_entry()],
+                         transcript)
+
+        msg = _worktree_return_msg(
+            reviewed_by_tier="claude-fable-5 gate:OPEN")
+        payload = _base_payload(msg, transcript_path=transcript,
+                                session_id=self.sid)
+
+        # First stop — should block (fable claimed, no dispatch).
+        rc1, out1, _ = _run_hook(payload, home_dir=self.home)
+        self.assertEqual(rc1, 0)
+        self.assertIn('"block"', out1)
+
+        # Second stop same session+issue — should pass (once-per).
+        rc2, out2, _ = _run_hook(payload, home_dir=self.home)
+        self.assertEqual(rc2, 0)
+        if out2:
+            self.assertNotIn('"block"', out2)
+
+
 class TestNonWorkerSkipped(unittest.TestCase):
     """The hook should exit 0 silently for non-autopilot-worker agents."""
 
@@ -420,7 +478,7 @@ class TestWorkerDoctrineReviewedByTier(unittest.TestCase):
 
     def test_lane_return_template_has_tier(self):
         worker = (REPO_ROOT / "agents" / "autopilot-worker.md").read_text()
-        self.assertIn("reviewed-by-tier <tier>", worker)
+        self.assertIn("reviewed-by-tier:", worker)
 
 
 class TestSKILLStep4ReviewTier(unittest.TestCase):

@@ -148,23 +148,27 @@ if tier_val not in valid_tiers:
     # Invalid tier value — pass (fail-open, the handoff CLI validates).
     sys.exit(0)
 
-# Read transcript.
+# Read transcript — structured tool_result parse ONLY (no raw-substring
+# fallback; the #876 Fable review RED: a loose `OPEN\b` whole-file scan
+# false-triggers on any unrelated "OPEN" token in the transcript).
 gate_open = None  # None = no gate call found
 has_fable_dispatch = False
 
+# Anchored pattern: fable-gate output is "OPEN fable=N%" or "CLOSED fable=N%".
+_GATE_RESULT_RE = re.compile(r"\b(OPEN|CLOSED)\b.*\bfable\s*=", re.I)
+
 if not transcript_path or not os.path.isfile(transcript_path):
-    # Unreadable transcript + line present => pass + log.
     print("PASS_NO_TRANSCRIPT")
     sys.exit(0)
 
 try:
     with open(transcript_path, "r", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for raw_line in f:
+            raw_line = raw_line.strip()
+            if not raw_line:
                 continue
             try:
-                rec = json.loads(line)
+                rec = json.loads(raw_line)
             except (json.JSONDecodeError, ValueError):
                 continue
 
@@ -176,101 +180,83 @@ try:
                 if not isinstance(block, dict):
                     continue
 
-                # Check tool_use blocks.
+                # Detect fable-advisor Agent dispatch in tool_use blocks.
                 if block.get("type") == "tool_use":
-                    name = block.get("name", "")
-                    inp = block.get("input", {})
-
-                    # Detect fable-gate Bash command.
-                    if name == "Bash":
-                        cmd = inp.get("command", "")
-                        if "fable-gate" in cmd:
-                            # Will be resolved by the paired tool_result.
-                            pass
-
-                    # Detect fable-advisor Agent dispatch.
-                    if name == "Agent":
-                        st = inp.get("subagent_type", "")
-                        if st == "fable-advisor":
+                    if block.get("name") == "Agent":
+                        inp = block.get("input", {})
+                        if inp.get("subagent_type") == "fable-advisor":
                             has_fable_dispatch = True
 
-                # Check tool_result blocks for fable-gate output.
+                # Detect fable-gate OPEN/CLOSED in tool_result blocks.
                 if block.get("type") == "tool_result":
-                    content_val = block.get("content", "")
-                    if isinstance(content_val, list):
-                        content_val = " ".join(
-                            c.get("text", "") for c in content_val
-                            if isinstance(c, dict))
-                    if isinstance(content_val, str) and "fable-gate" in str(block.get("tool_use_id", "")):
-                        # Heuristic — check the content.
-                        pass
-
-            # Also check for fable-gate results in tool_result messages.
-            if rec.get("type") == "user":
-                for block in msg_content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "tool_result":
-                        text = ""
-                        c = block.get("content", "")
-                        if isinstance(c, str):
-                            text = c
-                        elif isinstance(c, list):
-                            text = " ".join(
-                                x.get("text", "") for x in c
-                                if isinstance(x, dict))
-                        if "OPEN" in text and "fable" in text.lower():
+                    text = ""
+                    c = block.get("content", "")
+                    if isinstance(c, str):
+                        text = c
+                    elif isinstance(c, list):
+                        text = " ".join(
+                            x.get("text", "") for x in c
+                            if isinstance(x, dict))
+                    # Anchored match: require "OPEN/CLOSED" + "fable=" in
+                    # the SAME result text — not a bare OPEN anywhere.
+                    m = _GATE_RESULT_RE.search(text)
+                    if m:
+                        token = m.group(1).upper()
+                        if token == "OPEN":
                             gate_open = True
-                        elif "CLOSED" in text and "fable" in text.lower():
-                            if gate_open is None:
-                                gate_open = False
+                        elif token == "CLOSED" and gate_open is None:
+                            gate_open = False
 
 except Exception:
-    # Unreadable transcript — pass (fail-open).
     print("PASS_NO_TRANSCRIPT")
     sys.exit(0)
 
-# Also scan for fable-gate in assistant Bash commands and their results.
-# Re-scan more simply: look for fable-gate command + OPEN/CLOSED in results.
-try:
-    with open(transcript_path, "r", errors="replace") as f:
-        content = f.read()
-    if "fable-gate" in content:
-        # Look for OPEN or CLOSED tokens near fable-gate context.
-        if re.search(r"OPEN\b", content) and gate_open is None:
-            gate_open = True
-        if gate_open is None and re.search(r"CLOSED\b", content):
-            gate_open = False
-except Exception:
-    pass
-
-# Consistency table:
+# Consistency table — all verdicts print their tag for bash routing.
+# Accepted residuals (documented, #876 Fable review evidence-integrity):
+# - trivial-diff is a negation-blind substring; "not a trivial-diff" passes.
+#   The supervisor Step 4 spot-audits trivial-diff declarations.
+# - A worker that never runs fable-gate + writes "gate:CLOSED" passes
+#   (PASS_NO_GATE fail-open). Supervisor Step 4 is the second net.
+verdict = None
 if tier_val == "claude-fable-5":
     if not has_fable_dispatch:
-        # Fable tier claimed but no fable-advisor dispatch — BLOCK.
-        print("BLOCK_NO_DISPATCH")
-        sys.exit(0)
-    # Fable tier + dispatch = consistent, pass.
+        verdict = "BLOCK_NO_DISPATCH"
+    # else: fable tier + dispatch = consistent, pass.
+elif tier_val == "claude-opus-4-6":
+    if has_trivial:
+        pass  # Trivial-diff declaration — pass regardless of gate state.
+    elif gate_open is True:
+        verdict = "BLOCK_DOWNTIER"
+    elif gate_open is False:
+        pass  # Gate CLOSED + opus — pass.
+    elif gate_open is None:
+        verdict = "PASS_NO_GATE"
+
+if verdict and verdict.startswith("PASS_"):
+    print(verdict)
     sys.exit(0)
 
-if tier_val == "claude-opus-4-6":
-    if has_trivial:
-        # Trivial-diff declaration — pass regardless of gate state.
-        sys.exit(0)
-    if gate_open is True:
-        # Gate OPEN + opus tier without trivial-diff — BLOCK (downtier).
-        print("BLOCK_DOWNTIER")
-        sys.exit(0)
-    if gate_open is False:
-        # Gate CLOSED + opus — pass.
-        sys.exit(0)
-    if gate_open is None:
-        # No gate call observed + opus without trivial — pass (fail-open).
-        # Could be a resumed lane whose gate call was in the dead transcript.
-        print("PASS_NO_GATE")
-        sys.exit(0)
+if verdict and verdict.startswith("BLOCK_"):
+    # Collect issue refs for once-per state (mirrors stage 1).
+    issues = []
+    seen_i = set()
+    for line_re in (re.compile(r"^\s*issues\s*:(.*)$", re.I | re.M),
+                    re.compile(r"^\s*issue_state\s*:(.*)$", re.I | re.M)):
+        for mi in line_re.finditer(msg):
+            for n in dg.issue_refs(mi.group(1)):
+                if n not in seen_i:
+                    seen_i.add(n)
+                    issues.append(n)
+        if issues:
+            break
+    repo = notify.resolve_repo_key(cwd, msg=msg) if issues else ""
+    print(verdict)
+    if repo:
+        print(repo)
+    for n in issues:
+        print(n)
+    sys.exit(0)
 
-# Anything else — pass (fail-open).
 sys.exit(0)
 PYEOF
 )
@@ -278,68 +264,57 @@ PYEOF
 
 VERDICT=$(printf '%s\n' "$RESULT" | sed -n '1p')
 
+# --- PASS verdicts ---
 case "$VERDICT" in
     PASS_NO_TRANSCRIPT)
-        # Log the fail-open decision.
         printf '[review-tier] line present, transcript unreadable — pass (fail-open)\n' >&2
         exit 0
         ;;
     PASS_NO_GATE)
-        # Log: no gate call observed, opus without trivial — pass (fail-open).
         printf '[review-tier] opus tier, no gate call in transcript — pass (fail-open, possible resumed lane)\n' >&2
         exit 0
         ;;
-    BLOCK_NO_DISPATCH)
-        REASON="reviewed-by-tier claims claude-fable-5 but NO fable-advisor Agent dispatch
-found in the transcript (#876). A claude-fable-5 review tier requires a real
-fable-advisor dispatch — an in-context self-review cannot claim the Fable tier.
+esac
 
-Fix: run fable-gate, dispatch fable-advisor (OPEN) or the model-less Opus consult
-(CLOSED), paste the verdict into the Self-review table, then add/correct the
-reviewed-by-tier line and repost LANE-RETURN."
-        jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
-        exit 0
-        ;;
-    BLOCK_DOWNTIER)
-        REASON="reviewed-by-tier claims claude-opus-4-6 but fable-gate was OPEN in the
-transcript (#876). A non-trivial diff with gate OPEN must dispatch fable-advisor
-and record reviewed-by-tier: claude-fable-5 — or declare trivial-diff explicitly.
+# --- ALL BLOCK verdicts go through the same once-per (session, repo#issue)
+#     guard (#876 Fable review YELLOW: stage-2 blocks must be non-wedging too).
+case "$VERDICT" in
+    BLOCK_MISSING|BLOCK_NO_DISPATCH|BLOCK_DOWNTIER) ;;
+    *) exit 0 ;;
+esac
 
-Fix: dispatch fable-advisor for the review (gate is OPEN), paste the verdict,
-update reviewed-by-tier to claude-fable-5 gate:OPEN, and repost LANE-RETURN.
-(If the diff is genuinely trivial, add the trivial-diff marker.)"
-        jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
-        exit 0
-        ;;
-    BLOCK_MISSING)
-        # Stage 1: no reviewed-by-tier line at all.
-        REPO=$(printf '%s\n' "$RESULT" | sed -n '2p')
-        ITEMS=$(printf '%s\n' "$RESULT" | sed -n '3,$p')
-        [ -n "$REPO" ] && [ -n "$ITEMS" ] || exit 0
+REPO=$(printf '%s\n' "$RESULT" | sed -n '2p')
+ITEMS=$(printf '%s\n' "$RESULT" | sed -n '3,$p')
+[ -n "$REPO" ] || exit 0
+# Stage 2 blocks may have no ITEMS (issues already collected in python);
+# default to a synthetic "#0" so the once-per guard still fires.
+[ -n "$ITEMS" ] || ITEMS="0"
 
-        # Once per (session, repo#issue).
-        STATE="/tmp/airuleset-reviewtier-$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')"
-        SEEN=$(cat "$STATE" 2>/dev/null || echo "")
-        FRESH=""
-        NEW_SEEN="$SEEN"
-        while IFS= read -r n; do
-            [ -n "$n" ] || continue
-            case " $SEEN " in *" ${REPO}#${n} "*) continue ;; esac
-            FRESH="${FRESH}${n}
+# Per-uid state file (#492 lesson).
+STATE="/tmp/airuleset-reviewtier-${EUID}-$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')"
+SEEN=$(cat "$STATE" 2>/dev/null || echo "")
+FRESH=""
+NEW_SEEN="$SEEN"
+while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    case " $SEEN " in *" ${REPO}#${n} "*) continue ;; esac
+    FRESH="${FRESH}${n}
 "
-            NEW_SEEN="${NEW_SEEN}${NEW_SEEN:+ }${REPO}#${n}"
-        done <<EOF
+    NEW_SEEN="${NEW_SEEN}${NEW_SEEN:+ }${REPO}#${n}"
+done <<EOF
 $ITEMS
 EOF
-        [ -n "$FRESH" ] || exit 0
-        printf '%s' "$NEW_SEEN" > "$STATE" 2>/dev/null || true
+[ -n "$FRESH" ] || exit 0
+printf '%s' "$NEW_SEEN" > "$STATE" 2>/dev/null || true
 
-        LINES=""
-        for n in $FRESH; do
-            LINES="${LINES}  #${n}
+LINES=""
+for n in $FRESH; do
+    LINES="${LINES}  #${n}
 "
-        done
+done
 
+case "$VERDICT" in
+    BLOCK_MISSING)
         REASON="Completed return has NO reviewed-by-tier line (#876). Every worktree-mode
 and full-flow return MUST carry:
 
@@ -353,10 +328,31 @@ reviewed-by-tier line and repost LANE-RETURN.
 
 You are blocked once per issue; if the review genuinely cannot be dispatched,
 report that and stop."
-        jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
-        exit 0
         ;;
-    *)
-        exit 0
+    BLOCK_NO_DISPATCH)
+        REASON="reviewed-by-tier claims claude-fable-5 but NO fable-advisor Agent dispatch
+found in the transcript (#876). A claude-fable-5 review tier requires a real
+fable-advisor dispatch — an in-context self-review cannot claim the Fable tier.
+
+Fix: run fable-gate, dispatch fable-advisor (OPEN) or the model-less Opus consult
+(CLOSED), paste the verdict into the Self-review table, then add/correct the
+reviewed-by-tier line and repost LANE-RETURN.
+
+You are blocked once per issue; if the review genuinely cannot be dispatched,
+report that and stop."
+        ;;
+    BLOCK_DOWNTIER)
+        REASON="reviewed-by-tier claims claude-opus-4-6 but fable-gate was OPEN in the
+transcript (#876). A non-trivial diff with gate OPEN must dispatch fable-advisor
+and record reviewed-by-tier: claude-fable-5 — or declare trivial-diff explicitly.
+
+Fix: dispatch fable-advisor for the review (gate is OPEN), paste the verdict,
+update reviewed-by-tier to claude-fable-5 gate:OPEN, and repost LANE-RETURN.
+
+You are blocked once per issue; if the review genuinely cannot be dispatched,
+report that and stop."
         ;;
 esac
+
+jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
+exit 0
