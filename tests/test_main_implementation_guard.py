@@ -2188,30 +2188,44 @@ class BookkeepingWritesExempt178(unittest.TestCase):
     # anchored UNDER .claude/ so it can never false-match a repo's own
     # work-products/ subdir (the rejected `*/work-products/*` hole).
 
+    # #875 hermetic: a FIXED non-/tmp home path so both the test's path
+    # construction and the hook's "$HOME" expansion agree — and no path
+    # accidentally matches the /tmp/* bookkeeping exemption (which would
+    # happen if HOME were under /tmp, as in a clean-HOME Pass A run).
+    # The hook only STRING-MATCHES, so the dir need not exist on disk.
+    _WP_HOME = "/home/airuleset-test-875"
+
+    def _write_wp(self, file_path, content=MID_1200, model="claude-fable-5"):
+        """Like _write but with a consistent HOME for the hook subprocess."""
+        helper = MainImplementationGuard()
+        return helper._run(tool="Write", content=content, file_path=file_path,
+                           transcript_text=transcript(model),
+                           extra_env={"HOME": self._WP_HOME})
+
     def test_write_to_claude_work_products_allowed_over_edit_max(self):
         # the hook only STRING-MATCHES the path — the payload path is built
-        # literally, home-agnostic like the memory-note test above.
-        wp = str(Path.home() / ".claude" / "work-products" / "draft.md")
-        out = self._write(wp)
+        # literally; both the path and the hook's $HOME use a fixed non-/tmp
+        # home (#875 hermetic fix).
+        wp = self._WP_HOME + "/.claude/work-products/draft.md"
+        out = self._write_wp(wp)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_claude_work_products_write_over_the_cap_is_blocked(self):
-        wp = str(Path.home() / ".claude" / "work-products" / "big.md")
-        out = self._write(wp, content="n" * (131072 + 1))
+        wp = self._WP_HOME + "/.claude/work-products/big.md"
+        out = self._write_wp(wp, content="n" * (131072 + 1))
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_claude_work_products_write_at_the_cap_is_allowed(self):
-        wp = str(Path.home() / ".claude" / "work-products" / "atcap.md")
-        out = self._write(wp, content="n" * 131072)
+        wp = self._WP_HOME + "/.claude/work-products/atcap.md"
+        out = self._write_wp(wp, content="n" * 131072)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_claude_work_products_path_with_traversal_is_never_exempt(self):
         # `.../.claude/work-products/../../../<repo>/app.py` string-matches
         # `*/.claude/work-products/*` but resolves OUTSIDE it — the `*..*)`
         # arm (first in the case) must still deny it (#178 review invariant).
-        trav = str(Path.home() / ".claude" / "work-products"
-                   / ".." / ".." / ".." / "app.py")
-        out = self._write(trav)
+        trav = self._WP_HOME + "/.claude/work-products/../../../app.py"
+        out = self._write_wp(trav)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_repo_work_products_subdir_is_NOT_exempt(self):
@@ -2226,8 +2240,9 @@ class BookkeepingWritesExempt178(unittest.TestCase):
     def test_bare_home_work_products_is_NOT_exempt(self):
         # ~/work-products (NOT under .claude) is likewise the rejected option
         # and stays BLOCKED — only ~/.claude/work-products/** is durable-exempt.
-        bare = str(Path.home() / "work-products" / "draft.md")
-        out = self._write(bare)
+        # #875: use the fixed non-/tmp home so it works under a clean HOME too.
+        bare = self._WP_HOME + "/work-products/draft.md"
+        out = self._write_wp(bare)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_repo_dot_claude_work_products_subdir_is_NOT_exempt(self):
@@ -2238,9 +2253,9 @@ class BookkeepingWritesExempt178(unittest.TestCase):
         # .claude/work-products/ (under $HOME/devel/<repo>/, NOT $HOME/.claude/)
         # stays BLOCKED. This path lives under the real home but in a repo
         # subdir — the reviewer's exact live exit-0 repro, now denied.
-        repo_dc = str(Path.home() / "devel" / "some-repo"
-                      / ".claude" / "work-products" / "impl.py")
-        out = self._write(repo_dc)
+        # #875: use the fixed non-/tmp home so it works under a clean HOME too.
+        repo_dc = self._WP_HOME + "/devel/some-repo/.claude/work-products/impl.py"
+        out = self._write_wp(repo_dc)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
@@ -2503,11 +2518,9 @@ class TestWiringAndSkill(unittest.TestCase):
         self.assertIn("fable-advisor", airuleset.SKILL_NAMES)
 
     def test_model_awareness_points_at_the_enforcement(self):
-        txt = (REPO / "modules" / "core" / "model-awareness.md").read_text()
+        txt = (REPO / "skills" / "model-awareness-deep" / "DEEP.md").read_text()
         self.assertIn("block-main-implementation.sh", txt)
         self.assertIn("fable-advisor", txt)
-        # the generalization itself must be documented, not just the old
-        # Fable-only behavior
         self.assertIn("#54", txt)
         self.assertRegex(txt, r"(?i)armed[^\n]*(/goal|goal)")
 

@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cli_webterm as w                    # noqa: E402
 import cli_webterm_gateway as g            # noqa: E402
 import cli_webterm_david as dvd            # noqa: E402
-import cli_webterm_marek as mrk            # noqa: E402
+# #882: marek webterm module deleted
 import cli_webterm_tunnel as tun           # noqa: E402
 import cli_webterm_access as access        # noqa: E402
 
@@ -221,11 +221,7 @@ class TestNoTcpLoopbackSurface(unittest.TestCase):
             unit, dvd.WEBTERM_DAVID_GATEWAY_SOCK_BASENAME,
             dvd.WEBTERM_DAVID_TTYD_SOCK_BASENAME)
 
-    def test_marek_gateway_unit_has_no_tcp(self):
-        unit = mrk.render_marek_gateway_unit()
-        self._assert_gateway_unit_is_unix(
-            unit, mrk.WEBTERM_MAREK_GATEWAY_SOCK_BASENAME,
-            mrk.WEBTERM_MAREK_TTYD_SOCK_BASENAME)
+    # #882: test_marek_gateway_unit_has_no_tcp removed (marek webterm module deleted)
 
     def _assert_launch_is_unix(self, script, ttyd_base):
         # binds a unix socket in the account runtime dir, never a TCP port
@@ -247,11 +243,7 @@ class TestNoTcpLoopbackSurface(unittest.TestCase):
             ttyd_socket_basename=dvd.WEBTERM_DAVID_TTYD_SOCK_BASENAME)
         self._assert_launch_is_unix(script, dvd.WEBTERM_DAVID_TTYD_SOCK_BASENAME)
 
-    def test_marek_launch_socket_variant(self):
-        script = w.render_webterm_launch_script(
-            inventory_path=mrk.WEBTERM_MAREK_INVENTORY_PATH,
-            ttyd_socket_basename=mrk.WEBTERM_MAREK_TTYD_SOCK_BASENAME)
-        self._assert_launch_is_unix(script, mrk.WEBTERM_MAREK_TTYD_SOCK_BASENAME)
+    # #882: test_marek_launch_socket_variant removed (marek webterm module deleted)
 
     def test_cloudflared_config_uses_unix_service_not_tcp(self):
         # every managed tunnel config points at a unix: origin, never http://127.0.0.1

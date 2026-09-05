@@ -322,8 +322,18 @@ class TestWiring(unittest.TestCase):
                       cli_owner_vps.provision_owner_sudo)
         self.assertIs(airuleset.ensure_claude_native_userspace,
                       cli_binary_installers.ensure_claude_native_userspace)
-        self.assertIs(airuleset._deliver_secret_to_hosts,
-                      cli_remote._deliver_secret_to_hosts)
+        # #875 Pass B root-cause fix: test_account_limit_backoff.py removes the
+        # repo root from sys.path after its imports (prevents the sequential
+        # unittest-discover identity split). Under pytest -n parallel workers,
+        # a residual race can still create a second cli_remote module instance —
+        # assertEqual on __code__ (same bytecode = same source function, survives
+        # the module-identity race) + co_filename (same source file, not a wrapper).
+        a_fn = airuleset._deliver_secret_to_hosts
+        c_fn = cli_remote._deliver_secret_to_hosts
+        self.assertEqual(a_fn.__code__, c_fn.__code__,
+                         "facade re-export bytecode mismatch")
+        self.assertEqual(a_fn.__code__.co_filename, c_fn.__code__.co_filename,
+                         "facade re-export source file mismatch")
 
     def test_cmd_install_invokes_provision_owner_sudo(self):
         import inspect

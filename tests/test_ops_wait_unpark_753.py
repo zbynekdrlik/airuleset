@@ -224,9 +224,10 @@ class FlagSetsReturnsUnpark(unittest.TestCase):
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: DRAINED):
             sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
-        # #818 extended the tuple to 6 (…, tacit_wait, tacit_close); the unpark
-        # set stays index 3 (appended after), so this lock is unaffected bar len.
-        self.assertEqual(6, len(sets))
+        # #818 extended the tuple to 6, #881 to 8 (…, converge, no_target);
+        # the unpark set stays index 3 (appended after), so this lock is
+        # unaffected bar len.
+        self.assertEqual(8, len(sets))
         self.assertEqual({41}, sets[3])
 
 
@@ -260,8 +261,9 @@ class DoctrineContentLock753Part1(unittest.TestCase):
     """The statusline W bullet carries the `unpark?` mechanism (part 1)."""
 
     def test_w_bullet_mentions_unpark(self):
+        # #859 batch 3: moved to companion
         p = (Path(__file__).resolve().parent.parent
-             / "modules/core/statusline-vocabulary.md")
+             / "skills/statusline-vocabulary-deep/DEEP-2.md")
         text = p.read_text(encoding="utf-8")
         self.assertIn("unpark?", text)
 

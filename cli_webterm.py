@@ -205,8 +205,7 @@ def _login_user(profile):
     mode, so no credential is generated for them)."""
     if profile == profiles.DAVID:
         return "david"
-    if profile == profiles.MAREK:
-        return profiles.MAREK_GATEWAY_USER
+    # marek profile REMOVED (#882)
     return WEBTERM_LOGIN_USER
 
 
@@ -668,21 +667,17 @@ WEBTERM_DASHBOARD_TABS = {
         "david1-subdev", "david2-subdev", "david3-subdev",
         "miva1-subdev", "spinbike-vps",
     ],
-    # marek.newlevel.media -- Marek's set (owner #661 rework 2026-08-25; #787
-    # doplnenie 2026-08-31 added montalu2; owner request 2026-09-03 added
-    # miva1 + gatekeeper as OBSERVE tabs): his own subdev account first
-    # (default-active tab), his montalu2 stream, the miva1 subdev stream, his
-    # montalu4 stream, his `marek` tmux sessions on dev1 + dev2, the gk box,
-    # and his forestshop VPS (handled like the owner's spinbike `sb` tab). The
-    # ids are the MAREK LANE inventory ids (cli_webterm_profiles.marek_inventory)
-    # -- his lane render consumes this list via LaneSpec.dashboard_human="marek",
-    # so it dictates order + exclusivity there. NB: `dev1`/`dev2` here name
-    # MAREK's lane entries (which attach HIS `marek` tmux group), and
-    # `gatekeeper` names his OBSERVE entry (which attaches the OWNER's gk group),
-    # not the fleet's owner entries -- the two id namespaces meet only in tests,
-    # never in a prod render.
-    "marek": ["marek-subdev", "montalu2-subdev", "miva1-subdev",
-              "montalu4-subdev", "dev1", "dev2", "gatekeeper", "forestshop"],
+    # marek.newlevel.media -- Marek's OBSERVER set (#882 scope correction
+    # 2026-09-05: DEV STREAM cancelled but webterm dashboard survives; owner
+    # "potrebujem aby marek mal prístup aj k m1"). marek-subdev LOCAL tab
+    # REMOVED (his cancelled stream session); montalu1-subdev ADDED per owner
+    # request. Remaining: his montalu streams (montalu1/2/4), miva1, dev1/dev2,
+    # gatekeeper, forestshop.
+    "marek": [
+        "montalu1-subdev", "montalu2-subdev",
+        "miva1-subdev", "montalu4-subdev",
+        "dev1", "dev2", "gatekeeper", "forestshop",
+    ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
     # ids david1..4 + codex-bridge) and does NOT consume this list; this records

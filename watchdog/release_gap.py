@@ -128,6 +128,14 @@ RELEASE_STATE_FETCH_FAIL_TTL_S = 60
 # budget-deferred pane.
 RELEASE_GAP_ORPHAN_TTL_S = 24 * 3600
 
+# #883: stalled-release inactivity threshold — the minimum time (seconds) since
+# the LAST gh-observed action (shadow run updatedAt, cut PR check completedAt,
+# cut PR updatedAt) before a stalled release (cut-ci-red / shadow-failed) is
+# nudged. 30 min = the owner's ">30 min sa nič nedispatchlo" directive.
+# Env: AIRULESET_RELEASE_STALL_INACTIVITY_S, floored at 10 min.
+STALL_INACTIVITY_THRESHOLD_S = 30 * 60
+STALL_INACTIVITY_MIN_S = 10 * 60
+
 # #749 — bounded retry, mirroring ops_wait_recheck.MAX_SEND_FAILS (#714). A pane
 # whose submit is persistently swallowed (verify fails every sweep — e.g. it sat
 # in CC's "Waiting for N background agents" state, or was otherwise un-typeable)
@@ -159,6 +167,15 @@ def _cadence():
 def _min_ahead():
     """The effective minimum integration-ahead count, floored at 1."""
     return max(_env_int("AIRULESET_RELEASE_GAP_MIN_AHEAD", RELEASE_GAP_MIN_AHEAD), 1)
+
+
+def _stall_inactivity_threshold():
+    """#883: the effective stall-inactivity threshold, floored at
+    STALL_INACTIVITY_MIN_S (10 min) so a units error can't turn a stalled
+    release into an instant nudge."""
+    return max(_env_int("AIRULESET_RELEASE_STALL_INACTIVITY_S",
+                        STALL_INACTIVITY_THRESHOLD_S),
+               STALL_INACTIVITY_MIN_S)
 
 
 def _fetch_ttl():
@@ -202,6 +219,41 @@ def _sig(rstate):
     f = rstate.get("in_flight")
     return "ahead:%s|inflight:%s" % (a if isinstance(a, int) else "?",
                                      f if isinstance(f, bool) else "?")
+
+
+def _last_action_ts(rstate):
+    """#883: the most recent gh-observed action timestamp across the release
+    train's PR/run fields — the SOURCE-OF-TRUTH inactivity anchor. Returns an
+    epoch float or None (unmeasurable/absent). Picks the max of parseable:
+      - shadow_run.updatedAt
+      - cut_pr.updatedAt
+      - max(cut_pr.statusCheckRollup[].completedAt)
+    Malformed/missing fields → skipped, never raises. None → the caller falls
+    back to the existing anchor behavior (#134 anti-silence invariant)."""
+    if not isinstance(rstate, dict):
+        return None
+    candidates = []
+    # shadow run updatedAt
+    sr = rstate.get("shadow_run")
+    if isinstance(sr, dict):
+        t = _parse_iso_ts(sr.get("updatedAt"))
+        if t is not None:
+            candidates.append(t)
+    # cut PR updatedAt
+    cp = rstate.get("cut_pr")
+    if isinstance(cp, dict):
+        t = _parse_iso_ts(cp.get("updatedAt"))
+        if t is not None:
+            candidates.append(t)
+        # statusCheckRollup completedAt
+        checks = cp.get("statusCheckRollup")
+        if isinstance(checks, list):
+            for c in checks:
+                if isinstance(c, dict):
+                    t = _parse_iso_ts(c.get("completedAt"))
+                    if t is not None:
+                        candidates.append(t)
+    return max(candidates) if candidates else None
 
 
 def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
@@ -259,7 +311,8 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 #                 persistently-swallowing pane is not re-typed every sweep).
 
 def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
-                      oldest_ahead_ts=None, deploy_age=None):
+                      oldest_ahead_ts=None, deploy_age=None,
+                      last_action_ts=None):
     """Pure verdict for ONE armed session's release-gap state. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `rstate` is
     the fetched `{"ahead": int, "in_flight": bool, "train": bool}` (the #698
@@ -283,11 +336,23 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
     today's gap-only behaviour). Both default None for legacy 5-arg callers
     (thresholds inactive → byte-identical to pre-#846).
 
+    #883: `last_action_ts` (epoch, or None when unmeasurable) is the gh-observed
+    last-action timestamp (max of shadow_run.updatedAt, cut_pr.updatedAt,
+    statusCheckRollup[].completedAt). When present and the release is STALLED
+    (in_flight + STALLED_STAGES), the nudge fires only after
+    `STALL_INACTIVITY_THRESHOLD_S` (30 min) of gh-observed inactivity, gated by
+    `max(last_stall_nudge, last_nudge)` for re-nudge cadence. The `inflight`
+    action carries `last_stall_nudge` forward so the stall re-nudge clock
+    survives the first_seen/last_nudge reset. When `last_action_ts` is None,
+    the stalled path falls back to the existing anchor behavior (#134
+    anti-silence). Default None for legacy callers (stall path inactive).
+
     The gap is "real" when `ahead >= min_ahead`. Below that (incl. ahead 0) is a
     drained/absent gap -> `clear` (pop the rec). A real gap with `in_flight` True
-    is `inflight` (reset first_seen=now, drop last_nudge -> once the release ends
-    and if a gap persists, a fresh cadence grace applies before nudging). A real
-    gap with `in_flight` False is a STALLED train: it nudges only when `now -
+    is `inflight` (reset first_seen=now, drop last_nudge, CARRY last_stall_nudge
+    -> once the release ends and if a gap persists, a fresh cadence grace applies
+    before nudging; the stall re-nudge clock survives via last_stall_nudge). A
+    real gap with `in_flight` False is a STALLED train: it nudges only when `now -
     (last_nudge or first_seen) >= cadence` — `first_seen` gives the initial grace
     (never nudge a gap that JUST appeared) and becomes the reping anchor via
     `last_nudge` afterwards. `last_nudge` is PRESERVED unchanged here (a "nudge"
@@ -319,8 +384,14 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
                 and lane.stage in STALLED_STAGES):
             threshold_exempt = True  # fall through to cadence, skip thresholds
         else:
-            return ("inflight", {"first_seen": now, "last_nudge": None,
-                                 "sig": _sig(rstate)}, "release-in-flight")
+            # #883: carry last_stall_nudge across the inflight reset so the
+            # stall re-nudge cadence survives the first_seen/last_nudge reset.
+            lsn = rec.get("last_stall_nudge") if isinstance(rec, dict) else None
+            inflight_rec = {"first_seen": now, "last_nudge": None,
+                            "sig": _sig(rstate)}
+            if isinstance(lsn, (int, float)) and not isinstance(lsn, bool):
+                inflight_rec["last_stall_nudge"] = lsn
+            return ("inflight", inflight_rec, "release-in-flight")
     # Seed the rec BEFORE the threshold gates so a "wait" from a fresh gap
     # returns a caller-safe rec with sig/first_seen/last_nudge (Fable review
     # RED 1: returning the raw incoming rec={} crashes the caller on
@@ -331,8 +402,53 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
     last_nudge = rec.get("last_nudge") if isinstance(rec, dict) else None
     if not isinstance(last_nudge, (int, float)):
         last_nudge = None
+    # #883: carry last_stall_nudge across rec rebuilds (type-checked across
+    # the JSON persistence boundary, like last_nudge).
+    last_stall_nudge = (rec.get("last_stall_nudge")
+                        if isinstance(rec, dict) else None)
+    if not (isinstance(last_stall_nudge, (int, float))
+            and not isinstance(last_stall_nudge, bool)):
+        last_stall_nudge = None
     new_rec = {"first_seen": first_seen, "last_nudge": last_nudge,
                "sig": _sig(rstate)}
+    if last_stall_nudge is not None:
+        new_rec["last_stall_nudge"] = last_stall_nudge
+    # #883: stalled-release sub-path — when threshold_exempt (in_flight +
+    # STALLED_STAGES), use gh-observed inactivity instead of the generic
+    # anchor (which the inflight flap resets). This path is BEFORE the
+    # #846 threshold gates (stalled releases are already threshold-exempt).
+    if threshold_exempt:
+        stall_thr = _stall_inactivity_threshold()
+        if (isinstance(last_action_ts, (int, float))
+                and not isinstance(last_action_ts, bool)):
+            inactivity = now - last_action_ts
+            if inactivity < stall_thr:
+                return ("wait", new_rec, "stall-active")
+            # Inactivity met; check the re-nudge cadence via the FRESHEST of
+            # last_stall_nudge and last_nudge — so #749's back-off (which
+            # advances last_nudge on a swallowed send) is effective on the
+            # stall path too, and an unmeasurable→measurable transition
+            # cannot double-nudge within the hour.
+            stall_anchor = max(t for t in (last_stall_nudge, last_nudge)
+                               if isinstance(t, (int, float))
+                               and not isinstance(t, bool)) if any(
+                isinstance(t, (int, float)) and not isinstance(t, bool)
+                for t in (last_stall_nudge, last_nudge)) else None
+            if stall_anchor is not None and now - stall_anchor < cadence:
+                return ("wait", new_rec, "stall-cadence")
+            return ("nudge", new_rec, "stalled")
+        # last_action_ts unmeasurable — fall through to the generic anchor
+        # path (#134 anti-silence: unmeasurable degrades to current behavior,
+        # never to permanent silence AND never to instant-nudge). The
+        # last_stall_nudge re-nudge gate still applies (freshest of both).
+        stall_anchor = max(t for t in (last_stall_nudge, last_nudge)
+                           if isinstance(t, (int, float))
+                           and not isinstance(t, bool)) if any(
+            isinstance(t, (int, float)) and not isinstance(t, bool)
+            for t in (last_stall_nudge, last_nudge)) else None
+        if stall_anchor is not None and now - stall_anchor < cadence:
+            return ("wait", new_rec, "stall-cadence")
+        # Fall through to the generic anchor below.
     # #846 continuation: time-based thresholds gate whether the gap is ripe.
     # Skipped when the in_flight+stalled exemption applies.
     # When oldest_ahead_ts is measurable, the oldest commit ahead must be at
@@ -356,7 +472,8 @@ def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
     return ("wait", new_rec, "grace")
 
 
-def _nudge_text(ahead, integration, prod, lane=None, deploy_age_h=None):
+def _nudge_text(ahead, integration, prod, lane=None, deploy_age_h=None,
+                inactive_m=None):
     """The release-gap keystroke injected into the armed loop. Carries the shared
     `stuck-check: ` prefix (own-payload recognition + machine-prompt exclusion —
     see the module docstring). Names the branches and the gap, and points at the
@@ -364,18 +481,25 @@ def _nudge_text(ahead, integration, prod, lane=None, deploy_age_h=None):
     as the only option — the job is generic over full-authority repos.
 
     #846: when `lane` is a LaneResult with a non-empty action, generate a
-    stage-derived text with evidence. The text is ≤700 chars (#714 cap)."""
+    stage-derived text with evidence. The text is ≤700 chars (#714 cap).
+
+    #883: `inactive_m` — when set, appends `, bez akcie ~NNm` to the stalled
+    nudge text so it distinguishes "just failed" from "standing dead"."""
     prefix = "stuck-check: release-idle"
     age_sfx = ""
     if isinstance(deploy_age_h, (int, float)) and deploy_age_h > 0:
         age_sfx = ", posledný PROD deploy ~%dh" % int(deploy_age_h)
+    # #883: inactivity suffix for stalled releases
+    inact_sfx = ""
+    if isinstance(inactive_m, (int, float)) and inactive_m > 0:
+        inact_sfx = ", bez akcie ~%dm" % int(inactive_m)
     if lane is not None and hasattr(lane, "action") and lane.action:
-        head = ("%s — `%s` je %d commitov pred `%s`%s. %s (%s)."
-                % (prefix, integration, ahead, prod, age_sfx,
+        head = ("%s — `%s` je %d commitov pred `%s`%s%s. %s (%s)."
+                % (prefix, integration, ahead, prod, age_sfx, inact_sfx,
                    lane.action, lane.evidence)
                 if lane.evidence
-                else "%s — `%s` je %d commitov pred `%s`%s. %s."
-                % (prefix, integration, ahead, prod, age_sfx,
+                else "%s — `%s` je %d commitov pred `%s`%s%s. %s."
+                % (prefix, integration, ahead, prod, age_sfx, inact_sfx,
                    lane.action))
         doctrine = (" Doktrína: in-flight vetva = FROZEN (len release-blocking "
                     "fix), NIKDY re-cut — každý restart stojí celý chvost.")
@@ -578,10 +702,13 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     deploy_age_h = _deploy_age_hours(rstate, now)
     deploy_age_s = (deploy_age_h * 3600.0
                     if isinstance(deploy_age_h, (int, float)) else None)
+    # #883: gh-observed last-action timestamp for the stalled sub-path.
+    last_act_ts = _last_action_ts(rstate)
     action, new_rec, reason = _release_decision(rec, rstate, now, cadence,
                                                 min_ahead, lane=lane,
                                                 oldest_ahead_ts=oldest_ahead_ts,
-                                                deploy_age=deploy_age_s)
+                                                deploy_age=deploy_age_s,
+                                                last_action_ts=last_act_ts)
 
     if action == "skip":
         logs.append("release-gap %s -> skip:%s (state unchanged)" % (loc, reason))
@@ -616,9 +743,14 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                     "anchor reset)" % (loc, ahead, was))
         return logs
     if action == "wait":
-        anchor = new_rec["last_nudge"] or new_rec["first_seen"]
-        logs.append("release-gap %s -> wait (ahead=%d, %s since anchor < "
-                    "cadence)" % (loc, ahead, _fmt_age(now - anchor)))
+        # #883: stall-specific wait reasons carry more detail.
+        if reason in ("stall-active", "stall-cadence"):
+            logs.append("release-gap %s -> wait:%s (ahead=%d, stalled)"
+                        % (loc, reason, ahead))
+        else:
+            anchor = new_rec["last_nudge"] or new_rec["first_seen"]
+            logs.append("release-gap %s -> wait (ahead=%d, %s since anchor < "
+                        "cadence)" % (loc, ahead, _fmt_age(now - anchor)))
         return logs
 
     # action == "nudge"
@@ -666,13 +798,18 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                     "retry next sweep)" % loc)
         return logs
     if dry_run:
-        logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, no release in "
-                    "flight)" % (loc, ahead))
+        logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, reason=%s)"
+                    % (loc, ahead, reason))
         return logs
 
     deploy_age_h = _deploy_age_hours(rstate, now)
+    # #883: compute inactivity minutes for the stalled nudge text.
+    inactive_m = None
+    if reason == "stalled" and last_act_ts is not None:
+        inactive_m = (now - last_act_ts) / 60.0
     text = _nudge_text(ahead, _integration_branch(), _prod_branch(),
-                       lane=lane, deploy_age_h=deploy_age_h)
+                       lane=lane, deploy_age_h=deploy_age_h,
+                       inactive_m=inactive_m)
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
     # residual stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)
@@ -694,6 +831,11 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
         return logs
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now
+    # #883: a stalled nudge also advances last_stall_nudge so the stall
+    # re-nudge cadence gate works. A non-stalled nudge also counts against the
+    # generic cadence so a stall→no-cut transition doesn't double-nudge.
+    if reason == "stalled":
+        new_rec["last_stall_nudge"] = now
     new_rec["send_fails"] = 0   # #749: a delivered send clears the failure streak
     rrecs[sid] = new_rec
     _nudge_gate.mark_sent(state, sid, "release-gap", now)   # #797

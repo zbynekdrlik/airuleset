@@ -1,25 +1,25 @@
 """airuleset webterm — DOMINIKA observer gateway provisioning (#867, owner request
 2026-09-04).
 
-The FOURTH per-human webterm lane (after owner, david, marek), for
-`dominika.newlevel.media`, provisioned on the SAME subdev VPS as david + marek —
-but as the `dominika` unix account, with a SEPARATE scoped inventory + Cloudflare
-Access realm + cloudflared tunnel. Like marek this module is THIN — the
-render + setup skeleton lives in the shared parameterized provisioner
+A per-human webterm lane (alongside owner and david; marek was decommissioned
+#882, 2026-09-05), for `dominika.newlevel.media`, provisioned on the SAME subdev
+VPS as david — but as the `dominika` unix account, with a SEPARATE scoped
+inventory + Cloudflare Access realm + cloudflared tunnel. This module is THIN —
+the render + setup skeleton lives in the shared parameterized provisioner
 `cli_webterm_lane` (one engine for every lane); here only dominika's per-user
 constants (the source of truth tests patch) + a `_spec()` factory + public-API
 wrappers delegating to that engine.
 
 Session set (owner request 2026-09-04 — "pridat noveho webterm uzivatela dominika
 … aby mala pristup k m5, miva"): dominika is a PURE OBSERVER — she has NO local
-attach (unlike marek, whose gateway runs as his own tmux group). BOTH her tabs are
-loopback ssh, and BOTH are CROSS-TENANT OBSERVE tabs — `montalu5@subdev` (marek's
-own montalu-family stream) and `miva1@subdev` (a separate external sub-dev stream
+attach. BOTH her tabs are loopback ssh, and BOTH are CROSS-TENANT OBSERVE tabs —
+`montalu5@subdev` (a montalu-family stream) and `miva1@subdev` (a separate
+external sub-dev stream
 notify-routed to the OWNER) — so she merely WATCHES them, never a within-tenant
 read (neither carries `u_tenant`, #703). Every ssh tab goes via the DEDICATED
 `profiles.WEBTERM_DOMINIKA_IDENTITY` key (never the fleet gatekeeper key, never the
 sshpass shared-password branch). The connect allowlist is physically this
-two-member set: it can never resolve another stream's id, a david/marek id, or
+two-member set: it can never resolve another stream's id, a david id, or
 another person's account. The lane dash renders through the owner-defined per-domain
 tab policy (`LaneSpec.dashboard_human="dominika"` → WEBTERM_DASHBOARD_TABS).
 
@@ -28,20 +28,20 @@ NO-OP. #663: the gateway + ttyd bind mode-0700 UNIX sockets in dominika's
 /run/user/<uid> runtime dir (NOT TCP loopback) — a SEPARATE cloudflared tunnel
 (service: unix:<sock>) is the public HTTPS front. AUTH is Cloudflare Access (email
 one-time-PIN) at the edge; the gateway runs `--trust-access-header` (no
-password/credential), exactly like the david/marek lanes.
+password/credential), exactly like the david lane.
 
 SECURITY NOTE — the boundary this lane DOES and does NOT provide (honest, #612 R1
 review shape). The PUBLIC Access-gated path reaches ONLY dominika's scoped
 two-member set — the connect allowlist is physically `{montalu5-subdev,
 miva1-subdev}` (ssh only via the dedicated dominika key), so a dominika WEB LOGIN
-can never drive another stream's, david's, marek's, or the owner's id, and
+can never drive another stream's, david's, or the owner's id, and
 dominika's Access realm/tunnel are separate from every other lane's. Both targets
-are OBSERVE-only (loopback ssh into their own tmux group), so unlike marek's lane
-there is NO owner-realm (dev1/dev2/gatekeeper) transitive-reach consequence here —
+are OBSERVE-only (loopback ssh into their own tmux group), so there is NO
+owner-realm transitive-reach consequence here —
 montalu5 + miva1 are sub-dev stream accounts, not the owner's maintainer account.
 Because dominika has NO local tab, until the dedicated key + authorized_keys land
 (owner-action, `_DOMINIKA_GO_LIVE` step 5) BOTH tabs fail VISIBLY; there is no
-keyless fallback tab (marek's lane keeps its own local attach working meanwhile).
+keyless fallback tab.
 The multi-tenant LOOPBACK floor is CLOSED (#663): the gateway + ttyd bind mode-0700
 UNIX sockets in dominika's runtime dir, so a peer subdev account can no longer reach
 dominika's gateway/ttyd (or, from dominika, another lane's). The only remaining
@@ -64,8 +64,8 @@ import cli_webterm_lane as lane             # the shared parameterized provision
 DOMINIKA_GATEWAY_USER = profiles.DOMINIKA_GATEWAY_USER
 
 # dominika's own artifact paths + distinct port constants (kept legacy for the
-# go-live text) — DISTINCT from owner (8080/7682), david (8081/7683) AND marek
-# (8082/7684), so the shared subdev box is self-documenting. #663 the gateway +
+# go-live text) — DISTINCT from owner (8080/7682), david (8081/7683) AND the
+# former marek lane (8082/7684, decommissioned #882). #663 the gateway +
 # ttyd bind UNIX sockets in the account runtime dir (NOT these TCP ports) and a
 # cloudflared tunnel fronts the gateway socket (no public port, no tailscale IP is
 # involved).
@@ -86,7 +86,7 @@ WEBTERM_DOMINIKA_GATEWAY_SERVICE_DEST = (
     Path.home() / ".config" / "systemd" / "user" / "webterm-dominika-gateway.service")
 
 # dominika's SEPARATE cloudflared tunnel (created via dev2's origin cert, #867
-# go-live) — NOT david's/marek's. A separate tunnel = separate creds JSON + unit +
+# go-live) — NOT david's. A separate tunnel = separate creds JSON + unit +
 # restart blast-radius. The UUID is public (the DNS CNAME target); the per-tunnel
 # creds JSON on subdev is the only secret, and the tunnel provisioner is
 # prerequisite-gated on it.

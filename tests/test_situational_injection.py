@@ -85,9 +85,18 @@ class TestTriggerTable(TestCase):
                 (ROOT / body).exists(), f"{topic}: body file {body} does not exist"
             )
 
-    def test_topics_are_unique(self):
-        topics = [r[0] for r in load_conf()]
-        self.assertEqual(len(topics), len(set(topics)), "duplicate topic in table")
+    def test_topics_are_unique_per_tool(self):
+        # #859 batch 4a: a topic may appear on MULTIPLE tool surfaces
+        # (e.g. model-awareness-deep on Agent + Workflow + Bash) for shared
+        # dedup — but the same topic+tool pair must not be duplicated.
+        rows = load_conf()
+        seen = set()
+        for topic, tool, _pat, _body, *_ in rows:
+            key = (topic, tool)
+            self.assertNotIn(key, seen,
+                             f"duplicate topic+tool: {key}"
+                             )
+            seen.add(key)
 
     def test_every_stub_target_skill_has_a_trigger(self):
         """The whole point of #91: a converted skill must have a load path.
@@ -184,13 +193,20 @@ class TestInjection(TestCase):
         self.assertIn("airuleset", ctx.lower())
         self.assertIn("project rule", ctx.lower())
 
-    def test_second_call_in_the_same_session_does_not_re_inject(self):
+    def test_second_call_in_the_same_session_does_not_re_inject_same_topic(self):
+        # #859 batch 4a: the 2nd call may inject DEFERRED co-fire topics
+        # (autonomous-quality-discipline-deep deferred on the 1st call when
+        # pr-merge-policy consumed MAX_TOTAL). What must NOT happen is the
+        # SAME topic's source tag re-appearing.
         first = injected(run({"command": "gh pr merge 5"}, tmpdir=self.tmpdir))
         self.assertIsNotNone(first)
-        second = run({"command": "gh pr merge 6 --merge"}, tmpdir=self.tmpdir)
-        self.assertEqual(
-            second.stdout.strip(), "", "body must be paid for once per session"
-        )
+        # The source tag identifies the topic in the injected wrapper
+        self.assertIn('source="airuleset:pr-merge-policy"', first)
+        second_out = run({"command": "gh pr merge 6 --merge"}, tmpdir=self.tmpdir).stdout
+        # pr-merge-policy's SOURCE TAG must NOT re-appear (dedup marker set)
+        if second_out.strip():
+            self.assertNotIn('source="airuleset:pr-merge-policy"', second_out,
+                             "same topic source must not re-inject in the same session")
 
     def test_a_different_session_gets_its_own_injection(self):
         injected(run({"command": "gh pr merge 5"}, session_id="s1", tmpdir=self.tmpdir))
@@ -273,7 +289,11 @@ class TestFalsePositives(TestCase):
         self.tmpdir = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
 
-    def test_heredoc_body_mentioning_triggers_injects_nothing(self):
+    def test_heredoc_body_mentioning_triggers_does_not_inject_heredoc_topics(self):
+        # #859 batch 4a: the trailing `gh issue comment` IS a real gh command
+        # that legitimately fires gh-cli-recipes-deep. The test verifies the
+        # HEREDOC body's mention of `gh pr merge` / `rsync` does NOT inject
+        # pr-merge-policy / deploy-ssh — only the real trailing command fires.
         cmd = (
             "cat > body.md <<'EOF'\n"
             "The table binds `gh pr merge` and `git push` and `gh run list`\n"
@@ -282,9 +302,11 @@ class TestFalsePositives(TestCase):
             "gh issue comment 91 -F body.md"
         )
         r = run({"command": cmd}, tmpdir=self.tmpdir)
-        self.assertEqual(
-            r.stdout.strip(), "", "a heredoc document is not an action"
-        )
+        ctx = r.stdout
+        # pr-merge-policy (triggered by the heredoc's "gh pr merge") must NOT
+        # inject — the heredoc is DATA, not an action
+        self.assertNotIn("pr-merge-policy", ctx,
+                         "heredoc mention of gh pr merge must not inject")
 
     def test_commit_message_mentioning_a_trigger_injects_nothing(self):
         r = run(

@@ -55,7 +55,7 @@ import os
 # staged schedules), not footer/partition nudges into an armed loop.
 GATED_CATEGORIES = frozenset({
     "u-freshness", "partition-audit", "release-gap", "queue-arrival",
-    "lane-occupancy",
+    "lane-occupancy", "goal-guard",
 })
 
 # The owner's hard 1×/hour U-reconcile strop. Env AIRULESET_U_RECONCILE_CADENCE_S
@@ -100,11 +100,18 @@ def _family_gap():
                NUDGE_FAMILY_GAP_MIN_S)
 
 
+GOAL_GUARD_FLOOR_S = 24 * 3600
+
+
 def _category_floor(category):
     """The per-category floor: the owner's `_u_cadence()` strop for `u-freshness`,
-    0 for every other gated category (their own cadences govern — the gate is a
-    pure additional no-op floor for them)."""
-    return _u_cadence() if category == "u-freshness" else 0
+    24h for `goal-guard` (#878 — at most 1 nudge/24h per session), 0 for every
+    other gated category (their own cadences govern)."""
+    if category == "u-freshness":
+        return _u_cadence()
+    if category == "goal-guard":
+        return GOAL_GUARD_FLOOR_S
+    return 0
 
 
 def _session(state, sid):

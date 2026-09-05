@@ -12,10 +12,11 @@ from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = ROOT / "modules" / "core" / "gh-cli-recipes.md"
+COMPANION = ROOT / "skills" / "gh-cli-recipes-deep" / "DEEP.md"
 
 
 def read():
-    return MODULE.read_text(encoding="utf-8")
+    return COMPANION.read_text(encoding="utf-8")
 
 
 class TestAutoCloseNegationWarningIsDocumented(TestCase):

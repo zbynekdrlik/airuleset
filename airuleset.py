@@ -87,6 +87,12 @@ MODEL_TIERS = {
 # statusline highlight keeps working. Full policy history: the fable-advisor skill.
 MANAGED_MODEL = MODEL_TIERS["fable"] + "[1m]"
 
+# Valid reviewed-by-tier values — the TWO review-capable tiers (Fable = gate
+# OPEN, Opus = gate CLOSED / trivial-diff), derived from MODEL_TIERS so there
+# is ONE source.  Used by cmd_handoff validation AND the SubagentStop
+# review-tier gate (hooks/subagent-stop-check-review-tier.sh).  #876.
+REVIEWED_BY_TIER_VALUES = {MODEL_TIERS["fable"], MODEL_TIERS["opus"]}
+
 
 def _normalize_model(value):
     """Lower-cased, quote/space-stripped, `[Nm]`-tag-dropped model string —
@@ -3149,6 +3155,7 @@ def cmd_gk_request(args):
 HANDOFF_DEFAULT_LENSES = [
     "security", "correctness", "test-integrity",
     "evidence-integrity", "design-doctrine", "process",
+    "shared-benefit",  # #877 — fleet-wide, unconditional
 ]
 
 # Receipt directory for the hook to verify.
@@ -3177,11 +3184,18 @@ def _parse_gk_findings(comment_body):
     return ids
 
 
+_LENS_ID_RE = re.compile(r'^[a-z][a-z0-9-]+$')
+
+
 def _load_lens_list(repo_root=None):
     """Load the repo's lens list or fall back to the built-in default.
 
-    The lens list is at .claude/rules/gk-review-lenses.md — one lens per
-    non-empty, non-comment line."""
+    The lens list is at .claude/rules/gk-review-lenses.md.  Only lines
+    matching the lens-id shape (^[a-z][a-z0-9-]+$) are extracted — a bare
+    id-shaped line anywhere (including inside a code block) is treated as
+    a lens id; prose paragraphs, markdown tables and headers are filtered
+    out by the shape check.  If the file is absent or yields zero valid
+    ids, falls back to HANDOFF_DEFAULT_LENSES (#880)."""
     if repo_root:
         p = os.path.join(repo_root, ".claude", "rules",
                          "gk-review-lenses.md")
@@ -3190,7 +3204,7 @@ def _load_lens_list(repo_root=None):
                 lenses = []
                 for line in f:
                     line = line.strip()
-                    if line and not line.startswith("#"):
+                    if _LENS_ID_RE.match(line):
                         lenses.append(line)
                 if lenses:
                     return lenses
@@ -3305,13 +3319,12 @@ def cmd_handoff(args):
             print("handoff BLOCK: bounce round %d requires "
                   "--reviewed-by-tier" % rnd)
             return 1
-        # Validate reviewed-by-tier value.
-        valid_tiers = {"claude-fable-5", "claude-opus-4-6"}
+        # Validate reviewed-by-tier value — shared constant (#876).
         parts = reviewed_by_tier.split() if reviewed_by_tier else []
         tier_val = parts[0] if parts else ""
-        if tier_val not in valid_tiers:
+        if tier_val not in REVIEWED_BY_TIER_VALUES:
             print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
-                  % ", ".join(sorted(valid_tiers)))
+                  % ", ".join(sorted(REVIEWED_BY_TIER_VALUES)))
             return 1
 
     # Stamp Verified-at-UTC (now).
@@ -3334,7 +3347,7 @@ def cmd_handoff(args):
 
     # Verify HEAD is on the remote branch.
     R = ["-R", repo] if repo else []
-    ls_r = _run(["git", "ls-remote", "origin", branch])
+    ls_r = _run(["git", "ls-remote", "origin", "refs/heads/" + branch])
     if ls_r.returncode != 0:
         print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
         return 1
@@ -4897,6 +4910,10 @@ def _watchdog_ops_wait_fetch(cwd):
                         # dropped the false "remind DNES" nudge), so it is
                         # deliberately NOT parsed here (the #753 no-dead-parse rule).
                         "tacit_close": "tacit-close?" in reason,
+                        # #881: convergence tags consumed by the job-20 nudge's
+                        # CONVERGE and NO-TARGET clauses.
+                        "converge": "converge!" in reason,
+                        "no_target": "no-target!" in reason,
                         "title": title})
     return members
 
@@ -5265,7 +5282,7 @@ def _watchdog_release_state_fetch(cwd):
             r = subprocess.run(
                 ["gh", "pr", "list", "--repo", repo, "--state", "open",
                  "--base", base,
-                 "--json", "number,statusCheckRollup,mergeable",
+                 "--json", "number,statusCheckRollup,mergeable,updatedAt",
                  "--limit", "3"],
                 capture_output=True, text=True, timeout=15)
         except Exception:
@@ -5333,7 +5350,7 @@ def _watchdog_release_state_fetch(cwd):
             r = subprocess.run(
                 ["gh", "run", "list", "--repo", repo, "-w", shadow_wf,
                  "--branch", staging, "--limit", "1",
-                 "--json", "status,conclusion,databaseId"],
+                 "--json", "status,conclusion,databaseId,updatedAt"],
                 capture_output=True, text=True, timeout=15)
         except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
             shadow_run = None
@@ -6294,6 +6311,42 @@ MAINTAINER_GH_LOGIN = "zbynekdrlik"
 # and preserves; stream-A-own vs stream-B-own is deliberately not distinguished.
 STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"
 
+# #888: the airuleset repo is NOT in the App's installation list (its
+# contents:write permission would give every stream push access to
+# airuleset's code). App-token streams file airuleset tickets via
+# gk-request --repo, never direct gh issue create.
+AIRULESET_RELAY_REPO = "zbynekdrlik/airuleset"
+
+
+def _probe_relay_repo_reach(*, run_fn=None) -> str:
+    """#888: install-time probe — on an App-token box, verify whether this
+    box can directly reach airuleset issues.  Returns a non-empty LOUD
+    finding string when it cannot (the expected state: the relay path is
+    required), or "" when reachable or when this is not an App-token box.
+    Transport errors → "" (fail-open, never a false finding).
+
+    ``run_fn`` is an injectable seam for tests (default: subprocess.run).
+    """
+    if not _is_gh_app_token_box():
+        return ""
+    import subprocess as _sp
+    _run = run_fn or _sp.run
+    try:
+        r = _run(
+            ["gh", "api", f"repos/{AIRULESET_RELAY_REPO}/issues?per_page=1"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        return ""  # transport error — fail open
+    if r.returncode == 0:
+        return ""  # reachable — no finding
+    return (
+        f"CONFORMANCE FINDING (#888): App-token box cannot directly reach "
+        f"{AIRULESET_RELAY_REPO} issues (HTTP non-200). "
+        f"Use gk-request --repo {AIRULESET_RELAY_REPO} for airuleset ticket filing "
+        f"(AIRULESET_RELAY_REPO relay path)."
+    )
+
 
 def _current_user() -> str:
     """The invoking box's UNIX account from the UNSPOOFABLE uid (airuleset#839).
@@ -6392,6 +6445,9 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
+    _converge_flagged as _converge_flagged,
+    _no_target_flagged as _no_target_flagged,
+    OPS_WAIT_CONVERGE_AGE_D as OPS_WAIT_CONVERGE_AGE_D,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
     _label_exists_on_repo as _label_exists_on_repo,

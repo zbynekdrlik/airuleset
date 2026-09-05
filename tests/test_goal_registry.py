@@ -382,5 +382,17 @@ class TestGoalInventoryCLI(TestCase):
         self.assertEqual(r.returncode, expected, r.stdout + r.stderr)
 
 
+class TestBlockedClause878(TestCase):
+    """#878 — every profile's rendered condition must contain the (A)
+    BLOCKED ON MY ANSWER clause and the ❓ NEEDS YOU: detection token,
+    so a `/goal` evaluator can hold a loop blocked on an unanswered question."""
+
+    def test_every_profile_contains_blocked_question_stop_clause(self):
+        for p in gr.PROFILES:
+            line = gr.render(p)
+            self.assertIn("(A) BLOCKED ON MY ANSWER", line, p)
+            self.assertIn("`❓ NEEDS YOU:`", line, p)
+
+
 if __name__ == "__main__":
     main()

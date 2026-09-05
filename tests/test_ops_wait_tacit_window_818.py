@@ -46,6 +46,7 @@ from watchdog import ops_wait_recheck as owr
 
 ROOT = Path(__file__).resolve().parent.parent
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
+STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 
 # A deterministic weekday timeline: now = Friday noon UTC (2026-09-04). Working
 # deltas are then unambiguous regardless of the calendar the suite runs on.
@@ -73,10 +74,15 @@ def _ow_rows(*nums):
                 "createdAt": "2026-08-01T00:00:00Z"} for n in nums}
 
 
-def _ages(*, cited=None, final_reminder=None, any_ts=None, oldest=None):
+def _ages(*, cited=None, final_reminder=None, any_ts=None, oldest=None,
+          own_target="2099-12-31"):
+    # own_target defaults to a far-future date so the #881 converge! tag
+    # does NOT fire on these tacit-window fixtures (whose createdAt is old
+    # by design). Tests that exercise converge! use their own fixtures.
     return {"own": cited, "any": any_ts if any_ts is not None else cited,
             "own_cited": cited, "own_oldest": oldest if oldest is not None else cited,
-            "own_final_reminder": final_reminder}
+            "own_final_reminder": final_reminder,
+            "own_target": own_target}
 
 
 class WorkingDeltaFixturesAreSane(unittest.TestCase):
@@ -266,8 +272,8 @@ class FlagSetsSubtractsTacitFromStale(unittest.TestCase):
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: None):
             sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
-        self.assertEqual(6, len(sets))
-        stale, _recheck, _gkh, _unpark, tacit_wait, tacit_close = sets
+        self.assertEqual(8, len(sets))
+        stale, _recheck, _gkh, _unpark, tacit_wait, tacit_close, _conv, _nt = sets
         self.assertIn(42, tacit_close)          # delivered+reminded, silent
         self.assertNotIn(42, stale)             # NOT double-flagged stale!
         self.assertIn(43, stale)                # no marker → stale! stands
@@ -292,7 +298,7 @@ class FlagSetsSubtractsTacitFromStale(unittest.TestCase):
                                   lambda cwd=None: "full"), \
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: None):
-            _stale, recheck, _gkh, _unpark, _tw, tacit_close = \
+            _stale, recheck, _gkh, _unpark, _tw, tacit_close, _conv, _nt = \
                 cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
         self.assertIn(48, tacit_close)          # tacit (acceptance + reminded)
         self.assertNotIn(48, recheck)           # release title but tacit → no recheck!
@@ -364,11 +370,14 @@ class NudgeTacitCloseClause(unittest.TestCase):
 
 class DoctrineNamesTacitMechanism(unittest.TestCase):
     def _w_line(self):
-        text = STATUS.read_text(encoding="utf-8")
+        # #859 batch 3: the #818 tacit-window mechanism prose moved out of the
+        # always-on module into the on-demand DEEP-2 companion — find the
+        # operative physical line there instead.
+        text = STATUS_DEEP2.read_text(encoding="utf-8")
         for ln in text.splitlines():
-            if "`· W N` (#510" in ln:
+            if "#818 mechanika" in ln:
                 return ln
-        self.fail("W bullet not found in statusline-vocabulary.md")
+        self.fail("W bullet not found in statusline-vocabulary-deep/DEEP-2.md")
 
     def test_marker_and_tags_and_negation(self):
         line = self._w_line()

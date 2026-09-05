@@ -8,7 +8,7 @@ Two callers share this:
     message with Cieľ / Dosiahnuté / double-review + backlog progress).
 
 Responsibilities:
-  * resolve the OWNER from the tmux session group (zbynek / marek / …) and turn it
+  * resolve the OWNER from the tmux session group (zbynek / david / …) and turn it
     into a Discord @mention so every message clearly targets the right person;
   * compose the canonical autopilot card (Slovak, structured markdown) FROM FIELDS
     so the structure is guaranteed by code, not by agent prose;
@@ -67,24 +67,18 @@ CONTENT_DEDUP_WINDOW_S = 120
 
 # Stream personas whose tmux session name has NO Discord identity of its own
 # (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap/miva1 (#300)
-# route to zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
-# — airuleset#295, 2026-08-07: the user's own statement, independently
-# corroborated by odoo-erp#2961's 2026-08-05 ACCESS DECISION comment,
-# montalu4 is the ONLY montalu-family account marek's own SSH key was added
-# to — montalu/montalu2/montalu3 stay zbynek-only). david routes to its own
-# thread. Checked in resolve_owner() ITSELF — never via a bashrc
-# AIRULESET_NOTIFY_OWNER export — so it takes effect on the very NEXT hook
-# invocation everywhere. A bashrc export only reaches shells started AFTER
-# the write; an adversarial review of the first version of this fix
-# live-verified that simap's OWN already-running session kept misrouting
-# after the bashrc line was applied, because that session's process
-# environment predated the write and nothing short of restarting the live
-# session (never done to another user's session) would have picked it up.
-# `marek` is deliberately absent as a MAP KEY: its own tmux session name
-# ("marek") already resolves directly and has its own
-# DISCORD_NOTIFICATION_CHANNEL_MAREK/DISCORD_MENTION_MAREK keys, so no
-# override is needed FOR IT — it is still a valid map VALUE (montalu4's
-# redirect target). montalu/david ALSO still carry a redundant, hand-added
+# route to zbynek's own thread; montalu4 also routes to zbynek (#882,
+# 2026-09-05: marek stream decommissioned — montalu4 was marek's dev stream,
+# now rerouted to zbynek; rejected alternative: deletion → #572 shared-channel
+# regression). david routes to its own thread. Checked in resolve_owner()
+# ITSELF — never via a bashrc AIRULESET_NOTIFY_OWNER export — so it takes
+# effect on the very NEXT hook invocation everywhere. A bashrc export only
+# reaches shells started AFTER the write; an adversarial review of the first
+# version of this fix live-verified that simap's OWN already-running session
+# kept misrouting after the bashrc line was applied, because that session's
+# process environment predated the write and nothing short of restarting the
+# live session (never done to another user's session) would have picked it up.
+# montalu/david ALSO still carry a redundant, hand-added
 # `export AIRULESET_NOTIFY_OWNER=...` bashrc line from before this fix
 # existed — harmless, since the env override is checked FIRST in
 # resolve_owner() and carries the identical value either way.
@@ -96,21 +90,19 @@ STREAM_NOTIFY_OWNER = {
     # without touching Discord routing. The bare `david` self-map is GONE (the
     # OS account no longer exists); `david1 -> david` carries the routing. Note
     # `david` STAYS a valid map VALUE (the owner of david1/david2/3/4, a real
-    # Discord thread) — exactly like marek is a value but not a key; dropping
-    # the self-map is behaviour-neutral (resolve_owner falls back to the tmux
-    # session group for a self-mapped stream). marek deliberately stays
-    # unnumbered (and out of this map, per the header comment above).
+    # Discord thread); dropping the self-map is behaviour-neutral
+    # (resolve_owner falls back to the tmux session group for a self-mapped
+    # stream).
     "david1": "david",
     "montalu1": "zbynek",   # #537 rename of montalu (live 2026-08-19) — see the david1 comment above
     "montalu2": "zbynek",
     "montalu3": "zbynek",
-    "montalu4": "marek",
+    "montalu4": "zbynek",   # #882: rerouted from marek (decommissioned) to zbynek
     # montalu5/6/7/8 (airuleset#378, odoo-erp#3642): FOUR MORE full parallel
     # montalu streams -> claude-zbynek. Owner routing decision 2026-08-19
     # (airuleset#572) REVERSED the earlier 2026-08-11 #378 decision that
-    # "montalu5 is operated by MAREK -> claude-marek": the owner directed that
-    # montalu5's notifications go to claude-zbynek, so montalu5 now routes to
-    # zbynek exactly like montalu6/7/8 (montalu4 stays Marek's own stream).
+    # montalu5 was operated by marek: montalu5's notifications now go to
+    # claude-zbynek, same as montalu6/7/8.
     # §6a still requires verifying delivery with a REAL notify-delivery.log
     # ping on the montalu5 box, not only configuring it.
     "montalu5": "zbynek",
@@ -159,13 +151,13 @@ STREAM_NOTIFY_OWNER = {
     "david4": "david",
     # admin/stepan (airuleset#572, 2026-08-19): the forestshop-dev box's two
     # linux accounts (cli_fleet.py -- admin@forestshop-dev /
-    # stepan@forestshop-dev). Owner directive: forestshop-dev notifications
-    # go to claude-marek. Neither account has a Discord identity of its own
-    # and neither is in AUTHORITY_BY_USER (both are full-authority), so
-    # without this redirect resolve_owner() finds no per-owner mapping for
-    # them (it returns "" with no tmux, else the box's own unmapped session
-    # group), so notification_channel() falls back to the shared
-    # DISCORD_NOTIFICATION_CHANNEL_ID thread -- the "chodí do claude" reported.
+    # stepan@forestshop-dev). Originally routed to claude-marek; rerouted to
+    # claude-zbynek (#882, 2026-09-05: marek decommissioned — rejected
+    # alternative: deletion → #572 shared-channel "chodí do claude" regression).
+    # Neither account has a Discord identity of its own and neither is in
+    # AUTHORITY_BY_USER (both are full-authority), so without this redirect
+    # resolve_owner() falls back to the shared DISCORD_NOTIFICATION_CHANNEL_ID
+    # thread.
     #
     # GENERIC-USERNAME CAVEAT: "admin"/"stepan" are generic names that TODAY
     # exist in the managed fleet ONLY on the forestshop-dev box.
@@ -173,18 +165,18 @@ STREAM_NOTIFY_OWNER = {
     # box-qualified key), so if any FUTURE box ever adds a linux user
     # "admin"/"stepan" belonging to a DIFFERENT owner, this map MUST be
     # narrowed at that point. The risk is low (managed boxes use named
-    # accounts -- newlevel/gatekeeper/david/montalu*/simap*/miva*/marek), but
+    # accounts -- newlevel/gatekeeper/david/montalu*/simap*/miva*), but
     # it is real and must be re-checked whenever a new box is onboarded.
     #
     # RESIDUAL (routing decision != delivered ping, the #300 gap): this
     # redirect deploys with the next push, but a real ping still needs the
     # forestshop-dev box's own local ~/.claude/channels/discord/.env to carry
-    # DISCORD_NOTIFICATION_CHANNEL_MAREK (+ DISCORD_MENTION_MAREK).
+    # DISCORD_NOTIFICATION_CHANNEL_ZBYNEK (+ DISCORD_MENTION_ZBYNEK).
     # check_discord_notify_config() surfaces that gap loudly at install; the
     # supervisor provisions it and live-verifies with a real notify-delivery.log
     # ping at integration.
-    "admin": "marek",
-    "stepan": "marek",
+    "admin": "zbynek",   # #882: rerouted from marek (decommissioned) to zbynek
+    "stepan": "zbynek",  # #882: rerouted from marek (decommissioned) to zbynek
 }
 
 
@@ -287,7 +279,7 @@ def _clean(s):
 
 def resolve_owner():
     """Return the lowercase owner of the current tmux session (e.g. 'zbynek' /
-    'marek'), or "" when it can't be determined.
+    'david'), or "" when it can't be determined.
 
     AIRULESET_NOTIFY_OWNER overrides everything — for the non-tmux / test / future
     board-daemon path. Next, STREAM_NOTIFY_OWNER maps the current LINUX USER (an
@@ -363,13 +355,13 @@ def stream_redirect(raw_owner):
 # channel-less), so a ticketless suppressed ❓ folds into the `U N`
 # ticketless surface too, not only webterm. Owner `david` (and david1-4
 # -> `david`) keeps FULL question delivery, so it is deliberately NOT in this set.
-QUESTION_PING_OWNERS_OFF = frozenset({"zbynek", "marek"})
+QUESTION_PING_OWNERS_OFF = frozenset({"zbynek"})  # marek removed #882 (decommissioned)
 
 
 def question_ping_off(owner):
     """True when a ❓ QUESTION ping to `owner`'s Discord thread must be
     SUPPRESSED (#710). Normalised via `stream_redirect` so a stream persona
-    whose questions ROUTE INTO claude-zbynek / claude-marek (montalu5/montalu1/
+    whose questions ROUTE INTO claude-zbynek (montalu5/montalu1/montalu4/
     simap1 -> zbynek, ...) is classified by its real THREAD owner and is off
     too, while david1-4 -> `david` passes through and stays ON. Empty/None/
     unknown owner -> False (never suppress on "don't know" — the safe direction:
@@ -384,9 +376,7 @@ def notification_channel(env=None, owner=None, kind="default", project=None):
     """Resolve the Discord channel/THREAD id to POST to for the current owner.
 
     Per-owner routing: each person gets their OWN thread so notifications don't
-    mix (the user runs zbynek + marek side by side and an @mention in a shared
-    thread was not enough — they want a separate `claude-zbynek` / `claude-marek`
-    thread). `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` (e.g.
+    mix. `DISCORD_NOTIFICATION_CHANNEL_<OWNER>` (e.g.
     DISCORD_NOTIFICATION_CHANNEL_ZBYNEK=<thread id>) wins when set; it falls back
     to the shared `DISCORD_NOTIFICATION_CHANNEL_ID` when the owner has no per-owner
     thread configured OR the owner can't be determined (no tmux). Returns "" when
@@ -679,7 +669,7 @@ def resolve_questions_channel(env=None, owner=None, spawn=None):
 # #296 -- provisioning the per-owner QUESTIONS thread (claude-<owner>-q).
 #
 # No code in this repo has ever created a Discord thread before -- the
-# existing per-owner threads (claude-zbynek / claude-marek / claude-david)
+# existing per-owner threads (claude-zbynek / claude-david)
 # were configured BY HAND into the .env. #296's own body allows the mechanism
 # to CREATE the thread ("vlákno sa vytvorí/nájde"), and the ticket's live
 # acceptance criterion needs a REAL thread to post a test ❓ into -- so this
@@ -944,7 +934,7 @@ def provision_question_thread(owner, env=None, env_path=None, http=None,
 # per-owner decision, the principled set to provision-at-install is now exact:
 # the SINGLE question-delivery-ENABLED owner THIS box actually delivers AS
 # (`resolve_owner()`, which maps david1-4 -> "david" via STREAM_NOTIFY_OWNER
-# with no tmux needed), skipping the #710-suppressed owners (zbynek/marek) and
+# with no tmux needed), skipping the #710-suppressed owners (zbynek) and
 # any box with no owner / no bot token. Install is a deliberate, non-per-❓
 # action (the same tier #296 already blesses for create). The #330
 # duplicate-thread hiccup (a transient lookup failure read as "absent", then
@@ -969,7 +959,7 @@ def provision_owner_question_thread_for_install(env=None, env_path=None,
     Returns `{"owner": <owner or "">, "status": <str>, "thread": <id or "">}`,
     status one of:
       - "skip-no-owner"  : this box delivers as no owner (nothing to provision)
-      - "skip-suppressed": owner's ❓ delivery is OFF (#710 zbynek/marek) — no
+      - "skip-suppressed": owner's ❓ delivery is OFF (#710 zbynek) — no
                            -q thread is needed; makes ZERO Discord calls
       - "skip-no-token"  : no bot token here (a more fundamental gap that
                            `check_discord_notify_config` already reports loudly
@@ -1326,7 +1316,7 @@ def _plural_done(n):
 
 def stream_qualified(name):
     """Append the box's unix user to a ping label for STREAM users
-    (gatekeeper/montalu/david/marek) so the phone can tell which stream
+    (gatekeeper/montalu/david/miva1) so the phone can tell which stream
     speaks; personal boxes (newlevel/root) keep the plain label. The shell
     hook + watchdog project_label carry the same rule (2026-07-20)."""
     import getpass
@@ -1827,7 +1817,7 @@ def repo_name_for(cwd, run=None):
     """The GitHub repo NAME for `cwd`, from its `origin` remote — never the
     directory basename.
 
-    The live trap this exists for: marek's checkout is
+    The live trap this exists for: marek's checkout was
     `~/devel/forestshop/parovanie_produktov` (underscore) while every card
     marker is keyed `parovanie-produktov` (hyphen), because
     `_notify_run_card` keys on the `--repo` argument. A directory-derived key
@@ -2225,7 +2215,7 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     if not session:
         return False
     if suppressed:
-        # #716: a Discord-less entry for a #710-suppressed owner (zbynek/marek).
+        # #716: a Discord-less entry for a #710-suppressed owner (zbynek).
         # No Discord POST happened, so there is NO snowflake message-id/channel;
         # the entry exists PURELY to fold the ticketless ❓ into the footer `U N`
         # (statusbar.ticketless_question_pings reads only cwd/block/question).

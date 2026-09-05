@@ -1,6 +1,6 @@
 ---
 name: version-on-dashboard
-description: Version-label-on-dashboard mandate for every web UI — v<semver> format, build-time injection from git describe, DOM read-back verification, foundation-gate issue, required Playwright test. Load when building/changing a web dashboard or frontend, doing post-deploy verification of a web UI, or running /issue-planner foundation checks.
+description: Every web dashboard must show v<semver> from git describe, verified by DOM read. Load when working on any web UI.
 user-invocable: false
 ---
 

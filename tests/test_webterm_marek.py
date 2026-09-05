@@ -6,15 +6,14 @@ The SECURITY-CRITICAL boundary this pins (#661 rework, owner ruling 2026-08-25 �
 the old "single local attach" set was owner-REJECTED as incomplete; #787 added
 montalu2-subdev; a later owner request 2026-09-03 added miva1-subdev + gatekeeper
 so marek can SEE the miva subdev stream and the gk box):
-  * marek's connect allowlist is PHYSICALLY his EIGHT-member set {marek-subdev,
+  * marek's connect allowlist is PHYSICALLY his EIGHT-member set {montalu1-subdev,
     montalu2-subdev, miva1-subdev, montalu4-subdev, dev1, dev2, gatekeeper,
-    forestshop} — his ttyd cannot resolve any OTHER fleet id (a bare gk/
-    montalu1,3,5-8/simap/stepan/admin-forestshop-dev) NOR any DAVID id
+    forestshop} (#882 scope correction: marek-subdev LOCAL tab REMOVED, montalu1
+    ADDED) — his ttyd cannot resolve any OTHER fleet id NOR any DAVID id
     (david1..4/codex-bridge) → refused, never execed;
   * every ssh member uses the DEDICATED WEBTERM_MAREK_IDENTITY key (never the
     fleet gatekeeper key, never the sshpass shared-password branch) — the
-    WEBTERM_DAVID_IDENTITY precedent; marek-subdev itself stays a keyless
-    LOCAL attach;
+    WEBTERM_DAVID_IDENTITY precedent;
   * a per-hostname Cloudflare Access realm (marek email only, deny-by-default);
   * the owner AND david profiles are byte-identical (marek is purely additive);
   * account-aware provisioning dispatch (marek@subdev -> marek, david1 -> david).
@@ -93,9 +92,11 @@ class TestMarekInventory(unittest.TestCase):
     # adding miva1-subdev (loopback, like montalu2) and gatekeeper (tailscale,
     # like dev1/dev2) so marek can SEE the miva subdev stream and the gk box.
     def test_eight_member_set_in_owner_order(self):
+        # #882 scope correction: marek-subdev LOCAL tab REMOVED (cancelled stream),
+        # montalu1-subdev ADDED (owner: "potrebujem aby marek mal prístup aj k m1").
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
-                         ["marek-subdev", "montalu2-subdev", "miva1-subdev",
+                         ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
                           "montalu4-subdev", "dev1", "dev2", "gatekeeper",
                           "forestshop"])
 
@@ -157,15 +158,21 @@ class TestMarekInventory(unittest.TestCase):
         self.assertEqual(e["user"], fleet_e["user"])
         self.assertIsNone(fleet_e.get("host_keys"))
 
-    def test_marek_entry_is_a_local_attach_with_no_ssh(self):
-        # marek's own primary session stays what it was: the gateway runs AS
-        # marek on subdev and attaches his LOCAL tmux — no ssh, no key.
-        e = next(x for x in p.marek_inventory() if x["id"] == "marek-subdev")
-        self.assertTrue(e["local"])
-        self.assertIsNone(e["host"])
-        self.assertIsNone(e["identity"])
-        self.assertEqual(e["preferred"], "marek")
-        self.assertEqual(e["user"], "marek")
+    def test_montalu1_entry_is_loopback_ssh_with_dedicated_key(self):
+        # #882 scope correction: montalu1-subdev ADDED — his first montalu stream,
+        # within-tenant (u_tenant: True), mirroring the montalu2/4 loopback shape.
+        e = next(x for x in p.marek_inventory() if x["id"] == "montalu1-subdev")
+        self.assertFalse(e["local"])
+        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["user"], "montalu1")
+        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
+        self.assertEqual(e["preferred"], "montalu1")
+        self.assertIs(e.get("u_tenant"), True)
+
+    def test_marek_subdev_local_tab_removed_882(self):
+        # #882 scope correction: marek-subdev LOCAL tab REMOVED (cancelled stream).
+        ids = [x["id"] for x in p.marek_inventory()]
+        self.assertNotIn("marek-subdev", ids)
 
     def test_montalu4_entry_is_loopback_ssh_with_dedicated_key(self):
         # His montalu stream — a local subdev unix account reached over loopback
@@ -269,22 +276,20 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
             self.assertEqual(rc, 2, "foreign id %r must be refused" % foreign)
             ex.assert_not_called()
 
-    def test_marek_id_execs_a_local_attach_no_ssh(self):
+    def test_montalu1_id_execs_loopback_ssh_with_dedicated_key(self):
+        # #882 scope correction: montalu1-subdev ADDED — loopback ssh with the
+        # dedicated marek key, attaching montalu1's tmux group.
         f = self._marek_inv_file()
         with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
                 m.patch.object(w.os, "execvp") as ex:
-            w.connect_main(["marek-subdev"])
+            w.connect_main(["montalu1-subdev"])
         ex.assert_called_once()
         argv = ex.call_args[0][1]
-        # A local attach — never ssh, attaches marek's tmux group (never a
-        # broader target). #736: marek's LOCAL subdev tmux is scope-detached
-        # too (`systemd-run --user --scope ... sh -c <tmux>`), so its server
-        # never lands in the subdev ttyd cgroup either.
-        self.assertEqual(argv[0], "systemd-run")
-        self.assertIn("--scope", argv)
-        self.assertIn("sh", argv)
-        self.assertNotIn("ssh", argv)
-        self.assertIn("marek", " ".join(argv))
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("-i", argv)
+        self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
+        self.assertIn("montalu1@127.0.0.1", argv)
+        self.assertNotIn("sshpass", argv)
 
     def test_dev1_id_execs_ssh_with_dedicated_key_to_marek_group(self):
         f = self._marek_inv_file()
@@ -335,7 +340,8 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         # gatekeeper joined the set.
         fleet = _fleet_inventory()
         marek_ids = p.allowed_ids(p.MAREK, fleet)
-        self.assertEqual(marek_ids, {"marek-subdev", "montalu2-subdev",
+        # #882 scope correction: marek-subdev REMOVED, montalu1-subdev ADDED.
+        self.assertEqual(marek_ids, {"montalu1-subdev", "montalu2-subdev",
                                      "miva1-subdev", "montalu4-subdev", "dev1",
                                      "dev2", "gatekeeper", "forestshop"})
         for foreign in ("gk", "montalu-subdev", "david1",
@@ -486,8 +492,9 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             # #661 rework + #787 + owner-req 2026-09-03: the written connect
             # allowlist is the eight-member set (montalu2-subdev, miva1-subdev
             # and gatekeeper added).
+            # #882 scope correction: montalu1-subdev replaces marek-subdev.
             self.assertEqual([e["id"] for e in inv],
-                             ["marek-subdev", "montalu2-subdev", "miva1-subdev",
+                             ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
                               "montalu4-subdev", "dev1", "dev2", "gatekeeper",
                               "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(

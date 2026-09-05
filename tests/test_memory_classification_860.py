@@ -11,10 +11,11 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 class TestDedupByCodeAreaPromoted(unittest.TestCase):
     """The dedup-by-code-area discipline from montalu3 memory must be
-    present in modules/quality/no-dropped-work.md (#860 PROMOTE)."""
+    present in the no-dropped-work companion (#860 PROMOTE, #859 batch 4a
+    re-tiered the detail to skills/no-dropped-work-deep/DEEP.md)."""
 
     def setUp(self):
-        self.text = (REPO / "modules" / "quality" / "no-dropped-work.md").read_text()
+        self.text = (REPO / "skills" / "no-dropped-work-deep" / "DEEP.md").read_text()
 
     def test_dedup_by_code_area_anchor_present(self):
         """The promoted anchor text must exist in no-dropped-work.md."""
@@ -45,7 +46,8 @@ class TestWorkflowJoinByIndexPromoted(unittest.TestCase):
     is caught even if a sibling bullet quotes the same phrase."""
 
     def setUp(self):
-        self.text = (REPO / "modules" / "core" / "claude-code-tooling.md").read_text()
+        # #859 batch 3: Workflow detail moved to companion
+        self.text = (REPO / "skills" / "claude-code-workflows" / "DEEP.md").read_text()
 
     def test_index_join_line_carries_all_tokens(self):
         """The ONE physical line with 'joining aggregate results' must also

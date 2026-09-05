@@ -14,10 +14,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_repo_root = str(Path(__file__).resolve().parent.parent)
+sys.path.insert(0, _repo_root)
 
-import watchdog as wd
-from watchdog import goal
+import watchdog as wd  # noqa: E402
+from watchdog import goal  # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
@@ -25,6 +26,13 @@ from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
     _write_marker_transcript,
 )
+
+# #875 Pass B: remove the repo root from sys.path after imports complete so
+# later test modules under `unittest discover` don't re-import cli_remote as a
+# top-level module (creating a second module instance that breaks assertIs
+# identity checks in facade reexport tests).
+if _repo_root in sys.path:
+    sys.path.remove(_repo_root)
 
 WEEKLY = "You've hit your weekly limit · resets Aug 20, 1am (Europe/Bratislava)"
 SESSION = "You've hit your session limit · resets 2am (Europe/Bratislava)"

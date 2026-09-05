@@ -20,9 +20,15 @@ def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
+# #859 batch 4a: stub + companion = the full governance text
+def _full_aba():
+    return read("modules/core/ask-before-assuming.md") + "\n" + read(
+        "skills/ask-before-assuming-deep/DEEP.md")
+
+
 class TestOwnershipGateSelfInvented(TestCase):
     def test_self_invented_obstacle_is_yours_to_solve(self):
-        t = read("modules/core/ask-before-assuming.md")
+        t = _full_aba()
         self.assertIn(
             "A technical OBSTACLE in something YOU designed is YOURS to SOLVE", t)
         # The exact rationalization it must kill.
@@ -33,12 +39,12 @@ class TestOwnershipGateSelfInvented(TestCase):
         self.assertIn("menu of technical workarounds", t)
 
     def test_incident_is_recorded(self):
-        t = read("modules/core/ask-before-assuming.md")
+        t = _full_aba()
         self.assertIn("estimatedPlayoutTimestamp", t)
         self.assertIn("mňa s tým neotravuj", t)
 
     def test_preanswered_table_row_present(self):
-        t = read("modules/core/ask-before-assuming.md")
+        t = _full_aba()
         self.assertIn("SOLVE it — never ask; if truly impossible, PROVE it + declare unsolvable", t)
 
 

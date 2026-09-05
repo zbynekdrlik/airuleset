@@ -1,0 +1,149 @@
+"""#879 — a `secret show` one-shot URL delivered to the owner must go
+through the ❓ marker machinery (pings the phone, sits in U), never as
+a bare line in a ✅ report or status prose.
+
+RED (proven against main 64e017ff): a message with `secret show` CLI
+output (``endpoint-ttl=...`` + ``jednorazové zobrazenie``) and a URL,
+ending ``✅ DONE``, passes the gate clean — the hook has no check.
+The enforcement tests below fail on that hook; the control tests pass
+both before and after.
+"""
+
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
+
+# --- Fixtures ---
+
+# The incident shape: secret show output pasted into a ✅ report.
+SECRET_SHOW_IN_REPORT = (
+    "PIN pre kiosk je pripravený.\n\n"
+    "name=kiosk_pin  endpoint-ttl=3600s  (jednorazové zobrazenie)\n\n"
+    "URL: https://100.104.8.125:9871/a1b2c3d4e5f6/\n\n"
+    "✅ DONE: PIN pripravený na vyzdvihnutie"
+)
+
+# The correct shape: same output inside a ❓ block.
+SECRET_SHOW_IN_QUESTION = (
+    "**Otázka — projekt airuleset (konfiguračný systém):**\n\n"
+    "Vygeneroval som jednorazovú URL na vyzdvihnutie kiosk PIN-u.\n"
+    "URL je platná 1 hodinu alebo do prvého otvorenia.\n\n"
+    "name=kiosk_pin  endpoint-ttl=3600s  (jednorazové zobrazenie)\n\n"
+    "URL: https://100.104.8.125:9871/a1b2c3d4e5f6/\n\n"
+    "Ak URL už nefunguje, odpíš — vygenerujem novú.\n\n"
+    "❓ NEEDS YOU: vyzdvihni si PIN na jednorazovej URL vyššie"
+)
+
+# A doctrine discussion quoting the pattern — no URL → must pass.
+DOCTRINE_DISCUSSION = (
+    "The `secret show` output contains `endpoint-ttl=600s` and "
+    "`jednorazové zobrazenie` — this is the show-only discriminator.\n\n"
+    "⏳ WORKING: implementing the hook check"
+)
+
+# A `secret request` output (different shape) — must pass even without ❓.
+SECRET_REQUEST_OUTPUT = (
+    "Credential endpoint ready.\n"
+    "endpoint-ttl=600s  keep=900s\n"
+    "URL: https://100.104.8.125:9870/x9y8z7/\n\n"
+    "✅ DONE: secret request spustený, URL poslaná"
+)
+
+
+def _run_hook(msg, *, session_id=None):
+    """Drive stop-check-prose-violations.sh with a minimal Stop payload."""
+    sid = session_id or ("test-879-" + uuid.uuid4().hex[:12])
+    payload = json.dumps({
+        "type": "Stop",
+        "session_id": sid,
+        "session": {
+            "cwd": str(ROOT),
+            "account": {"email": "test@test.local"},
+        },
+        "transcript_path": "/dev/null",
+        "tool_input": {},
+        "last_assistant_message": msg,
+    })
+    with tempfile.TemporaryDirectory() as tmp_home:
+        env = {
+            **os.environ,
+            "HOME": tmp_home,
+            "CLAUDE_SESSION_ID": sid,
+        }
+        r = subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload, capture_output=True, text=True,
+            env=env, timeout=30,
+        )
+    return r
+
+
+class TestSecretShowDelivery(unittest.TestCase):
+    """#879 — secret show URL without ❓ marker is blocked."""
+
+    def test_red_show_output_in_report_blocked(self):
+        """A secret show URL in a ✅ report (no ❓) → hard block."""
+        r = _run_hook(SECRET_SHOW_IN_REPORT)
+        self.assertIn("secret show", r.stderr.lower(),
+                       "expected a secret-show block reason on stderr")
+        # The hook signals a block via {"decision":"block"} on stdout,
+        # NOT via exit code (exit 0 is always returned).
+        self.assertIn('"decision"', r.stdout,
+                      "hook must output a block decision JSON for a "
+                      "secret show URL delivered without ❓")
+        out = json.loads(r.stdout)
+        self.assertEqual(out.get("decision"), "block")
+
+    def test_green_show_output_in_question_passes(self):
+        """A secret show URL inside a ❓ block → passes."""
+        r = _run_hook(SECRET_SHOW_IN_QUESTION)
+        self.assertNotIn('"block"', r.stdout,
+                         f"hook must pass when ❓ marker present; "
+                         f"stderr={r.stderr[:300]}")
+
+    def test_green_doctrine_discussion_passes(self):
+        """Quoting the discriminator in prose with no URL → passes."""
+        r = _run_hook(DOCTRINE_DISCUSSION)
+        self.assertNotIn('"block"', r.stdout,
+                         f"hook must pass doctrine discussion; "
+                         f"stderr={r.stderr[:300]}")
+
+    def test_green_secret_request_output_passes(self):
+        """`secret request` output (no jednorazove) → passes."""
+        r = _run_hook(SECRET_REQUEST_OUTPUT)
+        self.assertNotIn('"block"', r.stdout,
+                         f"hook must pass for request output; "
+                         f"stderr={r.stderr[:300]}")
+
+
+class TestShowDiscriminatorSourceLock(unittest.TestCase):
+    """#879 source-lock: the hook's discriminator tokens must stay in
+    cli_vault.py's show print line — a rewording there silently disarms
+    the gate (#498 class)."""
+
+    def test_cli_vault_show_print_carries_discriminator(self):
+        """The show print line in cli_vault.py carries both tokens."""
+        vault = (ROOT / "cli_vault.py").read_text()
+        # Find lines with the show-only parenthetical
+        show_lines = [ln for ln in vault.splitlines()
+                      if "jednorazov" in ln.lower()]
+        self.assertTrue(show_lines,
+                        "cli_vault.py must contain 'jednorazov' "
+                        "(the show-only discriminator)")
+        # At least one of those lines also carries endpoint-ttl=
+        has_ttl = any("endpoint-ttl=" in ln for ln in show_lines)
+        self.assertTrue(has_ttl,
+                        "the cli_vault.py line with 'jednorazov' must "
+                        "also carry 'endpoint-ttl=' — the hook depends "
+                        "on their co-occurrence")
+
+
+if __name__ == "__main__":
+    unittest.main()

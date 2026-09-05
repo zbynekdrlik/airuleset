@@ -55,9 +55,9 @@ class TestMarkerIsLowerOnly828(TestCase):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_full_marker_on_branch_merge_stream_is_ignored(self):
-        # marek is branch-merge in the table; a full marker would RAISE -> ignored.
+        # montalu1 is branch-merge in the table; full marker would RAISE -> ignored.
         d = self._write_marker("full")
-        with m.patch.object(airuleset, "_current_user", return_value="marek"):
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "branch-merge")
 
     def test_full_marker_on_full_account_stays_full(self):
@@ -82,16 +82,16 @@ class TestMarkerIsLowerOnly828(TestCase):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_fork_marker_lowers_a_branch_merge_stream(self):
-        # marek (branch-merge) + fork-no-merge marker -> fork-no-merge.
+        # montalu1 (branch-merge) + fork-no-merge marker -> fork-no-merge.
         d = self._write_marker("fork-no-merge")
-        with m.patch.object(airuleset, "_current_user", return_value="marek"):
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     # -- no marker -> the table -------------------------------------------- #
     def test_no_marker_resolves_from_the_table(self):
         import tempfile
         d = tempfile.mkdtemp()  # no CLAUDE.md
-        with m.patch.object(airuleset, "_current_user", return_value="marek"):
+        with m.patch.object(airuleset, "_current_user", return_value="montalu1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "branch-merge")
         with m.patch.object(airuleset, "_current_user", return_value="david1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
@@ -107,7 +107,7 @@ class TestMarkerIsLowerOnly828(TestCase):
     # -- _authority_base is the marker-FREE base --------------------------- #
     def test_authority_base_is_marker_free(self):
         import cli_quals
-        self.assertEqual(cli_quals._authority_base("marek"),
+        self.assertEqual(cli_quals._authority_base("montalu1"),
                          ("branch-merge", "per-user map"))
         self.assertEqual(cli_quals._authority_base("david1"),
                          ("fork-no-merge", "per-user map"))
@@ -164,7 +164,7 @@ class TestMarkerIsLowerOnly828(TestCase):
     def test_explain_marks_a_redundant_marker_as_equal_base(self):
         # a marker EQUAL to the base is neither lowered nor a raise — the base
         # source stands and the annotation flags it redundant.
-        out = self._explain("marek", "branch-merge")
+        out = self._explain("montalu1", "branch-merge")
         self.assertIn("resolved=branch-merge via per-user map", out)
         self.assertIn("marker=branch-merge (== base branch-merge)", out)
 

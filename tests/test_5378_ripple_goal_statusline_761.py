@@ -32,6 +32,7 @@ import goal_registry as gr  # noqa: E402
 
 SKILL = "skills/autopilot/SKILL.md"
 STATUSLINE = "modules/core/statusline-vocabulary.md"
+STATUSLINE_DEEP2 = "skills/statusline-vocabulary-deep/DEEP-2.md"
 MIN_HEADROOM_AIM = 180  # #621/#730 aim (150 is the hard floor)
 
 
@@ -109,7 +110,7 @@ class TestUncappedProseCarriesTheOdooErpHow(TestCase):
         self.assertIn("delivering STREAM", header)
 
     def test_statusline_636_clause_carries_the_exception(self):
-        t = read(STATUSLINE)
+        t = read(STATUSLINE_DEEP2)  # #859 batch 3: moved to companion
         idx = t.index("GK-blocked ops-wait = post-release limbo (#636")
         window = t[idx:idx + 2500]
         # the stale routing-outcome phrase stays (it is still where the ticket

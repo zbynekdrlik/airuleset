@@ -1,6 +1,6 @@
 ---
 name: meeting-analysis
-description: Analyze a meeting/call recording MULTIMODALLY — Soniox stt-async-v5 transcription with native speaker diarization + screenshare-frame reading — into a complete, structured understanding (requirements, decisions, tickets, summary). Use whenever the user hands you a recorded call/meeting (video or audio) and wants it analyzed, especially screen-shared sales/product/requirements calls. Local dev2-GPU whisper is the fallback. The method SELF-IMPROVES after every run (Phase 6).
+description: Analyze meeting/call recordings multimodally — Soniox stt-async-v5 transcription + screenshare reading. Load for recorded calls.
 user-invocable: true
 ---
 

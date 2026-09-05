@@ -285,9 +285,9 @@ class TestTriggerRow(TestCase):
         _, _, _, body = self.by_topic["odoo-discuss-read-attachments"]
         self.assertTrue((ROOT / body).exists())
 
-    def test_topics_still_unique(self):
-        topics = [r[0] for r in self.rows]
-        self.assertEqual(len(topics), len(set(topics)), "duplicate topic in table")
+    def test_topic_tool_pairs_still_unique(self):
+        pairs = [(r[0], r[1]) for r in self.rows]
+        self.assertEqual(len(pairs), len(set(pairs)), "duplicate (topic, tool) in table")
 
     def test_existing_message_post_row_untouched(self):
         topic, tool, pattern, body = self.by_topic["odoo-discuss-xmlrpc"]

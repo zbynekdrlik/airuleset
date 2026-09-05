@@ -1,13 +1,13 @@
 """airuleset webterm — the ONE parameterized per-developer LANE provisioner (#665).
 
-The rule-of-three is reached (david + marek + a future 4th developer), so the
-~90%-shared render + setup skeleton the per-developer modules used to each COPY is
-consolidated here into a single engine driven by a per-lane :class:`LaneSpec`.
+The shared render + setup skeleton is consolidated here into a single engine
+driven by a per-lane :class:`LaneSpec`. (The rule-of-three was reached with david +
+marek + dominika; marek was decommissioned #882, 2026-09-05.)
 
-``cli_webterm_david.py`` and ``cli_webterm_marek.py`` are now THIN: each keeps its
+``cli_webterm_david.py`` and ``cli_webterm_dominika.py`` are THIN: each keeps its
 per-user module-level constants (the source of truth existing tests patch) + a
 ``_spec()`` factory that reads them fresh + public-API wrappers that delegate to the
-functions here. A future 4th developer is a ``LaneSpec`` + a tiny thin module — a
+functions here. A future developer is a ``LaneSpec`` + a tiny thin module — a
 config entry, never another copy.
 
 This is post-#663 (v0.1.34+) only: every lane binds mode-0700 UNIX sockets in the

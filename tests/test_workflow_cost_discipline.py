@@ -28,7 +28,7 @@ def read(rel):
 
 class TestWorkflowCostDiscipline(TestCase):
     def test_ground_once_and_right_size_fanout(self):
-        t = read("modules/core/claude-code-tooling.md")
+        t = read("skills/claude-code-workflows/DEEP.md")  # #859 batch 3: moved to companion
         # Ground-once rule + the residual-uncertainty sizing + the ultracode clarification.
         self.assertIn("Ground ONCE", t)
         self.assertIn("RESIDUAL UNCERTAINTY", t)
@@ -39,7 +39,7 @@ class TestWorkflowCostDiscipline(TestCase):
         self.assertIn("salvage-before-discarding-work.md", t)
 
     def test_tiering_still_names_a_miss_and_keeps_lookups_light(self):
-        t = read("modules/core/model-awareness.md")
+        t = read("skills/model-awareness-deep/DEEP.md")
         # The self-audit must still name a tiering MISS (inverted under max-performance).
         self.assertIn("tiering MISS", t)
         # Mechanical lookups stay on a light/low tier under EVERY policy. The

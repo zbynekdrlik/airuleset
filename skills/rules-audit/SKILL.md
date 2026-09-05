@@ -1,6 +1,6 @@
 ---
 name: rules-audit
-description: "Merged into /mdreview v2 (#858) — invoke /mdreview instead. The structural baseline (size, dupes, orphans, contradictions, model-version strings) is now Step 1 of the mdreview skill, consuming the structured JSON artifact from `mdreview-audit --fleet`."
+description: "Merged into /mdreview v2 (#858) — invoke /mdreview instead. Structural baseline (size, dupes, orphans, contradictions) is now Step 1 of mdreview."
 user-invocable: false
 disable-model-invocation: true
 ---
