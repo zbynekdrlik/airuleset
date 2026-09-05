@@ -175,6 +175,7 @@ class DoctrineContentLock699(unittest.TestCase):
     job 20 = backstop only."""
 
     STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
+    STATUS_DEEP2 = REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
     SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
     FINDER = "recheck! kadencia je MECHANICKÁ (#699"
 
@@ -190,7 +191,7 @@ class DoctrineContentLock699(unittest.TestCase):
         return " ".join(text[i:(j if j > 0 else len(text))].split())
 
     def test_statusline_W_bullet_carries_699_cadence(self):
-        text = self.STATUS.read_text(encoding="utf-8")
+        text = self.STATUS_DEEP2.read_text(encoding="utf-8")  # #859 batch 3
         line = self._line_with(text, self.FINDER)
         self.assertTrue(line, "the W bullet must carry the #699 recheck! sentence")
         for tok in ("recheck!", "KAŽDÝ pracovný cyklus", "#699"):

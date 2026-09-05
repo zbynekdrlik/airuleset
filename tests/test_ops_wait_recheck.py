@@ -747,6 +747,9 @@ class TestLaneSweepWiring(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 _REPO = Path(__file__).resolve().parent.parent
+# #859 batch 3: the W-bullet deep mechanism prose moved out of the always-on
+# statusline-vocabulary module into this on-demand companion.
+DEEP2 = _REPO / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
 
 
 def _line_with(text, finder):
@@ -778,8 +781,7 @@ class TestDoctrineContentLock(unittest.TestCase):
     TOKENS = ("job 20", "--ops-wait", "stuck-check:", "never auto-unlabels")
 
     def test_statusline_vocabulary_W_bullet_points_at_mechanism(self):
-        text = (_REPO / "modules/core/statusline-vocabulary.md").read_text(
-            encoding="utf-8")
+        text = DEEP2.read_text(encoding="utf-8")
         line = _line_with(text, self.STATUS_FINDER)
         self.assertTrue(line, "the W bullet must carry the #547 mechanism sentence")
         for tok in self.TOKENS:
@@ -804,8 +806,7 @@ class TestDoctrineContentLock(unittest.TestCase):
     TOKENS_552 = ("partition-audit", "re-audit", "OPPOSITE direction")
 
     def test_statusline_vocabulary_carries_I_direction_mechanism(self):
-        text = (_REPO / "modules/core/statusline-vocabulary.md").read_text(
-            encoding="utf-8")
+        text = DEEP2.read_text(encoding="utf-8")
         line = _line_with(text, self.STATUS_FINDER_552)
         self.assertTrue(line, "the W bullet must carry the #552 I→W/U mechanism "
                               "sentence")

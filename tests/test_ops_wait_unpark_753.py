@@ -260,8 +260,9 @@ class DoctrineContentLock753Part1(unittest.TestCase):
     """The statusline W bullet carries the `unpark?` mechanism (part 1)."""
 
     def test_w_bullet_mentions_unpark(self):
+        # #859 batch 3: moved to companion
         p = (Path(__file__).resolve().parent.parent
-             / "modules/core/statusline-vocabulary.md")
+             / "skills/statusline-vocabulary-deep/DEEP-2.md")
         text = p.read_text(encoding="utf-8")
         self.assertIn("unpark?", text)
 
