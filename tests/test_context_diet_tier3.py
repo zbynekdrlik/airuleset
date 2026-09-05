@@ -297,7 +297,7 @@ class TestContextCostParagraph(unittest.TestCase):
 HOOK = os.path.join(REPO_DIR, "hooks", "inject-situational-rule.sh")
 
 
-def _inject(tool_input, tool_name="Bash", session_id=None):
+def _inject(tool_input, tool_name="Bash", session_id=None, tmpdir=None):
     """Drive the real inject-situational-rule.sh; fresh session_id per call."""
     if session_id is None:
         import uuid
@@ -305,9 +305,14 @@ def _inject(tool_input, tool_name="Bash", session_id=None):
     payload = json.dumps(
         {"session_id": session_id, "tool_name": tool_name, "tool_input": tool_input}
     )
+    import tempfile as _tf
+    env = dict(os.environ)
+    if tmpdir is None:
+        tmpdir = _tf.mkdtemp(prefix="diet3-inject-")
+    env["TMPDIR"] = tmpdir
     r = subprocess.run(
         ["bash", HOOK], input=payload, capture_output=True, text=True, timeout=15,
-        cwd=REPO_DIR,
+        cwd=REPO_DIR, env=env,
     )
     return r
 

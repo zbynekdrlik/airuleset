@@ -27,8 +27,11 @@ if [ "$CEILING" -eq 0 ] 2>/dev/null; then
   exit 0
 fi
 
-# Compute current resolved bytes via context-baseline --json
-CURRENT="$(python3 "$REPO_DIR/airuleset.py" context-baseline --json 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('global',{}).get('resolved_bytes',0))" 2>/dev/null || echo 0)"
+# Compute current modules_resolved_bytes via context-baseline --check
+# (the --check output prints "ok: modules_resolved_bytes = N <= C" which
+# uses the SAME metric the ceiling measures — never global.resolved_bytes
+# which includes more than just modules).
+CURRENT="$(python3 "$REPO_DIR/airuleset.py" context-baseline --check 2>/dev/null | grep 'modules_resolved_bytes' | grep -oE '[0-9]+' | head -1 || echo 0)"
 if [ "$CURRENT" -eq 0 ] 2>/dev/null; then
   exit 0
 fi
