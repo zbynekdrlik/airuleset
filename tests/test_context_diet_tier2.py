@@ -176,15 +176,19 @@ class TestCompletionReportConversion(TestCase):
         self.assertIn("## ✅ Work Complete", self.module)
 
     def test_hard_rules_stay(self):
-        self.assertIn("Hard rules", self.module)
+        # #859 batch 4b: deep content moved to companion
+        combined = self.module + "\n" + _read("skills/completion-report-deep/DEEP.md")
+        self.assertIn("Hard rules", combined)
 
     def test_compact_instruction_stays(self):
         self.assertIn("compact-request --self", self.module)
 
     def test_boundary_trigger_skips_gates_not_applies(self):
         # Y1 fix: --self deliberately SKIPS the #99/#48 gates, never "applies"
-        self.assertIn("deliberately SKIPS", self.module)
-        self.assertNotIn("gates apply", self.module)
+        # #859 batch 4b: deep content moved to companion
+        combined = self.module + "\n" + _read("skills/completion-report-deep/DEEP.md")
+        self.assertIn("deliberately SKIPS", combined)
+        self.assertNotIn("gates apply", combined)
 
     def test_pointer_exists(self):
         self.assertIn("completion-report-history.md", self.module)
@@ -218,15 +222,17 @@ class TestAutonomousVerificationConversion(TestCase):
             "hand-install an APK on their OWN phone 10x", self.module
         )
 
-    # core stays
+    # core stays — #859 batch 4b: deep content moved to companion
     def test_verification_protocol_stays(self):
-        self.assertIn("Functional verification", self.module)
+        combined = self.module + "\n" + _read("skills/autonomous-verification-deep/DEEP.md")
+        self.assertIn("Functional verification", combined)
 
     def test_banned_phrases_stay(self):
         self.assertIn("Banned hand-off phrases", self.module)
 
     def test_prod_decision_tree_stays(self):
-        self.assertIn("Decision tree for a prod-STATE READ", self.module)
+        combined = self.module + "\n" + _read("skills/autonomous-verification-deep/DEEP.md")
+        self.assertIn("Decision tree for a prod-STATE READ", combined)
 
     def test_pointer_exists(self):
         self.assertIn("autonomous-verification-history.md", self.module)
@@ -364,12 +370,14 @@ class TestMilestoneNotificationsConversion(TestCase):
     def test_134_incident_not_in_module(self):
         self.assertNotIn("85 merged PRs", self.module)
 
-    # core stays
+    # core stays — #859 batch 4b: deep content moved to companion
     def test_enforcement_stays(self):
-        self.assertIn("ENFORCED, not advisory", self.module)
+        combined = self.module + "\n" + _read("skills/milestone-notifications-deep/DEEP.md")
+        self.assertIn("ENFORCED, not advisory", combined)
 
     def test_anti_patterns_stay(self):
-        self.assertIn("Anti-patterns", self.module)
+        combined = self.module + "\n" + _read("skills/milestone-notifications-deep/DEEP.md")
+        self.assertIn("Anti-patterns", combined)
 
     def test_pointer_exists(self):
         self.assertIn("milestone-notifications-history.md", self.module)
@@ -403,10 +411,14 @@ class TestCIMonitoringConversion(TestCase):
         self.assertIn("Never stop at partial green", self.module)
 
     def test_poll_recipe_stays(self):
-        self.assertIn("AIRULESET_POLL_BUDGET_S", self.module)
+        # #859 batch 4c: recipes moved to companion
+        combined = self.module + "\n" + _read("skills/ci-monitoring-deep/DEEP.md")
+        self.assertIn("AIRULESET_POLL_BUDGET_S", combined)
 
     def test_deploy_watch_stays(self):
-        self.assertIn("DEPLOY_JOB_RE", self.module)
+        # #859 batch 4c: recipes moved to companion
+        combined = self.module + "\n" + _read("skills/ci-monitoring-deep/DEEP.md")
+        self.assertIn("DEPLOY_JOB_RE", combined)
 
     def test_pointer_exists(self):
         self.assertIn("ci-monitoring-history.md", self.module)

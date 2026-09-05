@@ -38,6 +38,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CI_MONITORING = REPO / "modules" / "core" / "ci-monitoring.md"
+CI_MONITORING_DEEP = REPO / "skills" / "ci-monitoring-deep" / "DEEP.md"
 TEST_STRICTNESS = REPO / "modules" / "ci" / "test-strictness.md"
 # #859 batch 4a: stub + companion = full governance text
 ASK_BEFORE_ASSUMING = REPO / "modules" / "core" / "ask-before-assuming.md"
@@ -179,7 +180,8 @@ class TestLongWaitWaiterActuallyBlocks(unittest.TestCase):
     notification the design depends on fires straight away."""
 
     def _long_wait_block(self):
-        blocks = re.findall(r"```(?:bash)?\n(.*?)\n\s*```", _text(CI_MONITORING), re.S)
+        # #859 batch 4c: code blocks moved to DEEP companion
+        blocks = re.findall(r"```(?:bash)?\n(.*?)\n\s*```", _text(CI_MONITORING_DEEP), re.S)
         self.assertGreaterEqual(len(blocks), 2, "expected a long-wait code block")
         return blocks[1]
 
