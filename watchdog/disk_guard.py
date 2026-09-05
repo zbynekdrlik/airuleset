@@ -1284,23 +1284,68 @@ def discover_oneoff_venvs(home=None, now=None, min_age_days=ONEOFF_VENV_MIN_AGE_
     return out
 
 
+def _metadata_child_newest_mtime(entry):
+    """Newest mtime inside a dir child (subtree walk), or the entry's own
+    mtime for a file. A dir whose files are actively written (e.g.
+    ``tasks/<uuid>/*.highwatermark``) will read fresh even though the dir's
+    OWN mtime was set at creation (Fable review finding 1)."""
+    cpath = str(entry)
+    if not entry.is_dir():
+        return os.lstat(cpath).st_mtime
+    newest = os.lstat(cpath).st_mtime
+    try:
+        for dp, _dirs, files in os.walk(cpath, onerror=lambda _e: None):
+            for f in files:
+                try:
+                    mt = os.lstat(os.path.join(dp, f)).st_mtime
+                    if mt > newest:
+                        newest = mt
+                except OSError:
+                    pass  # airuleset:script-ok individual file stat in a best-effort subtree walk
+    except OSError:
+        pass  # airuleset:script-ok unreadable subdir in a best-effort walk — falls back to dir mtime
+    return newest
+
+
+_SESSION_UUID_RE_META = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _metadata_session_live(name, home, now, proc_dir=None):
+    """True (KEEP) when a tasks/ or shell-snapshots/ child whose name is a
+    session uuid is live or undeterminable — reuses the #863 authoritative
+    registry check. Non-uuid names return False (no liveness gate needed)."""
+    if not _SESSION_UUID_RE_META.match(name):
+        return False
+    try:
+        from cli_scratch_sweep import _session_uuid_live
+        return _session_uuid_live("-metadata-", name, home, now, proc_dir)
+    except Exception:
+        return True          # fail-safe KEEP on any import/call error
+
+
 def discover_stale_claude_metadata(home=None, now=None,
-                                   min_age_days=CLAUDE_METADATA_MIN_AGE_DAYS):
+                                   min_age_days=CLAUDE_METADATA_MIN_AGE_DAYS,
+                                   proc_dir=None):
     """Per-child sweep of ``~/.claude/tasks/``, ``~/.claude/debug/``, and
-    ``~/.claude/shell-snapshots/`` (#849 ask 3). These are pure disposable CC
-    runtime artifacts — tasks = CC's task registry, debug = CC's debug data,
-    shell-snapshots = CC's shell state captures. Each TOP-LEVEL child is aged
-    independently: mtime > ``min_age_days`` → candidate (``reason=None``);
-    otherwise kept. Never follows symlinks. Returns
+    ``~/.claude/shell-snapshots/`` (#849 ask 3).
+
+    ``tasks/`` and ``shell-snapshots/`` children are session-uuid dirs — a
+    LIVE session's entry is KEPT unconditionally via the #863 session liveness
+    check (Fable review finding 1). Each child is aged by its NEWEST SUBTREE
+    mtime (not the dir's own mtime). ``debug/`` is genuinely disposable (no
+    session binding). Never follows symlinks. Returns
     ``[{cls:"claude-metadata", path, bytes, reason}]``."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     cutoff = min_age_days * 86400
     out = []
+    session_keyed = {"tasks", "shell-snapshots"}
     for subdir in CLAUDE_METADATA_SUBDIRS:
         d = Path(home) / ".claude" / subdir
         if not d.is_dir():
             continue
+        is_session_dir = subdir in session_keyed
         try:
             for entry in sorted(d.iterdir()):
                 cpath = str(entry)
@@ -1309,15 +1354,22 @@ def discover_stale_claude_metadata(home=None, now=None,
                                 "bytes": 0,
                                 "reason": "symlink — never followed"})
                     continue
+                if is_session_dir and _metadata_session_live(
+                        entry.name, home, now, proc_dir):
+                    out.append({"cls": "claude-metadata", "path": cpath,
+                                "bytes": 0,
+                                "reason": "live session %s — kept" % entry.name})
+                    continue
                 try:
-                    st = os.lstat(cpath)
+                    newest_mt = _metadata_child_newest_mtime(entry)
                 except OSError as e:
                     out.append({"cls": "claude-metadata", "path": cpath,
                                 "bytes": 0,
                                 "reason": "could not stat: %s" % e})
                     continue
-                age = now - st.st_mtime
-                size = _safe_dir_size(cpath) if entry.is_dir() else st.st_size
+                age = now - newest_mt
+                size = _safe_dir_size(cpath) if entry.is_dir() else (
+                    os.lstat(cpath).st_size if os.path.exists(cpath) else 0)
                 row = {"cls": "claude-metadata", "path": cpath, "bytes": size,
                        "reason": None}
                 if age < cutoff:

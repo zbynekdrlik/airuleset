@@ -1757,6 +1757,28 @@ class TestClaudeMetadata849:
         assert "claude-metadata" in labels, \
             "claude-metadata must be a rung in the drain ladder"
 
+    def test_live_session_tasks_kept(self, tmp_path):
+        """A tasks/ child whose name is a live session uuid is KEPT even if
+        old (Fable review finding 1: a live session's task registry must
+        never be deleted)."""
+        home = tmp_path
+        live_uuid = _LIVE_UUID
+        td = home / ".claude" / "tasks" / live_uuid
+        _mkfile(td / "task.json", age_days=40)
+        # Make the session registry say this uuid is live
+        sdir = home / ".claude" / "sessions"
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "reg.json").write_text(json.dumps(
+            {"pid": os.getpid(), "sessionId": live_uuid}))
+        rows = dg.discover_stale_claude_metadata(
+            home=str(home), now=_NOW, min_age_days=7, proc_dir="/proc")
+        candidates = [r for r in rows if r.get("reason") is None]
+        assert len(candidates) == 0, \
+            "a live session's tasks/ dir must be KEPT, never a candidate"
+        kept = [r for r in rows if r.get("reason") is not None]
+        assert len(kept) == 1
+        assert "live session" in kept[0]["reason"]
+
 
 # --------------------------------------------------------------------------- #
 # #849 ask 5 — escalation names top-5 consumers by path
@@ -1779,19 +1801,26 @@ class TestEscalationTop5Paths849:
         assert top[1] == ("/big2", 200)
         assert top[2] == ("/wt3", 100)
 
-    def test_escalation_output_includes_top5(self, tmp_path):
+    def test_escalation_output_includes_top5_via_seam(self, tmp_path):
         """The escalation log line must include a 'top-5-by-path' section
-        naming the largest individual candidates."""
+        naming the largest individual candidates, driven via the injectable
+        top_consumers_fn seam (Fable review finding 3)."""
         import time as _time
         marker = "/tmp/airuleset-disk-guard-escalated-%s" % _time.strftime(
             "%Y%m%d", _time.gmtime(_NOW))
         if os.path.exists(marker):
             os.unlink(marker)
         status = {"worst_pct": 95, "dim": "bytes"}
-        lines = dg.escalate(status, str(tmp_path), _NOW, dry_run=True)
+        fake_top = [("/tmp/big1", 500_000_000), ("/home/x/wt2", 200_000_000)]
+        lines = dg.escalate(
+            status, str(tmp_path), _NOW, dry_run=True,
+            top_consumers_fn=lambda h, n, limit: fake_top[:limit])
         assert len(lines) >= 1, "escalation must produce at least one log line"
         text = lines[0]
-        assert "ESCALATE" in text
+        assert "top-5-by-path" in text, \
+            "the escalation must include a 'top-5-by-path' section"
+        assert "/tmp/big1" in text, "the largest consumer must be named by path"
+        assert "/home/x/wt2" in text
 
     def test_escalation_source_has_top5_detail(self):
         """The escalate() function source must reference top-5-by-path."""
