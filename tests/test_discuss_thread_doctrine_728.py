@@ -221,9 +221,8 @@ class TestChannelPlacementParagraphSurvives(_CompanionBase):
 
     def test_channel_placement_kept(self):
         w = self._closing_window()
-        self.assertIn("sub-thread under the channel the owner named", w)
-        self.assertIn("never a new top-level channel or group chat", w)
-        self.assertIn("Channel + recipients", w)
+        self.assertIn("channel placement rule", w)
+        self.assertIn("odoo-task-sync.md", w)
 
     def test_ask_one_decision_kept(self):
         w = self._closing_window()
