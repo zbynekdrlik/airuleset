@@ -165,6 +165,12 @@ class TestReviewTierHook(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="review-tier-876-")
         self.home = os.path.join(self.tmpdir, "home")
         os.makedirs(self.home, exist_ok=True)
+        # Seed .gitconfig with safe.directory so git works under the
+        # relocated HOME on the GitHub runner (uid 0, workspace owned by
+        # runner — "dubious ownership" without this; the #875 class).
+        gitconfig = os.path.join(self.home, ".gitconfig")
+        with open(gitconfig, "w") as f:
+            f.write("[safe]\n\tdirectory = *\n")
         # Unique session id per test to avoid once-per state collision (#494).
         self.sid = "test-876-" + uuid.uuid4().hex
         # Register cleanup for any state files this session creates.
