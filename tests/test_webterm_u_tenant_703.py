@@ -44,7 +44,7 @@ import cli_webterm_lane as lane          # noqa: E402
 import cli_webterm_profiles as profiles  # noqa: E402
 import cli_webterm_pwa as pwa            # noqa: E402
 import cli_webterm_david as dv           # noqa: E402
-import cli_webterm_marek as mk           # noqa: E402
+# #882: marek webterm module deleted
 
 
 def _inv(ids):
@@ -63,28 +63,14 @@ class TestUTenantSets703(unittest.TestCase):
         # codex-bridge = newlevel@dev2 (the OWNER's account) — cross-tenant.
         self.assertNotIn(profiles.CODEX_ID, ids)
 
-    def test_marek_set_excludes_owner_account_boxes(self):
-        # #787: montalu2-subdev joined marek's u_tenant set alongside montalu4.
-        # owner-req 2026-09-03: miva1-subdev + gatekeeper were ADDED as TABS but
-        # are CROSS-TENANT (miva1 = a separate developer's stream, notify-routed
-        # to the OWNER; gatekeeper = an owner-realm account), so NEITHER carries
-        # u_tenant — the set is UNCHANGED at the four within-tenant accounts.
-        ids = {e["id"] for e in profiles.u_tenant_entries(profiles.MAREK)}
-        self.assertEqual(ids, {profiles.MAREK_ID, "montalu2-subdev",
-                               "montalu4-subdev", profiles.MAREK_FORESTSHOP_ID})
-        # dev1/dev2 = newlevel@ (the OWNER's account) — cross-tenant.
-        self.assertNotIn("dev1", ids)
-        self.assertNotIn("dev2", ids)
-        # miva1-subdev = a DIFFERENT developer's stream; gatekeeper = the
-        # owner-realm gk account — both observe-only tabs, never u_tenant.
-        self.assertNotIn("miva1-subdev", ids)
-        self.assertNotIn("gatekeeper", ids)
+    # #882: test_marek_set_excludes_owner_account_boxes removed (marek webterm module deleted)
 
     def test_no_owner_account_entry_is_ever_u_tenant(self):
         # CROSS-TENANT REFUSAL: an inventory entry whose TARGET account is the
         # owner's (`newlevel`) must never be marked u_tenant — its
         # ~/.claude/tickets-status caches aggregate the OWNER's sessions.
-        for profile in (profiles.DAVID, profiles.MAREK):
+        # #882: marek webterm module deleted — test david only
+        for profile in (profiles.DAVID,):
             for e in profiles.profile_inventory(profile, []):
                 if e.get("user") == "newlevel":
                     self.assertIsNot(e.get("u_tenant"), True, e["id"])
@@ -113,7 +99,8 @@ class TestUTenantSets703(unittest.TestCase):
             self.assertEqual(profiles.u_tenant_entries("david"), [])
 
     def test_every_collected_entry_is_local_or_explicit_identity(self):
-        for profile in (profiles.DAVID, profiles.MAREK):
+        # #882: marek webterm module deleted — test david only
+        for profile in (profiles.DAVID,):
             entries = profiles.u_tenant_entries(profile)
             self.assertTrue(entries)                       # non-vacuous
             for e in entries:
@@ -180,16 +167,12 @@ class TestLaneArtifactsScopedU703(unittest.TestCase):
 
     def test_lane_gateway_units_carry_u_lane_and_never_u_collect(self):
         d_unit = dv.render_david_gateway_unit()
-        m_unit = mk.render_marek_gateway_unit()
+        # #882: marek webterm module deleted — test david only
         d_exec = next(ln for ln in d_unit.splitlines()
                       if ln.startswith("ExecStart="))
-        m_exec = next(ln for ln in m_unit.splitlines()
-                      if ln.startswith("ExecStart="))
         self.assertIn("--u-lane david", d_exec)
-        self.assertIn("--u-lane marek", m_exec)
         # the owner-only cross-tenant flag stays OUT of every lane unit
         self.assertNotIn("--u-collect", d_unit)
-        self.assertNotIn("--u-collect", m_unit)
 
     def test_owner_unit_still_u_collect_never_u_lane(self):
         unit = w._render_webterm_gateway_unit("127.0.0.1", access_mode=True)

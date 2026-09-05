@@ -5976,9 +5976,9 @@ class TestTmuxWindowSizeNoResize(TestCase):
         # in the window-naming feature) -- a resize subcommand rendered there
         # would bypass the version gate and the doctrine with zero friction.
         base = Path(airuleset.__file__).resolve().parent
+        # #882: cli_webterm_marek.py removed from this list (marek webterm module deleted)
         for name in ("cli_bashrc_appliers.py", "cli_webterm.py",
-                     "cli_webterm_lane.py", "cli_webterm_david.py",
-                     "cli_webterm_marek.py"):
+                     "cli_webterm_lane.py", "cli_webterm_david.py"):
             f = base / name
             if f.exists():
                 self.assertNotIn("resize-window", f.read_text(),

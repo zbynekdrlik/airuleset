@@ -287,13 +287,11 @@ class TestDominikaUnitRender(unittest.TestCase):
 
     def test_dominika_ports_are_distinct_from_owner_david_and_marek(self):
         import cli_webterm_david as d
-        import cli_webterm_marek as mk
+        # #882: marek webterm module deleted — check david + owner only
         self.assertNotIn(dn.WEBTERM_DOMINIKA_GATEWAY_PORT,
-                         (w.WEBTERM_GATEWAY_PORT, d.WEBTERM_DAVID_GATEWAY_PORT,
-                          mk.WEBTERM_MAREK_GATEWAY_PORT))
+                         (w.WEBTERM_GATEWAY_PORT, d.WEBTERM_DAVID_GATEWAY_PORT))
         self.assertNotIn(dn.WEBTERM_DOMINIKA_TTYD_PORT,
-                         (w.WEBTERM_TTYD_PORT, d.WEBTERM_DAVID_TTYD_PORT,
-                          mk.WEBTERM_MAREK_TTYD_PORT))
+                         (w.WEBTERM_TTYD_PORT, d.WEBTERM_DAVID_TTYD_PORT))
 
     def test_gateway_after_points_at_dominika_ttyd_unit(self):
         unit = dn.render_dominika_gateway_unit()
@@ -311,13 +309,11 @@ class TestDominikaUnitRender(unittest.TestCase):
         self.assertEqual(dn.WEBTERM_DOMINIKA_TUNNEL_UUID,
                          "7792f710-16fb-41da-b46d-1d7b1cd0f8a6")
         import cli_webterm_david as d
-        import cli_webterm_marek as mk
+        # #882: marek webterm module deleted — check david only
         self.assertNotIn(dn.WEBTERM_DOMINIKA_TUNNEL_UUID,
-                         (d.WEBTERM_DAVID_TUNNEL_UUID, mk.WEBTERM_MAREK_TUNNEL_UUID))
+                         (d.WEBTERM_DAVID_TUNNEL_UUID,))
         self.assertNotEqual(dn.WEBTERM_DOMINIKA_TUNNEL_CONFIG,
                             d.WEBTERM_DAVID_TUNNEL_CONFIG)
-        self.assertNotEqual(dn.WEBTERM_DOMINIKA_TUNNEL_CONFIG,
-                            mk.WEBTERM_MAREK_TUNNEL_CONFIG)
 
 
 class TestDominikaPrerequisiteGate(unittest.TestCase):
