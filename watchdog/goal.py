@@ -252,12 +252,27 @@ _GOAL_AUTH_REARM_ORIGIN = "auth-rearm"
 # gates -- NEVER a free-text nudge (owner directive #764). Rate-limited (min gap
 # + daily cap per sid) since the 🏁 proof replaces the dark-duration confirmation.
 _GOAL_FULFILLED_REARM_ORIGIN = "fulfilled-rearm"
+# #890 -- a watchdog-INITIATED re-arm after the OWNER ANSWERED a `❓ NEEDS YOU`-
+# blocked turn in a session that had an armed `/goal` (stop (A) disarmed it; CC
+# never writes a `cleared` marker for this, so `mark` is still "set" with
+# `armed is False`). The answer is UNAMBIGUOUS (a user message after the ❓ turn),
+# so it shares the recovery-class relaxations (own rate state, compact-hold-exempt,
+# stale-cache-tolerant). Delivered by the SAME goal_sweep/deliver_goal channel.
+_GOAL_ANSWER_REARM_ORIGIN = "answer-rearm"
 # The watchdog-INITIATED re-arm origins that honour deliver_goal's recent-human
 # gate (never type into a pane a human just touched) — as opposed to the user's
 # own `self-callback` arm, whose origin IS the user.
 _GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN, _GOAL_STALE_REARM_ORIGIN,
                                 _GOAL_AUTH_REARM_ORIGIN,
-                                _GOAL_FULFILLED_REARM_ORIGIN)
+                                _GOAL_FULFILLED_REARM_ORIGIN,
+                                _GOAL_ANSWER_REARM_ORIGIN)
+# #890 -- RECOVERY-class origins: events that are PROVEN (not guessed) — an auth
+# clear is CC saying so, an answered-❓ is the transcript saying so. These are
+# EXEMPT from the dead-dark attempt cap (they have their OWN rate states) and from
+# the compact-pending hold (they only RECORD a request — a file write, not a
+# keystroke; the hold exists to prevent a work-pushing nudge, not a recovery
+# recording). A subset of `_GOAL_WATCHDOG_REARM_ORIGINS`.
+_GOAL_RECOVERY_ORIGINS = (_GOAL_AUTH_REARM_ORIGIN, _GOAL_ANSWER_REARM_ORIGIN)
 # #757 -- the genuine USER-callback origins: a request written because a HUMAN
 # typed `/autopilot` (the only such origin today is `self-callback`, produced
 # ONLY by the CLI `goal-arm --self` -- never auto-refired in a loop). This is
@@ -354,7 +369,9 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
     # the recent-human gate the user always trips -> silent expiry. Re-recording
     # the SAME origin (prior_origin == new_origin) still updates in place.
     if prior is not None \
-            and new_origin in (_GOAL_REARM_ORIGIN, _GOAL_FULFILLED_REARM_ORIGIN) \
+            and new_origin in (_GOAL_REARM_ORIGIN, _GOAL_FULFILLED_REARM_ORIGIN,
+                               _GOAL_AUTH_REARM_ORIGIN,
+                               _GOAL_ANSWER_REARM_ORIGIN) \
             and prior_origin != new_origin:
         return True                              # pending arm stands, untouched
 
@@ -1220,7 +1237,8 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
     # episode its own ping.
     if (send_fn is not None and not dry_run
             and origin not in (_GOAL_STALE_REARM_ORIGIN, _GOAL_AUTH_REARM_ORIGIN,
-                               _GOAL_FULFILLED_REARM_ORIGIN)):
+                               _GOAL_FULFILLED_REARM_ORIGIN,
+                               _GOAL_ANSWER_REARM_ORIGIN)):
         from notify import stream_redirect
         owner = (stream_redirect(watchdog.pane_owner(pid, run))
                  if pid else None)
@@ -1413,7 +1431,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if (send_fn is not None and not dry_run
                     and origin not in (_GOAL_STALE_REARM_ORIGIN,
                                        _GOAL_AUTH_REARM_ORIGIN,
-                                       _GOAL_FULFILLED_REARM_ORIGIN)):
+                                       _GOAL_FULFILLED_REARM_ORIGIN,
+                                       _GOAL_ANSWER_REARM_ORIGIN)):
                 from notify import stream_redirect
                 pid_for_owner = _compact._find_pane_for_session(
                     sid, cwd, run=run, projects_dir=projects_dir)
@@ -1934,6 +1953,19 @@ GOAL_DARK_REARM_HARD_CAP_PER_DAY = 12   # anti-keystorm daily strop past the bac
 # many times a day; both tunable, with a why here.
 GOAL_FULFILLED_REARM_MIN_GAP_S = 600    # >= 10 min between fulfilled-rearms / sid
 GOAL_FULFILLED_REARM_MAX_PER_DAY = 12   # cap: max fulfilled-rearms per sid / 24h
+# #890 -- RECOVERY-class rate limits. Auth-rearm is PROVEN (CC auth event, not a
+# guess), so it has its OWN rate state separate from the dead-dark 2/24h cap.
+# MIN_GAP: 300s (5 min) — an auth clear + recovery happens in seconds, but a
+# flapping credential (expired token, provider outage) can fire many clears/min,
+# so min-gap prevents a keystroke livelock into a broken session. MAX_PER_DAY: 12
+# (the fulfilled precedent) — a normal fleet day can have several account switches
+# (claudy drain passes, manual evacuations; #890 evidence: 2 in one afternoon).
+GOAL_AUTH_REARM_MIN_GAP_S = 300         # >= 5 min between auth-rearms / sid
+GOAL_AUTH_REARM_MAX_PER_DAY = 12        # cap: max auth-rearms per sid / 24h
+# #890 -- answer-rearm rate limits. The owner answers a handful of ❓ questions a
+# day; 6/day bounds a pathological ❓→answer→❓ ping-pong.
+GOAL_ANSWER_REARM_MIN_GAP_S = 600      # >= 10 min between answer-rearms / sid
+GOAL_ANSWER_REARM_MAX_PER_DAY = 6      # cap: max answer-rearms per sid / 24h
 # #524-review: ~4 sweeps, not ~2.5 -- a single delayed/missed sweep (120s
 # TimeoutStartSec, #365 contention, a memory-pressure reap) between the record
 # sweep and job 9's first delivery must not false-drop an otherwise-fresh
@@ -2164,6 +2196,26 @@ def _fulfilled_rearm_ok(recs, now):
     if pruned and (now - max(pruned)) < GOAL_FULFILLED_REARM_MIN_GAP_S:
         return False, pruned, "gap"
     if len(pruned) >= GOAL_FULFILLED_REARM_MAX_PER_DAY:
+        return False, pruned, "cap"
+    return True, pruned, ""
+
+
+def _recovery_rearm_ok(recs, now, min_gap, max_per_day):
+    """#890 -- pure per-sid rate limiter for RECOVERY-class origins (auth-rearm,
+    answer-rearm). Mirrors `_fulfilled_rearm_ok` exactly but takes the gap +
+    cap as PARAMETERS so each recovery origin can configure its own cadence.
+    Returns `(ok, pruned, reason)`:
+      * `reason == "gap"`  -- < min_gap since the newest record;
+      * `reason == "cap"`  -- max_per_day records already in the rolling 24h;
+      * `("", ok=True)`    -- record allowed.
+    `pruned` is the 24h-pruned list; the caller appends `now` only on a real
+    record. Same fail-safe posture as `_fulfilled_rearm_ok`."""
+    day = 24 * 3600
+    pruned = [t for t in (recs or [])
+              if isinstance(t, (int, float)) and 0 <= (now - t) <= day]
+    if pruned and (now - max(pruned)) < min_gap:
+        return False, pruned, "gap"
+    if len(pruned) >= max_per_day:
         return False, pruned, "cap"
     return True, pruned, ""
 
@@ -2498,15 +2550,21 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
 
 
 def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
-                       obligation_fn, requests_path, attempts_state):
-    """#675 -- re-arm a loop CC cleared on a TRANSIENT auth failure (the newest
-    marker is `cleared` with `clear_kind=="auth"`; the caller gates on that, the
-    #170 boundary -- a USER/`error` clear is NEVER re-armed). Mirrors
-    `_stale_rearm_decide`'s bounds and shares the dark-rearm 24h/2 attempt cap
-    (a loop is either dead-dark OR alive-stale OR auth-cleared this sweep, in
-    mutually-exclusive `armed`/`mark` branches -- dead-dark vs alive-stale split
-    by `armed`, auth-cleared by the `mark.clear_kind` this branch already gated).
+                       obligation_fn, requests_path, auth_attempts_state):
+    """#675/#890 -- re-arm a loop CC cleared on a TRANSIENT auth failure (the
+    newest marker is `cleared` with `clear_kind=="auth"`; the caller gates on
+    that, the #170 boundary -- a USER/`error` clear is NEVER re-armed).
     Returns ONE explicit decision-log line, or None for the non-actionable cases.
+
+    #890 CHANGES from the original #675: auth-rearm is a RECOVERY-class origin
+    (PROVEN, not guessed), so it has its OWN rate state (`auth_attempts_state`,
+    separate from the dead-dark 2/24h `attempts_state`) with a generous but
+    capped cadence (min-gap 300s + 12/day, the #764 fulfilled-rearm precedent).
+    It also TOLERATES a STALE obligation cache (the session being recovered is
+    the only thing that refreshes this cache — demanding freshness from a dead
+    session is circular; a wrong re-arm on a stale-but-drained backlog costs one
+    loop launch → 🏁 → fulfilled machinery). A MISSING cache (`cts is None`) or
+    `open == 0` still skips — that stays the fail-safe floor.
 
     Unlike the dead-dark path it needs NO 8-read death CONFIRMATION: the auth
     clear is UNAMBIGUOUS (CC explicitly cleared it), so the only question is "is
@@ -2523,7 +2581,7 @@ def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
     NO marker-age bound is imposed: an auth clear left un-rearmed for hours (box
     down, then back with a still-live idle pane + workable backlog) SHOULD still
     recover -- late recovery of the owner's autopilot is desired, and the
-    workable-backlog + attempt-cap + recent-human + foreign gates already bound
+    workable-backlog + rate-limit + recent-human + foreign gates already bound
     it (a deliberate owner clear is a `user` marker, never re-armed).
 
     The keystroke + its recent-human + freshness gates live in `deliver_goal`."""
@@ -2543,26 +2601,240 @@ def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
                 "is FOREIGN / unknown (not an autopilot condition) -- never "
                 "re-armed (#170)" % (loc, sid))
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
-    fresh = cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S
-    if not (isinstance(open_n, int) and open_n > 0 and fresh):
+    # #890 -- STALE-TOLERANT: accept open_n > 0 even when the cache is stale.
+    # A dead session is the only thing that refreshes this cache; demanding
+    # freshness from a dead session is circular (the 22h gap's exact mechanism).
+    # A wrong re-arm on a stale-but-drained backlog costs one launch → 🏁 → stop
+    # (handled by #764/#766 fulfilled machinery). MISSING cache (cts is None)
+    # or open == 0 still skips — the fail-safe floor.
+    has_cache = cts is not None
+    if not (isinstance(open_n, int) and open_n > 0 and has_cache):
         return ("auth-rearm %s sid=%s -> cleared-by-auth but backlog not "
-                "workable (open=%s) -- skip" % (loc, sid, open_n))
-    ok, pruned, wait_s = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
+                "workable (open=%s, cache=%s) -- skip"
+                % (loc, sid, open_n,
+                   "missing" if not has_cache else "present"))
+    # #890 -- own rate state, separate from the dead-dark 2/24h cap.
+    ok, pruned, reason = _recovery_rearm_ok(
+        auth_attempts_state.get(sid), now,
+        GOAL_AUTH_REARM_MIN_GAP_S, GOAL_AUTH_REARM_MAX_PER_DAY)
     if not ok:
-        if wait_s is not None:   # #804 mode-2 -- backoff, never silent-until-midnight
-            return ("auth-rearm %s sid=%s -> cleared-by-auth but re-arm BACKOFF "
-                    "(next in %ss) -- skip" % (loc, sid, wait_s))
-        return ("auth-rearm %s sid=%s -> cleared-by-auth but ATTEMPT-CAP "
-                "(%d/24h) -- skip" % (loc, sid, GOAL_DARK_REARM_HARD_CAP_PER_DAY))
+        return ("auth-rearm %s sid=%s -> cleared-by-auth but RATE-LIMIT "
+                "(%s, %d recorded) -- skip"
+                % (loc, sid, reason, len(pruned)))
     if dry_run:
         return ("auth-rearm %s sid=%s -> cleared-by-auth would record re-arm "
                 "(dry-run, open=%s authority=%s)" % (loc, sid, open_n, authority))
-    attempts_state[sid] = pruned + [now]
+    auth_attempts_state[sid] = pruned + [now]
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_AUTH_REARM_ORIGIN, path=requests_path)
     return ("auth-rearm %s sid=%s -> cleared-by-auth: recording re-arm (open=%s "
             "authority=%s attempt=%d)"
-            % (loc, sid, open_n, authority, len(attempts_state[sid])))
+            % (loc, sid, open_n, authority, len(auth_attempts_state[sid])))
+
+
+def _answer_rearm_check_transcript(tpath, mark_ts):
+    """#890 -- read the bounded transcript tail to detect the ANSWERED-❓ pattern:
+    the newest REAL assistant turn has a `❓` marker (line-start, same `_MARKER_RX`
+    as `transcript_last_marker_bounded`), AND a genuine human USER prompt (not a
+    tool_result, not a known machine prompt) follows it.
+
+    Returns `(q_idx, answered, owner_touched_goal)`:
+      * `q_idx`: the INDEX in the entries list of the ❓-marked assistant turn,
+        or None if no such turn found.
+      * `answered`: True when a human user message follows the ❓ turn.
+      * `owner_touched_goal`: True when the owner's post-❓ text contains `/goal`
+        (the #170 belt — the owner touching goal state ⇒ abstain).
+
+    BOUNDED read: uses `_read_jsonl_byte_tail` (the #764 perf class), never a
+    whole-file scan. The ❓ turn is detected by `_MARKER_RX.match` on the last
+    ≤3 non-blank lines — the IDENTICAL walk `_last_marker_line_from_entries`
+    uses (review C1 fix: not `text.endswith("❓")`). mark_ts is used to reject
+    a stale ❓ from a previous arm episode (fail-closed on unparseable mark_ts,
+    the #764 point-4 shape).
+
+    MACHINE-PROMPT FILTERING (review M1): a plain-text user entry that matches
+    known machine-injected prefixes (watchdog keystroke nudges, continue prompts)
+    is NOT counted as a human answer — prevents the montalu6-class bulldoze."""
+    import re
+    from watchdog.transcripts import _read_jsonl_byte_tail, _entry_text
+    from watchdog import _SENTINELS
+    _marker_rx = re.compile(r"^\s*(⏳|✅|❓)")
+    entries = _read_jsonl_byte_tail(tpath, 2_000_000, 200)
+    if not entries:
+        return None, False, False
+    # Walk backward to find the newest REAL assistant turn with a ❓ marker.
+    q_idx = None
+    q_ts = None
+    for i in range(len(entries) - 1, -1, -1):
+        entry = entries[i]
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            break  # an API error is not a real turn
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue  # synthetic/bookkeeping entry
+        # Found the newest real assistant turn — check for ❓ marker.
+        nonblank = [ln for ln in text.splitlines() if ln.strip()]
+        found_q_marker = False
+        for ln in reversed(nonblank[-3:]):
+            m = _marker_rx.match(ln)
+            if m and m.group(1) == "❓":
+                found_q_marker = True
+                break
+            elif m:
+                break  # a different marker (⏳/✅) — not a ❓ turn
+        if found_q_marker:
+            q_idx = i
+            # Extract the timestamp for the episode guard.
+            ts_str = entry.get("timestamp")
+            if isinstance(ts_str, str):
+                try:
+                    from datetime import datetime
+                    q_ts = datetime.fromisoformat(
+                        ts_str.replace("Z", "+00:00")).timestamp()
+                except (ValueError, TypeError):
+                    q_ts = None
+            elif isinstance(ts_str, (int, float)):
+                q_ts = ts_str
+        break  # stop at the newest real assistant turn either way
+
+    if q_idx is None or q_ts is None:
+        return None, False, False
+
+    # #764 point-4: fail CLOSED on unparseable mark_ts — a stale ❓ from a
+    # previous arm episode.
+    if not (isinstance(mark_ts, (int, float)) and q_ts >= mark_ts):
+        return None, False, False
+
+    # Walk FORWARD from the ❓ entry (by INDEX, not timestamp — review C2 fix)
+    # to find a genuine human user message.
+    answered = False
+    owner_touched_goal = False
+    # Known machine-injected user-entry prefixes (M1 fix: a watchdog nudge or
+    # a /compact command is NOT a human answer).
+    _machine_prefixes = (
+        "continue", "lane-check:", "stuck-check:", "/compact",
+        "recheck:", "nudge:", "UNPARK-AUDIT:",
+    )
+    for entry in entries[q_idx + 1:]:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "user":
+            continue
+        # A user entry with tool_result is NOT a human prompt.
+        msg = entry.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in content):
+                continue  # tool_result — not a human prompt
+        # A plain-text user entry — check for machine shapes.
+        text = (_entry_text(entry) or "").strip()
+        if not text:
+            continue
+        # Filter known machine-injected prefixes.
+        is_machine = False
+        for pfx in _machine_prefixes:
+            if text.startswith(pfx):
+                is_machine = True
+                break
+        if is_machine:
+            continue
+        # Check for /goal in the user's text (#170 belt).
+        if text.lstrip().startswith("/goal"):
+            owner_touched_goal = True
+        answered = True
+        break
+
+    return q_idx, answered, owner_touched_goal
+
+
+def _answer_rearm_decide(sid, cwd, tpath, mark, mark_ts, armed, now, loc,
+                         dry_run, rearm_fn, obligation_fn, requests_path,
+                         answer_attempts_state):
+    """#890 -- re-arm a loop after the OWNER ANSWERED a `❓ NEEDS YOU`-blocked
+    turn. CC's stop condition (A) disarmed the goal when the ❓ marker was
+    present; the owner's answer resumes the session, but the goal is gone.
+    This rider detects the answered-❓ pattern from the transcript and records
+    an `answer-rearm` request.
+
+    Trigger (ALL must hold):
+      1. `mark == "set"` AND `armed is False` — the stop-(A) shape.
+      2. Newest real assistant turn ends with `❓ NEEDS YOU` at epoch Q >= mark_ts.
+      3. A human USER message at U > Q — the answer arrived.
+      4. The cleared goal is an AUTOPILOT condition (foreign guard, #170).
+      5. Workable backlog (stale-tolerant, like auth-rearm).
+      6. Rate limit (own `answer_attempts_state`, min-gap 600s + 6/day).
+      7. Once-per-episode dedup: `answer_handled_state[sid]` stores the last Q.
+
+    #170 belts: (i) if `mark.state == "cleared"` (any kind), this code path is
+    unreachable — the caller only enters this branch on `mark.state == "set"`;
+    (ii) a `/goal` prefix in the user's post-❓ text ⇒ ABSTAIN (the owner
+    touching goal state is NEVER overridden).
+
+    Returns ONE decision-log line, or None (silent) for non-actionable cases.
+    The keystroke + its recent-human + freshness gates live in `deliver_goal`."""
+    if armed is not False:
+        return None
+    # Only for mark == "set" (the caller already gates on this).
+    if mark is None or mark.get("state") != "set":
+        return None
+
+    # Detect the answered-❓ pattern from the transcript.
+    q_idx, answered, owner_touched_goal = _answer_rearm_check_transcript(
+        tpath, mark_ts)
+    if q_idx is None:
+        return None  # no ❓ turn found, or stale ❓ from prior episode
+    if not answered:
+        return None  # ❓ not yet answered — the awaiting-user veto should hold
+    # #170 belt: the owner typed /goal after answering — abstain.
+    if owner_touched_goal:
+        return ("answer-rearm %s sid=%s -> answered-❓ but owner typed /goal "
+                "after answer -- never re-armed (#170)" % (loc, sid))
+
+    # defer to ANY pending request (goal_sweep is already delivering it).
+    if isinstance(load_goal_requests(requests_path).get(sid), dict):
+        return None
+
+    text, authority = (rearm_fn or _default_rearm_fn)(cwd)
+    if not text:
+        return ("answer-rearm %s sid=%s -> answered-❓ but NO template "
+                "resolved -- skip" % (loc, sid))
+    # Foreign guard: only re-arm an autopilot condition.
+    payload = mark.get("payload") if isinstance(mark, dict) else None
+    if _classify_armed_condition(payload, text) not in ("stale", "current"):
+        return ("answer-rearm %s sid=%s -> answered-❓ but the goal is "
+                "FOREIGN / unknown -- never re-armed (#170)" % (loc, sid))
+    # Workable backlog (stale-tolerant, like auth-rearm #890).
+    open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
+    has_cache = cts is not None
+    if not (isinstance(open_n, int) and open_n > 0 and has_cache):
+        return ("answer-rearm %s sid=%s -> answered-❓ but backlog not "
+                "workable (open=%s, cache=%s) -- skip"
+                % (loc, sid, open_n,
+                   "missing" if not has_cache else "present"))
+    # Own rate limit.
+    ok, pruned, reason = _recovery_rearm_ok(
+        answer_attempts_state.get(sid), now,
+        GOAL_ANSWER_REARM_MIN_GAP_S, GOAL_ANSWER_REARM_MAX_PER_DAY)
+    if not ok:
+        return ("answer-rearm %s sid=%s -> answered-❓ but RATE-LIMIT "
+                "(%s, %d recorded) -- skip"
+                % (loc, sid, reason, len(pruned)))
+    if dry_run:
+        return ("answer-rearm %s sid=%s -> answered-❓ would record re-arm "
+                "(dry-run, open=%s authority=%s)" % (loc, sid, open_n, authority))
+    # Record the re-arm request. Dedup is handled by the DOWNGRADE-REFUSED
+    # mechanism (a pending request of ANY origin blocks re-recording) + the
+    # rate limiter's min-gap (M2 fix: no consumed-epoch dedup that would lose
+    # a dropped/expired request forever).
+    answer_attempts_state[sid] = pruned + [now]
+    record_goal_request(sid, cwd, text, authority, now=now,
+                        origin=_GOAL_ANSWER_REARM_ORIGIN, path=requests_path)
+    return ("answer-rearm %s sid=%s -> answered-❓: recording re-arm (open=%s "
+            "authority=%s attempt=%d)"
+            % (loc, sid, open_n, authority, len(answer_attempts_state[sid])))
 
 
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
@@ -2631,6 +2903,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # #764 -- the per-sid fulfilled-rearm record timestamps (rate limiter), a
     # JSON list per sid; reaped below exactly like `attempts_state`.
     fulfilled_state = state.setdefault("goal_fulfilled_rearm", {})
+    # #890 -- per-sid recovery-class rate states (own dicts, separate from the
+    # dead-dark `attempts_state`). Reaped below exactly like `fulfilled_state`.
+    auth_attempts_state = state.setdefault("goal_auth_rearm_attempts", {})
+    answer_attempts_state = state.setdefault("goal_answer_rearm_attempts", {})
     # #767 -- the per-episode 🏁 PROOF cache `{sid: {"mark_ts", "bts", "seen"}}`.
     # Written on ANY 🏁-after-mark sighting (both the fulfilled-rearm AND the #766
     # veto branch) so heavy post-achieve output that scrolls the 🏁 out of the
@@ -2668,6 +2944,17 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                           and any(isinstance(t, (int, float))
                                   and 0 <= (now - t) <= _day for t in v))]:
         fulfilled_state.pop(_fsid, None)
+    # #890 -- same REAPER for the recovery-class rate states (auth + answer).
+    for _rsid in [k for k, v in list(auth_attempts_state.items())
+                  if not (isinstance(v, list)
+                          and any(isinstance(t, (int, float))
+                                  and 0 <= (now - t) <= _day for t in v))]:
+        auth_attempts_state.pop(_rsid, None)
+    for _rsid in [k for k, v in list(answer_attempts_state.items())
+                  if not (isinstance(v, list)
+                          and any(isinstance(t, (int, float))
+                                  and 0 <= (now - t) <= _day for t in v))]:
+        answer_attempts_state.pop(_rsid, None)
     # #767 -- same 24h REAPER for the proof cache, keyed on `seen` (the last
     # IN-WINDOW 🏁 sighting), NOT the immutable `bts`. A live fulfilled loop whose
     # 🏁 is still in the bounded tail refreshes `seen`=now every sweep, so it is
@@ -2749,17 +3036,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         if _cleared:
             continue
 
-        # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
-        # dark RE-ARM below (a re-arm WRITE schedules a next-batch /goal for job
-        # 9 to type). The janitor recovery + stranded-truncated clear ABOVE
-        # already ran deliberately -- they UNBLOCK the pane so the compact can
-        # deliver, they never push new work -- so only the re-arm decisions are
-        # held. Leave it; the next sweep re-arms once the compact clears.
-        if _compact.pending_compact_hold(sid, now):   # #848 bounded
-            logs.append("dark-watch %s sid=%s -> hold:compact-pending "
-                        "(pending /compact; no re-arm until it delivers)"
-                        % (loc, sid))
-            continue
+        # #890 -- marker reading + vetoes + auth-rearm are ABOVE the compact-
+        # pending hold (moved from below it). RECOVERY-class origins (auth-rearm,
+        # answer-rearm) only RECORD a request (a file write, not a keystroke); the
+        # hold exists to prevent a work-pushing NUDGE from landing before /compact,
+        # not to block a recovery recording. The dead-loop machinery (confirmation
+        # runs + dark-rearm, which goal_sweep types) stays BELOW the hold.
 
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None
@@ -2806,18 +3088,31 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         if vetoed:
             continue
 
-        # #737 C -- a session PARKED on a ❓ question is ALIVE-waiting; never
-        # re-arm/ping/stale-replace it (see `_dark_awaiting_user_veto`). Placed
-        # BEFORE the mark-state / auth-rearm block below so it covers EVERY re-arm
-        # path -- auth-rearm (state!="set") AND the armed True/None/False branches
-        # -- so the "never re-arm an awaiting-user session" invariant is literal.
-        if _dark_awaiting_user_veto(tpath):
-            if confirm_state.pop(sid, None) is not None:
-                logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
-                            "(❓ marker, confirmation run reset)" % (loc, sid))
-            seen_state.pop(sid, None)
-            pinged_state.pop(sid, None)
-            continue
+        # #737 C / #890 -- a session PARKED on a ❓ question is ALIVE-waiting.
+        # The ORIGINAL #737 veto held unconditionally when the last assistant
+        # marker was ❓. #890 makes it ANSWER-AWARE: when the ❓ is present but
+        # a genuine human user message FOLLOWED it, the veto LIFTS — the owner
+        # answered, so the answer-rearm rider (below) should fire. The veto
+        # still holds for all NON-answer-rearm paths (auth-rearm, stale-rearm,
+        # dead-loop) when the ❓ is unanswered.
+        _awaiting_user = _dark_awaiting_user_veto(tpath)
+        if _awaiting_user:
+            # #890 -- peek at whether the ❓ was answered. If so, DON'T veto:
+            # let the flow proceed to the answer-rearm check below.
+            # (Use mark_ts from the current mark, which may not be read yet
+            # for the non-"set" branch; for the "set" branch, mark.get("ts").)
+            _ans_mark_ts = mark.get("ts") if isinstance(mark, dict) else None
+            _q_idx, _q_answered, _ = _answer_rearm_check_transcript(
+                tpath, _ans_mark_ts)
+            if not _q_answered:
+                if confirm_state.pop(sid, None) is not None:
+                    logs.append("dark-watch %s sid=%s -> hold:awaiting-user "
+                                "(❓ marker, confirmation run reset)"
+                                % (loc, sid))
+                seen_state.pop(sid, None)
+                pinged_state.pop(sid, None)
+                continue
+            # ❓ was answered — lift the veto, let the flow proceed.
 
         armed = watchdog.pane_goal_armed(captured)
 
@@ -2828,11 +3123,13 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             # freshness gates apply). A USER `/goal clear` (or a non-auth `error`
             # clear) is NEVER re-armed (#170) and just resets the ping/confirm
             # state below.
+            # #890 -- this block is now ABOVE the compact-pending hold, so auth-
+            # rearm records its request regardless of a pending /compact.
             if (mark is not None and mark.get("state") == "cleared"
                     and mark.get("clear_kind") == "auth"):
                 ar = _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run,
                                         rearm_fn, obligation_fn, requests_path,
-                                        attempts_state)
+                                        auth_attempts_state)
                 if ar:
                     logs.append(ar)
             seen_state.pop(sid, None)
@@ -2840,6 +3137,16 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             confirm_state.pop(sid, None)   # #524 -- episode over (clear/no marker)
             continue
         mark_ts = mark.get("ts")
+
+        # #741/#890 WRITER-SIDE LATCH: a pending /compact for this session HOLDS
+        # the dead-loop RE-ARM below (a re-arm WRITE schedules a next-batch /goal
+        # for job 9 to type). Moved DOWN from its prior position (above marker
+        # reading) so FOUR origins now run ABOVE it: auth-rearm (mark != "set"
+        # branch), stale-rearm (armed=True branch), fulfilled-rearm (armed=False
+        # branch, before the hold), and answer-rearm (armed=False branch, before
+        # the hold). All four only RECORD requests (file writes, not keystrokes);
+        # the hold was built for work-pushing nudges, not recordings. The dead-
+        # loop confirmation + dark-rearm machinery stays BELOW.
 
         if armed is True:
             seen_state.pop(sid, None)
@@ -2921,6 +3228,33 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 logs.append(_vline)
             continue
         if _frhandled:
+            continue
+
+        # #890 ANSWER-REARM lane: a stop-(A) ❓-blocked loop whose owner
+        # ANSWERED. The awaiting-user veto (above) holds while the ❓ is
+        # unanswered; once the owner answers, the veto lifts, `armed is False` +
+        # `mark == "set"` reaches here, and this rider detects the answered-❓
+        # pattern from the transcript. Like auth-rearm, it only RECORDS a
+        # request (a file write) — the keystroke + all its gates live in
+        # deliver_goal. Placed ABOVE the compact-pending hold.
+        _arline = _answer_rearm_decide(
+            sid, cwd, tpath, mark, mark_ts, armed, now, loc, dry_run,
+            rearm_fn, obligation_fn, requests_path,
+            answer_attempts_state)
+        if _arline:
+            logs.append(_arline)
+            # If a re-arm was recorded (not just a skip log), move on.
+            if "recording re-arm" in _arline:
+                continue
+
+        # #741/#890 -- compact-pending hold, MOVED DOWN from its prior position
+        # (above marker reading). Recovery-class origins (auth-rearm above,
+        # fulfilled-rearm above, answer-rearm above) already ran;
+        # this holds ONLY the dead-loop confirmation + dark-rearm machinery below.
+        if _compact.pending_compact_hold(sid, now):   # #848 bounded
+            logs.append("dark-watch %s sid=%s -> hold:compact-pending "
+                        "(pending /compact; no dead-loop re-arm until it "
+                        "delivers)" % (loc, sid))
             continue
 
         prior = seen_state.get(sid)
