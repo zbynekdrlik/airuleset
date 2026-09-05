@@ -139,7 +139,7 @@ class TestOwnerSessionDefault(unittest.TestCase):
     def test_stream_box_uses_own_username(self):
         with mock.patch.object(appliers, "is_single_session_box_user",
                                return_value=True):
-            self.assertEqual(appliers._owner_session_default("marek"), "marek")
+            self.assertEqual(appliers._owner_session_default("montalu4"), "montalu4")
 
 
 class _FakeRun:
@@ -361,42 +361,42 @@ class TestNormalizeKillSweep660(unittest.TestCase):
             self.assertNotIn("killed", text)
             self.assertIn("skip", text)
 
-    # --- fleet-wide stream-family strays (dev2 marek incident) ---------------
+    # --- fleet-wide stream-family strays (dev2 incident) ----------------------
     def test_kills_foreign_stream_stray_on_owner_box(self):
-        # `marek` (a stream user) STANDALONE + idle on an owner box IS a stray.
+        # `montalu4` (a stream user) STANDALONE + idle on an owner box IS a stray.
         srv = self._run({"zbynek": ("1", "", ["bash"]),
-                         "marek": ("0", "", ["bash"]),
-                         "marek-12": ("0", "", ["bash"])},
+                         "montalu4": ("0", "", ["bash"]),
+                         "montalu4-12": ("0", "", ["bash"])},
                         stray_name_res=_OWNER_BOX_RES)
         killed = {c[-1] for c in srv.kill_calls()}
-        self.assertEqual(killed, {"=marek", "=marek-12"})
+        self.assertEqual(killed, {"=montalu4", "=montalu4-12"})
 
     def test_preserves_grouped_stream_work_session(self):
-        # marek-3 (grouped, real work) + david-0 (attached) preserved; only the
-        # standalone idle `marek` stray is absorbed.
+        # montalu4-3 (grouped, real work) + david-0 (attached) preserved; only
+        # the standalone idle `montalu4` stray is absorbed.
         srv = self._run({"zbynek": ("1", "", ["bash"]),
-                         "marek": ("0", "", ["bash"]),
-                         "marek-3": ("0", "marek", ["bash", "bash"]),
+                         "montalu4": ("0", "", ["bash"]),
+                         "montalu4-3": ("0", "montalu4", ["bash", "bash"]),
                          "david-0": ("1", "david", ["node"])},
                         stray_name_res=_OWNER_BOX_RES)
-        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=marek"})
+        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=montalu4"})
 
     def test_default_namespace_ignores_stream_names(self):
-        # WITHOUT the widened res, a `marek` stray is NOT swept (owner-N only).
+        # WITHOUT the widened res, a `montalu4` stray is NOT swept (owner-N only).
         srv = self._run({"zbynek": ("1", "", ["bash"]),
-                         "marek": ("0", "", ["bash"])})
+                         "montalu4": ("0", "", ["bash"])})
         self.assertEqual(srv.kill_calls(), [])
 
     def test_never_kills_stream_work_session_cwd_in_project_dir(self):
-        # the second-review residual: a `marek` name doubles as a real work
+        # the second-review residual: a `montalu4` name doubles as a real work
         # session whose stopped-claude bare shell sits in a PROJECT dir -- the
         # cwd-guard preserves it while a $HOME stray is still absorbed.
         srv = self._run({"zbynek": ("1", "", ["bash"]),
-                         "marek": ("0", "", ["bash"]),         # cwd $HOME -> kill
-                         "marek-2": ("0", "", ["bash"])},      # cwd project -> skip
+                         "montalu4": ("0", "", ["bash"]),         # cwd $HOME -> kill
+                         "montalu4-2": ("0", "", ["bash"])},      # cwd project -> skip
                         stray_name_res=_OWNER_BOX_RES,
-                        cwds={"marek-2": "/home/tester/devel/odoo"})
-        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=marek"})
+                        cwds={"montalu4-2": "/home/tester/devel/odoo"})
+        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=montalu4"})
 
     def test_audit_log_records_kill(self):
         with tempfile.TemporaryDirectory() as td:

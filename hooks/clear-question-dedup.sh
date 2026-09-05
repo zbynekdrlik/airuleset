@@ -73,6 +73,7 @@ else
         "stuck-check: "*)         AUTO="machine-nudge-stuck-check" ;;
         "bounce-backstop: "*)     AUTO="machine-nudge-bounce-backstop" ;;
         "gk-request backstop: "*) AUTO="machine-nudge-gk-request-backstop" ;;
+        "goal-guard: "*)          AUTO="machine-nudge-goal-guard" ;;
         "oauth-resume:"*)         AUTO="machine-nudge-oauth-resume" ;;
         "continue")               AUTO="machine-nudge-continue" ;;
     esac
@@ -93,6 +94,7 @@ if [ -n "$AUTO" ]; then
 fi
 
 rm -f "/tmp/claude-discord-lastq-${SID}" 2>/dev/null || true
+rm -f "/tmp/claude-lastq-refs-${SID}" 2>/dev/null || true
 # #668: the ✅ idle-ping dedup (LASTOK) follows the SAME rule as the ❓ dedup —
 # a real user prompt means the conversation moved on, so a later identical ✅ is
 # a fresh completion and must re-ping even if byte-identical.

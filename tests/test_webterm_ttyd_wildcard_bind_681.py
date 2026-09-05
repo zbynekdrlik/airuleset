@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_webterm as w  # noqa: E402
 import cli_webterm_david as dvd  # noqa: E402
-import cli_webterm_marek as mrk  # noqa: E402
+# #882: marek webterm module deleted
 
 
 # A coarse SECOND-LAYER scan of rendered output for an interface-any bind literal.
@@ -83,9 +83,8 @@ def _all_rendered_spawn_artifacts():
         ("owner Access gateway unit",
          w._render_webterm_gateway_unit(w.WEBTERM_TTYD_BIND, access_mode=True)),
         ("david gateway unit", dvd.render_david_gateway_unit()),
-        ("marek gateway unit", mrk.render_marek_gateway_unit()),
+        # #882: marek webterm module deleted
         ("david ttyd unit", dvd.render_david_ttyd_unit()),
-        ("marek ttyd unit", mrk.render_marek_ttyd_unit()),
     ]
 
 

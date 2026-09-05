@@ -4208,13 +4208,9 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertNotIn("montalu", self.notify.STREAM_NOTIFY_OWNER)
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
-        # montalu4 is Marek's OWN dev stream (airuleset#295 — the user's own
-        # statement, independently corroborated by odoo-erp#2961's
-        # 2026-08-05 ACCESS DECISION comment: montalu4 is the ONLY
-        # montalu-family account marek's SSH key was added to). Routing it
-        # to zbynek was the #295 bug — this assertion was INVERTED from
-        # "zbynek" as the RED half of that fix's regression test.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "marek")
+        # montalu4 was marek's stream (airuleset#295); #882 decommissioned
+        # marek and re-routed montalu4 to zbynek.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "zbynek")
         # montalu5/6/7/8: owner routing decision 2026-08-19 (airuleset#572)
         # REVERSED the 2026-08-11 #378 decision that montalu5 was Marek's --
         # montalu5 now routes to zbynek (-> claude-zbynek), same as 6/7/8.
@@ -4245,15 +4241,11 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david2"], "david")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david3"], "david")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david4"], "david")
-        # admin/stepan (airuleset#572, 2026-08-19): the forestshop-dev box's
-        # two linux accounts route to claude-marek. They have no Discord
-        # identity of their own and are absent from AUTHORITY_BY_USER (full
-        # authority) -- without this redirect resolve_owner() returned "" and
-        # the ping fell to the shared DISCORD_NOTIFICATION_CHANNEL_ID thread.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["admin"], "marek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["stepan"], "marek")
-        # marek is deliberately absent: its own tmux session name already
-        # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
+        # admin/stepan (airuleset#572): the forestshop-dev box's two linux
+        # accounts route to zbynek (#882: marek decommissioned, re-routed).
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["admin"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["stepan"], "zbynek")
+        # marek decommissioned (#882) — absent from STREAM_NOTIFY_OWNER.
         self.assertNotIn("marek", self.notify.STREAM_NOTIFY_OWNER)
 
     def test_a_mapped_user_resolves_with_no_tmux_and_no_env_override(self):
@@ -4294,16 +4286,15 @@ class TestStreamNotifyOwnerRouting(TestCase):
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), owner, who)
 
-    def test_forestshop_dev_accounts_resolve_to_marek(self):
+    def test_forestshop_dev_accounts_resolve_to_zbynek(self):
         # airuleset#572: the forestshop-dev box's two linux accounts (admin,
-        # stepan) redirect to claude-marek, resolved directly inside
-        # resolve_owner() with no TMUX and no env override -- without the
-        # STREAM_NOTIFY_OWNER entries they returned "" and the ping fell to
-        # the shared channel.
+        # stepan) originally redirected to claude-marek. #882 (2026-09-05):
+        # marek decommissioned, rerouted to zbynek (rejected: deletion →
+        # #572 shared-channel regression).
         for who in ("admin", "stepan"):
             with m.patch.dict(os.environ, {}, clear=True), \
                     m.patch.object(self.notify, "_current_user", return_value=who):
-                self.assertEqual(self.notify.resolve_owner(), "marek", who)
+                self.assertEqual(self.notify.resolve_owner(), "zbynek", who)
 
     def test_env_override_still_wins_over_the_stream_map(self):
         # montalu/david keep a redundant hand-added bashrc export from
@@ -4360,8 +4351,8 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.stream_redirect("montalu1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("montalu2"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("montalu3"), "zbynek")
-        # montalu4 → marek (airuleset#295) — see the sibling assertion above.
-        self.assertEqual(self.notify.stream_redirect("montalu4"), "marek")
+        # montalu4 → zbynek (#882: marek decommissioned, montalu4 re-routed)
+        self.assertEqual(self.notify.stream_redirect("montalu4"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("simap1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
         # david1 (renamed from david, #537) redirects to the `david` owner
@@ -5976,9 +5967,9 @@ class TestTmuxWindowSizeNoResize(TestCase):
         # in the window-naming feature) -- a resize subcommand rendered there
         # would bypass the version gate and the doctrine with zero friction.
         base = Path(airuleset.__file__).resolve().parent
+        # #882: cli_webterm_marek.py removed from this list (marek webterm module deleted)
         for name in ("cli_bashrc_appliers.py", "cli_webterm.py",
-                     "cli_webterm_lane.py", "cli_webterm_david.py",
-                     "cli_webterm_marek.py"):
+                     "cli_webterm_lane.py", "cli_webterm_david.py"):
             f = base / name
             if f.exists():
                 self.assertNotIn("resize-window", f.read_text(),
@@ -11920,7 +11911,8 @@ class TestRemoteHosts(TestCase):
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
     # david streams — additional capacity for the same external developer,
     # same subdev box, same gatekeeper_access identity requirement as david1.
-    SUBDEV_USERS = {"marek", "david1", "simap1", "miva1",
+    # marek removed #882 (decommissioned)
+    SUBDEV_USERS = {"david1", "simap1", "miva1",
                     "david2", "david3", "david4"}
 
     def _subdev_entries(self):
@@ -11931,7 +11923,7 @@ class TestRemoteHosts(TestCase):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu1@subdev",
-                         "marek@subdev", "david1@subdev", "simap1@subdev",
+                         "david1@subdev", "simap1@subdev",
                          "montalu2@subdev", "montalu3@subdev",
                          "montalu4@subdev", "miva1@subdev",
                          "david2@subdev", "david3@subdev", "david4@subdev",
@@ -14576,6 +14568,13 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         payload = json.dumps({"tool_input": {"command": command}})
         env = dict(os.environ)
+        # Use a clean HOME so the hook falls back to its hardcoded allowlist
+        # instead of reading the real ~/.claude/airuleset-subdev-accounts.conf
+        # (which may be missing users like marek — #869 conf divergence).
+        if "HOME" not in (env_extra or {}):
+            fake_home = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, fake_home, ignore_errors=True)
+            env["HOME"] = fake_home
         if env_extra:
             env.update(env_extra)
         return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
@@ -14741,7 +14740,8 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             'sshpass -p newlevel ssh -o StrictHostKeyChecking=no montalu1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_allows_marek_with_gatekeeper_identity(self):
+    def test_allows_marek_with_gatekeeper_identity_882(self):
+        # #882 scope correction: marek@subdev restored (observer lane).
         r = self._run(
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 marek@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -14781,7 +14781,8 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         r = self._run("scp file.txt montalu1@subdev:/tmp/")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_allows_rsync_marek_with_identity(self):
+    def test_allows_rsync_marek_882(self):
+        # #882 scope correction: marek@subdev restored (observer lane).
         r = self._run(
             "rsync -avz -e 'ssh -i ~/.secrets/gatekeeper_access_ed25519' "
             "./local/ marek@subdev:/remote/")

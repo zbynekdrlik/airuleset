@@ -164,16 +164,7 @@ PRIVILEGES: List[Privilege] = [
         must_move=True,
         used_by=("cli_webterm_profiles.py:96 (WEBTERM_DAVID_IDENTITY)",),
     ),
-    Privilege(
-        name="webterm_marek_ed25519",
-        kind=KIND_SSH_KEY,
-        local_path="~/.secrets/webterm_marek_ed25519",
-        reach="dedicated webterm-provisioning ssh key for marek@subdev",
-        rotation="new keypair on the new box, authorize for marek@subdev, "
-                 "remove dev1's old key",
-        must_move=True,
-        used_by=("cli_webterm_profiles.py:186 (WEBTERM_MAREK_IDENTITY)",),
-    ),
+    # #882: webterm_marek_ed25519 entry removed (marek webterm module deleted)
     Privilege(
         name="cloudflare-newlevel-access",
         kind=KIND_API_TOKEN,
@@ -335,9 +326,11 @@ PRIVILEGES: List[Privilege] = [
     Privilege(
         name="soniox_source",
         kind=KIND_API_TOKEN,
-        local_path="~/devel/voiceagent/.env",
+        local_path="~/.secrets/soniox.env",
         reach="Soniox API key source (the origin file soniox provisioning "
-              "reads and fans out to fleet targets)",
+              "reads and fans out to fleet targets; #870 F3: controller box "
+              "sources from ~/.secrets/soniox.env, dev1 falls back to "
+              "~/devel/voiceagent/.env via SONIOX_KEY_SOURCE fallback chain)",
         rotation="new Soniox key on the new box; fan out via push",
         must_move=True,
         used_by=("cli_remote.py:99 (SONIOX_KEY_SOURCE)",),

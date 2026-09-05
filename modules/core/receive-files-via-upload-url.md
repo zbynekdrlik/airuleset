@@ -11,4 +11,4 @@
 
 #### Receiving CREDENTIALS FROM the User — `secret request`/`secret exec`, NEVER `upload` or chat
 
-A credential is NOT a file — `secret request` receives it safely, `secret exec` uses it without exposing it, `secret show` delivers one to the owner. BANNED: pasting a password/key/token into chat (permanently in the transcript). Full credential/vault mechanics (persistence, delivery, `--persist`, one-shot render URLs): companion `skills/receive-files-credentials/DEEP.md` (#859).
+A credential is NOT a file — `secret request` receives it safely, `secret exec` uses it without exposing it, `secret show` delivers one to the owner. **`secret show` URL = OWNER ACTION (#879):** deliver via `❓` block + `needs-owner-action` (→ `U`), never a report line; use `--ttl 3600`; hook-backstopped. BANNED: pasting a password/key/token into chat (permanently in the transcript). Full credential/vault mechanics (persistence, delivery, `--persist`, one-shot render URLs): companion `skills/receive-files-credentials/DEEP.md` (#859).
