@@ -524,7 +524,8 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "tests/test_marek_decommission_882.py": 44
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
