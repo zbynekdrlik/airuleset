@@ -45,7 +45,6 @@ class TestPassAArgvMatchesCI(unittest.TestCase):
 
     def test_pass_a_argv_matches_ci(self):
         ci_args = _ci_pytest_args()
-        ci_args_output = "\n".join(ci_args) + "\n" if ci_args else ""
         expected_argv = [
             sys.executable, "-m", "pytest", "tests/",
             *ci_args,
@@ -77,7 +76,7 @@ class TestPassAArgvMatchesCI(unittest.TestCase):
                             try:
                                 import argparse
                                 cli_remote.cmd_push(argparse.Namespace())
-                            except SystemExit as exc:
+                            except SystemExit:
                                 # cmd_push may exit on install/deploy steps —
                                 # the captured calls are what we need
                                 pass  # noqa: expected in test harness
@@ -125,7 +124,7 @@ class TestPassAEnvHomeIsFreshTmp(unittest.TestCase):
                             try:
                                 import argparse
                                 cli_remote.cmd_push(argparse.Namespace())
-                            except SystemExit as exc:
+                            except SystemExit:
                                 pass  # noqa: expected in test harness
 
         # Find the Pass A call

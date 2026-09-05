@@ -518,6 +518,12 @@ is blocked by `block-foreign-airuleset-write.sh` RULE B2 (#817) from mutating th
 so a GENUINE airuleset serial-fallback dispatch must set the STANDING env `AIRULESET_ALLOW_WORKTREE_ESCAPE=1`
 on the worker (a per-command `VAR=1 …` prefix does NOT reach the hook); other repos are unaffected.
 
+**On airuleset, never bypass `cmd_push` with a bare `git push` — the push gate's runner-shape Pass A
+IS the integration lane's CI-parity second pass (#875).** `cmd_push` runs a CI-mirroring hermetic
+pytest subset under a clean HOME (no `~/.claude`, no dev1 tools) before the full unittest pass,
+catching env-coupled test failures pre-push instead of one 15-min CI cycle later. Workers touching
+env-coupled code cite a Pass-A-green line in their LANE-RETURN.
+
 **Repo-flow policy — which target a round's branches integrate into:**
 - **Local-merge repo** (pushes straight to `main`, no PR/CI — e.g. airuleset itself): the round's
   worktree branches each merge `--no-ff` into local `main` ONE AT A TIME (Step 4), THEN one full
