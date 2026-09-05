@@ -230,7 +230,7 @@
     "tests/test_item95_item9_question_skill.py": 218,
     "tests/test_janitor_park_reclaim.py": 538,
     "tests/test_job20_nudge_busy_cap_714.py": 246,
-    "tests/test_key_rotation.py": 715,
+    "tests/test_key_rotation.py": 748,
     "tests/test_labelled_box_border.py": 276,
     "tests/test_lane_dedup_670.py": 106,
     "tests/test_lane_dormant_cleanup_729.py": 128,
