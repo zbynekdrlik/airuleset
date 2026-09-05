@@ -225,7 +225,7 @@ class TestTriggerRow(TestCase):
         # `mail_message_reaction` — the pattern MUST fire on it too, or writing
         # the psql fallback script never surfaces this recipe.
         self.assertIn("mail_message_reaction", pattern)
-        self.assertEqual(body, "skills/odoo-discuss-xmlrpc/read-reactions.md")
+        self.assertEqual(body, "skills/odoo-client-messaging/read-reactions.md")
 
     def test_recipe_reads_guest_id(self):
         # review finding: a Discuss GUEST reacts with partner_id=False + a set

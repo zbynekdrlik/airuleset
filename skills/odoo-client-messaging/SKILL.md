@@ -1,6 +1,6 @@
 ---
 name: odoo-client-messaging
-description: "Channel-agnostic client messaging for Odoo sub-dev streams — state machine (U/W partition, tacit/stale, acceptance markers) + compose doctrine (owner approval, signature, family batching)."
+description: "Channel-agnostic Odoo client messaging: state machine (U/W, tacit/stale, acceptance markers) + compose doctrine (owner approval, signature, batching) in companion handover-compose.md."
 user-invocable: false
 ---
 
