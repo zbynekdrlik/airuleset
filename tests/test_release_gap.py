@@ -443,7 +443,7 @@ class TestOrchestrator(_OrchBase):
         self.assertTrue(any("release-gap nudge" in ln for ln in logs))
         typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed)
-        self.assertIn("release-gap", typed)
+        self.assertTrue("release-gap" in typed or "release-idle" in typed)
         self.assertIn("42", typed)
         self.assertEqual(rrecs[self.sid]["last_nudge"], NOW)
         self.assertIn(self.sid, handled)
@@ -587,7 +587,7 @@ class TestLaneSweepWiring(unittest.TestCase):
                       "an armed full-authority pane with a stalled release gap "
                       "past cadence must be nudged (RED before goal_lane_sweep "
                       "wires goal_release_gap_recheck)")
-        self.assertIn("release-gap", typed)
+        self.assertTrue("release-gap" in typed or "release-idle" in typed)
         self.assertEqual(state["release_gap"][sid]["last_nudge"], NOW)
 
     def test_busy_bg_agent_pane_not_nudged_wiring(self):
@@ -774,10 +774,13 @@ class TestReleaseTrainRunInFlight(unittest.TestCase):
 
 
 def _fake_run_factory(*, origin="https://github.com/o/n.git", origin_rc=0,
-                      compare=None, staging=None, prs=None, runs=None):
+                      compare=None, staging=None, prs=None, runs=None,
+                      deploy_runs=None, shadow_runs=None):
     """A subprocess.run replacement dispatching on argv (order-independent).
     compare/staging: (rc, stdout, stderr). prs: {base: [rows]}. runs: {status:
-    [rows]}."""
+    [rows]}. deploy_runs/shadow_runs: [rows] for workflow-scoped run list calls.
+    #846: compare stdout is now JSON {ahead, oldest} — callers pass the raw int
+    and this factory wraps it."""
     import json as _json
     from subprocess import CompletedProcess
 
@@ -786,6 +789,8 @@ def _fake_run_factory(*, origin="https://github.com/o/n.git", origin_rc=0,
             return CompletedProcess(argv, origin_rc, stdout=origin, stderr="")
         if argv[:2] == ["gh", "api"] and "compare" in argv[2]:
             rc, out, err = compare
+            if rc == 0 and out and not out.strip().startswith("{"):
+                out = _json.dumps({"ahead": int(out.strip()), "oldest": None})
             return CompletedProcess(argv, rc, stdout=out, stderr=err)
         if argv[:2] == ["gh", "api"] and "/branches/" in argv[2]:
             rc, out, err = staging
@@ -796,6 +801,15 @@ def _fake_run_factory(*, origin="https://github.com/o/n.git", origin_rc=0,
                                     stdout=_json.dumps((prs or {}).get(base, [])),
                                     stderr="")
         if argv[:3] == ["gh", "run", "list"]:
+            if "-w" in argv:
+                wf = argv[argv.index("-w") + 1]
+                if "deploy" in wf.lower() or "prod" in wf.lower():
+                    return CompletedProcess(argv, 0,
+                                            stdout=_json.dumps(deploy_runs or []),
+                                            stderr="")
+                return CompletedProcess(argv, 0,
+                                        stdout=_json.dumps(shadow_runs or []),
+                                        stderr="")
             st = argv[argv.index("--status") + 1]
             return CompletedProcess(argv, 0,
                                     stdout=_json.dumps((runs or {}).get(st, [])),
@@ -810,6 +824,12 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
         with m.patch("subprocess.run", side_effect=_fake_run_factory(**kw)):
             return airuleset._watchdog_release_state_fetch("/r")
 
+    def _assert_core(self, result, expected):
+        """Assert the core 3 keys match, ignoring #846 widened keys."""
+        self.assertIsInstance(result, dict)
+        for k in ("ahead", "in_flight", "train"):
+            self.assertEqual(result[k], expected[k], "key %r" % k)
+
     def test_non_github_origin_is_none(self):
         self.assertIsNone(self._fetch(origin="https://gitlab.com/o/n.git"))
 
@@ -817,7 +837,7 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
         self.assertIsNone(self._fetch(origin_rc=1))
 
     def test_no_develop_branch_compare_404_is_clean_no_gap(self):
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(1, "", "gh: Not Found (HTTP 404)")),
             {"ahead": 0, "in_flight": False, "train": False})
 
@@ -829,9 +849,9 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
         # short-circuits blind — the staging branch is verified so the result
         # can honestly carry `train` True for the release-landed escalation.
         # Same ahead/in_flight semantics as the pre-#698 short-circuit.
-        self.assertEqual(self._fetch(compare=(0, "0", ""),
-                                     staging=(0, "staging", "")),
-                         {"ahead": 0, "in_flight": False, "train": True})
+        self._assert_core(self._fetch(compare=(0, "0", ""),
+                                      staging=(0, "staging", "")),
+                          {"ahead": 0, "in_flight": False, "train": True})
 
     def test_unparsable_ahead_is_none(self):
         self.assertIsNone(self._fetch(compare=(0, "nope", "")))
@@ -839,7 +859,7 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
     def test_gap_but_no_staging_is_clean_no_gap(self):
         # review F6: a gap on a 2-branch repo with a stray develop but no staging
         # is NOT a release train -> clean no-gap, never a spurious nudge.
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(0, "9", ""),
                         staging=(1, "", "Not Found (HTTP 404)")),
             {"ahead": 0, "in_flight": False, "train": False})
@@ -849,19 +869,19 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
                                       staging=(1, "", "error connecting")))
 
     def test_gap_staging_release_pr_is_in_flight(self):
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={"staging": [{"number": 1}]}),
             {"ahead": 9, "in_flight": True, "train": True})
 
     def test_gap_prod_release_pr_is_in_flight(self):
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={"main": [{"number": 2}]}),
             {"ahead": 9, "in_flight": True, "train": True})
 
     def test_gap_no_pr_deploy_run_is_in_flight(self):
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={}, runs={"in_progress": [
                             {"status": "in_progress", "event": "push",
@@ -872,7 +892,7 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
         # THE NUDGE CASE (review F1 both directions): real gap, no release PR,
         # and only a utility issue_comment workflow running on main -> NOT in
         # flight, so the loop is genuinely stalled and will be nudged.
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={}, runs={"in_progress": [
                             {"status": "in_progress", "event": "issue_comment",
@@ -880,7 +900,7 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
             {"ahead": 9, "in_flight": False, "train": True})
 
     def test_gap_no_pr_no_run_is_stalled(self):
-        self.assertEqual(
+        self._assert_core(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={}, runs={}),
             {"ahead": 9, "in_flight": False, "train": True})

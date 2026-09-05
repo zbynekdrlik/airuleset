@@ -512,6 +512,42 @@ def _ops_wait_flag_sets(ops_wait, root):
     return stale, recheck, gk_handoff, unpark, tacit_wait, tacit_close
 
 
+def _print_bounce_rounds(quals, root, user):
+    """#843: print bounce rounds for open prio:bounce / ready-for-review tickets
+    in this slice — one line per member: number<TAB>round<TAB>tag<TAB>title.
+    The tag is `round3!` at round >= 3, empty otherwise (fail-safe untagged on
+    any gh error — #539/#570 bias). Scoped to LABELED tickets to bound gh calls
+    (each _bounce_round does one `gh issue view`)."""
+    import airuleset
+    slug = airuleset._repo_slug(cwd=root)
+    # Fetch only prio:bounce / ready-for-review labeled tickets (the bounce lane
+    # population — the same scope the design specified).
+    bounce_rows, _, failed = airuleset._slice_mine_and_handed(
+        quals, root, slug, extra="label:prio:bounce")
+    rfr_rows, _, rfr_failed = airuleset._slice_mine_and_handed(
+        quals, root, slug, extra="label:ready-for-review")
+    if failed and rfr_failed:
+        print("slice-quals --bounces: gh query failed", file=sys.stderr)
+        sys.exit(1)
+    # Union the two label populations.
+    all_rows = dict(bounce_rows)
+    all_rows.update(rfr_rows)
+    if not all_rows:
+        return
+    self_login = airuleset._stream_self_login()
+    for num in sorted(all_rows):
+        row = all_rows[num]
+        try:
+            rnd = airuleset._bounce_round(
+                num, self_login, cwd=root,
+                repo=slug if slug else None)
+        except Exception:
+            rnd = 1  # fail-safe
+        tag = "round3!" if rnd >= 3 else ""
+        title = row.get("title", "") if isinstance(row, dict) else ""
+        print("%d\t%d\t%s\t%s" % (num, rnd, tag, title))
+
+
 def cmd_slice_quals(args):
     """THE single definition of "my slice" (#181) — reused verbatim by the
     reduced-authority `/goal` stop-proof templates in skills/autopilot/SKILL.md
@@ -607,9 +643,17 @@ def cmd_slice_quals(args):
     want_waiting = getattr(args, "waiting", False)
     want_ops_wait = getattr(args, "ops_wait", False)
     want_audit = getattr(args, "audit", False)   # #578
-    if not (want_count or want_list or want_waiting or want_ops_wait or want_audit):
+    want_bounces = getattr(args, "bounces", False) is True   # #843
+    if not (want_count or want_list or want_waiting or want_ops_wait
+            or want_audit or want_bounces):
         for q in quals:
             print(q)
+        return
+
+    # #843: --bounces is a SEPARATE path — scoped to prio:bounce/ready-for-review
+    # labeled tickets, calls _bounce_round per member. No shared rows path.
+    if want_bounces:
+        _print_bounce_rounds(quals, root, user)
         return
 
     extra = getattr(args, "extra", None)

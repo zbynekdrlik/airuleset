@@ -392,6 +392,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 DISK_SEGMENT_RED_PCT = 90           # shown (red) at/above this, HIDDEN below (#854)
 DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
 
+RELEASE_IDLE_BREACH_H = 3           # #846: show `rel <Nh>` only at >= 3h deploy age
+RELEASE_IDLE_STALE_S = 3600         # cache older than this → hide (dead watchdog)
+
 
 def disk_segment(home=None, now=None):
     """The `disk NN%` footer segment (#834 req 1, narrowed by #854): shown ONLY
@@ -421,6 +424,32 @@ def disk_segment(home=None, now=None):
     if not shown:
         return ""
     return "\033[38;5;196mdisk %d%%\033[0m" % int(worst)
+
+
+def release_idle_segment(cwd=None, home=None, now=None):
+    """The `rel <Nh>` footer segment (#846): shown ONLY when the last PROD deploy
+    is >= RELEASE_IDLE_BREACH_H hours old (RED), hidden otherwise. Also hidden
+    when the release-idle cache is stale (> RELEASE_IDLE_STALE_S) so a dead
+    watchdog never paints a frozen age. Reads ONLY the machine-local cache the
+    release-gap rider writes; renders as no segment on any error. The #834 disk
+    pattern."""
+    import time as _time
+    now = _time.time() if now is None else now
+    if not cwd:
+        return ""
+    key = cwd_key(cwd)
+    cache = _load(_claude_dir(home) / "release-idle" / ("%s.json" % key))
+    if not isinstance(cache, dict):
+        return ""
+    ts = cache.get("ts")
+    if not isinstance(ts, (int, float)) or (now - ts) > RELEASE_IDLE_STALE_S:
+        return ""
+    age_h = cache.get("deploy_age_h")
+    if not isinstance(age_h, (int, float)) or isinstance(age_h, bool):
+        return ""
+    if age_h < RELEASE_IDLE_BREACH_H:
+        return ""
+    return "\033[38;5;196mrel %dh\033[0m" % int(age_h)
 
 
 def _fmt_tokens(n):

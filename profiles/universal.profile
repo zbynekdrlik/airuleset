@@ -31,6 +31,7 @@ modules/core/salvage-before-discarding-work.md
 modules/core/view-image-urls.md
 modules/core/deliver-files-as-urls.md
 modules/core/receive-files-via-upload-url.md
+modules/core/release-lane-discipline.md
 modules/git/two-branch-workflow.md
 modules/git/commit-conventions.md
 modules/ci/test-strictness.md

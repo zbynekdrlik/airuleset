@@ -1403,3 +1403,11 @@ def cmd_push(args):
     except Exception as e:  # noqa: BLE001 — best-effort, never break the push
         print("  ⚠ DISK-GUARD-ROOT step error (non-fatal): %r" % e,
               file=sys.stderr)
+
+    # 6. Context-baseline push summary (#857) — a read-only call, never blocks
+    try:
+        summary = airuleset.push_summary_line()
+        print(f"\n{summary}")
+    except Exception as e:  # noqa: BLE001 — never break the push
+        print(f"  context-baseline: error ({type(e).__name__})",
+              file=sys.stderr)

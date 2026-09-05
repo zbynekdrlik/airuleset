@@ -326,6 +326,18 @@ from cli_drop_gateway import (  # noqa: E402  #664 public-TLS drop lane
     cmd_drop_gateway as cmd_drop_gateway,
 )
 
+# --- webterm-only SSH access management (#869): key manager + sshd provisioning
+# + subdev accounts conf rendering. Wired into cmd_install + CLI subcommand. ---
+from cli_webterm_only import (  # noqa: E402, F401
+    manage_webterm_only_keys as manage_webterm_only_keys,
+    render_subdev_accounts_conf as render_subdev_accounts_conf,
+    render_sshd_dropin as render_sshd_dropin,
+    audit_webterm_only_keys as audit_webterm_only_keys,
+    cmd_webterm_only as cmd_webterm_only,
+    SSHD_DROPIN_PATH as SSHD_DROPIN_PATH,
+    SUBDEV_ACCOUNTS_FALLBACK as SUBDEV_ACCOUNTS_FALLBACK,
+)
+
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
@@ -419,6 +431,8 @@ from cli_caveman_plugins import (  # noqa: E402, F401
     maybe_setup_caveman,
     reconcile_managed_plugins,
     _plugin_registry_keys,
+    _load_plugin_registry,
+    _heal_stale_plugin_registry,
     _managed_plugin_built,
     _playwright_browsers_installed,
     ensure_playwright_browsers,
@@ -1157,6 +1171,36 @@ def cmd_install(args):
         provision_owner_sudo()
     except Exception as e:
         print(f"  owner-sudo provisioning error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3b-quinque. Webterm-only SSH key management (#869): manage the
+    # authorized_keys for webterm-only accounts (david1-4, dominika).
+    # ACTIVE ONLY when getpass.getuser() is a webterm-only user — every
+    # other account gets a no-op (test-locked). Non-fatal. ---
+    try:
+        result = manage_webterm_only_keys()
+        if result["action"] != "skipped":
+            print("  webterm-only keys: %s — %s" % (
+                result.get("user", "?"), result["action"]))
+    except Exception as e:
+        print(f"  webterm-only keys error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3b-sexte. Render subdev accounts conf (#869): the SINGLE source for
+    # block-subdev-ssh-misuse.sh + block-destructive-remote.sh — no Python
+    # import per Bash call. Written on EVERY install so the hooks always have
+    # a fresh copy. ---
+    try:
+        _conf_content = render_subdev_accounts_conf()
+        _conf_path = CLAUDE_DIR / "airuleset-subdev-accounts.conf"
+        if _conf_path.exists() and _conf_path.read_text() == _conf_content:
+            print(f"  No change: {_conf_path}")
+        else:
+            # Atomic write via tmp + os.replace (#869 review MINOR-8)
+            _conf_tmp = _conf_path.with_suffix(".conf.tmp")
+            _conf_tmp.write_text(_conf_content, encoding="utf-8")
+            os.replace(str(_conf_tmp), str(_conf_path))
+            print(f"  Updated:   {_conf_path}")
+    except Exception as e:
+        print(f"  subdev accounts conf error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
@@ -3078,6 +3122,284 @@ def cmd_gk_request(args):
     return 1
 
 
+# ---------------------------------------------------------------------------
+# Hand-off composer (#843) — compose-and-post READY-FOR-REVIEW comment
+# ---------------------------------------------------------------------------
+
+# Built-in lens list when the target repo has no .claude/rules/gk-review-lenses.md
+HANDOFF_DEFAULT_LENSES = [
+    "security", "correctness", "test-integrity",
+    "evidence-integrity", "design-doctrine", "process",
+]
+
+# Receipt directory for the hook to verify.
+HANDOFF_GATE_DIR = ".claude/handoff-gate"
+
+# Decision log path.
+HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
+
+# Finding id pattern from gatekeeper bounce comments.
+_GK_FINDING_ID_RE = re.compile(
+    r'(?:🔴|🟡|🔵)\s*(\d+)|([A-Z]\d+)|F(\d+)', re.UNICODE)
+
+
+def _parse_gk_findings(comment_body):
+    """Extract finding ids from a gatekeeper bounce comment body.
+
+    Returns a list of string ids (e.g. ["1", "2", "F3"]) or an empty list
+    when unparseable."""
+    if not comment_body:
+        return []
+    ids = []
+    for m in _GK_FINDING_ID_RE.finditer(comment_body):
+        fid = m.group(1) or m.group(2) or ("F" + m.group(3))
+        if fid and fid not in ids:
+            ids.append(fid)
+    return ids
+
+
+def _load_lens_list(repo_root=None):
+    """Load the repo's lens list or fall back to the built-in default.
+
+    The lens list is at .claude/rules/gk-review-lenses.md — one lens per
+    non-empty, non-comment line."""
+    if repo_root:
+        p = os.path.join(repo_root, ".claude", "rules",
+                         "gk-review-lenses.md")
+        try:
+            with open(p) as f:
+                lenses = []
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        lenses.append(line)
+                if lenses:
+                    return lenses
+        except OSError:
+            pass  # file absent -> fall through to default  # airuleset:script-ok expected: repo may lack lens file
+    return list(HANDOFF_DEFAULT_LENSES)
+
+
+def _validate_self_review_table(table_text, lenses):
+    """Validate a Self-review table has one row per lens with evidence.
+
+    Returns (ok, reason_or_None)."""
+    if not table_text or not table_text.strip():
+        return False, "empty Self-review table"
+    lines = [ln.strip() for ln in table_text.strip().splitlines() if ln.strip()]
+    # Skip markdown table header rows.
+    data_lines = []
+    for line in lines:
+        if line.startswith("|"):
+            cols = [c.strip() for c in line.strip("|").split("|")]
+            # Skip separator rows (all dashes/spaces).
+            if all(re.match(r'^[-:\s]+$', c) for c in cols):
+                continue
+            data_lines.append(cols)
+        else:
+            data_lines.append([line])
+    covered_lenses = set()
+    for cols in data_lines:
+        if not cols:
+            continue
+        lens_name = cols[0].strip().lower()
+        covered_lenses.add(lens_name)
+        # If verdict is n/a, need a reason.
+        if len(cols) >= 2:
+            verdict = cols[1].strip().lower()
+            if verdict == "n/a" and (len(cols) < 3 or not cols[2].strip()):
+                return False, "lens '%s' has n/a verdict with no reason" % lens_name
+
+    missing = []
+    for lens in lenses:
+        if lens.lower() not in covered_lenses:
+            missing.append(lens)
+    if missing:
+        return False, "missing lenses: %s" % ", ".join(missing)
+
+    return True, None
+
+
+def cmd_handoff(args):
+    """Sub-dev hand-off composer (#843): compose and post a READY-FOR-REVIEW
+    comment from validated inputs. The CLI stamps Verified-at-UTC + HEAD
+    ITSELF at compose time (live git rev-parse + git ls-remote), so the
+    copy-forward / stale-evidence class dies by construction.
+
+    Pattern donor: cmd_gk_request (compose-and-post CLI).
+
+    Writes a receipt to ~/.claude/handoff-gate/<owner>-<repo>-<N>.json
+    that the hook verifies, and logs PASS/BLOCK to
+    ~/.claude/handoff-gate.log."""
+    import hashlib
+    import subprocess
+    import datetime
+    import time as _time
+
+    repo = getattr(args, "repo", None)
+    issue = getattr(args, "issue", None)
+    branch = getattr(args, "branch", None)
+    self_review_file = getattr(args, "self_review_file", None)
+    root_cause = getattr(args, "root_cause", None)
+    closes_finding = getattr(args, "closes_finding", None) or []
+    prevencia_read = getattr(args, "prevencia_read", None)
+    reviewed_by_tier = getattr(args, "reviewed_by_tier", None)
+
+    if not repo or not issue or not branch or not self_review_file:
+        print("handoff: --repo, --issue, --branch, --self-review-file required")
+        return 1
+
+    # Read self-review table.
+    try:
+        with open(self_review_file) as f:
+            table_text = f.read()
+    except OSError as e:
+        print("handoff BLOCK: cannot read self-review file: %s" % e)
+        return 1
+
+    # Resolve repo root for lens list (the TARGET repo checkout, when
+    # the cwd IS the target repo; otherwise fall back to the default).
+    target_root = _repo_root()
+    lenses = _load_lens_list(target_root)
+
+    # Validate table.
+    ok, reason = _validate_self_review_table(table_text, lenses)
+    if not ok:
+        print("handoff BLOCK: Self-review table invalid — %s" % reason)
+        return 1
+
+    # Get bounce round.
+    self_login = _gh_login()
+    rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
+
+    # Round >= 2 requires extra fields.
+    if rnd >= 2:
+        if not root_cause:
+            print("handoff BLOCK: bounce round %d requires "
+                  "--root-cause" % rnd)
+            return 1
+        if not prevencia_read:
+            print("handoff BLOCK: bounce round %d requires "
+                  "--prevencia-read" % rnd)
+            return 1
+        if not reviewed_by_tier:
+            print("handoff BLOCK: bounce round %d requires "
+                  "--reviewed-by-tier" % rnd)
+            return 1
+        # Validate reviewed-by-tier value.
+        valid_tiers = {"claude-fable-5", "claude-opus-4-6"}
+        parts = reviewed_by_tier.split() if reviewed_by_tier else []
+        tier_val = parts[0] if parts else ""
+        if tier_val not in valid_tiers:
+            print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
+                  % ", ".join(sorted(valid_tiers)))
+            return 1
+
+    # Stamp Verified-at-UTC (now).
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+    # Stamp HEAD (live git rev-parse).
+    def _run(argv):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=15)
+        except Exception as e:
+            return subprocess.CompletedProcess(argv, 1, "", str(e))
+
+    head_r = _run(["git", "rev-parse", "HEAD"])
+    head_sha = (head_r.stdout or "").strip() if head_r.returncode == 0 else ""
+    if not head_sha:
+        print("handoff BLOCK: cannot determine HEAD sha")
+        return 1
+
+    # Verify HEAD is on the remote branch.
+    R = ["-R", repo] if repo else []
+    ls_r = _run(["git", "ls-remote", "origin", branch])
+    if ls_r.returncode != 0:
+        print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
+        return 1
+    remote_sha = ""
+    for line in (ls_r.stdout or "").strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            remote_sha = parts[0]
+            break
+    if not remote_sha:
+        print("handoff BLOCK: branch '%s' not found on remote" % branch)
+        return 1
+    if remote_sha != head_sha:
+        print("handoff BLOCK: HEAD %s does not match remote branch '%s' "
+              "tip %s — push first" % (head_sha[:12], branch, remote_sha[:12]))
+        return 1
+
+    # Compose the comment body.
+    body_parts = ["READY-FOR-REVIEW: branch %s" % branch]
+    body_parts.append("")
+    body_parts.append("**Self-review:**")
+    body_parts.append("")
+    body_parts.append(table_text.strip())
+    body_parts.append("")
+    body_parts.append("Verified-at-UTC: %s" % now_utc)
+    body_parts.append("HEAD: %s" % head_sha)
+    if rnd >= 2:
+        body_parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
+        body_parts.append("Prevencia-read: %s" % prevencia_read)
+        body_parts.append("Reviewed-by-tier: %s" % reviewed_by_tier)
+    for cf in closes_finding:
+        body_parts.append("Closes-finding: %s" % cf)
+    body_parts.append("Bounce-round: %d" % rnd)
+
+    body = "\n".join(body_parts) + "\n"
+
+    # Write receipt BEFORE posting (the hook checks the receipt).
+    gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
+    os.makedirs(gate_dir, exist_ok=True)
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    owner_repo = repo.replace("/", "-") if "/" in repo else repo
+    receipt_path = os.path.join(gate_dir,
+                                "%s-%s.json" % (owner_repo, issue))
+    receipt = json.dumps({"sha256": body_hash,
+                          "ts": _time.time(),
+                          "issue": int(issue),
+                          "branch": branch,
+                          "round": rnd})
+    try:
+        with open(receipt_path, "w") as f:
+            f.write(receipt)
+    except OSError as e:
+        print("handoff WARNING: could not write receipt: %s" % e)
+
+    # Log.
+    log_path = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_LOG)
+    try:
+        with open(log_path, "a") as f:
+            f.write("PASS issue=%s repo=%s round=%d ts=%s\n"
+                    % (issue, repo, rnd, now_utc))
+    except OSError as e:
+        print("handoff: log write failed: %s" % e)  # non-fatal
+
+    # Post via gh issue comment.
+    body_file = os.path.join(gate_dir, "body-%s-%s.md" % (owner_repo, issue))
+    try:
+        with open(body_file, "w") as f:
+            f.write(body)
+    except OSError as e:
+        print("handoff BLOCK: cannot write body file: %s" % e)
+        return 1
+
+    r = _run(["gh", "issue", "comment", str(issue), "--body-file",
+              body_file] + R)
+    if r.returncode != 0:
+        print("handoff FAILED: gh issue comment failed: %s"
+              % (r.stderr or "").strip())
+        return 1
+
+    print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
+          % (issue, rnd, head_sha[:12]))
+    return 0
+
+
 # How many tickets the digest NAMES. Also the suppression bound: the caller
 # may only mark what this body listed by number.
 BACKFILL_MAX_SHOWN = 10
@@ -3922,6 +4244,20 @@ from cli_resource_guards import (  # noqa: E402, F401
     render_root_exempt_dropin as render_root_exempt_dropin,
     render_service_oom_dropin as render_service_oom_dropin,
     render_sysctl_vm as render_sysctl_vm,
+)
+
+# --- #870 F0: privilege inventory of the control account -- a self-contained
+# leaf (stdlib only; its ssh reach is derived from cli_fleet via a LAZY import).
+# Re-exported here so `SUBCOMMANDS["privileges"]` and the tests
+# (`airuleset.cmd_privileges` / `airuleset.privileges_build_report`) resolve through this
+# module, the same facade convention every other leaf uses.
+from cli_privileges import (  # noqa: E402, F401
+    cmd_privileges as cmd_privileges,
+    build_report as privileges_build_report,
+    scan_memory_credentials as scan_memory_credentials,
+    PRIVILEGES as PRIVILEGES,
+    KIND_PASSWORD as KIND_PASSWORD,
+    KIND_STORE as KIND_STORE,
 )
 
 # --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed
@@ -4840,22 +5176,31 @@ def _watchdog_release_state_fetch(cwd):
         return None
     # (1) gap: integration ahead of prod. A 404 (no integration branch) -> not a
     # release repo (clean "no gap", `train` False, full-TTL). Any OTHER error ->
-    # None (transient).
+    # None (transient). #846: widened jq extracts oldest_ahead_ts too.
+    not_a_train = {"ahead": 0, "in_flight": False, "train": False}
     try:
         r = subprocess.run(
             ["gh", "api", "repos/%s/compare/%s...%s" % (repo, prod, integ),
-             "--jq", ".ahead_by"],
+             "--jq",
+             '{ahead:.ahead_by, oldest:(.commits[0].commit.committer.date // null)}'],
             cwd=cwd, capture_output=True, text=True, timeout=15)
     except Exception:
         return None
     if r.returncode != 0:
         if _gh_not_found(r.stderr):
-            return {"ahead": 0, "in_flight": False, "train": False}
+            return dict(not_a_train)
         return None
     try:
-        ahead = int((r.stdout or "").strip())
+        cmp = json.loads((r.stdout or "").strip())
     except (ValueError, TypeError):
         return None
+    if not isinstance(cmp, dict):
+        return None
+    try:
+        ahead = int(cmp.get("ahead", 0))
+    except (ValueError, TypeError):
+        return None
+    oldest_ahead_ts = cmp.get("oldest")  # ISO string or null
     # (2) 3-branch gate (review F6, widened by #698): a real release train has a
     # `staging` branch — checked on the DRAINED path too, because the job-20
     # release-landed escalation may only ever claim "train drained" for a
@@ -4876,7 +5221,7 @@ def _watchdog_release_state_fetch(cwd):
         return None
     train = r.returncode == 0
     if not train:
-        return {"ahead": 0, "in_flight": False, "train": False}
+        return dict(not_a_train)
     # (3) in-flight: an open release PR whose base is staging or prod, queried
     # server-side per base (review F1 — never a truncated default-limit window).
     # #698 review fix: MEASURED for the DRAINED (ahead 0) verdict too, not only
@@ -4886,11 +5231,15 @@ def _watchdog_release_state_fetch(cwd):
     # running" it never checked (2-4 extra cached gh calls per drained train
     # repo per TTL, same trade the staging gate above already accepted).
     in_flight = False
+    cut_pr = None     # #846: develop→staging PR detail
+    promote_pr = None  # #846: staging→main PR detail
     for base in (staging, prod):
         try:
             r = subprocess.run(
                 ["gh", "pr", "list", "--repo", repo, "--state", "open",
-                 "--base", base, "--json", "number", "--limit", "1"],
+                 "--base", base,
+                 "--json", "number,statusCheckRollup,mergeable",
+                 "--limit", "3"],
                 capture_output=True, text=True, timeout=15)
         except Exception:
             return None
@@ -4902,7 +5251,10 @@ def _watchdog_release_state_fetch(cwd):
             return None
         if isinstance(prs, list) and prs:
             in_flight = True
-            break
+            if base == staging:
+                cut_pr = prs[0]
+            elif base == prod:
+                promote_pr = prs[0]
     # (4) a genuine deploy/release workflow running/queued (only if no release PR),
     # server-side status-filtered + event-filtered (review F1 both directions).
     if not in_flight:
@@ -4924,8 +5276,52 @@ def _watchdog_release_state_fetch(cwd):
             if isinstance(page, list):
                 runs.extend(page)
         in_flight = _release_train_run_in_flight(runs, staging, prod)
+    # (5) #846: last PROD deploy age — the newest SUCCESS of the deploy workflow.
+    # Workflow name = env with default (#574 branch-env pattern); 404 -> field None.
+    deploy_wf = os.environ.get("AIRULESET_RELEASE_DEPLOY_WORKFLOW",
+                               "deploy-prod.yml")
+    last_deploy_ts = None
+    try:
+        r = subprocess.run(
+            ["gh", "run", "list", "--repo", repo, "-w", deploy_wf,
+             "--status", "success", "--limit", "1",
+             "--json", "updatedAt,databaseId"],
+            capture_output=True, text=True, timeout=15)
+    except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
+        last_deploy_ts = None
+    else:
+        if r.returncode == 0:
+            try:
+                drs = json.loads(r.stdout or "[]")
+            except (ValueError, TypeError):
+                drs = []
+            if isinstance(drs, list) and drs and isinstance(drs[0], dict):
+                last_deploy_ts = drs[0].get("updatedAt")
+    # (6) #846: shadow run state — only when a cut PR is open.
+    shadow_run = None
+    if cut_pr is not None:
+        shadow_wf = os.environ.get("AIRULESET_RELEASE_SHADOW_WORKFLOW",
+                                   "deploy-staging-shadow.yml")
+        try:
+            r = subprocess.run(
+                ["gh", "run", "list", "--repo", repo, "-w", shadow_wf,
+                 "--branch", staging, "--limit", "1",
+                 "--json", "status,conclusion,databaseId"],
+                capture_output=True, text=True, timeout=15)
+        except Exception:  # airuleset:script-ok #846 workflow 404 -> field None not fetch None
+            shadow_run = None
+        else:
+            if r.returncode == 0:
+                try:
+                    srs = json.loads(r.stdout or "[]")
+                except (ValueError, TypeError):
+                    srs = []
+                if isinstance(srs, list) and srs and isinstance(srs[0], dict):
+                    shadow_run = srs[0]
     return {"ahead": ahead if ahead > 0 else 0, "in_flight": in_flight,
-            "train": True}
+            "train": True, "cut_pr": cut_pr, "promote_pr": promote_pr,
+            "shadow_run": shadow_run, "last_deploy_ts": last_deploy_ts,
+            "oldest_ahead_ts": oldest_ahead_ts}
 
 
 def _watchdog_vault_purge():
@@ -5272,6 +5668,9 @@ def cmd_watchdog(args):
                     # this user's own home); left False in run_once unit tests so
                     # the real statvfs/drain never touches a developer box.
                     disk_guard_enabled=True,
+                    # Job 42 (#866) — NICE-CHECK SELF-CHECK. Enabled on every
+                    # real poll; left False in run_once unit tests.
+                    nice_check_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
@@ -5939,6 +6338,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_user_waiting as _row_is_user_waiting,
     _user_waiting_reason as _user_waiting_reason,
     _partition_user_waiting as _partition_user_waiting,
+    _bounce_round as _bounce_round,
     OPS_WAIT_LABELS as OPS_WAIT_LABELS,
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
@@ -6220,6 +6620,26 @@ from cli_autopilot_lock import (  # noqa: E402
 
 from cli_onboard import (  # noqa: E402
     cmd_onboard_project as cmd_onboard_project,
+)
+
+# --- #857: context-baseline + skill-usage CLI leaves ---
+from cli_context_baseline import (  # noqa: E402, F401
+    cmd_context_baseline as cmd_context_baseline,
+    measure_box as measure_box,
+    measure_skills as measure_skills,
+    resolve_imports_recursive as resolve_imports_recursive,
+    always_on_rule_files as always_on_rule_files,
+    bytes_to_tokens as bytes_to_tokens,
+    check_ratchet as check_ratchet,
+    update_ratchet as update_ratchet,
+    push_summary_line as push_summary_line,
+    _measure_repo_ceilings as _measure_repo_ceilings,
+    load_ratchet as load_ratchet,
+    save_ratchet as save_ratchet,
+)
+from cli_skill_usage import (  # noqa: E402, F401
+    cmd_skill_usage as cmd_skill_usage,
+    scan_usage as scan_usage,
 )
 
 
@@ -6632,6 +7052,30 @@ def main():
     p_gkr.add_argument("--comment",
                        help="Request text for --issue mode (Slovak, plain)")
 
+    p_ho = sub.add_parser(
+        "handoff",
+        help="Sub-dev hand-off composer (#843): compose and post a "
+             "READY-FOR-REVIEW comment from validated inputs, stamping "
+             "Verified-at-UTC + HEAD at compose time")
+    p_ho.add_argument("--repo", required=True,
+                      help="owner/name of the target repo")
+    p_ho.add_argument("--issue", required=True, type=int,
+                      help="Issue number to post the hand-off comment on")
+    p_ho.add_argument("--branch", required=True,
+                      help="Branch name with the work")
+    p_ho.add_argument("--self-review-file", dest="self_review_file",
+                      required=True,
+                      help="Path to the Self-review markdown table file")
+    p_ho.add_argument("--root-cause",
+                      help="Root-cause-of-previous-bounce (required round >= 2)")
+    p_ho.add_argument("--closes-finding", action="append",
+                      help="Closes-finding: <id> — <evidence> (repeatable)")
+    p_ho.add_argument("--prevencia-read",
+                      help="Prevencia-read: <path> (required round >= 2)")
+    p_ho.add_argument("--reviewed-by-tier",
+                      help="Reviewed-by-tier: claude-fable-5 | claude-opus-4-6 "
+                           "(required round >= 2)")
+
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
                            "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-6)")
@@ -6649,6 +7093,16 @@ def main():
                           action="store_true",
                           help="print only flagged (banned) rows")
 
+    # --- #870 F0: privilege inventory (migration-completeness gate) --------
+    p_priv = sub.add_parser(
+        "privileges",
+        help="Inventory the control account's credentials/reach (#870 F0) — "
+             "declared registry vs a read-only live probe; exit 1 on any "
+             "undeclared-or-wrong-mode credential, exit 0 clean. Never prints "
+             "a token value.")
+    p_priv.add_argument("--json", action="store_true",
+                        help="Emit the full report as JSON instead of a table")
+
     p_wacc = sub.add_parser(
         "webterm-access",
         help="#612: reconcile the Cloudflare Access email-OTP app(s) in front of "
@@ -6661,6 +7115,18 @@ def main():
                              "without --apply); accepted for clarity")
     p_wacc.add_argument("--profile", default=None,
                         help="limit to one profile (default: every declared profile)")
+
+    p_wto = sub.add_parser(
+        "webterm-only",
+        help="#869: manage webterm-only SSH access (key management, sshd drop-in)")
+    p_wto.add_argument("--audit", dest="wt_action", action="store_const",
+                        const="audit",
+                        help="read-only fleet audit of authorized_keys")
+    p_wto.add_argument("--apply-sshd", dest="wt_action", action="store_const",
+                        const="apply-sshd",
+                        help="render + apply sshd Match drop-in on subdev")
+    p_wto.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="with --apply-sshd: print the script, don't execute")
 
     p_dg = sub.add_parser(
         "drop-gateway",
@@ -6874,6 +7340,10 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "member (the --list set + a labels column) — the job-20 named "
              "partition-audit nudge reads this to name each I member (#578)")
+    p_slice.add_argument(
+        "--bounces", action="store_true",
+        help="Print bounce rounds for open prio:bounce/ready-for-review "
+             "tickets in this slice (#843) — tags round >= 3 as round3!")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
@@ -6967,6 +7437,34 @@ def main():
         help="Re-render SKILL.md's /goal lines from the registry (regeneration)")
     p_goalinv.add_argument(
         "--json", action="store_true", help="Print the inventory as JSON")
+
+    # --- #857: context-baseline + skill-usage ---
+    p_cb = sub.add_parser(
+        "context-baseline",
+        help="Measure always-on context per box/project (#857)")
+    p_cb.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_cb.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+    p_cb.add_argument("--project", action="append", default=None,
+                      help="Project directory to measure (repeatable)")
+    p_cb.add_argument("--check", action="store_true",
+                      help="Check repo against ratchet ceilings (exit 1 if over)")
+    p_cb.add_argument("--update-ratchet", dest="update_ratchet",
+                      action="store_true",
+                      help="Update ratchet ceilings (only lowers by default)")
+    p_cb.add_argument("--allow-raise", dest="allow_raise", default=None,
+                      help="Allow raising a ceiling (must give a reason)")
+
+    p_su = sub.add_parser(
+        "skill-usage",
+        help="Scan transcript jsonl for Skill tool_use + slash commands (#857)")
+    p_su.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_su.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+    p_su.add_argument("--days", type=int, default=60,
+                      help="Window in days (default 60)")
 
     args = parser.parse_args()
 
@@ -7081,7 +7579,9 @@ SUBCOMMANDS = {
     "goal-arm": cmd_goal_arm,
     "goal-roster": cmd_goal_roster,
     "fable-gate": cmd_fable_gate,
+    "privileges": cmd_privileges,
     "webterm-access": cmd_webterm_access,
+    "webterm-only": cmd_webterm_only,
     "drop-gateway": cmd_drop_gateway,
     "disk-guard-root": cmd_disk_guard_root,
     "burn": cmd_burn,
@@ -7093,10 +7593,13 @@ SUBCOMMANDS = {
     "secret": cmd_secret,
     "tickets-status": cmd_tickets_status,
     "gk-request": cmd_gk_request,
+    "handoff": cmd_handoff,
     "autopilot-lock": cmd_autopilot_lock,
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
     "model-audit": cmd_model_audit,
+    "context-baseline": cmd_context_baseline,
+    "skill-usage": cmd_skill_usage,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

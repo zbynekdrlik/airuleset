@@ -102,6 +102,13 @@ RELEASE_GAP_MIN_S = 1 * 3600
 # AIRULESET_RELEASE_GAP_MIN_AHEAD, floored at 1 — a units error must never make a
 # 0-commit "gap" nudge). Default 1: any unreleased integration commit qualifies.
 RELEASE_GAP_MIN_AHEAD = 1
+# #846: time-based thresholds for the gap trigger. The gap is ripe when the
+# oldest commit ahead is at least 2h old AND the last deploy is at least 3h
+# ago (or unmeasurable → that conjunct is ignored). Unmeasurable
+# oldest_ahead_ts → the 2h conjunct is ignored too (fail-safe toward today's
+# gap-only behaviour, never toward suppressing a real nudge).
+OLDEST_AHEAD_THRESHOLD_S = 2 * 3600   # 2 hours
+DEPLOY_AGE_THRESHOLD_S = 3 * 3600     # 3 hours
 # env AIRULESET_RELEASE_STATE_FETCH_TTL_S — how long a `{ahead,in_flight,train}` read is
 # CACHED per repo (`state["release_state_cache"]`, keyed by cwd, shared across
 # every armed pane on that repo). 30 min — half the #812 1h cadence (was ~8% of
@@ -251,13 +258,30 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 #                 attempts (the bounded-retry back-off — one cadence, so a
 #                 persistently-swallowing pane is not re-typed every sweep).
 
-def _release_decision(rec, rstate, now, cadence, min_ahead):
+def _release_decision(rec, rstate, now, cadence, min_ahead, lane=None,
+                      oldest_ahead_ts=None, deploy_age=None):
     """Pure verdict for ONE armed session's release-gap state. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `rstate` is
     the fetched `{"ahead": int, "in_flight": bool, "train": bool}` (the #698
     `train` key is ignored by this decider), or None when UNDETERMINED (a
     gh/ssh error, or a repo with no integration branch) — None fails safe to
     `skip`.
+
+    #846: `lane` is an optional `LaneResult` from `classify_release_lane`. When
+    present and `in_flight` is True: if the lane's stage is in STALLED_STAGES
+    (cut-ci-red, shadow-failed), the in-flight release is STALLED and needs a
+    nudge — the semantic flip (today's `in_flight=True` blanket suppressor
+    becomes conditional). When `lane` is None → today's exact behaviour
+    (backward compat for legacy callers).
+
+    #846 continuation: `oldest_ahead_ts` (epoch, or None when unmeasurable) and
+    `deploy_age` (seconds since last deploy, or None when unmeasurable) are
+    time-based threshold gates on the nudge trigger. The gap is ripe only when
+    `oldest_ahead_age >= OLDEST_AHEAD_THRESHOLD_S` (2h) AND
+    (`deploy_age >= DEPLOY_AGE_THRESHOLD_S` (3h) OR deploy_age is None).
+    Unmeasurable oldest_ahead_ts → the 2h conjunct is ignored (fail-safe toward
+    today's gap-only behaviour). Both default None for legacy 5-arg callers
+    (thresholds inactive → byte-identical to pre-#846).
 
     The gap is "real" when `ahead >= min_ahead`. Below that (incl. ahead 0) is a
     drained/absent gap -> `clear` (pop the rec). A real gap with `in_flight` True
@@ -285,10 +309,22 @@ def _release_decision(rec, rstate, now, cadence, min_ahead):
         return ("skip", rec, "undetermined")
     if ahead < min_ahead:
         return ("clear", None, "no-gap")
+    # #846: stalled-lane nudges (in_flight + cut-ci-red/shadow-failed) are
+    # EXEMPT from the time thresholds below — a red-CI stalled train is urgent
+    # regardless of commit age. Track exemption with a flag.
+    threshold_exempt = False
     if in_flight:
-        # The train is already moving -> reset the stall anchor, never nudge.
-        return ("inflight", {"first_seen": now, "last_nudge": None,
-                             "sig": _sig(rstate)}, "release-in-flight")
+        from watchdog.release_lane import STALLED_STAGES
+        if (lane is not None and hasattr(lane, "stage")
+                and lane.stage in STALLED_STAGES):
+            threshold_exempt = True  # fall through to cadence, skip thresholds
+        else:
+            return ("inflight", {"first_seen": now, "last_nudge": None,
+                                 "sig": _sig(rstate)}, "release-in-flight")
+    # Seed the rec BEFORE the threshold gates so a "wait" from a fresh gap
+    # returns a caller-safe rec with sig/first_seen/last_nudge (Fable review
+    # RED 1: returning the raw incoming rec={} crashes the caller on
+    # new_rec["sig"]).
     first_seen = rec.get("first_seen") if isinstance(rec, dict) else None
     if not isinstance(first_seen, (int, float)):
         first_seen = now
@@ -297,18 +333,56 @@ def _release_decision(rec, rstate, now, cadence, min_ahead):
         last_nudge = None
     new_rec = {"first_seen": first_seen, "last_nudge": last_nudge,
                "sig": _sig(rstate)}
+    # #846 continuation: time-based thresholds gate whether the gap is ripe.
+    # Skipped when the in_flight+stalled exemption applies.
+    # When oldest_ahead_ts is measurable, the oldest commit ahead must be at
+    # least OLDEST_AHEAD_THRESHOLD_S old. Unmeasurable → conjunct ignored
+    # (fail-safe toward gap-only behaviour).
+    if not threshold_exempt:
+        if (isinstance(oldest_ahead_ts, (int, float))
+                and not isinstance(oldest_ahead_ts, bool)):
+            oldest_age = now - oldest_ahead_ts
+            if oldest_age < OLDEST_AHEAD_THRESHOLD_S:
+                return ("wait", new_rec, "gap-fresh")
+        # When deploy_age is measurable, it must be >= DEPLOY_AGE_THRESHOLD_S.
+        # Unmeasurable → conjunct ignored.
+        if (isinstance(deploy_age, (int, float))
+                and not isinstance(deploy_age, bool)):
+            if deploy_age < DEPLOY_AGE_THRESHOLD_S:
+                return ("wait", new_rec, "deploy-recent")
     anchor = last_nudge if last_nudge is not None else first_seen
     if now - anchor >= cadence:
         return ("nudge", new_rec, "due")
     return ("wait", new_rec, "grace")
 
 
-def _nudge_text(ahead, integration, prod):
+def _nudge_text(ahead, integration, prod, lane=None, deploy_age_h=None):
     """The release-gap keystroke injected into the armed loop. Carries the shared
     `stuck-check: ` prefix (own-payload recognition + machine-prompt exclusion —
     see the module docstring). Names the branches and the gap, and points at the
     project's own release pipeline (e.g. `/process-subdev`) WITHOUT hardcoding it
-    as the only option — the job is generic over full-authority repos."""
+    as the only option — the job is generic over full-authority repos.
+
+    #846: when `lane` is a LaneResult with a non-empty action, generate a
+    stage-derived text with evidence. The text is ≤700 chars (#714 cap)."""
+    prefix = "stuck-check: release-idle"
+    age_sfx = ""
+    if isinstance(deploy_age_h, (int, float)) and deploy_age_h > 0:
+        age_sfx = ", posledný PROD deploy ~%dh" % int(deploy_age_h)
+    if lane is not None and hasattr(lane, "action") and lane.action:
+        head = ("%s — `%s` je %d commitov pred `%s`%s. %s (%s)."
+                % (prefix, integration, ahead, prod, age_sfx,
+                   lane.action, lane.evidence)
+                if lane.evidence
+                else "%s — `%s` je %d commitov pred `%s`%s. %s."
+                % (prefix, integration, ahead, prod, age_sfx,
+                   lane.action))
+        doctrine = (" Doktrína: in-flight vetva = FROZEN (len release-blocking "
+                    "fix), NIKDY re-cut — každý restart stojí celý chvost.")
+        text = head + doctrine
+        if len(text) > 700:
+            text = head[:700]
+        return text
     return (
         "stuck-check: release-gap — integračná vetva `%s` je %d commitov PRED "
         "`%s` (produkcia) a ŽIADNY release nie je in flight (žiaden otvorený "
@@ -318,6 +392,59 @@ def _nudge_text(ahead, integration, prod):
         "verify), otvor/pokračuj release PR a dotiahni vlak do `%s`. Ak zámerne "
         "ešte batchuješ ďalšie tickety, potvrď to; inak vydaj TERAZ."
         % (integration, ahead, prod, integration, prod, prod))
+
+
+# --- DEPLOY AGE + FOOTER CACHE (#846) --------------------------------------
+
+def _parse_iso_ts(s):
+    """Parse an ISO 8601 timestamp string to a Unix epoch float, or None."""
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        from datetime import datetime
+        s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _deploy_age_hours(rstate, now):
+    """Return the age of the last PROD deploy in hours, or None."""
+    if not isinstance(rstate, dict):
+        return None
+    ts = _parse_iso_ts(rstate.get("last_deploy_ts"))
+    if ts is None:
+        return None
+    age = now - ts
+    if age < 0:
+        return 0
+    return age / 3600.0
+
+
+def _write_release_idle_cache(cwd, rstate, now, dry_run):
+    """Write the footer cache for the `rel <Nh>` segment (#846). The cache is a
+    ts-stamped JSON at `~/.claude/release-idle/<cwd-key>.json`, read by
+    `statusbar.release_idle_segment`. Only written on a full-authority train repo
+    with a measurable deploy age. `dry_run` writes nothing."""
+    if dry_run:
+        return
+    if not isinstance(rstate, dict) or not rstate.get("train"):
+        return
+    deploy_age_h = _deploy_age_hours(rstate, now)
+    import json as _json
+    from pathlib import Path
+    import statusbar
+    key = statusbar.cwd_key(cwd)
+    cache_dir = Path(os.path.expanduser("~")) / ".claude" / "release-idle"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": now, "deploy_age_h": deploy_age_h}
+        p = cache_dir / ("%s.json" % key)
+        with open(p, "w", encoding="utf-8") as fh:
+            _json.dump(entry, fh)
+    except OSError:  # airuleset:script-ok footer cache write is best-effort (never blocks the sweep)
+        return
 
 
 # --- ORPHAN REAPER ---------------------------------------------------------
@@ -435,11 +562,26 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                     "no nudge" % (loc, e))
         return logs
 
+    # #846: classify the release lane for stage-derived nudge text + footer cache
+    from watchdog.release_lane import classify_release_lane
+    lane = classify_release_lane(rstate)
+    # #846: write footer cache (deploy age for `rel <Nh>` segment)
+    _write_release_idle_cache(cwd, rstate, now, dry_run)
+
     rec = rrecs.get(sid)
     if not isinstance(rec, dict):
         rec = {}
+    # #846 continuation: extract oldest_ahead_ts and deploy_age (seconds) from
+    # rstate for the time-based threshold gates.
+    oldest_ahead_ts = _parse_iso_ts(rstate.get("oldest_ahead_ts")
+                                    ) if isinstance(rstate, dict) else None
+    deploy_age_h = _deploy_age_hours(rstate, now)
+    deploy_age_s = (deploy_age_h * 3600.0
+                    if isinstance(deploy_age_h, (int, float)) else None)
     action, new_rec, reason = _release_decision(rec, rstate, now, cadence,
-                                                min_ahead)
+                                                min_ahead, lane=lane,
+                                                oldest_ahead_ts=oldest_ahead_ts,
+                                                deploy_age=deploy_age_s)
 
     if action == "skip":
         logs.append("release-gap %s -> skip:%s (state unchanged)" % (loc, reason))
@@ -528,7 +670,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                     "flight)" % (loc, ahead))
         return logs
 
-    text = _nudge_text(ahead, _integration_branch(), _prod_branch())
+    deploy_age_h = _deploy_age_hours(rstate, now)
+    text = _nudge_text(ahead, _integration_branch(), _prod_branch(),
+                       lane=lane, deploy_age_h=deploy_age_h)
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
     # residual stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

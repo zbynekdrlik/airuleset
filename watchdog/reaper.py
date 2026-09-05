@@ -48,6 +48,7 @@ alert-suppression direction).
 """
 
 import os
+import re
 import signal
 import subprocess
 
@@ -96,6 +97,84 @@ def _is_shadow_ugrep_runaway(args, etimes, cputimes, min_age_s=REAPER_MIN_AGE_S,
     if cpu < age * min_cpu_ratio:
         return False
     return _matches_signature(args)
+
+
+# --------------------------------------------------------------------------- #
+# #865 — claude-home grep classifier: a raw grep/ugrep whose search root is
+# under ~/.claude (the multi-GB JSONL transcript tree). NOT the shadow-ugrep
+# signature (that is `_matches_signature` above) — this catches a raw
+# `grep -o 'pattern' /home/<user>/.claude/` that was never shadowed.
+# --------------------------------------------------------------------------- #
+
+_GREP_NAMES = {"grep", "egrep", "fgrep", "rgrep", "ugrep"}
+
+# Match /home/<user>/.claude (any depth) in an argv token.
+_CLAUDE_HOME_RE = re.compile(r"^/home/[^/]+/\.claude(/|$)")
+
+
+def _is_claude_home_grep(args):
+    """True iff `args` is a grep/ugrep/egrep/fgrep/rgrep command with an argv
+    PATH positional (not the pattern) under /home/<user>/.claude.
+    argv[0]-ANCHORED: a process merely mentioning grep in its arguments
+    (argv0 = watch/pgrep/python) never matches.
+
+    The first non-flag positional is the search PATTERN (not a path), UNLESS
+    `-e`/`-f`/`--regexp`/`--file` is present in argv (then every non-flag
+    positional is a path). This mirrors the hook's own positional logic and
+    avoids killing a `grep '/home/u/.claude/...'` pattern search (#865
+    review finding)."""
+    toks = (args or "").split()
+    if not toks:
+        return False
+    base = os.path.basename(toks[0])
+    if base not in _GREP_NAMES:
+        return False
+    # Detect whether the pattern was provided by a flag (-e/-f/--regexp/--file)
+    pattern_from_flag = False
+    for tok in toks[1:]:
+        if tok in ("-e", "-f", "--regexp", "--file"):
+            pattern_from_flag = True
+            break
+        if tok.startswith("--regexp=") or tok.startswith("--file="):
+            pattern_from_flag = True
+            break
+        # A short-flag group containing e or f (like -rne, -rf)
+        if tok.startswith("-") and tok != "-" and not tok.startswith("--"):
+            for ch in tok[1:]:
+                if ch in ("e", "f"):
+                    pattern_from_flag = True
+                    break
+            if pattern_from_flag:
+                break
+    # Collect non-flag positionals, then check PATHS (skip the pattern)
+    positionals = []
+    for tok in toks[1:]:
+        if tok.startswith("-") and tok != "-":
+            continue
+        positionals.append(tok)
+    paths = positionals if pattern_from_flag else positionals[1:]
+    for p in paths:
+        if _CLAUDE_HOME_RE.match(p):
+            return True
+    return False
+
+
+def _is_claude_home_grep_runaway(args, etimes, cputimes,
+                                 min_age_s=REAPER_MIN_AGE_S,
+                                 min_cpu_ratio=REAPER_MIN_CPU_RATIO):
+    """True ONLY for a grep/ugrep with a /home/<user>/.claude root, running
+    longer than `min_age_s`, AND burning CPU the whole time. Same gate as the
+    shadow-ugrep classifier; different signature."""
+    try:
+        age = int(etimes)
+        cpu = int(cputimes)
+    except (TypeError, ValueError):
+        return False
+    if age <= min_age_s:
+        return False
+    if cpu < age * min_cpu_ratio:
+        return False
+    return _is_claude_home_grep(args)
 
 
 def default_ps_fetch():
@@ -185,19 +264,28 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
         except Exception:
             # malformed row — skip, never guess
             continue
-        if not _is_shadow_ugrep_runaway(args, etimes, cputimes, min_age_s,
-                                        min_cpu_ratio):
+        # Determine which classifier matched: shadow-ugrep (#776) or
+        # claude-home grep (#865). Both share the same age+CPU gate.
+        is_shadow = _is_shadow_ugrep_runaway(args, etimes, cputimes,
+                                             min_age_s, min_cpu_ratio)
+        is_claude_home = (not is_shadow and
+                          _is_claude_home_grep_runaway(args, etimes, cputimes,
+                                                      min_age_s, min_cpu_ratio))
+        if not is_shadow and not is_claude_home:
             continue
+        kind = "shadow-ugrep" if is_shadow else "claude-home-grep"
+        label = "shadow-ugrep-reaper" if is_shadow else "claude-home-grep-reaper"
+        issue = "776, upstream cc#81916" if is_shadow else "865"
         if dry_run:
             logs.append(
-                "shadow-ugrep-reaper: DRY-RUN would SIGKILL pid=%s age=%ss "
-                "cpu=%ss cmd=%s" % (pid, etimes, cputimes, args))
+                "%s: DRY-RUN would SIGKILL pid=%s age=%ss "
+                "cpu=%ss cmd=%s" % (label, pid, etimes, cputimes, args))
             continue
         if kill_fn is None:
             logs.append(
-                "shadow-ugrep-reaper: kill_fn not wired — would SIGKILL pid=%s "
+                "%s: kill_fn not wired — would SIGKILL pid=%s "
                 "age=%ss cpu=%ss cmd=%s (skipped)"
-                % (pid, etimes, cputimes, args))
+                % (label, pid, etimes, cputimes, args))
             continue
         # TOCTOU: re-verify the pid still IS the runaway right before killing,
         # so a pid reused by an unrelated process is never SIGKILLed.
@@ -207,24 +295,27 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
             live = None
         if live is None:
             logs.append(
-                "shadow-ugrep-reaper: pid=%s vanished before kill, skipped "
-                "(cmd was %s)" % (pid, args))
+                "%s: pid=%s vanished before kill, skipped "
+                "(cmd was %s)" % (label, pid, args))
             continue
-        if not _matches_signature(live):
+        # Re-verify with the MATCHING classifier
+        live_ok = (_matches_signature(live) if is_shadow
+                   else _is_claude_home_grep(live))
+        if not live_ok:
             logs.append(
-                "shadow-ugrep-reaper: pid=%s no longer the runaway (reused?), "
-                "skipped (now %r)" % (pid, live))
+                "%s: pid=%s no longer the runaway (reused?), "
+                "skipped (now %r)" % (label, pid, live))
             continue
         try:
             kill_fn(pid)
             logs.append(
-                "shadow-ugrep-reaper: SIGKILL pid=%s age=%ss cpu=%ss runaway "
-                "shadow-ugrep (issue 776, upstream cc#81916) cmd=%s"
-                % (pid, etimes, cputimes, args))
+                "%s: SIGKILL pid=%s age=%ss cpu=%ss runaway "
+                "%s (issue %s) cmd=%s"
+                % (label, pid, etimes, cputimes, kind, issue, args))
         except Exception as e:
             logs.append(
-                "shadow-ugrep-reaper: SIGKILL pid=%s FAILED: %r "
-                "(age=%ss cpu=%ss cmd=%s)" % (pid, e, etimes, cputimes, args))
+                "%s: SIGKILL pid=%s FAILED: %r "
+                "(age=%ss cpu=%ss cmd=%s)" % (label, pid, e, etimes, cputimes, args))
     return logs
 
 
