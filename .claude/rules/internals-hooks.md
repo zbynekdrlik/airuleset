@@ -7,17 +7,7 @@ paths:
 
 Staršie/hlbšie hooks/ lekcie (archív) sú v `.claude/rules-reference/internals-archive.md` (on-demand, bez `paths` — grepni ho). Sem pribúdajú NOVÉ lekcie, kým súbor neprekročí ratchet strop, potom sa najstaršie presunú do archívu.
 
-## Managed-plugin tiers (#415, 2026-08-13; #542 reversal, 2026-08-18)
-
-There are TWO plugin tiers in `cli_caveman_plugins.py`, distinguished by what
-`reconcile_managed_plugins()` writes into user-scope `~/.claude/settings.json`:
-`MANAGED_PLUGINS` (force-ENABLED — superpowers AND, since #542, playwright) and
-`MANAGED_DISABLED_PLUGINS` (force-DISABLED). #415's third `OPTIONAL_PLUGINS`
-tier (playwright default-off, per-project opt-in) was REMOVED by #542 — see the
-`OPTIONAL_PLUGINS is REMOVED` bullet in `internals-tests.md` for the empirical
-lazy-Chrome finding behind the reversal. The `#415` hook-gotcha bullets below
-are unrelated to the tier policy (they are about `-F "$VAR"` literal reading).
-
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the #873 cap — grep "#415/#542 managed-plugin tiers" there]** two plugin tiers (MANAGED_PLUGINS force-ENABLED, MANAGED_DISABLED_PLUGINS force-DISABLED); #542 removed OPTIONAL_PLUGINS; see internals-tests.md for the lazy-Chrome finding behind the reversal.
 - **[Moved to the archive at the #734 cap — grep "#436/#477" there]** same-turn design-marker propagation-lag recovery (re-invoke the recorder against the real posted comment; post + `sleep 2-3` + re-trigger before trusting `marker_exists`).
 - **[Moved to the archive at the #802/#807 cap — grep "#734" tmux-kill-guard there]** scan-aware fixes for the two sibling security locks a new destructive-tmux-naming guard trips (#613 forward-scan, #132 self-re-validating exemption).
 - **[Moved to the archive at the #734 cap — grep "#95 item-12" there]** count BOTH escaping levels of the `inject-situational-rule.sh` marker — a single-level count reads a double-escaped delivered topic as a false ZERO.
@@ -59,3 +49,5 @@ are unrelated to the tier policy (they are about `-F "$VAR"` literal reading).
 - **#740 recidíva — a delivery-side DEDUP is not session PUSHBACK; a hook that only SUPPRESSES a repeated ping never changes what the session DOES.** miva1 re-emitted ONE ask-and-continue question 27×/8h: `notify-discord-pending.sh` dedup'd every repeat (phone pinged once) while `stop-check-question-quality.sh`'s verbatim-repeat bypass `exit 0`'d the Stop → repeat every turn. FIX = split the LASTQF-match by SHAPE: the bare blocked `❓ NEEDS YOU:` re-poke stays `exit 0`; a re-emitted `❓ ASKED` line / full `**Otázka` block / line-start `⏳`/`✅` marker → `exit 2` + stderr + a `repeat-asked-question` log line (rolling: RETRY_FILE cleared at cap = a stubborn session keeps getting pushback). A prose preamble + bare `❓ NEEDS YOU` line is an ACCEPTED residual (prose-enforced — NOT every non-bare shape is caught, only those three). `_qhash` → shared `hooks/lib-qhash.sh`. GENERAL: a Stop-gate meant to STOP a habit MUST exit 2 — dedup'ing the SYMPTOM leaves the habit; #740's prose-only fix failed in 4 days → mechanize.
 
 - **#868 — W-drain gate pattern: a PreToolUse hook reading a per-cwd cache count + a CLI-written receipt is the reusable shape for 'block dispatch X until condition Y is recorded'.** Fail-OPEN on every parse/read error; gate only the exact `subagent_type` set; receipt = JSON with `expires_at` (working-time-aware TTL, `working_time`); `WDRAIN-BYPASS:` prompt token = logged escape. Footer breach signal = a bool cache field consumed by the renderer, never a second read.
+
+- **#873 — `close_guard_segment.py`: substitution regexes must match CLOSE not just `gh`; heredoc bodies stripped BEFORE `split_top_level`.** `_SUBST_CLOSE_RE` matched ANY `$(gh ...)` — require BOTH `gh`+`close` inside delimiters. Heredoc body apostrophes → shlex ValueError → false block; `_strip_heredoc_bodies()` consumer-aware (data=blanked; executing=scanned). Review: `(?!<)` herestrings, unterminated RESTORE, PATCH body scan.

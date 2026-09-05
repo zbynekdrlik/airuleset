@@ -433,6 +433,8 @@ from cli_caveman_plugins import (  # noqa: E402, F401
     _plugin_registry_keys,
     _load_plugin_registry,
     _heal_stale_plugin_registry,
+    _heal_stale_marketplace_registry,
+    heal_stale_plugin_registries,
     _managed_plugin_built,
     _playwright_browsers_installed,
     ensure_playwright_browsers,
@@ -1421,6 +1423,17 @@ def cmd_install(args):
     except Exception as e:                             # pragma: no cover - defensive
         print(f"  drop-gateway ingress re-assert error (non-fatal): {e}",
               file=sys.stderr)
+
+    # --- 5d. heal stale plugin registries (#845 lane 3) ---
+    # Both installed_plugins.json and known_marketplaces.json can carry
+    # absolute home-dir paths that become stale after an account rename
+    # (#537).  The heal must run BEFORE any ensure_marketplace_registered()
+    # or `claude plugin install` call — i.e. before step 6
+    # (maybe_setup_caveman) and step 6b (setup_managed_plugins).
+    try:
+        heal_stale_plugin_registries()
+    except Exception as e:
+        print(f"  registry heal error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
     # A still-failing plugin install (after correct marketplace registration)
@@ -4266,6 +4279,14 @@ from cli_privileges import (  # noqa: E402, F401
     KIND_STORE as KIND_STORE,
 )
 
+# --- #870 F1: fleet push-key rotation — 3-phase state machine
+# (ADD → VERIFY → REMOVE) over every REMOTE_HOSTS entry + root@subdev.
+# Re-exported here so `SUBCOMMANDS["key-rotation"]` resolves through this
+# module (the same facade convention every other leaf uses).
+from cli_key_rotation import (  # noqa: E402, F401
+    cmd_key_rotation as cmd_key_rotation,
+)
+
 # --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed
 # by cmd_push (via `airuleset.provision_disk_guard_root`, the facade name, so it
 # stays test-patchable) as one non-fatal LOUD step after the resource-guards
@@ -5677,6 +5698,10 @@ def cmd_watchdog(args):
                     # Job 42 (#866) — NICE-CHECK SELF-CHECK. Enabled on every
                     # real poll; left False in run_once unit tests.
                     nice_check_enabled=True,
+                    # Job 43 (#858) — MDREVIEW CADENCE. Dev1-gated, daily
+                    # TTL. Enabled on every real poll; left False in
+                    # run_once unit tests.
+                    mdreview_cadence_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
@@ -6647,6 +6672,9 @@ from cli_skill_usage import (  # noqa: E402, F401
     cmd_skill_usage as cmd_skill_usage,
     scan_usage as scan_usage,
 )
+from cli_mdreview_audit import (  # noqa: E402, F401
+    cmd_mdreview_audit as cmd_mdreview_audit,
+)
 
 # --- #868: W-drain receipt CLI (block-dispatch-over-wdrain.sh companion).
 from cli_wdrain import (  # noqa: E402
@@ -7104,6 +7132,33 @@ def main():
                           action="store_true",
                           help="print only flagged (banned) rows")
 
+    # --- #870 F1: fleet push-key rotation (3-phase state machine) ----------
+    p_kr = sub.add_parser(
+        "key-rotation",
+        help="Rotate the fleet push ssh key (#870 F1) — three phases: "
+             "add (distribute new pubkey), verify (prove new key works), "
+             "remove (delete old key). Never prints private-key material.")
+    kr_sub = p_kr.add_subparsers(dest="kr_phase")
+    kr_add = kr_sub.add_parser("add", help="Append new pubkey to targets")
+    kr_verify = kr_sub.add_parser("verify",
+                                  help="Prove new key works for each target")
+    kr_remove = kr_sub.add_parser("remove",
+                                  help="Delete old key from targets")
+    for kr_p in (kr_add, kr_verify, kr_remove):
+        kr_p.add_argument("--dry-run", action="store_true",
+                          help="Print plan without executing")
+        kr_p.add_argument("--host", default=None,
+                          help="Limit to one target (user@host)")
+        kr_p.add_argument("--state", default=None,
+                          help="State file path (default: ~/.claude/"
+                               "key-rotation/airuleset_push_ed25519.json)")
+        kr_p.add_argument("--new-key", default=None,
+                          help="Path to the new private key (its .pub is read)")
+        kr_p.add_argument("--include-dev1", action="store_true",
+                          help="Include dev1 (excluded by default until F3)")
+        kr_p.add_argument("--summary-file", default=None,
+                          help="Write the summary to this file")
+
     # --- #870 F0: privilege inventory (migration-completeness gate) --------
     p_priv = sub.add_parser(
         "privileges",
@@ -7489,6 +7544,15 @@ def main():
     p_wdrain.add_argument("--cwd", default=None,
                           help="Override cwd for cache key resolution")
 
+    # --- #858: mdreview-audit ---
+    p_ma = sub.add_parser(
+        "mdreview-audit",
+        help="Structured review input for fleet-wide mdreview (#858)")
+    p_ma.add_argument("--fleet", action="store_true",
+                      help="Run on every deployable host via ssh")
+    p_ma.add_argument("--json", dest="json_output", action="store_true",
+                      help="JSON output")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -7624,6 +7688,8 @@ SUBCOMMANDS = {
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
     "wdrain-pass": cmd_wdrain_pass,
+    "key-rotation": cmd_key_rotation,
+    "mdreview-audit": cmd_mdreview_audit,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

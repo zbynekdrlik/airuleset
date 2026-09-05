@@ -1270,6 +1270,11 @@ def cmd_push(args):
         # same single-place-that-knows rule as the overrides above.
         test_env["AIRULESET_GOAL_ROSTER_PATH"] = str(
             Path(_lock_tmp) / "goal-roster.json")
+        # #858 re-review (dual-coverage): mdreview_cadence writes
+        # ~/.claude/mdreview-cadence.json by default; same pattern as the
+        # goal-roster isolation above.
+        test_env["AIRULESET_MDREVIEW_STATE_PATH"] = str(
+            Path(_lock_tmp) / "mdreview-cadence.json")
         # #804 mode-5: the resurrect ACTION opt-in flag OFF for the push-gate
         # suite (conftest is pytest-only), so the mode-5 test stays deterministic
         # even if the LIVE box running the gate has enabled it fleet-wide.

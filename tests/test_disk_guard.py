@@ -1602,9 +1602,16 @@ def test_largest_live_scratch_single_discovery_and_change_only_log(tmp_path, mon
 
     monkeypatch.setattr(cs, "discover_claude_scratch_candidates", _counting)
     log = tmp_path / ".claude" / "disk-guard" / "disk-guard.log"
+    # #863 integration fix: inject a minimal planners_fn returning ONLY the
+    # scratch rung so the drain does not scan the REAL filesystem (/var/log,
+    # /tmp/claude-*, etc.) — on a dev box those SKIP lines alone exceed
+    # LOG_MAX_BYTES (512 KB), triggering log rotation that moves the
+    # LIVE-SCRATCH line from call 1 into the rotated .1 file, making the
+    # change-only-log assertion read 0 occurrences from the fresh file.
     kw = dict(now=_NOW, home=str(tmp_path), dry_run=True,
               statvfs_fn=statvfs_map({"/": (85, 20)}), dev_fn=dev_map({"/": 1}),
-              geteuid_fn=lambda: uid or 1000, mounts=("/",))
+              geteuid_fn=lambda: uid or 1000, mounts=("/",),
+              planners_fn=lambda h, n: [])
     dg.run_disk_guard(**kw)
     assert calls["n"] == 1, "exactly ONE scratch discovery per drain poll"
     assert log.exists() and log.read_text().count("LIVE-SCRATCH") == 1

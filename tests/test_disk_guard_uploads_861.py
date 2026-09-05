@@ -207,6 +207,7 @@ def test_execute_drain_appends_deletion_journal_every_rung(tmp_path):
         planners=[("uploads", fake_planner)],
         recheck_fn=lambda: next(recheck_calls),
         do_action_fn=lambda a: a.get("bytes", 0),
+        geteuid_fn=lambda: 1000,          # CI runs as root; bypass the uid-0 refusal
         log_path=log_path,
         now=now,
     )
@@ -270,6 +271,7 @@ def test_deletion_journal_dry_run_writes_nothing(tmp_path):
         planners=[("uploads", fake_planner)],
         recheck_fn=lambda: next(recheck_calls),
         do_action_fn=lambda a: a.get("bytes", 0),
+        geteuid_fn=lambda: 1000,          # CI runs as root; bypass the uid-0 refusal
         log_path=log_path,
         now=now,
         dry_run=True,

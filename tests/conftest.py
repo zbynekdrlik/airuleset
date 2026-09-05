@@ -194,7 +194,12 @@ def _isolate_goal_roster():
         with mock.patch.dict(os.environ,
                              {"AIRULESET_GOAL_ROSTER_PATH":
                               str(Path(d) / "goal-roster.json"),
-                              "AIRULESET_RESURRECT_ACTION": ""}):
+                              "AIRULESET_RESURRECT_ACTION": "",
+                              # #858 re-review: cadence job owns its state file;
+                              # isolate it so a test never writes the developer's
+                              # real ~/.claude/mdreview-cadence.json.
+                              "AIRULESET_MDREVIEW_STATE_PATH":
+                              str(Path(d) / "mdreview-cadence.json")}):
             yield
 
 
