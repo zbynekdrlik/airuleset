@@ -77,13 +77,14 @@ self-close above pass cleanly); do not route around it — #349, 2026-08-09: a `
 stream self-closed three already-merged tickets because merging into the INTEGRATION branch does
 NOT auto-close via GitHub's `Closes #N`, which only fires on the repo's actual DEFAULT branch.
 Closing a foreign ticket yourself removes the hand-off event and bypasses the review this authority
-exists to enforce. **A ticket that BOUND an Odoo Discuss thread may be closed ONLY after the thread's
-closing note is posted** — record the binding `Discuss-thread: <channel-id>` on the ticket when you
+exists to enforce. **A ticket that BOUND a client acceptance thread may be closed ONLY after the thread's
+closing note is posted** — record the binding `Acceptance-thread: <ref>` (or legacy `Discuss-thread: <channel-id>`) on the ticket when you
 open/first-post-into the thread, and before ANY close of a thread-bound ticket record
-`Discuss-closed: <msg-id>` (the closing note was posted — the LAST ticket of the thread) or
-`Discuss-defer: <siblings #A #B still open>` (a non-last sibling); `block-fork-no-merge-issue-close.sh`
-enforces this for EVERY authority (airuleset #627), the obligation follows the ticket's current owner
-never the author, and you compose the note per `skills/odoo-discuss-xmlrpc/handover-compose.md`.
+`Acceptance-cited: msg <id>` (the closing note was posted — the LAST ticket of the thread) or
+`Acceptance-defer: <siblings #A #B still open>` (a non-last sibling); legacy `Discuss-closed:`/`Discuss-defer:` are also accepted.
+`block-fork-no-merge-issue-close.sh`
+enforces this for EVERY authority (airuleset #627/#891), the obligation follows the ticket's current owner
+never the author, and you compose the note per `skills/odoo-client-messaging/handover-compose.md`.
 `branch-merge` hands off exactly like `fork-no-merge` — the SAME
 `READY-FOR-REVIEW:` comment convention, posted right after your integration-branch merge lands (the
 repo's `subdev-handoff-label` workflow auto-applies the `ready-for-review` label from that comment,

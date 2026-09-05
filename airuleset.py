@@ -372,7 +372,7 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
                # banned); hidden on-demand, deploys everywhere at zero
                # slash-noise cost, description-triggered when a session
                # posts to an Odoo Discuss channel over XML-RPC.
-               "odoo-discuss-xmlrpc",
+               "odoo-discuss-xmlrpc", "odoo-client-messaging",
                # #569 (2026-08-19) — thin wrapper over `airuleset.py
                # onboard-project`; all onboarding logic lives in the CLI
                # (cli_onboard.py), the skill just invokes + reports. Deploys

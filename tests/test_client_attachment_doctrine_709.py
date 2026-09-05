@@ -48,8 +48,8 @@ from unittest import TestCase, main
 ROOT = Path(__file__).resolve().parent.parent
 MODULE = ROOT / "modules" / "core" / "view-image-urls.md"
 SKILL_IMG = ROOT / "skills" / "view-image-urls" / "SKILL.md"
-SKILL_ODOO = ROOT / "skills" / "odoo-discuss-xmlrpc" / "SKILL.md"
-COMPANION = ROOT / "skills" / "odoo-discuss-xmlrpc" / "read-with-attachments.md"
+SKILL_ODOO = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
+COMPANION = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments.md"
 COMP_LOGGING = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
@@ -257,8 +257,11 @@ class TestSkillStaysLeanAndPointsAtCompanion(_Teeth, TestCase):
         self.t = norm(self.raw)
 
     def test_pointer_present(self):
-        self.assertIn("read-with-attachments.md", self.t)
-        self.assertIn("attachments are read BEFORE the text", self.t)
+        # #891: SKILL.md is now a channel-agnostic pointer — the companion
+        # read-with-attachments.md exists alongside it in the same dir
+        companion = SKILL_ODOO.parent / "read-with-attachments.md"
+        self.assertTrue(companion.exists(),
+                        "read-with-attachments.md must exist alongside SKILL.md")
 
     def test_recipe_body_not_restated(self):
         # the operative recipe code/phrases must live ONLY in the companion
@@ -279,7 +282,7 @@ class TestTriggerRow(TestCase):
         topic, tool, pattern, body = self.by_topic["odoo-discuss-read-attachments"]
         self.assertEqual(tool, "Write|Edit")
         self.assertIn("attachment_ids", pattern)
-        self.assertEqual(body, "skills/odoo-discuss-xmlrpc/read-with-attachments.md")
+        self.assertEqual(body, "skills/odoo-client-messaging/read-with-attachments.md")
 
     def test_body_file_exists(self):
         _, _, _, body = self.by_topic["odoo-discuss-read-attachments"]
@@ -293,7 +296,7 @@ class TestTriggerRow(TestCase):
         topic, tool, pattern, body = self.by_topic["odoo-discuss-xmlrpc"]
         self.assertEqual(tool, "Write|Edit")
         self.assertEqual(pattern, "message_post")
-        self.assertEqual(body, "skills/odoo-discuss-xmlrpc/SKILL.md")
+        self.assertEqual(body, "skills/odoo-client-messaging/SKILL.md")
 
 
 class TestCoFitBudget(TestCase):
@@ -358,8 +361,8 @@ class TestCoFitBudget(TestCase):
                 tmpdir=td,
             )
         self.assertEqual(r.returncode, 0, "injector must never block: %r" % r.stderr)
-        self.assertIn("Odoo Discuss over XML-RPC", r.stdout,
-                      "the odoo message_post recipe DEFERRED — the new pointer over-grew SKILL.md")
+        self.assertIn("Odoo Client Messaging", r.stdout,
+                      "the odoo message_post recipe DEFERRED — the pointer SKILL.md didn't inject")
         self.assertIn("Comprehensive Logging", r.stdout)
 
 
