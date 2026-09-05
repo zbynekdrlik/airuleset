@@ -31,36 +31,33 @@ def read(rel):
 
 class TestCiMonitoringDurationSplit(TestCase):
     def test_mechanism_is_chosen_by_expected_wait_length(self):
-        t = read("modules/core/ci-monitoring.md")
+        # Deep content moved to companion (#859 batch 4c)
+        t = read("skills/ci-monitoring-deep/DEEP.md")
         low = t.lower()
         self.assertIn("expected wait", low)
         self.assertIn("short wait", low)
         self.assertIn("long wait", low)
 
     def test_foreground_loop_still_the_short_wait_default(self):
-        # The existing shape/snippet must survive untouched -- this is an
-        # ADDITIVE fix, not a replacement (#90's snippet-extraction test
-        # depends on the DEADLINE snippet staying the first ```bash block).
-        t = read("modules/core/ci-monitoring.md")
+        # Deep content moved to companion (#859 batch 4c)
+        t = read("skills/ci-monitoring-deep/DEEP.md")
         self.assertIn("Foreground bounded poll loop", t)
         self.assertIn("DEADLINE=", t)
 
     def test_long_wait_recommends_one_background_waiter(self):
-        t = read("modules/core/ci-monitoring.md")
+        t = read("skills/ci-monitoring-deep/DEEP.md")
         self.assertIn("background waiter", t)
         self.assertIn("run_in_background: true", t)
-        # Must NOT be a repeated-print poll -- silent until terminal state.
         self.assertIn("ONE task-notification", t)
 
     def test_background_waiter_has_a_death_or_timeout_branch(self):
-        # verify-launched-work-liveness.md: never a bare success-only wait.
-        t = read("modules/core/ci-monitoring.md")
+        t = read("skills/ci-monitoring-deep/DEEP.md")
         self.assertTrue(
             "death" in t.lower() or "budget" in t.lower(),
             "the long-wait example must self-bound on failure/timeout too")
 
     def test_recovery_step_stated_on_next_turn(self):
-        t = read("modules/core/ci-monitoring.md")
+        t = read("skills/ci-monitoring-deep/DEEP.md")
         low = t.lower()
         self.assertIn("relaunch", low)
         self.assertIn("durable", low)
@@ -153,7 +150,7 @@ class TestMemoryPressureReapDeathModeNamed(TestCase):
     not)."""
 
     SURFACES = (
-        "modules/core/ci-monitoring.md",
+        "skills/ci-monitoring-deep/DEEP.md",
         "skills/verify-launched-work-liveness/SKILL.md",
         "modules/quality/verify-launched-work-liveness.md",
     )
@@ -161,7 +158,7 @@ class TestMemoryPressureReapDeathModeNamed(TestCase):
     # stays terse (reap named + recovery), so the env kill-switch / minutes /
     # subagent-exempt asserts below apply only to these two.
     FULL = (
-        "modules/core/ci-monitoring.md",
+        "skills/ci-monitoring-deep/DEEP.md",
         "skills/verify-launched-work-liveness/SKILL.md",
     )
 

@@ -61,13 +61,17 @@ def read(rel):
 
 class TestCompletionReportTeachesServedSelfCompact(TestCase):
     MOD = "modules/core/completion-report.md"
+    DEEP = "skills/completion-report-deep/DEEP.md"
+
+    def _combined(self):
+        return read(self.MOD) + "\n" + read(self.DEEP)
 
     def test_self_call_is_taught(self):
-        t = read(self.MOD)
+        t = self._combined()
         self.assertIn("compact-request --self", t)
 
     def test_scoped_to_served_non_worker_sessions(self):
-        t = read(self.MOD)
+        t = self._combined()
         # Must explicitly name the population this teaching is for, not
         # just repeat the mechanism -- otherwise a reader can't tell this
         # applies outside the autopilot/goal-loop flow already covered in
@@ -80,7 +84,7 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         )
 
     def test_trigger_is_the_full_heading_never_a_bare_done_marker(self):
-        t = read(self.MOD)
+        t = self._combined()
         low = t.lower()
         self.assertIn("never a bare", low)
         self.assertIn("## ✅ work complete", low)
@@ -91,7 +95,7 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         self.assertTrue("#99" in t and "#48" in t)
 
     def test_call_happens_before_the_report_not_after(self):
-        t = read(self.MOD)
+        t = self._combined()
         low = t.lower()
         self.assertIn("first", low)
         self.assertIn("before writing the report", low)
@@ -105,7 +109,7 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         )
 
     def test_never_right_after_answering_a_question(self):
-        t = read(self.MOD)
+        t = self._combined()
         # polarity: forbid the INVERSION of this NEVER, not just require
         # the phrase to appear somewhere in the file.
         self.assertRegex(
@@ -123,14 +127,14 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         )
 
     def test_never_mid_work(self):
-        t = read(self.MOD)
+        t = self._combined()
         # polarity: the literal NEVER-mid-work bullet must be present,
         # and no rewrite may flip it to a permissive "ALWAYS" form.
         self.assertRegex(t, r"NEVER mid-work")
         self.assertNotRegex(t.upper(), r"ALWAYS MID-WORK")
 
     def test_durability_precondition_present(self):
-        t = read(self.MOD)
+        t = self._combined()
         low = t.lower()
         # a clean ✅/no-⏳ report proves the TURN ended, not that the work
         # is durable -- the compaction is unsafe if the only record of
@@ -142,7 +146,7 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         )
 
     def test_references_the_deciding_tickets(self):
-        t = read(self.MOD)
+        t = self._combined()
         self.assertTrue("#225" in t or "#228" in t)
 
     def test_retired_fallback_hook_is_named_not_silently_dropped(self):
@@ -157,7 +161,7 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         # the hook (so a reader knows what happened to it, rather than
         # the reference silently vanishing) and must NOT still claim it
         # "covers you" -- both checked here.
-        t = read(self.MOD)
+        t = self._combined()
         self.assertIn("notify-compact-request.sh", t)
         self.assertNotRegex(t, r"still covers you")
         low = t.lower()

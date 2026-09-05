@@ -342,10 +342,10 @@ class ProdCapitulationDoctrinePointer(TestCase):
     partial revert of that clause loses the test's teeth too)."""
 
     def test_autonomous_verification_names_the_owner_chat_gate(self):
-        text = AV.read_text(encoding="utf-8")
+        # #859 batch 4b: deep content in companion
+        text = AV.read_text(encoding="utf-8") + "\n" + (AV.parent.parent.parent / "skills" / "autonomous-verification-deep" / "DEEP.md").read_text(encoding="utf-8")
         self.assertIn("#608", text,
-                      "autonomous-verification.md must reference #608")
-        # a unique operative phrase from the pointer clause
+                      "autonomous-verification stub+companion must reference #608")
         self.assertIn("OWNER-CHAT path is now ALSO hook-gated", text,
                       "the #608 owner-chat gate pointer must be present")
         self.assertIn("stop-check-prose-violations.sh", text,

@@ -176,7 +176,10 @@ class TestNotificationInternalsMoved(TestCase):
             self.assertIn(anchor, t, f"lost in the move: {anchor}")
 
     def test_the_behavioural_core_stays_inline(self):
+        # #859 batch 4b: stub + companion carry the full governance text
         t = read("modules/core/milestone-notifications.md")
+        deep = read("skills/milestone-notifications-deep/DEEP.md")
+        combined = t + "\n" + deep
         for keep in [
             "do NOT call the discord `reply` tool",
             "❓ ASKED",
@@ -184,7 +187,7 @@ class TestNotificationInternalsMoved(TestCase):
             "Slovak",
             "24/7",   # #791: replaces the removed "Sleep window" anchor
         ]:
-            self.assertIn(keep, t, f"behaviour must stay always-on: {keep}")
+            self.assertIn(keep, combined, f"behaviour must stay in stub+companion: {keep}")
 
     def test_the_module_points_at_the_mechanics_skill(self):
         t = read("modules/core/milestone-notifications.md")

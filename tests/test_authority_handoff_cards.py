@@ -273,12 +273,13 @@ class TestCompletionReportBranchMergeHandoff(TestCase):
     three merged tickets sat neither queued nor reviewed."""
 
     def test_handoff_line_covers_branch_merge_too(self):
-        t = read("modules/core/completion-report.md")
+        # #859 batch 4b: deep content in companion
+        t = read("modules/core/completion-report.md") + "\n" + read("skills/completion-report-deep/DEEP.md")
         self.assertIn("fork-no-merge AND branch-merge", t)
         self.assertIn("NEVER a self-close", t)
 
     def test_pr_line_states_ticket_stays_open(self):
-        t = read("modules/core/completion-report.md")
+        t = read("modules/core/completion-report.md") + "\n" + read("skills/completion-report-deep/DEEP.md")
         self.assertIn("ticket stays OPEN", t)
 
 
