@@ -262,6 +262,38 @@ EOF
   esac
 fi
 
+# ======================= RULE C — controller push-origin (#870 F3) =========
+# When CONTROLLER_CUTOVER_DONE is True in cli_fleet.py, block
+# `airuleset.py push` from a non-controller box. When the flag is False
+# (the dev1-safe commit-A default), this is a no-op. The flag is a source
+# constant, so a grep on the file is sufficient (no python startup, no
+# import side-effects, no REPO_DIR dependency). Runs ONLY when CMD already
+# passed the "airuleset" prefilter below (line ~305), so zero cost for
+# non-airuleset commands. The override env var is recognized here too so
+# the python-side and hook-side agree.
+case "$CMD" in *airuleset*)
+  # Resolve the repo dir from this hook's own path (hooks/ is one level below repo root).
+  _RULE_C_REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." 2>/dev/null && pwd)" || true
+  _CUTOVER_DONE=0
+  if [ -n "${_RULE_C_REPO:-}" ] && grep -q '^CONTROLLER_CUTOVER_DONE = True' "${_RULE_C_REPO}/cli_fleet.py" 2>/dev/null; then
+    _CUTOVER_DONE=1
+  fi
+  if [ "$_CUTOVER_DONE" = "1" ]; then
+    # Honor the same override the python guard advertises.
+    case "${AIRULESET_CONTROLLER_OVERRIDE:-}" in 1) ;; *)
+      _BOX_CLASS="$(cat "${HOME:-/nonexistent}/.claude/airuleset-box-class" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+      if [ "${_BOX_CLASS:-}" != "controller" ]; then
+        case "$CMD" in
+          *"airuleset.py push"*|*"airuleset.py"*" push"*)
+            echo "[block-foreign-airuleset-write:ruleC] push from non-controller box blocked (class=${_BOX_CLASS:-})" >&2
+            exit 2 ;;
+        esac
+      fi
+    ;; esac
+  fi
+  ;;
+esac
+
 # ======================= RULE A — foreign session ==========================
 # Bash-only: a git write / airuleset.py push arrives only as a Bash command.
 [ -z "$CMD" ] && exit 0
