@@ -4260,6 +4260,14 @@ from cli_privileges import (  # noqa: E402, F401
     KIND_STORE as KIND_STORE,
 )
 
+# --- #870 F1: fleet push-key rotation — 3-phase state machine
+# (ADD → VERIFY → REMOVE) over every REMOTE_HOSTS entry + root@subdev.
+# Re-exported here so `SUBCOMMANDS["key-rotation"]` resolves through this
+# module (the same facade convention every other leaf uses).
+from cli_key_rotation import (  # noqa: E402, F401
+    cmd_key_rotation as cmd_key_rotation,
+)
+
 # --- #841: disk-guard ROOT/system-level legs -- a self-contained leaf, consumed
 # by cmd_push (via `airuleset.provision_disk_guard_root`, the facade name, so it
 # stays test-patchable) as one non-fatal LOUD step after the resource-guards
@@ -7093,6 +7101,33 @@ def main():
                           action="store_true",
                           help="print only flagged (banned) rows")
 
+    # --- #870 F1: fleet push-key rotation (3-phase state machine) ----------
+    p_kr = sub.add_parser(
+        "key-rotation",
+        help="Rotate the fleet push ssh key (#870 F1) — three phases: "
+             "add (distribute new pubkey), verify (prove new key works), "
+             "remove (delete old key). Never prints private-key material.")
+    kr_sub = p_kr.add_subparsers(dest="kr_phase")
+    kr_add = kr_sub.add_parser("add", help="Append new pubkey to targets")
+    kr_verify = kr_sub.add_parser("verify",
+                                  help="Prove new key works for each target")
+    kr_remove = kr_sub.add_parser("remove",
+                                  help="Delete old key from targets")
+    for kr_p in (kr_add, kr_verify, kr_remove):
+        kr_p.add_argument("--dry-run", action="store_true",
+                          help="Print plan without executing")
+        kr_p.add_argument("--host", default=None,
+                          help="Limit to one target (user@host)")
+        kr_p.add_argument("--state", default=None,
+                          help="State file path (default: ~/.claude/"
+                               "key-rotation/airuleset_push_ed25519.json)")
+        kr_p.add_argument("--new-key", default=None,
+                          help="Path to the new private key (its .pub is read)")
+        kr_p.add_argument("--include-dev1", action="store_true",
+                          help="Include dev1 (excluded by default until F3)")
+        kr_p.add_argument("--summary-file", default=None,
+                          help="Write the summary to this file")
+
     # --- #870 F0: privilege inventory (migration-completeness gate) --------
     p_priv = sub.add_parser(
         "privileges",
@@ -7600,6 +7635,7 @@ SUBCOMMANDS = {
     "model-audit": cmd_model_audit,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
+    "key-rotation": cmd_key_rotation,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

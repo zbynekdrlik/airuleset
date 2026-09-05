@@ -185,12 +185,13 @@ class TestManageWebtermOnlyKeys(unittest.TestCase):
             f.write(content)
 
     def test_lockout_guard_empty_desired_set(self):
-        """Guard refuses when desired set would be empty."""
-        with mock.patch.object(cli_webterm_only, "FLEET_PUSH_PUBKEY", ""):
-            r = cli_webterm_only.manage_webterm_only_keys(
-                user="dominika", ssh_dir=self.ssh_dir,
-                run=_fake_run_ok, log_dir=self.log_dir,
-            )
+        """Guard refuses when desired set would be empty (all fleet blobs gone)."""
+        with mock.patch.object(cli_webterm_only, "FLEET_PUSH_PUBKEYS", ("",)):
+            with mock.patch.object(cli_webterm_only, "FLEET_PUSH_PUBKEY", ""):
+                r = cli_webterm_only.manage_webterm_only_keys(
+                    user="dominika", ssh_dir=self.ssh_dir,
+                    run=_fake_run_ok, log_dir=self.log_dir,
+                )
         self.assertEqual(r["action"], "error")
 
     def test_lockout_guard_preserves_file(self):

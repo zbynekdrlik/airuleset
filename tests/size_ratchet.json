@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 7609,
+    "airuleset.py": 7645,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -22,7 +22,7 @@
     "cli_onboard_exec.py": 140,
     "cli_owner_keys.py": 233,
     "cli_owner_vps.py": 168,
-    "cli_privileges.py": 824,
+    "cli_privileges.py": 838,
     "cli_push_gate.py": 218,
     "cli_quals.py": 2295,
     "cli_quals_cmd.py": 988,
@@ -41,7 +41,7 @@
     "cli_webterm_gateway.py": 1177,
     "cli_webterm_lane.py": 413,
     "cli_webterm_marek.py": 256,
-    "cli_webterm_only.py": 595,
+    "cli_webterm_only.py": 604,
     "cli_webterm_profiles.py": 503,
     "cli_webterm_pwa.py": 217,
     "cli_webterm_tunnel.py": 180,
@@ -444,7 +444,7 @@
     "tests/test_webterm_lane_parity_684.py": 210,
     "tests/test_webterm_loopback_hardening_663.py": 285,
     "tests/test_webterm_marek.py": 596,
-    "tests/test_webterm_only.py": 752,
+    "tests/test_webterm_only.py": 753,
     "tests/test_webterm_per_human_tabs.py": 295,
     "tests/test_webterm_profiles.py": 246,
     "tests/test_webterm_pwa.py": 201,
@@ -514,7 +514,9 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "cli_key_rotation.py": 579,
+    "tests/test_key_rotation.py": 548
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
@@ -524,7 +526,7 @@
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 229,
     "airuleset.py::cmd_watchdog": 253,
-    "airuleset.py::main": 830,
+    "airuleset.py::main": 857,
     "cli_quals.py::_slice_mine_and_handed": 217,
     "cli_quals_cmd.py::cmd_core_quals": 219,
     "cli_quals_cmd.py::cmd_slice_quals": 217,

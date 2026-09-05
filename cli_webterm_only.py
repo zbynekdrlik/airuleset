@@ -37,14 +37,22 @@ import time
 # Public-key constants (PUBLIC material, safe to commit)
 # ---------------------------------------------------------------------------
 
-# The fleet push pubkey — the key ``cmd_push`` authenticates with to reach
-# every subdev account.  Read from ``~/.secrets/gatekeeper_access_ed25519.pub``
-# on dev1 (the maintainer box).  The lockout guard structurally refuses to
-# write any authorized_keys that lacks this blob.
-FLEET_PUSH_PUBKEY = (
+# The fleet push pubkeys — a TUPLE so the lockout guard structurally refuses
+# to write any authorized_keys that lacks ALL members' blobs.  During a key
+# rotation (F1, #870) this tuple holds BOTH the old and new key; after the
+# rotation completes (F3 cutover) it collapses to ``(new,)``.
+#
+# Member 0 = the CURRENT (old) key, read from
+# ``~/.secrets/gatekeeper_access_ed25519.pub`` on dev1 (the maintainer box).
+# F1: append the new pubkey here as member 1
+FLEET_PUSH_PUBKEYS = (
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGyVa+vk1mN9ZDh9VeBCOGx4r1OVGmcb5n67md"
-    "t+R3Q/ gatekeeper-access dev1->odoo-gatekeeper"
+    "t+R3Q/ gatekeeper-access dev1->odoo-gatekeeper",
+    # F1: append new pubkey here
 )
+
+# Backwards-compatible alias — the first member IS the old single pubkey.
+FLEET_PUSH_PUBKEY = FLEET_PUSH_PUBKEYS[0]
 
 # The webterm david lane pubkey — the key the webterm david gateway uses to
 # loopback-ssh between david1-4 accounts on subdev.  Read from subdev's
@@ -111,7 +119,7 @@ def desired_keys_for_user(user):
 
     from cli_owner_keys import OWNER_PUBKEYS
 
-    keys = [FLEET_PUSH_PUBKEY]
+    keys = list(FLEET_PUSH_PUBKEYS)
     keys.extend(OWNER_PUBKEYS)
 
     # david1-4 get the lane key
@@ -183,12 +191,13 @@ def manage_webterm_only_keys(
         result["reason"] = str(e)
         return result
 
-    # 2. STRUCTURAL REFUSAL: fleet push key must be in desired set
-    fleet_blob = _key_blob(FLEET_PUSH_PUBKEY)
+    # 2. STRUCTURAL REFUSAL: at least ONE fleet push pubkey blob must be in
+    # the desired set (during rotation the tuple has 2 members; after cutover 1)
     desired_blobs = {_key_blob(k) for k in desired_lines}
-    if not fleet_blob or fleet_blob not in desired_blobs:
-        msg = ("  webterm-only keys: LOCKOUT GUARD — FLEET_PUSH_PUBKEY blob "
-               "NOT in desired set for %s; touching NOTHING" % user)
+    fleet_blobs = {_key_blob(k) for k in FLEET_PUSH_PUBKEYS} - {None}
+    if not fleet_blobs or not (fleet_blobs & desired_blobs):
+        msg = ("  webterm-only keys: LOCKOUT GUARD — NO FLEET_PUSH_PUBKEYS "
+               "blob in desired set for %s; touching NOTHING" % user)
         print(msg, file=sys.stderr)
         result["reason"] = "lockout-guard: fleet key missing from desired set"
         return result
