@@ -107,12 +107,26 @@ PRIVILEGES: List[Privilege] = [
               "(SHARED_STREAM_GUARD_HOSTS, admin_user=root)",
         rotation="generate airuleset_push_ed25519 on the new box; distribute "
                  "via #869 managed authorized_keys push using the OLD key; then "
-                 "remove the old key from every target's authorized_keys",
+                 "remove the old key from every target's authorized_keys "
+                 "(rotation: F1 — being replaced by airuleset_push_ed25519)",
         must_move=True,
         used_by=("cli_fleet.py:52 (REMOTE_HOSTS identity)",
                  "cli_fleet.py:619 (SHARED_STREAM_GUARD_HOSTS root@subdev)",
                  "cli_resource_guards.py:33"),
         identity_of="~/.secrets/gatekeeper_access_ed25519",
+    ),
+    Privilege(
+        name="airuleset_push_ed25519",
+        kind=KIND_SSH_KEY,
+        local_path="~/.secrets/airuleset_push_ed25519",
+        reach="NEW fleet push ssh key — replaces gatekeeper_access_ed25519; "
+              "reaches every REMOTE_HOSTS entry + root@subdev "
+              "(SHARED_STREAM_GUARD_HOSTS) after F1 rotation",
+        rotation="F1: generated on the airuleset box; distributed via "
+                 "cli_key_rotation add/verify/remove using the old key",
+        must_move=True,
+        used_by=("cli_key_rotation.py:46 (F1 rotation target, forward-ref)",),
+        identity_of="~/.secrets/airuleset_push_ed25519",
     ),
     Privilege(
         name="default_key_id_ed25519",
