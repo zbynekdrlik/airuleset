@@ -1,6 +1,6 @@
 ---
 name: autopilot-master
-description: "Usage: /autopilot-master. GATEKEEPER umbrella loop — ONE armed /goal multiplexing every lane of the pipeline so the session NEVER idles while any lane has work: sub-dev hand-off reviews (/process-subdev body), release prep ANYTIME with prod deploys held for the repo's declared release window, the gatekeeper's own core backlog (/autopilot body), and user questions asked one at a time via ask-and-continue. Replaces running /autopilot and /process-subdev as separate loops that each parked the whole session while waiting (the 2026-07-20 stalls). airuleset owns it (#22)."
+description: Gatekeeper umbrella loop — drives the gk box's /goal across all streams. Merges sub-dev hand-offs, runs /process-subdev, fires cards.
 argument-hint: ""
 user-invocable: true
 disable-model-invocation: true

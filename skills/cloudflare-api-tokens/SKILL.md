@@ -1,6 +1,6 @@
 ---
 name: cloudflare-api-tokens
-description: Use when doing ANY Cloudflare API work (DNS records, zones), when you need a Cloudflare API token, or when ANY Cloudflare credential appears — a `cfat_` account-owned token, a legacy user token, a Global API Key, or an Origin CA key. Covers the credential taxonomy (which artifact is which, its shape + auth header + correct verification) and how to FIND, VERIFY (the verify endpoint LIES — it returns `Invalid API Token` for account-owned `cfat_` tokens BY DESIGN), NAME, and PERSIST tokens correctly. Load before asking the user for a Cloudflare token, before deciding a token is invalid, or before rejecting/escalating a credential on its length or prefix.
+description: Cloudflare API credential taxonomy — find, verify, name, persist tokens. Load before any Cloudflare API work or when a cfat_/legacy token appears.
 user-invocable: false
 ---
 

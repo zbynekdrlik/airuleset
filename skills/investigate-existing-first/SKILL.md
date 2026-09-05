@@ -1,6 +1,6 @@
 ---
 name: investigate-existing-first
-description: Investigate existing libraries, frameworks, OCA repos, and off-the-shelf solutions before proposing or recommending custom development. Load before proposing a custom module/layer/wrapper or estimating custom-dev scope.
+description: Investigate existing libraries/frameworks/OCA repos before proposing custom development. Load before recommending custom work.
 user-invocable: false
 ---
 

@@ -28,7 +28,7 @@ def read(rel):
 
 class TestWorkflowCostDiscipline(TestCase):
     def test_ground_once_and_right_size_fanout(self):
-        t = read("modules/core/claude-code-tooling.md")
+        t = read("skills/claude-code-workflows/DEEP.md")  # #859 batch 3: moved to companion
         # Ground-once rule + the residual-uncertainty sizing + the ultracode clarification.
         self.assertIn("Ground ONCE", t)
         self.assertIn("RESIDUAL UNCERTAINTY", t)

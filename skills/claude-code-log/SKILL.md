@@ -1,7 +1,7 @@
 ---
 name: claude-code-log
 user-invocable: false
-description: Browse, export, or archive Claude Code session transcripts as HTML/Markdown or in a TUI, using the external `claude-code-log` tool (uvx claude-code-log@latest). Load when the user wants to read, browse, export, search, or archive past transcripts/sessions, turn a session into a shareable HTML/Markdown page, or review token usage across sessions. Covers the #410 gzip-at-rest interplay (claude-code-log reads only plain .jsonl, not .jsonl.gz) and when to reach for airuleset's own gzip-aware `claude-history` instead.
+description: Browse, export, or archive Claude Code session transcripts as HTML/Markdown using claude-code-log. Load for transcript reading or token-usage review.
 ---
 
 ### Browsing / Exporting / Archiving Transcripts — `claude-code-log` (adopt, don't build — #420)

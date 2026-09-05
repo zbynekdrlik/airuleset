@@ -1,6 +1,6 @@
 ---
 name: process-subdev
-description: "Usage: /process-subdev <stream>. GATEKEEPER-side counterpart of /autopilot — the strict independent review → release → prod pipeline for sub-dev hand-offs (ready-for-review queue). Owns the whole lifecycle: cold diff-first review, own CI + release gates, verdict (CLEAN → release THROUGH main + prod deploy in the repo's release window; FINDINGS → prio:bounce ticket-first bounce lane), and a continuation /goal whose DONE = slice RELEASED + deployed + verified for EVERY stream — never 'tickets closed'. Repo specifics (stream matrix, review dimensions, windows, approvals) come from the repo's CLAUDE.md parameters; this skill is the canonical PROCESS (airuleset owns it — #21, 2026-07-20). No argument → print all streams' queue state and stop."
+description: Gatekeeper sub-dev pipeline — review hand-offs, merge to staging/main, deploy, verify. Load when processing ready-for-review tickets.
 argument-hint: "<stream>"
 user-invocable: true
 disable-model-invocation: true

@@ -98,13 +98,17 @@ class TestDescriptionTriggersAndNoBrowserFraming(TestCase):
             self.assertIn(needle, desc.lower(), needle)
 
     def test_description_advertises_no_browser_first(self):
-        desc = _description(SKILL)
-        self.assertIn("download it locally with curl", desc)
-        self.assertIn("Read tool", desc)
+        # #859 batch 3: description trimmed to ≤200 chars; the full assertion
+        # now checks the SKILL body (the description keeps the "no browser" gist).
+        body = SKILL.read_text(encoding="utf-8")
+        self.assertIn("download", body)
+        self.assertIn("Read tool", body)
 
     def test_description_bans_not_installed_claim(self):
-        # the #415 honesty requirement reaches the LOAD-trigger line itself.
-        self.assertIn('NEVER claim Playwright "is not installed"', _description(SKILL))
+        # #859 batch 3: enforcement phrase lives in body; desc keeps gist.
+        body = SKILL.read_text(encoding="utf-8")
+        self.assertIn("is not installed", body)
+        self.assertIn("NEVER", body)
 
 
 class TestNoBrowserPathIsFirst(_Teeth, TestCase):
