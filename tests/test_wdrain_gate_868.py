@@ -395,5 +395,44 @@ class TestFamilyLabel(unittest.TestCase):
         self.assertIsNone(verdicts[0]["number"])
 
 
+class TestQualsTimeout902(unittest.TestCase):
+    """#902: quals subprocess timeout must accommodate O(|W|) network calls."""
+
+    def test_timeout_constant_exists_and_is_adequate(self):
+        """_QUALS_SUBPROCESS_TIMEOUT must exist and be >= 120s.
+
+        The quals subprocess does per-member gh calls (~2-3s each).
+        At |W|=37, the old 30s timeout always failed. The constant must
+        accommodate at least ~40 members comfortably.
+        """
+        sys.path.insert(0, str(REPO))
+        try:
+            from cli_wdrain import _QUALS_SUBPROCESS_TIMEOUT
+        finally:
+            sys.path.pop(0)
+
+        self.assertGreaterEqual(
+            _QUALS_SUBPROCESS_TIMEOUT, 120,
+            "quals subprocess timeout must be >= 120s to accommodate "
+            "O(|W|) network calls (at ~3s/member, 40 members = 120s)")
+
+    def test_cmd_wdrain_pass_uses_timeout_constant(self):
+        """The subprocess.run call must use _QUALS_SUBPROCESS_TIMEOUT,
+        not a hardcoded literal, so the value is testable and documented.
+        """
+        sys.path.insert(0, str(REPO))
+        try:
+            import inspect
+            import cli_wdrain
+            src = inspect.getsource(cli_wdrain.cmd_wdrain_pass)
+        finally:
+            sys.path.pop(0)
+
+        self.assertIn("_QUALS_SUBPROCESS_TIMEOUT", src,
+                       "cmd_wdrain_pass must use the named constant")
+        self.assertNotIn("timeout=30", src,
+                         "the old hardcoded timeout=30 must be gone")
+
+
 if __name__ == "__main__":
     unittest.main()
