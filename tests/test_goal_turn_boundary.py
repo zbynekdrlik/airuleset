@@ -52,7 +52,9 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
         # dispatch a new lane before the compact runs).
         for line in goal_lines():
             self.assertIn("END the turn", line)
-            self.assertIn("HOLD each later goal turn until that compact runs", line)
+            # #911: callback compact disabled — the HOLD tail is retired;
+            # every template must carry the DISABLED note instead.
+            self.assertIn("Callback compact is DISABLED by owner flag (#911", line)
             self.assertIn("✅ DONE:", line)
             # the retired batch-boundary tail must be gone
             self.assertNotIn("WHOLE batch has returned", line)
@@ -64,7 +66,10 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
         # #848: the tail HOLDS each later goal turn until the compact runs,
         # dispatching no NEW LANE first (continuous refill; was "no next batch").
         for line in goal_lines():
-            self.assertIn("no new lane first", line)
+            # #911: the HOLD/no-new-lane-first compact ordering is retired with
+            # the callback compact itself; templates must say NOT to hold.
+            self.assertIn("do NOT HOLD for a compact", line)
+            self.assertNotIn("no new lane first", line)
             self.assertNotIn("no next batch first", line)
             self.assertNotIn("compacting then dispatching the next batch", line)
 

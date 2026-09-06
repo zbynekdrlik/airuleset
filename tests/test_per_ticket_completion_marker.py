@@ -38,8 +38,11 @@ class TestMessageStatusMarkerRule(TestCase):
         t = read(self.MOD)
         self.assertIn("ARMED", t)
         self.assertIn("◎ /goal", t)
-        self.assertIn("ticket-boundary", t)
-        self.assertIn("once PER TICKET", t)
+        # #911: callback compact disabled by owner flag — the per-ticket
+        # compact phrasing is gone; the armed-goal exception + the disabled
+        # note are what the module must still document.
+        self.assertIn("safe compaction boundary", t)
+        self.assertIn("Callback compact DISABLED #911", t)
 
     def test_reserve_working_for_genuinely_in_flight_work(self):
         t = read(self.MOD)

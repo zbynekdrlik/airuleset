@@ -62,10 +62,15 @@ class TestMarekLanePresent882(unittest.TestCase):
         self.assertNotIn("marek-subdev", tabs,
                          "marek-subdev LOCAL tab must be removed (#882)")
 
-    def test_profile_for_host_subdev_marek_returns_marek(self):
+    def test_marek_lane_hosted_on_controller_not_subdev(self):
+        # #870 F4c-marek: the lane STILL EXISTS (the #882 lock) but its host
+        # flipped to the controller — subdev must no longer install it.
+        from cli_webterm_profiles import LANE_HOST
+        self.assertEqual(LANE_HOST.get("marek"), "controller",
+                         "marek lane host must be the controller (#870 F4c)")
         result = profile_for_host("subdev", "marek")
-        self.assertEqual(result, "marek",
-                         "profile_for_host must resolve marek account (#882)")
+        self.assertIsNone(result,
+                          "subdev must no longer install the marek lane (#870)")
 
     def test_not_in_webterm_only_users(self):
         # #882 integration review: owner's #869 ruling ("direct SSH fallback
