@@ -166,8 +166,16 @@ def _deployable_hosts(hosts=None):
     L-E rule); `hosts` defaults to it, a caller with its own list passes it."""
     import airuleset  # #433 L-E: REMOTE_HOSTS in cli_fleet, read via facade
     import cli_fleet  # #851: is_paused -- deferred, module-level import banned (L-E)
+    import platform
     src = hosts if hosts is not None else airuleset.REMOTE_HOSTS
-    return [h for h in src if not h.get("pending") and not cli_fleet.is_paused(h)]
+    # #870 F3: exclude the box's OWN entry (name == nodename) — post-cutover
+    # dev1 sits in the fleet table, and a dev1-run fleet consumer (job 16 burn
+    # collector, context-baseline/mdreview/key-rotation --fleet) must never
+    # ssh dev1->dev1 with the controller-only push identity.
+    me = platform.node()
+    return [h for h in src
+            if not h.get("pending") and not cli_fleet.is_paused(h)
+            and h.get("name") != me]
 
 
 def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
@@ -1292,10 +1300,11 @@ def _push_origin_guard():
     import cli_fleet
     if not cli_fleet.CONTROLLER_CUTOVER_DONE:
         return
-    import getpass
+    import airuleset
     from watchdog.reaper import default_box_class
     box_class = default_box_class()
-    unix_user = getpass.getuser()
+    # pwd-based, never the env-spoofable getpass/USER source (#839 rule).
+    unix_user = airuleset._current_user()
     if os.environ.get("AIRULESET_CONTROLLER_OVERRIDE") == "1":
         print("  ⚠ CONTROLLER_OVERRIDE=1: push-origin guard bypassed "
               f"(box_class={box_class!r}, user={unix_user!r})",
@@ -1321,7 +1330,9 @@ def cmd_push(args):
     import subprocess
     import airuleset  # #433 L-E: cmd_install resident + REMOTE_HOSTS in cli_fleet, via facade
 
-    _push_origin_guard()
+    # #870 F3: the push-origin guard runs at main()'s dispatch site (it is a
+    # CLI-invocation policy), NOT here — unit tests under both runners drive
+    # cmd_push directly to exercise deploy wiring (Fable review RED-2).
 
     # 0a. Lint the whole repo — fail-closed before any push/deploy. Unlike the
     # PreToolUse hook (which lints only the files a real `git push` command

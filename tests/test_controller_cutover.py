@@ -46,7 +46,7 @@ class TestPushOriginGuard(unittest.TestCase):
 
         with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", True), \
              mock.patch("watchdog.reaper.default_box_class", return_value="workstation"), \
-             mock.patch("getpass.getuser", return_value="newlevel"), \
+             mock.patch("airuleset._current_user", return_value="newlevel"), \
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AIRULESET_CONTROLLER_OVERRIDE", None)
             with self.assertRaises(SystemExit) as ctx:
@@ -60,7 +60,7 @@ class TestPushOriginGuard(unittest.TestCase):
 
         with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", True), \
              mock.patch("watchdog.reaper.default_box_class", return_value="controller"), \
-             mock.patch("getpass.getuser", return_value="airuleset"), \
+             mock.patch("airuleset._current_user", return_value="airuleset"), \
              mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AIRULESET_CONTROLLER_OVERRIDE", None)
             cli_remote._push_origin_guard()
@@ -72,7 +72,7 @@ class TestPushOriginGuard(unittest.TestCase):
 
         with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", True), \
              mock.patch("watchdog.reaper.default_box_class", return_value="workstation"), \
-             mock.patch("getpass.getuser", return_value="newlevel"), \
+             mock.patch("airuleset._current_user", return_value="newlevel"), \
              mock.patch.dict(os.environ, {"AIRULESET_CONTROLLER_OVERRIDE": "1"}):
             cli_remote._push_origin_guard()
 
@@ -368,9 +368,6 @@ class TestHookRuleC(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestControllerAccountRegistration(unittest.TestCase):
     """(g) commit B follow-up: the controller's own unix account `airuleset`
@@ -406,3 +403,56 @@ class TestControllerAccountRegistration(unittest.TestCase):
         finally:
             cli_fleet.CONTROLLER_CUTOVER_DONE = saved_flag
             cli_fleet.REMOTE_HOSTS[:] = saved
+
+    def test_shipped_flag_true_and_dev1_present_at_import(self):
+        import cli_fleet
+        self.assertTrue(cli_fleet.CONTROLLER_CUTOVER_DONE)
+        dev1 = [h for h in cli_fleet.REMOTE_HOSTS if h.get("name") == "dev1"]
+        self.assertEqual(len(dev1), 1)
+        self.assertFalse(dev1[0].get("owner_vps"),
+                         "dev1 must never get owner-vps sudo provisioning")
+        self.assertTrue(dev1[0].get("dev_workstation"))
+
+    def test_marker_writer_controller_class(self):
+        import airuleset
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("airuleset._current_user",
+                            return_value="airuleset"), \
+                 mock.patch.object(airuleset, "CLAUDE_DIR", Path(td)):
+                airuleset._write_box_class_marker()
+            self.assertEqual(
+                (Path(td) / "airuleset-box-class").read_text().strip(),
+                "controller")
+
+    def test_push_guard_lives_at_the_cli_dispatch_site(self):
+        import inspect
+        import airuleset
+        import cli_remote
+        self.assertIn("_push_origin_guard",
+                      inspect.getsource(airuleset.main))
+        self.assertNotIn("_push_origin_guard(",
+                         inspect.getsource(cli_remote.cmd_push))
+
+    def test_deployable_hosts_excludes_self_box(self):
+        import cli_remote
+        rows = [{"name": "dev1", "host": "100.104.8.125", "user": "newlevel"},
+                {"name": "dev2", "host": "100.82.64.27", "user": "newlevel"}]
+        with mock.patch("platform.node", return_value="dev1"):
+            names = [h["name"] for h in cli_remote._deployable_hosts(rows)]
+        self.assertEqual(names, ["dev2"])
+        with mock.patch("platform.node", return_value="controller-vps"):
+            names = [h["name"] for h in cli_remote._deployable_hosts(rows)]
+        self.assertEqual(names, ["dev1", "dev2"])
+
+    def test_watchdog_deploy_target_skips_dev_workstation_entry(self):
+        import airuleset
+        fake = mock.Mock(returncode=0, stdout="100.104.8.125\n")
+        with mock.patch("subprocess.run", return_value=fake), \
+             mock.patch.object(airuleset, "REMOTE_HOSTS", [
+                 {"name": "dev1", "host": "100.104.8.125",
+                  "dev_workstation": True}]):
+            self.assertFalse(airuleset._watchdog_is_deploy_target())
+
+
+if __name__ == "__main__":
+    unittest.main()

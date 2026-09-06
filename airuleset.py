@@ -965,8 +965,13 @@ def _write_box_class_marker():
     Best-effort + non-fatal: a write failure never breaks install (and the
     reaper/hook both fail OPEN on a missing/unreadable marker)."""
     try:
-        box_class = ("shared-stream"
-                     if _current_user() in AUTHORITY_BY_USER
+        u = _current_user()
+        # "airuleset" = the controller account (#870 F3): its marker must say
+        # `controller` — the push-origin guard, hook RULE C and the heavy-build
+        # gates all read this file, and a writer without this branch demoted it
+        # to `workstation` on the first in-process install (Fable review RED-1).
+        box_class = ("controller" if u == "airuleset"
+                     else "shared-stream" if u in AUTHORITY_BY_USER
                      else "workstation")
         marker = CLAUDE_DIR / "airuleset-box-class"
         if not marker.exists() or marker.read_text().strip() != box_class:
@@ -5422,7 +5427,11 @@ def _watchdog_is_deploy_target():
     if r.returncode != 0:
         return False
     my_ips = {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
-    target_hosts = {e.get("host") for e in REMOTE_HOSTS if e.get("host")}
+    # #870 F3: a `dev_workstation` entry (dev1 mid-transition) hosts the
+    # owner's live, routinely-dirty dev trees — the drift dimension staying
+    # skipped there is the module's never-a-false-alarm invariant.
+    target_hosts = {e.get("host") for e in REMOTE_HOSTS
+                    if e.get("host") and not e.get("dev_workstation")}
     return bool(my_ips & target_hosts)
 
 
@@ -7616,6 +7625,14 @@ def main():
         parser.print_help()
         sys.exit(1)
 
+    if args.command == "push":
+        # #870 F3: CLI-invocation policy — a real `airuleset.py push` runs
+        # only from the controller. Guarded at the DISPATCH site, not inside
+        # cmd_push: library-level cmd_push callers (unit tests, both runners)
+        # exercise deploy wiring without the box policy, while every real
+        # push still passes here; hook RULE C gates Claude sessions too.
+        import cli_remote as _cli_remote_guard
+        _cli_remote_guard._push_origin_guard()
     rc = commands[args.command](args)
     # Propagate a command's non-zero int return code to the process exit status
     # (#664 review: a failed `drop-gateway --apply` / `webterm-access` must not

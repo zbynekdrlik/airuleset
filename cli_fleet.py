@@ -397,7 +397,13 @@ def _append_dev1_if_cutover():
             "user": "newlevel",
             "repo_path": "~/devel/airuleset",
             "identity": "~/.secrets/airuleset_push_ed25519",
-            "owner_vps": True,
+            # NOT owner_vps: that flag drives sudoers NOPASSWD provisioning
+            # (provision_owner_sudo) — dev1's sudo state is the owner's own,
+            # never fleet-provisioned (Fable review YELLOW-2).
+            # dev_workstation: the owner still runs live dev sessions here, so
+            # the watchdog conformance drift dimension stays skipped for it
+            # (_watchdog_is_deploy_target) until dev1 becomes a pure target.
+            "dev_workstation": True,
             "soniox": True,
         })
 

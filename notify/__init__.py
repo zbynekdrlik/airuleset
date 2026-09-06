@@ -83,6 +83,10 @@ CONTENT_DEDUP_WINDOW_S = 120
 # existed — harmless, since the env override is checked FIRST in
 # resolve_owner() and carries the identical value either way.
 STREAM_NOTIFY_OWNER = {
+    # airuleset (#870 F3): the controller/control-plane account — its pings
+    # route to the owner exactly like dev1 maintainer work (never left to the
+    # tmux-session-name fallback, the #882 reroute rule).
+    "airuleset": "zbynek",
     # david1/montalu1/simap1 (#537): the NUMBERED names for the base-stream
     # rename — all three now LIVE (montalu1 2026-08-19, simap1 2026-08-18,
     # david1 2026-08-21). Each mirrors its base's routing decision EXACTLY —
