@@ -479,7 +479,7 @@
     "tests/test_webterm_lane.py": 126,
     "tests/test_webterm_lane_parity_684.py": 210,
     "tests/test_webterm_loopback_hardening_663.py": 277,
-    "tests/test_webterm_marek.py": 622,
+    "tests/test_webterm_marek.py": 628,
     "tests/test_webterm_only.py": 1064,
     "tests/test_webterm_per_human_tabs.py": 294,
     "tests/test_webterm_profiles.py": 392,
