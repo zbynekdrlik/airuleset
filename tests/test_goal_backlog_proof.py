@@ -673,21 +673,20 @@ class TestBatchDispatchMandate(TestCase):
                          "master /goal template still carries the retired DRAIN WINDOW")
 
     def test_the_master_template_reminder_is_continuous_not_batch(self):
-        # #848: scope to the COMPACT clause itself. It must name the
-        # compact-request --self boundary + "live lanes or not" + #848, and must
-        # NOT re-introduce the drained-batch / zero-live-tasks framing or a fixed
-        # 3-5 cap.
+        # #911: callback compact DISABLED by owner flag; the COMPACT clause
+        # must name the disabled state + #911, and must NOT re-introduce the
+        # drained-batch / zero-live-tasks framing or a fixed 3-5 cap.
         full = master_goal_lines()[0]
         start = full.index("COMPACT:")
         after = full[start + len("COMPACT:"):]
         m = re.search(r"LANE 4", after)
         clause = (after[:m.start()] if m else after).lower()
-        self.assertIn("compact-request --self", clause,
-                      "master COMPACT clause must name the compact-request --self boundary")
-        self.assertIn("live lanes or not", clause,
-                      "master COMPACT clause must name the live-lanes-or-not delivery")
-        self.assertIn("#848", clause,
-                      "master COMPACT clause must cite #848")
+        self.assertIn("disabled", clause,
+                      "master COMPACT clause must name the disabled state (#911)")
+        self.assertIn("#911", clause,
+                      "master COMPACT clause must cite #911")
+        self.assertIn("native autocompact", clause,
+                      "master COMPACT clause must name the native autocompact replacement")
         self.assertNotIn("zero live", clause,
                          "master COMPACT clause must not carry the retired zero-live-tasks framing")
         self.assertNotIn("drain window", clause,
@@ -750,20 +749,20 @@ class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
     form already lives in the skill body's own Step 3.1) — never any
     enforcement-bearing text."""
 
-    def test_every_template_calls_compact_request_self(self):
+    def test_every_template_names_compact_disabled(self):
+        # #911: callback compact DISABLED by owner flag; every /goal template
+        # must name the disabled state and the native autocompact replacement.
         for line in goal_lines():
-            self.assertIn("compact-request --self", line)
+            lower = line.lower()
+            self.assertIn("disabled", lower,
+                          "goal template must name the disabled state (#911)")
+            self.assertIn("#911", lower)
 
-    def test_every_template_compacts_at_every_integration_cycle(self):
-        # #848 CONTINUOUS REFILL retires #723's drained-batch gating: the
-        # compact-request --self call fires at EVERY integration cycle, live
-        # lanes or not — the "WHOLE batch has returned (ZERO live tasks)" gate is
-        # GONE (it held the boundary undelivered forever on a saturated box). The
-        # #741 HOLD-until-delivered ordering survives; the pre-#723 serializing
-        # tail stays banned.
+    def test_every_template_bans_retired_batch_framing(self):
+        # #848 CONTINUOUS REFILL retired #723's drained-batch gating; #911
+        # disabled callback compact entirely — both the old batch framing and
+        # the old zero-live-tasks gate must stay out.
         for line in goal_lines():
-            self.assertIn("compact-request --self", line)
-            self.assertIn("live lanes or not", line)
             self.assertNotIn("WHOLE batch has returned", line)
             self.assertNotIn("ZERO live tasks", line)
             self.assertNotIn("do NOT integrate a SECOND branch this turn", line)

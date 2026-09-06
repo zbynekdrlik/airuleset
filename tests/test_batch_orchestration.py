@@ -68,13 +68,13 @@ class TestRegistryClausesAreContinuous(TestCase):
         self.assertNotIn("BATCH MODE", core)
         self.assertNotIn("NO refill while a batch runs", core)
 
-    def test_compact_boundary_fires_every_cycle_every_profile(self):
+    def test_compact_boundary_is_disabled_911(self):
+        # #911: callback compact DISABLED by owner flag.
         for p in gr.PROFILES:
             cb = self._clause("compact-boundary", p)
-            self.assertIn("compact-request --self", cb)
-            self.assertIn("live lanes or not", cb)
-            self.assertIn("#848", cb)
-            # the retired batch/mid-fleet framing must be gone
+            self.assertIn("DISABLED", cb)
+            self.assertIn("#911", cb)
+            # the retired batch/mid-fleet framing must stay gone
             self.assertNotIn("WHOLE batch has returned", cb)
             self.assertNotIn("ZERO live tasks", cb)
             self.assertNotIn("next batch", cb)
@@ -89,7 +89,7 @@ class TestRegistryClausesAreContinuous(TestCase):
         for p in gr.PROFILES:
             line = gr.render(p)
             self.assertIn("CONTINUOUS REFILL", line)
-            self.assertIn("live lanes or not", line)
+            self.assertIn("DISABLED", line)
             self.assertNotIn("BATCH MODE", line)
             self.assertNotIn("ZERO live tasks", line)
 

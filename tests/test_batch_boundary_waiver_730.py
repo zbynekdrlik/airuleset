@@ -84,10 +84,11 @@ class TestAutopilotMasterWaiverIsRetired(TestCase):
         self.assertEqual(len(lines), 1, "expected exactly one master /goal line")
         return lines[0]
 
-    def test_goal_line_compacts_every_cycle_not_at_a_drain_window(self):
+    def test_goal_line_compact_is_disabled_911(self):
+        # #911: callback compact DISABLED by owner flag.
         line = self._master_goal_line()
-        self.assertIn("compact-request --self", line)
-        self.assertIn("#848", line)
+        self.assertIn("DISABLED", line)
+        self.assertIn("#911", line)
         self.assertNotIn("(waiver #730)", line)
         self.assertNotIn("DRAIN WINDOW", line)
         self.assertNotIn("BATCH+COMPACT", line)
@@ -100,19 +101,22 @@ class TestAutopilotMasterWaiverIsRetired(TestCase):
 
     def _compact_boundary_window(self):
         body = read(SKILL_MASTER)
-        idx = body.index("**COMPACT BOUNDARY (#848):**")
+        idx = body.index("**COMPACT BOUNDARY — DISABLED")
         end = body.index("- **LANE 4 QUESTIONS**")
         self.assertGreater(end, idx)
         return body[idx:end]
 
-    def test_compact_boundary_is_every_cycle(self):
+    def test_compact_boundary_is_disabled(self):
+        # #911: the compact boundary section must name the disabled state.
         window = norm(self._compact_boundary_window())
-        self.assertIn(norm("EVERY LANE 3 integration cycle"), window)
-        self.assertIn(norm("live lanes or not"), window)
+        self.assertIn(norm("DISABLED"), window)
+        self.assertIn(norm("#911"), window)
+        self.assertIn(norm("native autocompact"), window.lower())
 
     def test_the_taskstop_relaunch_protocol_is_gone_from_master(self):
         window = norm(self._compact_boundary_window())
-        self.assertIn(norm("The #730 re-derivable-waiter waiver is RETIRED (#848)"), window)
+        # #848 retired the waiver; #911 disabled the whole mechanism —
+        # the retired note is inside the historical details block.
         self.assertNotIn(norm("`TaskStop` it DELIBERATELY"), window)
         self.assertNotIn(norm("RELAUNCH the waiter fresh"), window)
         self.assertNotIn(norm("live-tasks veto itself is NOT touched"), window)

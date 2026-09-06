@@ -159,13 +159,15 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
                          ("saturation-core", "saturation-delivery",
                           "compact-boundary"))
 
-    def test_compact_boundary_fires_every_integration_cycle(self):
+    def test_compact_boundary_is_disabled_911(self):
+        # #911: callback compact DISABLED by owner flag; the clause must name
+        # the disabled state and the native autocompact replacement.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
-            self.assertIn("compact-request --self", cb)
-            self.assertIn("live lanes or not", cb)
-            self.assertIn("#848", cb)
-        # TEETH: the retired drained-batch-boundary framing must be GONE.
+            self.assertIn("DISABLED", cb)
+            self.assertIn("#911", cb)
+            self.assertIn("native autocompact", cb)
+        # TEETH: the retired drained-batch-boundary framing must stay GONE.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
             self.assertNotIn("WHOLE batch has returned", cb)
@@ -173,13 +175,10 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
             self.assertNotIn("next batch", cb)
             self.assertNotIn("waiver #730", cb)
 
-    def test_compact_boundary_compacts_over_live_lanes(self):
-        # #848: the whole point — a compact over live lanes is SAFE (the STEP-0
-        # experiment), so the old "NEVER compact while lanes live (CC #29193)"
-        # framing that held the boundary undelivered forever must be GONE.
+    def test_compact_boundary_no_live_lanes_framing(self):
+        # #911: compact is DISABLED — live lanes framing is irrelevant now.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
-            self.assertIn("compact over live lanes is safe", cb)
             self.assertNotIn("NEVER compact while lanes live", cb)
             self.assertNotIn("#29193", cb)
 
@@ -195,22 +194,18 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
 
 
 class TestCompactBoundaryHoldTurn741(TestCase):
-    """#741: after `compact-request --self` at an integration boundary the loop
-    HOLDS until the compact is delivered — it does NOT dispatch a new lane first.
-    The buggy pre-#741 ORDERING claim (the armed goal 'fires the NEXT TURN,
-    compacting then dispatching the next batch' — an order nothing enforced) is
-    removed from every profile's clause, and the terse HOLD pointer is present.
-    #848 replaced 'no next batch first' with 'no new lane first' (continuous refill)."""
+    """#741/#911: callback compact DISABLED by owner flag (#911). The old HOLD
+    mechanism text is no longer in the clause. The clause explicitly says
+    do NOT HOLD for a compact."""
 
     def _cb(self, p):
         return next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
 
-    def test_hold_sentence_present_in_every_profile(self):
+    def test_hold_disabled_in_every_profile(self):
         for p in gr.PROFILES:
             cb = self._cb(p)
-            self.assertIn("HOLD each later goal turn until that compact runs", cb,
-                          "%s missing the #741 hold sentence" % p)
-            self.assertIn("no new lane first", cb)
+            self.assertIn("do NOT HOLD for a compact", cb,
+                          "%s missing the #911 no-hold instruction" % p)
             self.assertNotIn("no next batch first", cb)
 
     def test_old_ordering_claim_removed_from_every_profile(self):
@@ -235,17 +230,16 @@ class TestCompactBoundaryHoldTurn741(TestCase):
         self.assertIn("hold:compact-pending", t)
 
     def test_old_ordering_gone_from_the_autopilot_master_skill_too(self):
-        # #741 doctrine-drift lock (the #618/#623/#726 "deployed≠effective" class
-        # this ticket targets): the gatekeeper MASTER loop skill must NOT still
-        # assert the removed "compacting then dispatching the next batch" ordering,
-        # and must carry the hold-turn probe.
+        # #741/#911 doctrine-drift lock: the gatekeeper MASTER loop skill must
+        # NOT still assert the removed "compacting then dispatching the next
+        # batch" ordering, and must name the #911 disabled state.
         master = (ROOT / "skills/autopilot-master/SKILL.md").read_text(
             encoding="utf-8")
         self.assertNotIn("compacting then dispatching", master)
-        # whitespace-collapse so the assertion is line-wrap-robust.
+        # #911: the master skill must name the disabled state.
         flat = " ".join(master.split())
-        self.assertIn("compact-request --status", flat)
-        self.assertIn("čakám na compact hranice várky", flat)
+        self.assertIn("DISABLED", flat)
+        self.assertIn("#911", flat)
 
 
 class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):
