@@ -47,8 +47,10 @@ def _fleet_inventory():
 
 
 class TestProfileForHost(unittest.TestCase):
-    def test_dev1_is_owner(self):
-        self.assertEqual(p.profile_for_host("dev1"), p.OWNER)
+    def test_dev1_no_longer_owner_after_zbynek_flip(self):
+        # #870 F4c-zbynek: zbynek moved to controller -- dev1 no longer hosts
+        # any lane, so profile_for_host("dev1") returns None.
+        self.assertIsNone(p.profile_for_host("dev1"))
 
     def test_subdev_no_longer_david(self):
         # #870 F4c-david: david moved to controller — the bare
@@ -100,9 +102,12 @@ class TestDavidInventory(unittest.TestCase):
 
 
 class TestProfileInventoryScoping(unittest.TestCase):
-    def test_owner_profile_is_the_full_fleet_unchanged(self):
+    def test_owner_profile_is_zbynek_inventory(self):
+        # #870 F4c-zbynek: after the flip, profile_inventory(OWNER) returns the
+        # declarative zbynek_inventory(), not the fleet-derived inventory.
         fleet = _fleet_inventory()
-        self.assertEqual(p.profile_inventory(p.OWNER, fleet), list(fleet))
+        result = p.profile_inventory(p.OWNER, fleet)
+        self.assertEqual(result, p.zbynek_inventory())
 
     def test_david_profile_is_the_david_set(self):
         fleet = _fleet_inventory()
@@ -265,9 +270,11 @@ class TestProfileForHostReturnSet870(unittest.TestCase):
         self.assertIsInstance(result, (set, frozenset))
         self.assertEqual(result, {p.OWNER, p.DAVID, p.MAREK, p.DOMINIKA})
 
-    def test_dev1_returns_owner_only(self):
+    def test_dev1_returns_empty_after_zbynek_flip(self):
+        # #870 F4c-zbynek: zbynek moved to controller -- dev1 no longer hosts
+        # any lane, so profile_for_host_set("dev1") returns empty.
         result = p.profile_for_host_set("dev1", "newlevel")
-        self.assertEqual(result, {p.OWNER})
+        self.assertEqual(result, frozenset())
 
     def test_subdev_david_returns_empty_after_flip(self):
         # #870 F4c-david: david moved to controller — subdev no longer hosts
