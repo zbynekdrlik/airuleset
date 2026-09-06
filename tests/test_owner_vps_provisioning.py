@@ -378,6 +378,7 @@ class TestWiring(unittest.TestCase):
         args = m.Mock()
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
+                m.patch("cli_remote._push_origin_guard"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", [owner, plain]), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
             airuleset.cmd_push(args)
@@ -410,6 +411,7 @@ class TestWiring(unittest.TestCase):
         args = m.Mock()
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
+                m.patch("cli_remote._push_origin_guard"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", [plain]), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
             airuleset.cmd_push(args)
@@ -469,6 +471,7 @@ class TestNoAuthTokenStep(unittest.TestCase):
         args = m.Mock()
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
+                m.patch("cli_remote._push_origin_guard"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", [owner]), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", {}), \
                 m.patch("sys.stderr", out):
