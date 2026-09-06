@@ -101,9 +101,15 @@ class TestDavidPrerequisiteGate(unittest.TestCase):
         self.assertIn("gateway account", reason)
 
     def test_no_op_when_key_or_ttyd_missing(self):
-        with m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
-                m.patch.object(lane.shutil, "which", return_value=None):
-            ok, reason = d.prerequisites_ready()
+        # #870 F4b: pin HOME to an EMPTY tmp dir — the gate reads the real
+        # HOME for the lane key + ~/.local/bin/ttyd, and the controller now
+        # genuinely HAS both (keys minted at F4b prep), which would flip the
+        # missing-prerequisites branch under test (Pass B real-env leak).
+        with tempfile.TemporaryDirectory() as tmp:
+            with m.patch.dict(os.environ, {"HOME": tmp}), \
+                    m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
+                    m.patch.object(lane.shutil, "which", return_value=None):
+                ok, reason = d.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("prerequisites missing", reason)
 

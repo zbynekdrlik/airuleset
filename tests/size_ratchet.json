@@ -463,7 +463,7 @@
     "tests/test_webterm_access.py": 265,
     "tests/test_webterm_active_tab_691.py": 222,
     "tests/test_webterm_ctrlbw_darkening.py": 966,
-    "tests/test_webterm_david.py": 364,
+    "tests/test_webterm_david.py": 370,
     "tests/test_webterm_dominika.py": 520,
     "tests/test_webterm_fit_reopen_798_886.py": 155,
     "tests/test_webterm_gateway.py": 1133,
