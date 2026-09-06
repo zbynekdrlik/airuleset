@@ -186,16 +186,16 @@ def _subdev_target_host(human):
     return SUBDEV_LOCAL
 DAVID_ACCOUNTS = ("david1", "david2", "david3", "david4")
 
-# codex-bridge tab — MIRROR of David's existing dev2 ssh (owner ruling
-# 2026-08-21). Same user/key/host as david1's `~/.ssh/config` `Host dev2` today:
-# newlevel@<dev2 tailscale IP> via ~/.ssh/id_ed25519, the existing `david` tmux
-# group. Not a dedicated restricted account (that permanent isolation is
-# owner-deferred). Subdev IS on the tailnet, so it reaches dev2's tailscale IP
-# even though David himself is not on the tailnet.
+# codex-bridge tab — David's dev2 ssh tab. Connects as newlevel@dev2 via the
+# dedicated david webterm key (WEBTERM_DAVID_IDENTITY), the existing `david`
+# tmux group. #870 F4c: after the lane moved to controller, the old
+# ~/.ssh/id_ed25519 resolved to the airuleset account's unrestricted key —
+# uniform identity via the dedicated key (#661 transitive-reach honesty).
+# Go-live: the key must be authorized on newlevel@dev2 with restrict,pty,
+# command="..." (the supervisor's F4c-codex go-live checklist).
 CODEX_ID = "codex-bridge"
 CODEX_USER = "newlevel"
 CODEX_HOST = "100.82.64.27"           # dev2 tailscale IP
-CODEX_IDENTITY = "~/.ssh/id_ed25519"  # david1's own dev2 key (mirror, not new trust)
 CODEX_PREFERRED = "david"             # the existing dev2 tmux group
 
 
@@ -229,7 +229,7 @@ def david_inventory():
         "local": False,
         "host": CODEX_HOST,
         "user": CODEX_USER,
-        "identity": CODEX_IDENTITY,
+        "identity": WEBTERM_DAVID_IDENTITY,
         "preferred": CODEX_PREFERRED,
         # #703: NO u_tenant — the target ACCOUNT is the OWNER's (newlevel@dev2);
         # its per-cwd tickets-status caches aggregate the OWNER's sessions, so a
