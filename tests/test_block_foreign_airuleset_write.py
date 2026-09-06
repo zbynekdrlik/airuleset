@@ -19,6 +19,7 @@ as a secondary signal). Read ops, the sanctioned airuleset.py CLI surface
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -100,8 +101,19 @@ class ForeignSessionBlocked(TestCase):
     def test_airuleset_session_commits_freely(self):
         r = run("git add -A && git commit -m x", cwd=AR, transcript=AR_TR)
         self.assertEqual(r.returncode, 0, r.stderr)
+        # #870 F3 cutover: even the airuleset session\'s own `airuleset.py
+        # push` needs the CONTROLLER box-class now (RULE C runs before the
+        # session-identity allow) — dev1 is push-read-only.
         r = run("python3 airuleset.py push", cwd=AR, transcript=AR_TR)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("ruleC", r.stderr)
+        with tempfile.TemporaryDirectory() as td:
+            claude = Path(td) / ".claude"
+            claude.mkdir()
+            (claude / "airuleset-box-class").write_text("controller\n")
+            r = run("python3 airuleset.py push", cwd=AR, transcript=AR_TR,
+                    env_extra={"HOME": td})
+            self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_claude_project_dir_env_also_identifies(self):
         r = run("git commit -am x", cwd=AR, transcript="",

@@ -283,11 +283,18 @@ case "$CMD" in *airuleset*)
     case "${AIRULESET_CONTROLLER_OVERRIDE:-}" in 1) ;; *)
       _BOX_CLASS="$(cat "${HOME:-/nonexistent}/.claude/airuleset-box-class" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
       if [ "${_BOX_CLASS:-}" != "controller" ]; then
-        case "$CMD" in
-          *"airuleset.py push"*|*"airuleset.py"*" push"*)
-            echo "[block-foreign-airuleset-write:ruleC] push from non-controller box blocked (class=${_BOX_CLASS:-})" >&2
-            exit 2 ;;
-        esac
+        # Precise INVOCATION match (first live Pass A on the controller,
+        # #870 commit B): a mere MENTION (`echo airuleset.py push`) or a
+        # composite where `airuleset.py <other-subcommand>` precedes a
+        # foreign repo's `git push` must NOT trip this — only a real
+        # `airuleset.py push` invocation at a command position (optionally
+        # via python3) does. RULE C deliberately stays BEFORE RULE A: it
+        # must also catch the airuleset session's OWN push on a
+        # non-controller box, so its message carries the ticket redirect.
+        if printf '%s' "$CMD" | grep -Eq '(^|;|&&?|\|\|?|\()[[:space:]]*(command[[:space:]]+)?(python3?[[:space:]]+)?[^[:space:]]*airuleset\.py[[:space:]]+push([[:space:]]|$|;|&|\|)'; then
+          echo "[block-foreign-airuleset-write:ruleC] push from non-controller box blocked (class=${_BOX_CLASS:-}) — airuleset.py push runs ONLY on the controller box (#870). From any other box/session: file a ticket (gh issue create -R zbynekdrlik/airuleset) instead." >&2
+          exit 2
+        fi
       fi
     ;; esac
   fi

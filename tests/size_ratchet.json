@@ -97,7 +97,7 @@
     "tests/test_block_commit_without_design.py": 661,
     "tests/test_block_discuss_archive_853.py": 223,
     "tests/test_block_discuss_thread_name.py": 960,
-    "tests/test_block_foreign_airuleset_write.py": 289,
+    "tests/test_block_foreign_airuleset_write.py": 301,
     "tests/test_block_heavy_build_toolchain.py": 113,
     "tests/test_block_root_recursive_grep.py": 229,
     "tests/test_block_staged_content_values.py": 260,
