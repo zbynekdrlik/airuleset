@@ -95,7 +95,13 @@ class TestDavidUnitRender(unittest.TestCase):
 
 class TestDavidPrerequisiteGate(unittest.TestCase):
     def test_no_op_when_not_the_gateway_account(self):
-        with m.patch.object(fw, "_whoami", lambda: "marek"):
+        # #870 F4c-david: pin box-class — on the real controller the acceptance
+        # branch legitimately accepts the airuleset account; this test probes a
+        # non-gateway account on an ORDINARY box, so the env must say so
+        # (mirrors test_webterm_marek.py, the F4c-marek precedent).
+        import watchdog.reaper as _reaper
+        with m.patch.object(_reaper, "default_box_class", lambda: "workstation"), \
+                m.patch.object(fw, "_whoami", lambda: "marek"):
             ok, reason = d.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("gateway account", reason)
