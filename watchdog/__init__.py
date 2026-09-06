@@ -2768,7 +2768,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           transcript and its single newest subagent transcript, and journals
           any model NOT on the exact-id allowlist (`airuleset.MODEL_TIERS`) —
           a session that floated off its launch pin mid-lifetime (e.g. onto
-          the banned Fable 5.1). MACHINE-CHANNEL ONLY (the #850 repo-health
+          a banned or superseded model). MACHINE-CHANNEL ONLY (the #850 repo-health
           class) — never pings the owner; the remedy is `/model` or a
           relaunch. `watchdog/model_audit_job.py`'s docstring is the SSOT.
       (42) NICE-CHECK SELF-CHECK (#866), gated on `nice_check_enabled` (True in

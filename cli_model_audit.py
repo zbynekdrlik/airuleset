@@ -3,7 +3,7 @@
 The managed launch pin (`MANAGED_MODEL`) fixes a session's model at LAUNCH, but
 a running session can still emit a `model_changed` record and FLOAT mid-lifetime
 onto a model outside the exact-id allowlist (`airuleset.MODEL_TIERS`) — e.g. the
-banned Fable 5.1 (`claude-fable-5-1`) or a superseded Opus. No code surface can
+banned Opus 5 (`claude-opus-5`) or a superseded model. No code surface can
 prevent an in-session float; this command SURFACES it (read-only, no keystrokes
 — feedback_never_keystroke_human_active_pane / no_manual_pane_nudges).
 
@@ -11,7 +11,7 @@ For every live managed tmux pane it reads the newest-assistant `model` of the
 pane's MAIN transcript AND of every subagent transcript under it, and flags any
 that is not on the allowlist. A watchdog job (machine-channel only, never an
 owner ping — the #850 repo-health class) journals violations; the owner's remedy
-per floated session is `/model → Fable 5` (or a relaunch, which re-lands the
+per floated session is `/model → Fable 5.1` (or a relaunch, which re-lands the
 launch pin automatically).
 """
 import glob
@@ -150,5 +150,5 @@ def cmd_model_audit(args):
                 "BANNED" if r["banned"] else "ok"))
         if flagged:
             print("model-audit: %d BANNED (floated off the allowlist) — owner "
-                  "remedy per session: /model -> Fable 5, or relaunch" % len(flagged))
+                  "remedy per session: /model -> Fable 5.1, or relaunch" % len(flagged))
     return 1 if flagged else 0
