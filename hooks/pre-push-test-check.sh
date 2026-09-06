@@ -65,10 +65,14 @@ PROJECT=$(basename "$(git rev-parse --show-toplevel)")
 # spans multi-push PRs).
 CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
 BASE_REF="origin/${DEFAULT_BRANCH}"
+_CASE_RESOLVED=false
 case "$CUR_BRANCH" in
     HEAD|"$DEFAULT_BRANCH"|staging) ;;
     develop)
-        git rev-parse -q --verify origin/staging >/dev/null && BASE_REF="origin/staging" ;;
+        if git rev-parse -q --verify origin/staging >/dev/null; then
+            BASE_REF="origin/staging"
+            _CASE_RESOLVED=true
+        fi ;;
     *)
         for CAND in develop dev; do
             if [ "$CAND" != "$CUR_BRANCH" ]; then
@@ -82,47 +86,38 @@ case "$CUR_BRANCH" in
                 if git rev-parse -q --verify "upstream/${CAND}" >/dev/null && \
                    git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
                     BASE_REF="upstream/${CAND}"
+                    _CASE_RESOLVED=true
                     break
                 elif git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
                     BASE_REF="origin/${CAND}"
+                    _CASE_RESOLVED=true
                     break
                 fi
             fi
         done ;;
 esac
-# #909: Override BASE_REF with tighter candidates when available.
-# Priority: (a) origin/<branch> > (b) @{upstream} > (c) local develop/dev.
-# (a) For a RE-PUSH of an existing branch, origin/<branch> is the tightest
-#     base — only commits since the last push are in the diff.
-# (b) For a NEW branch push, the tracking branch (@{upstream}) may point to
-#     the correct integration branch even when the case block can't find it
-#     (e.g. upstream/develop exists but origin/develop doesn't — the case
-#     block's AND condition fails, but the branch tracks upstream/develop).
-# (c) When NEITHER remote integration branch refs NOR a tracking branch
-#     exist, try the LOCAL integration branch (develop/dev). If the branch
-#     was created from a local develop, git diff develop...HEAD gives the
-#     right range — only the branch's own commits.
-_909_OVERRIDDEN=false
-if [ "$CUR_BRANCH" != "HEAD" ] && \
-   git rev-parse -q --verify "origin/${CUR_BRANCH}" >/dev/null 2>&1; then
-    BASE_REF="origin/${CUR_BRANCH}"
-    _909_OVERRIDDEN=true
-fi
-if [ "$_909_OVERRIDDEN" = false ]; then
+# #909: When the case block found NOTHING (no origin/develop, no
+# upstream/develop — the new-branch-push scenario), try fallbacks.
+# NOTE: candidate (a) origin/<branch> is deliberately NOT applied here —
+# pre-push-test-check.sh's gates (Gate 1: feature needs test, Gate 2:
+# RED before GREEN) are PR-scoped by design; narrowing the base to
+# origin/<branch> would turn them into push-delta gates and break the
+# multi-push RED/GREEN ordering (F1 from Fable review). The case block
+# stays the PRIMARY base for this hook (2-branch dev->main is unchanged —
+# the whole open PR is still the range); only (b)/(c) run as true fallbacks.
+if [ "$_CASE_RESOLVED" = false ]; then
     _TRACKING=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
     if [ -n "$_TRACKING" ] && git rev-parse -q --verify "$_TRACKING" >/dev/null 2>&1; then
         BASE_REF="$_TRACKING"
-        _909_OVERRIDDEN=true
+    else
+        for _LOCAL_CAND in develop dev; do
+            if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
+               git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
+                BASE_REF="$_LOCAL_CAND"
+                break
+            fi
+        done
     fi
-fi
-if [ "$_909_OVERRIDDEN" = false ]; then
-    for _LOCAL_CAND in develop dev; do
-        if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
-           git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
-            BASE_REF="$_LOCAL_CAND"
-            break
-        fi
-    done
 fi
 # The base ref may not exist at all (fresh repo, no origin) — the ranges below
 # already fall back on error, so BASE_REF is used as-is.

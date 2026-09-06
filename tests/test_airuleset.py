@@ -13807,7 +13807,6 @@ class TestBlockTestSkipsNewBranch909(TestCase):
 
         # Feature branch off develop — only touches non-test files
         g("checkout", "-qb", "montalu/6386-cutover-f2-impl")
-        open(os.path.join(root, "scripts", "import-montalu.py"), "w") if False else None
         os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
         open(os.path.join(root, "scripts", "import-montalu.py"), "w").write(
             "# import script\nprint('hello')\n")
@@ -13951,6 +13950,71 @@ class TestBlockTestSkipsNewBranch909(TestCase):
         self.assertEqual(r.returncode, 0,
                          "re-push should use origin/<branch> as base: "
                          + r.stderr)
+
+    def test_repush_new_skip_still_blocks(self):
+        """F4: when origin/<branch> exists AND a new commit adds a skip,
+        the hook must still BLOCK — the re-push base must not make a
+        genuinely new skip invisible."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("x = 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "feat-w")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_ok.py"), "w").write(
+            "def test_ok():\n    assert 1\n")
+        g("add", "tests/test_ok.py")
+        g("commit", "-qm", "test: clean first push")
+        g("update-ref", "refs/remotes/origin/feat-w",
+          g("rev-parse", "HEAD").stdout.strip())
+        # New commit ADDS a skip — must block even with origin/feat-w as base
+        open(os.path.join(root, "tests", "test_bad.py"), "w").write(
+            "test.skip('lazy', () => {});\n")
+        g("add", "tests/test_bad.py")
+        g("commit", "-qm", "test: add lazy skip")
+        r = self._run("git push origin feat-w", root)
+        self.assertEqual(r.returncode, 2,
+                         "new skip on re-push must block: " + r.stderr)
+        self.assertIn("test.skip", r.stdout + r.stderr)
+
+    def test_bypass_as_shell_comment_does_not_bypass(self):
+        """F3: the bypass marker as a trailing shell comment on the push
+        command must NOT lift the block — only a commit message source."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_thing.py"), "w").write(
+            "def test_ok():\n    assert 1\n")
+        g("add", "tests/test_thing.py")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        open(os.path.join(root, "tests", "test_thing.py"), "a").write(
+            "test.skip('bad', () => {});\n")
+        g("add", "tests/test_thing.py")
+        g("commit", "-qm", "test: add skip")
+        # Bypass as a bash trailing comment — must NOT work
+        cmd = 'git push origin main # airuleset:test-skip-ok lazy reason'
+        r = self._run(cmd, root)
+        self.assertEqual(r.returncode, 2,
+                         "shell-comment bypass must NOT work: " + r.stderr)
 
 
 class TestPrePushTestCheckForkAware(TestCase):
