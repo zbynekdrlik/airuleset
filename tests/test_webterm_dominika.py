@@ -322,7 +322,12 @@ class TestDominikaUnitRender(unittest.TestCase):
 
 class TestDominikaPrerequisiteGate(unittest.TestCase):
     def test_no_op_when_not_the_dominika_account(self):
-        with m.patch.object(fw, "_whoami", lambda: "david1"):
+        # #870 F4c: pin box-class — on the real controller the acceptance branch
+        # legitimately accepts the airuleset account; this test probes a
+        # non-gateway account on an ORDINARY box, so the env must say so.
+        import watchdog.reaper as _reaper
+        with m.patch.object(_reaper, "default_box_class", lambda: "workstation"), \
+                m.patch.object(fw, "_whoami", lambda: "david1"):
             ok, reason = dn.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("gateway account", reason)
