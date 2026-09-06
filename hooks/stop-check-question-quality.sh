@@ -532,6 +532,61 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 7 — an Odoo-context question must carry an Odoo task URL (#907).
+# Owner directive (montalu 2026-09-06): every question about Odoo work must
+# reference the Odoo project.task with its deep URL — the primary client
+# tracking. An Odoo-context block = the BLOCK mentions an Odoo stream or
+# ERP-related token. A satisfying task URL = /odoo/project/<pid>/tasks/<tid>
+# or /odoo/action- shape. An explicit no-task statement also passes.
+# Same fail-safe as Check 6: fires only on away-user question turns past
+# Checks 1-6, narrow detection, over-block is safe (model re-adds the URL).
+if [ -z "$VIOLATION" ]; then
+    # Odoo-context detector: the BRIEFING LINE names odoo-erp as the project
+    # (the `**Otazka — projekt odoo-erp` shape), or the block carries an ERP
+    # domain, or "odoo" adjacent to a task/module/ERP token. A bare stream
+    # name (montalu/david) does NOT trigger — it is too broad (a camera-box
+    # question mentioning montalu as client, a Discuss-thread approval that
+    # Check 6 handles). The discriminator is the PROJECT identity or an
+    # explicit Odoo task/module context.
+    # Primary: briefing names "odoo-erp" / "odoo erp" as the PROJECT (the word
+    # immediately after "projekt " starts with "odoo", anchored by the [-_ ]
+    # char after "odoo" so "montalu (Odoo ERP...)" does NOT match — "montalu"
+    # stands between "projekt" and "odoo", and ".{0,10}" limits the gap to keep
+    # it tight). Secondary: an ERP domain in the block. Deliberately narrow:
+    # a "projekt montalu (Odoo ERP...)" is NOT matched by the project detector
+    # (accepted residual — the doctrine catches it, the hook only catches the
+    # common "projekt odoo-erp" shape; over-block risk of stream names is the
+    # reason Check 6's sibling tests broke on the first broad cut).
+    ODOO_PROJECT_RX='projekt[[:space:]]+odoo[-_ ]'
+    # ERP domain detector DROPPED (an erp.*.cloud domain in a Discuss URL
+    # like erp.montalu.cloud/odoo/discuss false-positived on Check 6's thread
+    # fixtures; a task URL in the same domain is already caught by the task
+    # URL satisfying-evidence check below). Accepted residual: a question
+    # naming "erp.montalu.cloud" without a project name or task-word is NOT
+    # caught — the doctrine handles it, this hook doesn't.
+    # Tertiary: explicit "Odoo task" or "Odoo úloha" adjacent (a WORK context,
+    # not a project description like "Odoo ERP pre klienta"). Narrow: "task"
+    # and "úloha" only, never bare "erp"/"modul"/"projekt" (those collide with
+    # project descriptions in non-odoo-erp briefings).
+    ODOO_WORK_RX='odoo[[:space:]]+(task|[úu]loh)'
+    odoo_ctx=""
+    if LC_ALL=C.UTF-8 grep -qiE "$ODOO_PROJECT_RX" <<<"$BLOCK"; then odoo_ctx=1; fi
+    # (domain detector removed — see comment above)
+    if [ -z "$odoo_ctx" ] && LC_ALL=C.UTF-8 grep -qiE "$ODOO_WORK_RX" <<<"$BLOCK"; then odoo_ctx=1; fi
+    if [ -n "$odoo_ctx" ]; then
+        # Satisfying evidence: an Odoo task deep URL, an action URL, or an
+        # explicit no-task statement.
+        TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
+        ACTION_URL_RX='/odoo/action-[A-Za-z0-9_.]+/[0-9]+'
+        NO_TASK_RX='task[[:space:]]+(neexistuje|nexist)|bez[[:space:]]+tasku|no[[:space:]]+(matching[[:space:]]+)?task|[čc]isto[[:space:]]+technick'
+        if ! LC_ALL=C.UTF-8 grep -qiE "$TASK_URL_RX" <<<"$BLOCK" \
+            && ! LC_ALL=C.UTF-8 grep -qiE "$ACTION_URL_RX" <<<"$BLOCK" \
+            && ! LC_ALL=C.UTF-8 grep -qiE "$NO_TASK_RX" <<<"$BLOCK"; then
+            VIOLATION="task"
+        fi
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
@@ -548,6 +603,8 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ block references an OLD question by allusion (\"pýtal som sa skôr\" / \"ako som spomínal\" / \"jediné otvorené rozhodnutie je X\") instead of restating it. If a conversation happened since it was last asked, this is a NEW ask — write the FULL self-contained block again (briefing + options + decision); the away user cannot see your history. A byte-identical VERBATIM repeat of the SAME still-blocked question is fine and does not hit this check.${TEMPLATE}" ;;
         thread)
             REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — a per #657 pridaj aj deep URL …/odoo/discuss?active_id=discuss.channel_<N> (samotný deep URL tiež stačí) — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-client-messaging/handover-compose.md (#632/#650/#697)." ;;
+        task)
+            REASON="Your ❓ block is about Odoo work but does NOT carry an Odoo task reference URL. Per #907 (owner directive montalu 2026-09-06): EVERY Odoo-context question MUST carry the project.task deep URL — napr. https://erp.montalu.cloud/odoo/project/4/tasks/503 — a meno tasku + stage. Odoo task je primárny klientsky tracking; GitHub issue je len developerský. Ak task neexistuje, napíš to explicitne ('Odoo task neexistuje — čisto technická úloha'). NIKDY nepoužívaj model-form URL (/odoo/project.task/503) — ten otvorí natívny formulár bez custom záložiek. See issue-reference-context.md." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0

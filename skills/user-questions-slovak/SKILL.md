@@ -99,3 +99,34 @@ The user wants to decide **part by part**, NOT give a single sweeping answer cov
 - **This governs QUESTIONS the user must answer — it does NOT change `autonomous-batch-issue-development.md`** (still bundle the WORK silently, no asking between issues). When you genuinely MUST ask, ask small and explain each piece.
 
 The intent: the user understands every question instantly, in their language, without engineering knowledge, and decides in small clear steps — never a number they can't decode, never one sweeping answer to a pile. Applies to all rewordings and semantic equivalents — every question the user reads, in any project, via any tool.
+
+#### Odoo-context questions — Odoo task reference + origin + functional action URL (issue 907, owner directive montalu 2026-09-06)
+
+**When the `❓` question is about Odoo work (any Odoo stream — montalu/david/miva/simap), the question block MUST carry:**
+
+1. **Odoo project.task reference:** task name + deep URL (`https://<instancia>/odoo/project/<pid>/tasks/<tid>`) + current stage. The Odoo task is the PRIMARY client-facing tracking — "vyjadruje čo chcel zákazník". A GitHub issue (`#N`) is the developer tracking and appears only ALONGSIDE the task reference, never instead of it. If no Odoo task exists for the question, state it explicitly: "Odoo task neexistuje — ide o čisto technickú úlohu."
+2. **Origin intro:** where the task came from — which discussion, session, or Discuss thread originated it, what is being worked on and why. The owner cannot engage with a question that has no pôvod. The montalu 2026-09-06 incident: question to issue 5629 was 3x unintelligible until it got origin + functional URL.
+3. **Functional action URL:** when linking to an Odoo record, use the ACTION URL shape (`/odoo/project/<pid>/tasks/<tid>`, `/odoo/action-<xmlid>/<id>`) — NEVER a raw model-form URL (`/odoo/project.task/503`, `/odoo/<model>/<id>`). The model-form opens the native Odoo form WITHOUT custom tabs, views, or buttons — the owner sees "nič tam nie je" and cannot act on it.
+
+**Mechanically enforced: `stop-check-question-quality.sh` Check 7 blocks an Odoo-context `❓` block that carries no Odoo task URL (`/odoo/project/` shape) and no explicit no-task statement.**
+
+#### Worked example — Odoo-context question
+
+**WRONG (no task, no origin, model-form URL):**
+
+> **Otázka — projekt odoo-erp (Odoo ERP systém):** V IT-Výroba moduli som narazil na problém s číslom šarže. Mám to opraviť alebo nechať? Pozri /odoo/project.task/503.
+> • Opraviť (odporúčam)
+> • Nechať
+> ❓ NEEDS YOU: opraviť číslo šarže?
+
+**CORRECT (task + origin + action URL):**
+
+> **Otázka — projekt odoo-erp (Odoo ERP pre montalu — objednávky, sklad, fakturácia):**
+> Odoo task: „Číslo šarže v IT-Výroba" (stage: V riešení) — https://erp.montalu.cloud/odoo/project/4/tasks/503
+> Pôvod: vlákno „IT-Vyroba 1" v Discuss — klient nahlásil, že po poslednom update sa pri výrobe neprenáša číslo šarže na hotový výrobok.
+> Príčina je v tom, že field `lot_producing_id` sa neplní pri `button_mark_done` keď je zapnuté tracking podľa sériového čísla. Riešenie existuje, ale zmení správanie aj pre objednávky, kde sa šarže nepoužívajú.
+>
+> • **Opraviť len pre IT-Výroba (odporúčam)** — podmienka na `tracking == 'lot'`, žiadny vplyv na ostatné objednávky
+> • **Opraviť univerzálne** — vždy plniť šaržu, aj keď tracking je serial — jednoduchšie, ale zmení správanie pre sériové čísla
+>
+> ❓ NEEDS YOU: opraviť číslo šarže len pre šarže (lot tracking), alebo univerzálne?
