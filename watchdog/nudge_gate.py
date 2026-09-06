@@ -19,7 +19,10 @@ Two problems this fixes, both reported by the owner:
    across sweeps, and no cross-sweep per-session floor exists anywhere. This gate
    adds a FAMILY-SPACING floor (`NUDGE_FAMILY_GAP_S`) that every rider consults, so
    a SECOND category's keystroke defers to a later sweep when a DIFFERENT category
-   nudged this session recently.
+   nudged this session recently. #913 (owner directive 2026-09-06): the gap was
+   raised from 15 min to 1 h — "nikdy viac ako raz za hodinu!!!! a ani iny nudge
+   do promptu!!!" — so the cross-family spacing now equals the u-freshness
+   per-category strop.
 
 DESIGN — a pure helper over ONE new state namespace, no new I/O, no new job:
 
@@ -55,7 +58,7 @@ import os
 # staged schedules), not footer/partition nudges into an armed loop.
 GATED_CATEGORIES = frozenset({
     "u-freshness", "partition-audit", "release-gap", "queue-arrival",
-    "lane-occupancy", "goal-guard",
+    "lane-occupancy", "goal-guard", "lane-reconcile",
 })
 
 # The owner's hard 1×/hour U-reconcile strop. Env AIRULESET_U_RECONCILE_CADENCE_S
@@ -67,9 +70,11 @@ U_RECONCILE_CADENCE_MIN_S = 3600
 
 # The cross-category family spacing: consecutive-sweep deliveries of DIFFERENT
 # categories to the same session are spaced at least this far apart, so "besne po
-# sebe" ends. Env AIRULESET_NUDGE_FAMILY_GAP_S, floored at NUDGE_FAMILY_GAP_MIN_S.
-NUDGE_FAMILY_GAP_S = 15 * 60
-NUDGE_FAMILY_GAP_MIN_S = 5 * 60
+# sebe" ends. #913 (owner directive 2026-09-06): raised from 15 min to 1 h — no
+# watchdog nudge into any session prompt more often than 1x/hour TOTAL.
+# Env AIRULESET_NUDGE_FAMILY_GAP_S, floored at NUDGE_FAMILY_GAP_MIN_S.
+NUDGE_FAMILY_GAP_S = 60 * 60
+NUDGE_FAMILY_GAP_MIN_S = 60 * 60
 
 # orphan-reaper TTL for a per-sid cadence rec whose session is gone (mirrors the
 # #519/#531 per-sid-leak reaper): the `visited_sids` gate is PRIMARY (a live pane
@@ -94,8 +99,9 @@ def _u_cadence():
 
 
 def _family_gap():
-    """The effective family spacing, floored at NUDGE_FAMILY_GAP_MIN_S so a units
-    error can't collapse it back toward a per-sweep re-nudge (#504/#543)."""
+    """The effective family spacing, floored at NUDGE_FAMILY_GAP_MIN_S (1 h since
+    #913) so a units error can't lower it below the owner's hard 1x/hour strop
+    (#504/#543)."""
     return max(_env_int("AIRULESET_NUDGE_FAMILY_GAP_S", NUDGE_FAMILY_GAP_S),
                NUDGE_FAMILY_GAP_MIN_S)
 
