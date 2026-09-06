@@ -29,6 +29,8 @@ The artifact (`~/.claude/mdreview-audit/<date>.json`, schema 1) carries:
 - **Memory R/P/S candidates** — R (rule/procedure: doctrine vocab), P (fact/preference), S (credential-like: LOUD flag, value NEVER in output); per-R: proposed target surface
 - **Zero-caller skills** — from `skill-usage --json` (90d fleet window)
 - **Scoping matrix** — per-box role (gk/stream/workstation) + profile/module/skill presence
+- **Slimming candidates** (#908) — modules flagged as conversion/review-eligible (hook-enforced prose, reference-growth), each with category + reason + verdict hint
+- **Context snapshot** (#908) — current `modules_resolved_bytes` / `module_count` / `skill_desc_chars` + ceilings from the #857 ratchet
 
 Consume the artifact's punch-list directly. Do NOT re-grep what the artifact already computed.
 
@@ -89,6 +91,38 @@ Run `/skill-doctor` once on the current box (non-interactive: `echo '/skill-doct
 
 If `/skill-doctor` is unavailable (CC < v2.1.252), skip this step with a logged note — never block the review.
 
+## Step 5c — SLIMMING PASS (mandatory, #908)
+
+**This step is MANDATORY on every /mdreview run. A model-generation trigger (Job 43 `reason=model-generation`) makes it NON-SKIPPABLE; a 30d cadence run also runs it but may produce zero candidates if the set is already minimal.**
+
+Read the artifact's `slimming` section (added by `mdreview-audit` since #908). It carries:
+- **`candidates`** — modules/rules flagged as slimming-eligible, each with `category`, `reason`, and `verdict_hint`
+- **`context_snapshot`** — current `modules_resolved_bytes`, `module_count`, `skill_desc_chars`, and `ceilings`
+
+For EACH candidate, assign a verdict:
+
+| Verdict | Meaning | Evidence required |
+|---|---|---|
+| **keep** | The rule still earns its always-on place | State WHY — what the current model still needs it for, or what the hook does NOT cover |
+| **convert** | Move to hook-stub / paths-scoped rule / reference archive | The #9 stub pattern: enforcement-critical core stays as a stub pointing at the hook/skill; the verbose prose moves off always-on |
+| **remove** | Delete (content no longer useful at all) | Cite live prompting docs OR an observed-behavior check proving the current gen does this natively. Per existing hard lines: conversion never deletion for still-useful content |
+
+**Candidate areas to seed the first run (issue #908 point 4):**
+1. Oldest always-on modules with hook coverage (the `hook-enforced` category in the artifact) — the Rust/mutation-era calibrations from the 2026-07-09 run are precedent
+2. Duplicate enforcement: a hook + prose banning the same thing → the prose is the conversion candidate (the hook is deterministic, the prose is probabilistic)
+3. `rules-reference/` and `*-history.md` files growing past 50 KB without fleet reads — archive or trim oldest entries
+
+**A run that identifies ZERO slimming candidates must say WHY in the audit log** — evidence that the current set is already minimal (e.g. "all N candidates reviewed, all kept because: <reason>"), never a bare "nothing to slim" default.
+
+**Record `context-baseline` bytes BEFORE and AFTER** this step's applied changes (or the whole run's changes if slimming edits are applied in Step 7):
+```bash
+python3 ~/devel/airuleset/airuleset.py context-baseline --check
+# Record the output in the audit log as "BEFORE"
+# After applying any conversions/removals:
+python3 ~/devel/airuleset/airuleset.py context-baseline --check
+# Record as "AFTER" — ties to the #857 down-only ceiling
+```
+
 ## Step 6 — Live web research (AXIS 1–3, extends the artifact)
 
 WebSearch + WebFetch, queries built from the live model:
@@ -104,7 +138,7 @@ Every proposed change carries a source URL; no URL = no change.
 2. **AskUserQuestion** — EVERYTHING goes to the user's review. Per change: Apply now / Defer-to-issue / Reject. Never apply silently.
 3. **Apply** accepted edits.
 4. **Validate + deploy:** `python3 airuleset.py validate` then `python3 airuleset.py push`.
-5. **Log** to `audits/mdreview-<date>.md`: every finding, score, source, verdict. A run whose verdict is "reviewed, all rules still earn their place" is a SUCCESSFUL run.
+5. **Log** to `audits/mdreview-<date>.md`: every finding, score, source, verdict, **+ context-baseline bytes BEFORE/AFTER** (from Step 5c). A run whose verdict is "reviewed, all rules still earn their place" is a SUCCESSFUL run — but it MUST include the slimming-pass evidence (candidates reviewed + verdicts, or "zero candidates because: <reason>").
 
 ## Rules
 
@@ -114,3 +148,5 @@ Every proposed change carries a source URL; no URL = no change.
 - MCP/connector changes are for the OWNING project to apply.
 - Never apply silently; always validate before push.
 - **Re-audit trigger:** after every Claude Code release + the watchdog's 30d/model-generation cadence.
+- **Slimming pass is MANDATORY** (#908, owner directive): every run produces the slimming output (Step 5c). A model-generation trigger (Job 43) makes the pass non-skippable. A run that slimmed nothing must say WHY with evidence.
+- **Measurability:** context-baseline bytes BEFORE/AFTER in every audit log. The #857 down-only ceiling is the target; a run that raises it is a finding.

@@ -155,14 +155,26 @@ def act_on_due(ticket, reason, audit_data, gh_runner=None):
     Returns True on success, False on gh failure.
     """
     summary_lines = [f"mdreview due ({reason})", ""]
+
+    # #908: mark model-generation triggers as slimming-required
+    if reason == "model-generation":
+        summary_lines.append(
+            "**slimming_required: true** — model lineup changed; "
+            "the /mdreview slimming pass is MANDATORY (not just "
+            "size-triggered).")
+        summary_lines.append("")
+
     for box in audit_data.get("boxes", []):
         mem = box.get("memory", {})
         host = box.get("host", "?")
+        slim = box.get("slimming", {})
+        slim_count = len(slim.get("candidates", []))
         summary_lines.append(
             f"- {host}: R={len(mem.get('R', []))} "
             f"P={len(mem.get('P', []))} "
             f"S={mem.get('S_flag_count', 0)} "
-            f"dedup={len(box.get('dedup_pairs', []))}")
+            f"dedup={len(box.get('dedup_pairs', []))} "
+            f"slim={slim_count}")
     for s in audit_data.get("skipped", []):
         summary_lines.append(f"- SKIPPED: {s['host']} -- {s['reason']}")
     for f in audit_data.get("failed", []):
