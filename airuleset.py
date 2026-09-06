@@ -3307,7 +3307,7 @@ def cmd_handoff(args):
         return 1
 
     # Get bounce round.
-    self_login = _gh_login()
+    self_login = _stream_self_login()
     rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
 
     # Round >= 2 requires extra fields.
