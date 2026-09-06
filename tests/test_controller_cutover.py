@@ -370,3 +370,39 @@ class TestHookRuleC(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestControllerAccountRegistration(unittest.TestCase):
+    """(g) commit B follow-up: the controller's own unix account `airuleset`
+    is a registered FULL-authority maintainer account (#827 class), stays
+    label-neutral in transcripts, and the owner webterm inventory carries
+    exactly ONE dev1 tab even with the cutover dev1 REMOTE_HOSTS entry."""
+
+    def test_airuleset_user_is_full_authority(self):
+        import cli_fleet
+        self.assertIn("airuleset", cli_fleet.FULL_AUTHORITY_USERS)
+        self.assertNotIn("airuleset", cli_fleet.AUTHORITY_BY_USER)
+
+    def test_stream_user_neutral_for_airuleset(self):
+        from watchdog import transcripts
+        with mock.patch("getpass.getuser", return_value="airuleset"):
+            self.assertEqual(transcripts._stream_user(), "")
+
+    def test_owner_inventory_single_dev1_tab(self):
+        import cli_fleet
+        import cli_webterm
+        saved = cli_fleet.REMOTE_HOSTS[:]
+        saved_flag = cli_fleet.CONTROLLER_CUTOVER_DONE
+        try:
+            cli_fleet.CONTROLLER_CUTOVER_DONE = True
+            cli_fleet.REMOTE_HOSTS[:] = [
+                h for h in saved if h.get("name") != "dev1"]
+            cli_fleet._append_dev1_if_cutover()
+            inv = cli_webterm.webterm_inventory()
+            dev1 = [e for e in inv if e["id"] == "dev1"]
+            self.assertEqual(len(dev1), 1)
+            self.assertEqual(dev1[0]["label"], "dev1 (localhost)")
+            self.assertTrue(dev1[0]["local"])
+        finally:
+            cli_fleet.CONTROLLER_CUTOVER_DONE = saved_flag
+            cli_fleet.REMOTE_HOSTS[:] = saved
