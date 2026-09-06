@@ -413,6 +413,10 @@ def slimming_candidates(inventory, hooks_dir=None):
         if mod_abs not in global_modules:
             continue
         mod_bytes = global_modules.get(mod_abs, 0)
+        # Stubs (<= 1500 B) are already converted — hint 'review'
+        # instead of 'convert' so the session knows the conversion
+        # already happened and only needs to re-verdict the stub.
+        hint = "convert" if mod_bytes > 1500 else "review"
         candidates.append({
             "path": mod_relpath,
             "category": "hook-enforced",
@@ -420,11 +424,11 @@ def slimming_candidates(inventory, hooks_dir=None):
                        f"module is {mod_bytes} B always-on prose that "
                        f"restates what the hook already blocks — "
                        f"{description}"),
-            "verdict_hint": "convert",
+            "verdict_hint": hint,
         })
 
-    # 2. Reference-growth: large on-demand files in rules-reference/
-    ref_dir = REPO_DIR / "rules-reference"
+    # 2. Reference-growth: large on-demand files in .claude/rules-reference/
+    ref_dir = REPO_DIR / ".claude" / "rules-reference"
     if ref_dir.is_dir():
         for f in sorted(ref_dir.glob("*.md")):
             try:

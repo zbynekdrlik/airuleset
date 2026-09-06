@@ -95,7 +95,7 @@ If `/skill-doctor` is unavailable (CC < v2.1.252), skip this step with a logged 
 
 **This step is MANDATORY on every /mdreview run. A model-generation trigger (Job 43 `reason=model-generation`) makes it NON-SKIPPABLE; a 30d cadence run also runs it but may produce zero candidates if the set is already minimal.**
 
-Read the artifact's `slimming` section (added by `mdreview-audit` since #908). It carries:
+Read the artifact's per-box `slimming` section (`boxes[].slimming`, added by `mdreview-audit` since #908). It carries:
 - **`candidates`** — modules/rules flagged as slimming-eligible, each with `category`, `reason`, and `verdict_hint`
 - **`context_snapshot`** — current `modules_resolved_bytes`, `module_count`, `skill_desc_chars`, and `ceilings`
 

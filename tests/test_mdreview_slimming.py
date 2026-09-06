@@ -86,17 +86,15 @@ class TestSlimmingCandidates(unittest.TestCase):
                              "module not in inventory → no candidate")
 
     def test_reference_growth_flagged(self):
-        """A rules-reference file > 50 KB is flagged."""
+        """A .claude/rules-reference file > 50 KB is flagged."""
         from cli_mdreview_audit import slimming_candidates
 
         with tempfile.TemporaryDirectory() as tmpdir:
             hooks_dir = Path(tmpdir)
-            # Create a fake rules-reference dir in the repo tree
-            # We'll mock REPO_DIR
             with mock.patch("cli_mdreview_audit.REPO_DIR",
                             Path(tmpdir)):
-                ref_dir = Path(tmpdir) / "rules-reference"
-                ref_dir.mkdir()
+                ref_dir = Path(tmpdir) / ".claude" / "rules-reference"
+                ref_dir.mkdir(parents=True)
                 big_file = ref_dir / "big-history.md"
                 big_file.write_text("x" * 60000)
 
@@ -109,15 +107,15 @@ class TestSlimmingCandidates(unittest.TestCase):
                                 "a candidate")
 
     def test_small_reference_not_flagged(self):
-        """A rules-reference file <= 50 KB is NOT flagged."""
+        """A .claude/rules-reference file <= 50 KB is NOT flagged."""
         from cli_mdreview_audit import slimming_candidates
 
         with tempfile.TemporaryDirectory() as tmpdir:
             hooks_dir = Path(tmpdir)
             with mock.patch("cli_mdreview_audit.REPO_DIR",
                             Path(tmpdir)):
-                ref_dir = Path(tmpdir) / "rules-reference"
-                ref_dir.mkdir()
+                ref_dir = Path(tmpdir) / ".claude" / "rules-reference"
+                ref_dir.mkdir(parents=True)
                 small_file = ref_dir / "small.md"
                 small_file.write_text("x" * 1000)
 
@@ -149,8 +147,8 @@ class TestSlimmingCandidates(unittest.TestCase):
 
             with mock.patch("cli_mdreview_audit.REPO_DIR",
                             Path(tmpdir)):
-                ref_dir = Path(tmpdir) / "rules-reference"
-                ref_dir.mkdir()
+                ref_dir = Path(tmpdir) / ".claude" / "rules-reference"
+                ref_dir.mkdir(parents=True)
                 (ref_dir / "big.md").write_text("x" * 60000)
 
                 result = slimming_candidates(inventory, hooks_dir=hooks_dir)
@@ -357,6 +355,83 @@ class TestSkillBodySlimmingStep(unittest.TestCase):
         text = skill_path.read_text(encoding="utf-8")
         self.assertIn("Slimming candidates", text)
         self.assertIn("Context snapshot", text)
+
+
+class TestRealTreeSlimmingCandidates(unittest.TestCase):
+    """Run slimming_candidates against the REAL repo layout — H1 fix proof."""
+
+    def test_real_tree_finds_reference_growth(self):
+        """The real .claude/rules-reference/internals-archive.md > 50 KB
+        must appear as a reference-growth candidate."""
+        from cli_mdreview_audit import slimming_candidates
+        result = slimming_candidates({"global_modules": {}})
+        ref_growth = [c for c in result
+                      if c["category"] == "reference-growth"]
+        archive_hit = any("internals-archive" in c["path"]
+                          for c in ref_growth)
+        self.assertTrue(archive_hit,
+                        f"real tree should find internals-archive.md "
+                        f"(>50 KB); got {ref_growth}")
+
+
+class TestHookProsePairsExist(unittest.TestCase):
+    """Pin test: every entry in _HOOK_PROSE_PAIRS names files that exist."""
+
+    def test_all_hooks_exist(self):
+        from cli_mdreview_audit import _HOOK_PROSE_PAIRS, REPO_DIR
+        for hook_basename, _mod, _desc in _HOOK_PROSE_PAIRS:
+            hook_path = REPO_DIR / "hooks" / hook_basename
+            self.assertTrue(hook_path.exists(),
+                            f"hook {hook_basename} does not exist "
+                            f"at {hook_path}")
+
+    def test_all_modules_exist(self):
+        from cli_mdreview_audit import _HOOK_PROSE_PAIRS, REPO_DIR
+        for _hook, mod_relpath, _desc in _HOOK_PROSE_PAIRS:
+            mod_path = REPO_DIR / mod_relpath
+            self.assertTrue(mod_path.exists(),
+                            f"module {mod_relpath} does not exist "
+                            f"at {mod_path}")
+
+
+class TestStubAwareHint(unittest.TestCase):
+    """Stubs (<= 1500 B) get 'review' not 'convert' (M2 fix)."""
+
+    def test_small_module_gets_review_hint(self):
+        from cli_mdreview_audit import slimming_candidates
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hooks_dir = Path(tmpdir)
+            (hooks_dir / "block-test-skips.sh").write_text("#!/bin/bash\n")
+
+            mod_path = str(
+                (REPO / "modules/ci/test-strictness.md").resolve())
+            # Small module (stub-like, <= 1500 B)
+            inventory = {"global_modules": {mod_path: 800}}
+
+            result = slimming_candidates(inventory, hooks_dir=hooks_dir)
+            hook_hits = [c for c in result
+                         if c["category"] == "hook-enforced"]
+            self.assertTrue(len(hook_hits) > 0)
+            self.assertEqual(hook_hits[0]["verdict_hint"], "review")
+
+    def test_large_module_gets_convert_hint(self):
+        from cli_mdreview_audit import slimming_candidates
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hooks_dir = Path(tmpdir)
+            (hooks_dir / "block-test-skips.sh").write_text("#!/bin/bash\n")
+
+            mod_path = str(
+                (REPO / "modules/ci/test-strictness.md").resolve())
+            # Large module (> 1500 B)
+            inventory = {"global_modules": {mod_path: 3000}}
+
+            result = slimming_candidates(inventory, hooks_dir=hooks_dir)
+            hook_hits = [c for c in result
+                         if c["category"] == "hook-enforced"]
+            self.assertTrue(len(hook_hits) > 0)
+            self.assertEqual(hook_hits[0]["verdict_hint"], "convert")
 
 
 if __name__ == "__main__":
