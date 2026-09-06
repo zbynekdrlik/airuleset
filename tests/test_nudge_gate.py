@@ -5,6 +5,11 @@ release-gap, queue-arrival, lane-occupancy) consult, so nudges stop arriving in
 bursts ("chodia jak besne po sebe") and the u-freshness reconcile can never fire
 more often than 1×/hour (the owner's hard strop).
 
+#913 (owner directive 2026-09-06): the cross-family gap was raised from 15 min
+to 60 min — NO watchdog nudge into any session prompt more often than 1×/hour
+TOTAL, across ALL families. `NUDGE_FAMILY_GAP_MIN_S` raised to 3600 so the env
+override can only RAISE above 1 h. `lane-reconcile` added to GATED_CATEGORIES.
+
 RED against the pre-implementation tree: `from watchdog import nudge_gate`
 ImportErrors. GREEN once the module lands.
 """
@@ -45,16 +50,24 @@ class TestCadenceFloors(unittest.TestCase):
                           {"AIRULESET_U_RECONCILE_CADENCE_S": "not-a-number"}):
             self.assertEqual(ng._u_cadence(), HOUR)
 
-    def test_family_gap_default_and_floor(self):
-        self.assertEqual(ng.NUDGE_FAMILY_GAP_S, 15 * 60)
+    def test_family_gap_default_is_one_hour(self):
+        # #913: cross-family gap raised to 1 h (owner directive).
+        self.assertEqual(ng.NUDGE_FAMILY_GAP_S, HOUR)
+        self.assertEqual(ng.NUDGE_FAMILY_GAP_MIN_S, HOUR)
         with m.patch.dict(os.environ, {"AIRULESET_NUDGE_FAMILY_GAP_S": "5"}):
-            self.assertEqual(ng._family_gap(), ng.NUDGE_FAMILY_GAP_MIN_S)
+            # env can only RAISE above 1 h, never lower.
+            self.assertEqual(ng._family_gap(), HOUR)
 
     def test_category_floor_only_u_freshness(self):
         self.assertEqual(ng._category_floor("u-freshness"), ng._u_cadence())
         for cat in ("partition-audit", "release-gap", "queue-arrival",
                     "lane-occupancy"):
             self.assertEqual(ng._category_floor(cat), 0)
+
+    def test_gated_categories_includes_lane_reconcile(self):
+        """#913: lane-reconcile already calls gate_ok/mark_sent — it must be
+        in GATED_CATEGORIES for documentation + enumeration completeness."""
+        self.assertIn("lane-reconcile", ng.GATED_CATEGORIES)
 
 
 class TestGateOk(unittest.TestCase):
@@ -87,6 +100,16 @@ class TestGateOk(unittest.TestCase):
         # past the family gap it is allowed
         self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap",
                                    NOW + ng._family_gap()))
+
+    def test_family_gap_defers_at_59_min_913(self):
+        """#913: a second DIFFERENT-family nudge at +59 min must be deferred —
+        the owner's hard 1×/hour cross-family strop."""
+        st = {}
+        ng.mark_sent(st, "sess-a", "partition-audit", NOW)
+        self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness",
+                                    NOW + 59 * 60))
+        # at exactly 1 h it passes
+        self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness", NOW + HOUR))
 
     def test_family_gap_ignores_SAME_category(self):
         # a rider's OWN back-to-back is governed by its own cadence, NOT the
