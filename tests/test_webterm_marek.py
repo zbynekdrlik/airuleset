@@ -421,7 +421,13 @@ class TestMarekUnitRender(unittest.TestCase):
 
 class TestMarekPrerequisiteGate(unittest.TestCase):
     def test_no_op_when_not_the_marek_account(self):
-        with m.patch.object(fw, "_whoami", lambda: "david1"):
+        # #870 F4c-marek: pin box-class — on the real controller the acceptance
+        # branch legitimately accepts the airuleset account; this test probes a
+        # non-gateway account on an ORDINARY box, so the env must say so
+        # (mirrors test_webterm_dominika.py, the F4c-dominika precedent).
+        import watchdog.reaper as _reaper
+        with m.patch.object(_reaper, "default_box_class", lambda: "workstation"), \
+                m.patch.object(fw, "_whoami", lambda: "david1"):
             ok, reason = mk.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("gateway account", reason)
