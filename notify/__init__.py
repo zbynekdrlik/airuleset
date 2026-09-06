@@ -1328,7 +1328,7 @@ def stream_qualified(name):
         u = getpass.getuser()
     except Exception:
         return name
-    if u in ("newlevel", "root", ""):
+    if u in ("newlevel", "root", "airuleset", ""):
         return name
     if str(name).endswith("-" + u):
         # already stream-qualified upstream (watchdog project_label appends

@@ -6757,6 +6757,11 @@ class TestClaudeHistoryPopupScript(TestCase):
         -S -- still attaches to the very same server."""
         sock = os.path.join(scratch, "tmux-%d" % os.getuid(), "default")
         os.makedirs(os.path.dirname(sock), exist_ok=True)
+        # 0700 regardless of the ambient umask: under umask 0002 (controller
+        # box default) makedirs yields 0775 and tmux refuses the dir with
+        # "unsafe permissions" on the bare TMUX_TMPDIR-resolved capture-pane
+        # the popup script issues (the explicit -S new-session skips the check).
+        os.chmod(os.path.dirname(sock), 0o700)
         env = {"TMUX_TMPDIR": scratch, "PATH": "/usr/local/bin:/usr/bin:/bin"}
         r = subprocess.run(
             ["tmux", "-S", sock, "new-session", "-d", "-s", "t376",

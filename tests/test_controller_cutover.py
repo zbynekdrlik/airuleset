@@ -454,5 +454,11 @@ class TestControllerAccountRegistration(unittest.TestCase):
             self.assertFalse(airuleset._watchdog_is_deploy_target())
 
 
+    def test_stream_qualified_neutral_for_airuleset(self):
+        from notify import stream_qualified
+        with mock.patch("getpass.getuser", return_value="airuleset"):
+            self.assertEqual(stream_qualified("bakerion-ai"), "bakerion-ai")
+
+
 if __name__ == "__main__":
     unittest.main()
