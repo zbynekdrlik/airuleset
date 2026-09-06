@@ -83,10 +83,14 @@ PROJECT=$(basename "$(git rev-parse --show-toplevel)")
 # unchanged — the whole open PR is still the range).
 CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
 BASE_REF="origin/${DEFAULT_BRANCH}"
+_CASE_RESOLVED=false
 case "$CUR_BRANCH" in
     HEAD|"$DEFAULT_BRANCH"|staging) ;;
     develop)
-        git rev-parse -q --verify origin/staging >/dev/null && BASE_REF="origin/staging" ;;
+        if git rev-parse -q --verify origin/staging >/dev/null; then
+            BASE_REF="origin/staging"
+            _CASE_RESOLVED=true
+        fi ;;
     *)
         for CAND in develop dev; do
             if [ "$CAND" != "$CUR_BRANCH" ]; then
@@ -100,14 +104,50 @@ case "$CUR_BRANCH" in
                 if git rev-parse -q --verify "upstream/${CAND}" >/dev/null && \
                    git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
                     BASE_REF="upstream/${CAND}"
+                    _CASE_RESOLVED=true
                     break
                 elif git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
                     BASE_REF="origin/${CAND}"
+                    _CASE_RESOLVED=true
                     break
                 fi
             fi
         done ;;
 esac
+# #909: For block-test-skips.sh (per-added-line semantics), a tighter base
+# is always correct. Override with origin/<branch> for re-pushes (only new
+# commits since last push are diffed). This does NOT apply to
+# pre-push-test-check.sh whose PR-scoped gates need the full PR range.
+if [ "$CUR_BRANCH" != "HEAD" ] && \
+   git rev-parse -q --verify "origin/${CUR_BRANCH}" >/dev/null 2>&1; then
+    BASE_REF="origin/${CUR_BRANCH}"
+    _CASE_RESOLVED=true
+fi
+# #909: When the case block found NOTHING (no origin/develop, no
+# upstream/develop — the new-branch-push scenario), try fallbacks.
+# These run ONLY when the case block did not resolve, to avoid overriding
+# a correctly-resolved base (F2 from Fable review).
+if [ "$_CASE_RESOLVED" = false ]; then
+    # (b) The tracking branch (@{upstream}) may point to the correct
+    #     integration branch (e.g. upstream/develop when origin/develop is
+    #     absent — the case block's AND condition fails but the branch tracks
+    #     upstream/develop).
+    _TRACKING=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+    if [ -n "$_TRACKING" ] && git rev-parse -q --verify "$_TRACKING" >/dev/null 2>&1; then
+        BASE_REF="$_TRACKING"
+    else
+        # (c) Local integration branch (develop/dev) as last resort. If the
+        #     branch was created from a local develop, git diff develop...HEAD
+        #     gives the right range — only the branch's own commits.
+        for _LOCAL_CAND in develop dev; do
+            if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
+               git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
+                BASE_REF="$_LOCAL_CAND"
+                break
+            fi
+        done
+    fi
+fi
 # The base ref may not exist at all (fresh repo, no origin) — the diffs
 # below already fall back on error, so BASE_REF is used as-is.
 
@@ -124,6 +164,31 @@ LAST_MSG_FLAT=$(printf '%s' "$LAST_MSG" | tr '\n' ' ')
 if echo "$LAST_MSG_FLAT" | grep -qE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+'; then
     REASON=$(echo "$LAST_MSG_FLAT" | grep -oE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+' | head -1 | sed 's/[[:space:]]*$//')
     echo "$(date -Iseconds)  project=$PROJECT  sha=$LAST_SHA  $REASON" >> "$AUDIT_LOG"
+    exit 0
+fi
+
+# #909: Also check the COMMAND TEXT for the bypass marker when the commit
+# and push are in a single Bash call. PreToolUse fires BEFORE git commit
+# runs, so `git log -1` reads the PREVIOUS commit — the marker in the
+# pending commit is invisible.
+# F3 (Fable review): restrict to git commit -m message sources only — a bare
+# `git push ... # airuleset:test-skip-ok x` (trailing shell comment) or
+# `echo '# airuleset:test-skip-ok' && git push` must NOT bypass; the marker
+# must be in a commit message to have an auditable trail in git history.
+# Extract -m argument text from git commit segments of the compound command.
+_COMMIT_MSG_TEXT=$(printf '%s' "$INPUT" | python3 -c '
+import sys, re
+text = sys.stdin.read()
+# Find git commit -m "..." segments and extract the -m argument
+msgs = re.findall(r"git\s+commit\b[^&|;]*?-m\s+[\"'\''](.*?)[\"'\'']", text, re.DOTALL)
+# Also match --allow-empty -m "..."
+msgs += re.findall(r"git\s+commit\b[^&|;]*?--allow-empty[^&|;]*?-m\s+[\"'\''](.*?)[\"'\'']", text, re.DOTALL)
+print(" ".join(msgs))
+' 2>/dev/null || echo "")
+if [ -n "$_COMMIT_MSG_TEXT" ] && \
+   echo "$_COMMIT_MSG_TEXT" | grep -qE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+'; then
+    REASON=$(echo "$_COMMIT_MSG_TEXT" | grep -oE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+' | head -1 | sed 's/[[:space:]]*$//')
+    echo "$(date -Iseconds)  project=$PROJECT  sha=pending  $REASON (same-call)" >> "$AUDIT_LOG"
     exit 0
 fi
 
