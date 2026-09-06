@@ -261,7 +261,7 @@ class TestFleet(unittest.TestCase):
                 "schema": 1, "host": host["name"], "date": "2026-09-05",
                 "inventory": {}, "dedup_pairs": [], "memory": {},
             }), 0
-        with mock.patch("cli_remote._deployable_hosts", return_value=[
+        with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit", return_value=[
             {"name": "box1", "host": "1.2.3.4", "user": "u", "repo_path": "~/a"},
         ]):
             run_fleet(runner=fake_runner)
@@ -271,7 +271,7 @@ class TestFleet(unittest.TestCase):
         from cli_mdreview_audit import run_fleet
         def failing_runner(host):
             return "", 1
-        with mock.patch("cli_remote._deployable_hosts", return_value=[
+        with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit", return_value=[
             {"name": "dead", "host": "1.2.3.4", "user": "u", "repo_path": "~/a"},
         ]):
             result = run_fleet(runner=failing_runner)
@@ -284,7 +284,7 @@ class TestFleet(unittest.TestCase):
         def fake_runner(host):
             attempts.append(host["name"])
             return json.dumps({"schema": 1}), 0
-        with mock.patch("cli_remote._deployable_hosts", return_value=[]):
+        with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit", return_value=[]):
             run_fleet(runner=fake_runner)
         self.assertEqual(attempts, [])
 
@@ -513,7 +513,7 @@ class TestCadenceJob(unittest.TestCase):
                                        "closedAt": closed_old}), 0
                 return "", 0
             with mock.patch("socket.gethostname", return_value="dev1"):
-                with mock.patch("cli_remote._deployable_hosts",
+                with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
                                 return_value=[]):
                     logs = mdreview_cadence_job(
                         now, {}, state_path=str(sp),
@@ -567,7 +567,7 @@ class TestCadenceJob(unittest.TestCase):
                                        "closedAt": "2026-01-01T00:00:00Z"}), 0
                 return "", 0
             with mock.patch("socket.gethostname", return_value="dev1"):
-                with mock.patch("cli_remote._deployable_hosts",
+                with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
                                 return_value=[]):
                     with mock.patch("cli_mdreview_audit.run_fleet",
                                     side_effect=RuntimeError("audit boom")):
@@ -678,7 +678,7 @@ class TestFleetRunnerSep(unittest.TestCase):
         def fake_fleet(host):
             fleet_calls.append(host["name"])
             return json.dumps({"schema": 1, "host": host["name"]}), 0
-        with mock.patch("cli_remote._deployable_hosts", return_value=[
+        with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit", return_value=[
             {"name": "rmt", "host": "1.2.3.4", "user": "u", "repo_path": "~/a"},
         ]):
             run_fleet(fleet_runner=fake_fleet)
@@ -696,7 +696,7 @@ class TestScopingHoisted(unittest.TestCase):
         from cli_mdreview_audit import run_fleet
         def fake_fleet(host):
             return json.dumps({"schema": 1, "host": host["name"]}), 0
-        with mock.patch("cli_remote._deployable_hosts", return_value=[]):
+        with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit", return_value=[]):
             data = run_fleet(fleet_runner=fake_fleet)
         self.assertIn("scoping", data,
                       "scoping_matrix must be at top level of fleet result")
@@ -914,7 +914,7 @@ class TestHostKeyOpts(unittest.TestCase):
             "host_keys": ["ssh-ed25519 AAAA..."],
         }]
         from cli_mdreview_audit import run_fleet
-        with mock.patch("cli_remote._deployable_hosts",
+        with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
                          return_value=hosts_with_keys):
             with mock.patch("cli_remote.host_key_check_opts",
                             side_effect=capturing_fn):

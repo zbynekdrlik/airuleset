@@ -443,6 +443,42 @@ def _scan_memory_all():
     return mem_result
 
 
+# -- classify_fleet_host ----------------------------------------------------
+
+
+def classify_fleet_host(host):
+    """Classify a host for the fleet mdreview sweep (#903).
+
+    Returns (status, reason) where status is 'active' or 'skipped'.
+    Classification order (first match wins):
+      1. paused (#851) -> skipped
+      2. user in WEBTERM_ONLY_USERS (#869) -> skipped
+      3. user in WEBTERM_OBSERVER_USERS (#867) -> skipped
+      4. else -> active
+    """
+    if cli_fleet.is_paused(host):
+        return "skipped", f"paused: {cli_fleet.paused_reason(host)}"
+
+    user = host.get("user", "")
+    if user in cli_fleet.WEBTERM_ONLY_USERS:
+        return "skipped", "webterm-only (#869)"
+    if user in cli_fleet.WEBTERM_OBSERVER_USERS:
+        return "skipped", "webterm-observer (#867)"
+
+    return "active", ""
+
+
+def _fleet_hosts_for_audit(hosts=None):
+    """All REMOTE_HOSTS minus self — broader than _deployable_hosts because
+    the classification step handles paused/webterm-only/observer filtering.
+    Excludes only the box's own entry (name == nodename), same as
+    _deployable_hosts' self-exclusion (#870 F3)."""
+    import platform
+    src = hosts if hosts is not None else cli_fleet.REMOTE_HOSTS
+    me = platform.node()
+    return [h for h in src if h.get("name") != me]
+
+
 # -- run_fleet --------------------------------------------------------------
 
 def run_fleet(runner=None, fleet_runner=None):
@@ -450,6 +486,11 @@ def run_fleet(runner=None, fleet_runner=None):
 
     runner: legacy alias for fleet_runner (backward compat).
     fleet_runner: callable(host_entry) -> (stdout_str, returncode).
+
+    Hosts are classified before SSH (#903): paused, webterm-only, and
+    webterm-observer accounts are skipped (no Claude sessions to audit).
+    Active hosts with an ``identity`` field get ``-i <identity>
+    -o IdentitiesOnly=yes`` in the SSH command.
     """
     import datetime
     import subprocess
@@ -458,9 +499,10 @@ def run_fleet(runner=None, fleet_runner=None):
     if fleet_runner is None and runner is not None:
         fleet_runner = runner
 
-    hosts = cli_remote._deployable_hosts()
+    hosts = _fleet_hosts_for_audit()
     boxes = []
     failed = []
+    skipped = []
 
     import socket
     if not fleet_runner:
@@ -483,6 +525,13 @@ def run_fleet(runner=None, fleet_runner=None):
 
     for host in hosts:
         name = host.get("name", host.get("host", "unknown"))
+
+        # #903: classify before SSH — skip expected-unreachable accounts
+        status, reason = classify_fleet_host(host)
+        if status == "skipped":
+            skipped.append({"host": name, "reason": reason})
+            continue
+
         try:
             if fleet_runner:
                 stdout, rc = fleet_runner(host)
@@ -494,8 +543,15 @@ def run_fleet(runner=None, fleet_runner=None):
                 # so a host with host_keys gets StrictHostKeyChecking=yes.
                 hk_opts = cli_remote.host_key_check_opts(host)
                 ssh_base = ["ssh", "-o", "BatchMode=yes",
-                            "-o", "ConnectTimeout=10"] + hk_opts + [
-                            f"{user}@{addr}"]
+                            "-o", "ConnectTimeout=10"] + hk_opts
+                # #903: use per-host identity when present (same ssh
+                # options as cli_remote._deploy_to_all_remotes).
+                identity = host.get("identity", "")
+                if identity:
+                    expanded = os.path.expanduser(identity)
+                    ssh_base += ["-i", expanded,
+                                 "-o", "IdentitiesOnly=yes"]
+                ssh_base += [f"{user}@{addr}"]
                 cmd = ssh_base + [
                     "python3",
                     f"{repo_path}/airuleset.py",
@@ -521,6 +577,7 @@ def run_fleet(runner=None, fleet_runner=None):
         "date": datetime.date.today().isoformat(),
         "boxes": boxes,
         "failed": failed,
+        "skipped": skipped,
         "scoping": scoping_matrix(),
     }
     return result_data
@@ -599,5 +656,7 @@ def _print_fleet_table(data):
         print(f"{box.get('host', '?')}: "
               f"R={len(mem.get('R', []))} P={len(mem.get('P', []))} "
               f"S={mem.get('S_flag_count', 0)}")
+    for s in data.get("skipped", []):
+        print(f"SKIPPED: {s['host']} -- {s['reason']}")
     for f in data.get("failed", []):
         print(f"FAILED: {f['host']} -- {f['error']}")
