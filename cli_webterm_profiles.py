@@ -85,6 +85,10 @@ def profile_for_host(nodename, account=None):
     each). The hostnames are the fleet's real, stable node names
     (machine-identities: dev1/dev2/subdev == hostname == MagicDNS)."""
     if nodename == "dev1":
+        # #870 F4a-live Y5: when LANE_HOST["zbynek"] moves off dev1 (to
+        # "controller"), dev1 stops reinstalling the old owner gateway.
+        if LANE_HOST.get("zbynek") != "dev1":
+            return None
         return OWNER
     if nodename == "subdev":
         if account == MAREK_GATEWAY_USER:

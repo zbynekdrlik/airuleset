@@ -1687,20 +1687,111 @@ def setup_webterm_service(run=None):
     return ok_all
 
 
+def _setup_controller_webterm():
+    """#870 F4a-live: controller-only webterm provisioning. Provisions each
+    hosted lane AND the ONE shared cloudflared tunnel fronting all of them.
+
+    The hosted set is LANE_HOST entries whose value is "controller",
+    intersected with profile_for_host_set("controller"). Today this set is
+    EMPTY (all lanes still on dev1/subdev) — a clean no-op. F4c flips one
+    human at a time to "controller".
+
+    The shared tunnel uses a SINGLE multi-ingress config with one rule per
+    hosted lane (hostname -> unix:<gateway socket>) and a catch-all 404."""
+    import cli_webterm_tunnel as tun
+
+    _HUMAN_TO_MODULE = {
+        "zbynek": "cli_webterm_zbynek",
+        "david": "cli_webterm_david",
+        "marek": "cli_webterm_marek",
+        "dominika": "cli_webterm_dominika",
+    }
+
+    # Compute which lanes are hosted on this controller.
+    hosted_humans = [
+        h for h, box in profiles.LANE_HOST.items()
+        if box == "controller"
+    ]
+
+    # Provision each hosted lane.
+    for human in hosted_humans:
+        mod_name = _HUMAN_TO_MODULE.get(human)
+        if mod_name is None:
+            continue
+        import importlib
+        mod = importlib.import_module(mod_name)
+        if hasattr(mod, "setup_webterm_%s_service" % human):
+            getattr(mod, "setup_webterm_%s_service" % human)()
+
+    # ALWAYS render + install the ONE shared cloudflared tunnel.
+    tunnel_uuid = "f85ea304-920b-4ba4-96bc-a68001ce6fb4"
+    creds_path = Path.home() / ".cloudflared" / (tunnel_uuid + ".json")
+    config_path = Path.home() / ".cloudflared" / "controller-webterm.yml"
+    service_dest = (Path.home() / ".config" / "systemd" / "user"
+                    / "webterm-controller-tunnel.service")
+    service_name = "webterm-controller-tunnel.service"
+    cloudflared_bin = str(Path.home() / ".local" / "bin" / "cloudflared")
+
+    # Build ingress rules from the hosted lanes' specs.
+    ingress_rules = []
+    for human in hosted_humans:
+        mod_name = _HUMAN_TO_MODULE.get(human)
+        if mod_name is None:
+            continue
+        import importlib
+        mod = importlib.import_module(mod_name)
+        if hasattr(mod, "_spec"):
+            spec = mod._spec()
+            gw_sock = webterm_runtime_socket_abs(spec.gateway_sock_basename)
+            ingress_rules.append(
+                (spec.tunnel_hostname, "unix:" + gw_sock))
+
+    config_text = tun.render_cloudflared_multi_ingress_config(
+        tunnel_uuid, str(creds_path), ingress_rules)
+
+    # Build the gateway service names for After= ordering.
+    after_parts = ["network-online.target"]
+    for human in hosted_humans:
+        mod_name = _HUMAN_TO_MODULE.get(human)
+        if mod_name is None:
+            continue
+        import importlib
+        mod = importlib.import_module(mod_name)
+        if hasattr(mod, "_spec"):
+            after_parts.append(mod._spec().gateway_service_name)
+
+    unit_text = tun.render_cloudflared_tunnel_unit(
+        "airuleset webterm controller tunnel (multi-ingress, #870 F4a)",
+        str(config_path), cloudflared_bin,
+        after=" ".join(after_parts))
+
+    return tun._provision_managed_tunnel(
+        creds_path, cloudflared_bin, config_path, config_text,
+        service_dest, service_name, unit_text,
+        lane="(controller)")
+
+
 def maybe_setup_webterm():
     """Install-time entry point (cmd_install). Dispatches by box profile AND the
-    install account: dev1 -> owner gateway (unchanged); subdev + the `marek`
-    account -> the marek developer gateway; subdev + the `dominika` account ->
-    the dominika observer gateway (#867); subdev (its own account david1, or the
-    default) -> the david developer gateway. subdev is a MULTI-developer box (#612
-    marek scope-add, #867 dominika) — david, marek and dominika each run their OWN
-    gateway as their OWN
-    account, so the install-as-account selects which one this run provisions. Each
-    provisioner is ALSO prerequisite-gated on its own account (a safe no-op
-    otherwise), so a non-matching account never touches systemd. Any other box ->
-    no-op. The developer modules are lazily imported to avoid a module-level
-    cycle."""
+    install account: controller (as airuleset) -> per-lane provisioning + shared
+    tunnel; dev1 -> owner gateway (unchanged); subdev + the `marek` account ->
+    the marek developer gateway; subdev + the `dominika` account -> the dominika
+    observer gateway (#867); subdev (its own account david1, or the default) ->
+    the david developer gateway. subdev is a MULTI-developer box (#612 marek
+    scope-add, #867 dominika) — david, marek and dominika each run their OWN
+    gateway as their OWN account, so the install-as-account selects which one
+    this run provisions. Each provisioner is ALSO prerequisite-gated on its own
+    account (a safe no-op otherwise), so a non-matching account never touches
+    systemd. Any other box -> no-op. The developer modules are lazily imported
+    to avoid a module-level cycle."""
     from cli_filedrop_watchdog import _whoami
+    # #870 F4a-live: controller branch BEFORE the existing profile dispatch.
+    try:
+        from watchdog.reaper import default_box_class
+        if default_box_class() == "controller" and _whoami() == "airuleset":
+            return _setup_controller_webterm()
+    except Exception:
+        pass  # airuleset:script-ok not a controller — fall through to existing dispatch
     prof = profiles.profile_for_host(os.uname().nodename, account=_whoami())
     if prof == profiles.OWNER:
         return setup_webterm_service()
