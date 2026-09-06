@@ -79,6 +79,32 @@ class TestDurableDecisionsRule(TestCase):
         self.assertIn("~/.claude/work-products/", m)
         self.assertIn("durable-decisions-to-tickets.md", m)
 
+    def test_rozhodnute_reversing_shipped_spawns_immediate_lane_912(self):
+        # #912 (owner escalation 2026-09-06, odoo-erp #5718): an owner
+        # ROZHODNUTÉ that reverses shipped behaviour must spawn an
+        # implementation lane IMMEDIATELY — never ops-wait.
+        t = read(self.MOD)
+        self.assertIn("reverses shipped behaviour", t)
+        self.assertIn("IMMEDIATE implementation lane", t)
+        self.assertIn("never ops-wait", t)
+        self.assertIn("client question may run in PARALLEL", t)
+        self.assertIn("ruling is binding", t)
+        # Corollary (a): Odoo task stage mirrors the LATEST ROZHODNUTÉ
+        self.assertIn("LATEST ROZHODNUT", t)
+        self.assertIn("Verifikacia", t)
+        # Anti-pattern present
+        self.assertIn("WITHOUT spawning a fix lane", t)
+
+    def test_rozhodnute_reversal_anti_pattern_in_anti_patterns_section_912(self):
+        # The anti-pattern must live in the "Anti-patterns" section, not
+        # just anywhere in the file.
+        t = read(self.MOD)
+        ap_idx = t.index("Anti-patterns")
+        tail = t[ap_idx:]
+        self.assertIn("ops-wait", tail)
+        self.assertIn("implement the fix IMMEDIATELY", tail)
+        self.assertIn("#912", tail)
+
 
 if __name__ == "__main__":
     main()
