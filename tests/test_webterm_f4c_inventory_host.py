@@ -80,13 +80,13 @@ class TestControllerHostedInventoryNoLoopback(_BoxClassPinned):
         """david's loopback entries must use tailscale IP when on controller."""
         with m.patch.dict(p.LANE_HOST, {"david": "controller"}):
             inv = p.david_inventory()
-            subdev = self._subdev_entries(inv)
-            self.assertTrue(len(subdev) > 0)
-            for entry in subdev:
-                self.assertNotEqual(
-                    entry["host"], p.SUBDEV_LOCAL,
-                    "david entry %r still uses loopback on controller"
-                    % entry["id"])
+            # david1-4 are subdev-targeted (previously SUBDEV_LOCAL);
+            # codex-bridge is dev2 (CODEX_HOST) — not a subdev target
+            loopback = [e for e in inv if e.get("host") == p.SUBDEV_LOCAL]
+            self.assertEqual(
+                len(loopback), 0,
+                "david has %d loopback entries on controller: %s"
+                % (len(loopback), [e["id"] for e in loopback]))
 
     def test_marek_controller_no_loopback(self):
         """marek's loopback entries must use tailscale IP when on controller."""
@@ -121,9 +121,10 @@ class TestSubdevHostedInventoryKeepsLoopback(_BoxClassPinned):
         """david's entries use loopback when lane is on subdev."""
         self.assertEqual(p.LANE_HOST["david"], "subdev")
         inv = p.david_inventory()
-        # david1-4 entries should all be SUBDEV_LOCAL
+        # david1-4 entries should all be SUBDEV_LOCAL (loopback on subdev)
+        david_accounts = {"david1", "david2", "david3", "david4"}
         for entry in inv:
-            if entry["id"] in ("david1", "david2", "david3", "david4"):
+            if entry["id"] in david_accounts:
                 self.assertEqual(
                     entry["host"], p.SUBDEV_LOCAL,
                     "david entry %r lost loopback on subdev" % entry["id"])

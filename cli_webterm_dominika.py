@@ -115,13 +115,22 @@ _DOMINIKA_GO_LIVE = (
     "       dominika.newlevel.media — set WEBTERM_ACCESS_APPS['dominika']\n"
     "       allow-list (nika.sarikova@gmail.com) and run\n"
     "       `airuleset.py webterm-access --apply`. No credential is delivered.\n"
-    "    5. ssh tabs: deploy the dedicated key %s (private key on subdev as\n"
-    "       dominika; pubkey in authorized_keys of montalu5@subdev and\n"
-    "       miva1@subdev as a forced-command entry —\n"
-    "       restrict,pty,command=\"tmux ...\" (keep `pty`; `restrict` alone\n"
-    "       kills the PTY)). dominika has NO local tab, so BOTH tabs fail\n"
-    "       VISIBLY until the key + authorized_keys land.\n"
+    "    5. ssh tabs: deploy the dedicated key %s.\n"
+    "       POST-FLIP (LANE_HOST['dominika']=='controller'):\n"
+    "         - PRIVATE KEY on the CONTROLLER at %s.\n"
+    "         - PUBKEY as forced-command entries in authorized_keys of\n"
+    "           montalu5@subdev and miva1@subdev:\n"
+    "           restrict,pty,command=\"<rendered from cli_webterm._remote_command>\"\n"
+    "           (keep `pty`; `restrict` alone kills the PTY).\n"
+    "         - montalu5@subdev: reached via gatekeeper root@subdev (the\n"
+    "           montalu family has NO explicit identity in REMOTE_HOSTS — the\n"
+    "           push path uses the default key, which does NOT reach montalu5's\n"
+    "           authorized_keys; root is needed for key distribution).\n"
+    "         - miva1@subdev: reached via gatekeeper root@subdev (same).\n"
+    "       dominika has NO local tab, so BOTH tabs fail VISIBLY until\n"
+    "       the key + authorized_keys land.\n"
     % (WEBTERM_DOMINIKA_TUNNEL_UUID, WEBTERM_DOMINIKA_TUNNEL_UUID,
+       profiles.WEBTERM_DOMINIKA_IDENTITY,
        profiles.WEBTERM_DOMINIKA_IDENTITY))
 
 # #614/#638 FOOTGUN: the dominika ttyd unit carries the shared self-contained PATH

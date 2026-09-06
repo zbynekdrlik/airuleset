@@ -67,20 +67,23 @@ class TestDominikaInventory(unittest.TestCase):
         self.assertEqual([e["id"] for e in inv],
                          ["montalu5-subdev", "miva1-subdev"])
 
-    def test_montalu5_entry_is_loopback_ssh_observe_no_u_tenant(self):
+    def test_montalu5_entry_is_ssh_observe_no_u_tenant(self):
         e = next(x for x in p.dominika_inventory() if x["id"] == "montalu5-subdev")
         self.assertFalse(e["local"])
-        self.assertEqual(e["host"], "127.0.0.1")
+        # #870 F4c: host is LANE_HOST-aware — tailscale on controller, loopback
+        # on subdev. With LANE_HOST["dominika"]=="controller", expect tailscale.
+        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "montalu5")
         self.assertEqual(e["identity"], p.WEBTERM_DOMINIKA_IDENTITY)
         self.assertEqual(e["preferred"], "montalu5")
         # OBSERVE-only, CROSS-TENANT: never a within-tenant read.
         self.assertIsNot(e.get("u_tenant"), True)
 
-    def test_miva1_entry_is_loopback_ssh_observe_no_u_tenant(self):
+    def test_miva1_entry_is_ssh_observe_no_u_tenant(self):
         e = next(x for x in p.dominika_inventory() if x["id"] == "miva1-subdev")
         self.assertFalse(e["local"])
-        self.assertEqual(e["host"], "127.0.0.1")
+        # #870 F4c: same LANE_HOST-aware host as montalu5.
+        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "miva1")
         self.assertEqual(e["identity"], p.WEBTERM_DOMINIKA_IDENTITY)
         self.assertEqual(e["preferred"], "miva1")

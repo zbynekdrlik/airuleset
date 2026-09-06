@@ -166,6 +166,24 @@ WEBTERM_DAVID_IDENTITY = "~/.secrets/webterm_david_ed25519"
 # them over loopback with the dedicated key (uniform for all four, so the
 # gateway user is irrelevant to correctness — it only needs the private key).
 SUBDEV_LOCAL = "127.0.0.1"
+
+# #870 F4c: when a lane runs on the CONTROLLER (not on subdev), its subdev-
+# targeted inventory entries must ssh the subdev box over the tailnet, not
+# loopback. Duplicated VERBATIM from cli_fleet.REMOTE_HOSTS subdev entries
+# (this leaf imports no airuleset module — the CODEX_HOST/MAREK_DEV1_HOST
+# precedent); a drift-lock test ties it to the ONE fleet source. No #680
+# host_keys pin — subdev is a private tailscale address (cli_fleet line 302).
+SUBDEV_TAILSCALE_HOST = "100.118.174.27"
+
+
+def _subdev_target_host(human):
+    """#870 F4c: the ssh host for subdev-targeted entries in ``human``'s
+    inventory. When the lane runs ON subdev (``LANE_HOST[human]=="subdev"``),
+    the entries use loopback (same box). When the lane runs on the CONTROLLER,
+    they reach subdev over the tailnet."""
+    if LANE_HOST.get(human) == "controller":
+        return SUBDEV_TAILSCALE_HOST
+    return SUBDEV_LOCAL
 DAVID_ACCOUNTS = ("david1", "david2", "david3", "david4")
 
 # codex-bridge tab — MIRROR of David's existing dev2 ssh (owner ruling
@@ -187,6 +205,7 @@ def david_inventory():
     the dedicated identity, then codex-bridge mirroring the existing dev2
     access. This — and ONLY this — is what david's ttyd is launched against, so
     it is his full connect allowlist."""
+    host = _subdev_target_host("david")
     entries = []
     for user in DAVID_ACCOUNTS:
         entries.append({
@@ -194,7 +213,7 @@ def david_inventory():
             "label": user,
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": host,
             "user": user,
             "identity": WEBTERM_DAVID_IDENTITY,
             "preferred": user,
@@ -323,13 +342,14 @@ def marek_inventory():
     person's account can ever be present. Every ssh entry carries
     WEBTERM_MAREK_IDENTITY explicitly, so the connect child never takes the
     sshpass shared-password branch and never touches the gatekeeper key."""
+    subdev_host = _subdev_target_host("marek")
     return [
         {
             "id": "montalu1-subdev",
             "label": "montalu1@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu1",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": "montalu1",
@@ -342,7 +362,7 @@ def marek_inventory():
             "label": "montalu2@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu2",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": "montalu2",
@@ -355,7 +375,7 @@ def marek_inventory():
             "label": "miva1@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "miva1",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": "miva1",
@@ -371,7 +391,7 @@ def marek_inventory():
             "label": "montalu4@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu4",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": "montalu4",
@@ -481,13 +501,14 @@ def dominika_inventory():
     takes the sshpass shared-password branch and never touches the gatekeeper key.
     Neither entry is `u_tenant` (both cross-tenant OBSERVE), so
     ``u_tenant_entries("dominika")`` is empty — her lane collector reads nothing."""
+    host = _subdev_target_host("dominika")
     return [
         {
             "id": "montalu5-subdev",
             "label": "montalu5@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": host,
             "user": "montalu5",
             "identity": WEBTERM_DOMINIKA_IDENTITY,
             "preferred": "montalu5",
@@ -499,7 +520,7 @@ def dominika_inventory():
             "label": "miva1@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": host,
             "user": "miva1",
             "identity": WEBTERM_DOMINIKA_IDENTITY,
             "preferred": "miva1",
@@ -550,6 +571,7 @@ def zbynek_inventory():
     F4c wires this into the live install path (``profile_inventory`` routes
     OWNER to it when ``LANE_HOST["zbynek"] == "controller"``); until then
     the owner profile still uses the fleet-derived ``webterm_inventory()``."""
+    subdev_host = _subdev_target_host("zbynek")
     return [
         {
             "id": "ar",
@@ -596,7 +618,7 @@ def zbynek_inventory():
             "label": "montalu1@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu1",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu1",
@@ -608,7 +630,7 @@ def zbynek_inventory():
             "label": "montalu2@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu2",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu2",
@@ -620,7 +642,7 @@ def zbynek_inventory():
             "label": "montalu3@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu3",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu3",
@@ -632,7 +654,7 @@ def zbynek_inventory():
             "label": "montalu4@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu4",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu4",
@@ -644,7 +666,7 @@ def zbynek_inventory():
             "label": "montalu5@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu5",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu5",
@@ -656,7 +678,7 @@ def zbynek_inventory():
             "label": "montalu6@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "montalu6",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu6",
@@ -668,7 +690,7 @@ def zbynek_inventory():
             "label": "david1@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "david1",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "david1",
@@ -680,7 +702,7 @@ def zbynek_inventory():
             "label": "david2@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "david2",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "david2",
@@ -692,7 +714,7 @@ def zbynek_inventory():
             "label": "david3@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "david3",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "david3",
@@ -704,7 +726,7 @@ def zbynek_inventory():
             "label": "miva1@subdev",
             "kind": "stream",
             "local": False,
-            "host": SUBDEV_LOCAL,
+            "host": subdev_host,
             "user": "miva1",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "miva1",
