@@ -194,8 +194,22 @@ def run_fleet(days=DEFAULT_DAYS, runner=None):
     Returns the fleet aggregated schema.
 
     runner: callable(host_entry) -> (stdout_str, returncode) for testing.
+
+    #903 follow-up: `_deployable_hosts()` already excludes pending (#537)
+    and paused (#851) entries, so this leaf never contacts a frozen/
+    not-yet-created account. What it was MISSING is the per-host
+    `identity` field -- same bug #903 fixed in cli_mdreview_audit.py's
+    fleet sweep on refs/autopilot-wip/worktree-agent-a7c4bddf7234fb900:
+    an identity-keyed REMOTE_HOSTS entry (e.g. gatekeeper) has no default
+    newlevel key on the box, so an ssh command with no `-i` fails
+    rc=255 before ever reaching `skill-usage --json` remotely. No shared
+    `cli_remote.identity_ssh_opts` helper exists yet on main (#903's own
+    fix inlines the same two-line pattern rather than introduce one) --
+    this replicates that exact inline shape so a future extraction
+    unifies both call sites identically.
     """
     import datetime
+    import os
     import subprocess
     import cli_remote
 
@@ -215,8 +229,16 @@ def run_fleet(days=DEFAULT_DAYS, runner=None):
                                      "~/devel/airuleset")
                 ssh_base = ["ssh", "-o", "BatchMode=yes",
                             "-o", "ConnectTimeout=10",
-                            "-o", "StrictHostKeyChecking=no",
-                            f"{user}@{addr}"]
+                            "-o", "StrictHostKeyChecking=no"]
+                # #903 follow-up: per-host identity, same as
+                # cli_mdreview_audit.run_fleet -- IdentitiesOnly=yes so
+                # only the pinned key is offered (fewer fail2ban lines).
+                identity = host.get("identity", "")
+                if identity:
+                    expanded = os.path.expanduser(identity)
+                    ssh_base += ["-i", expanded,
+                                 "-o", "IdentitiesOnly=yes"]
+                ssh_base += [f"{user}@{addr}"]
                 cmd = ssh_base + [
                     "python3",
                     f"{repo_path}/airuleset.py",
