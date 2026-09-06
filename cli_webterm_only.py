@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import namedtuple
 
 
 # ---------------------------------------------------------------------------
@@ -66,18 +67,56 @@ WEBTERM_DAVID_LANE_PUBKEY = (
 )
 
 
-def _key_blob(line):
-    """The base64 key BLOB (field 2) — the unique-per-key token the whole
-    idempotency + foreign-key detection keys on.  Same helper shape as
-    ``cli_owner_keys._key_blob``.  Returns None for malformed/blank."""
+# #870 F4a D5: controller lane per-human forced-command pubkeys. Empty until
+# F4b mints the keys; dict of {human: pubkey_line} where pubkey_line is a bare
+# "ssh-ed25519 AAAA... comment" (options are prepended by desired_keys_for_user).
+WEBTERM_CONTROLLER_LANE_PUBKEYS = {}
+
+# ---------------------------------------------------------------------------
+# Options-aware authorized_keys parser (#870 F4a D5)
+# ---------------------------------------------------------------------------
+
+SSH_KEY_TYPES = frozenset({
+    "ssh-ed25519", "ssh-rsa", "ssh-dss",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+})
+
+AuthorizedKey = namedtuple("AuthorizedKey", "options key_type blob comment")
+
+
+def parse_authorized_key(line):
+    """Parse an authorized_keys line into ``AuthorizedKey(options, key_type,
+    blob, comment)``. Detection: scan whitespace-split fields left-to-right;
+    the FIRST field matching ``SSH_KEY_TYPES`` is the key type. Everything
+    before it (if any) is the options prefix — which may contain spaces inside
+    quoted ``command="..."`` values. Returns ``AuthorizedKey(None, ...)`` for a
+    plain key line without options."""
     parts = (line or "").split()
-    return parts[1] if len(parts) >= 2 else None
+    if len(parts) < 2:
+        return AuthorizedKey(None, None, None, "")
+    for i, field in enumerate(parts):
+        if field in SSH_KEY_TYPES:
+            options = " ".join(parts[:i]) if i > 0 else None
+            key_type = field
+            blob = parts[i + 1] if i + 1 < len(parts) else None
+            comment = " ".join(parts[i + 2:]) if i + 2 < len(parts) else ""
+            return AuthorizedKey(options, key_type, blob, comment)
+    return AuthorizedKey(None, parts[0], parts[1] if len(parts) > 1 else None,
+                         " ".join(parts[2:]) if len(parts) > 2 else "")
+
+
+def _key_blob(line):
+    """The base64 key BLOB — the unique-per-key token the whole idempotency +
+    foreign-key detection keys on. Options-aware: delegates to
+    ``parse_authorized_key`` so ``restrict,pty,... ssh-ed25519 AAAA...`` lines
+    return the blob, not the options prefix. Returns None for malformed/blank."""
+    return parse_authorized_key(line).blob
 
 
 def _key_comment(line):
-    """The trailing comment (fields 3+) of an authorized_keys line, or ''."""
-    parts = (line or "").split(None, 2)
-    return parts[2] if len(parts) >= 3 else ""
+    """The trailing comment of an authorized_keys line, or ''. Options-aware."""
+    return parse_authorized_key(line).comment
 
 
 def _write_0600(path, content):
@@ -129,6 +168,51 @@ def desired_keys_for_user(user):
     # Sort by blob for deterministic output
     keys.sort(key=lambda k: _key_blob(k) or "")
     return keys
+
+
+def append_controller_lane_pubkey_command(user, key_line, ssh_dir=None):
+    """#870 F4a D6: render a shell command that APPENDS an options-bearing key
+    to a NON-webterm-only target's authorized_keys. Idempotent on the key blob
+    — greps for the blob BEFORE appending (a second push is a no-op). NEVER a
+    desired-set rewrite (that is for webterm-only targets only — a desired-set
+    rewrite on a non-webterm-only target is one-bug-from-lockout, F1 ruling).
+
+    The key_line MAY carry options (e.g. ``restrict,pty,command="..."``); the
+    whole line is appended verbatim. Returns the shell script string.
+
+    The script runs on the REMOTE (over ssh), so ``~`` is expanded by the
+    remote shell via ``$HOME`` (double-quoted, never single-quoted — single
+    quotes suppress tilde expansion). ``set -euo pipefail`` per
+    script-failure-policy.md. Key line and comment are shell-escaped via
+    ``printf '%s'`` to avoid injection from ``command="..."`` options
+    containing quotes."""
+    import shlex as _shlex
+    if ssh_dir is None:
+        ssh_dir = "$HOME/.ssh"
+    ak = parse_authorized_key(key_line)
+    if not ak.blob:
+        raise ValueError("key_line has no parseable blob: %r" % key_line)
+    escaped_key = _shlex.quote(key_line.rstrip("\n"))
+    escaped_comment = _shlex.quote(ak.comment or "(no comment)")
+    return (
+        "set -euo pipefail\n"
+        "# airuleset:managed append-only key (#870 F4a D6)\n"
+        'mkdir -p "%(ssh_dir)s" && chmod 700 "%(ssh_dir)s"\n'
+        'AK="%(ssh_dir)s/authorized_keys"\n'
+        "BLOB=%(blob)s\n"
+        'if ! grep -qF "$BLOB" "$AK" 2>/dev/null; then\n'
+        "  printf '%%s\\n' %(key_line)s >> \"$AK\"\n"
+        '  chmod 600 "$AK"\n'
+        "  echo \"  appended key (%(comment)s) to $AK\"\n"
+        "else\n"
+        "  echo \"  key (%(comment)s) already in $AK — no-op\"\n"
+        "fi\n"
+    ) % {
+        "ssh_dir": ssh_dir,
+        "blob": _shlex.quote(ak.blob),
+        "key_line": escaped_key,
+        "comment": escaped_comment,
+    }
 
 
 def render_authorized_keys(user):

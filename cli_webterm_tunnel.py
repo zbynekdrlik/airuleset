@@ -43,25 +43,35 @@ WEBTERM_OWNER_TUNNEL_HOSTNAME = "zbynek.newlevel.media"
 WEBTERM_CLOUDFLARED_BIN = "/usr/local/bin/cloudflared"
 
 
-def render_cloudflared_tunnel_config(tunnel_uuid, credentials_file, hostname,
-                                     service_url):
-    """A locally-managed cloudflared `config.yml` fronting ONE hostname onto a
-    loopback origin. `credentials-file` (the per-tunnel secret JSON) is the only
-    secret — referenced by absolute path, never inlined. The trailing
-    `http_status:404` catch-all makes any unmatched host a 404 rather than leaking
-    to the origin."""
-    return (
-        "# airuleset-managed cloudflared tunnel config (webterm, #635). Do NOT\n"
+def render_cloudflared_multi_ingress_config(tunnel_uuid, credentials_file,
+                                            ingress_rules):
+    """A locally-managed cloudflared `config.yml` fronting N hostnames onto their
+    respective origins (#870 F4a D1). ``ingress_rules`` is a list of
+    ``(hostname, service_url)`` tuples. The trailing ``http_status:404`` catch-all
+    makes any unmatched host a 404 rather than leaking to any origin."""
+    header = (
+        "# airuleset-managed cloudflared tunnel config (webterm, #635/#870). Do NOT\n"
         "# hand-edit — regenerated + reconciled on every `airuleset.py install`.\n"
         "# Only the referenced per-tunnel credentials JSON is a secret (not in git).\n"
         "tunnel: %s\n"
         "credentials-file: %s\n"
         "\n"
         "ingress:\n"
-        "  - hostname: %s\n"
-        "    service: %s\n"
-        "  - service: http_status:404\n"
-        % (tunnel_uuid, credentials_file, hostname, service_url))
+        % (tunnel_uuid, credentials_file))
+    rules = ""
+    for hostname, service_url in ingress_rules:
+        rules += "  - hostname: %s\n    service: %s\n" % (hostname, service_url)
+    rules += "  - service: http_status:404\n"
+    return header + rules
+
+
+def render_cloudflared_tunnel_config(tunnel_uuid, credentials_file, hostname,
+                                     service_url):
+    """A locally-managed cloudflared `config.yml` fronting ONE hostname onto a
+    loopback origin. Delegates to ``render_cloudflared_multi_ingress_config``
+    with a single-element rule list."""
+    return render_cloudflared_multi_ingress_config(
+        tunnel_uuid, credentials_file, [(hostname, service_url)])
 
 
 def render_cloudflared_tunnel_unit(description, config_path, cloudflared_bin,

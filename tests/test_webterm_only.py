@@ -811,5 +811,53 @@ class TestHookConfReading(unittest.TestCase):
                              "Hook should block unknown user 'hacker'")
 
 
+class TestOptionsAwareParser870(unittest.TestCase):
+    """#870 F4a D5: options-aware authorized_keys parser — AuthorizedKey must
+    correctly parse lines with options prefixes (restrict,pty,command=...)."""
+
+    OPTIONS_LINE = (
+        'restrict,pty,command="tmux new -A -s test" '
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestBlobHere1234567890abcdef"
+        "ghijklmn webterm_zbynek@controller"
+    )
+    PLAIN_LINE = (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlainKeyBlobHere1234567890ab"
+        "cdefghijklm plain-comment"
+    )
+
+    def test_parse_options_bearing_key(self):
+        ak = cli_webterm_only.parse_authorized_key(self.OPTIONS_LINE)
+        self.assertEqual(ak.options, 'restrict,pty,command="tmux new -A -s test"')
+        self.assertEqual(ak.key_type, "ssh-ed25519")
+        self.assertIn("TestBlobHere", ak.blob)
+        self.assertEqual(ak.comment, "webterm_zbynek@controller")
+
+    def test_parse_plain_key(self):
+        ak = cli_webterm_only.parse_authorized_key(self.PLAIN_LINE)
+        self.assertIsNone(ak.options)
+        self.assertEqual(ak.key_type, "ssh-ed25519")
+        self.assertIn("PlainKeyBlobHere", ak.blob)
+        self.assertEqual(ak.comment, "plain-comment")
+
+    def test_key_blob_works_with_options_prefix(self):
+        blob = cli_webterm_only._key_blob(self.OPTIONS_LINE)
+        self.assertIn("TestBlobHere", blob)
+        self.assertNotIn("restrict", blob)
+
+    def test_key_comment_works_with_options_prefix(self):
+        comment = cli_webterm_only._key_comment(self.OPTIONS_LINE)
+        self.assertEqual(comment, "webterm_zbynek@controller")
+
+    def test_ssh_key_types_frozenset_exists(self):
+        self.assertIsInstance(cli_webterm_only.SSH_KEY_TYPES, frozenset)
+        self.assertIn("ssh-ed25519", cli_webterm_only.SSH_KEY_TYPES)
+        self.assertIn("ssh-rsa", cli_webterm_only.SSH_KEY_TYPES)
+        self.assertIn("ecdsa-sha2-nistp256", cli_webterm_only.SSH_KEY_TYPES)
+
+    def test_controller_lane_pubkeys_placeholder_exists(self):
+        self.assertIsInstance(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS, dict)
+
+
 if __name__ == "__main__":
     unittest.main()

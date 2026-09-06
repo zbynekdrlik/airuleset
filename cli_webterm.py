@@ -496,6 +496,20 @@ def _ssh_interactive_prefix(entry):
     identity = entry.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity)] + common
+    # #870 F4a D4: on the controller box, sshpass MUST NOT run — no shared
+    # password exists there, and a wrong-password attempt -> fail2ban ban ->
+    # push outage (the design's RED-2). Refuse instead of silently failing.
+    try:
+        from watchdog.reaper import default_box_class
+        if default_box_class() == "controller":
+            raise ValueError(
+                "sshpass branch reached on the controller box for entry %r — "
+                "every non-local entry must carry an explicit identity on the "
+                "controller (#870 RED-2)" % entry.get("id", "?"))
+    except ImportError:
+        # watchdog unavailable = not on the controller; proceed with sshpass
+        print("  webterm: watchdog.reaper not importable (non-controller box)",
+              file=sys.stderr)
     return ["sshpass", "-p", "newlevel", "ssh"] + common
 
 
@@ -849,9 +863,26 @@ def _ssh_read_prefix(entry):
         hostkey_opts = ["-o", "StrictHostKeyChecking=no",
                         "-o", "UserKnownHostsFile=/dev/null"]
     common = hostkey_opts + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
-    identity = entry.get("identity")
+    # #870 F4a D8: prefer collect_identity (the push key, able to run python)
+    # over identity (which may be a forced-command webterm key that can only
+    # exec tmux — _U_READER_SNIPPET would be killed by the forced command).
+    identity = entry.get("collect_identity") or entry.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity)] + common
+    # #870 F4a D4 (Y1 review fix): sshpass refusal on controller — same guard
+    # as _ssh_interactive_prefix. The collector path reaches here via
+    # _owner_u_entries → fleet inventory entries with identity=None.
+    try:
+        from watchdog.reaper import default_box_class
+        if default_box_class() == "controller":
+            raise ValueError(
+                "sshpass branch reached in _ssh_read_prefix on the controller "
+                "box for entry %r — every non-local entry must carry an explicit "
+                "identity on the controller (#870 RED-2)"
+                % entry.get("id", "?"))
+    except ImportError:
+        print("  webterm: watchdog.reaper not importable (_ssh_read_prefix)",
+              file=sys.stderr)
     return ["sshpass", "-p", "newlevel", "ssh"] + common
 
 

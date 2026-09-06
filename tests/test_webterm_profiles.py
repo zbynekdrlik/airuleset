@@ -242,5 +242,151 @@ class TestAuthRealmSeparation(unittest.TestCase):
         self.assertTrue(pw)
 
 
+class TestProfileForHostReturnSet870(unittest.TestCase):
+    """#870 F4a D2: profile_for_host returns a lane SET; controller branch
+    selected by box-class marker + pwd-based user."""
+
+    def test_controller_returns_all_four_lanes(self):
+        """On the controller box (box-class 'controller', user 'airuleset'),
+        profile_for_host returns the full set of all human lanes."""
+        result = p.profile_for_host_set("controller", "airuleset")
+        self.assertIsInstance(result, (set, frozenset))
+        self.assertEqual(result, {p.OWNER, p.DAVID, p.MAREK, p.DOMINIKA})
+
+    def test_dev1_returns_owner_only(self):
+        result = p.profile_for_host_set("dev1", "newlevel")
+        self.assertEqual(result, {p.OWNER})
+
+    def test_subdev_david_returns_david_only(self):
+        result = p.profile_for_host_set("subdev", "david1")
+        self.assertEqual(result, {p.DAVID})
+
+    def test_lane_host_table_exists(self):
+        """LANE_HOST maps each human to the box that hosts their lane."""
+        self.assertIsInstance(p.LANE_HOST, dict)
+        self.assertIn("zbynek", p.LANE_HOST)
+        self.assertIn("david", p.LANE_HOST)
+        self.assertIn("marek", p.LANE_HOST)
+        self.assertIn("dominika", p.LANE_HOST)
+
+
+class TestZbynekInventory870(unittest.TestCase):
+    """#870 F4a D4: zbynek_inventory() declarative leaf — no identity=None
+    unless local=True; sshpass refusal on controller box-class."""
+
+    def test_zbynek_inventory_exists(self):
+        self.assertTrue(hasattr(p, "zbynek_inventory"))
+
+    def test_zbynek_inventory_returns_entries(self):
+        inv = p.zbynek_inventory()
+        self.assertIsInstance(inv, list)
+        self.assertTrue(len(inv) > 0)
+
+    def test_no_identity_none_unless_local(self):
+        """RED-2: a non-local entry with identity=None would trigger sshpass
+        on the controller — fail2ban ban — push outage."""
+        for e in p.zbynek_inventory():
+            if not e.get("local"):
+                self.assertIsNotNone(
+                    e.get("identity"),
+                    "non-local entry %r has identity=None — would trigger "
+                    "sshpass on controller" % e["id"])
+
+    def test_local_ar_tab_exists(self):
+        """Y6: the controller's own tmux tab (local: True)."""
+        inv = p.zbynek_inventory()
+        local_entries = [e for e in inv if e.get("local")]
+        self.assertTrue(len(local_entries) > 0, "no local entry for the ar tab")
+        ar = local_entries[0]
+        self.assertEqual(ar["id"], "ar")
+
+    def test_zbynek_inventory_non_local_ids_match_dashboard_tabs(self):
+        """Pairwise lock: zbynek_inventory()'s NON-LOCAL ids == the dashboard
+        tabs (the local 'ar' tab is controller-only and added to the tabs by
+        F4c when LANE_HOST["zbynek"] flips to "controller")."""
+        inv_ids = {e["id"] for e in p.zbynek_inventory() if not e.get("local")}
+        tab_ids = set(w.WEBTERM_DASHBOARD_TABS["zbynek"])
+        self.assertEqual(inv_ids, tab_ids)
+
+
+class TestLaneSpecFields870(unittest.TestCase):
+    """#870 F4a D3: LaneSpec gains collector_mode + shared_tunnel fields."""
+
+    def test_lanespec_has_collector_mode(self):
+        import cli_webterm_lane as lane
+        self.assertTrue(hasattr(lane.LaneSpec, "collector_mode"))
+
+    def test_lanespec_has_shared_tunnel(self):
+        import cli_webterm_lane as lane
+        self.assertTrue(hasattr(lane.LaneSpec, "shared_tunnel"))
+
+
+class TestSshpassRefusal870(unittest.TestCase):
+    """#870 F4a D4: _ssh_interactive_prefix and _ssh_read_prefix REFUSE the
+    sshpass branch outright when box-class == controller."""
+
+    def test_interactive_prefix_refuses_sshpass_on_controller(self):
+        """On the controller box, an entry without identity must NOT produce
+        sshpass — it must raise or refuse."""
+        entry = {"host": "10.0.0.1", "user": "test", "identity": None}
+        with m.patch("watchdog.reaper.default_box_class",
+                     return_value="controller"):
+            with self.assertRaises((ValueError, SystemExit)):
+                w._ssh_interactive_prefix(entry)
+
+
+class TestCollectorIdentitySplit870(unittest.TestCase):
+    """#870 F4a D8: per-entry collect_identity separate from tab identity.
+    The U-dot reader must never use a webterm forced-command key."""
+
+    def test_collect_identity_field_supported(self):
+        """Entries can carry a collect_identity for the U reader."""
+        entry = {
+            "id": "test", "host": "10.0.0.1", "user": "test",
+            "identity": "~/.secrets/webterm_zbynek_ed25519",
+            "collect_identity": "~/.secrets/airuleset_push_ed25519",
+        }
+        # _ssh_read_prefix should use collect_identity when present
+        with m.patch("cli_remote.host_key_check_opts", return_value=[]):
+            prefix = w._ssh_read_prefix(entry)
+        self.assertIn("airuleset_push_ed25519", " ".join(prefix))
+        self.assertNotIn("webterm_zbynek", " ".join(prefix))
+
+
+class TestAppendOnlyKeyWriter870(unittest.TestCase):
+    """#870 F4a D6: append-only options-bearing key writer for non-webterm-only
+    targets. Idempotent on blob, never desired-set rewrite."""
+
+    def test_append_pubkey_command_exists(self):
+        import cli_webterm_only as wo
+        self.assertTrue(hasattr(wo, "append_controller_lane_pubkey_command"))
+
+    def test_appends_options_bearing_key(self):
+        import cli_webterm_only as wo
+        key_line = (
+            'restrict,pty,command="tmux new -A -s test" '
+            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey test-comment'
+        )
+        cmd = wo.append_controller_lane_pubkey_command(
+            "testuser", key_line, ssh_dir="/tmp/test-ssh"
+        )
+        self.assertIsInstance(cmd, str)
+        self.assertIn("AAAAC3NzaC1lZDI1NTE5AAAAITestKey", cmd)
+        self.assertIn("restrict,pty", cmd)
+
+    def test_idempotent_on_blob(self):
+        """The command must check if the blob already exists before appending."""
+        import cli_webterm_only as wo
+        key_line = (
+            'restrict,pty,command="tmux new -A -s test" '
+            'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey test-comment'
+        )
+        cmd = wo.append_controller_lane_pubkey_command(
+            "testuser", key_line, ssh_dir="/tmp/test-ssh"
+        )
+        # Must contain a grep/check for the blob before appending
+        self.assertIn("grep", cmd.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

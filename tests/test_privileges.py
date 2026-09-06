@@ -454,5 +454,25 @@ class TestJsonSchema(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
 
 
+class TestControllerWebtermPrivileges870(unittest.TestCase):
+    """#870 F4a D9: webterm per-human keys + controller tunnel creds must
+    be registered in PRIVILEGES."""
+
+    def setUp(self):
+        self.names = {e.name for e in p.PRIVILEGES}
+
+    def test_webterm_zbynek_registered(self):
+        self.assertIn("webterm_zbynek_ed25519", self.names)
+
+    def test_webterm_dominika_registered(self):
+        self.assertIn("webterm_dominika_ed25519", self.names)
+
+    def test_webterm_marek_registered(self):
+        self.assertIn("webterm_marek_ed25519", self.names)
+
+    def test_controller_tunnel_creds_registered(self):
+        self.assertIn("controller_tunnel_creds", self.names)
+
+
 if __name__ == "__main__":
     unittest.main()
