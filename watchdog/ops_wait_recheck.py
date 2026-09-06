@@ -1092,14 +1092,21 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # upstream release can correct. So the escalation runs only for full /
     # branch-merge authority (origin = the canonical repo there); fork-no-merge
     # and an unresolvable authority fail safe to the generic wording.
-    # #914 — update stagnation tracking before composing the nudge text.
-    # Compare current W count against w_count_at_nudge from the prior rec.
+    # #914 — compute stagnation count LOCALLY for the nudge text; do NOT
+    # write to new_rec here (F1 fix: the state must be committed only AFTER
+    # send_verified confirms delivery, same invariant as last_nudge).
     w_count_now = len(_member_numbers(members)) if isinstance(members, list) else 0
     prior_w_at_nudge = new_rec.get("w_count_at_nudge")
     prior_stag = new_rec.get("stagnation_count")
     if not isinstance(prior_stag, int) or isinstance(prior_stag, bool):
         prior_stag = 0
-    if (isinstance(prior_w_at_nudge, int)
+    # F2 fix: W==0 is NOT stagnation — a freshly-parked W after N I-only
+    # nudges must not inherit a stale stagnation_count from the I-only era.
+    if w_count_now == 0 or (isinstance(prior_w_at_nudge, int)
+                            and not isinstance(prior_w_at_nudge, bool)
+                            and prior_w_at_nudge == 0):
+        stag_count = 0       # empty W or W growing from nothing — not stagnation
+    elif (isinstance(prior_w_at_nudge, int)
             and not isinstance(prior_w_at_nudge, bool)):
         if w_count_now >= prior_w_at_nudge:
             stag_count = prior_stag + 1
@@ -1107,8 +1114,6 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
             stag_count = 0   # W shrunk — reset
     else:
         stag_count = 0       # first nudge — no prior data
-    new_rec["w_count_at_nudge"] = w_count_now
-    new_rec["stagnation_count"] = stag_count
 
     rel_shaped = _release_shaped_numbers(members)
     rstate = None
@@ -1168,11 +1173,22 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now
     new_rec["send_fails"] = 0
+    # #914 F1 fix: commit stagnation state ONLY on confirmed delivery
+    # (same invariant as last_nudge — a swallowed send must not inflate
+    # the counter, or 3 swallows reach the flag threshold with zero
+    # delivered nudges).
+    new_rec["w_count_at_nudge"] = w_count_now
+    new_rec["stagnation_count"] = stag_count
     wrecs[sid] = new_rec
     _nudge_gate.mark_sent(state, sid, "partition-audit", now)   # #797
     if handled is not None:
         handled.add(sid)
+    # #914 F5: include stagnation token + effective cadence in the log
+    # so live-box acceptance can prove the tight cadence fired.
+    effective = OPS_WAIT_RECHECK_TIGHT_CADENCE_S if stag_count >= 1 else _cadence()
     note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"
-    logs.append("ops-wait-recheck nudge %s -> partition %s (tracked %s)%s"
-                % (loc, sig, _fmt_age(now - new_rec["first_seen"]), note))
+    logs.append("ops-wait-recheck nudge %s -> partition %s stag=%d cadence=%ds "
+                "(tracked %s)%s"
+                % (loc, sig, stag_count, effective,
+                   _fmt_age(now - new_rec["first_seen"]), note))
     return logs

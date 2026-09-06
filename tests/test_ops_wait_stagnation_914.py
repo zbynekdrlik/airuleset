@@ -183,5 +183,129 @@ class TestConstantValues(unittest.TestCase):
                            W_STAGNATION_FLAG_THRESHOLD)
 
 
+class _OrchestratorBase(unittest.TestCase):
+    """Harness for orchestrator-level stagnation tests, mirroring _OrchBase
+    in test_ops_wait_recheck.py."""
+    SID = "sess-914-stag"
+    CWD = "/fake/odoo"
+
+    def setUp(self):
+        from tests.test_ops_wait_recheck import (  # noqa: F811
+            CAD, DeliverGoalFakeTmux, GOAL_ARMED_CAP,
+        )
+        self.CAD = CAD
+        self.FakeTmux = DeliverGoalFakeTmux
+        self.GOAL_ARMED_CAP = GOAL_ARMED_CAP
+        import tempfile
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tpath = Path(self._tmpdir.name) / "transcript.jsonl"
+        self.tpath.write_text("")
+        self.addCleanup(self._tmpdir.cleanup)
+
+    def _tmux(self, **kw):
+        return self.FakeTmux([("%9", "claude", self.CWD, "111")],
+                             self.GOAL_ARMED_CAP, model_type=True,
+                             transcript_path=self.tpath, **kw)
+
+    def _run(self, wrecs, fetch, tmux, *, state=None, i_count=0):
+        from watchdog.ops_wait_recheck import goal_ops_wait_recheck
+        return goal_ops_wait_recheck(
+            NOW, tmux, wrecs, self.SID, self.CWD, "%9", self.tpath, "sess:0",
+            False, set(), ops_wait_fetch=fetch,
+            state=state if state is not None else {},
+            sleep_fn=lambda *a, **k: None, cadence=self.CAD, i_count=i_count)
+
+
+class TestOrchestratorStagnation(_OrchestratorBase):
+    """The orchestrator writes stagnation state ONLY on confirmed delivery."""
+
+    def test_delivered_nudge_records_stagnation(self):
+        """A delivered nudge writes w_count_at_nudge + stagnation_count."""
+        wrecs = {self.SID: {"first_seen": NOW - 10 * DAY, "last_nudge": None}}
+        logs = self._run(wrecs, lambda cwd: [41, 43], self._tmux())
+        self.assertTrue(any("nudge" in ln for ln in logs))
+        rec = wrecs[self.SID]
+        self.assertEqual(rec["w_count_at_nudge"], 2)
+        self.assertEqual(rec["stagnation_count"], 0)  # first nudge
+
+    def test_stagnation_increments_across_delivered_nudges(self):
+        """stagnation_count increments when W count >= prior at delivery."""
+        wrecs = {self.SID: {
+            "first_seen": NOW - 10 * DAY,
+            "last_nudge": NOW - 25 * HOUR,
+            "w_count_at_nudge": 2,
+            "stagnation_count": 1,
+        }}
+        logs = self._run(wrecs, lambda cwd: [41, 43], self._tmux())
+        self.assertTrue(any("nudge" in ln for ln in logs))
+        rec = wrecs[self.SID]
+        self.assertEqual(rec["stagnation_count"], 2)
+        self.assertEqual(rec["w_count_at_nudge"], 2)
+
+    def test_stagnation_resets_on_shrink(self):
+        """stagnation_count resets to 0 when W count < prior at delivery."""
+        wrecs = {self.SID: {
+            "first_seen": NOW - 10 * DAY,
+            "last_nudge": NOW - 25 * HOUR,
+            "w_count_at_nudge": 5,
+            "stagnation_count": 3,
+        }}
+        logs = self._run(wrecs, lambda cwd: [41, 43], self._tmux())
+        self.assertTrue(any("nudge" in ln for ln in logs))
+        rec = wrecs[self.SID]
+        self.assertEqual(rec["stagnation_count"], 0)
+        self.assertEqual(rec["w_count_at_nudge"], 2)
+
+    def test_swallowed_send_does_not_inflate_stagnation(self):
+        """F1 fix: a swallowed send must NOT increment stagnation_count."""
+        wrecs = {self.SID: {
+            "first_seen": NOW - 10 * DAY,
+            "last_nudge": NOW - 25 * HOUR,
+            "w_count_at_nudge": 2,
+            "stagnation_count": 1,
+        }}
+        # enters_swallowed=99 makes send_verified always return False (swallow)
+        tmux = self._tmux(enters_swallowed=99)
+        self._run(wrecs, lambda cwd: [41, 43], tmux)
+        rec = wrecs[self.SID]
+        # stagnation_count MUST stay at 1 (the prior value), not increment
+        self.assertEqual(rec.get("stagnation_count", 1), 1,
+                         "F1: a swallowed send must NOT increment stagnation_count")
+        # w_count_at_nudge MUST stay at 2 (the prior value), not update
+        self.assertEqual(rec.get("w_count_at_nudge", 2), 2,
+                         "F1: a swallowed send must NOT update w_count_at_nudge")
+
+    def test_i_only_nudges_do_not_inflate_stagnation(self):
+        """F2 fix: I-only nudges (W=0) must not inflate stagnation_count."""
+        wrecs = {self.SID: {
+            "first_seen": NOW - 10 * DAY,
+            "last_nudge": NOW - 25 * HOUR,
+            "w_count_at_nudge": 0,
+            "stagnation_count": 2,
+        }}
+        state = {"goal_lane": {self.SID: {"llast": NOW - 1}}}
+        self._run(wrecs, lambda cwd: [], self._tmux(),
+                  i_count=3, state=state)
+        rec = wrecs[self.SID]
+        # After an I-only nudge, stagnation must NOT increment beyond prior
+        # The W is empty, so stagnation_count should reset to 0
+        self.assertEqual(rec.get("stagnation_count", 0), 0,
+                         "F2: I-only nudges must not inflate stagnation_count")
+
+    def test_log_carries_stagnation_token(self):
+        """F5: the nudge log line must carry stag= and cadence= tokens."""
+        wrecs = {self.SID: {
+            "first_seen": NOW - 10 * DAY,
+            "last_nudge": NOW - 25 * HOUR,
+            "w_count_at_nudge": 2,
+            "stagnation_count": 1,
+        }}
+        logs = self._run(wrecs, lambda cwd: [41, 43], self._tmux())
+        nudge_logs = [ln for ln in logs if "nudge" in ln]
+        self.assertTrue(nudge_logs, "expected a nudge log line")
+        self.assertIn("stag=", nudge_logs[0])
+        self.assertIn("cadence=", nudge_logs[0])
+
+
 if __name__ == "__main__":
     unittest.main()
