@@ -141,7 +141,7 @@
     "tests/test_context_diet_tier2.py": 429,
     "tests/test_context_diet_tier3.py": 377,
     "tests/test_context_ratchet.py": 866,
-    "tests/test_controller_cutover.py": 372,
+    "tests/test_controller_cutover.py": 408,
     "tests/test_count_live_workers.py": 800,
     "tests/test_dead_lane_resume_836.py": 126,
     "tests/test_delegation_meter.py": 653,

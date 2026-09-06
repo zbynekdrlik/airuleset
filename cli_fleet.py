@@ -550,7 +550,12 @@ AUTHORITY_BY_USER = {
 # `authority=full` marker does NOT elevate an unmapped user: airuleset#828 (owner
 # decision A) made the marker a CAP that can only LOWER, never raise. Everything
 # ELSE in neither registry still fails SAFE to `fork-no-merge`.
-FULL_AUTHORITY_USERS = frozenset({"newlevel", "gatekeeper", "admin", "stepan"})
+# `airuleset` = the controller/control-plane account (#870 F3 commit B): the box
+# that authors and gates every push post-cutover — the same maintainer class as
+# `gatekeeper`, deliberately NOT in AUTHORITY_BY_USER (a stream-registry row
+# would misclassify the controller as a sub-dev stream downstream).
+FULL_AUTHORITY_USERS = frozenset(
+    {"newlevel", "gatekeeper", "admin", "stepan", "airuleset"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a

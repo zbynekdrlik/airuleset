@@ -1637,7 +1637,7 @@ def _stream_user():
         u = getpass.getuser()
     except Exception:
         return ""
-    return "" if u in ("newlevel", "root", "") else u
+    return "" if u in ("newlevel", "root", "airuleset", "") else u
 
 
 def project_label(cwd):

@@ -244,6 +244,12 @@ def webterm_inventory(profile=profiles.OWNER):
         "preferred": OWNER_GROUP,
     }]
     for h in _deployable_hosts():
+        # #870 F3 commit B: post-cutover the fleet table carries a real `dev1`
+        # deploy target; the hardcoded local entry above already IS the owner's
+        # dev1 tab, so skip the fleet row (a second dev1 entry would collide on
+        # id and render a bogus remote tab). F4 replaces this inventory wholesale.
+        if h.get("name") == "dev1":
+            continue
         user = h["user"]
         is_stream = user in stream_users
         entries.append({

@@ -357,8 +357,10 @@ class TestWiring(unittest.TestCase):
         self.assertTrue(sb[0].get("owner_vps"))
 
     def test_no_subdev_or_dev2_is_owner_vps(self):
+        # dev1 joined REMOTE_HOSTS with a deliberate owner_vps=True at the
+        # #870 cutover (commit A design, reviewed) — it is the owner's own box.
         for h in airuleset.REMOTE_HOSTS:
-            if h.get("name") != "spinbike-vps":
+            if h.get("name") not in ("spinbike-vps", "dev1"):
                 self.assertFalse(h.get("owner_vps"),
                                  "%s must not be owner_vps" % h.get("name"))
 
