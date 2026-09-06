@@ -163,6 +163,8 @@ def act_on_due(ticket, reason, audit_data, gh_runner=None):
             f"P={len(mem.get('P', []))} "
             f"S={mem.get('S_flag_count', 0)} "
             f"dedup={len(box.get('dedup_pairs', []))}")
+    for s in audit_data.get("skipped", []):
+        summary_lines.append(f"- SKIPPED: {s['host']} -- {s['reason']}")
     for f in audit_data.get("failed", []):
         summary_lines.append(f"- FAILED: {f['host']} -- {f['error']}")
     comment_body = "\n".join(summary_lines)
