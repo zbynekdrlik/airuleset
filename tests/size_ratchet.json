@@ -231,7 +231,7 @@
     "tests/test_hook_deny_stderr.py": 223,
     "tests/test_hook_state_cleanup.py": 250,
     "tests/test_host_key_pinning.py": 330,
-    "tests/test_host_key_pinning_680.py": 218,
+    "tests/test_host_key_pinning_680.py": 238,
     "tests/test_hosted_reply_delivery.py": 295,
     "tests/test_isolation_guard_817.py": 425,
     "tests/test_item95_item9_question_skill.py": 213,
