@@ -13,6 +13,11 @@ import time
 
 import statusbar
 
+# The quals subprocess (core-quals/slice-quals --ops-wait) does per-member gh
+# network calls, so its runtime is O(|W|). At ~3s/member, |W|=100 takes ~300s.
+# The old hardcoded 30s always timed out at |W| > ~10 (#902).
+_QUALS_SUBPROCESS_TIMEOUT = 300
+
 
 def _claude_dir(home=None):
     return statusbar._claude_dir(home)
@@ -167,7 +172,8 @@ def cmd_wdrain_pass(args):
     try:
         result = subprocess.run(
             [sys.executable, str(script), quals_cmd, "--ops-wait"],
-            capture_output=True, text=True, timeout=30, cwd=cwd
+            capture_output=True, text=True,
+            timeout=_QUALS_SUBPROCESS_TIMEOUT, cwd=cwd
         )
     except Exception as exc:
         print(f"ERROR: failed to run {quals_cmd} --ops-wait: {exc}", file=sys.stderr)
