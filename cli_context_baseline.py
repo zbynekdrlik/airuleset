@@ -527,14 +527,28 @@ def run_fleet(runner=None):
     Returns the fleet JSON schema.
 
     runner: callable(host_entry) -> (stdout_str, returncode) for testing.
+
+    #900: SSH commands mirror the push deploy identity map from cli_fleet
+    REMOTE_HOSTS — identity-pinned hosts get `-i <key> -o BatchMode=yes`,
+    default-key hosts get `sshpass -p <pw> -o NumberOfPasswordPrompts=1`,
+    host-key pins (#669) apply via `cli_remote.host_key_check_opts()`.
+    Webterm OBSERVER accounts (WEBTERM_OBSERVER_USERS) are excluded — they
+    run no Claude sessions, so measuring them is wasted ssh + auth risk.
     """
     import datetime
     import shlex
     import socket
     import subprocess
+    import cli_fleet
     import cli_remote
 
     hosts = cli_remote._deployable_hosts()
+
+    # #900: exclude webterm OBSERVER accounts — they have no Claude sessions
+    # to measure (marek #882, dominika #867).
+    hosts = [h for h in hosts
+             if not cli_fleet.is_webterm_observer(h.get("user"))]
+
     boxes = []
     failed = []
 
@@ -558,11 +572,7 @@ def run_fleet(runner=None):
                 user = host.get("user", "newlevel")
                 repo_path = host.get("repo_path",
                                      "~/devel/airuleset")
-                ssh_base = ["ssh", "-o", "BatchMode=yes",
-                            "-o", "ConnectTimeout=10",
-                            "-o", "StrictHostKeyChecking=no",
-                            f"{user}@{addr}"]
-                cmd = ssh_base + [
+                remote_argv = [
                     "python3",
                     f"{repo_path}/airuleset.py",
                     "context-baseline", "--json"
@@ -571,7 +581,29 @@ def run_fleet(runner=None):
                 # shlex.quote each path for the remote shell (YELLOW 3)
                 host_projects = by_host.get(name, [])
                 for pd in host_projects:
-                    cmd.extend(["--project", shlex.quote(pd)])
+                    remote_argv.extend(["--project", shlex.quote(pd)])
+
+                # #900: mirror push deploy's identity resolution from
+                # cli_remote._deploy_to_all_remotes (lines 974-1007).
+                identity = host.get("identity")
+                hostkey_opts = cli_remote.host_key_check_opts(host)
+                if identity:
+                    ssh_base = [
+                        "ssh", "-i", os.path.expanduser(identity),
+                        *hostkey_opts,
+                        "-o", "BatchMode=yes",
+                        "-o", "ConnectTimeout=10",
+                        f"{user}@{addr}",
+                    ]
+                else:
+                    ssh_base = [
+                        "sshpass", "-p", "newlevel",
+                        "ssh", *hostkey_opts,
+                        "-o", "NumberOfPasswordPrompts=1",
+                        "-o", "ConnectTimeout=10",
+                        f"{user}@{addr}",
+                    ]
+                cmd = ssh_base + remote_argv
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=30)
                 stdout = result.stdout
