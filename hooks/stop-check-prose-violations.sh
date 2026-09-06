@@ -2002,6 +2002,46 @@ if [ -n "$GLOBE_LOCALHOST" ] || [ "$GLOBE_LOCALHOST_UNKNOWN" = "1" ]; then
     add_hard "🌐/📱 URL line points at localhost/127.0.0.1/0.0.0.0 — use the real LAN IP"
 fi
 
+# #916 — Odoo posting READ-BACK evidence check. When the assistant's message
+# REPORTS having posted to Odoo chatter/Discuss (a past-tense posting verb near
+# an Odoo posting term, outside quotes/code), it must carry read-back evidence
+# that the posted messages have no escaped HTML tags (the "0 escaped messages"
+# evidence line). The #915 PreToolUse hook guards the posting ACTION; this
+# guards the REPORTING.
+#
+# The Stop hook reads ONLY `last_assistant_message` text — it has NO access to
+# tool calls or tool results. A fully reliable turn-shape detector for "this
+# turn performed Odoo message posting" does NOT exist in this information space.
+# This check is NARROW on purpose: it fires only when the message explicitly
+# reports a posting action, so a message merely DISCUSSING the hook, the
+# doctrine, or the concept of message_post is not gated (MSG_MENTION strips
+# backticked/quoted/fenced spans first).
+#
+# 3-conjunct, fail-safe PASS (any absent -> pass):
+#   (1) POSTING ACTION: a past-tense verb (posted/sent/odoslal/napisal/created)
+#       near (.{0,60}) an Odoo posting term (chatter, message_post,
+#       project.task, discuss.channel) — MSG_MENTION.
+#   (2) EVIDENCE MISSING: no read-back proof in the message (0 escaped,
+#       no escaped, body_is_html verified/True, read-back, airuleset:html-ok).
+#   (3) NO ESCAPE: no UNVERIFIED: line.
+#
+# Accepted residuals: (1) a turn that posts without describing it is NOT caught
+# (the #915 PreToolUse hook is the guard); (2) a prose description of posting
+# (not actually posting) can false-fire if outside quotes/code — strip_mentions
+# mitigates; (3) evidence tokens are intentionally loose.
+ODOO_POST_VERB_RX='\b(posted|sent|wrote|created)\b'
+ODOO_POST_TERM_RX='(chatter|message_post|project\.task|discuss\.channel)'
+ODOO_POST_SK_VERB_RX='\b(odoslal|napisal|odoslane|vytvoril)\b'
+ODOO_POST_ACTION=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE "${ODOO_POST_VERB_RX}.{0,60}${ODOO_POST_TERM_RX}|${ODOO_POST_TERM_RX}.{0,60}${ODOO_POST_VERB_RX}|${ODOO_POST_SK_VERB_RX}.{0,60}${ODOO_POST_TERM_RX}|${ODOO_POST_TERM_RX}.{0,60}${ODOO_POST_SK_VERB_RX}" && echo 1 || echo 0)
+if [ "$ODOO_POST_ACTION" = "1" ]; then
+    ODOO_RB_EVIDENCE=$(msg_has "$MSG" -qiE '0 escaped|escaped.{0,20}\b0\b|no escaped|body_is_html.{0,20}(verified|True|checked|confirmed)|read.back|airuleset:html-ok' && echo 1 || echo 0)
+    ODOO_RB_UNVERIFIED=$(msg_has "$MSG" -qE 'UNVERIFIED:' && echo 1 || echo 0)
+    if [ "$ODOO_RB_EVIDENCE" = "0" ] && [ "$ODOO_RB_UNVERIFIED" = "0" ]; then
+        echo "VIOLATION: Your message reports having posted to Odoo (chatter/Discuss/message_post) but carries no read-back evidence that the posted messages have no escaped HTML tags. After posting via message_post, read back the posted messages and verify that 0 contain raw '<' characters (escaped HTML). Include the evidence line in your message, e.g.: 'Read-back: 0 escaped messages.' or 'body_is_html=True verified.' The #915 PreToolUse hook guards the posting action; this check ensures you VERIFIED the result. If you cannot read back, write 'UNVERIFIED: <why>'. See airuleset #915/#916." >&2
+        add_hard "Odoo posting report without read-back evidence (0 escaped messages / body_is_html verified) — verify posted messages have no escaped HTML (#916)"
+    fi
+fi
+
 # #194 — the global suppression that used to sit here is GONE. It asked "did ANY
 # check error" and, on yes, discarded EVERY hard violation, including ones
 # decided by a different pattern on a different regex engine that never errored:

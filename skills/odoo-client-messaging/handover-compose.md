@@ -95,6 +95,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   reaches PROD, regardless of which skill you loaded (montalu6 shipped an
   unsigned client message from a skill that never carried this rule). Bypass
   for a genuine internal/legacy post: `airuleset:discuss-sig-ok` in the content.
+- **Chatter = helper only; `body_is_html=True` is MANDATORY on every
+  `message_post` with HTML tags.** Without it Odoo escapes the HTML and clients
+  see raw `<p>` tags. HOOK-ENFORCED (`hooks/block-odoo-message-post-without-html.sh`,
+  airuleset #915): payload with HTML + no `body_is_html` is BLOCKED fleet-wide.
+  After posting, read back and verify 0 escaped messages (#916 Stop check).
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route/record/page URL the client clicks to SEE
   it, never a menu path ("Predaj → Objednávky → …") and never the bare instance
@@ -131,9 +136,9 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   what is delivered and working (airuleset #742).** "Chýba nám X" / "nemáme
   prístup k Y" / "nevieme to overiť" / "nestihli sme Z" — any framing that
   surfaces OUR internal gap into a client-facing message is unprofessional and
-  leaves the client nothing actionable ("čo s tým mám ako klient robiť?"). When
-  something is missing or unfinished on OUR side, there are exactly two legal
-  paths, mirroring the #696 verified-past-events rule above: (1) FIX it first —
+  leaves the client nothing actionable. When
+  something is missing on OUR side, two legal
+  paths (mirroring #696 above): (1) FIX it first —
   get the access/data from the owner, self-service verify it
   (`autonomous-verification.md`'s "What's on PROD?" tree), finish the step —
   THEN message the client about the COMPLETED result; or (2) DON'T message yet
