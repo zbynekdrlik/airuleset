@@ -96,7 +96,7 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 0)
 
-    def test_skip_active_process_cwd(self, tmp_path=None):
+    def test_skip_active_process_cwd(self):
         """A worktree with an active process cwd inside it must be SKIPPED."""
         fn = getattr(dg, "discover_stale_home_worktrees", None)
         if fn is None:
@@ -112,7 +112,7 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
             os.utime(str(wt), (old_time, old_time))
 
             def fake_proc_cwds():
-                return {str(wt)}
+                return ({str(wt)}, set())
 
             result = fn(
                 now=_NOW,
@@ -146,7 +146,7 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
             result = fn(
                 now=_NOW,
                 home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: set(),
+                proc_cwd_fn=lambda: (set(), set()),
                 git_run_fn=fake_git_run,
                 dir_size_fn=lambda p: 1000,
             )
@@ -171,7 +171,7 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
             result = fn(
                 now=_NOW,
                 home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: set(),
+                proc_cwd_fn=lambda: (set(), set()),
                 git_run_fn=lambda *a, **k: "",
                 dir_size_fn=lambda p: 1000,
             )
@@ -196,7 +196,7 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
             result = fn(
                 now=_NOW,
                 home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: set(),
+                proc_cwd_fn=lambda: (set(), set()),
                 git_run_fn=lambda *a, **k: "",  # clean porcelain
                 dir_size_fn=lambda p: 935_000_000,
             )
@@ -226,7 +226,7 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
             result = fn(
                 now=_NOW,
                 home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: set(),
+                proc_cwd_fn=lambda: (set(), set()),
                 git_run_fn=lambda *a, **k: "",
                 dir_size_fn=lambda p: 1000,
             )

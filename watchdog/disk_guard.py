@@ -1615,11 +1615,19 @@ def discover_stale_claude_metadata(home=None, now=None,
 # #906 — cross-user home worktree discovery (top-consumers + drain rung)
 # --------------------------------------------------------------------------- #
 def _default_proc_cwds():
-    """Set of absolute paths that are the cwd of ANY process on the box (read
-    from ``/proc/*/cwd``). Best-effort: unreadable entries (foreign user, kernel
-    thread) are silently skipped — fail-safe is to KEEP a worktree whose liveness
-    we cannot determine (the caller checks containment)."""
+    """Scan ``/proc/*/cwd`` for ALL processes on the box (#906).
+
+    Returns ``(cwds, opaque_uids)`` where ``cwds`` is the set of resolved
+    cwd paths (same-uid only — /proc/<pid>/cwd is owner-readable), and
+    ``opaque_uids`` is the set of UIDs whose cwd readlink returned EACCES
+    (foreign user, kernel thread). The CALLER uses opaque_uids to fail-safe
+    KEEP a worktree whose owner has ANY opaque process (#906 R2 fix).
+
+    Best-effort: a /proc scan error returns ``(set(), set())`` — the caller
+    treats an empty opaque set as "no evidence of liveness" (fail-safe KEEP
+    would require opaque_uids to be non-empty for a given owner)."""
     cwds = set()
+    opaque_uids = set()
     proc = Path("/proc")
     try:
         for entry in proc.iterdir():
@@ -1628,27 +1636,49 @@ def _default_proc_cwds():
             try:
                 cwd = os.readlink(str(entry / "cwd"))
                 cwds.add(cwd)
+            except PermissionError:
+                # Foreign-user proc: we know a process EXISTS but can't read
+                # its cwd. Record the proc's owner UID so the caller can
+                # fail-safe KEEP worktrees owned by that user.
+                try:
+                    uid = os.stat(str(entry)).st_uid
+                    opaque_uids.add(uid)
+                except OSError:
+                    pass  # airuleset:script-ok zombie/gone proc between readlink and stat
             except (OSError, ValueError):
-                # Expected: foreign-user procs, kernel threads, zombie procs —
-                # fail-safe is to NOT add their cwd (the caller keeps the
-                # worktree if it can't prove no process is there).
+                # Kernel thread, zombie, gone-between-readdir-and-readlink —
+                # not a foreign-user proc, no UID to record.
                 continue
     except OSError as e:
         _dbg("proc cwd scan failed: %r" % e)
-    return cwds
+    return cwds, opaque_uids
 
 
-def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None):
+def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None,
+                        exclude_own_user=True):
     """Enumerate ``/home/*/devel/**/.claude/worktrees/*`` — every worktree
-    directory across all home dirs. Returns ``[(wt_path, owner, repo_path)]``
-    where ``owner`` is the username (the first path segment under the home
-    glob), and ``repo_path`` is the repo root (the parent of ``.claude/``).
-    ``listdir_fn`` is injectable for testing (default: real glob + os.walk)."""
+    directory across all home dirs EXCEPT the calling user's own (R3: the
+    existing ``worktree`` rung handles own-home with STRONGER guards).
+    Returns ``[(wt_path, owner, repo_path)]`` where ``owner`` is the
+    username (the first path segment under the home glob), and
+    ``repo_path`` is the repo root (the parent of ``.claude/``).
+    ``listdir_fn`` is injectable for testing (default: real glob + os.walk).
+    ``exclude_own_user`` (default True) skips homes matching the calling
+    user's username (#906 R3 fix)."""
     import glob as _glob
+    import pwd
     results = []
+    own_user = None
+    if exclude_own_user:
+        try:
+            own_user = pwd.getpwuid(os.geteuid()).pw_name
+        except (KeyError, OSError) as e:
+            _dbg("could not resolve own username: %r — not excluding" % e)
     homes = sorted(_glob.glob(home_glob)) if listdir_fn is None else listdir_fn(home_glob)
     for home_dir in homes:
         owner = os.path.basename(home_dir)
+        if own_user and owner == own_user:
+            continue  # R3: own-home covered by the stronger per-user worktree rung
         devel = os.path.join(home_dir, "devel")
         if not os.path.isdir(devel):
             continue
@@ -1702,7 +1732,13 @@ def discover_stale_home_worktrees(now=None, home_glob=HOME_WORKTREE_GLOB,
     All seams injectable for hermetic testing. NEVER runs real sudo/git in tests.
     """
     now = time.time() if now is None else now
-    proc_cwds = (proc_cwd_fn or _default_proc_cwds)()
+    proc_result = (proc_cwd_fn or _default_proc_cwds)()
+    # Support both old (set) and new (set, set) return shapes for the seam
+    if isinstance(proc_result, tuple) and len(proc_result) == 2:
+        proc_cwds, opaque_uids = proc_result
+    else:
+        proc_cwds = proc_result if isinstance(proc_result, set) else set()
+        opaque_uids = set()
     wt_dirs = _find_worktree_dirs(home_glob=home_glob, listdir_fn=listdir_fn)
     out = []
     for wt_path, owner, repo_path in wt_dirs:
@@ -1716,7 +1752,21 @@ def discover_stale_home_worktrees(now=None, home_glob=HOME_WORKTREE_GLOB,
             row["reason"] = "no .git marker — not a valid worktree"
             out.append(row)
             continue
-        # 2. Check active process cwd
+        # R2 fix: check if the owner has ANY opaque (unreadable) process.
+        # If so, we cannot prove the worktree is not in use → fail-safe KEEP.
+        try:
+            import pwd as _pwd
+            owner_uid = _pwd.getpwnam(owner).pw_uid
+        except (KeyError, OSError):
+            owner_uid = None
+        if owner_uid is not None and owner_uid in opaque_uids:
+            row["bytes"] = 0
+            row["kind"] = "skip"
+            row["reason"] = ("owner %s has opaque /proc entries — "
+                             "liveness undeterminable, kept (fail-safe)" % owner)
+            out.append(row)
+            continue
+        # 2. Check active process cwd (same-uid visible cwds)
         is_active = any(
             cwd == wt_path or cwd.startswith(wt_path + "/")
             for cwd in proc_cwds
@@ -1786,10 +1836,18 @@ def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
                                      listdir_fn=None, dir_size_fn=None):
     """Top-consumers report: sizes of worktree dirs under ``/home/*/devel/``
     (#906 fix 1). Returns action-shaped rows ``{cls, path, bytes, kind, reason}``
-    for ``_top_consumers_by_path``. No liveness/age check here — just sizes,
-    so the report shows WHERE the disk is consumed regardless of reclaimability.
+    for ``_top_consumers_by_path``. No sudo needed — worktree dirs are typically
+    world-readable (only git status needs sudo). No liveness/age check here —
+    just sizes, so the report shows WHERE disk is consumed regardless of
+    reclaimability.
+
+    ``kind`` is ``home-worktree-remove`` (not ``report``) so that
+    ``_top_consumers_by_path`` includes these rows (it filters out ``skip``
+    and ``report`` kinds — Y1 fix). The rows are never EXECUTED by the report
+    path, only by the drain ladder's executor.
     """
-    wt_dirs = _find_worktree_dirs(home_glob=home_glob, listdir_fn=listdir_fn)
+    wt_dirs = _find_worktree_dirs(home_glob=home_glob, listdir_fn=listdir_fn,
+                                  exclude_own_user=False)  # report ALL users' sizes
     out = []
     for wt_path, _owner, _repo in wt_dirs:
         if dir_size_fn is not None:
@@ -1799,7 +1857,7 @@ def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
         # Only report non-trivial dirs (> 1 MB)
         if size > 1_000_000:
             out.append({"cls": "home-worktree", "path": wt_path, "bytes": size,
-                        "kind": "report", "reason": None})
+                        "kind": "home-worktree-remove", "reason": None})
     return out
 
 
@@ -2344,9 +2402,10 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
 # escalation (#834 req 1 ≥90 %, machine-channel; box-wide daily dedup)
 # --------------------------------------------------------------------------- #
 def _ranked_consumers(home, now):
-    """Ranked (class, reclaimable-bytes) for THIS user's own home — never a
-    cross-user ``du`` (a stream user cannot read other homes; #834 review-bite
-    3). Best-effort; a failing planner contributes 0, never kills the list."""
+    """Ranked (class, reclaimable-bytes) for this user's own home PLUS
+    cross-user ``home-worktree`` trees (#906: world-readable worktree dirs
+    under ``/home/*/devel/``). Best-effort; a failing planner contributes 0,
+    never kills the list."""
     ranked = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
                         ("home-worktree", lambda: _plan_home_worktrees(home, now)),
