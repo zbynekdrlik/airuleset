@@ -57,6 +57,18 @@ DOMINIKA = "dominika"
 # provisions.
 # --------------------------------------------------------------------------- #
 
+# #870 F4a D2: which box HOSTS each human's lane. Flipped one human at a time
+# during F4c migration (dominika -> marek -> david -> zbynek LAST). A post-F4
+# push reads this table on BOTH the controller AND dev1, so a retired lane is
+# never re-installed. Values: "controller" or "subdev" (or "dev1" pre-cutover).
+LANE_HOST = {
+    "zbynek": "dev1",           # F4c flips to "controller"
+    "david": "subdev",          # F4c flips to "controller"
+    "marek": "subdev",          # F4c flips to "controller"
+    "dominika": "subdev",       # F4c flips to "controller"
+}
+
+
 def profile_for_host(nodename, account=None):
     """Which webterm profile a box provisions, by its ``os.uname().nodename`` and
     the install ``account`` (``_whoami()``): dev1 -> owner (the single gateway,
@@ -81,6 +93,44 @@ def profile_for_host(nodename, account=None):
             return DOMINIKA
         return DAVID
     return None
+
+
+def profile_for_host_set(box_class, account=None):
+    """#870 F4a D2: which lane SET a box provisions. Returns a frozenset of
+    profile constants.
+
+    Controller (box-class 'controller', user 'airuleset'): ALL 4 lanes.
+    dev1: owner only (via LANE_HOST — only lanes hosted on dev1).
+    subdev: the lane for the current account (via LANE_HOST — only lanes
+    hosted on subdev).
+    Other: empty set.
+
+    Both dev1 and controller branches read LANE_HOST, so a post-F4 push
+    that flips a human from subdev to controller cannot re-install a retired
+    lane on the old host."""
+    _HUMAN_TO_PROFILE = {
+        "zbynek": OWNER, "david": DAVID, "marek": MAREK, "dominika": DOMINIKA,
+    }
+    if box_class == "controller":
+        return frozenset(_HUMAN_TO_PROFILE.values())
+    # Non-controller: return the profiles whose LANE_HOST matches this box
+    hosted = set()
+    nodename = box_class  # for non-controller, box_class == nodename
+    for human, host_box in LANE_HOST.items():
+        if host_box == nodename:
+            profile = _HUMAN_TO_PROFILE.get(human)
+            if profile is not None:
+                # On subdev, also check account match
+                if nodename == "subdev":
+                    if human == "marek" and account != MAREK_GATEWAY_USER:
+                        continue
+                    if human == "dominika" and account != DOMINIKA_GATEWAY_USER:
+                        continue
+                    if human == "david" and account not in (None, DAVID_GATEWAY_USER):
+                        # david is the default for non-marek/non-dominika accounts
+                        continue
+                hosted.add(profile)
+    return frozenset(hosted)
 
 
 # --------------------------------------------------------------------------- #
@@ -441,6 +491,207 @@ def dominika_inventory():
             "preferred": "miva1",
             # #867: OBSERVE-only, CROSS-TENANT — NO u_tenant (miva1 is a separate
             # external stream notify-routed to the OWNER, never dominika's tenant).
+        },
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# zbynek (owner) profile — DECLARATIVE session set (#870 F4a D4).
+# --------------------------------------------------------------------------- #
+
+# Owner-dedicated ssh key for the zbynek lane on the controller, authorized on
+# every target the zbynek inventory reaches. NEVER the fleet push key
+# (`airuleset_push_ed25519`, which runs push commands — it is NOT a webterm tab
+# key) and NEVER the old gatekeeper key. A forced-command entry on the target
+# means this key can only exec tmux, never a shell.
+WEBTERM_ZBYNEK_IDENTITY = "~/.secrets/webterm_zbynek_ed25519"
+
+# Owner's own tabs — the hosts are DUPLICATED from cli_fleet / cli_webterm for
+# the zero-import-leaf contract (the marek/david/dominika precedent). Drift-lock
+# tests tie these to the ONE fleet source.
+ZBYNEK_DEV1_HOST = "100.104.8.125"    # dev1 tailscale IP
+ZBYNEK_DEV2_HOST = "100.82.64.27"     # dev2 tailscale IP
+ZBYNEK_GK_HOST = "100.90.94.41"       # gatekeeper tailscale IP
+ZBYNEK_SPINBIKE_HOST = "spinbike-vps.newlevel.media"
+ZBYNEK_SPINBIKE_HOST_KEYS = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICqtadLnTI+wfXp9J2FUkuTp0IIcZ5IvCG5eNVlR2jA5",
+]
+
+
+def zbynek_inventory():
+    """Owner's DECLARATIVE session set (#870 F4a D4, marek shape) — NEVER
+    derived from ``_deployable_hosts()``. On the controller, an entry with
+    ``identity=None`` would trigger the ``sshpass -p newlevel`` branch in
+    ``_ssh_interactive_prefix`` → fail2ban ban → push outage (the design's
+    RED-2). Every non-local entry carries an explicit ``identity``.
+
+    The ``ar`` tab (``local: True``) is the controller's own tmux — the
+    ``airuleset`` account's session, managed by the owner, not an ssh target.
+
+    This — and ONLY this — is what the zbynek lane's ttyd is launched against
+    when running on the controller, so it is the owner's full connect allowlist
+    on that box."""
+    return [
+        {
+            "id": "ar",
+            "label": "airuleset (local)",
+            "kind": "owner",
+            "local": True,
+            "host": None,
+            "user": None,
+            "identity": None,
+            "preferred": "zbynek",
+        },
+        {
+            "id": "dev1",
+            "label": "dev1",
+            "kind": "owner",
+            "local": False,
+            "host": ZBYNEK_DEV1_HOST,
+            "user": "newlevel",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "zbynek",
+        },
+        {
+            "id": "dev2",
+            "label": "dev2",
+            "kind": "owner",
+            "local": False,
+            "host": ZBYNEK_DEV2_HOST,
+            "user": "newlevel",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "zbynek",
+        },
+        {
+            "id": "gatekeeper",
+            "label": "gk (gatekeeper@gk)",
+            "kind": "owner",
+            "local": False,
+            "host": ZBYNEK_GK_HOST,
+            "user": "gatekeeper",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "zbynek",
+        },
+        {
+            "id": "montalu1-subdev",
+            "label": "montalu1@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu1",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "montalu1",
+            "u_tenant": True,
+        },
+        {
+            "id": "montalu2-subdev",
+            "label": "montalu2@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu2",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "montalu2",
+            "u_tenant": True,
+        },
+        {
+            "id": "montalu3-subdev",
+            "label": "montalu3@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu3",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "montalu3",
+            "u_tenant": True,
+        },
+        {
+            "id": "montalu4-subdev",
+            "label": "montalu4@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu4",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "montalu4",
+            "u_tenant": True,
+        },
+        {
+            "id": "montalu5-subdev",
+            "label": "montalu5@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu5",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "montalu5",
+            "u_tenant": True,
+        },
+        {
+            "id": "montalu6-subdev",
+            "label": "montalu6@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu6",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "montalu6",
+            "u_tenant": True,
+        },
+        {
+            "id": "david1-subdev",
+            "label": "david1@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "david1",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "david1",
+            "u_tenant": True,
+        },
+        {
+            "id": "david2-subdev",
+            "label": "david2@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "david2",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "david2",
+            "u_tenant": True,
+        },
+        {
+            "id": "david3-subdev",
+            "label": "david3@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "david3",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "david3",
+            "u_tenant": True,
+        },
+        {
+            "id": "miva1-subdev",
+            "label": "miva1@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "miva1",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "miva1",
+            "u_tenant": True,
+        },
+        {
+            "id": "spinbike-vps",
+            "label": "spinbike-vps",
+            "kind": "owner",
+            "local": False,
+            "host": ZBYNEK_SPINBIKE_HOST,
+            "user": "newlevel",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "host_keys": ZBYNEK_SPINBIKE_HOST_KEYS,
+            "preferred": "zbynek",
         },
     ]
 

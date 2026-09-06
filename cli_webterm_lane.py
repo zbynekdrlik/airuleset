@@ -147,6 +147,14 @@ class LaneSpec:
     # fleet ids, so a filter there would render empty. VISIBILITY only -- the
     # inventory JSON (the connect allowlist) is never filtered.
     dashboard_human: Optional[str] = None
+    # #870 F4a D3: collector mode — "--u-collect" (owner, fleet-wide) vs
+    # "--u-lane <profile>" (per-tenant). Consumed by render_gateway_unit to
+    # inject the right flag. Default None = the existing "--u-lane" injection.
+    collector_mode: Optional[str] = None
+    # #870 F4a D3: when True, this lane shares the controller's single tunnel
+    # (no per-lane tunnel_uuid/creds/config/service). The setup_tunnel call is
+    # skipped; the controller's multi-ingress config routes to this lane's socket.
+    shared_tunnel: bool = False
 
 
 def render_ttyd_unit(spec):

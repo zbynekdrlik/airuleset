@@ -170,6 +170,40 @@ def desired_keys_for_user(user):
     return keys
 
 
+def append_controller_lane_pubkey_command(user, key_line, ssh_dir=None):
+    """#870 F4a D6: render a shell command that APPENDS an options-bearing key
+    to a NON-webterm-only target's authorized_keys. Idempotent on the key blob
+    — greps for the blob BEFORE appending (a second push is a no-op). NEVER a
+    desired-set rewrite (that is for webterm-only targets only — a desired-set
+    rewrite on a non-webterm-only target is one-bug-from-lockout, F1 ruling).
+
+    The key_line MAY carry options (e.g. ``restrict,pty,command="..."``); the
+    whole line is appended verbatim. Returns the shell script string."""
+    if ssh_dir is None:
+        ssh_dir = "~/.ssh"
+    ak = parse_authorized_key(key_line)
+    if not ak.blob:
+        raise ValueError("key_line has no parseable blob: %r" % key_line)
+    return (
+        "# airuleset:managed append-only key (#870 F4a D6)\n"
+        "mkdir -p %(ssh_dir)s && chmod 700 %(ssh_dir)s\n"
+        "AK='%(ssh_dir)s/authorized_keys'\n"
+        "BLOB='%(blob)s'\n"
+        "if ! grep -qF \"$BLOB\" \"$AK\" 2>/dev/null; then\n"
+        "  echo '%(key_line)s' >> \"$AK\"\n"
+        "  chmod 600 \"$AK\"\n"
+        "  echo \"  appended key (%(comment)s) to $AK\"\n"
+        "else\n"
+        "  echo \"  key (%(comment)s) already in $AK — no-op\"\n"
+        "fi\n"
+    ) % {
+        "ssh_dir": ssh_dir,
+        "blob": ak.blob,
+        "key_line": key_line.rstrip("\n"),
+        "comment": ak.comment or "(no comment)",
+    }
+
+
 def render_authorized_keys(user):
     """Render the full authorized_keys file content for a webterm-only user.
     Returns the string (with trailing newline)."""
