@@ -169,7 +169,6 @@ refilled immediately), bounded by real resource signals (below).
   the compact ran (#741, the watchdog's own writers HOLD the same way). The #730 re-derivable-waiter
   waiver is RETIRED (#848) — #848 removed the live-tasks veto, so there is no drain to force.
   </details>
-  only in the residual dropped-notification case.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via
