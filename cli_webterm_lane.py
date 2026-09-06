@@ -304,12 +304,28 @@ def prerequisites_ready(spec):
     non-None ``identity_key``, that key present — david; a lane with
     ``identity_key=None``, incl. the ssh-only dominika lane, is NOT gated on a key,
     its ssh tabs degrade visibly until the key lands, #867). Every False is a SAFE
-    no-op reason, never a failure."""
+    no-op reason, never a failure.
+
+    #870 F4c: on the CONTROLLER, all hosted lanes run under the ONE ``airuleset``
+    account (accepted B1 residue), so ``_whoami() != spec.gateway_user`` is expected.
+    The controller acceptance branch fires when box-class is ``"controller"`` AND the
+    pwd user is ``"airuleset"`` (pwd-based, env-spoof-proof — #869 doctrine) AND the
+    lane's human maps to ``"controller"`` in ``LANE_HOST``."""
     from cli_filedrop_watchdog import _whoami
     who = _whoami()
     if who != spec.gateway_user:
-        return False, ("install runs as %r, not the gateway account %r"
-                       % (who, spec.gateway_user))
+        # #870 F4c: controller-hosting acceptance — all lanes run under airuleset.
+        import pwd
+        from watchdog.reaper import default_box_class
+        from cli_webterm_profiles import LANE_HOST
+        pwd_user = pwd.getpwuid(os.getuid()).pw_name
+        if (default_box_class() == "controller"
+                and pwd_user == "airuleset"
+                and LANE_HOST.get(spec.name) == "controller"):
+            pass  # accepted — fall through to ttyd/key checks below
+        else:
+            return False, ("install runs as %r, not the gateway account %r"
+                           % (who, spec.gateway_user))
     have_ttyd = _ttyd_available()
     if spec.identity_key is not None:
         key = Path(os.path.expanduser(spec.identity_key))
