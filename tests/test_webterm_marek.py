@@ -69,8 +69,10 @@ class TestProfileForHostAccountAware(unittest.TestCase):
         # Backward-compatible: the no-account call is unchanged (subdev -> david).
         self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
 
-    def test_subdev_marek_account_is_marek(self):
-        self.assertEqual(p.profile_for_host("subdev", account="marek"), p.MAREK)
+    def test_subdev_marek_account_is_none_after_flip(self):
+        # #870 F4c-marek: marek's lane moved to controller — subdev no longer
+        # hosts marek (LANE_HOST["marek"] == "controller").
+        self.assertIsNone(p.profile_for_host("subdev", account="marek"))
 
     def test_subdev_david_account_is_david(self):
         self.assertEqual(
@@ -100,27 +102,29 @@ class TestMarekInventory(unittest.TestCase):
                           "montalu4-subdev", "dev1", "dev2", "gatekeeper",
                           "forestshop"])
 
-    def test_montalu2_entry_is_loopback_ssh_with_dedicated_key(self):
-        # #787: mirrors montalu4-subdev exactly except for the account name.
+    def test_montalu2_entry_is_ssh_with_dedicated_key(self):
+        # #787: mirrors montalu4-subdev except for the account name.
+        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
         e = next(x for x in p.marek_inventory() if x["id"] == "montalu2-subdev")
         self.assertFalse(e["local"])
-        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "montalu2")
         self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
         self.assertEqual(e["preferred"], "montalu2")
         self.assertIs(e.get("u_tenant"), True)
 
-    def test_miva1_entry_is_loopback_ssh_with_dedicated_key(self):
-        # Owner request 2026-09-03: mirrors montalu2/montalu4-subdev (loopback
-        # ssh, dedicated key) EXCEPT it is CROSS-TENANT — miva1 is a SEPARATE
+    def test_miva1_entry_is_ssh_with_dedicated_key(self):
+        # Owner request 2026-09-03: mirrors montalu2/montalu4-subdev (ssh,
+        # dedicated key) EXCEPT it is CROSS-TENANT — miva1 is a SEPARATE
         # external sub-dev stream (cli_fleet: "5th sub-dev stream", peer to
         # david/simap, NOT a montalu-family account marek operates) and notify
         # routes it to the OWNER `zbynek`, not marek's realm — so NO u_tenant
         # (marek merely OBSERVES miva1; reading its tickets-status would be a
         # cross-tenant read, the same reason dev1/dev2 omit the field).
+        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
         e = next(x for x in p.marek_inventory() if x["id"] == "miva1-subdev")
         self.assertFalse(e["local"])
-        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "miva1")
         self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
         self.assertEqual(e["preferred"], "miva1")
@@ -158,12 +162,13 @@ class TestMarekInventory(unittest.TestCase):
         self.assertEqual(e["user"], fleet_e["user"])
         self.assertIsNone(fleet_e.get("host_keys"))
 
-    def test_montalu1_entry_is_loopback_ssh_with_dedicated_key(self):
+    def test_montalu1_entry_is_ssh_with_dedicated_key(self):
         # #882 scope correction: montalu1-subdev ADDED — his first montalu stream,
-        # within-tenant (u_tenant: True), mirroring the montalu2/4 loopback shape.
+        # within-tenant (u_tenant: True), mirroring the montalu2/4 shape.
+        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
         e = next(x for x in p.marek_inventory() if x["id"] == "montalu1-subdev")
         self.assertFalse(e["local"])
-        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "montalu1")
         self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
         self.assertEqual(e["preferred"], "montalu1")
@@ -174,12 +179,13 @@ class TestMarekInventory(unittest.TestCase):
         ids = [x["id"] for x in p.marek_inventory()]
         self.assertNotIn("marek-subdev", ids)
 
-    def test_montalu4_entry_is_loopback_ssh_with_dedicated_key(self):
-        # His montalu stream — a local subdev unix account reached over loopback
-        # with the dedicated key (the david1-4 shape).
+    def test_montalu4_entry_is_ssh_with_dedicated_key(self):
+        # His montalu stream — a subdev unix account reached over the tailnet
+        # with the dedicated key.
+        # #870 F4c-marek: host is now SUBDEV_TAILSCALE_HOST (controller origin).
         e = next(x for x in p.marek_inventory() if x["id"] == "montalu4-subdev")
         self.assertFalse(e["local"])
-        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["host"], p.SUBDEV_TAILSCALE_HOST)
         self.assertEqual(e["user"], "montalu4")
         self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
         self.assertEqual(e["preferred"], "montalu4")
@@ -276,9 +282,10 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
             self.assertEqual(rc, 2, "foreign id %r must be refused" % foreign)
             ex.assert_not_called()
 
-    def test_montalu1_id_execs_loopback_ssh_with_dedicated_key(self):
-        # #882 scope correction: montalu1-subdev ADDED — loopback ssh with the
-        # dedicated marek key, attaching montalu1's tmux group.
+    def test_montalu1_id_execs_ssh_with_dedicated_key(self):
+        # #882 scope correction: montalu1-subdev ADDED — ssh with the dedicated
+        # marek key, attaching montalu1's tmux group.
+        # #870 F4c-marek: host is SUBDEV_TAILSCALE_HOST (controller origin).
         f = self._marek_inv_file()
         with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
                 m.patch.object(w.os, "execvp") as ex:
@@ -288,7 +295,7 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         self.assertEqual(argv[0], "ssh")
         self.assertIn("-i", argv)
         self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
-        self.assertIn("montalu1@127.0.0.1", argv)
+        self.assertIn("montalu1@" + p.SUBDEV_TAILSCALE_HOST, argv)
         self.assertNotIn("sshpass", argv)
 
     def test_dev1_id_execs_ssh_with_dedicated_key_to_marek_group(self):
@@ -558,7 +565,9 @@ class TestMarekDispatch(unittest.TestCase):
         self.addCleanup(_p.stop)
 
 
-    def test_marek_account_on_subdev_dispatches_marek(self):
+    def test_marek_account_on_subdev_does_not_dispatch_marek_after_flip(self):
+        # #870 F4c-marek: marek's lane moved to controller — subdev no longer
+        # dispatches the marek provisioner (LANE_HOST["marek"] == "controller").
         called = []
         with m.patch.object(w.os, "uname",
                             return_value=type("U", (), {"nodename": "subdev"})()), \
@@ -566,7 +575,7 @@ class TestMarekDispatch(unittest.TestCase):
                 m.patch.object(mk, "setup_webterm_marek_service",
                                lambda: called.append("marek") or True):
             w.maybe_setup_webterm()
-        self.assertEqual(called, ["marek"])
+        self.assertNotIn("marek", called)
 
     def test_david_account_on_subdev_does_not_dispatch_marek(self):
         called = []

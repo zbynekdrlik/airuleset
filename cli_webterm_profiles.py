@@ -64,7 +64,7 @@ DOMINIKA = "dominika"
 LANE_HOST = {
     "zbynek": "dev1",           # F4c flips to "controller"
     "david": "subdev",          # F4c flips to "controller"
-    "marek": "subdev",          # F4c flips to "controller"
+    "marek": "controller",      # F4c step 2: flipped from "subdev"
     "dominika": "controller",   # F4c step 1: flipped from "subdev"
 }
 
