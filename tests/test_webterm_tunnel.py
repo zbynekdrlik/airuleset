@@ -189,7 +189,7 @@ class TestMultiIngressRenderer870(unittest.TestCase):
         cfg = tun.render_cloudflared_multi_ingress_config(
             "x", "/c.json", [("a.example.com", "http://localhost:80")])
         lines = cfg.strip().split("\n")
-        last_service = [l for l in lines if "service:" in l][-1]
+        last_service = [ln for ln in lines if "service:" in ln][-1]
         self.assertIn("http_status:404", last_service)
 
     def test_single_hostname_delegates_to_multi(self):
