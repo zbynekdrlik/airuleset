@@ -102,8 +102,15 @@ class TestSonioxKeyLine(TestCase):
         # which tests ran first in the SAME process (SONIOX_KEY_SOURCE
         # itself is unaffected — it's a module-level constant resolved
         # ONCE at airuleset.py's own import time, before any such leak).
-        self.assertEqual(airuleset.SONIOX_KEY_SOURCE.parts[-3:],
-                         ("devel", "voiceagent", ".env"))
+        # #870 F3: the constant has TWO documented resolutions — the
+        # controller-box ~/.secrets/soniox.env (present there) wins at
+        # import; the dev1-era voiceagent checkout path is the fallback.
+        # Accept exactly those two shapes, nothing else.
+        src = airuleset.SONIOX_KEY_SOURCE
+        self.assertTrue(
+            src.parts[-3:] == ("devel", "voiceagent", ".env")
+            or src.parts[-2:] == (".secrets", "soniox.env"),
+            "unexpected SONIOX_KEY_SOURCE %s" % (src,))
 
 
 # ---------------------------------------------------------------------------

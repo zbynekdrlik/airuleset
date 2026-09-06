@@ -193,6 +193,12 @@ class _IsolatedTmuxServer:
         self.env.pop("TMUX", None)
         self.env.pop("TMUX_PANE", None)
         self.env["TMUX_TMPDIR"] = self.dir   # defensive extra layer only; -S is primary
+        # A capable terminal type is part of this module's declared env: a
+        # TERM-less / TERM=dumb context (detached push gate over ssh on the
+        # controller, #870 commit B) makes every tmux CLIENT attach fail
+        # silently — the tests verify tmux behavior, not TERM detection.
+        if self.env.get("TERM", "dumb") in ("", "dumb"):
+            self.env["TERM"] = "xterm-256color"
         self._clients = []   # [(Popen, master_fd), ...]
         self._preflight_check()
 
