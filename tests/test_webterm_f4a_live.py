@@ -102,18 +102,19 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
         the shared tunnel via tun._provision_managed_tunnel."""
         import cli_webterm as w
         import cli_webterm_tunnel as tun
+        import pwd as _pwd
 
         with mock.patch("watchdog.reaper.default_box_class",
                         return_value="controller"), \
              mock.patch("cli_filedrop_watchdog._whoami",
                         return_value="airuleset"), \
+             mock.patch.object(_pwd, "getpwuid",
+                               return_value=SimpleNamespace(
+                                   pw_name="airuleset")), \
              mock.patch.object(tun, "_provision_managed_tunnel",
                                return_value=True) as prov_mock, \
              mock.patch("cli_webterm.setup_webterm_service"), \
              mock.patch("cli_webterm.profiles") as prof_mock:
-            # LANE_HOST maps all to controller today for the purpose of the
-            # test, so hosted set is empty (clean no-op for lanes).
-            prof_mock.profile_for_host_set.return_value = frozenset()
             prof_mock.LANE_HOST = {
                 "zbynek": "dev1", "david": "subdev",
                 "marek": "subdev", "dominika": "subdev",
@@ -131,21 +132,81 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
         config_text = call_kwargs[0][3] if len(call_kwargs[0]) > 3 else ""
         self.assertIn("http_status:404", config_text)
 
+    def test_controller_with_hosted_lane_provisions_lane_and_tunnel(self):
+        """When LANE_HOST has a human on 'controller', the controller dispatch
+        provisions that lane AND the shared tunnel with an ingress rule for it."""
+        import cli_webterm as w
+        import cli_webterm_tunnel as tun
+        import cli_webterm_zbynek as zbynek
+        import pwd as _pwd
+
+        zbynek_setup = mock.MagicMock()
+        with mock.patch("watchdog.reaper.default_box_class",
+                        return_value="controller"), \
+             mock.patch("cli_filedrop_watchdog._whoami",
+                        return_value="airuleset"), \
+             mock.patch.object(_pwd, "getpwuid",
+                               return_value=SimpleNamespace(
+                                   pw_name="airuleset")), \
+             mock.patch.object(tun, "_provision_managed_tunnel",
+                               return_value=True) as prov_mock, \
+             mock.patch("cli_webterm.setup_webterm_service"), \
+             mock.patch.object(zbynek, "setup_webterm_zbynek_service",
+                               zbynek_setup), \
+             mock.patch("cli_webterm.profiles") as prof_mock:
+            prof_mock.LANE_HOST = {
+                "zbynek": "controller", "david": "subdev",
+                "marek": "subdev", "dominika": "subdev",
+            }
+            prof_mock.OWNER = "owner"
+            prof_mock.DAVID = "david"
+            prof_mock.MAREK = "marek"
+            prof_mock.DOMINIKA = "dominika"
+            w.maybe_setup_webterm()
+
+        # zbynek's lane setup must have been called
+        zbynek_setup.assert_called_once()
+        # The shared tunnel must carry zbynek's ingress rule
+        prov_mock.assert_called_once()
+        config_text = prov_mock.call_args[0][3]
+        self.assertIn("zbynek.newlevel.media", config_text)
+        self.assertIn("webterm-zbynek-gateway.sock", config_text)
+        # credentials-file must be controller-webterm.json (drift-lock)
+        self.assertIn("controller-webterm.json", config_text)
+        # The service_name positional arg
+        self.assertEqual(prov_mock.call_args[0][5],
+                         "webterm-controller-tunnel.service")
+
     def test_non_controller_unchanged(self):
         """On a non-controller box, behavior is unchanged (dispatches by
         profile_for_host)."""
         import cli_webterm as w
+        import pwd as _pwd
 
         with mock.patch("watchdog.reaper.default_box_class",
                         return_value="workstation"), \
              mock.patch("cli_filedrop_watchdog._whoami",
                         return_value="newlevel"), \
+             mock.patch.object(_pwd, "getpwuid",
+                               return_value=SimpleNamespace(
+                                   pw_name="newlevel")), \
              mock.patch("os.uname") as uname_mock, \
              mock.patch("cli_webterm.setup_webterm_service",
                         return_value=True) as setup_mock:
             uname_mock.return_value = SimpleNamespace(nodename="dev1")
             w.maybe_setup_webterm()
         setup_mock.assert_called_once()
+
+    def test_creds_path_matches_privileges(self):
+        """Drift-lock: the controller tunnel creds path in the dispatch code
+        must match the PRIVILEGES registry entry."""
+        import cli_webterm as w
+        import cli_privileges as p
+        priv = next(priv for priv in p.PRIVILEGES
+                    if priv.name == "controller_tunnel_creds")
+        # The PRIVILEGES local_path is ~-relative; the code uses Path.home()
+        expected_name = priv.local_path.split("/")[-1]
+        self.assertEqual(w.CONTROLLER_TUNNEL_CREDS_NAME, expected_name)
 
 
 class TestWiring4ZbynekSpec(unittest.TestCase):

@@ -1687,25 +1687,33 @@ def setup_webterm_service(run=None):
     return ok_all
 
 
+# #870 F4a-live: controller shared tunnel constants. The creds path MUST match
+# cli_privileges.PRIVILEGES["controller_tunnel_creds"].local_path — drift-locked
+# by tests/test_webterm_f4a_live.py::TestWiring6Privileges.
+CONTROLLER_TUNNEL_UUID = "f85ea304-920b-4ba4-96bc-a68001ce6fb4"
+CONTROLLER_TUNNEL_CREDS_NAME = "controller-webterm.json"
+
+# human -> thin-module name (the same set as profiles.LANE_HOST keys).
+_HUMAN_TO_MODULE = {
+    "zbynek": "cli_webterm_zbynek",
+    "david": "cli_webterm_david",
+    "marek": "cli_webterm_marek",
+    "dominika": "cli_webterm_dominika",
+}
+
+
 def _setup_controller_webterm():
     """#870 F4a-live: controller-only webterm provisioning. Provisions each
     hosted lane AND the ONE shared cloudflared tunnel fronting all of them.
 
-    The hosted set is LANE_HOST entries whose value is "controller",
-    intersected with profile_for_host_set("controller"). Today this set is
-    EMPTY (all lanes still on dev1/subdev) — a clean no-op. F4c flips one
-    human at a time to "controller".
+    The hosted set is LANE_HOST entries whose value is "controller". Today
+    this set is EMPTY (all lanes still on dev1/subdev) — a clean no-op.
+    F4c flips one human at a time to "controller".
 
     The shared tunnel uses a SINGLE multi-ingress config with one rule per
     hosted lane (hostname -> unix:<gateway socket>) and a catch-all 404."""
+    import importlib
     import cli_webterm_tunnel as tun
-
-    _HUMAN_TO_MODULE = {
-        "zbynek": "cli_webterm_zbynek",
-        "david": "cli_webterm_david",
-        "marek": "cli_webterm_marek",
-        "dominika": "cli_webterm_dominika",
-    }
 
     # Compute which lanes are hosted on this controller.
     hosted_humans = [
@@ -1713,52 +1721,43 @@ def _setup_controller_webterm():
         if box == "controller"
     ]
 
-    # Provision each hosted lane.
+    # Load each hosted lane's module + spec in ONE pass (Fable review: the
+    # three-loop shape duplicated importlib calls).
+    hosted_lanes = []  # [(human, mod, spec)]
     for human in hosted_humans:
         mod_name = _HUMAN_TO_MODULE.get(human)
         if mod_name is None:
             continue
-        import importlib
         mod = importlib.import_module(mod_name)
-        if hasattr(mod, "setup_webterm_%s_service" % human):
-            getattr(mod, "setup_webterm_%s_service" % human)()
+        setup_fn = "setup_webterm_%s_service" % human
+        if not hasattr(mod, setup_fn) or not hasattr(mod, "_spec"):
+            continue
+        hosted_lanes.append((human, mod, mod._spec()))
+
+    # Provision each hosted lane's gateway + ttyd (prereq-gated inside).
+    for _human, mod, _spec in hosted_lanes:
+        setup_fn = "setup_webterm_%s_service" % _human
+        getattr(mod, setup_fn)()
 
     # ALWAYS render + install the ONE shared cloudflared tunnel.
-    tunnel_uuid = "f85ea304-920b-4ba4-96bc-a68001ce6fb4"
-    creds_path = Path.home() / ".cloudflared" / (tunnel_uuid + ".json")
+    creds_path = Path.home() / ".cloudflared" / CONTROLLER_TUNNEL_CREDS_NAME
     config_path = Path.home() / ".cloudflared" / "controller-webterm.yml"
     service_dest = (Path.home() / ".config" / "systemd" / "user"
                     / "webterm-controller-tunnel.service")
     service_name = "webterm-controller-tunnel.service"
     cloudflared_bin = str(Path.home() / ".local" / "bin" / "cloudflared")
 
-    # Build ingress rules from the hosted lanes' specs.
+    # Build ingress rules + After= from the hosted lanes' specs (single pass).
     ingress_rules = []
-    for human in hosted_humans:
-        mod_name = _HUMAN_TO_MODULE.get(human)
-        if mod_name is None:
-            continue
-        import importlib
-        mod = importlib.import_module(mod_name)
-        if hasattr(mod, "_spec"):
-            spec = mod._spec()
-            gw_sock = webterm_runtime_socket_abs(spec.gateway_sock_basename)
-            ingress_rules.append(
-                (spec.tunnel_hostname, "unix:" + gw_sock))
+    after_parts = ["network-online.target"]
+    for _human, _mod, spec in hosted_lanes:
+        gw_sock = webterm_runtime_socket_abs(spec.gateway_sock_basename)
+        ingress_rules.append(
+            (spec.tunnel_hostname, "unix:" + gw_sock))
+        after_parts.append(spec.gateway_service_name)
 
     config_text = tun.render_cloudflared_multi_ingress_config(
-        tunnel_uuid, str(creds_path), ingress_rules)
-
-    # Build the gateway service names for After= ordering.
-    after_parts = ["network-online.target"]
-    for human in hosted_humans:
-        mod_name = _HUMAN_TO_MODULE.get(human)
-        if mod_name is None:
-            continue
-        import importlib
-        mod = importlib.import_module(mod_name)
-        if hasattr(mod, "_spec"):
-            after_parts.append(mod._spec().gateway_service_name)
+        CONTROLLER_TUNNEL_UUID, str(creds_path), ingress_rules)
 
     unit_text = tun.render_cloudflared_tunnel_unit(
         "airuleset webterm controller tunnel (multi-ingress, #870 F4a)",
@@ -1786,12 +1785,17 @@ def maybe_setup_webterm():
     to avoid a module-level cycle."""
     from cli_filedrop_watchdog import _whoami
     # #870 F4a-live: controller branch BEFORE the existing profile dispatch.
+    # Uses pwd-based identity (unspoofable, #869 doctrine), NOT _whoami/getpass.
+    # default_box_class is already fail-open (returns "workstation" on missing
+    # marker), so no try/except needed — a non-controller falls through cleanly.
     try:
         from watchdog.reaper import default_box_class
-        if default_box_class() == "controller" and _whoami() == "airuleset":
-            return _setup_controller_webterm()
-    except Exception:
-        pass  # airuleset:script-ok not a controller — fall through to existing dispatch
+    except ImportError:
+        default_box_class = lambda: "workstation"  # noqa: E731
+    import pwd as _pwd
+    _ctrl_user = _pwd.getpwuid(os.getuid()).pw_name
+    if default_box_class() == "controller" and _ctrl_user == "airuleset":
+        return _setup_controller_webterm()
     prof = profiles.profile_for_host(os.uname().nodename, account=_whoami())
     if prof == profiles.OWNER:
         return setup_webterm_service()

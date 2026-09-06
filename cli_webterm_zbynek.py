@@ -12,8 +12,11 @@ dominika thin-module shape. Unlike the subdev lanes, the owner lane:
   * ``identity_key=None`` — not gated on key presence (same reasoning as
     dominika: gateway/tunnel/dashboard come up immediately).
 
-Session set is ``profiles.zbynek_inventory()`` — the DECLARATIVE owner
-inventory, never derived from ``_deployable_hosts()``.
+Session set: today the owner profile still uses the fleet-derived
+``webterm_inventory()``; F4c wires ``profile_inventory`` to route the
+OWNER profile to ``profiles.zbynek_inventory()`` (the DECLARATIVE owner
+inventory, never derived from ``_deployable_hosts()``) when
+``LANE_HOST["zbynek"]`` flips to ``"controller"``.
 
 Port pair: 7686/8084 (next after dominika's 7685/8083).
 
