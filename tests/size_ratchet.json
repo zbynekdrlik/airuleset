@@ -483,7 +483,7 @@
     "tests/test_webterm_marek.py": 634,
     "tests/test_webterm_only.py": 1064,
     "tests/test_webterm_per_human_tabs.py": 294,
-    "tests/test_webterm_profiles.py": 402,
+    "tests/test_webterm_profiles.py": 406,
     "tests/test_webterm_pwa.py": 201,
     "tests/test_webterm_short_viewport_798.py": 306,
     "tests/test_webterm_stream_footer_672.py": 107,
