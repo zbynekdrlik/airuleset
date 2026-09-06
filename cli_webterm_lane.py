@@ -187,9 +187,16 @@ def render_gateway_unit(spec):
         tmpl, spec.gateway_sock_basename, spec.ttyd_sock_basename)
     # #703: the lane-mode sibling of the owner unit's --u-collect injection
     # (same replace shape, one ExecStart occurrence in the shared template).
-    execstart = execstart.replace(
-        "--base-path {{TTYD_BASE}}",
-        "--base-path {{TTYD_BASE}} --u-lane " + spec.profile)
+    # #870 F4a-live: collector_mode overrides --u-lane when set (the owner
+    # lane on the controller uses --u-collect instead of --u-lane).
+    if getattr(spec, "collector_mode", None) is not None:
+        execstart = execstart.replace(
+            "--base-path {{TTYD_BASE}}",
+            "--base-path {{TTYD_BASE}} " + spec.collector_mode)
+    else:
+        execstart = execstart.replace(
+            "--base-path {{TTYD_BASE}}",
+            "--base-path {{TTYD_BASE}} --u-lane " + spec.profile)
     return spec.unit_note + (
         execstart
         .replace("{{BIND_IP}}", spec.bind)
@@ -406,7 +413,7 @@ def setup_service(spec, run=None, *, prereq_fn, write_artifacts_fn, tunnel_fn):
         # Bring the public HTTPS front up too — but ONLY once the loopback gateway/
         # ttyd came up (ok_all), so the tunnel never fronts a dead origin. Prereq-
         # gated no-op if the creds JSON is not present.
-        if ok_all:
+        if ok_all and not getattr(spec, "shared_tunnel", False):
             tunnel_fn(run=run)
     except Exception as e:
         print("  %s: provisioning errored (%r) — left un-provisioned."
