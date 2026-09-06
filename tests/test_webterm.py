@@ -304,6 +304,16 @@ class TestInventory(unittest.TestCase):
 
 
 class TestConnectArgv(unittest.TestCase):
+    def setUp(self):
+        # #870 RED-2: the controller guard reads the real box-class marker,
+        # so on the controller box the legacy sshpass-fallback branch these
+        # tests assert raises. Pin a non-controller class so the assertions
+        # are hermetic on every box (Pass A runs ON the controller).
+        _p = m.patch("watchdog.reaper.default_box_class",
+                     return_value="workstation")
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def test_local_is_sh_c_with_attach_snippet(self):
         # #736: the OLD shape asserted here was `argv[0] == "sh"` — a bare
         # `sh -c` whose `tmux new-session` forked the tmux SERVER into

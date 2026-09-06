@@ -167,6 +167,16 @@ class TestCollectFleetU(unittest.TestCase):
     running the inline python reader. A box that errors / times out / returns a
     non-int is OMITTED (unknown != zero), never a false 0."""
 
+    def setUp(self):
+        # #870 RED-2: the controller guard reads the real box-class marker,
+        # so on the controller box the legacy sshpass-fallback branch these
+        # tests assert raises. Pin a non-controller class so the assertions
+        # are hermetic on every box (Pass A runs ON the controller).
+        _p = m.patch("watchdog.reaper.default_box_class",
+                     return_value="workstation")
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def _entries(self):
         return [
             {"id": "dev1", "local": True, "preferred": "zbynek"},
@@ -339,6 +349,16 @@ class TestUCollectOwnerGating(unittest.TestCase):
     password). Gated two ways: the dashboard poll ACTIVATION on CFG.u_status
     (owner-render only), and the gateway feature off unless --u-collect (which only
     the owner gateway unit injects)."""
+
+    def setUp(self):
+        # #870 RED-2: the controller guard reads the real box-class marker,
+        # so on the controller box the legacy sshpass-fallback branch these
+        # tests assert raises. Pin a non-controller class so the assertions
+        # are hermetic on every box (Pass A runs ON the controller).
+        _p = m.patch("watchdog.reaper.default_box_class",
+                     return_value="workstation")
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _dev1_inv(self):
         return [{"id": "dev1", "label": "dev1", "kind": "owner", "local": True,

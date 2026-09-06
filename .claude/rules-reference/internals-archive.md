@@ -1811,3 +1811,14 @@ Consequences that keep biting:
   joined to it by a one-line prompt.
 - **[Moved to archive]** #271 rescue-store, #277/#274/#280/#282 gh-prefilter — grep the archive.
 - **Diagnosing an orphaned/dead dispatched async `Agent`: `TaskStop(task_id=<the id from the launch tool_result>)` returning `"No task found with ID: X"`, cross-checked against its `<output-file>`'s own `stat` (tiny — e.g. 139 bytes — and unchanged by `mtime` for far longer than the task should plausibly still be working) is decisive, corroborating evidence that the dispatch died — most plausibly across a session-limit reset (a coordinator message reporting "session limit sa práve resetol" mid-wait is the tell) — rather than "still working, just slow".** #354: two async dispatches (a `Skill({skill:"review"})` fork and a `general-purpose` requesting-code-review agent) both went unresponsive for 2+ hours of bounded foreground waits; `TaskStop` on both ids came back not-found, and both output files sat at 139 bytes with `mtime` 2+ hours stale — the correct recovery was to treat both as dead (never try to read the orphaned output file's content — "don't peek" still applies to a dead dispatch, not just a live one) and re-dispatch a FRESH, self-contained `general-purpose` review with the same digest, which then completed normally in ~7 minutes. Never keep bounded-waiting on a dispatch past this evidence threshold hoping it resumes on its own.
+
+<!-- rotated from internals-webterm.md 2026-09-06 (50KB cap, cycle B) -->
+## Supervisor smoke po #663 (unix sockety)
+
+- Access-mode gateway/ttyd NEPOČÚVAJÚ na TCP — starý header-inject relay
+  (127.0.0.1:8199 → :8080) je mŕtvy. Supervízny smoke ide priamo cez socket:
+  `curl --unix-socket /run/user/<uid>/webterm-gateway.sock -H
+  "Cf-Access-Authenticated-User-Email: <owner e-mail>" http://localhost/`
+  (dev1 owner lane; subdev lane sockety: `webterm-<lane>-gateway.sock`).
+- Cross-account izolácia sa overuje NEGATÍVNE: cudzí účet dostane
+  "Couldn't connect" + `ls /run/user/<uid>` Permission denied (0700 runtime dir).
