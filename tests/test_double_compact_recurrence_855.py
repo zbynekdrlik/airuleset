@@ -371,5 +371,68 @@ class TestDefensiveClearsQueued(unittest.TestCase):
                           "the defensive-sent branch must clear the stale marker")
 
 
+class TestLadderRace910(unittest.TestCase):
+    """#910 recurrence: the EARLY `_compact_duplicate_consume_reason` check runs
+    BEFORE pane resolution / boundary / recent-human / classify / veto / cooldown.
+    Those later checks take 1-3 s of wall-clock time. When the compaction from the
+    first delivery completes DURING those checks, the early check finds no
+    `isCompactSummary` (returns False), the request falls through to cooldown-
+    supersede (self-callback), and a 2nd `/compact` is typed — "Not enough messages
+    to compact." The fix adds a LATE re-check at the cooldown-supersede point."""
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp, self.queuedp = _isolate(self)
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_late_recheck_catches_race(self):
+        """When the early check misses the compaction (it completed mid-ladder),
+        the LATE re-check at cooldown-supersede must catch it and consume the
+        duplicate — no 2nd /compact typed."""
+        proj = self._dir()
+        now = 6_000_000.0
+        # Transcript with report but NO compaction yet (simulates in-progress).
+        _transcript(proj, CWD, SID, [_report(now - 50)])
+        # First delivery 200s ago (past the 120s recently-compacted veto).
+        compact.mark_compact_delivery_ts(SID, now=now - 200, path=self.delp)
+        # Backstop record with bts NEWER than delivery (signal (a) fails).
+        compact.record_compact_request(SID, CWD, now=now - 190, path=self.reqp,
+                                       origin="self-callback")
+        # Mock _compact_boundary_already_compacted to simulate the race:
+        # First call (EARLY check): False — compaction not yet in transcript.
+        # Second call (LATE re-check, if it exists): True — compaction completed.
+        call_count = [0]
+
+        def _racing_compacted(cwd, sid, projects_dir=None):
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                return False   # early check: compaction not visible yet
+            return True        # late check: compaction now visible
+
+        with m.patch.object(compact, "_compact_boundary_already_compacted",
+                            side_effect=_racing_compacted):
+            run = _StaticRun(CWD, CB_IDLE)
+            logs = compact.compact_sweep(now, run=run, projects_dir=proj,
+                                         requests_path=self.reqp,
+                                         delivered_path=self.delp)
+        self.assertEqual(run.typed(), [],
+                         "#910: a compaction that completes mid-ladder must be "
+                         "caught by a LATE re-check — no 2nd /compact typed")
+        self.assertNotIn(SID, compact.load_compact_requests(self.reqp),
+                         "the duplicate must be CLEARED, not left pending")
+        self.assertTrue(any("already-compacted" in ln for ln in logs),
+                        "expected 'already-compacted' consume log: %s" % logs)
+        # O1: verify the LATE re-check site fired (not the early one).
+        sync_lines = self.syncp.read_text().splitlines() if self.syncp.exists() else []
+        self.assertTrue(any("late-recheck" in ln for ln in sync_lines),
+                        "expected 'late-recheck' in sync log: %s" % sync_lines)
+
+
 if __name__ == "__main__":
     unittest.main()

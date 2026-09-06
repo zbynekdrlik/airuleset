@@ -873,7 +873,11 @@ def _compact_duplicate_consume_reason(sid, cwd, delivered_path, request_bts,
         sweep, so sweep-only coverage still catches it.
     A genuinely-new boundary (a report NEWER than the last compaction AND `bts` newer
     than the last delivery) matches NEITHER → "" → the ordinary ladder delivers it.
-    Fail-safe "" (deliver, never wrongly consume) on any unmeasurable input."""
+    Fail-safe "" (deliver, never wrongly consume) on any unmeasurable input.
+
+    Called from `deliver_compact` at TWO sites: EARLY (before pane resolution,
+    clears fast duplicates) and LATE (#910, immediately before the keystroke,
+    closing the TOCTOU where the compaction completes mid-ladder)."""
     dts = _load_compact_delivered(delivered_path).get(sid)
     # `request_bts` is an int (record_compact_request writes `int(now)`) and `dts` a
     # float — both guarded numeric here, so `float()` never raises.
@@ -1346,9 +1350,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                            the last delivered ts). CONSUMED — the caller CLEARS it,
                            NO keystroke, so the #411 backstop's duplicate can never
                            re-deliver a 2nd `/compact` onto an already-compacted
-                           boundary. Runs EARLY (before recent-human / the 120 s
-                           veto), so a duplicate is cleared the first sweep after
-                           the compaction is observed, never held for the window.
+                           boundary. Checked at TWO sites: EARLY (before pane
+                           resolution / recent-human / the 120 s veto, so a
+                           duplicate is cleared the first sweep after the compaction
+                           is observed) and LATE (#910, immediately before the
+                           keystroke, closing the TOCTOU where the compaction
+                           completes during the multi-second ladder checks).
       "expired"         — condition (e): the request is older than
                            `COMPACT_REQUEST_MAX_AGE_S`. Discard.
       "already-queued"  — the pane already holds an unexecuted `/compact`
@@ -1552,6 +1559,25 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # #848 -- the raced live-tasks / live-bg-bash re-check is REMOVED with the
     # veto itself; only the #333 boundary re-check (`skip:raced` above) survives,
     # so a compact still never lands mid-turn / on a pane that raced busy.
+
+    # #910 LATE duplicate-consume re-check. The EARLY check (line ~1410) runs
+    # before pane resolution / boundary / recent-human / classify / veto /
+    # cooldown — those take 1-3 s wall-clock. A compaction from the first
+    # delivery can complete DURING those checks, so the early check finds no
+    # isCompactSummary. THIS is the last point before the keystroke: the pane is
+    # proven idle, every veto has passed, and the compaction has had the maximum
+    # wall-clock time to complete. Re-reading the transcript here closes the
+    # TOCTOU. Gated on the same origin scope as the early check; no dependence
+    # on cooldown being in effect.
+    if origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS:
+        _reason = _compact_duplicate_consume_reason(
+            sid, cwd, delivered_path, request_bts, projects_dir,
+            from_sweep=from_sweep)
+        if _reason:
+            _log_compact_sync(
+                "CONSUMED already-compacted sid=%s cwd=%s origin=%s "
+                "(%s, late-recheck)" % (sid, cwd, origin or "-", _reason))
+            return "already-compacted"
 
     # #855 — the pane was proven IDLE at boundary-classify AND at the fresh
     # re-check above, so this `/compact` executes IMMEDIATELY, exactly once — it
