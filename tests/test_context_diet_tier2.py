@@ -181,7 +181,9 @@ class TestCompletionReportConversion(TestCase):
         self.assertIn("Hard rules", combined)
 
     def test_compact_instruction_stays(self):
-        self.assertIn("compact-request --self", self.module)
+        # #911: callback compact DISABLED — the module now names the disabled
+        # state; the full mechanics are in the DEEP companion.
+        self.assertIn("DISABLED (#911)", self.module)
 
     def test_boundary_trigger_skips_gates_not_applies(self):
         # Y1 fix: --self deliberately SKIPS the #99/#48 gates, never "applies"

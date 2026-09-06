@@ -12,6 +12,6 @@
 
 **`❓` questions shaped as the structured Slovak block** (`**Otázka — projekt …:**` briefing + options + the ❓ line — `user-questions-slovak.md`, hook-enforced `stop-check-question-quality.sh`).
 
-**Compact at your own boundary:** call `compact-request --self` FIRST, BEFORE writing the report text — never after.
+**Compact at your own boundary — DISABLED (#911).** Callback compact disabled by owner flag; native autocompact in force.
 
 The full template skeleton, hard rules, pre-completion gate, reduced-authority variant, enforcement details, and compact-at-boundary mechanics are in the situational companion `skills/completion-report-deep/DEEP.md` — loaded automatically on `compact-request`/`plan-check`/`gh pr merge` commands. History + rationale: `.claude/rules-reference/completion-report-history.md` (#859).
