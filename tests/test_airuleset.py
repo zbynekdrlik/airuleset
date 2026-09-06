@@ -13744,6 +13744,215 @@ class TestBlockTestSkipsForkAware(TestCase):
                          "foreign upstream/develop false-blocked: " + r.stderr)
 
 
+class TestBlockTestSkipsNewBranch909(TestCase):
+    """#909: block-test-skips.sh false-positives on a NEW-branch push when
+    neither origin/develop nor upstream/develop exists locally — the BASE_REF
+    falls through to origin/main, making the three-dot diff include pre-existing
+    test.skip() from the whole develop history as "added".
+
+    Also covers #909 shape 2: bypass marker not seen when the commit and push
+    are in the same Bash call (PreToolUse fires before git commit runs)."""
+
+    HOOK = "block-test-skips.sh"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True,
+            cwd=cwd, timeout=60, env=env)
+
+    def _mk_new_branch_repo(self):
+        """Simulate a new-branch push scenario where origin/develop does NOT
+        exist locally:
+        - origin/main = base (old)
+        - develop branch has a pre-existing sanctioned test.skip() (committed
+          on develop but NOT on main)
+        - A feature branch created from develop adds only clean code
+        - Neither origin/develop nor upstream/develop exist as local refs
+        So the hook falls through to origin/main and the three-dot diff
+        includes the whole develop history."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+        g("update-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+        # Create develop with a sanctioned test.skip() — committed on develop
+        # but main stays behind (no origin/develop ref created)
+        g("checkout", "-qb", "develop")
+        os.makedirs(os.path.join(root, "tests", "e2e"), exist_ok=True)
+        open(os.path.join(root, "tests", "e2e", "ai-agent.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n\n"
+            "test.skip(!isApplicable(), 'sanctioned, not applicable');\n"
+            "test('agent responds', async () => {\n"
+            "  // real test\n"
+            "});\n"
+        )
+        g("add", "tests/e2e/ai-agent.spec.ts")
+        g("commit", "-qm", "test: add e2e agent test with sanctioned skip")
+        # NOTE: no origin/develop or upstream/develop refs created
+
+        # Feature branch off develop — only touches non-test files
+        g("checkout", "-qb", "montalu/6386-cutover-f2-impl")
+        open(os.path.join(root, "scripts", "import-montalu.py"), "w") if False else None
+        os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
+        open(os.path.join(root, "scripts", "import-montalu.py"), "w").write(
+            "# import script\nprint('hello')\n")
+        g("add", "scripts/import-montalu.py")
+        g("commit", "-qm", "feat: add import script")
+        return root, g
+
+    def test_new_branch_no_origin_develop_false_blocks(self):
+        """RED: a new branch push where origin/develop is absent false-blocks
+        on a pre-existing sanctioned test.skip() because the diff falls back
+        to origin/main. This MUST pass after the fix."""
+        root, g = self._mk_new_branch_repo()
+        r = self._run("git push origin montalu/6386-cutover-f2-impl", root)
+        self.assertEqual(r.returncode, 0,
+                         "new-branch false-block on pre-existing skip "
+                         "(no origin/develop): " + r.stderr)
+
+    def test_new_branch_tracking_upstream_no_origin_develop(self):
+        """RED: when only upstream/develop exists (no origin/develop), the
+        case block's AND condition (upstream AND origin both needed) fails,
+        falling through to origin/main. A branch tracking upstream/develop
+        via @{upstream} should use it as the base."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("x = 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+
+        # develop with a sanctioned skip — only upstream/develop, NO origin/develop
+        g("checkout", "-qb", "develop")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_old.py"), "w").write(
+            "import pytest\n\n@pytest.mark.skip(reason='sanctioned')\n"
+            "def test_old():\n    assert 1 == 1\n")
+        g("add", "tests/test_old.py")
+        g("commit", "-qm", "test: sanctioned skip on develop")
+        dev_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/upstream/develop", dev_sha)
+        # NOTE: no origin/develop ref — case block's && fails
+
+        # Feature branch tracking upstream/develop — clean addition
+        g("checkout", "-qb", "feat-new")
+        # Set up tracking to upstream/develop
+        g("config", "branch.feat-new.remote", "upstream")
+        g("config", "branch.feat-new.merge", "refs/heads/develop")
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "def test_new():\n    assert 2 + 2 == 4\n")
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add coverage")
+        r = self._run("git push origin feat-new", root)
+        self.assertEqual(r.returncode, 0,
+                         "tracking upstream/develop should prevent false-block: "
+                         + r.stderr)
+
+    def test_bypass_marker_in_same_call_command(self):
+        """RED: bypass marker in a commit message created in the same Bash
+        call as the push must be honored. The test.skip is ALREADY committed
+        (blocking the push). A second bypass-marker commit + push in one
+        Bash call should lift the block — but PreToolUse fires before git
+        commit runs, so git log -1 reads the test.skip commit, not the
+        pending marker commit."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_thing.py"), "w").write(
+            "def test_ok():\n    assert 1\n")
+        g("add", "tests/test_thing.py")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        # Commit that ADDS a test.skip — already committed, blocks the push
+        open(os.path.join(root, "tests", "test_thing.py"), "a").write(
+            "test.skip('dependency unavailable', () => {});\n")
+        g("add", "tests/test_thing.py")
+        g("commit", "-qm", "test: add skip for unavailable dep")
+        # NOW the compound command: bypass-marker commit + push in one call.
+        # PreToolUse fires before git commit --allow-empty runs, so git log -1
+        # still reads the "add skip" commit (no marker). The marker is only in
+        # the PENDING commit message.
+        cmd = ('git commit --allow-empty -m "'
+               '# airuleset:test-skip-ok tracked in issue 99" '
+               '&& git push origin main')
+        r = self._run(cmd, root)
+        self.assertEqual(r.returncode, 0,
+                         "same-call bypass marker must be honored: "
+                         + r.stderr)
+
+    def test_repush_existing_branch_uses_remote_ref(self):
+        """RED: when origin/<branch> already exists (a re-push), the hook
+        should diff only against origin/<branch> — the tightest base. Without
+        this, the case-block base (origin/main, which is older) includes the
+        already-pushed test.skip as "new" and false-blocks."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("x = 1\n")
+        g("add", "app.py")
+        g("commit", "-qm", "base")
+        base_sha = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base_sha)
+
+        # Feature branch: first commit adds test.skip (already pushed)
+        g("checkout", "-qb", "feat-z")
+        os.makedirs(os.path.join(root, "tests"), exist_ok=True)
+        open(os.path.join(root, "tests", "test_old.py"), "w").write(
+            "test.skip('pre-existing', () => {});\n")
+        g("add", "tests/test_old.py")
+        g("commit", "-qm", "test: add skipped test")
+        pushed_sha = g("rev-parse", "HEAD").stdout.strip()
+        # Simulate first push already landed: origin/feat-z at this commit
+        g("update-ref", "refs/remotes/origin/feat-z", pushed_sha)
+
+        # Second commit adds clean code — re-push should only see THIS commit
+        open(os.path.join(root, "tests", "test_new.py"), "w").write(
+            "def test_new():\n    assert 2 + 2 == 4\n")
+        g("add", "tests/test_new.py")
+        g("commit", "-qm", "test: add coverage")
+        r = self._run("git push origin feat-z", root)
+        self.assertEqual(r.returncode, 0,
+                         "re-push should use origin/<branch> as base: "
+                         + r.stderr)
+
+
 class TestPrePushTestCheckForkAware(TestCase):
     """#847: pre-push-test-check.sh has the same fork-lag false-positive
     as block-test-skips.sh — diff base resolves only against origin, never
