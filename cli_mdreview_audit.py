@@ -352,6 +352,119 @@ def _propose_target(text):
     return "managed module"
 
 
+# -- slimming candidates (#908) ---------------------------------------------
+
+# Known hooks that mechanically enforce what a prose module also states.
+# Each entry: (hook_script_basename, module_relative_path, description).
+_HOOK_PROSE_PAIRS = [
+    ("block-test-skips.sh", "modules/ci/test-strictness.md",
+     "hook blocks skip/ignore patterns that the module also bans in prose"),
+    ("block-history-rewrite.sh", "modules/git/commit-conventions.md",
+     "hook blocks git reset --hard / rebase -i / amend / push --force"),
+    ("pre-write-script-check.sh", "modules/quality/script-failure-policy.md",
+     "hook blocks scripts missing set -euo pipefail / bare except"),
+    ("block-destructive-remote.sh",
+     "modules/quality/no-destructive-remote-actions.md",
+     "hook blocks remote shutdown/reboot/drop/truncate over ssh"),
+    ("block-tier0-local-build.sh", "modules/quality/no-local-builds.md",
+     "hook blocks cargo compile locally under Tier 0"),
+    ("block-gh-invalid-json-flag.sh", "modules/core/gh-cli-recipes.md",
+     "hook blocks invalid gh --json flags"),
+    ("stop-check-prose-violations.sh",
+     "modules/core/autonomous-verification.md",
+     "hook blocks hand-off phrases the module also bans"),
+    ("stop-check-status-marker.sh",
+     "modules/core/message-status-marker.md",
+     "hook enforces terminal status marker the module also requires"),
+    ("stop-check-question-quality.sh",
+     "modules/core/user-questions-slovak.md",
+     "hook enforces question block shape the module also requires"),
+]
+
+
+def slimming_candidates(inventory, hooks_dir=None):
+    """Identify always-on modules that are candidates for slimming (#908).
+
+    Analyzes the inventory for:
+    - hook-enforced: a hook already mechanically enforces the ban, so the
+      always-on prose that restates it is conversion-eligible (to a stub
+      pointing at the hook, per the existing #9 stub pattern).
+    - reference-growth: rules-reference files that have grown large and are
+      on-demand (no paths: frontmatter), suggesting they carry content that
+      could be archived or trimmed.
+
+    Returns list of {path, category, reason, verdict_hint} dicts.
+    verdict_hint is one of: 'convert' (to hook-stub/paths-scoped/reference),
+    'review' (needs human assessment), never 'remove' (that requires cited
+    evidence from live prompting docs — the /mdreview session provides it).
+    """
+    if hooks_dir is None:
+        hooks_dir = REPO_DIR / "hooks"
+    candidates = []
+
+    # 1. Hook-enforced prose: check which hook scripts exist
+    global_modules = inventory.get("global_modules", {})
+    for hook_basename, mod_relpath, description in _HOOK_PROSE_PAIRS:
+        hook_path = hooks_dir / hook_basename
+        if not hook_path.exists():
+            continue
+        # Check if the module is in the always-on inventory
+        mod_abs = str((REPO_DIR / mod_relpath).resolve())
+        if mod_abs not in global_modules:
+            continue
+        mod_bytes = global_modules.get(mod_abs, 0)
+        # Stubs (<= 1500 B) are already converted — hint 'review'
+        # instead of 'convert' so the session knows the conversion
+        # already happened and only needs to re-verdict the stub.
+        hint = "convert" if mod_bytes > 1500 else "review"
+        candidates.append({
+            "path": mod_relpath,
+            "category": "hook-enforced",
+            "reason": (f"{hook_basename} mechanically enforces the ban; "
+                       f"module is {mod_bytes} B always-on prose that "
+                       f"restates what the hook already blocks — "
+                       f"{description}"),
+            "verdict_hint": hint,
+        })
+
+    # 2. Reference-growth: large on-demand files in .claude/rules-reference/
+    ref_dir = REPO_DIR / ".claude" / "rules-reference"
+    if ref_dir.is_dir():
+        for f in sorted(ref_dir.glob("*.md")):
+            try:
+                sz = f.stat().st_size
+            except OSError:
+                continue
+            if sz > 50000:  # > 50 KB is a growth signal
+                candidates.append({
+                    "path": f"rules-reference/{f.name}",
+                    "category": "reference-growth",
+                    "reason": (f"{sz:,} B on-demand reference file — "
+                               f"check if oldest entries can be archived "
+                               f"or trimmed"),
+                    "verdict_hint": "review",
+                })
+
+    return candidates
+
+
+def context_snapshot():
+    """Capture the current context-baseline metrics for audit embedding (#908).
+
+    Returns {modules_resolved_bytes, module_count, skill_desc_chars,
+             ceilings: {...}}.
+    """
+    current = cli_context_baseline._measure_repo_ceilings()
+    ratchet = cli_context_baseline.load_ratchet()
+    ceilings = ratchet.get("ceilings", {})
+    return {
+        "modules_resolved_bytes": current.get("modules_resolved_bytes", 0),
+        "module_count": current.get("module_count", 0),
+        "skill_desc_chars": current.get("skill_desc_chars", 0),
+        "ceilings": ceilings,
+    }
+
+
 # -- dedup surface collection -----------------------------------------------
 
 def _collect_dedup_surfaces(project_dirs=None):
@@ -520,6 +633,8 @@ def run_fleet(runner=None, fleet_runner=None):
         surfaces = _collect_dedup_surfaces(local_projects)
         pairs = dedup_candidates(surfaces)
         zero_callers = _compute_zero_caller_skills()
+        slim_cands = slimming_candidates(inv)
+        ctx_snap = context_snapshot()
 
         boxes.append({
             "host": local_hostname,
@@ -527,6 +642,10 @@ def run_fleet(runner=None, fleet_runner=None):
             "dedup_pairs": pairs,
             "memory": mem_result,
             "zero_caller_skills": zero_callers,
+            "slimming": {
+                "candidates": slim_cands,
+                "context_snapshot": ctx_snap,
+            },
         })
 
     for host in hosts:
@@ -627,6 +746,8 @@ def cmd_mdreview_audit(args):
     surfaces = _collect_dedup_surfaces(project_dirs)
     pairs = dedup_candidates(surfaces)
     zero_callers = _compute_zero_caller_skills()
+    slim_cands = slimming_candidates(inv)
+    ctx_snap = context_snapshot()
 
     data = {
         "schema": 1,
@@ -636,6 +757,10 @@ def cmd_mdreview_audit(args):
         "dedup_pairs": pairs,
         "memory": mem_result,
         "zero_caller_skills": zero_callers,
+        "slimming": {
+            "candidates": slim_cands,
+            "context_snapshot": ctx_snap,
+        },
     }
 
     if getattr(args, "json_output", False):
@@ -654,6 +779,16 @@ def _print_box_table(data):
     print(f"Memory: {len(mem.get('R', []))} rules, "
           f"{len(mem.get('P', []))} facts, "
           f"{mem.get('S_flag_count', 0)} credential flags")
+    slim = data.get("slimming", {})
+    cands = slim.get("candidates", [])
+    if cands:
+        print(f"Slimming candidates: {len(cands)}")
+        for c in cands:
+            print(f"  {c['category']}: {c['path']} -- {c['reason']}")
+    snap = slim.get("context_snapshot", {})
+    if snap:
+        print(f"Context baseline: {snap.get('modules_resolved_bytes', 0):,} B "
+              f"({snap.get('module_count', 0)} modules)")
 
 
 def _print_fleet_table(data):
