@@ -126,6 +126,16 @@ class TestOnboardLegPin(unittest.TestCase):
 
 
 class TestWebtermLegPin(unittest.TestCase):
+    def setUp(self):
+        # #870 RED-2: the controller guard reads the real box-class marker,
+        # so the unpinned/sshpass-branch assertions raise when the suite
+        # runs on the controller box. Pin a non-controller class so the
+        # assertions are hermetic on every box.
+        _p = m.patch("watchdog.reaper.default_box_class",
+                     return_value="workstation")
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def test_pinned_entry_engages_pin(self):
         entry = {"local": False, "user": "newlevel", "host": "203.0.113.7",
                  "identity": "~/.ssh/pin_vps",
@@ -157,6 +167,16 @@ class TestWebtermLegPin(unittest.TestCase):
 
 
 class TestWebtermInventoryThreadsHostKeys(unittest.TestCase):
+    def setUp(self):
+        # #870 RED-2: the controller guard reads the real box-class marker,
+        # so the unpinned/sshpass-branch assertions raise when the suite
+        # runs on the controller box. Pin a non-controller class so the
+        # assertions are hermetic on every box.
+        _p = m.patch("watchdog.reaper.default_box_class",
+                     return_value="workstation")
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def test_inventory_carries_host_keys_from_fleet(self):
         # The connect child can NOT import the fleet — the inventory JSON is its
         # allowlist, so the PUBLIC pin must be threaded through it at generation
