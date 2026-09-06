@@ -1532,6 +1532,20 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # supersedes the in-window cooldown, logged as an explicit #486 decision.
     if compact_delivery_in_cooldown(sid, now, path=delivered_path):
         if origin in _COMPACT_DRAINED_BOUNDARY_ORIGINS:
+            # #910 LATE duplicate-consume re-check. The EARLY check (line ~1410)
+            # runs before pane resolution / boundary / recent-human / classify —
+            # those take 1-3 s wall-clock. A compaction from the first delivery
+            # can complete DURING those checks, so the early check finds no
+            # isCompactSummary. By this point the compaction has had maximum
+            # time to complete — re-check here before superseding the cooldown.
+            _reason = _compact_duplicate_consume_reason(
+                sid, cwd, delivered_path, request_bts, projects_dir,
+                from_sweep=from_sweep)
+            if _reason:
+                _log_compact_sync(
+                    "CONSUMED already-compacted sid=%s cwd=%s origin=%s "
+                    "(%s, late-recheck)" % (sid, cwd, origin or "-", _reason))
+                return "already-compacted"
             _log_compact_sync(
                 "BOUNDARY-PRIORITY cooldown-superseded sid=%s cwd=%s origin=%s"
                 % (sid, cwd, origin or "-"))

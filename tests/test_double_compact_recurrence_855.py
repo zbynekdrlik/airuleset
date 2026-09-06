@@ -408,7 +408,6 @@ class TestLadderRace910(unittest.TestCase):
         # First call (EARLY check): False — compaction not yet in transcript.
         # Second call (LATE re-check, if it exists): True — compaction completed.
         call_count = [0]
-        orig = compact._compact_boundary_already_compacted
 
         def _racing_compacted(cwd, sid, projects_dir=None):
             call_count[0] += 1
