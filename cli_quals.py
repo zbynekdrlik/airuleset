@@ -1128,6 +1128,31 @@ def _norm_ages(res):
     return None
 
 
+def _is_own_login(login, self_login):
+    """App-aware identity match for own-comment detection (#904).
+
+    On App-token streams, ``_stream_self_login()`` returns the ``app/``-prefixed
+    form (``STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"``), but
+    GitHub's ``gh issue view --json comments`` renders the comment
+    ``author.login`` as the bare slug (``"odoo-erp-stream-tokens"``).
+
+    This helper accepts both directions of the ``app/`` prefix mismatch
+    (and the exact-match case) while rejecting any truly different login.
+    """
+    if not login or not self_login:
+        return False
+    if login == self_login:
+        return True
+    # #904: strip "app/" and compare bare slugs — but only when at least
+    # one side actually carried the prefix (prevents "foo" == "foo" via
+    # a vacuous strip when neither is an App login).
+    bare_login = login[4:] if login.startswith("app/") else login
+    bare_self = self_login[4:] if self_login.startswith("app/") else self_login
+    if bare_login == bare_self and (login != bare_login or self_login != bare_self):
+        return True
+    return False
+
+
 def _stream_self_login():
     """THIS box's own gh identity in the FORM a `gh issue view --json comments`
     comment `author.login` renders it (#463): the fixed App-bot login on an
@@ -1193,7 +1218,7 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
             any_ts = ts
         author = c.get("author")
         login = author.get("login") if isinstance(author, dict) else None
-        if self_login and login == self_login:
+        if self_login and _is_own_login(login, self_login):
             body = c.get("body")
             if own_ts is None or ts > own_ts:
                 own_ts = ts
@@ -2400,7 +2425,7 @@ def _bounce_round(number, self_login, cwd=None, runner=None, repo=None):
             continue
         author = c.get("author")
         login = author.get("login") if isinstance(author, dict) else None
-        if self_login and login == self_login:
+        if self_login and _is_own_login(login, self_login):
             body = c.get("body") or ""
             if _BOUNCE_RFR_RE.search(body):
                 own_rfr += 1
