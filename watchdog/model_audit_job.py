@@ -5,7 +5,7 @@ and every RECENT subagent transcript under it (recency-windowed — see
 `cli_model_audit.MODEL_AUDIT_SUBAGENT_RECENCY_S`, #871 fix), and JOURNALS any
 model that is NOT on the exact-id allowlist (`airuleset.MODEL_TIERS`) — a
 session that FLOATED off the launch pin mid-lifetime (`model_changed`), e.g.
-onto the banned Fable 5.1. The audit is about sessions that CAN STILL FLOAT —
+off the allowlist. The audit is about sessions that CAN STILL FLOAT —
 i.e. LIVE state only — so a subagent transcript is considered ONLY when its
 mtime is within the shared recency window; a subagent dispatched weeks ago
 (long dead, possibly from before the ban even existed) is not a live float
@@ -15,7 +15,7 @@ sweep even though it now checks every recent subagent, not just the newest.
 
 Machine-channel ONLY (the #850 repo-health class): it returns journal LOG lines
 and NEVER pings the owner (this module deliberately imports no `notify` send
-path). The owner's remedy per floated session is `/model -> Fable 5`, or a
+path). The owner's remedy per floated session is `/model -> Fable 5.1`, or a
 relaunch (which re-lands the launch pin). Read-only — never keystrokes, never
 writes (feedback_never_keystroke_human_active_pane / no_manual_pane_nudges).
 """
@@ -31,7 +31,7 @@ def _flag(read_model, path, kind, pane, cwd, out):
     # must not journal a false model-float violation.
     if m and airuleset.is_banned_model_for_audit(m):
         out.append("model-float %s pane=%s model=%s cwd=%s "
-                    "(off the allowlist — /model -> Fable 5 or relaunch)"
+                    "(off the allowlist — /model -> Fable 5.1 or relaunch)"
                     % (kind, pane, m, cwd))
 
 
