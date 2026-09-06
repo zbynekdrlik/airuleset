@@ -1781,3 +1781,33 @@ hook internals, not a rule a session acts on.
 - **[Moved from internals-filedrop.md at the cycle-8 integration 51200-byte cap]** **A "never over-match" regression test for a tightened regex must use a fixture that clears the regex's OWN anchor, not merely one that mentions similar words (#176 REOPENED F8).** A "which box am I" lookup against `REMOTE_HOSTS` should key on the system USERNAME, never the hostname (#151). `gh api graphql`'s `{owner}`/`{repo}` placeholder expansion works ONLY through `-F`/`--field` (typed), NEVER through `-f`/`--raw-field` (#230). A test asserting a flag/value PAIR must check they are ADJACENT in argv, not merely that both appear somewhere in the command (#230). A Fable/Opus adversarial-review dispatch given a DETAILED PROSE digest degrades gracefully — it re-derives the diff from the named commit range (#266/#177). Expanding an achieved/goal DENYLIST that other tests already hardcode as a fixture VALUE will silently break those tests (#272). Bake a per-BOX config constant into the shim at RENDER time via `{{PLACEHOLDER}}` + `.replace()`, never via a per-render lazy `import` (#133). Dispatching a review with an un-substituted placeholder still degrades gracefully (#279). A GraphQL-batched label-X test fixture stub must use the ACTUAL identity the test computes, not an UNRELATED value (#191). A test fixture's `if "view" in j` classifier for a fake `gh` call is a substring-collision trap — `"ready-for-review"` contains "view" (#382).
 
 - **[Moved from internals-watchdog.md at the cycle-7 integration 51200-byte cap]** **#890 — recovery-class re-arm origins (`_GOAL_RECOVERY_ORIGINS = auth-rearm + answer-rearm`): THREE reusable facts for ANY future re-arm origin.** (1) **A PROVEN event (CC auth clear, answered-question) must NOT share a rate limiter designed for GUESSING (dead-dark confirmation) — own rate state per origin class.** Sharing the 2/24h dead-dark cap with auth-rearm caused a 22h+ gap on the gk box (2 fast re-arms exhausted the cap, then a 30min+ backoff). Recovery origins get `_recovery_rearm_ok` (min-gap + daily cap, parameterized per origin). (2) **A control-flow hold that prevents a RECORDING (file write) must be placed AFTER the recording decision, not before it.** The compact-pending hold at L2758 blocked the marker reading and auth-rearm recording because it sat ABOVE them with `continue`. Recovery origins only WRITE a request; the hold exists to prevent a work-pushing KEYSTROKE. Fix: move marker reading + vetoes + auth-rearm ABOVE the hold; the hold now only blocks the dead-loop confirmation + dark-rearm. (3) **A freshness gate on a cache that only the DEAD SESSION refreshes is circular.** Auth-rearm's obligation-cache freshness check (`0 <= now-cts <= 3 days`) rejected a dead session's stale cache with `backlog not workable (open=18)` — the exact session being recovered is the only one that would refresh it. Recovery origins tolerate stale (but present) caches; a wrong re-arm on a stale-but-drained backlog costs one launch then stops via issue 764/766 fulfilled machinery. disk_guard severity-beats-cadence + additive-rung pattern + planners_fn seam + SUDO_CLASSES root-owned rungs.
+
+
+- **[Moved from internals-skills-modules.md at the #874 51200-byte cap]** ### Which surface actually LOADS — measure before converting a module (#104, 2026-07-27)
+
+Every `module → skill` or `module → path-scoped rule` conversion in this repo is
+a bet that the target surface is loaded on the path that needs it. `e9d1022` lost
+that bet once already, and the loss was invisible for 18 days. Before converting
+anything, know these EMPIRICAL facts (three introspection probes, 2026-07-27 —
+each subagent was asked only to report its own context):
+
+| Surface | Reaches a dispatched subagent? |
+|---|---|
+| Global `~/.claude/CLAUDE.md` with `@import`ed module BODIES expanded | **YES** — probes quoted verbatim sentences from inside the modules |
+| Project `CLAUDE.md` | **YES** |
+| Auto-memory `MEMORY.md` | **YES** |
+| An agent file (`agents/<name>.md`) | **YES** — it IS the subagent's system prompt |
+| **Skill BODIES (`skills/*/SKILL.md`)** | **NO** — only the name + one-line description from the skill list |
+| Path-scoped rules (`rules/*.md` → `~/.claude/rules/`) — MAIN session | **YES** — `nested_memory` attachment on Read (#105) |
+| Path-scoped rules (`rules/*.md` → `~/.claude/rules/`) — dispatched SUBAGENT | **NO** — zero `nested_memory` attachments even with the correct cwd (#105) |
+
+Consequences that keep biting:
+
+- **Content a dispatched worker must ACT on cannot live in a skill body.** It only
+  arrives if that worker itself calls the `Skill` tool, and nothing in the
+  `/autopilot` dispatch chain tells it to. This is exactly how the design-first
+  step vanished from the ticket path (#104): the supervisor loads
+  `batch-issue-development` in ITS context; the worker is a separate dispatch
+  joined to it by a one-line prompt.
+- **[Moved to archive]** #271 rescue-store, #277/#274/#280/#282 gh-prefilter — grep the archive.
+- **Diagnosing an orphaned/dead dispatched async `Agent`: `TaskStop(task_id=<the id from the launch tool_result>)` returning `"No task found with ID: X"`, cross-checked against its `<output-file>`'s own `stat` (tiny — e.g. 139 bytes — and unchanged by `mtime` for far longer than the task should plausibly still be working) is decisive, corroborating evidence that the dispatch died — most plausibly across a session-limit reset (a coordinator message reporting "session limit sa práve resetol" mid-wait is the tell) — rather than "still working, just slow".** #354: two async dispatches (a `Skill({skill:"review"})` fork and a `general-purpose` requesting-code-review agent) both went unresponsive for 2+ hours of bounded foreground waits; `TaskStop` on both ids came back not-found, and both output files sat at 139 bytes with `mtime` 2+ hours stale — the correct recovery was to treat both as dead (never try to read the orphaned output file's content — "don't peek" still applies to a dead dispatch, not just a live one) and re-dispatch a FRESH, self-contained `general-purpose` review with the same digest, which then completed normally in ~7 minutes. Never keep bounded-waiting on a dispatch past this evidence threshold hoping it resumes on its own.
