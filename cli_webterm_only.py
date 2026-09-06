@@ -67,10 +67,29 @@ WEBTERM_DAVID_LANE_PUBKEY = (
 )
 
 
-# #870 F4a D5: controller lane per-human forced-command pubkeys. Empty until
-# F4b mints the keys; dict of {human: pubkey_line} where pubkey_line is a bare
+# #870 F4b: controller lane per-human forced-command pubkeys. Minted on the
+# controller 2026-09-06 as ``~/.secrets/webterm_<human>_ed25519`` (0600).
+# Dict of {human: pubkey_line} where pubkey_line is a bare
 # "ssh-ed25519 AAAA... comment" (options are prepended by desired_keys_for_user).
-WEBTERM_CONTROLLER_LANE_PUBKEYS = {}
+# Split-string-literal pattern: the WEBTERM_DAVID_LANE_PUBKEY precedent.
+WEBTERM_CONTROLLER_LANE_PUBKEYS = {
+    "zbynek": (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHKrqw6/6j2laDxFTd8C1oq2eT9R"
+        "LqBhVaaU7pz+3vcW webterm-zbynek-controller"
+    ),
+    "david": (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDiUI2LEHPhKoNQt+KhO1ZmXg79g"
+        "HXUZqXXxufvtWAUp webterm-david-controller"
+    ),
+    "marek": (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICML2bKom1DPnvjHSArpISPVXDeP"
+        "s9HxQglfm7CaHSoz webterm-marek-controller"
+    ),
+    "dominika": (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDlZU9FysGrJT5FF9LwP69gEoLc+"
+        "Mtt+EwyBl0iv9+Lp webterm-dominika-controller"
+    ),
+}
 
 # ---------------------------------------------------------------------------
 # Options-aware authorized_keys parser (#870 F4a D5)
@@ -149,6 +168,29 @@ def _fingerprint(line, run=None):
 # Desired-set builder
 # ---------------------------------------------------------------------------
 
+def _webterm_only_user_to_human(user):
+    """Map a webterm-only account name to its human's lane key.
+    david1-4 -> "david", dominika -> "dominika", else None."""
+    if user.startswith("david") and user[5:].isdigit():
+        return "david"
+    if user == "dominika":
+        return "dominika"
+    return None
+
+
+def _controller_lane_key_line(user, pubkey):
+    """Build an options-prefixed authorized_keys line for a controller lane
+    key. The forced command attaches the user's own tmux session via
+    ``_remote_command(preferred=user)``. Shape: ``restrict,pty,command="..."``
+    — ``pty`` is load-bearing (#661 go-live lesson: bare ``restrict`` kills
+    the PTY)."""
+    from cli_webterm import _remote_command
+    cmd = _remote_command(user)
+    # Escape for authorized_keys command="..." format
+    escaped_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
+    return 'restrict,pty,command="%s" %s' % (escaped_cmd, pubkey)
+
+
 def desired_keys_for_user(user):
     """Return the SORTED list of authorized_keys lines for a webterm-only
     account.  Raises ValueError for a non-webterm-only user."""
@@ -161,9 +203,15 @@ def desired_keys_for_user(user):
     keys = list(FLEET_PUSH_PUBKEYS)
     keys.extend(OWNER_PUBKEYS)
 
-    # david1-4 get the lane key
+    # david1-4 get the subdev lane key
     if user.startswith("david") and user[5:].isdigit():
         keys.append(WEBTERM_DAVID_LANE_PUBKEY)
+
+    # Controller lane key with forced-command options (#870 F4b)
+    human = _webterm_only_user_to_human(user)
+    if human and human in WEBTERM_CONTROLLER_LANE_PUBKEYS:
+        pubkey = WEBTERM_CONTROLLER_LANE_PUBKEYS[human]
+        keys.append(_controller_lane_key_line(user, pubkey))
 
     # Sort by blob for deterministic output
     keys.sort(key=lambda k: _key_blob(k) or "")
