@@ -82,14 +82,15 @@ class TestDavidInventory(unittest.TestCase):
             self.assertEqual(e["preferred"], u)
             self.assertFalse(e.get("local"))
 
-    def test_codex_bridge_mirrors_existing_dev2_access(self):
-        # Owner ruling 2026-08-21: mirror David's existing ssh exactly —
-        # newlevel@dev2 via ~/.ssh/id_ed25519 (david1's own key), the existing
-        # `david` tmux group. NEVER a dedicated account / new key (deferred).
+    def test_codex_bridge_uses_dedicated_david_identity(self):
+        # #870 F4c: after the lane moved to the controller, codex-bridge must
+        # use WEBTERM_DAVID_IDENTITY (the dedicated david key), NEVER the
+        # default ~/.ssh/id_ed25519 (which on the controller is the airuleset
+        # account's own unrestricted key — #661 transitive-reach violation).
         cb = next(e for e in p.david_inventory() if e["id"] == "codex-bridge")
         self.assertEqual(cb["user"], "newlevel")
         self.assertEqual(cb["host"], "100.82.64.27")   # dev2 tailscale IP
-        self.assertEqual(cb["identity"], "~/.ssh/id_ed25519")
+        self.assertEqual(cb["identity"], p.WEBTERM_DAVID_IDENTITY)
         self.assertEqual(cb["preferred"], "david")
 
     def test_dedicated_identity_is_not_the_fleet_gatekeeper_key(self):
@@ -165,14 +166,17 @@ class TestConnectAllowlistIsProfileScoped(unittest.TestCase):
         # tailscale IP (controller reaches subdev over tailnet).
         self.assertIn("david2@%s" % p._subdev_target_host("david"), argv)
 
-    def test_codex_bridge_id_execs_mirror_of_existing_dev2_access(self):
+    def test_codex_bridge_id_execs_dedicated_david_identity(self):
+        # #870 F4c: codex-bridge connect must use the dedicated david key,
+        # never ~/.ssh/id_ed25519 (unrestricted on the controller).
         f = _david_inv_file()
         with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
                 m.patch.object(w.os, "execvp") as ex:
             w.connect_main(["codex-bridge"])
         argv = ex.call_args[0][1]
         self.assertEqual(argv[0], "ssh")
-        self.assertIn(os.path.expanduser("~/.ssh/id_ed25519"), argv)
+        self.assertIn(os.path.expanduser(p.WEBTERM_DAVID_IDENTITY), argv)
+        self.assertNotIn(os.path.expanduser("~/.ssh/id_ed25519"), argv)
         self.assertIn("newlevel@100.82.64.27", argv)
 
 
