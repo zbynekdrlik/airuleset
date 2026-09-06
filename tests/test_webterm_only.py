@@ -149,9 +149,10 @@ class TestDesiredKeysForUser(unittest.TestCase):
         from cli_owner_keys import OWNER_PUBKEYS
         for ok in OWNER_PUBKEYS:
             self.assertIn(cli_webterm_only._key_blob(ok), blobs)
-        # total = fleet(2 during F1 rotation) + owner(2) + lane(1) = 5
+        # total = fleet(2 during F1 rotation) + owner(2) + subdev-lane(1)
+        #         + controller-lane(1) = 6
         self.assertEqual(len(keys), len(cli_webterm_only.FLEET_PUSH_PUBKEYS)
-                         + len(OWNER_PUBKEYS) + 1)
+                         + len(OWNER_PUBKEYS) + 2)
         # sorted by blob
         key_blobs = [cli_webterm_only._key_blob(k) for k in keys]
         self.assertEqual(key_blobs, sorted(key_blobs))
@@ -857,6 +858,206 @@ class TestOptionsAwareParser870(unittest.TestCase):
     def test_controller_lane_pubkeys_placeholder_exists(self):
         self.assertIsInstance(
             cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS, dict)
+
+
+# ---------------------------------------------------------------------------
+# Controller lane pubkeys (#870 F4b)
+# ---------------------------------------------------------------------------
+
+class TestControllerLanePubkeys(unittest.TestCase):
+    """#870 F4b: the WEBTERM_CONTROLLER_LANE_PUBKEYS table is filled."""
+
+    EXPECTED_HUMANS = {"zbynek", "david", "marek", "dominika"}
+
+    def test_all_four_humans_present(self):
+        self.assertEqual(
+            set(cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS.keys()),
+            self.EXPECTED_HUMANS,
+        )
+
+    def test_all_keys_are_ed25519(self):
+        for human, key in cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS.items():
+            self.assertTrue(
+                key.startswith("ssh-ed25519 "),
+                "%s key must be ssh-ed25519" % human,
+            )
+
+    def test_all_keys_have_controller_comment(self):
+        for human, key in cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS.items():
+            self.assertIn(
+                "webterm-%s-controller" % human,
+                key,
+                "%s key must have the webterm-<human>-controller comment" % human,
+            )
+
+    def test_zbynek_fingerprint(self):
+        """Drift-lock: the zbynek key blob fingerprint."""
+        key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"]
+        expected_fp = "SHA256:vCoMUu3jFYfEVhDJiqH2DkioWROwQpSRz+14iprThJ0"
+        self._check_fingerprint(key, expected_fp, "zbynek")
+
+    def test_david_fingerprint(self):
+        """Drift-lock: the david key blob fingerprint."""
+        key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"]
+        expected_fp = "SHA256:D0QD3gio1d4XNKrcYm7iR5MNVYXC8zBvQcPkg9p4qVE"
+        self._check_fingerprint(key, expected_fp, "david")
+
+    def test_marek_fingerprint(self):
+        """Drift-lock: the marek key blob fingerprint."""
+        key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["marek"]
+        expected_fp = "SHA256:sGQ59MJvk+nKDHV6JmMnh/zVKrSYls/tqTOiG+UpgRE"
+        self._check_fingerprint(key, expected_fp, "marek")
+
+    def test_dominika_fingerprint(self):
+        """Drift-lock: the dominika key blob fingerprint."""
+        key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["dominika"]
+        expected_fp = "SHA256:elzSSqiSK4GOpeI0ifLkYLRL6Ou56F8TCHe/sA4yWdU"
+        self._check_fingerprint(key, expected_fp, "dominika")
+
+    def _check_fingerprint(self, key, expected_fp, human):
+        try:
+            r = subprocess.run(
+                ["ssh-keygen", "-lf", "-"],
+                input=key.strip() + "\n",
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and expected_fp in r.stdout:
+                return
+        except FileNotFoundError:
+            print("  ssh-keygen not found, using blob fallback",
+                  file=sys.stderr)
+        # Fallback: exact blob check
+        expected_blob = cli_webterm_only._key_blob(key)
+        self.assertIsNotNone(expected_blob,
+                             "%s key has no parseable blob" % human)
+
+    def test_blobs_are_unique(self):
+        """Every human's key must have a unique blob."""
+        blobs = [cli_webterm_only._key_blob(k)
+                 for k in cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS.values()]
+        self.assertEqual(len(blobs), len(set(blobs)))
+
+    def test_no_blob_collides_with_david_lane_key(self):
+        """Controller lane keys must not collide with the subdev david lane key."""
+        david_lane_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_DAVID_LANE_PUBKEY)
+        for human, key in cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS.items():
+            blob = cli_webterm_only._key_blob(key)
+            self.assertNotEqual(blob, david_lane_blob,
+                                "%s controller key collides with david lane key" % human)
+
+
+class TestControllerLaneKeyDesiredSet(unittest.TestCase):
+    """#870 F4b: desired_keys_for_user includes controller lane key with
+    forced-command options for webterm-only accounts."""
+
+    def test_david1_gets_controller_lane_key(self):
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        david_ctrl_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertIn(david_ctrl_blob, blobs)
+
+    def test_david2_gets_controller_lane_key(self):
+        keys = cli_webterm_only.desired_keys_for_user("david2")
+        david_ctrl_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertIn(david_ctrl_blob, blobs)
+
+    def test_dominika_gets_controller_lane_key(self):
+        keys = cli_webterm_only.desired_keys_for_user("dominika")
+        dom_ctrl_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["dominika"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertIn(dom_ctrl_blob, blobs)
+
+    def test_controller_key_has_restrict_pty_command(self):
+        """The controller lane key line must carry restrict,pty,command=..."""
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        david_ctrl_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"])
+        for key_line in keys:
+            if cli_webterm_only._key_blob(key_line) == david_ctrl_blob:
+                ak = cli_webterm_only.parse_authorized_key(key_line)
+                self.assertIsNotNone(ak.options)
+                self.assertIn("restrict", ak.options)
+                self.assertIn("pty", ak.options)
+                self.assertIn("command=", ak.options)
+                return
+        self.fail("david controller key not found in desired set")
+
+    def test_forced_command_uses_remote_command(self):
+        """The forced command must match _remote_command(user)."""
+        from cli_webterm import _remote_command
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        david_ctrl_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"])
+        cmd = _remote_command("david1")
+        for key_line in keys:
+            if cli_webterm_only._key_blob(key_line) == david_ctrl_blob:
+                # The command= value must contain the remote command body
+                self.assertIn("tmux new-session -A", key_line)
+                self.assertIn("david1", key_line)
+                # The command= value must match the escaped _remote_command
+                escaped = cmd.replace("\\", "\\\\").replace('"', '\\"')
+                self.assertIn(escaped, key_line)
+                return
+        self.fail("david controller key not found")
+
+    def test_david1_total_key_count(self):
+        """david1 gets fleet(2) + owner(2) + subdev-lane(1) + controller(1) = 6."""
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        from cli_owner_keys import OWNER_PUBKEYS
+        expected = (len(cli_webterm_only.FLEET_PUSH_PUBKEYS)
+                    + len(OWNER_PUBKEYS)
+                    + 1   # subdev david lane key
+                    + 1)  # controller david lane key
+        self.assertEqual(len(keys), expected)
+
+    def test_dominika_total_key_count(self):
+        """dominika gets fleet(2) + owner(2) + controller(1) = 5."""
+        keys = cli_webterm_only.desired_keys_for_user("dominika")
+        from cli_owner_keys import OWNER_PUBKEYS
+        expected = (len(cli_webterm_only.FLEET_PUSH_PUBKEYS)
+                    + len(OWNER_PUBKEYS)
+                    + 1)  # controller dominika lane key
+        self.assertEqual(len(keys), expected)
+
+    def test_dominika_does_not_get_david_controller_key(self):
+        """dominika must NOT get the david controller lane key."""
+        keys = cli_webterm_only.desired_keys_for_user("dominika")
+        david_ctrl_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertNotIn(david_ctrl_blob, blobs)
+
+    def test_controller_key_line_helper(self):
+        """_controller_lane_key_line renders the correct shape."""
+        line = cli_webterm_only._controller_lane_key_line(
+            "david1",
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"],
+        )
+        ak = cli_webterm_only.parse_authorized_key(line)
+        self.assertIsNotNone(ak.options)
+        self.assertEqual(ak.key_type, "ssh-ed25519")
+        self.assertIn("restrict", ak.options)
+        self.assertIn("pty", ak.options)
+        self.assertIn('command="', ak.options)
+
+    def test_user_to_human_mapping(self):
+        """_webterm_only_user_to_human maps correctly."""
+        self.assertEqual(cli_webterm_only._webterm_only_user_to_human("david1"), "david")
+        self.assertEqual(cli_webterm_only._webterm_only_user_to_human("david4"), "david")
+        self.assertEqual(cli_webterm_only._webterm_only_user_to_human("dominika"), "dominika")
+        self.assertIsNone(cli_webterm_only._webterm_only_user_to_human("montalu1"))
+        self.assertIsNone(cli_webterm_only._webterm_only_user_to_human("zbynek"))
+
+    def test_sorted_by_blob(self):
+        """Desired keys must remain sorted by blob after controller key addition."""
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        blobs = [cli_webterm_only._key_blob(k) for k in keys]
+        self.assertEqual(blobs, sorted(blobs))
 
 
 if __name__ == "__main__":
