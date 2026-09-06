@@ -201,6 +201,21 @@ OPS_WAIT_RECHECK_CADENCE_S = 22 * 3600
 # nag an armed loop several times a day about a ticket it JUST parked — a units
 # error must never turn the re-check into spam.
 OPS_WAIT_RECHECK_MIN_S = 6 * 3600
+# #914 — TIGHTER cadence when W is stagnating (count hasn't decreased across
+# consecutive nudges). The normal ~22h cadence gives a session ONE chance per day;
+# a non-shrinking W set (montalu1 W≈40 for weeks) needs pressure every few hours.
+# This value is NOT gated by OPS_WAIT_RECHECK_MIN_S (that floors only the USER-
+# configurable env override, not internal code constants); the #913 family-spacing
+# (nudge_gate.py, 1h) is the only cross-category floor.
+OPS_WAIT_RECHECK_TIGHT_CADENCE_S = 4 * 3600
+# #914 — how many consecutive non-shrinking nudges before the nudge text gains
+# the W-STAGNATION flag (the LOUD signal the owner wants). 3 = after the 3rd
+# consecutive nudge that didn't see W shrink (at tight cadence, ~12h; at normal
+# cadence, ~3 days).
+W_STAGNATION_FLAG_THRESHOLD = 3
+# #914 — above this many stagnation nudges, the nudge instructs the session to
+# escalate to the owner via the standard ❓ channel.
+W_STAGNATION_OWNER_ESCALATE_THRESHOLD = 5
 # orphan-reaper TTL for a per-sid rec whose session is gone (mirrors
 # GOAL_MARK_ORPHAN_TTL_S / the #519/#531 per-sid-leak reaper): the `visited_sids`
 # gate is PRIMARY (a live pane is never reaped regardless of age), this is only
@@ -589,7 +604,15 @@ def _recheck_decision(rec, i_count, w_members, now, cadence):
     SIGHT, so its age is under-reported until it re-enters W — the SAFE direction
     (never the over-report the incident was about), and the exact GitHub
     label-add EVENT timestamp is deliberately NOT fetched (a per-ticket timeline
-    query the repo twice rejected on this path, #507/#550)."""
+    query the repo twice rejected on this path, #507/#550).
+
+    #914 — W-stagnation tracking: `w_count_at_nudge` records the W count at the
+    last DELIVERED nudge; `stagnation_count` increments when the current W count
+    >= `w_count_at_nudge` and resets when W shrinks. When stagnation_count >= 1,
+    the EFFECTIVE cadence tightens to `OPS_WAIT_RECHECK_TIGHT_CADENCE_S` (4h)
+    instead of the normal ~22h — giving the session multiple chances per day to
+    drain its W set. The stagnation_count feeds the `W-STAGNATION` flag in the
+    nudge text and the owner-escalation threshold."""
     i_pos = isinstance(i_count, int) and i_count > 0
     w_pos = isinstance(w_members, list) and bool(w_members)
     if not (i_pos or w_pos):
@@ -614,11 +637,27 @@ def _recheck_decision(rec, i_count, w_members, now, cadence):
             w_seen[key] = ts if isinstance(ts, (int, float)) else now
     else:
         w_seen = None
+    # #914 — preserve stagnation state from prior rec
+    prior_w_count = rec.get("w_count_at_nudge") if isinstance(rec, dict) else None
+    prior_stagnation = rec.get("stagnation_count") if isinstance(rec, dict) else None
+    if not isinstance(prior_stagnation, int) or isinstance(prior_stagnation, bool):
+        prior_stagnation = 0
     new_rec = {"first_seen": first_seen, "last_nudge": last_nudge,
                "w_seen": w_seen,
+               "w_count_at_nudge": prior_w_count,
+               "stagnation_count": prior_stagnation,
                "sig": _partition_sig(i_count, w_members)}
+    # #914 — use the TIGHT cadence when W is stagnating (non-shrinking) and W is
+    # non-empty, so the session is re-nudged every few hours instead of ~daily.
+    # The first nudge uses the normal cadence (no stagnation data yet).
+    effective_cadence = cadence
+    if (w_pos and isinstance(prior_w_count, int)
+            and not isinstance(prior_w_count, bool)
+            and len(_member_numbers(w_members)) >= prior_w_count
+            and prior_stagnation >= 1):
+        effective_cadence = min(cadence, OPS_WAIT_RECHECK_TIGHT_CADENCE_S)
     anchor = last_nudge if last_nudge is not None else first_seen
-    if now - anchor >= cadence:
+    if now - anchor >= effective_cadence:
         return ("nudge", new_rec, "due")
     return ("wait", new_rec, "grace")
 
@@ -653,14 +692,28 @@ _W_TRIGGER = (
     "`ops-wait` s dôkazom; mis-shape → owner needs-owner-action U #601 / gk #636.")
 
 
-def _flag_items(w_members, release_landed):
+def _flag_items(w_members, release_landed, stagnation_count=0):
     """Self-contained compact flag sentences for the fired W sub-categories
     (#714) -- each carries its identifying token + doctrine ticket # + a COUNT,
     NEVER a member enumeration (the session gets WHICH members, tagged, from
     `slice-quals --ops-wait`). Ordered most-urgent first. The #698 release-landed
     escalation keeps its >N owner-ask tail. Returns a list of standalone
-    sentences; the caller appends as many as fit under NUDGE_MAX_CHARS."""
+    sentences; the caller appends as many as fit under NUDGE_MAX_CHARS.
+
+    #914: `stagnation_count` — the consecutive non-shrinking nudge count from
+    `_recheck_decision`; a positive value fires the W-STAGNATION flag (the
+    LOUD signal the owner asked for)."""
     items = []
+    # #914 — W-STAGNATION clause, FIRST (with W-OVERFLOW) so it survives the
+    # greedy NUDGE_MAX_CHARS cap. A non-shrinking W for multiple nudge periods
+    # is the specific rot the owner reported.
+    stag = (stagnation_count if isinstance(stagnation_count, int)
+            and not isinstance(stagnation_count, bool) else 0)
+    if stag >= W_STAGNATION_FLAG_THRESHOLD:
+        it = "W-STAGNATION %d nudges (#914 -- W neklesá)" % stag
+        if stag >= W_STAGNATION_OWNER_ESCALATE_THRESHOLD:
+            it += ", zhrň STAV ownerovi ❓"
+        items.append(it + ".")
     # #754 — the AGGREGATE W-OVERFLOW clause, FIRST so it survives the greedy
     # NUDGE_MAX_CHARS cap. The goal state is I0 ∧ U0 ∧ W0: W is a DEBT bucket, and
     # an over-threshold |W| is a strop breach the loop must act on BEFORE new I
@@ -768,7 +821,8 @@ _UNPARK_AUDIT_TRIGGER = (
 
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
-                release_landed=None, discuss_audit=False, unpark_audit_n=0):
+                release_landed=None, discuss_audit=False, unpark_audit_n=0,
+                stagnation_count=0):
     """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
     per-member enumeration + full-doctrine wall that parked orphaned in the
     incident). Carries the `stuck-check: ` prefix (janitor own-payload
@@ -808,7 +862,8 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     # while under the cap -- the members stay in the command output, not here.
     optional = []
     if w_count:
-        optional.extend(_flag_items(w_list, release_landed))
+        optional.extend(_flag_items(w_list, release_landed,
+                                    stagnation_count=stagnation_count))
     if discuss_audit:
         optional.append(_DISCUSS_TRIGGER)
     # #753 (b): the acceptance-unpark audit — only when there ARE acceptance-parked
@@ -1037,6 +1092,29 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # upstream release can correct. So the escalation runs only for full /
     # branch-merge authority (origin = the canonical repo there); fork-no-merge
     # and an unresolvable authority fail safe to the generic wording.
+    # #914 — compute stagnation count LOCALLY for the nudge text; do NOT
+    # write to new_rec here (F1 fix: the state must be committed only AFTER
+    # send_verified confirms delivery, same invariant as last_nudge).
+    w_count_now = len(_member_numbers(members)) if isinstance(members, list) else 0
+    prior_w_at_nudge = new_rec.get("w_count_at_nudge")
+    prior_stag = new_rec.get("stagnation_count")
+    if not isinstance(prior_stag, int) or isinstance(prior_stag, bool):
+        prior_stag = 0
+    # F2 fix: W==0 is NOT stagnation — a freshly-parked W after N I-only
+    # nudges must not inherit a stale stagnation_count from the I-only era.
+    if w_count_now == 0 or (isinstance(prior_w_at_nudge, int)
+                            and not isinstance(prior_w_at_nudge, bool)
+                            and prior_w_at_nudge == 0):
+        stag_count = 0       # empty W or W growing from nothing — not stagnation
+    elif (isinstance(prior_w_at_nudge, int)
+            and not isinstance(prior_w_at_nudge, bool)):
+        if w_count_now >= prior_w_at_nudge:
+            stag_count = prior_stag + 1
+        else:
+            stag_count = 0   # W shrunk — reset
+    else:
+        stag_count = 0       # first nudge — no prior data
+
     rel_shaped = _release_shaped_numbers(members)
     rstate = None
     if rel_shaped and release_state_fetch is not None:
@@ -1063,7 +1141,8 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     text = _nudge_text(i_count, members, now, release_landed=landed,
                        discuss_audit=_dscope,
                        unpark_audit_n=(len(_acceptance_numbers(members))
-                                       if _dscope else 0))
+                                       if _dscope else 0),
+                       stagnation_count=stag_count)
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)
@@ -1094,11 +1173,22 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     watchdog._janitor_clear_watch(state, pid)
     new_rec["last_nudge"] = now
     new_rec["send_fails"] = 0
+    # #914 F1 fix: commit stagnation state ONLY on confirmed delivery
+    # (same invariant as last_nudge — a swallowed send must not inflate
+    # the counter, or 3 swallows reach the flag threshold with zero
+    # delivered nudges).
+    new_rec["w_count_at_nudge"] = w_count_now
+    new_rec["stagnation_count"] = stag_count
     wrecs[sid] = new_rec
     _nudge_gate.mark_sent(state, sid, "partition-audit", now)   # #797
     if handled is not None:
         handled.add(sid)
+    # #914 F5: include stagnation token + effective cadence in the log
+    # so live-box acceptance can prove the tight cadence fired.
+    effective = OPS_WAIT_RECHECK_TIGHT_CADENCE_S if stag_count >= 1 else _cadence()
     note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"
-    logs.append("ops-wait-recheck nudge %s -> partition %s (tracked %s)%s"
-                % (loc, sig, _fmt_age(now - new_rec["first_seen"]), note))
+    logs.append("ops-wait-recheck nudge %s -> partition %s stag=%d cadence=%ds "
+                "(tracked %s)%s"
+                % (loc, sig, stag_count, effective,
+                   _fmt_age(now - new_rec["first_seen"]), note))
     return logs
