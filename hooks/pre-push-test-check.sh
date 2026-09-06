@@ -90,6 +90,40 @@ case "$CUR_BRANCH" in
             fi
         done ;;
 esac
+# #909: Override BASE_REF with tighter candidates when available.
+# Priority: (a) origin/<branch> > (b) @{upstream} > (c) local develop/dev.
+# (a) For a RE-PUSH of an existing branch, origin/<branch> is the tightest
+#     base — only commits since the last push are in the diff.
+# (b) For a NEW branch push, the tracking branch (@{upstream}) may point to
+#     the correct integration branch even when the case block can't find it
+#     (e.g. upstream/develop exists but origin/develop doesn't — the case
+#     block's AND condition fails, but the branch tracks upstream/develop).
+# (c) When NEITHER remote integration branch refs NOR a tracking branch
+#     exist, try the LOCAL integration branch (develop/dev). If the branch
+#     was created from a local develop, git diff develop...HEAD gives the
+#     right range — only the branch's own commits.
+_909_OVERRIDDEN=false
+if [ "$CUR_BRANCH" != "HEAD" ] && \
+   git rev-parse -q --verify "origin/${CUR_BRANCH}" >/dev/null 2>&1; then
+    BASE_REF="origin/${CUR_BRANCH}"
+    _909_OVERRIDDEN=true
+fi
+if [ "$_909_OVERRIDDEN" = false ]; then
+    _TRACKING=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+    if [ -n "$_TRACKING" ] && git rev-parse -q --verify "$_TRACKING" >/dev/null 2>&1; then
+        BASE_REF="$_TRACKING"
+        _909_OVERRIDDEN=true
+    fi
+fi
+if [ "$_909_OVERRIDDEN" = false ]; then
+    for _LOCAL_CAND in develop dev; do
+        if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
+           git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
+            BASE_REF="$_LOCAL_CAND"
+            break
+        fi
+    done
+fi
 # The base ref may not exist at all (fresh repo, no origin) — the ranges below
 # already fall back on error, so BASE_REF is used as-is.
 

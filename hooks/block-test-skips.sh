@@ -108,6 +108,40 @@ case "$CUR_BRANCH" in
             fi
         done ;;
 esac
+# #909: Override BASE_REF with tighter candidates when available.
+# Priority: (a) origin/<branch> > (b) @{upstream} > (c) local develop/dev.
+# (a) For a RE-PUSH of an existing branch, origin/<branch> is the tightest
+#     base — only commits since the last push are in the diff.
+# (b) For a NEW branch push, the tracking branch (@{upstream}) may point to
+#     the correct integration branch even when the case block can't find it
+#     (e.g. upstream/develop exists but origin/develop doesn't — the case
+#     block's AND condition fails, but the branch tracks upstream/develop).
+# (c) When NEITHER remote integration branch refs NOR a tracking branch
+#     exist, try the LOCAL integration branch (develop/dev). If the branch
+#     was created from a local develop, git diff develop...HEAD gives the
+#     right range — only the branch's own commits.
+_909_OVERRIDDEN=false
+if [ "$CUR_BRANCH" != "HEAD" ] && \
+   git rev-parse -q --verify "origin/${CUR_BRANCH}" >/dev/null 2>&1; then
+    BASE_REF="origin/${CUR_BRANCH}"
+    _909_OVERRIDDEN=true
+fi
+if [ "$_909_OVERRIDDEN" = false ]; then
+    _TRACKING=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+    if [ -n "$_TRACKING" ] && git rev-parse -q --verify "$_TRACKING" >/dev/null 2>&1; then
+        BASE_REF="$_TRACKING"
+        _909_OVERRIDDEN=true
+    fi
+fi
+if [ "$_909_OVERRIDDEN" = false ]; then
+    for _LOCAL_CAND in develop dev; do
+        if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
+           git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
+            BASE_REF="$_LOCAL_CAND"
+            break
+        fi
+    done
+fi
 # The base ref may not exist at all (fresh repo, no origin) — the diffs
 # below already fall back on error, so BASE_REF is used as-is.
 
@@ -124,6 +158,18 @@ LAST_MSG_FLAT=$(printf '%s' "$LAST_MSG" | tr '\n' ' ')
 if echo "$LAST_MSG_FLAT" | grep -qE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+'; then
     REASON=$(echo "$LAST_MSG_FLAT" | grep -oE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+' | head -1 | sed 's/[[:space:]]*$//')
     echo "$(date -Iseconds)  project=$PROJECT  sha=$LAST_SHA  $REASON" >> "$AUDIT_LOG"
+    exit 0
+fi
+
+# #909: Also check the COMMAND TEXT for the bypass marker. When the commit
+# and push are in a single Bash call (e.g. `git commit -m "... # airuleset:
+# test-skip-ok reason" && git push`), PreToolUse fires BEFORE git commit
+# runs, so `git log -1` reads the PREVIOUS commit — the marker in the
+# pending commit is invisible. Scanning the command text catches it.
+INPUT_FLAT=$(printf '%s' "$INPUT" | tr '\n' ' ')
+if echo "$INPUT_FLAT" | grep -qE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+'; then
+    REASON=$(echo "$INPUT_FLAT" | grep -oE '#[[:space:]]*airuleset:test-skip-ok[[:space:]]+[^#]+' | head -1 | sed 's/[[:space:]]*$//')
+    echo "$(date -Iseconds)  project=$PROJECT  sha=pending  $REASON (same-call)" >> "$AUDIT_LOG"
     exit 0
 fi
 
