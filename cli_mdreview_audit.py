@@ -451,18 +451,24 @@ def classify_fleet_host(host):
 
     Returns (status, reason) where status is 'active' or 'skipped'.
     Classification order (first match wins):
-      1. paused (#851) -> skipped
-      2. user in WEBTERM_ONLY_USERS (#869) -> skipped
-      3. user in WEBTERM_OBSERVER_USERS (#867) -> skipped
+      1. pending (#537) -> skipped (account not yet created on the box)
+      2. paused (#851) -> skipped (owner-frozen stream)
+      3. webterm-observer (#867, e.g. dominika/marek) -> skipped
+         (no Claude sessions to audit)
       4. else -> active
+
+    Note: WEBTERM_ONLY_USERS (david1-4) are NOT skipped — they are full
+    Claude dev streams reachable via the operator identity key (#903
+    review H1). The webterm-only flag is an SSH ACCESS POLICY for the
+    human developer, not a fleet reachability constraint.
     """
+    if host.get("pending"):
+        return "skipped", "pending (#537)"
     if cli_fleet.is_paused(host):
         return "skipped", f"paused: {cli_fleet.paused_reason(host)}"
 
     user = host.get("user", "")
-    if user in cli_fleet.WEBTERM_ONLY_USERS:
-        return "skipped", "webterm-only (#869)"
-    if user in cli_fleet.WEBTERM_OBSERVER_USERS:
+    if cli_fleet.is_webterm_observer(user):
         return "skipped", "webterm-observer (#867)"
 
     return "active", ""
@@ -544,8 +550,9 @@ def run_fleet(runner=None, fleet_runner=None):
                 hk_opts = cli_remote.host_key_check_opts(host)
                 ssh_base = ["ssh", "-o", "BatchMode=yes",
                             "-o", "ConnectTimeout=10"] + hk_opts
-                # #903: use per-host identity when present (same ssh
-                # options as cli_remote._deploy_to_all_remotes).
+                # #903: use per-host identity when present.
+                # IdentitiesOnly=yes is stricter than the deploy loop
+                # (only the pinned key is offered, fewer fail2ban lines).
                 identity = host.get("identity", "")
                 if identity:
                     expanded = os.path.expanduser(identity)

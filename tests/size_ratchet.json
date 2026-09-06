@@ -18,7 +18,7 @@
     "cli_filedrop_watchdog.py": 532,
     "cli_fleet.py": 774,
     "cli_key_rotation.py": 711,
-    "cli_mdreview_audit.py": 662,
+    "cli_mdreview_audit.py": 669,
     "cli_model_audit.py": 154,
     "cli_onboard.py": 931,
     "cli_onboard_exec.py": 140,

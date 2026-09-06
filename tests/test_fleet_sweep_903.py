@@ -38,7 +38,11 @@ class TestClassifyFleetHost(unittest.TestCase):
         self.assertEqual(status, "skipped")
         self.assertIn("paused", reason.lower())
 
-    def test_webterm_only_user_skipped(self):
+    def test_webterm_only_user_is_active(self):
+        """david1 is webterm-only but is a full Claude dev stream — it must
+        be classified active (not skipped). The webterm-only flag is an SSH
+        access policy for the human dev, not a fleet reachability
+        constraint (#903 review H1)."""
         from cli_mdreview_audit import classify_fleet_host
         host = {
             "name": "david1@subdev",
@@ -46,8 +50,21 @@ class TestClassifyFleetHost(unittest.TestCase):
             "user": "david1",
         }
         status, reason = classify_fleet_host(host)
+        self.assertEqual(status, "active")
+        self.assertEqual(reason, "")
+
+    def test_pending_host_skipped(self):
+        """A pending host (account not yet created) must be skipped."""
+        from cli_mdreview_audit import classify_fleet_host
+        host = {
+            "name": "future@subdev",
+            "host": "100.118.174.27",
+            "user": "future",
+            "pending": True,
+        }
+        status, reason = classify_fleet_host(host)
         self.assertEqual(status, "skipped")
-        self.assertIn("webterm-only", reason.lower())
+        self.assertIn("pending", reason.lower())
 
     def test_webterm_observer_skipped(self):
         from cli_mdreview_audit import classify_fleet_host
@@ -83,9 +100,9 @@ class TestClassifyFleetHost(unittest.TestCase):
         status, reason = classify_fleet_host(host)
         self.assertEqual(status, "active")
 
-    def test_dominika_webterm_only_takes_precedence(self):
-        """dominika is in BOTH WEBTERM_ONLY_USERS and WEBTERM_OBSERVER_USERS;
-        webterm-only should take precedence (it is checked first)."""
+    def test_dominika_observer_skipped(self):
+        """dominika is in WEBTERM_OBSERVER_USERS (no Claude sessions) —
+        must be skipped as webterm-observer."""
         from cli_mdreview_audit import classify_fleet_host
         host = {
             "name": "dominika@subdev",
@@ -94,10 +111,8 @@ class TestClassifyFleetHost(unittest.TestCase):
         }
         status, reason = classify_fleet_host(host)
         self.assertEqual(status, "skipped")
-        # Either webterm-only or observer is acceptable
-        self.assertTrue(
-            "webterm" in reason.lower(),
-            f"expected webterm classification, got {reason}")
+        self.assertIn("observer", reason.lower(),
+                      f"expected webterm-observer, got {reason}")
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +172,8 @@ class TestFleetSkipped(unittest.TestCase):
     def test_skipped_key_in_result(self):
         from cli_mdreview_audit import run_fleet
         hosts = [
-            {"name": "david1@subdev", "host": "100.118.174.27",
-             "user": "david1", "repo_path": "~/a",
+            {"name": "marek@subdev", "host": "100.118.174.27",
+             "user": "marek", "repo_path": "~/a",
              "identity": "~/.secrets/gatekeeper_access_ed25519"},
         ]
         with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
@@ -166,10 +181,10 @@ class TestFleetSkipped(unittest.TestCase):
             result = run_fleet(fleet_runner=lambda h: ('{"schema":1}', 0))
         self.assertIn("skipped", result,
                       "result must contain 'skipped' key")
-        # david1 is webterm-only → should be in skipped
+        # marek is webterm-observer → should be in skipped
         skipped_names = [s["host"] for s in result["skipped"]]
-        self.assertIn("david1@subdev", skipped_names,
-                      f"david1 must be skipped, got {result['skipped']}")
+        self.assertIn("marek@subdev", skipped_names,
+                      f"marek must be skipped, got {result['skipped']}")
 
     def test_active_host_not_in_skipped(self):
         from cli_mdreview_audit import run_fleet
@@ -204,7 +219,7 @@ class TestActOnDueSkipped(unittest.TestCase):
             "boxes": [],
             "failed": [{"host": "real-fail", "error": "rc=1"}],
             "skipped": [
-                {"host": "david1@subdev", "reason": "webterm-only (#869)"},
+                {"host": "marek@subdev", "reason": "webterm-observer (#867)"},
             ],
         }
         act_on_due(999, "30d", audit_data, gh_runner=fake_gh)
@@ -215,7 +230,7 @@ class TestActOnDueSkipped(unittest.TestCase):
         body = " ".join(str(x) for x in comment_calls[0])
         self.assertIn("SKIPPED", body,
                       f"comment must mention SKIPPED: {body}")
-        self.assertIn("david1@subdev", body)
+        self.assertIn("marek@subdev", body)
 
 
 if __name__ == "__main__":
