@@ -681,7 +681,6 @@ WEBTERM_DASHBOARD_TABS = {
     # owner request 2026-08-26 (#719). EXCLUDES montalu7/8, david4, simap1,
     # marek@subdev, stepan@forestshop-dev, admin@forestshop-dev.
     "zbynek": [
-        "ar",  # #870 F4a: controller's own tmux (local)
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
