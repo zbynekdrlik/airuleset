@@ -34,7 +34,7 @@ vlákno „Zakaznicky portal 3" — https://<instancia>/odoo/discuss?active_id=d
 
 - Thread reference = **NAME + deep URL**, every time. The deep URL opens the exact thread: `https://<client-instance>/odoo/discuss?active_id=discuss.channel_<N>` (montalu → `https://erp.montalu.cloud/…`). Open it and confirm it loads before pasting (same no-dead-links discipline as any `🌐` URL).
 - **Banned — a BARE channel id in owner-facing prose (all rewordings):** `vlakno 288`, `vo vlákne 288`, `Discuss vlákno 288`, `kanál 293`, `ch275`, `channel 288`. The owner's exact complaint (montalu3, 2026-08-24): *"co ja mam akoze robit s 'vlakno 288'?!"* — a number they cannot decode.
-- Origin: issue 657, extending 650/595. Mechanically backstopped: `stop-check-prose-violations.sh` blocks a bare channel id without a `discuss.channel_<N>` deep URL.
+- Origin: #657, extending #650/#595. Mechanically backstopped: `stop-check-prose-violations.sh` blocks a bare channel id without a `discuss.channel_<N>` deep URL.
 
 Applies to all streams (montalu*/david*/miva*/gk) and all messages and all rewordings.
 
@@ -42,5 +42,5 @@ Applies to all streams (montalu*/david*/miva*/gk) and all messages and all rewor
 
 **Every `❓` question to the owner about Odoo work MUST carry the Odoo project.task reference:** task name + deep URL (`https://<instancia>/odoo/project/<pid>/tasks/<tid>`) + current stage. Odoo task = the primary client tracking ("vyjadruje čo chcel zákazník"); a GitHub issue is the developer tracking and appears only alongside it. If no matching task exists, state it explicitly.
 
-- **Deep URLs must be FUNCTIONAL action URLs** — never raw model-form URLs (`/odoo/project.task/503` opens the native form without custom tabs; the owner sees "nič tam nie je"). Use `/odoo/project/<pid>/tasks/<tid>` or `/odoo/action-<xmlid>/<id>`. Origin: issue 907, montalu 2026-09-06.
+- **Deep URLs must be FUNCTIONAL action URLs** — never raw model-form URLs (`/odoo/project.task/503` opens the native form without custom tabs; the owner sees "nič tam nie je"). Use `/odoo/project/<pid>/tasks/<tid>` or `/odoo/action-<xmlid>/<id>`. Origin: #907, montalu 2026-09-06.
 - Mechanically backstopped: `stop-check-question-quality.sh` Check 7 blocks an Odoo-context `❓` block with no task URL.
