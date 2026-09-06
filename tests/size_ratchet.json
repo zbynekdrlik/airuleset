@@ -471,7 +471,7 @@
     "tests/test_webterm_dominika.py": 526,
     "tests/test_webterm_f4a_live.py": 362,
     "tests/test_webterm_f4c_dominika_flip.py": 155,
-    "tests/test_webterm_f4c_inventory_host.py": 165,
+    "tests/test_webterm_f4c_inventory_host.py": 169,
     "tests/test_webterm_f4c_marek_flip.py": 111,
     "tests/test_webterm_f4c_prereq_gate.py": 167,
     "tests/test_webterm_fit_reopen_798_886.py": 155,
