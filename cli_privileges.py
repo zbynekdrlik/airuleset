@@ -164,7 +164,57 @@ PRIVILEGES: List[Privilege] = [
         must_move=True,
         used_by=("cli_webterm_profiles.py:96 (WEBTERM_DAVID_IDENTITY)",),
     ),
-    # #882: webterm_marek_ed25519 entry removed (marek webterm module deleted)
+    # #870 F4a D9: per-human webterm keys for the controller consolidation.
+    # #882 removed webterm_marek_ed25519 when the dev STREAM was cancelled, but
+    # the webterm OBSERVE lane survives — the key is re-registered here.
+    Privilege(
+        name="webterm_zbynek_ed25519",
+        kind=KIND_SSH_KEY,
+        local_path="~/.secrets/webterm_zbynek_ed25519",
+        reach="dedicated webterm ssh key for the owner's own tabs on the "
+              "controller (forced-command restrict,pty,command= entries on "
+              "dev1/dev2/gk/subdev targets — never a fleet push key)",
+        rotation="new keypair on the controller box, authorize on each "
+                 "target's authorized_keys with forced-command, remove old key",
+        must_move=True,
+        used_by=("cli_webterm_profiles.py (zbynek_inventory, forward-ref #870)",),
+    ),
+    Privilege(
+        name="webterm_marek_ed25519",
+        kind=KIND_SSH_KEY,
+        local_path="~/.secrets/webterm_marek_ed25519",
+        reach="dedicated webterm ssh key for marek's OBSERVE lane tabs on the "
+              "controller (montalu/miva/dev/gk/forestshop targets — never the "
+              "fleet gatekeeper key)",
+        rotation="new keypair on the controller box, authorize on each "
+                 "target's authorized_keys, remove old key",
+        must_move=True,
+        used_by=("cli_webterm_profiles.py:189 (WEBTERM_MAREK_IDENTITY)",),
+    ),
+    Privilege(
+        name="webterm_dominika_ed25519",
+        kind=KIND_SSH_KEY,
+        local_path="~/.secrets/webterm_dominika_ed25519",
+        reach="dedicated webterm ssh key for dominika's OBSERVE lane tabs on "
+              "the controller (montalu5/miva1 loopback — never the fleet "
+              "gatekeeper key)",
+        rotation="new keypair on the controller box, authorize for "
+                 "montalu5/miva1@subdev, remove old key",
+        must_move=True,
+        used_by=("cli_webterm_profiles.py:397 (WEBTERM_DOMINIKA_IDENTITY)",),
+    ),
+    Privilege(
+        name="controller_tunnel_creds",
+        kind=KIND_STORE,
+        local_path="~/.cloudflared/controller-webterm.json",
+        reach="controller's SINGLE cloudflared tunnel credentials JSON — the "
+              "sole on-box secret for the multi-ingress tunnel fronting all 4 "
+              "webterm lanes (zbynek/david/marek/dominika hostnames)",
+        rotation="create a new tunnel on the controller via CF API or dev2's "
+                 "origin cert; the old creds are revoked with the old tunnel",
+        must_move=True,
+        used_by=("cli_webterm_tunnel.py (controller tunnel, forward-ref #870)",),
+    ),
     Privilege(
         name="cloudflare-newlevel-access",
         kind=KIND_API_TOKEN,

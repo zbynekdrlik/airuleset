@@ -550,7 +550,8 @@ class Gateway:
 
     def __init__(self, dash_index, cred_path, ttyd_host, ttyd_port, base_path,
                  origins, sessions=None, limiter=None, trust_access_header=None,
-                 u_status_path=None, u_collect_spawn=None, ttyd_socket=None):
+                 u_status_path=None, u_collect_spawn=None, ttyd_socket=None,
+                 allowed_emails=None):
         self.dash_index = dash_index
         self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
         # #677: the aggregate U map served at /u-status + a detached spawner that
@@ -588,10 +589,23 @@ class Gateway:
         # identical). Cloudflare strips client-supplied `Cf-*` headers before
         # setting the authentic one; #663 the gateway binds a mode-0700 UNIX socket
         # in the account runtime dir (reachable only by the account + its own
-        # cloudflared, so a peer unix account cannot forge this header) — see
-        # cli_webterm_access.py's honest residual note on the absence of stdlib RSA
-        # JWT validation.
+        # cloudflared, so a peer unix account cannot forge this header).
+        #
+        # #870 B1 (controller consolidation): on the controller box ALL 4 lane
+        # gateways run as the SAME `airuleset` unix account, so the UNIX-socket
+        # account boundary is a SINGLE-account trust domain — a forged trust
+        # header within that account is a same-account no-escalation (the account
+        # already owns every lane's shell). The per-lane `allowed_emails`
+        # defence-in-depth (#870 D7) is the remaining cross-lane check within
+        # that single account. See cli_webterm_access.py's honest residual note
+        # on the absence of stdlib RSA JWT validation.
         self.trust_access_header = trust_access_header
+        # #870 F4a D7: per-lane allowed-emails defence-in-depth. In Access mode,
+        # _authed fails CLOSED on an email NOT in this set. None = no restriction
+        # (backwards-compatible: every authenticated email passes).
+        self.allowed_emails = (
+            frozenset(e.lower() for e in allowed_emails)
+            if allowed_emails else None)
 
     # -- helpers ---------------------------------------------------------- #
 
@@ -627,8 +641,14 @@ class Gateway:
         # Access mode: authenticated iff the trusted Cloudflare identity header is
         # present + non-empty. No cookie/session/credential is involved. Password
         # mode (trust_access_header is None): the unchanged session-cookie check.
+        # #870 F4a D7: when allowed_emails is set, fail CLOSED on a non-member.
         if self.trust_access_header:
-            return self._access_identity(headers) is not None
+            identity = self._access_identity(headers)
+            if identity is None:
+                return False
+            if self.allowed_emails is not None:
+                return identity.lower() in self.allowed_emails
+            return True
         return self.sessions.valid(cookie_token(headers))
 
     # -- read a request head with a hard size cap ------------------------- #
@@ -971,7 +991,8 @@ async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1"
                         ttyd_port=7682, base_path="/t", origins=None,
                         sessions=None, limiter=None, trust_access_header=None,
                         u_status_path=None, u_collect_spawn=None,
-                        socket_path=None, ttyd_socket=None):
+                        socket_path=None, ttyd_socket=None,
+                        allowed_emails=None):
     """Bind + start the gateway. Default: a TCP `host:port` listener (the caller
     reads `server.sockets[0].getsockname()` for an ephemeral port). #663: when
     `socket_path` is set, bind a UNIX-domain socket instead (a stale socket file is
@@ -983,7 +1004,7 @@ async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1"
                  origins or [], sessions=sessions, limiter=limiter,
                  trust_access_header=trust_access_header,
                  u_status_path=u_status_path, u_collect_spawn=u_collect_spawn,
-                 ttyd_socket=ttyd_socket)
+                 ttyd_socket=ttyd_socket, allowed_emails=allowed_emails)
     if socket_path:
         _unlink_quiet(socket_path)      # clear a stale single-instance leftover
         # #663 review: bind UNDER umask 077 so the socket is owner-only from the
@@ -1018,13 +1039,16 @@ async def _main_async(args):
     origins = [] if args.socket else _origins_for(args.bind, args.port)
     # #677 owner --u-collect / #703 lane --u-lane — see _u_status_config.
     u_status_path, u_collect_spawn = _u_status_config(args)
+    ae = ([e.strip() for e in args.allowed_emails.split(",") if e.strip()]
+          if args.allowed_emails else None)
     server = await start_gateway(
         args.bind, args.port, args.dash_index, args.cred,
         ttyd_host=args.ttyd_host, ttyd_port=args.ttyd_port,
         base_path=args.base_path, origins=origins,
         trust_access_header=args.trust_access_header,
         u_status_path=u_status_path, u_collect_spawn=u_collect_spawn,
-        socket_path=args.socket, ttyd_socket=args.ttyd_socket)
+        socket_path=args.socket, ttyd_socket=args.ttyd_socket,
+        allowed_emails=ae)
     if args.socket:
         upstream = ("unix:%s" % args.ttyd_socket if args.ttyd_socket
                     else "%s:%d" % (args.ttyd_host, args.ttyd_port))
@@ -1115,6 +1139,11 @@ def main(argv):
                         "identity header (e.g. Cf-Access-Authenticated-User-Email) "
                         "instead of a password/login form. Mutually exclusive with "
                         "--cred.")
+    p.add_argument("--allowed-emails", dest="allowed_emails", default=None,
+                   help="#870 F4a D7: comma-separated list of allowed email "
+                        "addresses for this lane. Fail CLOSED on a non-member "
+                        "in Access mode (defence-in-depth alongside Cloudflare "
+                        "Access policy).")
     p.add_argument("--ttyd-host", default="127.0.0.1")
     p.add_argument("--ttyd-port", type=int, default=7682)
     p.add_argument("--ttyd-socket", dest="ttyd_socket", default=None,

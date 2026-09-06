@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import namedtuple
 
 
 # ---------------------------------------------------------------------------
@@ -66,18 +67,56 @@ WEBTERM_DAVID_LANE_PUBKEY = (
 )
 
 
-def _key_blob(line):
-    """The base64 key BLOB (field 2) — the unique-per-key token the whole
-    idempotency + foreign-key detection keys on.  Same helper shape as
-    ``cli_owner_keys._key_blob``.  Returns None for malformed/blank."""
+# #870 F4a D5: controller lane per-human forced-command pubkeys. Empty until
+# F4b mints the keys; dict of {human: pubkey_line} where pubkey_line is a bare
+# "ssh-ed25519 AAAA... comment" (options are prepended by desired_keys_for_user).
+WEBTERM_CONTROLLER_LANE_PUBKEYS = {}
+
+# ---------------------------------------------------------------------------
+# Options-aware authorized_keys parser (#870 F4a D5)
+# ---------------------------------------------------------------------------
+
+SSH_KEY_TYPES = frozenset({
+    "ssh-ed25519", "ssh-rsa", "ssh-dss",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+})
+
+AuthorizedKey = namedtuple("AuthorizedKey", "options key_type blob comment")
+
+
+def parse_authorized_key(line):
+    """Parse an authorized_keys line into ``AuthorizedKey(options, key_type,
+    blob, comment)``. Detection: scan whitespace-split fields left-to-right;
+    the FIRST field matching ``SSH_KEY_TYPES`` is the key type. Everything
+    before it (if any) is the options prefix — which may contain spaces inside
+    quoted ``command="..."`` values. Returns ``AuthorizedKey(None, ...)`` for a
+    plain key line without options."""
     parts = (line or "").split()
-    return parts[1] if len(parts) >= 2 else None
+    if len(parts) < 2:
+        return AuthorizedKey(None, None, None, "")
+    for i, field in enumerate(parts):
+        if field in SSH_KEY_TYPES:
+            options = " ".join(parts[:i]) if i > 0 else None
+            key_type = field
+            blob = parts[i + 1] if i + 1 < len(parts) else None
+            comment = " ".join(parts[i + 2:]) if i + 2 < len(parts) else ""
+            return AuthorizedKey(options, key_type, blob, comment)
+    return AuthorizedKey(None, parts[0], parts[1] if len(parts) > 1 else None,
+                         " ".join(parts[2:]) if len(parts) > 2 else "")
+
+
+def _key_blob(line):
+    """The base64 key BLOB — the unique-per-key token the whole idempotency +
+    foreign-key detection keys on. Options-aware: delegates to
+    ``parse_authorized_key`` so ``restrict,pty,... ssh-ed25519 AAAA...`` lines
+    return the blob, not the options prefix. Returns None for malformed/blank."""
+    return parse_authorized_key(line).blob
 
 
 def _key_comment(line):
-    """The trailing comment (fields 3+) of an authorized_keys line, or ''."""
-    parts = (line or "").split(None, 2)
-    return parts[2] if len(parts) >= 3 else ""
+    """The trailing comment of an authorized_keys line, or ''. Options-aware."""
+    return parse_authorized_key(line).comment
 
 
 def _write_0600(path, content):
