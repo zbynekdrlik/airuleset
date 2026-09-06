@@ -178,29 +178,40 @@ def append_controller_lane_pubkey_command(user, key_line, ssh_dir=None):
     rewrite on a non-webterm-only target is one-bug-from-lockout, F1 ruling).
 
     The key_line MAY carry options (e.g. ``restrict,pty,command="..."``); the
-    whole line is appended verbatim. Returns the shell script string."""
+    whole line is appended verbatim. Returns the shell script string.
+
+    The script runs on the REMOTE (over ssh), so ``~`` is expanded by the
+    remote shell via ``$HOME`` (double-quoted, never single-quoted — single
+    quotes suppress tilde expansion). ``set -euo pipefail`` per
+    script-failure-policy.md. Key line and comment are shell-escaped via
+    ``printf '%s'`` to avoid injection from ``command="..."`` options
+    containing quotes."""
+    import shlex as _shlex
     if ssh_dir is None:
-        ssh_dir = "~/.ssh"
+        ssh_dir = "$HOME/.ssh"
     ak = parse_authorized_key(key_line)
     if not ak.blob:
         raise ValueError("key_line has no parseable blob: %r" % key_line)
+    escaped_key = _shlex.quote(key_line.rstrip("\n"))
+    escaped_comment = _shlex.quote(ak.comment or "(no comment)")
     return (
+        "set -euo pipefail\n"
         "# airuleset:managed append-only key (#870 F4a D6)\n"
-        "mkdir -p %(ssh_dir)s && chmod 700 %(ssh_dir)s\n"
-        "AK='%(ssh_dir)s/authorized_keys'\n"
-        "BLOB='%(blob)s'\n"
-        "if ! grep -qF \"$BLOB\" \"$AK\" 2>/dev/null; then\n"
-        "  echo '%(key_line)s' >> \"$AK\"\n"
-        "  chmod 600 \"$AK\"\n"
+        'mkdir -p "%(ssh_dir)s" && chmod 700 "%(ssh_dir)s"\n'
+        'AK="%(ssh_dir)s/authorized_keys"\n'
+        "BLOB=%(blob)s\n"
+        'if ! grep -qF "$BLOB" "$AK" 2>/dev/null; then\n'
+        "  printf '%%s\\n' %(key_line)s >> \"$AK\"\n"
+        '  chmod 600 "$AK"\n'
         "  echo \"  appended key (%(comment)s) to $AK\"\n"
         "else\n"
         "  echo \"  key (%(comment)s) already in $AK — no-op\"\n"
         "fi\n"
     ) % {
         "ssh_dir": ssh_dir,
-        "blob": ak.blob,
-        "key_line": key_line.rstrip("\n"),
-        "comment": ak.comment or "(no comment)",
+        "blob": _shlex.quote(ak.blob),
+        "key_line": escaped_key,
+        "comment": escaped_comment,
     }
 
 

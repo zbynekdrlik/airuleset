@@ -506,6 +506,11 @@ def dominika_inventory():
 # means this key can only exec tmux, never a shell.
 WEBTERM_ZBYNEK_IDENTITY = "~/.secrets/webterm_zbynek_ed25519"
 
+# #870 F4a D8 (Y4 review fix): the push key used by the U-dot collector
+# (_ssh_read_prefix's collect_identity). The forced-command webterm key
+# (WEBTERM_ZBYNEK_IDENTITY) can only exec tmux — it kills _U_READER_SNIPPET.
+ZBYNEK_COLLECT_IDENTITY = "~/.secrets/airuleset_push_ed25519"
+
 # Owner's own tabs — the hosts are DUPLICATED from cli_fleet / cli_webterm for
 # the zero-import-leaf contract (the marek/david/dominika precedent). Drift-lock
 # tests tie these to the ONE fleet source.
@@ -528,9 +533,9 @@ def zbynek_inventory():
     The ``ar`` tab (``local: True``) is the controller's own tmux — the
     ``airuleset`` account's session, managed by the owner, not an ssh target.
 
-    This — and ONLY this — is what the zbynek lane's ttyd is launched against
-    when running on the controller, so it is the owner's full connect allowlist
-    on that box."""
+    F4c wires this into the live install path (``profile_inventory`` routes
+    OWNER to it when ``LANE_HOST["zbynek"] == "controller"``); until then
+    the owner profile still uses the fleet-derived ``webterm_inventory()``."""
     return [
         {
             "id": "ar",
@@ -582,6 +587,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu1",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "montalu2-subdev",
@@ -593,6 +599,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu2",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "montalu3-subdev",
@@ -604,6 +611,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu3",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "montalu4-subdev",
@@ -615,6 +623,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu4",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "montalu5-subdev",
@@ -626,6 +635,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu5",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "montalu6-subdev",
@@ -637,6 +647,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "montalu6",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "david1-subdev",
@@ -648,6 +659,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "david1",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "david2-subdev",
@@ -659,6 +671,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "david2",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "david3-subdev",
@@ -670,6 +683,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "david3",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "miva1-subdev",
@@ -681,6 +695,7 @@ def zbynek_inventory():
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "miva1",
             "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
             "id": "spinbike-vps",

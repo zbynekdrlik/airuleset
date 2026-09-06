@@ -603,9 +603,11 @@ class Gateway:
         # #870 F4a D7: per-lane allowed-emails defence-in-depth. In Access mode,
         # _authed fails CLOSED on an email NOT in this set. None = no restriction
         # (backwards-compatible: every authenticated email passes).
+        # Gate with `is not None`, never truthiness — an empty list is a
+        # CLOSED gate (no email passes), not a missing gate (#703 lesson).
         self.allowed_emails = (
             frozenset(e.lower() for e in allowed_emails)
-            if allowed_emails else None)
+            if allowed_emails is not None else None)
 
     # -- helpers ---------------------------------------------------------- #
 

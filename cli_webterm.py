@@ -869,6 +869,20 @@ def _ssh_read_prefix(entry):
     identity = entry.get("collect_identity") or entry.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity)] + common
+    # #870 F4a D4 (Y1 review fix): sshpass refusal on controller — same guard
+    # as _ssh_interactive_prefix. The collector path reaches here via
+    # _owner_u_entries → fleet inventory entries with identity=None.
+    try:
+        from watchdog.reaper import default_box_class
+        if default_box_class() == "controller":
+            raise ValueError(
+                "sshpass branch reached in _ssh_read_prefix on the controller "
+                "box for entry %r — every non-local entry must carry an explicit "
+                "identity on the controller (#870 RED-2)"
+                % entry.get("id", "?"))
+    except ImportError:
+        print("  webterm: watchdog.reaper not importable (_ssh_read_prefix)",
+              file=sys.stderr)
     return ["sshpass", "-p", "newlevel", "ssh"] + common
 
 
