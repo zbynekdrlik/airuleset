@@ -89,17 +89,17 @@ class TestControllerHostedInventoryNoLoopback(_BoxClassPinned):
                 % (len(loopback), [e["id"] for e in loopback]))
 
     def test_marek_controller_no_loopback(self):
-        """marek's loopback entries must use tailscale IP when on controller."""
-        with m.patch.dict(p.LANE_HOST, {"marek": "controller"}):
-            inv = p.marek_inventory()
-            # marek has dev1/dev2/gk/forestshop (non-subdev) + subdev loopbacks
-            loopback_entries = [e for e in inv
-                                if e.get("host") == p.SUBDEV_LOCAL]
-            self.assertEqual(
-                len(loopback_entries), 0,
-                "marek has %d loopback entries on controller: %s"
-                % (len(loopback_entries),
-                   [e["id"] for e in loopback_entries]))
+        """marek is LIVE on controller — no entry should have 127.0.0.1."""
+        # #870 F4c-marek: no longer needs a patch — LANE_HOST is "controller".
+        self.assertEqual(p.LANE_HOST["marek"], "controller")
+        inv = p.marek_inventory()
+        loopback_entries = [e for e in inv
+                            if e.get("host") == p.SUBDEV_LOCAL]
+        self.assertEqual(
+            len(loopback_entries), 0,
+            "marek has %d loopback entries on controller: %s"
+            % (len(loopback_entries),
+               [e["id"] for e in loopback_entries]))
 
     def test_zbynek_controller_no_loopback(self):
         """zbynek's subdev entries must use tailscale IP when on controller."""
@@ -129,15 +129,19 @@ class TestSubdevHostedInventoryKeepsLoopback(_BoxClassPinned):
                     entry["host"], p.SUBDEV_LOCAL,
                     "david entry %r lost loopback on subdev" % entry["id"])
 
-    def test_marek_subdev_keeps_loopback(self):
-        """marek's subdev-targeted entries use loopback on subdev."""
-        self.assertEqual(p.LANE_HOST["marek"], "subdev")
-        inv = p.marek_inventory()
-        for entry in inv:
-            if entry["id"].endswith("-subdev"):
-                self.assertEqual(
-                    entry["host"], p.SUBDEV_LOCAL,
-                    "marek entry %r lost loopback on subdev" % entry["id"])
+    def test_marek_subdev_keeps_loopback_when_lane_on_subdev(self):
+        """marek's subdev-targeted entries use loopback when lane is on subdev
+        (regression lock — patched since LANE_HOST is now 'controller')."""
+        # #870 F4c-marek: LANE_HOST is now "controller", so patch back to
+        # "subdev" to lock the regression (the dominika pattern).
+        with m.patch.dict(p.LANE_HOST, {"marek": "subdev"}):
+            inv = p.marek_inventory()
+            for entry in inv:
+                if entry["id"].endswith("-subdev"):
+                    self.assertEqual(
+                        entry["host"], p.SUBDEV_LOCAL,
+                        "marek entry %r lost loopback on subdev"
+                        % entry["id"])
 
 
 class TestSubdevTailscaleHostDriftLock(_BoxClassPinned):

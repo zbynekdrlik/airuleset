@@ -50,9 +50,9 @@ class TestProfileForHostAccountAware(unittest.TestCase):
     def test_subdev_default_is_still_david(self):
         self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
 
-    def test_subdev_marek_account_resolves_marek(self):
-        # #882 scope correction: marek lane RESTORED (observer, not dev stream).
-        self.assertEqual(p.profile_for_host("subdev", account="marek"), p.MAREK)
+    def test_subdev_marek_account_no_longer_marek(self):
+        # #870 F4c-marek: marek moved to controller — subdev no longer hosts him.
+        self.assertIsNone(p.profile_for_host("subdev", account="marek"))
 
     def test_dev1_is_owner_regardless_of_account(self):
         self.assertEqual(p.profile_for_host("dev1", account="dominika"), p.OWNER)
