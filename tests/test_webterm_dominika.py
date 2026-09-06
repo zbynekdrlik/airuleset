@@ -453,6 +453,16 @@ class TestDominikaLaneDashboardHuman(unittest.TestCase):
 
 
 class TestDominikaDispatch(unittest.TestCase):
+    def setUp(self):
+        # #870 F4a-live: the controller dispatch branch reads the REAL
+        # box-class marker + pwd user; on the controller box that hijacks
+        # this legacy dispatch test (cycle-B RED-2 pattern) — pin a
+        # workstation box class so the profile dispatch under test runs.
+        _p = m.patch("watchdog.reaper.default_box_class",
+                     return_value="workstation")
+        _p.start()
+        self.addCleanup(_p.stop)
+
     def test_dominika_account_on_subdev_dispatches_dominika(self):
         called = []
         with m.patch.object(w.os, "uname",
