@@ -90,10 +90,21 @@ class TestUTenantSets703(unittest.TestCase):
         self.assertTrue(profiles.dominika_inventory())          # inventory non-empty
         self.assertEqual(profiles.u_tenant_entries(profiles.DOMINIKA), [])
 
-    def test_fail_closed_for_owner_and_unknown_profiles(self):
-        # The owner profile has NO u_tenant set (its collector is the separate
-        # owner-only --u-collect path); an unknown lane collects nothing.
-        self.assertEqual(profiles.u_tenant_entries(profiles.OWNER), [])
+    def test_owner_u_tenant_entries_are_stream_entries(self):
+        # #870 F4c-zbynek: after the flip, profile_inventory(OWNER) returns
+        # zbynek_inventory() which HAS u_tenant entries (the 10 stream tabs).
+        # The owner's collector_mode is "--u-collect" (the cross-tenant fleet
+        # collector), NOT "--u-lane", so u_tenant_entries is NOT consumed
+        # by the owner gateway -- but the function correctly returns them.
+        owner_ut = profiles.u_tenant_entries(profiles.OWNER)
+        self.assertTrue(len(owner_ut) > 0,
+                        "owner u_tenant_entries unexpectedly empty after flip")
+        for e in owner_ut:
+            self.assertTrue(e.get("u_tenant"))
+            self.assertEqual(e["identity"], profiles.WEBTERM_ZBYNEK_IDENTITY)
+
+    def test_unknown_profile_collects_nothing(self):
+        # An unknown lane collects nothing.
         self.assertEqual(profiles.u_tenant_entries("no-such-lane"), [])
 
     def test_identityless_nonlocal_entry_is_dropped_never_sshpass(self):

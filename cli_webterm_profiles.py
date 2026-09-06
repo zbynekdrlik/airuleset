@@ -62,7 +62,7 @@ DOMINIKA = "dominika"
 # push reads this table on BOTH the controller AND dev1, so a retired lane is
 # never re-installed. Values: "controller" or "subdev" (or "dev1" pre-cutover).
 LANE_HOST = {
-    "zbynek": "dev1",           # F4c flips to "controller"
+    "zbynek": "controller",     # F4c step 4: flipped from "dev1" (LAST)
     "david": "controller",      # F4c step 3: flipped from "subdev"
     "marek": "controller",      # F4c step 2: flipped from "subdev"
     "dominika": "controller",   # F4c step 1: flipped from "subdev"
@@ -759,6 +759,8 @@ def profile_inventory(profile, fleet_inventory):
         return marek_inventory()
     if profile == DOMINIKA:
         return dominika_inventory()
+    if profile == OWNER:
+        return zbynek_inventory()
     return list(fleet_inventory)
 
 

@@ -58,8 +58,10 @@ class TestProfileForHostAccountAware(unittest.TestCase):
         # #870 F4c-marek: marek moved to controller — subdev no longer hosts him.
         self.assertIsNone(p.profile_for_host("subdev", account="marek"))
 
-    def test_dev1_is_owner_regardless_of_account(self):
-        self.assertEqual(p.profile_for_host("dev1", account="dominika"), p.OWNER)
+    def test_dev1_no_longer_owner_after_zbynek_flip(self):
+        # #870 F4c-zbynek: zbynek moved to controller -- dev1 no longer hosts
+        # any lane, so profile_for_host("dev1") returns None regardless of account.
+        self.assertIsNone(p.profile_for_host("dev1", account="dominika"))
 
     def test_other_box_has_no_profile(self):
         self.assertIsNone(p.profile_for_host("dev2", account="dominika"))

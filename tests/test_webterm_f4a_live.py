@@ -177,9 +177,10 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
         self.assertEqual(prov_mock.call_args[0][5],
                          "webterm-controller-tunnel.service")
 
-    def test_non_controller_unchanged(self):
-        """On a non-controller box, behavior is unchanged (dispatches by
-        profile_for_host)."""
+    def test_non_controller_dev1_is_noop_after_zbynek_flip(self):
+        """#870 F4c-zbynek: after the flip, dev1 hosts NO lane. A dev1 install
+        call to maybe_setup_webterm does nothing (profile_for_host returns None,
+        setup_webterm_service is NOT called)."""
         import cli_webterm as w
         import pwd as _pwd
 
@@ -195,7 +196,7 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
                         return_value=True) as setup_mock:
             uname_mock.return_value = SimpleNamespace(nodename="dev1")
             w.maybe_setup_webterm()
-        setup_mock.assert_called_once()
+        setup_mock.assert_not_called()
 
     def test_creds_path_matches_privileges(self):
         """Drift-lock: the controller tunnel creds path in the dispatch code
@@ -270,20 +271,22 @@ class TestWiring4RuleOfN(unittest.TestCase):
 class TestWiring5ProfileForHost(unittest.TestCase):
     """Y5: dev1-side profile_for_host returns None when zbynek moves off dev1."""
 
-    def test_dev1_returns_owner_when_zbynek_on_dev1(self):
-        """With LANE_HOST['zbynek']=='dev1' (today), dev1 returns OWNER."""
+    def test_dev1_returns_none_after_zbynek_flip(self):
+        """#870 F4c-zbynek: with LANE_HOST['zbynek']=='controller' (the flip),
+        dev1 returns None -- no lane is hosted there any more."""
         import cli_webterm_profiles as profiles
-        self.assertEqual(profiles.LANE_HOST["zbynek"], "dev1")
+        self.assertEqual(profiles.LANE_HOST["zbynek"], "controller")
         result = profiles.profile_for_host("dev1")
-        self.assertEqual(result, profiles.OWNER)
+        self.assertIsNone(result)
 
-    def test_dev1_returns_none_when_zbynek_on_controller(self):
-        """With LANE_HOST['zbynek']=='controller', dev1 returns None."""
+    def test_dev1_returns_owner_when_zbynek_patched_back_to_dev1(self):
+        """Regression lock: if LANE_HOST['zbynek'] were patched back to 'dev1',
+        dev1 would return OWNER again."""
         import cli_webterm_profiles as profiles
         with mock.patch.dict(profiles.LANE_HOST,
-                             {"zbynek": "controller"}):
+                             {"zbynek": "dev1"}):
             result = profiles.profile_for_host("dev1")
-        self.assertIsNone(result)
+        self.assertEqual(result, profiles.OWNER)
 
 
 class TestWiring6Privileges(unittest.TestCase):
