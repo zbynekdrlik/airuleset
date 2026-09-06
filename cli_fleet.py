@@ -20,7 +20,7 @@ pure leaf of the dependency DAG.
 # #870 F3: controller cutover flag. When False (the dev1-safe default), all
 # cutover code is DORMANT — zero runtime change. Commit B (the first push
 # FROM the controller box) flips this to True.
-CONTROLLER_CUTOVER_DONE = False
+CONTROLLER_CUTOVER_DONE = True
 
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.

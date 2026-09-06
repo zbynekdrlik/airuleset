@@ -29,11 +29,13 @@ class TestPushOriginGuard(unittest.TestCase):
         no-op — it returns immediately without reading box-class or user."""
         import cli_fleet
         import cli_remote
-        self.assertFalse(cli_fleet.CONTROLLER_CUTOVER_DONE)
         # A poisoned box_class that would raise if called — proves the
         # guard returns before reaching it. default_box_class is imported
         # lazily inside the guard, so patch at the source module.
-        with mock.patch("watchdog.reaper.default_box_class",
+        # Flag patched False explicitly — the module ships True since
+        # commit B; both directions stay covered.
+        with mock.patch.object(cli_fleet, "CONTROLLER_CUTOVER_DONE", False), \
+             mock.patch("watchdog.reaper.default_box_class",
                         side_effect=AssertionError("should not be called")):
             cli_remote._push_origin_guard()  # must not raise
 
@@ -79,12 +81,22 @@ class TestRemoteHostsDev1Entry(unittest.TestCase):
     """(b) REMOTE_HOSTS dev1 entry presence/absence + invariants."""
 
     def test_dev1_absent_when_false(self):
-        """When CONTROLLER_CUTOVER_DONE is False, no dev1 entry in REMOTE_HOSTS."""
+        """When CONTROLLER_CUTOVER_DONE is False, _append_dev1_if_cutover
+        adds no dev1 entry to a REMOTE_HOSTS list without one."""
         import cli_fleet
-        self.assertFalse(cli_fleet.CONTROLLER_CUTOVER_DONE)
-        dev1_entries = [h for h in cli_fleet.REMOTE_HOSTS
-                        if h.get("name") == "dev1"]
-        self.assertEqual(dev1_entries, [])
+        saved = cli_fleet.REMOTE_HOSTS[:]
+        saved_flag = cli_fleet.CONTROLLER_CUTOVER_DONE
+        try:
+            cli_fleet.CONTROLLER_CUTOVER_DONE = False
+            cli_fleet.REMOTE_HOSTS[:] = [
+                h for h in saved if h.get("name") != "dev1"]
+            cli_fleet._append_dev1_if_cutover()
+            dev1_entries = [h for h in cli_fleet.REMOTE_HOSTS
+                            if h.get("name") == "dev1"]
+            self.assertEqual(dev1_entries, [])
+        finally:
+            cli_fleet.CONTROLLER_CUTOVER_DONE = saved_flag
+            cli_fleet.REMOTE_HOSTS[:] = saved
 
     def test_dev1_present_when_true(self):
         """When True, dev1 entry must exist with correct identity."""
