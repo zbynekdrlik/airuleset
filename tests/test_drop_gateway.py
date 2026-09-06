@@ -554,39 +554,54 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
         Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
         calls, r = self._run_noop()
         self.assertTrue(dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="spinbike", marker_path=self.marker))  # no marker
+            run=r, nodename="spinbike", marker_path=self.marker,
+            username="newlevel"))  # no marker
         self.assertEqual(calls, [])
 
     def test_restart_failure_is_not_ok(self):
         # #826: a GENUINE failure (marker present, ingress clobbered, restart
         # rc!=0) must report NOT-ok (False) so cmd_install latches install_failed
         # and `push` exits non-zero instead of reporting OK over a stale tunnel.
+        # #889 CI regression: pin `username="newlevel"` explicitly — the spinbike
+        # lane is registered as ("spinbike", "newlevel"), and this test's own
+        # process account is only ever "newlevel" BY COINCIDENCE on dev1. The
+        # hermetic CI runner invokes as uid 0 ("root"), so an unpinned call falls
+        # through `drop_lane_for_account` to `_current_username()` returning
+        # "root" → no matching lane → reconcile takes the benign no-op (True)
+        # BEFORE ever touching the config/restart, and this assertFalse fails
+        # (#786 lesson: pin the account explicitly wherever a test's truth table
+        # depends on the invoking unix account resolving to a SPECIFIC name).
         Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
         dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
 
         def failing(argv, **kw):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="down")
         self.assertFalse(dg.reconcile_drop_ingress_on_install(
-            run=failing, nodename="spinbike", marker_path=self.marker))
+            run=failing, nodename="spinbike", marker_path=self.marker,
+            username="newlevel"))
 
     def test_unreadable_config_is_not_ok(self):
         # #826: marker present but the tunnel config is unreadable/missing is a
         # genuine failure (a live drop lane whose config we cannot heal) → NOT-ok.
+        # #889 CI regression: pin username (see test_restart_failure_is_not_ok).
         dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
         # self.cfg was never written → read_text raises OSError inside reconcile.
         calls, r = self._run_noop()
         self.assertFalse(dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="spinbike", marker_path=self.marker))
+            run=r, nodename="spinbike", marker_path=self.marker,
+            username="newlevel"))
         self.assertEqual(calls, [], "no restart attempted when the config is unreadable")
 
     def test_clobbered_ingress_is_re_added_and_restarted(self):
         # Simulate the webterm re-provision: config WITHOUT the drop ingress, but
         # the marker says the lane already went live.
+        # #889 CI regression: pin username (see test_restart_failure_is_not_ok).
         Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
         dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
         calls, r = self._run_noop()
         self.assertTrue(dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="spinbike", marker_path=self.marker))
+            run=r, nodename="spinbike", marker_path=self.marker,
+            username="newlevel"))
         self.assertIn("- hostname: drop-spinbike.newlevel.media",
                       Path(self.cfg).read_text(encoding="utf-8"))
         self.assertTrue(calls, "must restart after re-adding the ingress")
@@ -599,7 +614,8 @@ class TestReconcileDropIngressOnInstall(unittest.TestCase):
         dg.write_drop_marker("drop-spinbike.newlevel.media", spinbike_port, path=self.marker)
         calls, r = self._run_noop()
         self.assertTrue(dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="spinbike", marker_path=self.marker))
+            run=r, nodename="spinbike", marker_path=self.marker,
+            username="newlevel"))
         self.assertEqual(calls, [], "no restart when the ingress is already present")
 
 

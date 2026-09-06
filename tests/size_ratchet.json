@@ -171,7 +171,7 @@
     "tests/test_double_compact_855.py": 391,
     "tests/test_double_compact_recurrence_855.py": 375,
     "tests/test_draft_rescue.py": 441,
-    "tests/test_drop_gateway.py": 792,
+    "tests/test_drop_gateway.py": 808,
     "tests/test_durable_decisions.py": 84,
     "tests/test_dynamic_application.py": 152,
     "tests/test_ensure_timezone.py": 116,
