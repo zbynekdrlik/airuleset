@@ -428,6 +428,10 @@ class TestLadderRace910(unittest.TestCase):
                          "the duplicate must be CLEARED, not left pending")
         self.assertTrue(any("already-compacted" in ln for ln in logs),
                         "expected 'already-compacted' consume log: %s" % logs)
+        # O1: verify the LATE re-check site fired (not the early one).
+        sync_lines = self.syncp.read_text().splitlines() if self.syncp.exists() else []
+        self.assertTrue(any("late-recheck" in ln for ln in sync_lines),
+                        "expected 'late-recheck' in sync log: %s" % sync_lines)
 
 
 if __name__ == "__main__":
