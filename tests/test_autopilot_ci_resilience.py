@@ -36,8 +36,11 @@ class TestAutopilotCiResilience(TestCase):
         # dropped from this recommendation entirely — by its own tool description it
         # is a /loop dynamic-mode pacer and a silent no-op outside an armed /loop, so
         # it never belonged here as a general long-wait mechanism.) Locked in both the
-        # CI rule and the liveness rule.
-        ci = read("modules/core/ci-monitoring.md")
+        # CI rule and the liveness rule. (#859 diet batch 4c moved the
+        # operative foreground-loop recipe + its "compaction" discussion out
+        # of the always-on ci-monitoring.md module into its situational
+        # companion; the module is now a pointer stub.)
+        ci = read("skills/ci-monitoring-deep/DEEP.md")
         lv = read("modules/quality/verify-launched-work-liveness.md")
         for t in (ci, lv):
             self.assertIn("compaction", t)

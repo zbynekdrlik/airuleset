@@ -97,3 +97,5 @@ The user wants to decide **part by part**, NOT give a single sweeping answer cov
 - NEVER present a big heterogeneous batch ("tu je 52 ticketov / celý rollout — čo chceš?") expecting one universal answer — the tickets differ, so one answer can't fit them all.
 - Smaller + clearer + sequential beats big + sweeping. Each piece explained in plain Slovak (above).
 - **This governs QUESTIONS the user must answer — it does NOT change `autonomous-batch-issue-development.md`** (still bundle the WORK silently, no asking between issues). When you genuinely MUST ask, ask small and explain each piece.
+
+The intent: the user understands every question instantly, in their language, without engineering knowledge, and decides in small clear steps — never a number they can't decode, never one sweeping answer to a pile. Applies to all rewordings and semantic equivalents — every question the user reads, in any project, via any tool.

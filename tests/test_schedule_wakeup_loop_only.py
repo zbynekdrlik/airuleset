@@ -53,8 +53,10 @@ class TestScheduleWakeupLoopOnly(TestCase):
 
     def test_working_alternatives_still_present(self):
         # The fix is subtractive only -- no new mechanism. The mechanisms
-        # that actually work outside /loop must survive the edit.
-        ci = read("modules/core/ci-monitoring.md")
+        # that actually work outside /loop must survive the edit. (#859
+        # diet batch 4c moved the operative foreground-loop recipe out of
+        # the always-on ci-monitoring.md module into its companion.)
+        ci = read("skills/ci-monitoring-deep/DEEP.md")
         lv_module = read("modules/quality/verify-launched-work-liveness.md")
         lv_skill = read("skills/verify-launched-work-liveness/SKILL.md")
         self.assertIn("Foreground bounded poll loop", ci)

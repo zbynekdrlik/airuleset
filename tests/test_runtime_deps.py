@@ -236,8 +236,11 @@ class SudoLessToolRequestPath(unittest.TestCase):
     unfollowable there. The module must give it a working alternative: file a
     gk-request naming the package, which lands in RUNTIME_DEPS on fulfilment."""
 
-    MODULE = (airuleset.REPO_DIR / "modules" / "core" /
-              "autonomous-verification.md")
+    # #859 diet batch 4b moved the operative "no sudo -> gk-request" branch
+    # out of the always-on autonomous-verification.md module into its
+    # situational companion; the module itself is now a pointer stub.
+    MODULE = (airuleset.REPO_DIR / "skills" / "autonomous-verification-deep" /
+              "DEEP.md")
 
     def test_sudo_less_branch_points_at_gk_request(self):
         text = self.MODULE.read_text()

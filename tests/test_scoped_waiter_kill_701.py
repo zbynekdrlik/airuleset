@@ -31,7 +31,10 @@ from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parent.parent
 SKILL = REPO / "skills" / "verify-launched-work-liveness" / "SKILL.md"
-CI_MONITORING = REPO / "modules" / "core" / "ci-monitoring.md"
+# #859 diet batch 4c moved the operative waiter-cancellation pointer (the
+# `pkill -f "sleep 60"` risk-site + its #701/friendly-fire framing) out of
+# the always-on ci-monitoring.md module into its situational companion.
+CI_MONITORING = REPO / "skills" / "ci-monitoring-deep" / "DEEP.md"
 HOOK = REPO / "hooks" / "block-broad-pkill.sh"
 HOOKS_JSON = REPO / "settings" / "hooks.json"
 

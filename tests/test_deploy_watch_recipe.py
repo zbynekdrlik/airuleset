@@ -24,7 +24,11 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CI_MONITORING = REPO / "modules" / "core" / "ci-monitoring.md"
+# #859 diet batch 4c moved the operative #588 deploy-watch recipe (the jq
+# DEPLOY-DONE classifier + its documenting prose) out of the always-on
+# ci-monitoring.md module into its situational companion; the module itself
+# is now a pointer stub with no fenced code / no #588 prose left in it.
+CI_MONITORING = REPO / "skills" / "ci-monitoring-deep" / "DEEP.md"
 STATUSLINE = REPO / "modules" / "core" / "statusline-vocabulary.md"
 
 sys.path.insert(0, str(REPO))
@@ -90,7 +94,8 @@ class TestDeployDoneClassifier(unittest.TestCase):
         """RED anchor: the recipe (and thus its jq filter) exists at all."""
         self.assertIsNotNone(
             _deploy_watch_filter(),
-            "ci-monitoring.md carries no `jq -r`-based DEPLOY-DONE recipe (#588)",
+            "skills/ci-monitoring-deep/DEEP.md carries no `jq -r`-based "
+            "DEPLOY-DONE recipe (#588)",
         )
 
     def test_deploy_green_while_e2e_tail_running_is_deployed(self):

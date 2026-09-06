@@ -226,11 +226,17 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
     def test_required_phrases_survive_inline(self):
         # These are asserted by pre-existing tests (test_airuleset.py,
         # test_question_policy.py) directly against the module path — they
-        # MUST still be true after the split.
+        # MUST still be true after the split. (#859 diet batch 4c moved the
+        # operative "do NOT hand-fire" instruction out of the always-on
+        # module into its OWN situational companion, milestone-notifications
+        # -deep/DEEP.md — same precedent as test_airuleset.py's
+        # test_governance_no_hand_fired_per_merge_ping.)
         t = read(self.MOD)
+        deep = read("skills/milestone-notifications-deep/DEEP.md")
         self.assertIn("Mobile-App Model", t)
         self.assertIn(
-            "do NOT call the discord `reply` tool or `PushNotification`", t)
+            "do NOT call the discord `reply` tool or `PushNotification`",
+            deep)
         self.assertIn("⏳", t)
         self.assertIn("FULL completion", t)
         self.assertIn("IMMEDIATELY", t)

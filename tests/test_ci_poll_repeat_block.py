@@ -434,10 +434,18 @@ class Issue127CiSideGapTest(unittest.TestCase):
 
 
 class ModulePointerTest(unittest.TestCase):
-    """The ONLY prose change permitted: one line on the foreground bullet."""
+    """The ONLY prose change permitted: one line on the foreground bullet.
+
+    #859 diet batch 4c moved the operative foreground-loop recipe (and its
+    own `block-ci-poll-repeat.sh` pointer) out of the always-on
+    ci-monitoring.md module into its situational companion — the module
+    itself keeps a SEPARATE, shorter pointer of its own, so the "exactly
+    one pointer" shape is now locked on the companion, where the recipe
+    text this test is actually about lives.
+    """
 
     def test_foreground_bullet_names_the_hook_once(self):
-        text = (REPO / "modules" / "core" / "ci-monitoring.md").read_text()
+        text = (REPO / "skills" / "ci-monitoring-deep" / "DEEP.md").read_text()
         self.assertEqual(
             text.count("block-ci-poll-repeat.sh"), 1,
             "exactly one pointer — this ticket is not a third rewrite")
