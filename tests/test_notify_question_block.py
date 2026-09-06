@@ -150,7 +150,7 @@ Overené: PR #1726 MERGED, #1721 CLOSED. V backlogu ostal jediný ticket.
 
 **Otázka — projekt odoo-erp (Money→Odoo import pre Montalu):** Ticket #1173 \
 je nástenkový — zoznam, ktorý sleduje, čo ešte z Money nie je prenesené do \
-Odoo. Predajná časť je hotová a beží automaticky; chýba pokladňa + majetok + \
+Odoo. Odoo task neexistuje — čisto technická úloha (GitHub-only tracking). Predajná časť je hotová a beží automaticky; chýba pokladňa + majetok + \
 reklamácie, plný sklad a tri veci čakajúce na rozhodnutie vedenia.
 
 • Nechať otvorený na ďalšiu dávku (odporúčam) — beh ukončím záverečným \
