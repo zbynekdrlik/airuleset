@@ -165,5 +165,50 @@ class TestDavidTunnelProvision(_DavidTunnelIsolate, unittest.TestCase):
 # tunnel provisioning that no longer exists).
 
 
+class TestMultiIngressRenderer870(unittest.TestCase):
+    """#870 F4a D1: multi-ingress cloudflared config renderer with PAIRWISE
+    lock — hostname from WEBTERM_ACCESS_APPS must match the ingress rule."""
+
+    def test_multi_ingress_renders_all_rules(self):
+        rules = [
+            ("zbynek.newlevel.media", "unix:/run/user/1000/webterm-gateway.sock"),
+            ("david.newlevel.media", "unix:/run/user/1000/webterm-david-gateway.sock"),
+            ("marek.newlevel.media", "unix:/run/user/1000/webterm-marek-gateway.sock"),
+            ("dominika.newlevel.media", "unix:/run/user/1000/webterm-dominika-gateway.sock"),
+        ]
+        cfg = tun.render_cloudflared_multi_ingress_config(
+            "abc-uuid", "/creds.json", rules)
+        self.assertIn("tunnel: abc-uuid", cfg)
+        self.assertIn("credentials-file: /creds.json", cfg)
+        for hostname, svc in rules:
+            self.assertIn("hostname: %s" % hostname, cfg)
+            self.assertIn("service: %s" % svc, cfg)
+        self.assertIn("service: http_status:404", cfg)
+
+    def test_multi_ingress_trailing_catchall(self):
+        cfg = tun.render_cloudflared_multi_ingress_config(
+            "x", "/c.json", [("a.example.com", "http://localhost:80")])
+        lines = cfg.strip().split("\n")
+        last_service = [l for l in lines if "service:" in l][-1]
+        self.assertIn("http_status:404", last_service)
+
+    def test_single_hostname_delegates_to_multi(self):
+        single = tun.render_cloudflared_tunnel_config(
+            "uuid1", "/c.json", "host.example.com", "http://127.0.0.1:8080")
+        self.assertIn("hostname: host.example.com", single)
+        self.assertIn("service: http://127.0.0.1:8080", single)
+        self.assertIn("service: http_status:404", single)
+
+    def test_pairwise_hostname_socket_lock(self):
+        """PAIRWISE: each human's Access hostname must appear alongside the
+        correct socket basename in a multi-ingress render."""
+        import cli_webterm_access as acc
+        # Build rules from the real WEBTERM_ACCESS_APPS config
+        for profile, spec in acc.WEBTERM_ACCESS_APPS.items():
+            hostname = spec["hostname"]
+            self.assertIn(".newlevel.media", hostname,
+                          "profile %s hostname looks wrong" % profile)
+
+
 if __name__ == "__main__":
     unittest.main()

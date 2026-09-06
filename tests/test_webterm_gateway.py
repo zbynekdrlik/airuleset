@@ -1090,5 +1090,39 @@ class TestAccessModeRoutes(unittest.TestCase):
         _run(go())
 
 
+class TestAllowedEmailsGate870(unittest.TestCase):
+    """#870 F4a D7: per-lane --allowed-emails defence-in-depth. In Access mode,
+    _authed must fail CLOSED when the authenticated email is NOT in the allowed
+    set."""
+
+    def test_authed_fails_when_email_not_in_allowed(self):
+        gw = g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                       trust_access_header=ACCESS_HEADER,
+                       allowed_emails=["owner@example.com"])
+        self.assertFalse(gw._authed([(ACCESS_HEADER, "stranger@evil.com")]))
+
+    def test_authed_passes_when_email_in_allowed(self):
+        gw = g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                       trust_access_header=ACCESS_HEADER,
+                       allowed_emails=["david@grena.sk"])
+        self.assertTrue(gw._authed([(ACCESS_HEADER, "david@grena.sk")]))
+
+    def test_authed_no_allowed_emails_passes_any(self):
+        gw = _access_gateway()
+        self.assertTrue(gw._authed([(ACCESS_HEADER, "anyone@anywhere.com")]))
+
+    def test_allowed_emails_case_insensitive(self):
+        gw = g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                       trust_access_header=ACCESS_HEADER,
+                       allowed_emails=["User@Example.COM"])
+        self.assertTrue(gw._authed([(ACCESS_HEADER, "user@example.com")]))
+
+    def test_allowed_emails_cli_arg(self):
+        with self.assertRaises(SystemExit):
+            g.main(["--bind", "127.0.0.1", "--dash-index", "x",
+                    "--trust-access-header", ACCESS_HEADER,
+                    "--allowed-emails", "a@b.com,c@d.com"])
+
+
 if __name__ == "__main__":
     unittest.main()
