@@ -43,8 +43,9 @@ import cli_binary_installers as binstall  # noqa: E402
 
 
 class TestProfileForHostAccountAware(unittest.TestCase):
-    def test_subdev_dominika_account_is_dominika(self):
-        self.assertEqual(p.profile_for_host("subdev", account="dominika"), p.DOMINIKA)
+    def test_subdev_dominika_account_no_longer_dominika(self):
+        # #870 F4c: dominika moved to controller — subdev no longer hosts her.
+        self.assertIsNone(p.profile_for_host("subdev", account="dominika"))
 
     def test_subdev_default_is_still_david(self):
         self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
@@ -463,7 +464,9 @@ class TestDominikaDispatch(unittest.TestCase):
         _p.start()
         self.addCleanup(_p.stop)
 
-    def test_dominika_account_on_subdev_dispatches_dominika(self):
+    def test_dominika_account_on_subdev_no_longer_dispatches(self):
+        # #870 F4c: dominika moved to controller — subdev install as dominika
+        # is now a no-op (profile_for_host returns None).
         called = []
         with m.patch.object(w.os, "uname",
                             return_value=type("U", (), {"nodename": "subdev"})()), \
@@ -471,7 +474,7 @@ class TestDominikaDispatch(unittest.TestCase):
                 m.patch.object(dn, "setup_webterm_dominika_service",
                                lambda: called.append("dominika") or True):
             w.maybe_setup_webterm()
-        self.assertEqual(called, ["dominika"])
+        self.assertEqual(called, [], "dominika should NOT dispatch on subdev after F4c flip")
 
     def test_david_account_on_subdev_does_not_dispatch_dominika(self):
         called = []

@@ -65,7 +65,7 @@ LANE_HOST = {
     "zbynek": "dev1",           # F4c flips to "controller"
     "david": "subdev",          # F4c flips to "controller"
     "marek": "subdev",          # F4c flips to "controller"
-    "dominika": "subdev",       # F4c flips to "controller"
+    "dominika": "controller",   # F4c step 1: flipped from "subdev"
 }
 
 
@@ -91,10 +91,20 @@ def profile_for_host(nodename, account=None):
             return None
         return OWNER
     if nodename == "subdev":
+        # #870 F4c: gate each lane on LANE_HOST — when a human's lane moves
+        # to "controller", subdev stops reinstalling it (the dev1/zbynek Y5
+        # pattern applied to subdev lanes).
         if account == MAREK_GATEWAY_USER:
+            if LANE_HOST.get("marek") != "subdev":
+                return None
             return MAREK
         if account == DOMINIKA_GATEWAY_USER:
+            if LANE_HOST.get("dominika") != "subdev":
+                return None
             return DOMINIKA
+        # david is the default for non-marek/non-dominika accounts
+        if LANE_HOST.get("david") != "subdev":
+            return None
         return DAVID
     return None
 
