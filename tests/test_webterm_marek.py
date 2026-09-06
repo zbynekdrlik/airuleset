@@ -65,18 +65,21 @@ def _fleet_inventory():
 
 
 class TestProfileForHostAccountAware(unittest.TestCase):
-    def test_subdev_default_is_still_david(self):
-        # Backward-compatible: the no-account call is unchanged (subdev -> david).
-        self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
+    def test_subdev_default_no_longer_david(self):
+        # #870 F4c-david: david moved to controller — the bare
+        # profile_for_host("subdev") call now returns None.
+        self.assertIsNone(p.profile_for_host("subdev"))
 
     def test_subdev_marek_account_is_none_after_flip(self):
         # #870 F4c-marek: marek's lane moved to controller — subdev no longer
         # hosts marek (LANE_HOST["marek"] == "controller").
         self.assertIsNone(p.profile_for_host("subdev", account="marek"))
 
-    def test_subdev_david_account_is_david(self):
-        self.assertEqual(
-            p.profile_for_host("subdev", account=p.DAVID_GATEWAY_USER), p.DAVID)
+    def test_subdev_david_account_no_longer_david(self):
+        # #870 F4c-david: david's lane moved to controller — subdev no longer
+        # hosts david (LANE_HOST["david"] == "controller").
+        self.assertIsNone(
+            p.profile_for_host("subdev", account=p.DAVID_GATEWAY_USER))
 
     def test_dev1_is_owner_regardless_of_account(self):
         self.assertEqual(p.profile_for_host("dev1", account="marek"), p.OWNER)
@@ -583,7 +586,10 @@ class TestMarekDispatch(unittest.TestCase):
             w.maybe_setup_webterm()
         self.assertNotIn("marek", called)
 
-    def test_david_account_on_subdev_does_not_dispatch_marek(self):
+    def test_david_account_on_subdev_does_not_dispatch_anything(self):
+        # #870 F4c-david: david moved to controller — david1 account on subdev
+        # no longer dispatches david (LANE_HOST["david"] != "subdev"), and it
+        # must NOT dispatch marek either. Nothing dispatches.
         called = []
         import cli_webterm_david as d
         with m.patch.object(w.os, "uname",
@@ -595,7 +601,7 @@ class TestMarekDispatch(unittest.TestCase):
                 m.patch.object(mk, "setup_webterm_marek_service",
                                lambda: called.append("marek") or True):
             w.maybe_setup_webterm()
-        self.assertEqual(called, ["david"])
+        self.assertEqual(called, [])
 
 
 class TestMarekTtydAutoInstall(unittest.TestCase):

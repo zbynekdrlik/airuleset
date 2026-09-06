@@ -50,8 +50,10 @@ class TestProfileForHost(unittest.TestCase):
     def test_dev1_is_owner(self):
         self.assertEqual(p.profile_for_host("dev1"), p.OWNER)
 
-    def test_subdev_is_david(self):
-        self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
+    def test_subdev_no_longer_david(self):
+        # #870 F4c-david: david moved to controller — the bare
+        # profile_for_host("subdev") call now returns None.
+        self.assertIsNone(p.profile_for_host("subdev"))
 
     def test_other_box_has_no_profile(self):
         self.assertIsNone(p.profile_for_host("dev2"))
@@ -66,12 +68,16 @@ class TestDavidInventory(unittest.TestCase):
         self.assertEqual(ids, ["david1", "david2", "david3", "david4",
                                "codex-bridge"])
 
-    def test_david_accounts_use_dedicated_identity_local_subdev(self):
+    def test_david_accounts_use_dedicated_identity(self):
+        # #870 F4c-david: after the flip, david's subdev-targeted entries use
+        # the subdev tailscale IP (controller reaches subdev over tailnet),
+        # never loopback. The rest (identity, user, preferred) is unchanged.
         inv = {e["id"]: e for e in p.david_inventory()}
+        expected_host = p._subdev_target_host("david")
         for u in ("david1", "david2", "david3", "david4"):
             e = inv[u]
             self.assertEqual(e["user"], u)
-            self.assertEqual(e["host"], "127.0.0.1")
+            self.assertEqual(e["host"], expected_host)
             self.assertEqual(e["identity"], p.WEBTERM_DAVID_IDENTITY)
             self.assertEqual(e["preferred"], u)
             self.assertFalse(e.get("local"))
@@ -155,7 +161,9 @@ class TestConnectAllowlistIsProfileScoped(unittest.TestCase):
         self.assertEqual(argv[0], "ssh")
         self.assertIn("-i", argv)
         self.assertIn(os.path.expanduser(p.WEBTERM_DAVID_IDENTITY), argv)
-        self.assertIn("david2@127.0.0.1", argv)
+        # #870 F4c-david: after the flip, david's ssh target uses the subdev
+        # tailscale IP (controller reaches subdev over tailnet).
+        self.assertIn("david2@%s" % p._subdev_target_host("david"), argv)
 
     def test_codex_bridge_id_execs_mirror_of_existing_dev2_access(self):
         f = _david_inv_file()
@@ -257,9 +265,11 @@ class TestProfileForHostReturnSet870(unittest.TestCase):
         result = p.profile_for_host_set("dev1", "newlevel")
         self.assertEqual(result, {p.OWNER})
 
-    def test_subdev_david_returns_david_only(self):
+    def test_subdev_david_returns_empty_after_flip(self):
+        # #870 F4c-david: david moved to controller — subdev no longer hosts
+        # david, so profile_for_host_set("subdev", "david1") returns empty.
         result = p.profile_for_host_set("subdev", "david1")
-        self.assertEqual(result, {p.DAVID})
+        self.assertEqual(result, frozenset())
 
     def test_lane_host_table_exists(self):
         """LANE_HOST maps each human to the box that hosts their lane."""

@@ -47,8 +47,12 @@ class TestProfileForHostAccountAware(unittest.TestCase):
         # #870 F4c: dominika moved to controller — subdev no longer hosts her.
         self.assertIsNone(p.profile_for_host("subdev", account="dominika"))
 
-    def test_subdev_default_is_still_david(self):
-        self.assertEqual(p.profile_for_host("subdev"), p.DAVID)
+    def test_subdev_default_no_longer_david(self):
+        # #870 F4c-david: david moved to controller — subdev's default profile
+        # (the bare profile_for_host("subdev") call with no account) now returns
+        # None, since all non-marek/non-dominika accounts fall into the david
+        # branch, which checks LANE_HOST["david"] == "subdev" and returns None.
+        self.assertIsNone(p.profile_for_host("subdev"))
 
     def test_subdev_marek_account_no_longer_marek(self):
         # #870 F4c-marek: marek moved to controller — subdev no longer hosts him.
@@ -484,7 +488,10 @@ class TestDominikaDispatch(unittest.TestCase):
             w.maybe_setup_webterm()
         self.assertEqual(called, [], "dominika should NOT dispatch on subdev after F4c flip")
 
-    def test_david_account_on_subdev_does_not_dispatch_dominika(self):
+    def test_david_account_on_subdev_does_not_dispatch_anything(self):
+        # #870 F4c-david: david moved to controller — david1 account on subdev
+        # no longer dispatches david (LANE_HOST["david"] != "subdev"), and it
+        # must NOT dispatch dominika either. Nothing dispatches.
         called = []
         import cli_webterm_david as d
         with m.patch.object(w.os, "uname",
@@ -496,7 +503,7 @@ class TestDominikaDispatch(unittest.TestCase):
                 m.patch.object(dn, "setup_webterm_dominika_service",
                                lambda: called.append("dominika") or True):
             w.maybe_setup_webterm()
-        self.assertEqual(called, ["david"])
+        self.assertEqual(called, [])
 
 
 class TestDominikaTtydAutoInstall(unittest.TestCase):

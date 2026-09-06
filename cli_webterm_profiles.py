@@ -63,7 +63,7 @@ DOMINIKA = "dominika"
 # never re-installed. Values: "controller" or "subdev" (or "dev1" pre-cutover).
 LANE_HOST = {
     "zbynek": "dev1",           # F4c flips to "controller"
-    "david": "subdev",          # F4c flips to "controller"
+    "david": "controller",      # F4c step 3: flipped from "subdev"
     "marek": "controller",      # F4c step 2: flipped from "subdev"
     "dominika": "controller",   # F4c step 1: flipped from "subdev"
 }

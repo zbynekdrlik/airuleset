@@ -117,17 +117,19 @@ class TestControllerHostedInventoryNoLoopback(_BoxClassPinned):
 class TestSubdevHostedInventoryKeepsLoopback(_BoxClassPinned):
     """(c) When LANE_HOST says 'subdev', entries stay loopback (regression)."""
 
-    def test_david_subdev_keeps_loopback(self):
-        """david's entries use loopback when lane is on subdev."""
-        self.assertEqual(p.LANE_HOST["david"], "subdev")
-        inv = p.david_inventory()
-        # david1-4 entries should all be SUBDEV_LOCAL (loopback on subdev)
-        david_accounts = {"david1", "david2", "david3", "david4"}
-        for entry in inv:
-            if entry["id"] in david_accounts:
-                self.assertEqual(
-                    entry["host"], p.SUBDEV_LOCAL,
-                    "david entry %r lost loopback on subdev" % entry["id"])
+    def test_david_subdev_keeps_loopback_when_lane_on_subdev(self):
+        """david's subdev-targeted entries use loopback when lane is on subdev
+        (regression lock — patched since LANE_HOST is now 'controller')."""
+        # #870 F4c-david: LANE_HOST is now "controller", so patch back to
+        # "subdev" to lock the regression (the marek pattern).
+        with m.patch.dict(p.LANE_HOST, {"david": "subdev"}):
+            inv = p.david_inventory()
+            david_accounts = {"david1", "david2", "david3", "david4"}
+            for entry in inv:
+                if entry["id"] in david_accounts:
+                    self.assertEqual(
+                        entry["host"], p.SUBDEV_LOCAL,
+                        "david entry %r lost loopback on subdev" % entry["id"])
 
     def test_marek_subdev_keeps_loopback_when_lane_on_subdev(self):
         """marek's subdev-targeted entries use loopback when lane is on subdev
