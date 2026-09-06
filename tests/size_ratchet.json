@@ -160,7 +160,7 @@
     "tests/test_discuss_close_guard.py": 564,
     "tests/test_discuss_future_promise_696.py": 236,
     "tests/test_discuss_mention_anchor_702.py": 287,
-    "tests/test_discuss_no_lack_and_atomic_creation_742.py": 170,
+    "tests/test_discuss_no_lack_and_atomic_creation_742.py": 174,
     "tests/test_discuss_template_grant_799.py": 129,
     "tests/test_discuss_thread_doctrine_728.py": 233,
     "tests/test_discuss_thread_reference_657.py": 333,

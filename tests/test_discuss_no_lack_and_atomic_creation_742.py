@@ -85,8 +85,12 @@ class TestNeverMessageWhatWeLack(_CompanionBase):
         # must not be invented in isolation -- it explicitly parallels the
         # existing #696 verified-past-events doctrine already in this file.
         w = self._window(self.START)
-        self.assertIn("mirroring the", w)
-        self.assertIn("#696 verified-past-events rule above", w)
+        # #916 reworded the mirror reference to "(mirroring #696 above)" while
+        # adding the chatter-helper bullet — the LOCK is the mirror REFERENCE.
+        self.assertIn("mirroring #696", w)
+        # (#916 shortened "the #696 verified-past-events rule above" to
+        # "#696 above" — the surviving lock is the explicit anchor word.)
+        self.assertIn("mirroring #696 above", w)
 
     def test_client_request_carveout_present(self):
         # a genuine ask FOR something from the client is NOT the banned
