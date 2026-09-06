@@ -385,6 +385,158 @@ class TestFleet(unittest.TestCase):
         self.assertEqual(call_count["n"], 2)
 
 
+class TestFleetSshIdentity900(unittest.TestCase):
+    """#900: --fleet must use the push deploy identity map (cli_fleet
+    REMOTE_HOSTS `identity` field), never bare default ssh.
+
+    RED: with the current code, run_fleet(runner=None) builds
+    `["ssh", "-o", "BatchMode=yes", ...]` with NO `-i <identity>` for an
+    identity-pinned host → the test FAILS (assert `-i` in captured cmd).
+
+    GREEN: after the fix, the ssh command carries `-i <expanded_identity>`
+    for identity-pinned hosts and `sshpass` for default-key hosts."""
+
+    def test_identity_pinned_host_gets_dash_i(self):
+        """An identity-pinned REMOTE_HOSTS entry must produce an ssh
+        command with -i <identity>, matching push deploy's behaviour."""
+        import cli_context_baseline as cb
+        import subprocess as real_sp
+
+        captured_cmds = []
+
+        def spy_run(cmd, **kw):
+            captured_cmds.append(list(cmd))
+            stdout = json.dumps({
+                "schema": 1, "host": "gk-test",
+                "date": "2026-09-01",
+                "global": {"resolved_bytes": 100, "tokens": 25,
+                            "modules": 1, "missing": []},
+                "skills": {"count": 0, "desc_chars": 0, "per_skill": {}},
+                "projects": [],
+                "mcp": {"estimate_bytes": 0, "servers": 0,
+                         "estimate": True},
+            })
+            return real_sp.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        fake_hosts = [
+            {"name": "gk-test", "host": "100.90.94.41",
+             "user": "gatekeeper",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            reg = Path(td) / "projects-registry.json"
+            reg.write_text("[]", encoding="utf-8")
+            with patch("cli_remote._deployable_hosts",
+                       return_value=fake_hosts), \
+                 patch.object(cb, "REGISTRY_PATH", str(reg)), \
+                 patch("subprocess.run", side_effect=spy_run):
+                cb.run_fleet(runner=None)
+
+        # Must have called subprocess.run for the remote host
+        self.assertEqual(len(captured_cmds), 1)
+        cmd = captured_cmds[0]
+        # The command MUST contain -i with the expanded identity path
+        self.assertIn("-i", cmd,
+                      "identity-pinned host must get -i in ssh command")
+        i_idx = cmd.index("-i")
+        expanded = os.path.expanduser(
+            "~/.secrets/gatekeeper_access_ed25519")
+        self.assertEqual(cmd[i_idx + 1], expanded)
+        # Must NOT contain sshpass (identity hosts use key auth)
+        self.assertNotIn("sshpass", cmd)
+
+    def test_default_key_host_gets_sshpass(self):
+        """A REMOTE_HOSTS entry with NO identity must use sshpass (the
+        shared password path), matching push deploy's behaviour."""
+        import cli_context_baseline as cb
+        import subprocess as real_sp
+
+        captured_cmds = []
+
+        def spy_run(cmd, **kw):
+            captured_cmds.append(list(cmd))
+            stdout = json.dumps({
+                "schema": 1, "host": "montalu-test",
+                "date": "2026-09-01",
+                "global": {"resolved_bytes": 100, "tokens": 25,
+                            "modules": 1, "missing": []},
+                "skills": {"count": 0, "desc_chars": 0, "per_skill": {}},
+                "projects": [],
+                "mcp": {"estimate_bytes": 0, "servers": 0,
+                         "estimate": True},
+            })
+            return real_sp.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        fake_hosts = [
+            {"name": "montalu2@subdev", "host": "100.118.174.27",
+             "user": "montalu2",
+             "repo_path": "~/devel/airuleset"},
+        ]
+
+        with tempfile.TemporaryDirectory() as td:
+            reg = Path(td) / "projects-registry.json"
+            reg.write_text("[]", encoding="utf-8")
+            with patch("cli_remote._deployable_hosts",
+                       return_value=fake_hosts), \
+                 patch.object(cb, "REGISTRY_PATH", str(reg)), \
+                 patch("subprocess.run", side_effect=spy_run):
+                cb.run_fleet(runner=None)
+
+        self.assertEqual(len(captured_cmds), 1)
+        cmd = captured_cmds[0]
+        # Default-key host must use sshpass
+        self.assertIn("sshpass", cmd)
+        # Must NOT have -i (no identity pinned)
+        self.assertNotIn("-i", cmd)
+
+    def test_observer_excluded_from_fleet(self):
+        """Webterm OBSERVER accounts (WEBTERM_OBSERVER_USERS) must be
+        excluded from --fleet iteration — they have no Claude sessions
+        to measure (#900)."""
+        import cli_context_baseline as cb
+
+        call_count = {"n": 0}
+
+        def fake_runner(host):
+            call_count["n"] += 1
+            name = host.get("name", "test")
+            return (json.dumps({
+                "schema": 1, "host": name,
+                "date": "2026-09-01",
+                "global": {"resolved_bytes": 100, "tokens": 25,
+                            "modules": 1, "missing": []},
+                "skills": {"count": 0, "desc_chars": 0, "per_skill": {}},
+                "projects": [],
+                "mcp": {"estimate_bytes": 0, "servers": 0,
+                         "estimate": True},
+            }), 0)
+
+        # marek and dominika are WEBTERM_OBSERVER_USERS
+        fake_hosts = [
+            {"name": "dev2", "host": "100.82.64.27",
+             "user": "newlevel", "repo_path": "~/devel/airuleset"},
+            {"name": "marek@subdev", "host": "100.118.174.27",
+             "user": "marek", "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+            {"name": "dominika@subdev", "host": "100.118.174.27",
+             "user": "dominika", "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+
+        with patch("cli_remote._deployable_hosts",
+                   return_value=fake_hosts):
+            data = cb.run_fleet(runner=fake_runner)
+
+        # Only dev2 should be measured, not marek/dominika
+        measured_hosts = [b["host"] for b in data.get("boxes", [])]
+        self.assertNotIn("marek@subdev", measured_hosts)
+        self.assertNotIn("dominika@subdev", measured_hosts)
+        # dev2 + local box = 2 boxes (runner used for dev2 only)
+        self.assertEqual(call_count["n"], 1)
+
+
 class TestSeedConsistency(unittest.TestCase):
     """Committed ceilings >= current repo measurement."""
 
