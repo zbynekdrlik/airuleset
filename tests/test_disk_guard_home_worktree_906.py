@@ -4,7 +4,6 @@ stale-worktree drain rung for cross-user worktrees.
 Hermetic tests ONLY — fake /proc, fake worktree fixtures under tmp dirs,
 NO real sudo, NO real /home, NO real drains.
 """
-import json
 import os
 import sys
 import time
@@ -17,7 +16,7 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from watchdog import disk_guard as dg
+from watchdog import disk_guard as dg  # noqa: E402
 
 
 _NOW = time.time()
@@ -107,11 +106,10 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
             # Build fake /home/user1/devel/repo/.claude/worktrees/agent-1
             wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
             wt.mkdir(parents=True)
-            # Set old mtime
+            # Write .git FIRST, then set old mtime (writing .git updates dir mtime)
+            (wt / ".git").write_text("gitdir: /fake")
             old_time = _NOW - 2 * 86400
             os.utime(str(wt), (old_time, old_time))
-            # Fake git dir marker
-            (wt / ".git").write_text("gitdir: /fake")
 
             def fake_proc_cwds():
                 return {str(wt)}
@@ -136,15 +134,14 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
             wt.mkdir(parents=True)
+            # Write .git FIRST, then set old mtime
+            (wt / ".git").write_text("gitdir: /fake")
             old_time = _NOW - 2 * 86400
             os.utime(str(wt), (old_time, old_time))
-            (wt / ".git").write_text("gitdir: /fake")
 
             def fake_git_run(args, **kw):
-                # Return dirty status
-                if "status" in args and "--porcelain" in args:
-                    return " M file.py"
-                return ""
+                # Return dirty status for porcelain checks
+                return " M file.py"
 
             result = fn(
                 now=_NOW,
@@ -166,10 +163,10 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
             wt.mkdir(parents=True)
-            # Set RECENT mtime (< 24h)
+            # Write .git FIRST, then set RECENT mtime (< 24h)
+            (wt / ".git").write_text("gitdir: /fake")
             recent_time = _NOW - 3600  # 1 hour ago
             os.utime(str(wt), (recent_time, recent_time))
-            (wt / ".git").write_text("gitdir: /fake")
 
             result = fn(
                 now=_NOW,
@@ -191,9 +188,10 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
             wt.mkdir(parents=True)
+            # Write .git FIRST, then set old mtime
+            (wt / ".git").write_text("gitdir: /fake")
             old_time = _NOW - 2 * 86400
             os.utime(str(wt), (old_time, old_time))
-            (wt / ".git").write_text("gitdir: /fake")
 
             result = fn(
                 now=_NOW,
@@ -220,9 +218,10 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             wt = Path(td) / "david3" / "devel" / "odoo" / "odoo-erp" / ".claude" / "worktrees" / "agent-42"
             wt.mkdir(parents=True)
+            # Write .git FIRST, then set old mtime
+            (wt / ".git").write_text("gitdir: /fake")
             old_time = _NOW - 2 * 86400
             os.utime(str(wt), (old_time, old_time))
-            (wt / ".git").write_text("gitdir: /fake")
 
             result = fn(
                 now=_NOW,
