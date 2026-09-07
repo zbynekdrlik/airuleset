@@ -2665,6 +2665,172 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
 
 
 # --------------------------------------------------------------------------- #
+# #925-D — whole-disk survey tier (root-scope top-consumers context)
+# --------------------------------------------------------------------------- #
+# The per-user planners (scratch/worktree/uploads/…) scope to $HOME. System-
+# level hoards (swapfiles, /var/log, other users' big dirs) are invisible.
+# This survey READS the existing root reporter's daily JSON (#841 —
+# ``/run/airuleset/disk-guard-root.json``, already ``du -sxb`` as root, no
+# permission holes, no timeout problem) + cheap stat calls for swapfiles +
+# top-level scandir for big files at ``/``.  It never runs expensive recursive
+# du/find in the watchdog's 60 s tick (Fable review HIGH-1, 2026-09-07).
+_SURVEY_BIG_FILE_MIN = 300_000_000   # 300 MB — report files above this
+
+
+def _survey_root_report(report_read_fn=None):
+    """(a) Read the #841 root reporter's daily JSON for system-level consumers.
+    The report already carries ``du -sxb`` sizes for ``/var/log``,
+    ``/var/cache/apt``, ``/var/lib/docker``, ``/tmp``, and gh-runner ``_work``.
+    ``report_read_fn`` is injectable for testing (default reads the live
+    report via ``disk_guard_root.read_root_report``)."""
+    import time as _time
+    rows = []
+    try:
+        from watchdog import disk_guard_root
+        read_fn = report_read_fn or disk_guard_root.read_root_report
+        report = read_fn(_time.time())
+        if report is None:
+            _dbg("survey root-report: absent or stale")
+            return rows
+        candidates = report.get("candidates")
+        if not isinstance(candidates, list):
+            return rows
+        for c in candidates:
+            if not isinstance(c, dict):
+                continue
+            path = c.get("path", "")
+            nbytes = c.get("bytes", 0) or 0
+            if not path or nbytes <= 0:
+                continue
+            rows.append({"cls": "whole-disk", "path": path, "bytes": nbytes,
+                         "kind": "whole-disk-info", "reason": None})
+    except Exception as e:
+        _dbg("survey root-report failed: %r" % e)
+    return rows
+
+
+def _survey_swapfiles(glob_fn=None):
+    """(b) Swapfiles at ``/`` — ``os.stat`` on ``/swapfile*``, ``/swap.img``.
+    Cheap: stat only, no recursion. ``glob_fn`` injectable for testing."""
+    import glob as _glob
+    glob_fn = glob_fn or _glob.glob
+    rows = []
+    for pattern in ("/swapfile*", "/swap.img"):
+        try:
+            matches = glob_fn(pattern)
+        except Exception:
+            matches = []
+        for sf in matches:
+            try:
+                st = os.stat(sf)
+                if st.st_size > 0:
+                    rows.append({"cls": "whole-disk", "path": sf,
+                                 "bytes": st.st_size,
+                                 "kind": "whole-disk-info", "reason": None})
+            except PermissionError:
+                rows.append({"cls": "whole-disk", "path": sf, "bytes": 0,
+                             "kind": "whole-disk-info",
+                             "reason": "needs-root: permission denied"})
+            except OSError as e:
+                _dbg("survey swapfile stat %s: %r" % (sf, e))
+    return rows
+
+
+def _survey_root_big_files(scandir_fn=None):
+    """(c) Big files at ``/`` — ``os.scandir('/')`` + ``os.lstat`` for regular
+    files >= 300 MB on the root directory only (no recursion).  Catches
+    swapfiles, large DB dumps, and other files left at ``/``.  Sorted by size
+    descending so the top-N selector sees the biggest first."""
+    scandir_fn = scandir_fn or os.scandir
+    rows = []
+    try:
+        for entry in scandir_fn("/"):
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+                if st.st_size >= _SURVEY_BIG_FILE_MIN:
+                    rows.append({"cls": "whole-disk", "path": entry.path,
+                                 "bytes": st.st_size,
+                                 "kind": "whole-disk-info", "reason": None})
+            except PermissionError:
+                rows.append({"cls": "whole-disk", "path": entry.path,
+                             "bytes": 0, "kind": "whole-disk-info",
+                             "reason": "needs-root: permission denied"})
+            except OSError:
+                continue
+    except OSError as e:
+        _dbg("survey root-big-files scandir failed: %r" % e)
+    rows.sort(key=lambda r: r.get("bytes", 0), reverse=True)
+    return rows
+
+
+def _survey_home_breadth(scandir_fn=None):
+    """(d) Per-home breadth beyond ``devel/`` — ``os.scandir`` + ``os.lstat``
+    on each home's TOP-LEVEL entries (no recursion, no subprocess).  Reports
+    only entries whose own stat size > 0 (dirs at this level carry only the
+    entry metadata, not recursive content; the size is still useful as a
+    breadth signal — the planner that recursively sizes ``devel/`` already
+    covers that subtree)."""
+    import glob as _glob
+    scandir_fn = scandir_fn or os.scandir
+    rows = []
+    for home_dir in sorted(_glob.glob("/home/*/")):
+        try:
+            for entry in scandir_fn(home_dir):
+                name = entry.name
+                if name == "devel":
+                    continue   # already covered by worktree/home-worktree planners
+                if name.startswith(".") and name not in (
+                        ".local", ".cache", ".claude"):
+                    continue   # skip hidden dirs other than known big ones
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    # For known big-content dirs, use _safe_dir_size for an
+                    # actual recursive size (bounded by the existing helper).
+                    # For other dirs, report the entry for breadth only.
+                    if name in (".local", ".cache", ".claude", "uploads"):
+                        sz = _safe_dir_size(entry.path)
+                        if sz > 100_000_000:   # > 100 MB
+                            rows.append({"cls": "whole-disk", "path": entry.path,
+                                         "bytes": sz,
+                                         "kind": "whole-disk-info", "reason": None})
+                except PermissionError:
+                    rows.append({"cls": "whole-disk", "path": entry.path,
+                                 "bytes": 0, "kind": "whole-disk-info",
+                                 "reason": "needs-root: permission denied"})
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return rows
+
+
+def discover_whole_disk_survey(report_read_fn=None, glob_fn=None,
+                               scandir_fn=None):
+    """#925-D: whole-disk survey tier — extends the top-consumers report with
+    system-level context that the per-user planners cannot see.
+
+    Four tiers, ALL cheap (no recursive ``du`` / ``find`` walks):
+      (a) Read the #841 root reporter's daily JSON for system dir sizes.
+      (b) ``os.stat`` on swapfiles at ``/``.
+      (c) ``os.scandir('/')`` for big files (>= 300 MB) at the root level.
+      (d) ``os.scandir('/home/*/')`` for per-home breadth beyond ``devel/``.
+
+    Returns action-shaped rows for ``_top_consumers_by_path``.
+    ``report_read_fn``, ``glob_fn``, ``scandir_fn`` are injectable for testing.
+    Never fails — each tier is wrapped in try/except and returns what it can.
+    """
+    rows = []
+    rows.extend(_survey_root_report(report_read_fn=report_read_fn))
+    rows.extend(_survey_swapfiles(glob_fn=glob_fn))
+    rows.extend(_survey_root_big_files(scandir_fn=scandir_fn))
+    rows.extend(_survey_home_breadth(scandir_fn=scandir_fn))
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # escalation (#834 req 1 ≥90 %, machine-channel; box-wide daily dedup)
 # --------------------------------------------------------------------------- #
 def _ranked_consumers(home, now):
@@ -2712,7 +2878,9 @@ def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
                         # #920 — include new rung classes in top-consumers
                         ("tmp-test", lambda: _plan_tmp_test(home, now)),
                         ("runner-diag", lambda: _plan_runner_diag(home, now)),
-                        ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now))):
+                        ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
+                        # #925-D — whole-disk survey tier (root-scope context)
+                        ("whole-disk", lambda: discover_whole_disk_survey())):
         try:
             all_actions.extend(plan())
         except Exception as e:

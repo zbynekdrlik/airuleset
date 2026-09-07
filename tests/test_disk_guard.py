@@ -2504,3 +2504,120 @@ def test_run_disk_guard_severe_ticket_body_has_real_top_consumers_with_injected_
         "#896-899: the ticket body must carry the REAL top consumers, not "
         "'(none)' — body was: %r" % body)
     assert "(none)" not in body
+
+
+# --------------------------------------------------------------------------- #
+# #925-D — whole-disk survey tier
+# --------------------------------------------------------------------------- #
+class TestWholeDiskSurvey:
+    """#925-D: the top-consumers report must name system-level culprits
+    outside /home/*/devel/ (swapfiles, /var/log, big files anywhere on disk)."""
+
+    def test_top_consumers_misses_system_paths_without_survey(self, tmp_path):
+        """RED regression lock: WITHOUT the survey, the old planners do not
+        produce system paths. The survey is what closes the gap."""
+        import unittest.mock as mock
+        # Suppress the survey so only old planners run
+        with mock.patch.object(dg, "discover_whole_disk_survey",
+                               return_value=[]):
+            top = dg._collect_top_consumers(str(tmp_path), 1000.0, limit=10)
+        paths = [p for p, _b in top]
+        assert not any("/var" in p or "/swapfile" in p for p in paths), \
+            "without the whole-disk survey, system paths should not appear"
+
+    def test_whole_disk_not_in_reclaimable_classes(self):
+        """Invariant lock: whole-disk rows are reporting-only; the drain
+        executor must NEVER act on them."""
+        assert "whole-disk" not in dg.RECLAIMABLE_CLASSES
+
+    def test_survey_reads_root_report(self):
+        """Tier (a): the survey reads the #841 root reporter's JSON and
+        returns rows for each candidate."""
+        fake_report = {
+            "generated_ts": 1000.0,
+            "candidates": [
+                {"cls": "var-log", "path": "/var/log", "bytes": 1_100_000_000},
+                {"cls": "apt-cache", "path": "/var/cache/apt", "bytes": 500_000_000},
+                {"cls": "tmp", "path": "/tmp", "bytes": 200_000_000},
+            ]
+        }
+        rows = dg.discover_whole_disk_survey(
+            report_read_fn=lambda _now: fake_report,
+            glob_fn=lambda _p: [], scandir_fn=lambda _p: iter([]))
+        var_log = [r for r in rows if r["path"] == "/var/log"]
+        assert len(var_log) == 1
+        assert var_log[0]["bytes"] == 1_100_000_000
+        assert var_log[0]["cls"] == "whole-disk"
+        assert var_log[0]["kind"] == "whole-disk-info"
+        assert var_log[0]["reason"] is None
+        # All 3 candidates should appear
+        assert len(rows) == 3
+
+    def test_survey_swapfiles(self, tmp_path):
+        """Tier (b): swapfiles at / are stat'd directly."""
+        # Create a fake swapfile
+        sf = tmp_path / "swapfile"
+        sf.write_bytes(b"\0" * 1024)
+        # Only return the file for the /swapfile* pattern, not /swap.img
+        rows = dg._survey_swapfiles(
+            glob_fn=lambda p: [str(sf)] if "swapfile" in p else [])
+        assert len(rows) == 1
+        assert rows[0]["path"] == str(sf)
+        assert rows[0]["bytes"] == 1024
+        assert rows[0]["reason"] is None
+
+    def test_survey_swapfile_permission_denied(self):
+        """Tier (b): an unreadable swapfile gets reason='needs-root'."""
+        def stat_raises(_p):
+            raise PermissionError("EACCES")
+        import unittest.mock as mock
+        with mock.patch("os.stat", side_effect=stat_raises):
+            rows = dg._survey_swapfiles(
+                glob_fn=lambda p: ["/swapfile2"] if "swapfile" in p else [])
+        needs_root = [r for r in rows if r.get("reason", "").startswith("needs-root")]
+        assert len(needs_root) == 1
+        assert needs_root[0]["path"] == "/swapfile2"
+
+    def test_survey_root_big_files(self, tmp_path):
+        """Tier (c): big files at / found via scandir, sorted by size desc."""
+        def _make_entry(name, size):
+            e = types.SimpleNamespace(name=name, path="/" + name)
+            e.is_file = lambda follow_symlinks=False: size > 0
+            e.stat = lambda follow_symlinks=False: types.SimpleNamespace(st_size=size)
+            return e
+        entries = [_make_entry(n, s) for n, s in [
+            ("swapfile2", 17_000_000_000),
+            ("small.txt", 100),
+            ("bigdump.sql", 500_000_000),
+        ]]
+        rows = dg._survey_root_big_files(scandir_fn=lambda _p: iter(entries))
+        # Only files >= 300 MB should appear
+        assert len(rows) == 2
+        # Sorted by size descending
+        assert rows[0]["path"] == "/swapfile2"
+        assert rows[0]["bytes"] == 17_000_000_000
+        assert rows[1]["path"] == "/bigdump.sql"
+        assert rows[1]["bytes"] == 500_000_000
+
+    def test_survey_all_tiers_fail_returns_empty(self):
+        """When every tier fails, the survey returns an empty list."""
+        def broken_report(_now):
+            return None
+        rows = dg.discover_whole_disk_survey(
+            report_read_fn=broken_report,
+            glob_fn=lambda _p: [], scandir_fn=lambda _p: iter([]))
+        assert rows == []
+
+    def test_collect_top_consumers_includes_whole_disk(self, tmp_path):
+        """GREEN: _collect_top_consumers with the survey wired in names
+        system-level paths. This is the counterpart of the RED test above."""
+        import unittest.mock as mock
+        fake_rows = [{"cls": "whole-disk", "path": "/var/log",
+                      "bytes": 1_100_000_000, "kind": "whole-disk-info",
+                      "reason": None}]
+        with mock.patch.object(dg, "discover_whole_disk_survey",
+                               return_value=fake_rows):
+            top = dg._collect_top_consumers(str(tmp_path), 1000.0, limit=10)
+        paths = [p for p, _b in top]
+        assert "/var/log" in paths, (
+            "#925-D: the survey must surface /var/log in top_consumers")
