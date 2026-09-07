@@ -47,10 +47,16 @@ class TestDropInRendering(unittest.TestCase):
         self.assertIn("MemoryHigh=12%", d)
         self.assertIn("MemoryMax=18%", d)
         self.assertIn("TasksMax=512", d)
-        self.assertIn("CPUWeight=100", d)
-        # CPUQuota is DELIBERATELY absent (the collapse was memory thrash, not
-        # CPU; a hard quota would throttle a legit burst).
-        self.assertNotIn("CPUQuota", d)
+        # #922: CPUWeight lowered from 100 (default, no advantage) to 30 —
+        # stream users get 30/130 (~23%) of CPU when contending with root
+        # (weight 100 via root-exempt drop-in). Under no contention, streams
+        # can use any idle CPU.
+        self.assertIn("CPUWeight=30", d)
+        # #922: CPUQuota=300% caps each stream at 3 of 8 vCPU cores. This was
+        # DELIBERATELY absent in #775 (the collapse was memory thrash, not CPU),
+        # but the owner's live incident (david3 test at 98% CPU, owner can't
+        # scroll) showed the CPU gap is real.
+        self.assertIn("CPUQuota=300%", d)
         # percentages, never absolute bytes (survive a box resize).
         self.assertNotIn("MemoryMax=18G", d)
 
@@ -60,6 +66,10 @@ class TestDropInRendering(unittest.TestCase):
         self.assertIn("MemoryHigh=infinity", d)
         self.assertIn("MemoryMax=infinity", d)
         self.assertIn("TasksMax=infinity", d)
+        # #922: root exempt must also restore CPU priority (the template now
+        # sets CPUWeight=30 + CPUQuota=300%, both must be unlimited for root).
+        self.assertIn("CPUWeight=100", d)
+        self.assertIn("CPUQuota=", d)  # present with empty/infinity value
 
     def test_service_oom_dropin(self):
         d = g.render_service_oom_dropin()
@@ -130,6 +140,18 @@ class TestApplyScript(unittest.TestCase):
     def test_user0_exemption(self):
         # the live-apply + read-back loops both skip user-0.slice.
         self.assertIn('[ "$slice" = "user-0.slice" ] && continue', self.s)
+
+    def test_live_apply_includes_cpu_weight_and_quota(self):
+        # #922: the live-apply loop must set CPUWeight + CPUQuota alongside
+        # the existing MemoryHigh/MemoryMax/TasksMax.
+        self.assertIn("CPUWeight=30", self.s)
+        self.assertIn("CPUQuota=300%", self.s)
+
+    def test_read_back_verify_checks_cpu_weight(self):
+        # #922: the read-back verify must check CPUWeight.
+        self.assertIn("CPUWeight", self.s)
+        # The verify reads CPUWeight from systemctl show.
+        self.assertIn("-p CPUWeight", self.s)
 
     def test_swap_is_verify_only_never_created(self):
         self.assertIn("SwapTotal", self.s)
