@@ -70,6 +70,9 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
 
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
+        # Persistent state dict shared across sweeps — the busy_first_seen
+        # tracking must survive across goal_sweep calls (like run_once's state).
+        self.state = {}
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -85,7 +88,8 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, sid)],
                                    cap, model_type=True)
         logs = goal.goal_sweep(now, run=tmux, projects_dir=proj,
-                               requests_path=self.reqp, sleep_fn=lambda s: None)
+                               requests_path=self.reqp, sleep_fn=lambda s: None,
+                               state=self.state)
         return logs, tmux
 
     def test_busy_waiting_less_than_threshold_defers(self):
@@ -118,7 +122,8 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
         tmux2 = DeliverGoalFakeTmux([("%9", "claude", self.CWD, sid)],
                                     _WAITING_PANE, model_type=True)
         logs2 = goal.goal_sweep(100700.0, run=tmux2, projects_dir=proj,
-                                requests_path=self.reqp, sleep_fn=lambda s: None)
+                                requests_path=self.reqp, sleep_fn=lambda s: None,
+                                state=self.state)
         combined2 = "\n".join(logs2)
         # After the age bound, the sweep must NOT return skip:busy — it must
         # attempt the delivery (either send or another non-busy skip reason)
@@ -145,8 +150,9 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
         tmux2 = DeliverGoalFakeTmux([("%9", "claude", self.CWD, sid)],
                                     GOAL_IDLE_CAP, model_type=True)
         logs2 = goal.goal_sweep(100400.0, run=tmux2, projects_dir=proj,
-                                requests_path=self.reqp, sleep_fn=lambda s: None)
-        # Normal pane — not busy (delivery proceeds)
+                                requests_path=self.reqp, sleep_fn=lambda s: None,
+                                state=self.state)
+        # Normal pane — not busy (delivery proceeds, resets first-seen)
 
         # Third sweep: Waiting again at t=100500 — should be treated as
         # a NEW Waiting (first-seen reset), so must skip:busy (< 10 min)
@@ -156,7 +162,8 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
         tmux3 = DeliverGoalFakeTmux([("%9", "claude", self.CWD, sid)],
                                     _WAITING_PANE, model_type=True)
         logs3 = goal.goal_sweep(100500.0, run=tmux3, projects_dir=proj,
-                                requests_path=self.reqp, sleep_fn=lambda s: None)
+                                requests_path=self.reqp, sleep_fn=lambda s: None,
+                                state=self.state)
         combined3 = "\n".join(logs3)
         self.assertIn("skip:busy", combined3,
                       "After the Waiting state cleared and reappeared, the "
