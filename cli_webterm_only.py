@@ -93,10 +93,11 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
 
 # #870 incident 2 fix: which webterm-only user accounts each human's
 # controller connects to.  Derived from WEBTERM_DASHBOARD_TABS — zbynek's
-# dashboard has david1-3 tabs; david's has david1-4; marek and dominika have
-# no webterm-only targets.  Test-locked against WEBTERM_DASHBOARD_TABS drift.
+# dashboard has david1-4 tabs (#934); david's has david1-4; marek and
+# dominika have no webterm-only targets.  Test-locked against
+# WEBTERM_DASHBOARD_TABS drift.
 _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS = {
-    "zbynek": frozenset({"david1", "david2", "david3"}),
+    "zbynek": frozenset({"david1", "david2", "david3", "david4"}),
     "david": frozenset({"david1", "david2", "david3", "david4"}),
     "marek": frozenset(),
     "dominika": frozenset(),

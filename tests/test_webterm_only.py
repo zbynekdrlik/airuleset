@@ -1096,13 +1096,13 @@ class TestMultiHumanControllerKeys870(unittest.TestCase):
         blobs = {cli_webterm_only._key_blob(k) for k in keys}
         self.assertIn(zbynek_blob, blobs)
 
-    def test_david4_does_not_get_zbynek_controller_key(self):
-        """david4 is NOT in zbynek's dashboard → zbynek controller blob absent."""
+    def test_david4_gets_zbynek_controller_key(self):
+        """#934: david4 IS in zbynek's dashboard → zbynek controller blob present."""
         keys = cli_webterm_only.desired_keys_for_user("david4")
         zbynek_blob = cli_webterm_only._key_blob(
             cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
         blobs = {cli_webterm_only._key_blob(k) for k in keys}
-        self.assertNotIn(zbynek_blob, blobs)
+        self.assertIn(zbynek_blob, blobs)
 
     def test_dominika_does_not_get_zbynek_controller_key(self):
         """dominika is NOT in zbynek's dashboard → zbynek controller blob absent."""
