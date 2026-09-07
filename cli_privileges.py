@@ -105,10 +105,10 @@ PRIVILEGES: List[Privilege] = [
         reach="fleet operator ssh key — gatekeeper@gk + the identity-pinned "
               "subdev streams (marek/miva1/david1-4/simap1) AND root@subdev "
               "(SHARED_STREAM_GUARD_HOSTS, admin_user=root)",
-        rotation="generate airuleset_push_ed25519 on the new box; distribute "
-                 "via #869 managed authorized_keys push using the OLD key; then "
-                 "remove the old key from every target's authorized_keys "
-                 "(rotation: F1 — being replaced by airuleset_push_ed25519)",
+        rotation="F1 DONE: replaced by airuleset_push_ed25519 (ADD+VERIFY "
+                 "22/22, 2026-09-05). REMOVE pending — owner deferred "
+                 "(issuecomment-5549153954). File kept on controller as "
+                 "identity for REMOTE_HOSTS entries that still reference it.",
         must_move=True,
         used_by=("cli_fleet.py:52 (REMOTE_HOSTS identity)",
                  "cli_fleet.py:619 (SHARED_STREAM_GUARD_HOSTS root@subdev)",
@@ -122,8 +122,8 @@ PRIVILEGES: List[Privilege] = [
         reach="NEW fleet push ssh key — replaces gatekeeper_access_ed25519; "
               "reaches every REMOTE_HOSTS entry + root@subdev "
               "(SHARED_STREAM_GUARD_HOSTS) after F1 rotation",
-        rotation="F1: generated on the airuleset box; distributed via "
-                 "cli_key_rotation add/verify/remove using the old key",
+        rotation="F1 DONE: generated on the controller box (2026-09-05), "
+                 "ADD+VERIFY 22/22. The primary fleet push key.",
         must_move=True,
         used_by=("cli_key_rotation.py:46 (F1 rotation target, forward-ref)",),
         identity_of="~/.secrets/airuleset_push_ed25519",
@@ -135,9 +135,9 @@ PRIVILEGES: List[Privilege] = [
         reach="account default ssh key — the no-identity REMOTE_HOSTS "
               "(dev2, montalu1-8@subdev, forestshop-dev admin/stepan) that "
               "authorize the box's own default key",
-        rotation="new box's own default key; authorize its .pub on each "
-                 "default-key target (managed authorized_keys push), then "
-                 "de-authorize dev1's old default key on those targets",
+        rotation="MOVED: controller box's own default key. Owner cancelled "
+                 "rotation (issuecomment-5549153954) — dev1's key stays "
+                 "authorized on targets.",
         must_move=True,
         used_by=("cli_fleet.py:190 (default-key REMOTE_HOSTS)",),
         identity_of=DEFAULT_SSH_KEY,  # covers the no-identity fleet bucket
@@ -147,8 +147,8 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_SSH_KEY,
         local_path="~/.ssh/spinbike_vps",
         reach="ssh key for spinbike-vps (no-tailscale owner box)",
-        rotation="new keypair on the new box, authorize on spinbike-vps, "
-                 "remove dev1's old key",
+        rotation="MOVED: copied from dev1 to controller (owner cancelled "
+                 "rotation). dev1's key stays authorized on spinbike-vps.",
         must_move=True,
         used_by=("cli_fleet.py:280 (REMOTE_HOSTS identity)",),
         identity_of="~/.ssh/spinbike_vps",
@@ -159,8 +159,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.secrets/webterm_david_ed25519",
         reach="dedicated webterm-provisioning ssh key for david1-4@subdev "
               "(never the gatekeeper key — cli_webterm_profiles doctrine)",
-        rotation="new keypair on the new box, authorize for david1-4@subdev, "
-                 "remove dev1's old key",
+        rotation="F4b DONE: generated on the controller (2026-09-06), "
+                 "distributed to david1-4@subdev via fleet push.",
         must_move=True,
         used_by=("cli_webterm_profiles.py:96 (WEBTERM_DAVID_IDENTITY)",),
     ),
@@ -174,8 +174,8 @@ PRIVILEGES: List[Privilege] = [
         reach="dedicated webterm ssh key for the owner's own tabs on the "
               "controller (forced-command restrict,pty,command= entries on "
               "dev1/dev2/gk/subdev targets — never a fleet push key)",
-        rotation="new keypair on the controller box, authorize on each "
-                 "target's authorized_keys with forced-command, remove old key",
+        rotation="F4b DONE: generated on the controller (2026-09-06), "
+                 "distributed with forced-command entries.",
         must_move=True,
         used_by=("cli_webterm_profiles.py (zbynek_inventory, forward-ref #870)",),
     ),
@@ -186,8 +186,8 @@ PRIVILEGES: List[Privilege] = [
         reach="dedicated webterm ssh key for marek's OBSERVE lane tabs on the "
               "controller (montalu/miva/dev/gk/forestshop targets — never the "
               "fleet gatekeeper key)",
-        rotation="new keypair on the controller box, authorize on each "
-                 "target's authorized_keys, remove old key",
+        rotation="F4b DONE: generated on the controller (2026-09-06), "
+                 "distributed with forced-command entries.",
         must_move=True,
         used_by=("cli_webterm_profiles.py:189 (WEBTERM_MAREK_IDENTITY)",),
     ),
@@ -198,8 +198,8 @@ PRIVILEGES: List[Privilege] = [
         reach="dedicated webterm ssh key for dominika's OBSERVE lane tabs on "
               "the controller (montalu5/miva1 loopback — never the fleet "
               "gatekeeper key)",
-        rotation="new keypair on the controller box, authorize for "
-                 "montalu5/miva1@subdev, remove old key",
+        rotation="F4b DONE: generated on the controller (2026-09-06), "
+                 "distributed for montalu5/miva1@subdev.",
         must_move=True,
         used_by=("cli_webterm_profiles.py:397 (WEBTERM_DOMINIKA_IDENTITY)",),
     ),
@@ -210,8 +210,8 @@ PRIVILEGES: List[Privilege] = [
         reach="controller's SINGLE cloudflared tunnel credentials JSON — the "
               "sole on-box secret for the multi-ingress tunnel fronting all 4 "
               "webterm lanes (zbynek/david/marek/dominika hostnames)",
-        rotation="create a new tunnel on the controller via CF API or dev2's "
-                 "origin cert; the old creds are revoked with the old tunnel",
+        rotation="F4a DONE: controller tunnel created (2026-09-06), creds "
+                 "on the controller box.",
         must_move=True,
         used_by=("cli_webterm_tunnel.py (controller tunnel, forward-ref #870)",),
     ),
@@ -222,9 +222,8 @@ PRIVILEGES: List[Privilege] = [
         reach="Cloudflare token — Access apps/policies EDIT on the "
               "newlevel.media account (webterm-access --apply + drop-gateway "
               "Access lanes)",
-        rotation="mint a NEW account-owned token per the cloudflare-api-tokens "
-                 "skill; `secret request --persist`; revoke the old token in "
-                 "the Cloudflare dashboard",
+        rotation="MOVED: copied from dev1 to controller (owner cancelled "
+                 "rotation, issuecomment-5549153954). No rotation needed.",
         must_move=True,
         used_by=("cli_webterm_access.py:61 (WEBTERM_ACCESS_TOKEN_FILE)",
                  "cli_drop_gateway.py:373"),
@@ -235,8 +234,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.secrets/cloudflare-account-tokens",
         reach="Cloudflare newlevel.media account READ token (Access apps/idps "
               "GET; read-only — cannot edit Access)",
-        rotation="mint a NEW read-scoped account token; `secret request "
-                 "--persist`; revoke the old token",
+        rotation="MOVED: copied from dev1 to controller (owner cancelled "
+                 "rotation). No rotation needed.",
         must_move=True,
         used_by=("cli_webterm_access.py:50",),
     ),
@@ -246,8 +245,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.secrets/webterm_credential",
         reach="owner webterm gateway shared secret (constant-time compared by "
               "the gateway — the pre-Access password floor)",
-        rotation="regenerate the shared secret on the new box; re-provision the "
-                 "gateway unit; delete dev1's copy",
+        rotation="MOVED: copied from dev1 to controller (owner cancelled "
+                 "rotation). Gateway unit re-provisioned on controller.",
         must_move=True,
         used_by=("cli_webterm.py:161 (WEBTERM_CRED_PATH)",
                  "cli_webterm_gateway.py:209"),
@@ -258,9 +257,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.claude/channels/discord/.env",
         reach="Discord bot token — the notify device-ping path (per-owner "
               "threads: ❓ ask / ✅ done / autopilot card)",
-        rotation="mint a NEW Discord bot token for the airuleset account; write "
-                 "the new box's ~/.claude/channels/discord/.env; revoke the old "
-                 "bot token",
+        rotation="MOVED: copied from dev1 to controller (owner cancelled "
+                 "rotation). Same bot token on both boxes.",
         must_move=True,
         used_by=("notify/__init__.py:39 (_ENV_REL)",
                  "notify/__init__.py:2806",
@@ -273,9 +271,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.git-credentials",
         reach="GitHub auth (issues + contents across the managed repos) — the "
               "GH_TOKEN fallback airuleset extracts when the shell has none",
-        rotation="new fine-grained GitHub PAT (issues+contents on managed "
-                 "repos), later a GitHub App; re-auth `gh` on the new box; "
-                 "revoke the old PAT / re-auth dev1 read-only",
+        rotation="MOVED: gh auth copied from dev1 to controller (owner "
+                 "cancelled rotation). Same credentials on both boxes.",
         must_move=True,
         used_by=("airuleset.py:2331 (~/.git-credentials fallback)",),
     ),
@@ -301,8 +298,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.claude/secrets",
         reach="filedrop vault store dir — every `secret request` value lives "
               "here; `--persist` writes a ~/.secrets copy",
-        rotation="vault entries are transient (TTL ~24h); the dir itself moves "
-                 "with the account",
+        rotation="MOVED: vault dir created on controller at install time. "
+                 "Entries are transient (TTL ~24h).",
         must_move=True,
         used_by=("filedrop/vault.py:185 (secrets_dir())",),
     ),
@@ -313,8 +310,8 @@ PRIVILEGES: List[Privilege] = [
         reach="fleet shared ssh password (sshpass -p, hardcoded in "
               "cli_remote.py source + git history) — dev2, montalu1-8, "
               "forestshop admin/stepan (the no-identity hosts)",
-        rotation="pin identities per issue 659/679; phase out shared password; "
-                 "the literal is in git-tracked source AND git history",
+        rotation="DEBT: hardcoded literal in git-tracked source + history; "
+                 "pin identities per #659/#679 to phase out (ongoing).",
         must_move=True,
         used_by=("cli_remote.py:306 (sshpass -p, hardcoded literal)",
                  "cli_remote.py:983"),
@@ -325,7 +322,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.cloudflared",
         reach="cloudflared dir — per-tunnel credentials JSON files (the sole "
               "on-box secret for each managed tunnel) + cert.pem if present",
-        rotation="new tunnel creds on the new box; old creds deleted",
+        rotation="MOVED: cloudflared dir with tunnel creds on controller. "
+                 "dev1 copy kept per owner decision.",
         must_move=True,
         used_by=("cli_webterm_tunnel.py:34 (WEBTERM_CLOUDFLARED_DIR)",),
     ),
@@ -336,8 +334,8 @@ PRIVILEGES: List[Privilege] = [
         reach="airuleset's DEDICATED webterm tunnel config (never the default "
               "config.yml — that belongs to spinbike on dev1, see "
               "cli_webterm_tunnel.py:36)",
-        rotation="re-render on the new box from cli_webterm_tunnel + "
-                 "cli_drop_gateway",
+        rotation="F4a DONE: re-rendered on controller by cli_webterm_tunnel "
+                 "+ cli_drop_gateway at install time.",
         must_move=True,
         used_by=("cli_webterm_tunnel.py:38 (WEBTERM_OWNER_TUNNEL_CONFIG)",
                  "cli_drop_gateway.py:497 (drop-gateway ingress config)"),
@@ -359,8 +357,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.config/gh/hosts.yml",
         reach="gh CLI auth token (issues + contents across managed repos) — "
               "the primary GitHub auth every `gh` invocation uses",
-        rotation="re-auth `gh` on the new box with a fine-grained PAT; "
-                 "revoke the old PAT",
+        rotation="MOVED: gh CLI auth copied from dev1 to controller "
+                 "(owner cancelled rotation).",
         must_move=True,
         used_by=("airuleset.py:5788 (~/.config/gh/hosts.yml)",),
     ),
@@ -369,7 +367,8 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_OAUTH,
         local_path="~/.config/gh-app-tokens/primary",
         reach="GitHub App token (alternative auth path for gh CLI)",
-        rotation="re-provision on the new box; revoke the old token",
+        rotation="MOVED: copied from dev1 to controller if present "
+                 "(owner cancelled rotation).",
         must_move=True,
         used_by=("airuleset.py:2372 (gh-app-tokens/primary)",),
     ),
@@ -381,7 +380,8 @@ PRIVILEGES: List[Privilege] = [
               "reads and fans out to fleet targets; #870 F3: controller box "
               "sources from ~/.secrets/soniox.env, dev1 falls back to "
               "~/devel/voiceagent/.env via SONIOX_KEY_SOURCE fallback chain)",
-        rotation="new Soniox key on the new box; fan out via push",
+        rotation="MOVED: source file copied from dev1 to controller "
+                 "(owner cancelled rotation). Fan-out via push.",
         must_move=True,
         used_by=("cli_remote.py:99 (SONIOX_KEY_SOURCE)",),
         value_key="SONIOX_API_KEY",
@@ -392,7 +392,7 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.soniox.env",
         reach="Soniox API key local fanout copy (the delivered copy on this "
               "box, consumed by meeting-analysis)",
-        rotation="re-delivered by push from the source; no separate rotation",
+        rotation="MOVED: delivered by push from the source copy on controller.",
         must_move=True,
         used_by=("cli_remote.py:163 (soniox.env fan-out delivery)",),
         value_key="SONIOX_API_KEY",
@@ -403,8 +403,8 @@ PRIVILEGES: List[Privilege] = [
         local_path="~/.secrets/hetzner-airuleset",
         reach="Hetzner API token for the airuleset project (F1 box "
               "provisioning — server create/delete/manage)",
-        rotation="after migration this token stays ONLY on the airuleset box; "
-                 "revoke from dev1",
+        rotation="MOVED: copied from dev1 to controller (owner cancelled "
+                 "rotation). dev1 copy kept per owner decision.",
         must_move=True,
         used_by=("airuleset.py (F1 provisioning, issue 870)",),
     ),
@@ -415,8 +415,8 @@ PRIVILEGES: List[Privilege] = [
         reach="Tailscale API key (tskey-api-...) — creates pre-auth keys, "
               "adds/removes tailnet devices; found in plaintext in project "
               "memory on dev1 (the shared-blast-radius the ticket cites)",
-        rotation="new key in Tailscale admin console; `secret request --persist` "
-              "on the new box; revoke old; delete the memory file on dev1",
+        rotation="CANCELLED: owner cancelled standing Tailscale API key on "
+                 "controller (issuecomment-5549153954). Mint per-need.",
         must_move=True,
         used_by=("wireguard project memory (plaintext in md file)",),
     ),
