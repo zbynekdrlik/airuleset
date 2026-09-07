@@ -469,8 +469,6 @@ class TestSignOnly919(unittest.TestCase):
     def test_sign_only_argparse_present(self):
         """The --sign-only flag must exist on the handoff subcommand."""
         import inspect
-        src = inspect.getsource(airuleset.main)
-        # The argparse setup is in main() — check the whole airuleset module.
         full = inspect.getsource(airuleset)
         self.assertIn("--sign-only", full,
                        "handoff subcommand must accept --sign-only")
