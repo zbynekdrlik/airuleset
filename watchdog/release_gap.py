@@ -772,19 +772,16 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
         logs.append("release-gap %s -> skip:already-handled (another sweep job "
                     "typed this pane; retry next sweep)" % loc)
         return logs
-    # #749/#714 BUSY-PANE GATE: NEVER type into a pane showing CC's "Waiting for
-    # N background agents to finish" state — the submit is swallowed and the text
-    # parks ORPHANED in the input box (the head/tail verify then fails every
-    # sweep). Defer WITHOUT a keystroke; the transient Waiting state clears between
-    # turns and a later sweep delivers into the genuinely-idle `❯`. last_nudge
-    # stays unadvanced, the pane is NOT claimed in `handled`, and `send_fails` is
-    # NEITHER incremented NOR carried (this sweep booked no failure) — the fresh
-    # `new_rec` simply omits it, so an alternating busy↔swallow pane restarts the
-    # streak at 1, the accepted #714 residual (exact sibling parity). Inlined
-    # rather than importing `ops_wait_recheck._pane_busy_waiting` (a rider→rider
-    # private reach); both wrappers delegate to the SAME single-sourced signal
-    # `watchdog._BG_AGENTS_WAIT_RX`, so a signal change still lands in one place.
-    if captured and watchdog._BG_AGENTS_WAIT_RX.search(captured):
+    # #749/#714/#921 BUSY-PANE GATE: age-bounded busy-waiting — after >= 10 min
+    # of persistent Waiting with a bare prompt, deliver anyway. Defer WITHOUT
+    # a keystroke when below the age bound. last_nudge stays unadvanced, the
+    # pane is NOT claimed in `handled`, and `send_fails` is NEITHER incremented
+    # NOR carried (same sibling parity as before).
+    from watchdog import ops_wait_recheck as _owr
+    _rg_kind, _rg_draft = watchdog._classify_boundary(captured)
+    _rg_busy, _rg_aged = _owr._busy_waiting_with_age(
+        captured, state, sid, now, _rg_kind)
+    if _rg_busy and not _rg_aged:
         logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep)" % loc)
         return logs

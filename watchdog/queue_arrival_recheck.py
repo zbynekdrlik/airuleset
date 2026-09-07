@@ -462,11 +462,13 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                     "job typed this pane; retry next sweep, %d new)"
                     % (loc, len(arrivals)))
         return logs
-    # #714 BUSY-PANE GATE: NEVER type into a pane showing CC's "Waiting for N
-    # background agents to finish" state — the submit is swallowed and parks
-    # orphaned. Defer WITHOUT a keystroke (no send_fails increment, base
-    # unadvanced); the transient state clears and a later sweep delivers.
-    if _ops_wait_recheck._pane_busy_waiting(captured):
+    # #714/#921 BUSY-PANE GATE: age-bounded busy-waiting — after >= 10 min of
+    # persistent Waiting with a bare prompt, deliver anyway. Defer WITHOUT a
+    # keystroke when below the age bound.
+    _qa_kind, _qa_draft = watchdog._classify_boundary(captured)
+    _qa_busy, _qa_aged = _ops_wait_recheck._busy_waiting_with_age(
+        captured, state, sid, now, _qa_kind)
+    if _qa_busy and not _qa_aged:
         logs.append("queue-arrival %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep, %d new)"
                     % (loc, len(arrivals)))

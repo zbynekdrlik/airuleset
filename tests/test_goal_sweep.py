@@ -893,7 +893,10 @@ class TestGoalDarkWatch(unittest.TestCase):
         # #804 mode-2 keeps re-arming on backoff past this point, proven by
         # `test_re_arm_past_cap_backs_off_never_silent_804`.) Counted via a
         # record_goal_request spy; mtime frozen -> no liveness veto.
-        proj, tmux = self._dark("sess-dark-rearm-cap")
+        # #921 residual: attempts recorded at delivery time, so we simulate
+        # delivery by calling _record_delivered_attempt when a request is recorded.
+        _sid = "sess-dark-rearm-cap"
+        proj, tmux = self._dark(_sid)
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
         rearm = _rearm_ok
@@ -901,8 +904,13 @@ class TestGoalDarkWatch(unittest.TestCase):
         real_record = goal.record_goal_request
 
         def spy(*a, **k):
-            writes.append(1)
-            return real_record(*a, **k)
+            writes.append(now[0])
+            ret = real_record(*a, **k)
+            # #921 residual: simulate the full delivery cycle — record the
+            # delivered attempt + clear the request (as goal_sweep does on "sent").
+            goal._record_delivered_attempt(state, k.get("origin"), a[0], now[0])
+            goal.clear_goal_request(a[0], path=reqs)
+            return ret
 
         now = [1_700_000_000]
 
@@ -928,7 +936,10 @@ class TestGoalDarkWatch(unittest.TestCase):
         # within 24h); GREEN once the backoff allows a 3rd type after its 30m
         # window elapses, AND the 3rd type is spaced >= 30m from the 2nd (the
         # backoff floor, distinct from the ~confirm-ramp spacing of the 2nd).
-        proj, tmux = self._dark("sess-dark-rearm-backoff-804")
+        # #921 residual: attempts recorded at delivery time, so we simulate
+        # delivery by calling _record_delivered_attempt when a request is recorded.
+        _sid = "sess-dark-rearm-backoff-804"
+        proj, tmux = self._dark(_sid)
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
         rearm = _rearm_ok
@@ -937,7 +948,11 @@ class TestGoalDarkWatch(unittest.TestCase):
 
         def spy(*a, **k):
             writes.append(now[0])
-            return real_record(*a, **k)
+            ret = real_record(*a, **k)
+            # #921 residual: simulate the full delivery cycle.
+            goal._record_delivered_attempt(state, k.get("origin"), a[0], now[0])
+            goal.clear_goal_request(a[0], path=reqs)
+            return ret
 
         now = [1_700_000_000]
 

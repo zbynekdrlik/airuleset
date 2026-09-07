@@ -314,18 +314,43 @@ class TestFulfilledRearmLane(unittest.TestCase):
                          "an ALREADY-armed loop is never fulfilled-re-armed")
 
     # --- rate-limit: min gap between fulfilled-rearms per sid --------------- #
+    def _sweep_with_delivery(self, proj, tmux, now, obl, state, reqs, sid,
+                             rearm=None):
+        """#921 residual: _sweep + simulate delivery — record the delivered
+        attempt and clear the request (as goal_sweep does on "sent"), so
+        rate-limit tests work with delivered-only attempt recording."""
+        _real = goal.record_goal_request
+
+        def _spy(*a, **k):
+            ret = _real(*a, **k)
+            goal._record_delivered_attempt(state, k.get("origin"), a[0], now)
+            goal.clear_goal_request(a[0], path=reqs)
+            return ret
+
+        with unittest.mock.patch.object(goal, "record_goal_request",
+                                        side_effect=_spy):
+            rearm_fn = rearm or (lambda cwd: ("/goal DONE or stop after 50",
+                                              "full"))
+            logs = goal.goal_dark_watch(
+                now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
+                state=state, sleep_fn=lambda s: None,
+                obligation_fn=lambda cwd: obl, rearm_fn=rearm_fn,
+                requests_path=reqs)
+        return goal.load_goal_requests(reqs), logs, reqs
+
     def test_min_gap_blocks_a_second_rearm_within_the_window(self):
         proj, tmux = self._fixture("sess-gap")
         state = {}
         reqs = self._dir() / "goal-requests.json"
-        r1, _l1, _ = self._sweep(proj, tmux, 100000, (7, 100000), state, reqs)
-        self.assertEqual(r1.get("sess-gap", {}).get("origin"), self.ORIGIN)
+        # #921 residual: use delivery-simulating sweep for rate-limit tests
+        r1, _l1, _ = self._sweep_with_delivery(
+            proj, tmux, 100000, (7, 100000), state, reqs, "sess-gap")
         recs = state.get("goal_fulfilled_rearm", {}).get("sess-gap")
         self.assertEqual(len(recs or []), 1, "exactly ONE record in the window")
         # a 2nd sweep within the min-gap must NOT record a fresh slot.
-        _r2, l2, _ = self._sweep(
+        _r2, l2, _ = self._sweep_with_delivery(
             proj, tmux, 100000 + goal.GOAL_FULFILLED_REARM_MIN_GAP_S - 5,
-            (7, 100000), state, reqs)
+            (7, 100000), state, reqs, "sess-gap")
         recs = state.get("goal_fulfilled_rearm", {}).get("sess-gap")
         self.assertEqual(len(recs or []), 1,
                          "the min-gap holds a second re-arm inside the window")
@@ -335,9 +360,11 @@ class TestFulfilledRearmLane(unittest.TestCase):
         proj, tmux = self._fixture("sess-gap2")
         state = {}
         reqs = self._dir() / "goal-requests.json"
-        self._sweep(proj, tmux, 100000, (7, 100000), state, reqs)
-        self._sweep(proj, tmux, 100000 + goal.GOAL_FULFILLED_REARM_MIN_GAP_S + 5,
-                    (7, 100000), state, reqs)
+        self._sweep_with_delivery(proj, tmux, 100000, (7, 100000), state, reqs,
+                                  "sess-gap2")
+        self._sweep_with_delivery(
+            proj, tmux, 100000 + goal.GOAL_FULFILLED_REARM_MIN_GAP_S + 5,
+            (7, 100000), state, reqs, "sess-gap2")
         recs = state.get("goal_fulfilled_rearm", {}).get("sess-gap2")
         self.assertEqual(len(recs or []), 2,
                          "once the min-gap passes a fresh re-arm records again")
@@ -351,7 +378,8 @@ class TestFulfilledRearmLane(unittest.TestCase):
         # space each sweep past the min gap so only the DAILY cap can bind.
         step = goal.GOAL_FULFILLED_REARM_MIN_GAP_S + 1
         for _i in range(goal.GOAL_FULFILLED_REARM_MAX_PER_DAY + 3):
-            self._sweep(proj, tmux, now, (7, now), state, reqs)
+            self._sweep_with_delivery(proj, tmux, now, (7, now), state, reqs,
+                                      "sess-cap")
             now += step
         recs = state.get("goal_fulfilled_rearm", {}).get("sess-cap") or []
         self.assertEqual(len(recs), goal.GOAL_FULFILLED_REARM_MAX_PER_DAY,

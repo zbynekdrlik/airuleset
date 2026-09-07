@@ -303,6 +303,41 @@ _FULFILLED_SILENT = "fulfilled-silent"
 _GOAL_MARK_PARSER_VERSION = 2
 
 
+# #921 residual — the origin→state-dict mapping for attempt recording AFTER
+# verified delivery. Each rearm origin records its attempts in a SEPARATE
+# state dict; only "sent" deliveries are counted so undelivered attempts
+# (blocked by busy-waiting starvation) never fill the rate cap.
+_GOAL_ATTEMPTS_STATE_KEYS = {
+    _GOAL_AUTH_REARM_ORIGIN: "goal_auth_rearm_attempts",
+    _GOAL_ANSWER_REARM_ORIGIN: "goal_answer_rearm_attempts",
+    _GOAL_REARM_ORIGIN: "goal_dark_rearm_attempts",
+    _GOAL_STALE_REARM_ORIGIN: "goal_dark_rearm_attempts",
+    _GOAL_FULFILLED_REARM_ORIGIN: "goal_fulfilled_rearm",
+}
+
+
+def _record_delivered_attempt(state, origin, sid, now):
+    """#921 residual: record a successfully-delivered attempt in the
+    appropriate *_attempts state dict. Called from goal_sweep AFTER
+    deliver_goal returns "sent" — never at decision/request time.
+
+    A non-tracked origin (self-callback, etc.) is a no-op."""
+    key = _GOAL_ATTEMPTS_STATE_KEYS.get(origin)
+    if not key or not isinstance(state, dict):
+        return
+    d = state.setdefault(key, {})
+    _day = 24 * 3600
+    existing = d.get(sid)
+    if isinstance(existing, list):
+        pruned = [t for t in existing
+                  if isinstance(t, (int, float))
+                  and not isinstance(t, bool)
+                  and 0 <= (now - t) <= _day]
+    else:
+        pruned = []
+    d[sid] = pruned + [now]
+
+
 def record_goal_request(session, cwd, text, authority, now=None, path=None,
                         origin=None):
     """Record a pending `/goal` arm request for `session`. MULTIPLE writers:
@@ -643,6 +678,12 @@ GOAL_REQUEST_MAX_AGE_S = 30 * 60   # a request older than this is DISCARDED
 # long wait; the janitor's own provenance + own-content + recent-human gates
 # make each ordered recovery safe.
 GOAL_STASH_ABORT_LIVELOCK = 3
+# #921 residual: the ESCALATION threshold for the persistent foreign-slot
+# stash-abort livelock — after this many consecutive slot-occupied aborts
+# (preserved across request lifetimes), emit a LOUD escalation log and stop
+# re-ordering recovery (the janitor already tried and failed). Never auto-
+# clear a possibly-human stash; only surface the problem for the owner.
+GOAL_STASH_ABORT_ESCALATION = 6
 
 # #731 -- the SHARED per-request delivery-attempt cap. The montalu4 retype
 # livelock: `skip:verify-failed` / `skip:stash-abort` alternate with NO shared
@@ -1812,6 +1853,10 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += clog
             aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
+            # #921 residual (review M4): a drop:attempt-cap means keystrokes
+            # WERE typed (just not verified). Record one attempt so the origin's
+            # rate limit counts typed episodes, not only verified arms.
+            _record_delivered_attempt(state, entry.get("origin"), sid, now)
             logs.append("DROP (goal-sweep) %s sid=%s -> drop:attempt-cap "
                         "(%d keystroke deliveries failed, last=%s; leftover=%s)"
                         % (loc, sid, dl_fails, dl_last, leftover))
@@ -1849,9 +1894,20 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         dsuf = (" (%s)" % _out["detail"]) if _out.get("detail") else ""
         prior_aborts = aborts.get(sid, 0)
         if word in _GOAL_TERMINAL_WORDS:
-            aborts.pop(sid, None)
+            # #921 residual: preserve abort counter across request lifetimes.
+            # Only "sent" (slot freed) pops the counter. On "expired" /
+            # "drop:stale-rearm" etc. the slot is still occupied — keeping the
+            # counter lets the next dark-watch-created request inherit the
+            # accumulated abort history (fixes the drop+re-create ping-pong
+            # that reset the counter to 0 every request lifetime).
+            if word == "sent":
+                aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
         if word == "sent":
+            # #921 residual: record the delivered attempt in the origin's
+            # *_attempts state dict. Only "sent" deliveries count — an
+            # undelivered attempt (skip:busy etc.) never fills the cap.
+            _record_delivered_attempt(state, entry.get("origin"), sid, now)
             logs.append("OK (goal-sweep) %s sid=%s -> sent" % (loc, sid))
             if handled is not None:
                 handled.add(sid)
@@ -1871,14 +1927,22 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             # so the stale own stash slot is resolved BEFORE the age cap lapses.
             n = prior_aborts + 1
             aborts[sid] = n
-            logs.append("SKIP (goal-sweep) %s sid=%s -> %s (%d/%d)"
-                        % (loc, sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
-            if n >= GOAL_STASH_ABORT_LIVELOCK:
-                logs += _resolve_stash_abort_livelock(
-                    sid, cwd, run, projects_dir, state, now, send_fn,
-                    dry_run, sleep_fn, own_payload=text)  # #737
-                if handled is not None:
-                    handled.add(sid)
+            # #921 residual: past the ESCALATION threshold the recovery already
+            # tried and failed (foreign slot) — stop re-ordering and log LOUD.
+            if n >= GOAL_STASH_ABORT_ESCALATION:
+                logs.append("ESCALATION (goal-sweep) %s sid=%s -> %s "
+                            "PERSISTENT foreign-slot livelock (%d aborts, "
+                            "recovery exhausted — manual intervention needed)"
+                            % (loc, sid, word, n))
+            else:
+                logs.append("SKIP (goal-sweep) %s sid=%s -> %s (%d/%d)"
+                            % (loc, sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
+                if n >= GOAL_STASH_ABORT_LIVELOCK:
+                    logs += _resolve_stash_abort_livelock(
+                        sid, cwd, run, projects_dir, state, now, send_fn,
+                        dry_run, sleep_fn, own_payload=text)  # #737
+                    if handled is not None:
+                        handled.add(sid)
         else:
             aborts.pop(sid, None)
             # #731 -- a keystroke-delivering skip (verify-failed / stash-abort)
@@ -2332,6 +2396,13 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
         # completed loop, and logging it every sweep would flood the journal.
         return None, False
 
+    # #921 residual (review H1): defer to ANY pending request — a fulfilled-
+    # rearm must not re-record while the prior one is undelivered (without the
+    # decision-time attempt record, the min-gap alone no longer blocks re-entry
+    # every 60 s sweep). Mirrors auth/answer/stale at :2573/:2725/:2932.
+    if isinstance(load_goal_requests(requests_path).get(sid), dict):
+        return None, False
+
     text, auth = (rearm_fn or _default_rearm_fn)(cwd)
     if not text:
         return ("dark-watch %s sid=%s -> fulfilled-rearm SKIP:no-template "
@@ -2358,23 +2429,16 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
                 "(dry-run, open=%s authority=%s)"
                 % (loc, sid, open_n, auth)), True
 
-    fulfilled_state[sid] = pruned + [now]
+    # #921 residual: attempt recording moved to goal_sweep after verified
+    # delivery ("sent").  Same class as auth-rearm.
     seen_state.pop(sid, None)              # not a dead loop -> reset its state
     pinged_state.pop(sid, None)
     confirm_state.pop(sid, None)
-    # ACCEPTED RESIDUAL (review 🔵): record_goal_request returns True on BOTH a
-    # real write AND a DOWNGRADE-REFUSED no-op (a pending self-callback / sibling
-    # re-arm already in flight), so the two are indistinguishable from the return
-    # -> the log below reads "recording re-arm" even on a refusal. Benign: on a
-    # refusal the pending request delivers the arm anyway, and consuming a
-    # fulfilled slot for a refused sweep only escalates the min-gap/cap sooner
-    # (the same fail-safe direction as the dark cap). Not worth a pre-record
-    # pending-store read on the hot path.
     record_goal_request(sid, cwd, text, auth, now=now,
                         origin=_GOAL_FULFILLED_REARM_ORIGIN, path=requests_path)
     return ("dark-watch %s sid=%s -> FULFILLED-REARM: recording re-arm "
-            "(open=%s authority=%s records=%d per 24h)"
-            % (loc, sid, open_n, auth, len(fulfilled_state[sid]))), True
+            "(open=%s authority=%s)"
+            % (loc, sid, open_n, auth)), True
 
 
 def _fulfilled_silent_veto(sid, mark_ts, loc, dry_run,
@@ -2452,14 +2516,15 @@ def _dark_record_rearm(sid, cwd, text, auth, now, loc, open_n, dry_run,
         return ("dark-watch %s sid=%s -> CONFIRMED-DEAD would record "
                 "(dry-run, open=%s authority=%s reads=%s span=%ss)"
                 % (loc, sid, open_n, auth, reads, span))
-    attempts_state[sid] = list(attempts_state.get(sid) or []) + [now]
+    # #921 residual: attempt recording moved to goal_sweep after verified
+    # delivery ("sent").  Same class as auth-rearm.
     confirm_state.pop(sid, None)       # run consumed by the type
     pinged_state.pop(sid, None)        # episode resolved by the type
     record_goal_request(sid, cwd, text, auth, now=now,
                         origin=_GOAL_REARM_ORIGIN, path=requests_path)
     return ("dark-watch %s sid=%s -> CONFIRMED-DEAD: recording re-arm "
-            "(open=%s authority=%s reads=%s span=%ss attempt=%d)"
-            % (loc, sid, open_n, auth, reads, span, len(attempts_state[sid])))
+            "(open=%s authority=%s reads=%s span=%ss)"
+            % (loc, sid, open_n, auth, reads, span))
 
 
 def _default_obligation_fn(cwd):
@@ -2555,12 +2620,13 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     if dry_run:
         return ("stale-rearm %s sid=%s -> STALE would record re-arm (dry-run, "
                 "open=%s authority=%s)" % (loc, sid, open_n, authority))
-    attempts_state[sid] = pruned + [now]
+    # #921 residual: attempt recording moved to goal_sweep after verified
+    # delivery ("sent").  Same class as auth-rearm.
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_STALE_REARM_ORIGIN, path=requests_path)
     return ("stale-rearm %s sid=%s -> STALE: recording re-arm (open=%s "
-            "authority=%s attempt=%d)"
-            % (loc, sid, open_n, authority, len(attempts_state[sid])))
+            "authority=%s)"
+            % (loc, sid, open_n, authority))
 
 
 def _goal_guard_decide(sid, payload, template_line, state, now, loc,
@@ -2723,12 +2789,14 @@ def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
     if dry_run:
         return ("auth-rearm %s sid=%s -> cleared-by-auth would record re-arm "
                 "(dry-run, open=%s authority=%s)" % (loc, sid, open_n, authority))
-    auth_attempts_state[sid] = pruned + [now]
+    # #921 residual: attempt recording moved to goal_sweep after verified
+    # delivery ("sent").  Recording at decision time counted UNDELIVERED
+    # attempts toward the cap — the m1 12-starved-auth-rearm incident.
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_AUTH_REARM_ORIGIN, path=requests_path)
     return ("auth-rearm %s sid=%s -> cleared-by-auth: recording re-arm (open=%s "
-            "authority=%s attempt=%d)"
-            % (loc, sid, open_n, authority, len(auth_attempts_state[sid])))
+            "authority=%s)"
+            % (loc, sid, open_n, authority))
 
 
 def _answer_rearm_check_transcript(tpath, mark_ts):
@@ -2928,12 +2996,14 @@ def _answer_rearm_decide(sid, cwd, tpath, mark, mark_ts, armed, now, loc,
     # mechanism (a pending request of ANY origin blocks re-recording) + the
     # rate limiter's min-gap (M2 fix: no consumed-epoch dedup that would lose
     # a dropped/expired request forever).
-    answer_attempts_state[sid] = pruned + [now]
+    # #921 residual: attempt recording moved to goal_sweep after verified
+    # delivery ("sent").  Same class as auth-rearm — undelivered attempts
+    # must not fill the rate cap.
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_ANSWER_REARM_ORIGIN, path=requests_path)
     return ("answer-rearm %s sid=%s -> answered-❓: recording re-arm (open=%s "
-            "authority=%s attempt=%d)"
-            % (loc, sid, open_n, authority, len(answer_attempts_state[sid])))
+            "authority=%s)"
+            % (loc, sid, open_n, authority))
 
 
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
@@ -3396,7 +3466,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         rearm_text = rearm_auth = None
         attempt_ok = False
         attempt_wait = None
-        if workable:
+        # #921 residual (review H1): defer to ANY pending request — a dark-
+        # rearm must not re-record while the prior one is undelivered.
+        _has_pending = isinstance(
+            load_goal_requests(requests_path).get(sid), dict)
+        if workable and not _has_pending:
             rearm_text, rearm_auth = (rearm_fn or _default_rearm_fn)(cwd)
             attempt_ok, attempts_state[sid], attempt_wait = _dark_rearm_attempt_ok(
                 attempts_state.get(sid), now)
@@ -3678,16 +3752,18 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
             logs.append("qrepoke %s sid=%s -> disarm deferred (%s), retry next "
                         "sweep" % (loc, sid, word))
             continue
-        attempts[sid] = pruned + [now]        # a type was attempted -> consume a slot
         if word == "sent":
+            # #921 residual: record the attempt ONLY on verified delivery,
+            # not on a failed keystroke that never landed.
+            attempts[sid] = pruned + [now]
             qveto[sid] = {"disarmed_ts": now, "streak": streak}
             logs.append("qrepoke %s sid=%s -> DISARMED: /goal clear typed "
                         "(%d re-pokes, attempt=%d/%d)"
                         % (loc, sid, streak, len(attempts[sid]),
                            GOAL_QDISARM_MAX_PER_DAY))
         else:
-            logs.append("qrepoke %s sid=%s -> disarm delivery FAILED (%s, "
-                        "slot consumed)" % (loc, sid, word))
+            logs.append("qrepoke %s sid=%s -> disarm delivery FAILED (%s)"
+                        % (loc, sid, word))
     return logs
 
 
