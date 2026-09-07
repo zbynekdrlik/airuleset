@@ -28,8 +28,9 @@ import cli_webterm_profiles as profiles  # noqa: E402
 
 # The owner-defined zbynek.newlevel.media tab list, EXACT order (owner ROZHODNUTÉ
 # 2026-08-24: "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"; david3 (d3) added after
-# d2 per owner request 2026-08-26, #719).
+# d2 per owner request 2026-08-26, #719; ar (controller local) added first, #938).
 ZBYNEK_ORDER = [
+    "ar",
     "dev1", "dev2", "gatekeeper",
     "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
     "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -44,8 +45,8 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6", "d1", "d2",
-    "d3", "d4", "miva", "sb",
+    "ar", "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6", "d1",
+    "d2", "d3", "d4", "miva", "sb",
 ]
 
 
@@ -174,7 +175,8 @@ class TestOwnerDashboardRender(unittest.TestCase):
         # #870 fix: webterm_inventory(OWNER) returns zbynek_inventory() where
         # dev1's label is "dev1" (a remote entry), not "dev1 (localhost)".
         html = _render_owner()
-        for present in ('title="dev1"', 'title="dev2"',
+        for present in ('title="airuleset (local)"',  # #938: ar controller tab
+                        'title="dev1"', 'title="dev2"',
                         'title="gk (gatekeeper@gk)"', 'title="spinbike-vps"',
                         'title="david3@subdev"',   # #719: d3 now on the owner dashboard
                         'title="david4@subdev"'):   # #934: d4 added to owner dashboard
@@ -203,6 +205,50 @@ class TestOwnerDashboardRender(unittest.TestCase):
         self.assertEqual(aliases, [])
         # no foreign account leaked
         self.assertNotIn('title="marek@subdev"', html)
+
+
+class TestArLocalTab938(unittest.TestCase):
+    """#938: the controller's local 'ar' tab must render on the owner dashboard
+    as the FIRST tab button, with the correct alias and label."""
+
+    def test_ar_in_zbynek_dashboard_tabs(self):
+        # The EXCLUSIVE filter list must include 'ar'.
+        self.assertIn("ar", w.WEBTERM_DASHBOARD_TABS["zbynek"])
+
+    def test_ar_is_first_tab(self):
+        # 'ar' is the FIRST entry in zbynek_inventory, so it must be the first
+        # tab button on the owner dashboard (inventory order is preserved).
+        self.assertEqual(w.WEBTERM_DASHBOARD_TABS["zbynek"][0], "ar")
+
+    def test_ar_label_in_rendered_html(self):
+        # The rendered owner dashboard must carry the 'ar' tab button with
+        # its label 'airuleset (local)'.
+        html = _render_owner()
+        self.assertIn('title="airuleset (local)"', html)
+
+    def test_ar_alias_is_ar_not_dev1(self):
+        # _short_alias for the 'ar' entry (local=True, user=None, id="ar")
+        # must return "ar", NOT "dev1" (the pre-#938 shortcircuit bug).
+        ar_entry = {"id": "ar", "local": True, "user": None,
+                    "label": "airuleset (local)", "preferred": "zbynek"}
+        self.assertEqual(w._short_alias(ar_entry), "ar")
+
+    def test_ar_connect_uses_systemd_scope_not_ssh(self):
+        # Lock: 'ar' is local=True, so build_connect_argv must wrap it in
+        # _SYSTEMD_RUN_SCOPE (not ssh). This is the #736 local-entry contract.
+        ar_entry = {"id": "ar", "local": True, "user": None,
+                    "host": None, "identity": None, "preferred": "zbynek"}
+        argv = w.build_connect_argv(ar_entry)
+        self.assertEqual(argv[:5], w._SYSTEMD_RUN_SCOPE)
+        self.assertEqual(argv[5], "sh")
+        self.assertEqual(argv[6], "-c")
+
+    def test_dev1_alias_unchanged_by_938_fix(self):
+        # Regression lock: dev1 (local=True, user=None on dev1's inventory)
+        # must still alias as "dev1", not break under the #938 fix.
+        dev1_entry = {"id": "dev1", "local": True, "user": None,
+                      "label": "dev1 (localhost)", "preferred": "zbynek"}
+        self.assertEqual(w._short_alias(dev1_entry), "dev1")
 
 
 class TestConnectAllowlistMatchesZbynekInventory(unittest.TestCase):
