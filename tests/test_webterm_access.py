@@ -261,5 +261,67 @@ class TestReviewFixes(unittest.TestCase):
         self.assertEqual({mth for (mth, _p) in calls}, {"GET"})
 
 
+class TestSessionDuration932(unittest.TestCase):
+    """#932: session_duration must be 720h (30 days, CF documented max for the
+    1-month tier) for all webterm Access apps — the owner reports relogin too
+    frequent at 24h. The provisioning path already passes the declared value
+    idempotently; this locks the declared value AND the payload pass-through."""
+
+    EXPECTED_DURATION = "720h"
+
+    def test_all_apps_declare_720h_session_duration(self):
+        for name, spec in acc.WEBTERM_ACCESS_APPS.items():
+            self.assertEqual(
+                spec["session_duration"], self.EXPECTED_DURATION,
+                "%s declares session_duration=%r, expected %r"
+                % (name, spec["session_duration"], self.EXPECTED_DURATION))
+
+    def test_build_app_payload_passes_session_duration_through(self):
+        spec = {
+            "hostname": "test.example.com",
+            "name": "test app",
+            "allowed_emails": ["a@b.c"],
+            "session_duration": "720h",
+        }
+        payload = acc.build_app_payload(spec)
+        self.assertEqual(payload["session_duration"], "720h")
+
+    def test_build_app_payload_defaults_to_24h_when_missing(self):
+        spec = {
+            "hostname": "test.example.com",
+            "name": "test app",
+            "allowed_emails": ["a@b.c"],
+        }
+        payload = acc.build_app_payload(spec)
+        self.assertEqual(payload["session_duration"], "24h")
+
+    def test_apply_sends_declared_session_duration_in_payload(self):
+        """The session_duration from the spec must reach the API payload on both
+        create (POST) and update (PUT)."""
+        spec = {
+            "hostname": "new.example.com",
+            "name": "new app",
+            "allowed_emails": ["x@y.z"],
+            "session_duration": "720h",
+        }
+        # Create path (no existing app).
+        t = _FakeTransport(apps=[])
+        client = acc.AccessClient("acct", token="tok", transport=t)
+        res = acc.apply_profile(client, spec, dry_run=False)
+        self.assertTrue(res["ok"], res["error"])
+        post_body = t.body_for("POST", "/apps")
+        self.assertIsNotNone(post_body)
+        self.assertEqual(post_body["session_duration"], "720h")
+
+        # Update path (app already exists).
+        t2 = _FakeTransport(apps=[{"id": "a1", "domain": "new.example.com"}])
+        client2 = acc.AccessClient("acct", token="tok", transport=t2)
+        res2 = acc.apply_profile(client2, spec, dry_run=False)
+        self.assertTrue(res2["ok"], res2["error"])
+        put_body = t2.body_for("PUT", "/apps/a1")
+        self.assertIsNotNone(put_body)
+        self.assertEqual(put_body["session_duration"], "720h")
+
+
 if __name__ == "__main__":
     unittest.main()
