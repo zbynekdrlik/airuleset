@@ -1853,6 +1853,10 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += clog
             aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
+            # #921 residual (review M4): a drop:attempt-cap means keystrokes
+            # WERE typed (just not verified). Record one attempt so the origin's
+            # rate limit counts typed episodes, not only verified arms.
+            _record_delivered_attempt(state, entry.get("origin"), sid, now)
             logs.append("DROP (goal-sweep) %s sid=%s -> drop:attempt-cap "
                         "(%d keystroke deliveries failed, last=%s; leftover=%s)"
                         % (loc, sid, dl_fails, dl_last, leftover))
@@ -2390,6 +2394,13 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
         # PROVEN drained backlog still pings; #766 vetoes ONLY the proven case
         # above). No per-sweep log here: this is the steady idle state of a
         # completed loop, and logging it every sweep would flood the journal.
+        return None, False
+
+    # #921 residual (review H1): defer to ANY pending request — a fulfilled-
+    # rearm must not re-record while the prior one is undelivered (without the
+    # decision-time attempt record, the min-gap alone no longer blocks re-entry
+    # every 60 s sweep). Mirrors auth/answer/stale at :2573/:2725/:2932.
+    if isinstance(load_goal_requests(requests_path).get(sid), dict):
         return None, False
 
     text, auth = (rearm_fn or _default_rearm_fn)(cwd)
@@ -3455,7 +3466,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         rearm_text = rearm_auth = None
         attempt_ok = False
         attempt_wait = None
-        if workable:
+        # #921 residual (review H1): defer to ANY pending request — a dark-
+        # rearm must not re-record while the prior one is undelivered.
+        _has_pending = isinstance(
+            load_goal_requests(requests_path).get(sid), dict)
+        if workable and not _has_pending:
             rearm_text, rearm_auth = (rearm_fn or _default_rearm_fn)(cwd)
             attempt_ok, attempts_state[sid], attempt_wait = _dark_rearm_attempt_ok(
                 attempts_state.get(sid), now)

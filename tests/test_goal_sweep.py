@@ -906,10 +906,10 @@ class TestGoalDarkWatch(unittest.TestCase):
         def spy(*a, **k):
             writes.append(now[0])
             ret = real_record(*a, **k)
-            # #921 residual: simulate delivery — record the delivered attempt
-            # at the decision time (in production, goal_sweep does this on "sent").
-            # `a[0]` is the session id passed to record_goal_request.
+            # #921 residual: simulate the full delivery cycle — record the
+            # delivered attempt + clear the request (as goal_sweep does on "sent").
             goal._record_delivered_attempt(state, k.get("origin"), a[0], now[0])
+            goal.clear_goal_request(a[0], path=reqs)
             return ret
 
         now = [1_700_000_000]
@@ -949,8 +949,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         def spy(*a, **k):
             writes.append(now[0])
             ret = real_record(*a, **k)
-            # #921 residual: simulate delivery — record the delivered attempt.
+            # #921 residual: simulate the full delivery cycle.
             goal._record_delivered_attempt(state, k.get("origin"), a[0], now[0])
+            goal.clear_goal_request(a[0], path=reqs)
             return ret
 
         now = [1_700_000_000]
