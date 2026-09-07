@@ -217,7 +217,7 @@ class TestWorkDrivingPriority923(unittest.TestCase):
                                     NOW + 2 * HOUR))
         self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 2 * HOUR))
 
-    def test_starvation_shape_63_sweeps_red(self):
+    def test_starvation_shape_audit_monopoly(self):
         """RED repro of the gk incident: audit claims 3+ consecutive slots,
         lane-occupancy defers every time."""
         st = {}
@@ -232,6 +232,26 @@ class TestWorkDrivingPriority923(unittest.TestCase):
         t_check = NOW + 3 * HOUR
         self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", t_check))
         self.assertFalse(ng.gate_ok(st, "s", "partition-audit", t_check))
+
+    def test_quiescent_wd_does_not_permanently_mute_audit(self):
+        """#923 review C1: when work-driving fires once then goes quiet
+        (lanes full, no more refill needed), audit must NOT be permanently
+        muted. The deferral is BOUNDED: audit yields at most one extra
+        window (2x family_gap from the last overall nudge), then proceeds.
+        Permanent mute of u-freshness is the module's cardinal sin
+        (docstring lines 147-158)."""
+        st = {}
+        # Work-driving fires at T0, then never fires again (lanes full)
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # Audit fires at T0+1h
+        ng.mark_sent(st, "s", "partition-audit", NOW + HOUR)
+        # At T0+2h: audit yields one window for work-driving
+        self.assertFalse(ng.gate_ok(st, "s", "u-freshness", NOW + 2 * HOUR))
+        # At T0+3h: work-driving didn't fire — audit MUST proceed (bounded)
+        self.assertTrue(ng.gate_ok(st, "s", "u-freshness", NOW + 3 * HOUR))
+        # Also verify partition-audit is allowed at T0+3h
+        self.assertTrue(ng.gate_ok(st, "s", "partition-audit",
+                                   NOW + 3 * HOUR))
 
 
 class TestMarkSent(unittest.TestCase):

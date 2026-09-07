@@ -29,19 +29,22 @@ DESIGN — a pure helper over ONE new state namespace, no new I/O, no new job:
   state["nudge_cadence"] = {sid: {category: last_delivered_ts}}
 
 persisted in the ONE existing `~/.claude/api-watchdog-state.json` (run_once's
-`state`). `gate_ok(state, sid, category, now)` returns True iff BOTH hold:
+`state`). `gate_ok(state, sid, category, now)` returns True iff ALL THREE hold:
 
   (a) PER-CATEGORY FLOOR — at least `_category_floor(category)` since THIS
-      category's last DELIVERED nudge to this sid. Only `u-freshness` carries a
-      non-zero floor (the owner's `_u_cadence()` strop); the four existing
-      categories carry floor 0 (their OWN cadences already exceed any floor, so
-      the gate is a pure ADDITIONAL no-op floor for them — their steady-state
-      semantics are UNCHANGED).
+      category's last DELIVERED nudge to this sid. `u-freshness` carries the
+      owner's `_u_cadence()` strop, `goal-guard` carries a 24 h floor (#878);
+      the other categories carry floor 0 (their OWN cadences govern).
   (b) FAMILY SPACING — at least `_family_gap()` since ANY OTHER gated-family
       category's last DELIVERED nudge to this sid. The current category is
       EXCLUDED from this check on purpose: a rider's own back-to-back cadence is
       governed solely by its own last_nudge + (a), so the gate NEVER changes a
       rider's own semantics — it only spaces DISTINCT categories.
+  (c) WORK-DRIVING PRIORITY (#923) — an AUDIT category defers when a
+      WORK_DRIVING category is "due" (its mark_sent exists AND >= gap old) and
+      the most recent overall nudge was NOT work-driving. BOUNDED: audit defers
+      at most one extra window (2× gap from the newest overall nudge), so a
+      quiescent work-driving family never permanently mutes audit.
 
 `mark_sent` is written ONLY on a VERIFIED delivered send (a swallowed send never
 advances the clock — the #714 MAX_SEND_FAILS retry bound stays each rider's storm
@@ -185,7 +188,7 @@ def gate_ok(state, sid, category, now):
     including a FUTURE-skewed / corrupt-huge numeric ts, which `_gate_ts` ignores
     so it can never mute a session indefinitely."""
     sess = _session(state, sid)
-    # (a) per-category floor — only u-freshness carries a non-zero one.
+    # (a) per-category floor — u-freshness (1h) and goal-guard (24h).
     last_cat = _gate_ts(sess.get(category), now)
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False
@@ -200,8 +203,13 @@ def gate_ok(state, sid, category, now):
     # (c) #923: work-driving PRIORITY — an AUDIT category defers when a
     # work-driving category is "due" (its last nudge exists AND is >= gap old)
     # AND the most recent nudge overall was NOT work-driving (meaning
-    # work-driving hasn't had its turn yet). If work-driving NEVER fired
-    # (newest_wd is None), audit proceeds — nothing to yield to.
+    # work-driving hasn't had its turn yet). BOUNDED (#923 review C1): audit
+    # defers at most ONE extra window (2× gap from the newest overall nudge),
+    # so a quiescent work-driving family (lanes full, nothing to refill) can
+    # delay audit by at most 1 h, never permanently mute it — the module's
+    # cardinal sin (permanent mute of u-freshness, the owner's ONLY question
+    # surface). If work-driving NEVER fired (newest_wd is None), audit
+    # proceeds — nothing to yield to.
     if category in AUDIT_CATEGORIES:
         newest_wd = None
         newest_overall = None
@@ -215,13 +223,17 @@ def gate_ok(state, sid, category, now):
                 if newest_wd is None or ts > newest_wd:
                     newest_wd = ts
         if newest_overall is not None:
-            wd_had_turn = (newest_wd is not None
-                           and newest_wd >= newest_overall)
-            if not wd_had_turn:
-                wd_due = (newest_wd is not None
-                          and now - newest_wd >= gap)
-                if wd_due:
-                    return False
+            # Bound: only defer while within 2× gap of the last overall nudge.
+            # Past that, audit stops deferring — a quiescent WD family must
+            # not mute audit indefinitely.
+            if now - newest_overall < 2 * gap:
+                wd_had_turn = (newest_wd is not None
+                               and newest_wd >= newest_overall)
+                if not wd_had_turn:
+                    wd_due = (newest_wd is not None
+                              and now - newest_wd >= gap)
+                    if wd_due:
+                        return False
     return True
 
 
