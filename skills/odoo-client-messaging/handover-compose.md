@@ -2,7 +2,7 @@
 
 **This is the SINGLE canonical handover-proposal rule for EVERY sub-dev stream.**
 Streams composed client messages differently until the owner tired of re-teaching
-(montalu5 2026-08-16: a proposal with no deep-link URL, no owner membership). Keep
+(montalu5 2026-08-16). Keep
 no private per-stream notes. SEND mechanics (transport, channel choice) live in
 the PROJECT's own rules — for odoo-erp see `.claude/rules/odoo-task-sync.md`; the
 sibling `SKILL.md` in this dir is the channel-agnostic pointer (airuleset issue 891).
@@ -12,10 +12,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 - **The owner must APPROVE the exact text of EVERY client-facing Discuss message
   BEFORE it is posted — the OPENING message AND every follow-up reply / question /
   reminder into an EXISTING thread, without exception.** Not limited to a handover
-  proposal or a new thread — whatever goes to a client is approved first (owner
-  ruling after montalu6 posted an unapproved message into a live client thread on
-  PROD, 2026-08-22, thread 283 — deleted within a minute, but the bus push +
-  notification had already reached the client, irreversible). A stream reading the
+  proposal or a new thread — whatever goes to a client is approved first (owner ruling 2026-08-22, montalu6 thread 283 — irreversible). A stream reading the
   approval rule as applying only to thread CREATION is exactly what caused it; it
   applies to every message. Jediná výnimka: dva mechanické closure typy (final
   reminder + closing note) majú #799 STANDING template grant (Closure bullet
@@ -38,8 +35,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   the owner does not read tickets, so a proposal pointing at a ticket instead of
   carrying the whole text is not a proposal. Naming the target only by its
   internal number is what forced the owner to ask „do akého vlákna to má ísť?"
-  (airuleset #632, montalu1: an approval question referenced its target only as
-  „vlákno 250" instead of a separate visible field). Every owner-facing mention
+  (airuleset #632: target only „vlákno 250"). Every owner-facing mention
   of a thread also carries its own clickable deep URL, never a bare channel
   number (airuleset #657/#650, uniform doctrine in
   `modules/core/issue-reference-context.md`):
@@ -324,6 +320,13 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   life, including message zero. Each split thread gets its own name (naming rule
   above), its own `Discuss-ticket:` / `Discuss-thread:` binding, and its own
   owner approval — never a shortcut around any of those.
+
+- **Every client Discuss report → Odoo project.task IMMEDIATELY (#924,
+  owner 7.9.).** Before reply/GitHub ticket: create the task in the
+  client's project (origin: thread + deep URL + msg id, summary, dev
+  ref). Stages track reality (Zásobník→Realizácia→Verifikácia;
+  Hotovo=owner); lag=violation. Discuss is NEVER the source of truth;
+  the project task is.
 
 Every thread this file governs follows the project's own channel placement
 rule — for odoo-erp see `.claude/rules/odoo-task-sync.md` (task chatter for
