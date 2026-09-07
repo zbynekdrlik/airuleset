@@ -454,6 +454,74 @@ class TestJsonSchema(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
 
 
+class TestPostCutover870(unittest.TestCase):
+    """#870 F1: post-cutover migration gate — absent must_move credentials
+    are findings when the privileges gate runs with post_cutover=True."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def test_absent_must_move_is_finding_post_cutover(self):
+        """An empty HOME with post_cutover=True must exit 1: every must_move
+        credential absent = migration incomplete on the controller."""
+        rep = p.build_report(home=self.home, post_cutover=True)
+        must_move_absent = [
+            e for e in rep["entries"]
+            if e["must_move"] and not e["present"] and e.get("local_path")]
+        self.assertTrue(must_move_absent, "expected absent must_move entries")
+        self.assertEqual(rep["exit_code"], 1)
+
+    def test_absent_must_move_NOT_finding_default(self):
+        """Without post_cutover, absent entries are NOT findings (pre-cutover
+        semantics preserved — the docstring promise)."""
+        rep = p.build_report(home=self.home, post_cutover=False)
+        self.assertEqual(rep["exit_code"], 0)
+
+    def test_all_present_post_cutover_clean(self):
+        """When every must_move credential is present, exit 0 post_cutover."""
+        for priv in p.PRIVILEGES:
+            if priv.must_move and priv.local_path:
+                expanded = self.home / priv.local_path.lstrip("~/")
+                expanded.parent.mkdir(parents=True, exist_ok=True)
+                if priv.kind == p.KIND_SSH_KEY:
+                    _gen_ed25519(expanded)
+                elif priv.kind == p.KIND_STORE and priv.local_path.endswith("/"):
+                    expanded.mkdir(parents=True, exist_ok=True)
+                    os.chmod(expanded, 0o700)
+                elif priv.kind == p.KIND_STORE:
+                    expanded.mkdir(parents=True, exist_ok=True)
+                    os.chmod(expanded, 0o700)
+                else:
+                    _mk(expanded, "test_value_placeholder", 0o600)
+        rep = p.build_report(home=self.home, post_cutover=True)
+        absent_must_move = [
+            e for e in rep["entries"]
+            if e["must_move"] and not e["present"] and e.get("local_path")]
+        self.assertEqual(absent_must_move, [],
+                         "all must_move seeded but some still absent")
+        self.assertEqual(rep["exit_code"], 0)
+
+    def test_findings_includes_absent_count(self):
+        """The findings dict includes absent_must_move_count when
+        post_cutover=True."""
+        rep = p.build_report(home=self.home, post_cutover=True)
+        self.assertIn("absent_must_move_count", rep["findings"])
+        self.assertGreater(rep["findings"]["absent_must_move_count"], 0)
+
+    def test_cmd_privileges_post_cutover_flag(self):
+        """The --post-cutover CLI flag sets post_cutover=True."""
+        args = _FakeArgs(json=True)
+        args.post_cutover = True
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with self.assertRaises(SystemExit) as cm:
+                p.cmd_privileges(args)
+        self.assertEqual(cm.exception.code, 1)
+
+
 class TestControllerWebtermPrivileges870(unittest.TestCase):
     """#870 F4a D9: webterm per-human keys + controller tunnel creds must
     be registered in PRIVILEGES."""
