@@ -1533,36 +1533,23 @@ fi
 if [ "$IS_COMPLETION_SIGNAL" = "1" ] && [ "$IS_COMPLETION_HEADING" = "0" ]; then
     echo "VIOLATION: Your message is a completion report (PR URL + completion-signal phrase or Goal/What changed prose) but does NOT start with the canonical heading '## ✅ Work Complete'. completion-report.md MANDATES the FULL template every time — heading + audits block + --- separator + Goal + What changed + 🌐 URLs + PR title/URL. Prose substitutes ('PR clean. 8/8 checks green. mergeable=MERGEABLE...') are BANNED — they bypass the audit gates the user relies on (per slovnormal-mcp PR #9 incident: missing /requesting-code-review, missing 🌐 URLs, missing /plan-check all slipped through because no heading was present)." >&2
     echo "" >&2
-    echo "  Rewrite the message NOW using the EXACT template:" >&2
+    echo "  Rewrite the message NOW using the COMPACT template (#940, ~7 lines):" >&2
     echo "" >&2
     echo "    ## ✅ Work Complete" >&2
     echo "" >&2
-    echo "    **Audits & deploy:**" >&2
-    echo "    ✅ CI: green" >&2
-    echo "    ✅ /plan-check: N/N fulfilled" >&2
-    echo "    ✅ /review: clean — 0 🔴 0 🟡 0 🔵" >&2
-    echo "    ✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵" >&2
-    echo "    ✅ Deploy: <verified behavior on live target>   (omit if no deploy)" >&2
-    echo "    ✅ Regression test: <path>:<line> — RED <sha>, GREEN <sha>   (bug-fix only)" >&2
-    echo "    ✅ Výstup: <konkrétne hodnoty odčítané z reálneho artefaktu> | n/a — <prečo>   (ALWAYS)" >&2
+    echo "    ✅ /plan-check: N/N · /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵" >&2
+    echo "    ✅ Výstup: <konkrétne hodnoty z artefaktu> | n/a — <prečo>" >&2
+    echo "    ✅ Regression test: <test>:<line> — RED <sha>, GREEN <sha>   (bug-fix only; OMIT for non-bug)" >&2
+    echo "    🌐 <url>   (user-clickable URL; omit if no web UI)" >&2
+    echo "    **Goal:** <1 sentence> — **What changed:** <1-2 sentences>" >&2
+    echo "    📔 Playbook: <captured | n/a>" >&2
+    echo "    ✅ DONE: <one-line>" >&2
     echo "" >&2
-    echo "    ---" >&2
-    echo "" >&2
-    echo "    **Goal:** <user's ask in plain language>" >&2
-    echo "    **What changed:** <user-visible outcome, 1-2 sentences>" >&2
-    echo "" >&2
-    echo "    🌐 Dev:  <url>" >&2
-    echo "    🌐 Prod: <url>" >&2
-    echo "" >&2
-    echo "    **[<project>] PR #N: <full title>**" >&2
-    echo "    <full PR URL> — merged <sha> (default-auto) / mergeable, clean (manual-marker)" >&2
-    echo "" >&2
-    echo "  FORK-NO-MERGE / hand-off stream (no PR/merge/deploy exists): keep the heading +" >&2
-    echo "  audits + Goal/What changed, and replace the Deploy/🌐/PR lines with the hand-off:" >&2
-    echo "    ✅ Lokálne overenie: <tests+lint result on the fork branch>" >&2
+    echo "  FORK-NO-MERGE / BRANCH-MERGE hand-off: same template, replace deploy lines with:" >&2
+    echo "    ✅ Lokálne overenie: <tests+lint result on the fork/integration branch>" >&2
     echo "    ✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta" >&2
     echo "" >&2
-    echo "  See completion-report.md → 'MANDATORY structure (use this EXACT template)'." >&2
+    echo "  See completion-report.md → 'MANDATORY compact template'." >&2
     add_hard "Prose completion report missing canonical '## ✅ Work Complete' heading — use the full template, not a prose summary"
 fi
 
