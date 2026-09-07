@@ -155,17 +155,17 @@ def _is_gh_app_token_box():
     `.is_dir()`, never a bare `.exists()` — a stray FILE at this path must
     not be misread as "provisioned".
 
-    Known, accepted residual (adversarial review of #356): a stray or
-    stale App-token directory delivered to an OWN-account (PAT) box —
-    e.g. a misdirected `push-stream-tokens.sh` delivery, or a leftover
-    from an App-token-to-PAT migration — silently NARROWS that box's own
-    slice from 3 quals (assignee ∪ author ∪ label) down to 1 (label
-    alone), dropping any assigned/authored-but-unlabeled ticket from the
-    stop-proof with no refusal (the existing empty-result validators check
-    the LABEL dimension, never the missing assignee/author one). This is
-    an operational-error trigger, not something this local, static check
-    can distinguish from a genuine App-token box — a real App token proves
-    nothing beyond "this directory exists" either."""
+    Known residual (adversarial review of #356, MITIGATED by #918): a
+    stray or stale App-token directory delivered to an OWN-account (PAT)
+    box — e.g. a misdirected ``push-stream-tokens.sh`` delivery, or a
+    leftover from an App-token-to-PAT migration — silently NARROWS that
+    box's own slice from 3 quals (assignee ∪ author ∪ label) down to 1
+    (label alone). #918 mitigated the IDENTITY side: ``_stream_self_
+    login()`` now validates via ``_gh_login()`` and returns the real PAT
+    login when the active auth is a PAT, so own-comment matching and
+    bounce-round derivation are correct even with a stray directory.
+    The slice-narrowing residual (this function still returns True →
+    ``_slice_quals`` takes the label-only branch) remains accepted."""
     try:
         return _gh_app_token_dir().is_dir()
     except OSError:
