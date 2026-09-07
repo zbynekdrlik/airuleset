@@ -2792,6 +2792,57 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
                                       rec=rec)
         self.assertTrue(any("skip:hourly-cap" in ln for ln in logs), logs)
 
+    def test_937_starved_backoff_after_consecutive_ineffective_nudges(self):
+        # #937 RED: after 2 consecutive starved nudges (lsc=2) with no dispatch
+        # observed, a 3rd starved nudge at +16min (past 15-min, inside 1h)
+        # should be CAPPED at the 1h interval (skip:starved-backoff),
+        # not fire at the 15-min starved interval.
+        # PRE-FIX this fires (starved path ignores lsc), so the test FAILS.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        # ln=1 so we stay below the give-up threshold (MAX_NUDGES=2);
+        # lsc=2 means 2 starved nudges already landed with no dispatch.
+        rec = {"llast": now - 16 * 60, "ln": 1, "lsc": 2,
+               "lsb_starved": 5}  # 2 consecutive starved, backlog unchanged
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        # Should NOT fire the nudge — should be backed off to 1h
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(
+            any("starved-backoff" in ln or "skip:hourly-cap" in ln
+                for ln in logs), logs)
+
+    def test_937_non_full_authority_starved_eligible_uses_1h_cap(self):
+        # #937 RED (authority scope lock): a reduced-authority box (fork-no-merge)
+        # with workers=0+backlog>0 at +16min (past 15-min, inside 1h) must NOT
+        # fire — it should use the 1h cap. The code already checks
+        # authority=="full" at line 4237, so this should pass as a lock test.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"llast": now - 16 * 60, "ln": 1}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec, authority="fork-no-merge")
+        # Should be capped at 1h, not fire at 15-min
+        self.assertTrue(any("skip:hourly-cap" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_937_occupancy_covered_suppresses_nudge(self):
+        # #937 RED: when live_workers + recently-finished workers >= backlog_n,
+        # the nudge should be suppressed (skip:covered). Here: 2 live + 1
+        # finished = 3, backlog = 3 → all covered, no nudge needed.
+        # PRE-FIX this fires because saturation only checks live_workers.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        ev = [WorkerLane("w1", "live", 60, None, ""),
+              WorkerLane("w2", "live", 60, None, ""),
+              WorkerLane("w3", "finished", 120, None, "")]
+        with m.patch.object(wd, "count_live_workers", return_value=(2, ev)):
+            logs, owns, tmux = self._call(
+                GOAL_ARMED_CAP, lambda cwd: 3, now, tmtime)
+        # Should be suppressed — all workable tickets are covered
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("skip:covered" in ln for ln in logs), logs)
+
     def test_620_giveup_holds_and_fires_when_backlog_unchanged(self):
         # #620: an empty-lane sweep with the give-up already reached HOLDS the
         # counter and fires GAVE UP, whatever the backlog (here unchanged from the
