@@ -148,6 +148,141 @@ class TestGateOk(unittest.TestCase):
         self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW))   # family gap
 
 
+class TestClassification923(unittest.TestCase):
+    """#923: WORK_DRIVING vs AUDIT classification of gated categories."""
+
+    def test_classification_covers_all_gated(self):
+        """Every GATED_CATEGORIES member is in exactly one class."""
+        self.assertEqual(ng.WORK_DRIVING_CATEGORIES | ng.AUDIT_CATEGORIES,
+                         ng.GATED_CATEGORIES)
+        self.assertEqual(len(ng.WORK_DRIVING_CATEGORIES & ng.AUDIT_CATEGORIES),
+                         0)
+
+    def test_work_driving_members(self):
+        self.assertEqual(ng.WORK_DRIVING_CATEGORIES, frozenset({
+            "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
+        }))
+
+    def test_audit_members(self):
+        self.assertEqual(ng.AUDIT_CATEGORIES, frozenset({
+            "partition-audit", "u-freshness", "goal-guard",
+        }))
+
+
+class TestBatchEligible923(unittest.TestCase):
+    """#923 BATCHING: batch_eligible collects ALL eligible categories when
+    the 1h slot opens, ordered work-driving first, audit second."""
+
+    def test_empty_state_all_eligible(self):
+        st = {}
+        result = ng.batch_eligible(st, "s", NOW)
+        # All categories eligible (no history, no floor blocks)
+        self.assertEqual(len(result), len(ng.GATED_CATEGORIES))
+        # Work-driving comes first
+        wd_end = 0
+        for cat in result:
+            if cat in ng.WORK_DRIVING_CATEGORIES:
+                wd_end += 1
+            else:
+                break
+        self.assertEqual(wd_end, len(ng.WORK_DRIVING_CATEGORIES))
+
+    def test_gap_closed_returns_empty(self):
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # Within the gap: no batch
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])
+
+    def test_gap_open_returns_all_eligible(self):
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # After 1h: gap open → all eligible
+        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertGreater(len(result), 0)
+        self.assertIn("lane-occupancy", result)
+        self.assertIn("partition-audit", result)
+
+    def test_per_category_floor_excludes(self):
+        """u-freshness has a 1h floor — if sent at NOW, it's excluded from
+        a batch at NOW+HOUR-1 (floor not expired) but included at NOW+HOUR
+        (floor exactly expired)."""
+        st = {}
+        ng.mark_sent(st, "s", "u-freshness", NOW)
+        # At NOW+HOUR-1: gap open (only u-freshness in state, 3599 < 3600
+        # is True → gap closed). Actually the gap IS closed because
+        # u-freshness was sent 3599s ago which is < 3600.
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR - 1), [])
+        # At NOW+HOUR: gap open (3600 >= 3600) AND floor expired → included
+        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertIn("u-freshness", result)
+
+    def test_starvation_impossible_with_batching(self):
+        """The gk starvation shape is impossible with batching: when the slot
+        opens, BOTH lane-occupancy AND partition-audit are in the batch."""
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW - 2 * HOUR)
+        ng.mark_sent(st, "s", "partition-audit", NOW)
+        # After 1h from the latest mark_sent: gap opens
+        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertIn("lane-occupancy", result)
+        self.assertIn("partition-audit", result)
+
+    def test_mark_batch_sent_stamps_all(self):
+        """mark_batch_sent marks all categories at once — the family gap then
+        blocks the next batch for 1h."""
+        st = {}
+        cats = ["lane-occupancy", "partition-audit", "u-freshness"]
+        ng.mark_batch_sent(st, "s", cats, NOW)
+        for cat in cats:
+            self.assertEqual(st["nudge_cadence"]["s"][cat], NOW)
+        # Next batch blocked until NOW+HOUR
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 30 * 60), [])
+        self.assertGreater(len(ng.batch_eligible(st, "s", NOW + HOUR)), 0)
+
+    def test_ordering_work_driving_first(self):
+        """Work-driving categories appear before audit in the batch."""
+        st = {}
+        result = ng.batch_eligible(st, "s", NOW)
+        wd_idx = [i for i, c in enumerate(result)
+                  if c in ng.WORK_DRIVING_CATEGORIES]
+        au_idx = [i for i, c in enumerate(result)
+                  if c in ng.AUDIT_CATEGORIES]
+        if wd_idx and au_idx:
+            self.assertLess(max(wd_idx), min(au_idx))
+
+
+class TestComposeBatch923(unittest.TestCase):
+    """#923: compose_batch formats items into a BATCH_PREFIX-headed message."""
+
+    def test_prefix_leads(self):
+        result = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
+        self.assertTrue(result.startswith(ng.BATCH_PREFIX))
+
+    def test_orders_wd_first(self):
+        items = [("partition-audit", "I5 U0"),
+                 ("lane-occupancy", "refill 3")]
+        result = ng.compose_batch(items)
+        lo_pos = result.index("[lane-occupancy]")
+        pa_pos = result.index("[partition-audit]")
+        self.assertLess(lo_pos, pa_pos)
+
+    def test_empty_returns_empty_string(self):
+        self.assertEqual(ng.compose_batch([]), "")
+
+    def test_max_chars_trims_audit_first(self):
+        items = [("lane-occupancy", "refill"),
+                 ("partition-audit", "I5 U0 W0 skip0")]
+        result = ng.compose_batch(items, max_chars=50)
+        # Work-driving kept, audit trimmed if needed
+        self.assertIn("[lane-occupancy]", result)
+        self.assertTrue(len(result) <= 50)
+
+    def test_batch_prefix_is_machine_recognized(self):
+        """BATCH_PREFIX must be 'nudge:' — already in goal.py
+        _machine_prefixes, so the transcript classifier handles it."""
+        self.assertEqual(ng.BATCH_PREFIX, "nudge:")
+
+
 class TestMarkSent(unittest.TestCase):
     def test_mark_sent_records_per_sid_per_category(self):
         st = {}
