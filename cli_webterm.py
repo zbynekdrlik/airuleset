@@ -597,7 +597,11 @@ def _short_alias(entry):
     `dev1` short-circuit; a NON-owner local entry (marek's `marek-subdev`, with
     `user="marek"`) keeps its own id so it aliases via its user (`marek`), never
     mislabelled `dev1`."""
+    # #938: the local+no-user shortcircuit must only fire for id="dev1" — with
+    # the controller's 'ar' entry (also local=True, user=None) it would
+    # mislabel 'ar' as 'dev1'.
     box_name = ("dev1" if entry.get("local") and not entry.get("user")
+                          and entry.get("id") == "dev1"
                 else (entry.get("id") or entry.get("label") or ""))
     return cli_aliases.short_target_alias(entry.get("user"), box_name)
 
@@ -647,9 +651,12 @@ WEBTERM_DASHBOARD_TABS = {
     # zbynek.newlevel.media -- owner ROZHODNUTÉ 2026-08-24, EXACT order (verbatim
     # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"); david3 (d3) added after d2 per
     # owner request 2026-08-26 (#719); david4 (d4) added after d3 per owner
-    # request 2026-09-07 (#934). EXCLUDES montalu7/8, simap1, marek@subdev,
-    # stepan@forestshop-dev, admin@forestshop-dev.
+    # request 2026-09-07 (#934); ar (controller local tab) added as first entry
+    # per #938 (was in zbynek_inventory since #870 F4a but missing here).
+    # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
+    # admin@forestshop-dev.
     "zbynek": [
+        "ar",
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",

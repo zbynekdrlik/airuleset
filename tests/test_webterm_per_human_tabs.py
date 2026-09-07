@@ -28,8 +28,9 @@ import cli_webterm_profiles as profiles  # noqa: E402
 
 # The owner-defined zbynek.newlevel.media tab list, EXACT order (owner ROZHODNUTÉ
 # 2026-08-24: "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"; david3 (d3) added after
-# d2 per owner request 2026-08-26, #719).
+# d2 per owner request 2026-08-26, #719; ar (controller local) added first, #938).
 ZBYNEK_ORDER = [
+    "ar",
     "dev1", "dev2", "gatekeeper",
     "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
     "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -44,8 +45,8 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6", "d1", "d2",
-    "d3", "d4", "miva", "sb",
+    "ar", "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6", "d1",
+    "d2", "d3", "d4", "miva", "sb",
 ]
 
 
@@ -174,7 +175,8 @@ class TestOwnerDashboardRender(unittest.TestCase):
         # #870 fix: webterm_inventory(OWNER) returns zbynek_inventory() where
         # dev1's label is "dev1" (a remote entry), not "dev1 (localhost)".
         html = _render_owner()
-        for present in ('title="dev1"', 'title="dev2"',
+        for present in ('title="airuleset (local)"',  # #938: ar controller tab
+                        'title="dev1"', 'title="dev2"',
                         'title="gk (gatekeeper@gk)"', 'title="spinbike-vps"',
                         'title="david3@subdev"',   # #719: d3 now on the owner dashboard
                         'title="david4@subdev"'):   # #934: d4 added to owner dashboard
@@ -230,6 +232,23 @@ class TestArLocalTab938(unittest.TestCase):
         ar_entry = {"id": "ar", "local": True, "user": None,
                     "label": "airuleset (local)", "preferred": "zbynek"}
         self.assertEqual(w._short_alias(ar_entry), "ar")
+
+    def test_ar_connect_uses_systemd_scope_not_ssh(self):
+        # Lock: 'ar' is local=True, so build_connect_argv must wrap it in
+        # _SYSTEMD_RUN_SCOPE (not ssh). This is the #736 local-entry contract.
+        ar_entry = {"id": "ar", "local": True, "user": None,
+                    "host": None, "identity": None, "preferred": "zbynek"}
+        argv = w.build_connect_argv(ar_entry)
+        self.assertEqual(argv[:5], w._SYSTEMD_RUN_SCOPE)
+        self.assertEqual(argv[5], "sh")
+        self.assertEqual(argv[6], "-c")
+
+    def test_dev1_alias_unchanged_by_938_fix(self):
+        # Regression lock: dev1 (local=True, user=None on dev1's inventory)
+        # must still alias as "dev1", not break under the #938 fix.
+        dev1_entry = {"id": "dev1", "local": True, "user": None,
+                      "label": "dev1 (localhost)", "preferred": "zbynek"}
+        self.assertEqual(w._short_alias(dev1_entry), "dev1")
 
 
 class TestConnectAllowlistMatchesZbynekInventory(unittest.TestCase):
