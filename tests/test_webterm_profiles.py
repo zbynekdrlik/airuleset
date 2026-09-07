@@ -124,9 +124,11 @@ class TestProfileInventoryScoping(unittest.TestCase):
 
 
 class TestWebtermInventoryProfileArg(unittest.TestCase):
-    def test_default_is_owner_fleet(self):
-        # Regression: no-arg call is byte-identical to the pre-#612 inventory.
-        self.assertEqual(_fleet_inventory()[0]["id"], "dev1")
+    def test_default_is_zbynek_inventory(self):
+        # #870 fix: webterm_inventory(OWNER) now routes to zbynek_inventory()
+        # (the declarative owner leaf), not the fleet-derived inventory.
+        inv = w.webterm_inventory()
+        self.assertEqual(inv, p.zbynek_inventory())
 
     def test_david_profile_returns_david_set(self):
         inv = w.webterm_inventory(profile=p.DAVID)

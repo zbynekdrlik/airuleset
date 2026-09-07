@@ -395,11 +395,13 @@ class TestControllerAccountRegistration(unittest.TestCase):
             cli_fleet.REMOTE_HOSTS[:] = [
                 h for h in saved if h.get("name") != "dev1"]
             cli_fleet._append_dev1_if_cutover()
+            # #870 fix: webterm_inventory(OWNER) now returns
+            # zbynek_inventory() where dev1 is a REMOTE entry.
             inv = cli_webterm.webterm_inventory()
             dev1 = [e for e in inv if e["id"] == "dev1"]
             self.assertEqual(len(dev1), 1)
-            self.assertEqual(dev1[0]["label"], "dev1 (localhost)")
-            self.assertTrue(dev1[0]["local"])
+            self.assertEqual(dev1[0]["label"], "dev1")
+            self.assertFalse(dev1[0]["local"])
         finally:
             cli_fleet.CONTROLLER_CUTOVER_DONE = saved_flag
             cli_fleet.REMOTE_HOSTS[:] = saved

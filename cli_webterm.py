@@ -216,20 +216,24 @@ def _cred_path(profile):
 
 
 def webterm_inventory(profile=profiles.OWNER):
-    """The session inventory for `profile`. `david` -> the SCOPED david set
-    (david1..4 + codex-bridge) — self-contained in cli_webterm_profiles, so no
-    airuleset/fleet import is needed for it. `owner` (default) -> dev1
-    (localhost) + every `_deployable_hosts()` entry, byte-identical to the
-    pre-#612 single-tenant inventory. Per-entry `preferred` tmux group = the
-    unix user for a stream account (in AUTHORITY_BY_USER, the #264 whoami
-    convention), else `zbynek` (owner group). Read the fleet table via the
-    airuleset facade (test-patchable)."""
+    """The session inventory for `profile`. Every profile routes to its
+    declarative ``*_inventory()`` leaf in cli_webterm_profiles — a
+    zero-import constant that carries explicit identities and never
+    derives from ``_deployable_hosts()``.
+
+    #870 fix: the OWNER profile was the last one still routed to the
+    fleet-derived path; on the controller that produced entries with
+    ``identity=None`` (sshpass → ValueError) and legacy members
+    (montalu7/8/stepan). Now routes to ``zbynek_inventory()`` — symmetric
+    with ``profile_inventory()`` in cli_webterm_profiles.py."""
     if profile == profiles.DAVID:
         return profiles.david_inventory()
     if profile == profiles.MAREK:
         return profiles.marek_inventory()
     if profile == profiles.DOMINIKA:
         return profiles.dominika_inventory()
+    if profile == profiles.OWNER:
+        return profiles.zbynek_inventory()
     import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
     from cli_remote import _deployable_hosts
     stream_users = set(airuleset.AUTHORITY_BY_USER)

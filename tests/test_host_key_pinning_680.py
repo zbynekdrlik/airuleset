@@ -34,7 +34,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import airuleset            # noqa: E402  facade (REMOTE_HOSTS / AUTHORITY_BY_USER)
 import cli_burn             # noqa: E402
 import cli_fleet            # noqa: E402
 import cli_onboard_exec     # noqa: E402
@@ -177,25 +176,20 @@ class TestWebtermInventoryThreadsHostKeys(unittest.TestCase):
         _p.start()
         self.addCleanup(_p.stop)
 
-    def test_inventory_carries_host_keys_from_fleet(self):
-        # The connect child can NOT import the fleet — the inventory JSON is its
-        # allowlist, so the PUBLIC pin must be threaded through it at generation
-        # time, and the argv built from that entry must engage the pin.
-        hosts = [PINNED, PLAIN_NOIDENT]
-        with m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
-                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
-            inv = {e["id"]: e for e in w.webterm_inventory()}
-        self.assertEqual(inv["pin-vps"].get("host_keys"),
-                         ["ssh-ed25519 AAAAfakepin"])
-        _assert_pinned(self, w._ssh_interactive_prefix(inv["pin-vps"]))
+    def test_zbynek_inventory_carries_host_keys(self):
+        # #870 fix: webterm_inventory(OWNER) now returns zbynek_inventory(),
+        # which carries host_keys on the spinbike entry (the one public-IP
+        # target). The connect child argv must engage the pin.
+        inv = {e["id"]: e for e in w.webterm_inventory()}
+        spin = inv["spinbike-vps"]
+        self.assertTrue(spin.get("host_keys"),
+                        "spinbike entry must carry host_keys")
+        _assert_pinned(self, w._ssh_interactive_prefix(spin))
 
-    def test_inventory_unpinned_host_has_no_pin(self):
-        hosts = [PINNED, PLAIN_NOIDENT]
-        with m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
-                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
-            inv = {e["id"]: e for e in w.webterm_inventory()}
-        # a plain host carries no pin, so its leg stays =no + /dev/null
-        entry = inv["montalu1-subdev"]
+    def test_zbynek_inventory_unpinned_host_has_no_pin(self):
+        # Non-spinbike entries in zbynek_inventory carry no host_keys pin.
+        inv = {e["id"]: e for e in w.webterm_inventory()}
+        entry = inv["dev1"]  # a tailscale host, no pin
         self.assertIsNone(entry.get("host_keys"))
         prefix = w._ssh_interactive_prefix(entry)
         _assert_unpinned(self, prefix)
@@ -224,9 +218,10 @@ class TestRealFleetSpinbikePinned(unittest.TestCase):
         _assert_pinned(self, cli_onboard_exec._ssh_prefix(self.spin))
 
     def test_webterm_inventory_pins_real_spinbike(self):
+        # #870 fix: webterm_inventory(OWNER) now returns zbynek_inventory()
+        # which carries the spinbike pin by DNS name, not raw IP.
         inv = {e["id"]: e for e in w.webterm_inventory()}
-        entry = next(e for e in inv.values()
-                     if e.get("host") == "167.233.245.147")
+        entry = inv["spinbike-vps"]
         _assert_pinned(self, w._ssh_interactive_prefix(entry))
 
     def test_dev2_tailscale_leg_stays_no(self):

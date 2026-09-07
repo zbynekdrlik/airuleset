@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest import mock as m
 
 import cli_webterm as w
-import cli_webterm_lane as lane
 import cli_webterm_profiles as p
 
 

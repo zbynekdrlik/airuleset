@@ -104,10 +104,15 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         self.assertTrue(hasattr(profiles, "marek_inventory"))
         self.assertTrue(hasattr(profiles, "MAREK"))
 
-    def test_david_domain_shows_only_david_accounts(self):
+    def test_david_domain_shows_david_accounts_present_in_owner_inv(self):
+        # #870 fix: webterm_inventory(OWNER) is now zbynek_inventory() which
+        # carries david1-3 (not david4 — the zbynek dashboard EXCLUDES it).
+        # Filtering the owner inventory through david's tab list yields only
+        # the entries present in BOTH. David's own gateway renders his own
+        # david_inventory() (which HAS david4), not the owner inventory.
         inv = _owner_inv()
         got = {e["id"] for e in w.entries_for_tab_list(inv, w.WEBTERM_DASHBOARD_TABS["david"])}
-        self.assertEqual(got, {"david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"})
+        self.assertEqual(got, {"david1-subdev", "david2-subdev", "david3-subdev"})
 
     def test_dominika_domain_resolves_her_lane_inventory_to_exact_order(self):
         # #867 (owner request 2026-09-04): dominika's OBSERVE set is exactly the
@@ -167,9 +172,11 @@ class TestOwnerDashboardRender(unittest.TestCase):
             self.assertNotIn(other, html)
 
     def test_owner_dashboard_html_includes_his_boxes(self):
+        # #870 fix: webterm_inventory(OWNER) returns zbynek_inventory() where
+        # dev1's label is "dev1" (a remote entry), not "dev1 (localhost)".
         html = _render_owner()
-        for present in ('title="dev1 (localhost)"', 'title="dev2"',
-                        'title="gatekeeper"', 'title="spinbike-vps"',
+        for present in ('title="dev1"', 'title="dev2"',
+                        'title="gk (gatekeeper@gk)"', 'title="spinbike-vps"',
                         'title="david3@subdev"'):  # #719: d3 now on the owner dashboard
             self.assertIn(present, html)
 
@@ -198,15 +205,19 @@ class TestOwnerDashboardRender(unittest.TestCase):
         self.assertNotIn('title="marek@subdev"', html)
 
 
-class TestConnectAllowlistUnchanged(unittest.TestCase):
-    def test_connect_allowlist_stays_full_fleet(self):
-        # #661 is VISIBILITY, not an auth boundary: the inventory that feeds the
-        # connect allowlist is NOT filtered — the owner keeps reachability.
-        # marek-subdev is back in the fleet (#882 scope correction: lane restored).
+class TestConnectAllowlistMatchesZbynekInventory(unittest.TestCase):
+    def test_connect_allowlist_is_zbynek_inventory(self):
+        # #870 fix: webterm_inventory(OWNER) returns zbynek_inventory() — the
+        # DECLARATIVE owner inventory. The connect allowlist is this inventory,
+        # not the fleet-derived one. It carries the owner's CHOSEN entries.
         inv = _owner_inv()
         ids = {e["id"] for e in inv}
-        for present in ("stepan-forestshop-dev", "david3-subdev", "marek-subdev"):
+        # Owner-chosen entries present in zbynek_inventory
+        for present in ("david3-subdev", "dev1", "dev2", "spinbike-vps"):
             self.assertIn(present, ids)
+        # Legacy fleet entries NOT in zbynek_inventory
+        for absent in ("stepan-forestshop-dev", "marek-subdev"):
+            self.assertNotIn(absent, ids)
 
 
 class TestDavidProfileOwnDomain(unittest.TestCase):
