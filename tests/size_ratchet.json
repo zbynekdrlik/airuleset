@@ -571,7 +571,7 @@
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 235,
     "airuleset.py::cmd_watchdog": 261,
-    "airuleset.py::main": 892,
+    "airuleset.py::main": 896,
     "cli_quals.py::_slice_mine_and_handed": 217,
     "cli_quals_cmd.py::cmd_core_quals": 222,
     "cli_quals_cmd.py::cmd_slice_quals": 220,
