@@ -94,7 +94,7 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
   reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path out of the endpoint's own log:
   `grep SAVED ~/.claude/upload-logs/upload-<port>.log` → `$HOME/uploads/acme-call/<saved-name>`.
-  The name is PRESERVED (#116, e.g. ) — diacritics/spaces/parens survive (unsafe chars →
+  The name is PRESERVED (#116, e.g. `nahrávka test (1).mp4`) — diacritics/spaces/parens survive (unsafe chars →
   `_`, clipped to 200 bytes with extension kept); always QUOTE the path and read
   the SAVED line rather than guessing. Confirm byte count, then `kill <PID>`.
 - If the recording already lives on a dev box, skip this phase.
