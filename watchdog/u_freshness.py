@@ -313,10 +313,13 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
         logs.append("u-freshness %s -> skip:already-handled (another sweep job "
                     "typed this pane; retry next sweep)" % loc)
         return logs
-    # #714 BUSY-PANE GATE: NEVER type into a pane showing CC's "Waiting for N
-    # background agents to finish" state — the submit is swallowed and parks
-    # orphaned. Defer WITHOUT a keystroke; the transient state clears next sweep.
-    if _ops_wait_recheck._pane_busy_waiting(captured):
+    # #714/#921 BUSY-PANE GATE: age-bounded busy-waiting — after >= 10 min of
+    # persistent Waiting with a bare prompt, deliver anyway. Defer WITHOUT
+    # a keystroke when below the age bound.
+    _uf_kind, _uf_draft = watchdog._classify_boundary(captured)
+    _uf_busy, _uf_aged = _ops_wait_recheck._busy_waiting_with_age(
+        captured, state, sid, now, _uf_kind)
+    if _uf_busy and not _uf_aged:
         logs.append("u-freshness %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep)" % loc)
         return logs

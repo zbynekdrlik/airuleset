@@ -199,11 +199,14 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
         logs.append("lane-reconcile %s -> skip:already-handled "
                     "(another sweep job typed this pane; retry next sweep)" % loc)
         return logs
-    # BUSY-PANE gate (#714): NEVER type into a pane showing CC's "Waiting for N
-    # background agents to finish" state (the submit is swallowed). Defer WITHOUT
-    # advancing the dedup anchor.
+    # BUSY-PANE gate (#714/#921): age-bounded busy-waiting — after >= 10 min
+    # of persistent Waiting with a bare prompt, deliver anyway (CC queues the
+    # prompt). Defer WITHOUT advancing the dedup anchor when below the bound.
     from watchdog import ops_wait_recheck as _ops
-    if _ops._pane_busy_waiting(captured):
+    _lr_kind, _lr_draft = watchdog._classify_boundary(captured)
+    _lr_busy, _lr_aged = _ops._busy_waiting_with_age(
+        captured, state, sid, now, _lr_kind)
+    if _lr_busy and not _lr_aged:
         logs.append("lane-reconcile %s -> skip:busy-bg-agent "
                     "(pane waiting on a background agent — retry next sweep)"
                     % loc)

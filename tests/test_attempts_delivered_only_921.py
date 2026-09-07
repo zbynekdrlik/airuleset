@@ -10,8 +10,6 @@ The invariant: an *_attempts entry is written ONLY when deliver_goal returns
 "sent" — never at decision time when the request is merely RECORDED.
 """
 
-import json
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,7 +18,6 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from watchdog import goal                                # noqa: E402
-from watchdog import ops_wait_recheck as _owr             # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
     _isolate_goal_state,
@@ -84,13 +81,14 @@ class TestAuthRearmAttemptOnlyOnDelivery(unittest.TestCase):
             self.assertIn("recording re-arm", result,
                           "decision %d should record a re-arm" % i)
 
-        # After 12 decisions, all recorded at decision time, the cap is full.
-        self.assertEqual(len(auth_attempts.get(sid, [])), 12,
-                         "pre-fix: 12 attempts recorded at decision time")
+        # After the fix: NO attempts recorded at decision time (recording
+        # moved to delivery). The state dict should be empty.
+        self.assertEqual(len(auth_attempts.get(sid, [])), 0,
+                         "post-fix: 0 attempts recorded at decision time "
+                         "(recording moved to delivery)")
 
-        # The 13th decision — after clearing the pending request — should be
-        # ALLOWED (none of the 12 ever delivered), but on the CURRENT code
-        # it's rate-limited at the cap.
+        # The 13th decision — after clearing the pending request — must be
+        # ALLOWED (no delivery happened, so no attempts recorded).
         t13 = base_t + 12 * 400
         goal.clear_goal_request(sid, path=self.reqp)
         result13 = goal._auth_rearm_decide(
@@ -118,30 +116,8 @@ class TestQdisarmAttemptOnlyOnSent(unittest.TestCase):
 
     def test_failed_delivery_does_not_consume_slot(self):
         """A qdisarm delivery returning a non-sent, non-transient word
-        must NOT consume an attempt slot."""
-        state = {}
-        attempts = state.setdefault("goal_qdisarm_attempts", {})
-        sid = "sess-qdisarm-fail"
-
-        # Simulate: _deliver_goal_clear returned "skip:verify-failed"
-        # (non-transient). On the current code, line 3681 records the
-        # attempt for BOTH sent and failed. After the fix, only "sent".
-        # We test indirectly: after a "failed" delivery, the attempts
-        # dict for this sid should be empty.
-
-        # Pre-seed with a pruned list (as _qdisarm_attempt_ok returns)
-        pruned = []
-        now = 100000.0
-
-        # On the CURRENT code, a non-sent word still records:
-        #   attempts[sid] = pruned + [now]
-        # After the fix, only "sent" records.
-        # We can't easily call goal_question_repoke_watch here (too many deps),
-        # so we test the invariant directly on _auth_rearm_decide's sibling
-        # (the principle is the same class).
-
-        # This test is a content-lock: assert the qdisarm recording is
-        # inside the "if word == 'sent':" branch, not outside it.
+        must NOT consume an attempt slot. Content-lock: assert the
+        recording is inside the 'if word == "sent":' branch."""
         import inspect
         src = inspect.getsource(goal.goal_question_repoke_watch)
         # Find the qdisarm attempt recording line
