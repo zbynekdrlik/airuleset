@@ -14,7 +14,7 @@
     "cli_context_baseline.py": 727,
     "cli_deployer_glue.py": 371,
     "cli_disk_guard_root.py": 769,
-    "cli_drop_gateway.py": 739,
+    "cli_drop_gateway.py": 837,
     "cli_filedrop_watchdog.py": 532,
     "cli_fleet.py": 774,
     "cli_key_rotation.py": 711,
@@ -36,7 +36,7 @@
     "cli_tmux_provisioning.py": 2005,
     "cli_vault.py": 1077,
     "cli_wdrain.py": 274,
-    "cli_webterm.py": 1792,
+    "cli_webterm.py": 1799,
     "cli_webterm_access.py": 367,
     "cli_webterm_dash_template.py": 818,
     "cli_webterm_david.py": 196,
@@ -178,7 +178,7 @@
     "tests/test_double_compact_855.py": 391,
     "tests/test_double_compact_recurrence_855.py": 438,
     "tests/test_draft_rescue.py": 441,
-    "tests/test_drop_gateway.py": 901,
+    "tests/test_drop_gateway.py": 953,
     "tests/test_durable_decisions.py": 110,
     "tests/test_dynamic_application.py": 152,
     "tests/test_ensure_timezone.py": 116,
@@ -566,7 +566,8 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "tests/test_drop_gateway_controller_931.py": 305
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,

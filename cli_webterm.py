@@ -1724,6 +1724,13 @@ def _setup_controller_webterm():
             (spec.tunnel_hostname, "unix:" + gw_sock))
         after_parts.append(spec.gateway_service_name)
 
+    # #931: add drop-gateway ingress rules for controller-topology lanes.
+    # These proxy drop-<host>.newlevel.media → http://<tailscale>:<port> on
+    # the lane's box, so the drop server is reachable through the controller
+    # tunnel (the per-box tunnel was retired in #870).
+    import cli_drop_gateway as _dg
+    ingress_rules.extend(_dg.drop_ingress_rules_for_controller())
+
     config_text = tun.render_cloudflared_multi_ingress_config(
         CONTROLLER_TUNNEL_UUID, str(creds_path), ingress_rules)
 
