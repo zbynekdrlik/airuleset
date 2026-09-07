@@ -763,7 +763,7 @@ def test_shared_stream_growth_boost(tmp_path):
 
 
 def test_drain_exhausted_flag_set(tmp_path):
-    """#925: drain_exhausted is set when drain cannot reach target."""
+    """#925: drain_exhausted is True when drain at >=90 % freed nothing."""
     _seed_last_drain(tmp_path, 0.0)
     severe_calls = []
     # 96 % → drain runs (every-poll at >=95 %). The noop planner frees nothing,
@@ -781,6 +781,78 @@ def test_drain_exhausted_flag_set(tmp_path):
     )
     cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
     assert cache.get("drain_exhausted") is True
+
+
+def test_drain_exhausted_false_at_88(tmp_path):
+    """#925 F1: drain at 88 % that cannot reach 75 % target → NOT exhausted
+    (88 % < CRITICAL_PCT=90, so the badge band is not reached)."""
+    _seed_last_drain(tmp_path, 0.0)
+    dg.run_disk_guard(
+        now=1000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=120, f_bavail=120,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=lambda _h, _n: [("noop", lambda: [])],
+    )
+    cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert cache.get("drain_exhausted") is False
+
+
+def test_drain_exhausted_clear_below_critical(tmp_path):
+    """#925 F1: carry-forward clears drain_exhausted when < CRITICAL_PCT."""
+    # Seed a prior cache with drain_exhausted=True at 91 %
+    d = tmp_path / ".claude" / "disk-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps(
+        {"worst_pct": 91, "dim": "bytes", "level": "critical",
+         "ts": 999.0, "drain_exhausted": True,
+         "mounts": [{"mount": "/", "worst_pct": 91}]}))
+    # Now the box is at 85 % (below CRITICAL_PCT=90) — non-drain poll
+    dg.run_disk_guard(
+        now=1000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        min_drain_interval_s=999999,  # prevent drain from running
+    )
+    cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert cache.get("drain_exhausted") is False
+
+
+def test_growth_boost_not_on_workstation(tmp_path):
+    """#925 F2: growth boost applies ONLY to shared-stream boxes."""
+    _seed_last_drain(tmp_path, 1000.0)
+    _write_disk_cache(tmp_path, 83, 999.0)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    # 85 % at 1700, last drain 1000 (700 s). Growth 83→85. On workstation,
+    # MIN_DRAIN_INTERVAL_S=600 makes 700 s due, but there is NO growth boost.
+    # The drain DOES run because 700 > 600 (normal cadence), not because of
+    # growth. To test growth-boost exclusion: set min_drain_interval_s=3600
+    # so the normal cadence gates it, and growth boost does NOT apply.
+    dg.run_disk_guard(
+        now=1000.0 + 700, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=_noop,
+        box_class_fn=lambda: "workstation",
+        min_drain_interval_s=3600,
+    )
+    # On workstation, _is_shared=False, so growth_boost=False. 700 < 3600 → gated.
+    assert not ran["drained"]
 
 
 # --------------------------------------------------------------------------- #

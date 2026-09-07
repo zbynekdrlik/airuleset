@@ -3072,9 +3072,20 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             if "top_consumers_ts" in prior:
                 status["top_consumers_ts"] = prior["top_consumers_ts"]
         # #925: carry forward drain_exhausted on non-drain polls, but CLEAR it
-        # when pressure drops below DRAIN_PCT (the guard no longer needs help).
+        # when pressure drops below CRITICAL_PCT (the badge band — F1 review:
+        # DRAIN_PCT=80 would show the badge in the 80-89 % band #854 hid).
         if isinstance(prior, dict) and prior.get("drain_exhausted") is True:
-            if status["worst_pct"] < DRAIN_PCT:
+            if status["worst_pct"] < CRITICAL_PCT:
+                status["drain_exhausted"] = False
+            else:
+                status["drain_exhausted"] = True
+    # #925 F5: carry forward drain_exhausted BEFORE the pre-drain status write
+    # (the write would otherwise erase it on a drain poll that hits the lock
+    # early-return, or on a dry-run that skips the post-drain merge).
+    if "drain_exhausted" not in status:
+        _prior_ex = _read_status_cache(home) if will_drain else (prior if isinstance(prior, dict) else {})
+        if isinstance(_prior_ex, dict) and _prior_ex.get("drain_exhausted") is True:
+            if status["worst_pct"] < CRITICAL_PCT:
                 status["drain_exhausted"] = False
             else:
                 status["drain_exhausted"] = True
@@ -3170,17 +3181,21 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             except Exception as e:
                 logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
-        # #925: drain_exhausted — the ladder ran to completion but could NOT
-        # bring the worst mount below TARGET_PCT. The statusbar reads this to
-        # show the badge at <95 % ONLY when the guard needs human help.
+        # #925: drain_exhausted — True when the drain ran at >=CRITICAL_PCT
+        # pressure AND could NOT move the needle (no measurable pct drop).
+        # This is the "guard needs human help" signal the statusbar reads to
+        # show the badge BELOW 95 %. A drain that freed even 1 % clears it.
+        # Threshold = CRITICAL_PCT (90), NOT TARGET_PCT (75) — a drain at 88 %
+        # that cannot reach 75 % is still in the "machinery handles it" band
+        # and must NOT show the badge (F1 review finding).
         # Set on `post` AND written to a SEPARATE cache update so it survives
         # even when `planners_fn is not None` (test path) skips the top_consumers
         # write below.
         if not dry_run:
-            post["drain_exhausted"] = post["worst_pct"] >= TARGET_PCT
+            pre_pct = status.get("worst_pct", 0)
+            post["drain_exhausted"] = (post["worst_pct"] >= CRITICAL_PCT
+                                       and post["worst_pct"] >= pre_pct)
             try:
-                # Re-read the current cache (the pre-drain write), merge
-                # drain_exhausted + the fresh worst_pct, and write back.
                 _cur = _read_status_cache(home)
                 if isinstance(_cur, dict):
                     _cur["drain_exhausted"] = post["drain_exhausted"]
