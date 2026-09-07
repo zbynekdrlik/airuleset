@@ -216,60 +216,28 @@ def _cred_path(profile):
 
 
 def webterm_inventory(profile=profiles.OWNER):
-    """The session inventory for `profile`. `david` -> the SCOPED david set
-    (david1..4 + codex-bridge) — self-contained in cli_webterm_profiles, so no
-    airuleset/fleet import is needed for it. `owner` (default) -> dev1
-    (localhost) + every `_deployable_hosts()` entry, byte-identical to the
-    pre-#612 single-tenant inventory. Per-entry `preferred` tmux group = the
-    unix user for a stream account (in AUTHORITY_BY_USER, the #264 whoami
-    convention), else `zbynek` (owner group). Read the fleet table via the
-    airuleset facade (test-patchable)."""
+    """The session inventory for `profile`. Every profile routes to its
+    declarative ``*_inventory()`` leaf in cli_webterm_profiles — a
+    zero-import constant that carries explicit identities and never
+    derives from ``_deployable_hosts()``.
+
+    #870 fix: the OWNER profile was the last one still routed to the
+    fleet-derived path; on the controller that produced entries with
+    ``identity=None`` (sshpass → ValueError) and legacy members
+    (montalu7/8/stepan). Now routes to ``zbynek_inventory()`` — symmetric
+    with ``profile_inventory()`` in cli_webterm_profiles.py."""
     if profile == profiles.DAVID:
         return profiles.david_inventory()
     if profile == profiles.MAREK:
         return profiles.marek_inventory()
     if profile == profiles.DOMINIKA:
         return profiles.dominika_inventory()
-    import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
-    from cli_remote import _deployable_hosts
-    stream_users = set(airuleset.AUTHORITY_BY_USER)
-    entries = [{
-        "id": "dev1",
-        "label": "dev1 (localhost)",
-        "kind": "owner",
-        "local": True,
-        "host": None,
-        "user": None,
-        "identity": None,
-        "preferred": OWNER_GROUP,
-    }]
-    for h in _deployable_hosts():
-        # #870 F3 commit B: post-cutover the fleet table carries a real `dev1`
-        # deploy target; the hardcoded local entry above already IS the owner's
-        # dev1 tab, so skip the fleet row (a second dev1 entry would collide on
-        # id and render a bogus remote tab). F4 replaces this inventory wholesale.
-        if h.get("name") == "dev1":
-            continue
-        user = h["user"]
-        is_stream = user in stream_users
-        entries.append({
-            "id": _sanitize_id(h["name"]),
-            "label": h["name"],
-            "kind": "stream" if is_stream else "owner",
-            "local": False,
-            "host": h["host"],
-            "user": user,
-            "identity": h.get("identity"),
-            # #680: carry the committed PUBLIC host-key pin (spinbike-vps today)
-            # into the inventory so the connect child -- which must NOT import
-            # the fleet table (the inventory JSON IS its security allowlist) --
-            # can verify the raw public IP STRICTLY via cli_remote's #669 helper.
-            # PUBLIC key material, safe in the inventory JSON; absent (None) for
-            # every tailscale/subdev host, which stays =no.
-            "host_keys": h.get("host_keys"),
-            "preferred": user if is_stream else OWNER_GROUP,
-        })
-    return entries
+    if profile == profiles.OWNER:
+        return profiles.zbynek_inventory()
+    raise ValueError(
+        "unknown webterm profile %r — every known profile routes to a "
+        "declarative *_inventory() leaf; a silent fleet-derived fallback "
+        "would re-introduce the #870 incident" % (profile,))
 
 
 # --------------------------------------------------------------------------- #
@@ -1584,8 +1552,8 @@ def setup_webterm_service(run=None):
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     WEBTERM_DASH_DIR.mkdir(parents=True, exist_ok=True)
     inv = webterm_inventory()
-    # #661: the connect allowlist stays the FULL fleet inventory (tab VISIBILITY
-    # is filtered, not reachability — the owner keeps his existing access).
+    # #870 fix: the connect allowlist is now the declarative zbynek_inventory()
+    # (tab VISIBILITY is filtered by WEBTERM_DASHBOARD_TABS, not reachability).
     WEBTERM_INVENTORY_PATH.write_text(
         json.dumps(inv, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     # #584: the ttyd base is now RELATIVE (`/t`) — same-origin under the gateway,

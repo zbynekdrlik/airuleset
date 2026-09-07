@@ -234,73 +234,46 @@ def _run_revive_harness(html):
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-# A small, controlled fleet: one owner box (identity), one owner box (no
-# identity/sshpass), one stream (identity), one stream (no identity), and one
-# PENDING host that must be filtered out.
-_FAKE_HOSTS = [
-    {"name": "dev2", "host": "10.0.0.2", "user": "newlevel"},
-    {"name": "gatekeeper", "host": "10.0.0.9", "user": "gatekeeper",
-     "identity": "~/.secrets/gatekeeper_access_ed25519"},
-    {"name": "david@subdev", "host": "10.0.0.5", "user": "david",
-     "identity": "~/.secrets/gatekeeper_access_ed25519"},
-    {"name": "montalu@subdev", "host": "10.0.0.5", "user": "montalu"},
-    {"name": "ghost@subdev", "host": "10.0.0.5", "user": "ghost", "pending": True},
-]
-_FAKE_AUTHORITY = {"david": "fork-no-merge", "montalu": "branch-merge"}
-
-
-def _fake_inventory():
-    import airuleset
-    with m.patch.object(airuleset, "REMOTE_HOSTS", _FAKE_HOSTS), \
-            m.patch.object(airuleset, "AUTHORITY_BY_USER", _FAKE_AUTHORITY):
-        return w.webterm_inventory()
-
 
 class TestInventory(unittest.TestCase):
-    def test_generated_from_fleet_plus_dev1_never_hand_list(self):
-        inv = _fake_inventory()
-        ids = [e["id"] for e in inv]
-        # dev1 (localhost) is always first; the pending ghost host is filtered.
-        self.assertEqual(ids[0], "dev1")
-        self.assertIn("dev2", ids)
-        self.assertIn("gatekeeper", ids)
-        self.assertIn("david-subdev", ids)     # `@` sanitized to `-`
-        self.assertIn("montalu-subdev", ids)
-        self.assertNotIn("ghost-subdev", ids)   # pending -> excluded
-        self.assertEqual(len(inv), 5)           # dev1 + 4 live hosts
+    """#870 fix: webterm_inventory(OWNER) now returns zbynek_inventory()
+    (the declarative owner leaf), not the fleet-derived inventory."""
+
+    def test_owner_inventory_is_zbynek_inventory(self):
+        # #870: webterm_inventory(OWNER) routes to zbynek_inventory().
+        import cli_webterm_profiles as p
+        inv = w.webterm_inventory()
+        self.assertEqual(inv, p.zbynek_inventory())
 
     def test_ids_unique_and_url_safe(self):
-        inv = _fake_inventory()
+        inv = w.webterm_inventory()
         ids = [e["id"] for e in inv]
         self.assertEqual(len(ids), len(set(ids)))
         for i in ids:
             self.assertRegex(i, r"^[a-z0-9-]+$")  # no @, no ., URL-safe
 
-    def test_dev1_is_local(self):
-        dev1 = next(e for e in _fake_inventory() if e["id"] == "dev1")
-        self.assertTrue(dev1["local"])
+    def test_ar_is_local(self):
+        # The controller's local entry is 'ar' (airuleset), not 'dev1'.
+        ar = next(e for e in w.webterm_inventory() if e["id"] == "ar")
+        self.assertTrue(ar["local"])
+        self.assertEqual(ar["preferred"], "zbynek")
+        self.assertEqual(ar["kind"], "owner")
+
+    def test_dev1_is_remote_with_identity(self):
+        # dev1 in zbynek_inventory is a REMOTE entry with explicit identity.
+        dev1 = next(e for e in w.webterm_inventory() if e["id"] == "dev1")
+        self.assertFalse(dev1["local"])
+        self.assertIsNotNone(dev1["identity"])
         self.assertEqual(dev1["preferred"], "zbynek")
-        self.assertEqual(dev1["kind"], "owner")
 
-    def test_preferred_group_stream_is_user_owner_is_zbynek(self):
-        inv = {e["id"]: e for e in _fake_inventory()}
-        # stream accounts -> their unix user (the #264 whoami convention)
-        self.assertEqual(inv["david-subdev"]["preferred"], "david")
-        self.assertEqual(inv["david-subdev"]["kind"], "stream")
-        self.assertEqual(inv["montalu-subdev"]["preferred"], "montalu")
-        # owner boxes -> the owner group
-        self.assertEqual(inv["dev2"]["preferred"], "zbynek")
-        self.assertEqual(inv["dev2"]["kind"], "owner")
-        self.assertEqual(inv["gatekeeper"]["preferred"], "zbynek")
-
-    def test_identity_decision_matches_deploy_loop(self):
-        # The web terminal's identity-vs-sshpass DECISION must not drift from the
-        # deploy loop's: an entry has an identity iff its fleet row does.
-        inv = {e["id"]: e for e in _fake_inventory()}
-        self.assertEqual(inv["david-subdev"]["identity"],
-                         "~/.secrets/gatekeeper_access_ed25519")
-        self.assertIsNone(inv["montalu-subdev"]["identity"])
-        self.assertIsNone(inv["dev2"]["identity"])
+    def test_no_identity_none_on_non_local(self):
+        # Every non-local entry must carry an explicit identity (#870 RED-2).
+        for entry in w.webterm_inventory():
+            if entry.get("local"):
+                continue
+            self.assertIsNotNone(
+                entry.get("identity"),
+                "non-local entry %r has identity=None" % entry["id"])
 
 
 class TestConnectArgv(unittest.TestCase):
