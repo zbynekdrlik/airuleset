@@ -102,5 +102,71 @@ class RecordStampsSignature(unittest.TestCase):
         self.assertIn("dedup-unchanged", log or "")
 
 
+class StarvedFullAuthority929(unittest.TestCase):
+    """#929 — a full-authority box with workers=0 and backlog>0 (starved)
+    must use a 15-min nudge interval instead of the 1h cap, AND bypass
+    the #670 dedup on the unchanged (0, N) state."""
+
+    def test_starved_nudge_allowed_past_15min(self):
+        """Past the 15-min starved interval, a full-authority box with
+        workers=0 and backlog=6 must be allowed to nudge — NOT blocked
+        by the 1h hourly cap."""
+        rec = {"llast": NOW - 16 * 60, "lsw": 0, "lsb": 6}
+        skip, _log = goal._lane_cooldown_decision(
+            rec, NOW, backlog_n=6, loc="gk:0.0", live_workers=0, waiters=0,
+            authority="full")
+        self.assertFalse(skip,
+                         "starved full-authority box must nudge at 15-min cadence")
+
+    def test_starved_dedup_bypassed(self):
+        """Past the 15-min cap with an UNCHANGED (0, 6) signature, the #670
+        dedup must be BYPASSED for the starved case — the prior nudge failed
+        to revive the loop, so re-nudging is correct."""
+        rec = {"llast": NOW - 2 * HOUR, "lsw": 0, "lsb": 6}
+        skip, _log = goal._lane_cooldown_decision(
+            rec, NOW, backlog_n=6, loc="gk:0.0", live_workers=0, waiters=0,
+            authority="full")
+        self.assertFalse(skip,
+                         "starved box must bypass dedup-unchanged (#929)")
+
+    def test_starved_still_capped_within_15min(self):
+        """Within the 15-min starved interval, the cap still holds."""
+        rec = {"llast": NOW - 10 * 60, "lsw": 0, "lsb": 6}
+        skip, log = goal._lane_cooldown_decision(
+            rec, NOW, backlog_n=6, loc="gk:0.0", live_workers=0, waiters=0,
+            authority="full")
+        self.assertTrue(skip)
+        self.assertIn("hourly-cap", log or "")
+
+    def test_non_full_authority_keeps_1h_cap(self):
+        """A non-full-authority box (branch-merge) with workers=0 still uses
+        the 1h cap — the starved shortcut is full-authority only."""
+        rec = {"llast": NOW - 16 * 60, "lsw": 0, "lsb": 6}
+        skip, log = goal._lane_cooldown_decision(
+            rec, NOW, backlog_n=6, loc="sub:0.0", live_workers=0, waiters=0,
+            authority="branch-merge")
+        self.assertTrue(skip)
+        self.assertIn("hourly-cap", log or "")
+
+    def test_workers_gt0_keeps_1h_cap(self):
+        """A full-authority box with workers > 0 (not starved) keeps the
+        1h cap."""
+        rec = {"llast": NOW - 16 * 60, "lsw": 1, "lsb": 6}
+        skip, log = goal._lane_cooldown_decision(
+            rec, NOW, backlog_n=6, loc="gk:0.0", live_workers=1, waiters=0,
+            authority="full")
+        self.assertTrue(skip)
+        self.assertIn("hourly-cap", log or "")
+
+    def test_no_authority_keeps_1h_cap(self):
+        """authority=None (legacy/unknown) keeps the 1h cap — fail-safe."""
+        rec = {"llast": NOW - 16 * 60, "lsw": 0, "lsb": 6}
+        skip, log = goal._lane_cooldown_decision(
+            rec, NOW, backlog_n=6, loc="x:0.0", live_workers=0, waiters=0,
+            authority=None)
+        self.assertTrue(skip)
+        self.assertIn("hourly-cap", log or "")
+
+
 if __name__ == "__main__":
     unittest.main()

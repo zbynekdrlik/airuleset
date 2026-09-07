@@ -2759,14 +2759,38 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # A second empty-lane nudge 1000s (past the OLD 15-min cooldown, INSIDE
         # the new 1-hour cap) after the last must skip:hourly-cap. RED on the old
         # code (15-min cooldown -> fires at 1000s).
+        # #929: on FULL authority with workers=0+backlog>0 (starved), the cap
+        # drops to 15 min, so 1000s (16.7 min) passes the starved cap. Use a
+        # non-full authority (branch-merge) to keep testing the 1h cap for the
+        # non-starved path.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"llast": now - 1000, "ln": 1}
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
-                                      rec=rec)
+                                      rec=rec, authority="branch-merge")
         self.assertTrue(any("skip:hourly-cap" in ln for ln in logs), logs)
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
+
+    def test_929_starved_full_authority_uses_15min_cap(self):
+        # #929: a full-authority box with workers=0+backlog>0 (starved) uses
+        # the 15-min cap. At +16min (past 15-min, inside 1h) the nudge fires.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"llast": now - 16 * 60, "ln": 1}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_929_starved_within_15min_still_capped(self):
+        # #929: a starved full-authority box within the 15-min window is still
+        # capped.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"llast": now - 10 * 60, "ln": 1}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(any("skip:hourly-cap" in ln for ln in logs), logs)
 
     def test_620_giveup_holds_and_fires_when_backlog_unchanged(self):
         # #620: an empty-lane sweep with the give-up already reached HOLDS the

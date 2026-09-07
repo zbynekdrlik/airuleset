@@ -3804,6 +3804,12 @@ GOAL_LANE_IDLE_S = 15 * 60
 # written only on a landed nudge and no counter reset touches it, so the cap holds
 # regardless of resets.
 GOAL_LANE_INTERVAL_S = 60 * 60
+# #929 — STARVED FULL-AUTHORITY shortcut: when the box is full-authority,
+# live_workers == 0, and backlog > 0, the refill-nudge interval drops from
+# the 1h hourly cap to 15 min. The owner's directive: "gk musi pracovat
+# intenzivne a paralelne" — a full-authority box sitting idle with a
+# backlog is not a "correctly-declining supervisor", it is starvation.
+GOAL_LANE_STARVED_INTERVAL_S = 15 * 60
 GOAL_LANE_MAX_NUDGES = 2
 # #804 mode-1 -- the count give-up is a BACKOFF, not a permanent LATCH. Pre-#804
 # a 0-worker box that ignored 2 nudges latched `skip:gave-up` FOREVER (its only
@@ -3935,8 +3941,9 @@ def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
 # captured, via the shared check's symmetric clamp). Un-submitted
 # COMPOSITION stamps neither signal and is caught separately, by the
 # two-capture draft-diff check at the send point below. Worst-case
-# annoyance stays bounded by GOAL_LANE_INTERVAL_S + GOAL_LANE_MAX_NUDGES
-# regardless.
+# annoyance stays bounded by the cadence cap (GOAL_LANE_INTERVAL_S, or the
+# #929 GOAL_LANE_STARVED_INTERVAL_S for a starved full-authority box) +
+# GOAL_LANE_MAX_NUDGES regardless.
 GOAL_LANE_LIVE_CONVO_S = 3 * 60
 
 # #442-review F2 -- bound on CONSECUTIVE zero-progress stash aborts. A
@@ -4188,13 +4195,18 @@ def _stuck_alert_streak():
 # hourly cap (#530) + #670 dedup as the single un-branched cadence gate below.
 
 
-def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
+def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters,
+                            authority=None):
     """#530/#670 -- the lane-nudge cadence gate. Returns (skip, logline): whether
     to hold this sweep and its decision line. Two gates, in order:
 
     #530 HARD HOURLY CAP: no sid gets a second lane-nudge within
     GOAL_LANE_INTERVAL_S (1h) of its last landed one (`llast` is set only on a
-    landed nudge and no reset touches it).
+    landed nudge and no reset touches it). #929: on a FULL-AUTHORITY box with
+    live_workers == 0 and backlog > 0 (hard starvation), the cap drops to
+    GOAL_LANE_STARVED_INTERVAL_S (15 min) and the #670 dedup is BYPASSED --
+    a starved box with an unchanged (0, N) signature still needs re-nudging
+    because the prior nudge visibly failed to revive the loop.
 
     #670 DEDUP: past the hourly cap, an EXACTLY-unchanged (live_workers, backlog_n)
     signature to the last landed nudge (`rec["lsw"]`/`rec["lsb"]`, stamped by
@@ -4206,7 +4218,8 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
     `lsw`/`lsb` before falling through, so a genuinely dead-stuck box IS re-probed
     on the widening (1h/3h/6h) schedule instead of being permanently silent (the
     "sam sa vypne a uz nezapne" report). Only a genuinely CHANGED state -- or a
-    give-up-backoff re-arm -- re-nudges (still under the 1h floor).
+    give-up-backoff re-arm -- re-nudges (still under the 1h floor). #929: a
+    STARVED full-authority box bypasses this gate entirely (see above).
 
     #729: the under-saturated effectiveness backoff branch is gone. #848: the
     refill nudge reaches delivery for ANY live_workers < floor (0..4), so
@@ -4215,12 +4228,25 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters):
     last = rec.get("llast")
     if last is None:
         return False, None
-    # #530 -- HARD HOURLY CAP.
-    if (now - last) < GOAL_LANE_INTERVAL_S:
+    # #929 -- STARVED FULL-AUTHORITY shortcut: a full-authority box with zero
+    # workers and a non-empty backlog uses the 15-min interval AND bypasses
+    # the #670 dedup. The dedup bypass is necessary: without it, a frozen
+    # (0, N) state is permanently silent past the cap, and the #804 give-up
+    # requires n >= MAX_NUDGES (2 landed nudges) which dedup prevents from
+    # ever reaching (ln stays at 1). See #929 design comment approach 2.
+    starved = (authority == "full" and live_workers == 0 and backlog_n > 0)
+    interval = GOAL_LANE_STARVED_INTERVAL_S if starved else GOAL_LANE_INTERVAL_S
+    # #530 -- HARD CAP (1h default, #929 15-min for starved full-authority).
+    if (now - last) < interval:
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                       "skip:hourly-cap remaining=%ds"
                       % (loc, live_workers, waiters, backlog_n,
-                         int(GOAL_LANE_INTERVAL_S - (now - last))))
+                         int(interval - (now - last))))
+    # #929 -- a starved full-authority box bypasses the dedup: the prior nudge
+    # failed to revive the loop (workers still 0), so re-nudging at the
+    # 15-min cadence is correct pressure, not spam.
+    if starved:
+        return False, None
     # #670 -- DEDUP on UNCHANGED lane state (owner 2026-08-24). PAST the hourly
     # cap, an IDENTICAL (workers, backlog) signature to the last LANDED nudge
     # never re-nudges: the supervisor already saw+acted-on (or correctly
@@ -4735,7 +4761,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # `skip:batch-running` (NO refill while a batch runs) branch is REMOVED; the
     # 0<lw<floor case now falls through to the same nudge path. (#620's give-up
     # reset already fired above for any live_workers>0, and the #530 min-backlog
-    # floor + #670 dedup + #530 hourly cap below bound the refill nudge cadence.)
+    # floor + #670 dedup + cadence cap (#530 hourly / #929 15-min starved) below
+    # bound the refill nudge cadence.)
     # #530 refill floor: a lone/tiny backlog is not worth a fresh lane for a
     # FRESHLY-idle box (the anti-storm gate against nudge->"nič workable"->nudge).
     # #804 mode-4: but a loop that has STOOD idle > 1h over just 1-2 workable
@@ -4807,8 +4834,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # part of the #670 dedup signature `(live_workers, backlog_n)` -- which VARIES
     # as lanes come and go, so an identical signature (same lane count + backlog)
     # correctly dedups a repeat, and a state MOVE (a lane returned) re-nudges.
+    # #929: authority forwarded so the starved full-authority shortcut engages.
     cd_skip, cd_log = _lane_cooldown_decision(
-        rec, now, backlog_n, loc, live_workers, waiters)
+        rec, now, backlog_n, loc, live_workers, waiters, authority=authority)
     if cd_log:
         logs.append(cd_log)
     if cd_skip:
