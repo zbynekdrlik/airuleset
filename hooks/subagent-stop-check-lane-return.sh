@@ -160,9 +160,11 @@ MUST be a durable LANE-RETURN comment, so a lost lane-completion notification
 the lane from that comment + the branch:
 
 ${LINES}
-Post it NOW, then return:
+Post it NOW, then clean up your worktree (#939), then return:
 
   gh issue comment <N> --body \"LANE-RETURN: branch <worktree-branch> head <sha> worktree <path> version <v> — <one-line evidence: RED sha -> GREEN sha, local verify green>\"
+
+  git worktree remove --force <your-worktree-path>
 
 You are blocked once per issue; if the comment genuinely cannot be posted,
 report that and stop."

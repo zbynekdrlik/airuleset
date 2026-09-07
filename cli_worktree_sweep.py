@@ -992,23 +992,26 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
         return row
     head = head.strip()
 
-    clean = _worktree_is_clean(path, git_run)
-    if clean is None:
-        row["reason"] = "git status unmeasurable — kept"
-        return row
-    if clean is False:
-        row["reason"] = "dirty tree (uncommitted work) — never removed"
-        return row
     if precious_fn(path):
         row["reason"] = "precious ignored file present (.env/*.key/local.settings) — kept"
         return row
 
+    # #939: check reachability BEFORE the clean-tree gate. A returned worker's
+    # worktree is typically dirty (scratch/temp/build files) but its HEAD is fully
+    # preserved on origin — the DIRECTORY is safe to free (the branch ref is always
+    # kept). Only when HEAD is NOT reachable do we need the tree for salvage. The
+    # old order (clean-tree BEFORE reachability) permanently blocked 100% of
+    # returned workers' worktrees (55 worktrees / 20G on david3).
     via = _worktree_head_reachable_from_origin(path, branch, base, head, git_run)
     if via is None:
         row["reason"] = ("HEAD not reachable from any origin ref "
                          "(work not preserved on origin) — kept")
         return row
     row["reachable_via"] = via
+
+    clean = _worktree_is_clean(path, git_run)
+    if clean is False:
+        row["dirty"] = True                # decision-logged: dirty but reachable
     return row                             # reason None → directory reclaimable
 
 

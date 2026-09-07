@@ -2464,16 +2464,16 @@ def _default_planners(home, now, scratch_rows=None):
 
 
 def _prevention_planners(home, now, scratch_rows=None):
-    """#920 — cheapest/safest rungs ONLY, for the PREVENTION pass at 70-79%.
-    These are age-out operations on genuinely disposable content (test
-    runner tmp dirs, scratch age-out, one-off venvs, npm/uv cache) — nothing
-    box-wide, nothing that needs sudo. The scratch rung has its own session
-    liveness gate internally (#863)."""
+    """#920 — cheapest/safest rungs for the PREVENTION pass (70-79%, or any
+    level on shared-stream boxes #939). Age-out operations on disposable content
+    + worktree cleanup (#939: proactive worktree reclaim on shared-stream boxes,
+    not only under >=80% pressure)."""
     return [
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
+        ("worktree", lambda: _plan_worktrees(home, now)),
     ]
 
 
@@ -2507,19 +2507,16 @@ def _rm_path(path, sudo=False, run_fn=None):
 
 
 def _remove_worktree_dir(a):
-    """`git worktree remove` the directory (the branch REF is kept). NO
-    `--force`: the tree was verified clean at plan time, so plain `remove`
-    succeeds; a state that raced dirty makes git REFUSE, and that refusal is a
-    SKIP (raise → logged FAIL), NEVER a raw `rm -rf` that would bulldoze it
-    (review 🔴). TOCTOU re-verify: re-check `git status` clean immediately
-    before removal (review 🟡)."""
+    """`git worktree remove --force` the directory (the branch REF is kept).
+    #939: uses `--force` because the planner now classifies dirty-but-reachable
+    worktrees as reclaimable (HEAD preserved on origin, only scratch/temp files
+    lost). A git refusal is a SKIP (raise → logged FAIL), NEVER a raw `rm -rf`
+    (review 🔴). No clean-tree TOCTOU re-check — the planner verified
+    reachability, which is the correct safety invariant."""
     repo, path = a.get("repo"), a.get("path")
     if not repo:
         raise OSError("worktree-remove with no repo for %s" % path)
-    clean = _worktree_status_clean_recheck(path)
-    if clean is not True:
-        raise OSError("worktree %s no longer clean/measurable at remove time — SKIP" % path)
-    r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--", path],
+    r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", "--", path],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise OSError("git worktree remove refused %s: %s" % (path, (r.stderr or "").strip()))
@@ -3495,8 +3492,12 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     except Exception as e:
         logs.append("disk-guard: cache write failed: %r" % e)
     # #920: prevention pass at 70-79%
+    # #939: on shared-stream boxes, the prevention pass fires at ANY pressure
+    # level (not just >=70%) so worktree cleanup runs proactively on the hourly
+    # cadence, preventing the 55-worktree / 20G accumulation that hits >=90%.
+    _prev_threshold = 0 if _is_shared else PREVENTION_PCT
     if (status["level"] in ("ok", "notice")
-            and status["worst_pct"] >= PREVENTION_PCT
+            and status["worst_pct"] >= _prev_threshold
             and not is_root
             and _cadence_allows_drain(status["worst_pct"],
                                       _drain_due(home, now, effective_interval) or growth_boost,
