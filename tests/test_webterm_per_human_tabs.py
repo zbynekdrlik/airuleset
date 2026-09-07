@@ -205,6 +205,33 @@ class TestOwnerDashboardRender(unittest.TestCase):
         self.assertNotIn('title="marek@subdev"', html)
 
 
+class TestArLocalTab938(unittest.TestCase):
+    """#938: the controller's local 'ar' tab must render on the owner dashboard
+    as the FIRST tab button, with the correct alias and label."""
+
+    def test_ar_in_zbynek_dashboard_tabs(self):
+        # The EXCLUSIVE filter list must include 'ar'.
+        self.assertIn("ar", w.WEBTERM_DASHBOARD_TABS["zbynek"])
+
+    def test_ar_is_first_tab(self):
+        # 'ar' is the FIRST entry in zbynek_inventory, so it must be the first
+        # tab button on the owner dashboard (inventory order is preserved).
+        self.assertEqual(w.WEBTERM_DASHBOARD_TABS["zbynek"][0], "ar")
+
+    def test_ar_label_in_rendered_html(self):
+        # The rendered owner dashboard must carry the 'ar' tab button with
+        # its label 'airuleset (local)'.
+        html = _render_owner()
+        self.assertIn('title="airuleset (local)"', html)
+
+    def test_ar_alias_is_ar_not_dev1(self):
+        # _short_alias for the 'ar' entry (local=True, user=None, id="ar")
+        # must return "ar", NOT "dev1" (the pre-#938 shortcircuit bug).
+        ar_entry = {"id": "ar", "local": True, "user": None,
+                    "label": "airuleset (local)", "preferred": "zbynek"}
+        self.assertEqual(w._short_alias(ar_entry), "ar")
+
+
 class TestConnectAllowlistMatchesZbynekInventory(unittest.TestCase):
     def test_connect_allowlist_is_zbynek_inventory(self):
         # #870 fix: webterm_inventory(OWNER) returns zbynek_inventory() — the
