@@ -799,27 +799,47 @@ def scan_memory_credentials(home: Optional[Path] = None) -> List[dict]:
     return findings
 
 
-def build_report(home: Optional[Path] = None) -> dict:
+def build_report(home: Optional[Path] = None, *,
+                  post_cutover: bool = False) -> dict:
     """The whole F0 result: probed declared entries + undeclared extras +
-    a findings summary + the exit code. `home` is test-injectable."""
+    a findings summary + the exit code. `home` is test-injectable.
+
+    When ``post_cutover`` is True (#870 F1), the exit-code semantics shift:
+    an absent ``must_move=True`` credential IS a finding (the controller
+    should have every credential it needs — an absent one means the move
+    from dev1 is incomplete and a push/provision will fail). Without the
+    flag, the pre-cutover semantics are preserved (absent-declared is
+    reported but not a finding)."""
     h = _home(home)
     buckets = _fleet_hosts_by_identity()
-    entries = [probe_entry(p, h, buckets) for p in PRIVILEGES]
-    declared_paths = {p.local_path for p in PRIVILEGES if p.local_path}
+    entries = [probe_entry(priv, h, buckets) for priv in PRIVILEGES]
+    declared_paths = {priv.local_path for priv in PRIVILEGES if priv.local_path}
     undeclared = scan_undeclared(h, declared_paths)
 
     memory_creds = scan_memory_credentials(h)
     wrong_mode = [e for e in entries if e.get("wrong_mode")]
-    exit_code = 1 if (undeclared or wrong_mode or memory_creds) else 0
+
+    # Post-cutover gate (#870 F1): absent must_move credentials are findings.
+    absent_must_move: List[dict] = []
+    if post_cutover:
+        absent_must_move = [
+            e for e in entries
+            if e["must_move"] and not e["present"] and e.get("local_path")]
+
+    exit_code = 1 if (undeclared or wrong_mode or memory_creds
+                      or absent_must_move) else 0
     return {
         "entries": entries,
         "undeclared": undeclared,
         "memory_credentials": memory_creds,
+        "post_cutover": post_cutover,
         "findings": {
             "undeclared_count": len(undeclared),
             "wrong_mode_count": len(wrong_mode),
             "wrong_mode_names": [e["name"] for e in wrong_mode],
             "memory_credential_count": len(memory_creds),
+            "absent_must_move_count": len(absent_must_move),
+            "absent_must_move_names": [e["name"] for e in absent_must_move],
         },
         "exit_code": exit_code,
     }
@@ -863,10 +883,19 @@ def render_table(report: dict) -> str:
         for m in mem:
             lines.append("  %-50s pattern=%s" % (m["path"], m["pattern"]))
     lines.append("")
+    # Post-cutover: absent must_move credentials section (#870 F1)
+    absent_names = report["findings"].get("absent_must_move_names", [])
+    if absent_names:
+        lines.append("ABSENT must_move credentials (migration incomplete) — %d:" % len(absent_names))
+        for n in absent_names:
+            lines.append("  %s" % n)
+        lines.append("")
+
     f = report["findings"]
-    lines.append("FINDINGS: undeclared=%d wrong-mode=%d memory-creds=%d%s" % (
+    lines.append("FINDINGS: undeclared=%d wrong-mode=%d memory-creds=%d absent-must-move=%d%s" % (
         f["undeclared_count"], f["wrong_mode_count"],
         f.get("memory_credential_count", 0),
+        f.get("absent_must_move_count", 0),
         (" [" + ", ".join(f["wrong_mode_names"]) + "]") if f["wrong_mode_names"] else ""))
     lines.append("exit=%d (%s)" % (
         report["exit_code"],
@@ -875,9 +904,13 @@ def render_table(report: dict) -> str:
 
 
 def cmd_privileges(args) -> None:
-    """`airuleset.py privileges [--json]` — print the inventory and exit 1 when
-    any undeclared or wrong-mode credential exists (else 0)."""
-    report = build_report()
+    """`airuleset.py privileges [--json] [--post-cutover]` — print the
+    inventory and exit 1 when any undeclared or wrong-mode credential exists
+    (else 0). With ``--post-cutover`` (#870 F1), absent ``must_move=True``
+    credentials are also findings (the migration-completeness gate for the
+    controller box)."""
+    post_cutover = getattr(args, "post_cutover", False)
+    report = build_report(post_cutover=post_cutover)
     if getattr(args, "json", False):
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
