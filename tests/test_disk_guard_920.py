@@ -7,9 +7,6 @@ includes the new classes. Each test is designed to FAIL before the fix.
 
 import os
 import time
-from pathlib import Path
-
-import pytest
 
 import watchdog.disk_guard as dg
 
