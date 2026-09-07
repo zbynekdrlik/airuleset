@@ -8,46 +8,21 @@
 
 **The completion report's audience is the USER, not you.** Terminal scrolls — only the LAST passage is visible without scrolling back. Audits at TOP, user-facing answers at BOTTOM. Send the report as the LAST thing in your message.
 
-#### MANDATORY structure (use this EXACT template)
+#### MANDATORY compact template (#940 — ~6 lines, not ~20)
 
 ```
 ## ✅ Work Complete
 
-**Audits & deploy:**
-✅ CI: green
-✅ /plan-check: N/N fulfilled
-✅ /review: clean — 0 🔴 0 🟡 0 🔵
-✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)
-✅ Deploy: <user-visible behavior verified on the live target — include version label read from DOM>
-✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>   ← REQUIRED for bug-fix PRs (see regression-test-first.md); OMIT for non-bug PRs
-✅ Výstup: <konkrétne hodnoty ODČÍTANÉ z reálneho artefaktu — email/dokument/render/UI/notifikácia> | n/a — <prečo>   ← ALWAYS required (see Hard rules); never "sent OK"
-
-**Plan steps:**           ← OPTIONAL: multi-step work only; terse user-visible one-liners
-- <step 1>
-- <step 2>
-
-**E2E test coverage:**    ← OPTIONAL: only when this work ADDED new E2E tests
-| Feature/Fix | E2E Test File | What It Verifies |
-|---|---|---|
-| <new feature> | <new test file> | <user workflow> |
-
----
-
-**Goal:** <1 sentence — restate the user's ask in their words, no jargon>
-**What changed:** <1-2 sentences — user-visible outcome in plain language>
-
-🌐 Dev:  <url>          ← USER-CLICKABLE web URLs only (one per env × user-facing surface)
-🌐 Prod: <url>          ← never list backend/API URLs
-🌐 Demo: <url>          ← client-app projects: the running demo the user can click NOW — every ticket that touched the app
-📱 APK:  <url>          ← client-app projects: the installable build (APK/IPA/signed binary) — same rule, every ticket
-
-**[<project>] PR #<N>: <full PR title>**
-<full PR URL> — merged <merge-sha>        ← default-auto; manual-marker projects: `— mergeable, clean` + end with ❓ approve merge
-
-❓ **Question:** <concise 1-2 sentence question>   ← only if you actually need an answer
+✅ /plan-check: N/N · /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵
+✅ Výstup: <konkrétne hodnoty z artefaktu> | n/a — <prečo>
+✅ Regression test: <test>:<line> — RED <sha>, GREEN <sha>  ← bug-fix PRs only; OMIT for non-bug
+🌐 <url>                    ← user-clickable URL; one per env × surface; omit if no web UI
+**Goal:** <1 sentence> — **What changed:** <1-2 sentences>
+📔 Playbook: <captured | n/a>
+✅ DONE: <one-line>
 ```
 
-Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress — then you are NOT done; wait until everything is ✅ before sending.
+The audit-summary line packs plan-check + review + requesting-code-review into ONE line. Výstup stays its own `✅`-prefixed line (hook-enforced). Deploy evidence merges into Výstup (the deployed version IS the read-back value). CI is implicit (merged = CI green). Use ❌/⏳ if failed/in-progress — then NOT done.
 
 #### Reduced-authority (fork-no-merge / branch-merge) variant — SAME template, hand-off lines instead of merge/deploy
 
@@ -92,17 +67,17 @@ tickets were self-closed with no hand-off at all and sat neither queued nor revi
 2. Apply `/review` standards (Correctness / Security / Performance / Maintainability / Style) — fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. **Never invoke the built-in `Skill({skill: "review"})`/`code-review` tool for this** — it is a Claude Code platform skill this repo does not own, and it has proven to spiral into a disproportionate multi-agent fan-out, become cross-task addressable, and orphan silently across a session-limit reset (`agents/autopilot-worker.md` CYCLE step 6, #363). Self-apply the standards directly, or dispatch ONE self-contained fresh-context `general-purpose` subagent — never the built-in skill.
 3. Invoke `superpowers:requesting-code-review` skill — the DEEP pass. Fix every 🔴/🟡/🔵 it surfaces. This historically catches issues `/review` misses; the user always runs it after the report, so skipping = guaranteed rework.
 4. Read back the OUTPUT artifact the work produced/changed — open the real thing (the sent email from the DB, the rendered document, the live UI screen) and note the concrete values you SEE; that read-back is what the `✅ Výstup:` line cites (or establish honestly that no user-facing output exists → the explicit `n/a — <prečo>` form).
-5. All FOUR audit lines MUST appear in the audits block:
-   - `✅ /plan-check: N/N fulfilled`
-   - `✅ /review: clean — 0 🔴 0 🟡 0 🔵`
-   - `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵`
-   - `✅ Výstup: <konkrétne pozorované hodnoty> | n/a — <prečo>`
+5. All FOUR audit tokens MUST appear in the audit-summary line:
+   - `/plan-check: N/N`
+   - `/review:` with `0🔴0🟡0🔵`
+   - `/requesting-code-review:` with `0🔴0🟡0🔵`
+   - `Výstup: <konkrétne pozorované hodnoty> | n/a — <prečo>`
 
 If ANY audit fails, you are NOT done — fix the findings, re-run, then send.
 
-#### Length budget — ~20 lines
+#### Length budget — ~6 lines (#940)
 
-The whole report fits in ~20 lines (audits + optional plan steps + Goal + What changed + 🌐 + PR + maybe ❓). The diff is the evidence; the report is the summary. If you're writing more, you're over-explaining.
+The whole report fits in ~6 lines (one audit-summary + optional regression + 🌐 + Goal/What changed + Playbook + marker). The diff is the evidence; the report is the summary. If you're writing more, you're over-explaining.
 
 #### Enforcement
 
