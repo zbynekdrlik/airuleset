@@ -1384,10 +1384,15 @@ def discover_stale_claude_versions(home=None, running_fn=None, dir_stats_fn=None
         # #925-C: age gate — a version dir fresher than min_age_days is KEPT
         # even if strictly older than running, to avoid racing an in-progress
         # self-update that just downloaded but has not switched yet.
+        # F5 review: an unstat-able dir is KEPT (fail-safe), not treated as old.
         try:
             entry_mtime = entry.stat().st_mtime
         except OSError:
-            entry_mtime = 0    # unreadable mtime → treat as old (safe to delete)
+            out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                        "kind": "skip",
+                        "reason": "version %s mtime unreadable — kept (fail-safe)"
+                        % entry.name})
+            continue
         age_s = now - entry_mtime
         if age_s < min_age_days * 86400:
             out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,

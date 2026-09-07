@@ -176,15 +176,19 @@ def render_rsyslog_quiet():
     The api-watchdog systemd --user service runs every 60s on each stream
     account. On a shared-stream box with ~12 accounts, this produces ~5M
     syslog lines/day (the journal keeps them all — this rule only stops
-    rsyslog from forwarding them to /var/log/syslog). Uses the structured
-    journal field ``_SYSTEMD_USER_UNIT`` so it matches exactly the
-    api-watchdog.service unit regardless of syslog identifier."""
+    rsyslog from forwarding them to /var/log/syslog). Filters by
+    ``$programname`` which matches the ``SyslogIdentifier=api-watchdog``
+    set in the service template (#925-C review F1: Debian/Ubuntu rsyslog
+    uses ``imuxsock`` not ``imjournal``, so journal fields like
+    ``$!_SYSTEMD_USER_UNIT`` are always empty — ``$programname`` is the
+    correct filter)."""
     return (
         "# Managed by airuleset (#925-C) — suppress api-watchdog per-poll\n"
         "# output from syslog. The journal retains all entries; this only\n"
         "# prevents rsyslog from forwarding ~5M lines/day to /var/log/syslog\n"
         "# on shared-stream boxes (12 accounts x 60s polls).\n"
-        'if $!_SYSTEMD_USER_UNIT == "api-watchdog.service" then stop\n'
+        "# Requires SyslogIdentifier=api-watchdog in the service template.\n"
+        ':programname, isequal, "api-watchdog" stop\n'
     )
 
 
@@ -290,8 +294,10 @@ def build_apply_script() -> str:
     # #925-C: swap policy — idempotent swap management on shared-stream boxes.
     # Exactly ONE /swapfile of SWAP_SIZE_GB. Guard: only acts when a
     # shared-stream box-class marker exists under ANY home.
-    # The sequence is: create new → mkswap → swapon new → swapoff old → rm old
-    # → rename new → fstab entry. NEVER leaves two active swapfiles.
+    # The sequence is: cleanup stale .new → free-space check → create new →
+    # mkswap → swapon new → swapoff old → rm old → rename → fstab.
+    # NEVER leaves two active swapfiles. F2 review fixes: stale .new cleanup,
+    # free-space precheck, no dd fallback (ENOSPC risk), cleanup-on-failure.
     parts.append(
         '# Swap policy: exactly ONE /swapfile of %dG (#925-C, owner ruling).\n'
         '# Guard: only acts when a shared-stream box-class marker exists.\n'
@@ -303,45 +309,66 @@ def build_apply_script() -> str:
         'done\n'
         'want_swap_bytes=$((%d * 1024 * 1024 * 1024))\n'
         'if "$swap_is_shared_stream"; then\n'
+        '    # F2: clean up a stale /swapfile.new from a prior interrupted run\n'
+        '    if [ -f /swapfile.new ]; then\n'
+        '        swapoff /swapfile.new 2>/dev/null || true\n'
+        '        rm -f /swapfile.new\n'
+        '        echo "  resource-guards: cleaned stale /swapfile.new"\n'
+        '    fi\n'
         '    cur_swap_bytes=0\n'
         '    if [ -f /swapfile ]; then\n'
         '        cur_swap_bytes=$(stat -c %%s /swapfile 2>/dev/null || echo 0)\n'
         '    fi\n'
-        '    # Tolerance: within 1%% of the target size → no-op\n'
+        '    # Tolerance: within 1%% of the target size → no-op (also check\n'
+        '    # that swap is active and fstab has an entry — F3 review)\n'
         '    lo_swap=$((want_swap_bytes * 99 / 100))\n'
         '    hi_swap=$((want_swap_bytes * 101 / 100))\n'
-        '    if [ "$cur_swap_bytes" -ge "$lo_swap" ] && [ "$cur_swap_bytes" -le "$hi_swap" ]; then\n'
-        '        echo "  resource-guards: /swapfile already %dG — no-op"\n'
+        '    swap_active=false\n'
+        '    grep -q "^/swapfile " /proc/swaps 2>/dev/null && swap_active=true\n'
+        '    fstab_ok=false\n'
+        '    grep -qE "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null && fstab_ok=true\n'
+        '    if [ "$cur_swap_bytes" -ge "$lo_swap" ] && [ "$cur_swap_bytes" -le "$hi_swap" ] \\\n'
+        '       && "$swap_active" && "$fstab_ok"; then\n'
+        '        echo "  resource-guards: /swapfile already %dG + active + fstab — no-op"\n'
         '    else\n'
-        '        echo "  resource-guards: provisioning /swapfile (%dG)"\n'
-        '        # Create the new swapfile\n'
-        '        fallocate -l %dG /swapfile.new 2>/dev/null \\\n'
-        '            || dd if=/dev/zero of=/swapfile.new bs=1G count=%d status=none\n'
-        '        chmod 0600 /swapfile.new\n'
-        '        mkswap /swapfile.new >/dev/null\n'
-        '        swapon /swapfile.new\n'
-        '        # Deactivate + remove old swapfiles (swapfile, swapfile2, swapfile3)\n'
-        '        for old in /swapfile /swapfile2 /swapfile3; do\n'
-        '            if [ -f "$old" ] && [ "$old" != "/swapfile.new" ]; then\n'
-        '                swapoff "$old" 2>/dev/null || true\n'
-        '                rm -f "$old"\n'
-        '                echo "  resource-guards: removed old $old"\n'
+        '        # F2: free-space precheck — never fill the disk creating swap\n'
+        '        avail_bytes=$(df --output=avail -B1 / 2>/dev/null | tail -1 | tr -d " ")\n'
+        '        margin=$((1024 * 1024 * 1024))  # 1G margin\n'
+        '        if [ -n "$avail_bytes" ] && [ "$avail_bytes" -lt "$((want_swap_bytes + margin))" ] 2>/dev/null; then\n'
+        '            echo "  ⚠ RESOURCE-GUARDS: cannot provision %dG swap — only $(($avail_bytes / 1024 / 1024))M free, need $(($want_swap_bytes / 1024 / 1024 + 1024))M. Skipping." >&2\n'
+        '        else\n'
+        '            echo "  resource-guards: provisioning /swapfile (%dG)"\n'
+        '            if ! fallocate -l %dG /swapfile.new; then\n'
+        '                rm -f /swapfile.new\n'
+        '                echo "  ⚠ RESOURCE-GUARDS: fallocate failed for %dG swap. Skipping." >&2\n'
+        '            else\n'
+        '                chmod 0600 /swapfile.new\n'
+        '                mkswap /swapfile.new >/dev/null\n'
+        '                swapon /swapfile.new\n'
+        '                # Deactivate + remove old swapfiles\n'
+        '                for old in /swapfile /swapfile2 /swapfile3; do\n'
+        '                    if [ -f "$old" ] && [ "$old" != "/swapfile.new" ]; then\n'
+        '                        swapoff "$old" 2>/dev/null || true\n'
+        '                        rm -f "$old"\n'
+        '                        echo "  resource-guards: removed old $old"\n'
+        '                    fi\n'
+        '                done\n'
+        '                mv /swapfile.new /swapfile\n'
+        '                # Ensure fstab entry (F7: use [[:space:]] for tab compat)\n'
+        '                if ! grep -qE "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null; then\n'
+        '                    echo "/swapfile none swap sw 0 0" >> /etc/fstab\n'
+        '                    echo "  resource-guards: added /swapfile to fstab"\n'
+        '                fi\n'
+        '                # Remove stale fstab entries for old swapfiles\n'
+        '                for old_entry in /swapfile2 /swapfile3; do\n'
+        '                    if grep -qE "^${old_entry}[[:space:]]" /etc/fstab 2>/dev/null; then\n'
+        '                        sed -i "\\\\|^${old_entry}[[:space:]]|d" /etc/fstab\n'
+        '                        echo "  resource-guards: removed $old_entry from fstab"\n'
+        '                    fi\n'
+        '                done\n'
+        '                echo "  resource-guards: /swapfile %dG active"\n'
         '            fi\n'
-        '        done\n'
-        '        mv /swapfile.new /swapfile\n'
-        '        # Ensure fstab entry\n'
-        '        if ! grep -q "^/swapfile " /etc/fstab 2>/dev/null; then\n'
-        '            echo "/swapfile none swap sw 0 0" >> /etc/fstab\n'
-        '            echo "  resource-guards: added /swapfile to fstab"\n'
         '        fi\n'
-        '        # Remove stale fstab entries for old swapfiles\n'
-        '        for old_entry in /swapfile2 /swapfile3; do\n'
-        '            if grep -q "^${old_entry} " /etc/fstab 2>/dev/null; then\n'
-        '                sed -i "\\\\|^${old_entry} |d" /etc/fstab\n'
-        '                echo "  resource-guards: removed $old_entry from fstab"\n'
-        '            fi\n'
-        '        done\n'
-        '        echo "  resource-guards: /swapfile %dG active"\n'
         '    fi\n'
         'else\n'
         '    # Non-shared-stream: verify-only (the original #775 behaviour)\n'
@@ -351,7 +378,9 @@ def build_apply_script() -> str:
         '    fi\n'
         'fi'
         % (SWAP_SIZE_GB, SWAP_SIZE_GB,
-           SWAP_SIZE_GB, SWAP_SIZE_GB,
+           SWAP_SIZE_GB,
+           SWAP_SIZE_GB,
+           SWAP_SIZE_GB,
            SWAP_SIZE_GB, SWAP_SIZE_GB,
            SWAP_SIZE_GB)
     )

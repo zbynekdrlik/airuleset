@@ -171,6 +171,11 @@ class TestApplyScript(unittest.TestCase):
         self.assertIn("10G", self.s)
         # Never leaves two swapfiles — the old is swapped off before rm
         self.assertIn("swapoff", self.s)
+        # F2 review: stale .new cleanup + free-space precheck
+        self.assertIn("swapfile.new", self.s)
+        self.assertIn("avail_bytes", self.s)
+        # F2 review: no dd fallback (ENOSPC risk on a pressured disk)
+        self.assertNotIn("dd if=/dev/zero", self.s)
 
     def test_script_is_valid_bash(self):
         import subprocess
@@ -421,8 +426,12 @@ class TestRsyslogQuiet925C(unittest.TestCase):
 
     def test_render_content(self):
         body = g.render_rsyslog_quiet()
-        self.assertIn("api-watchdog.service", body)
-        self.assertIn("then stop", body)
+        self.assertIn("api-watchdog", body)
+        self.assertIn("stop", body)
+        # F1 review: must use $programname (works with imuxsock on
+        # Debian/Ubuntu), NOT $!_SYSTEMD_USER_UNIT (requires imjournal)
+        self.assertIn("programname", body)
+        self.assertNotIn("_SYSTEMD_USER_UNIT", body)
 
     def test_in_guard_files(self):
         paths = [p for p, _ in g.guard_files()]
