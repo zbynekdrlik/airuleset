@@ -1060,5 +1060,131 @@ class TestControllerLaneKeyDesiredSet(unittest.TestCase):
         self.assertEqual(blobs, sorted(blobs))
 
 
+# ---------------------------------------------------------------------------
+# #870 incident 2 — multi-human controller key quarantine fix
+# ---------------------------------------------------------------------------
+
+class TestMultiHumanControllerKeys870(unittest.TestCase):
+    """#870 incident 2: the zbynek controller key on david1-3 must NOT be
+    quarantined — multiple humans' controllers can connect to the same
+    webterm-only user account."""
+
+    def test_david1_gets_zbynek_controller_key(self):
+        """david1 is in zbynek's dashboard → zbynek controller blob in desired set."""
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        zbynek_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertIn(zbynek_blob, blobs,
+                      "zbynek controller key missing from david1 desired set — "
+                      "the #870 incident 2 quarantine bug")
+
+    def test_david2_gets_zbynek_controller_key(self):
+        """david2 is in zbynek's dashboard → zbynek controller blob in desired set."""
+        keys = cli_webterm_only.desired_keys_for_user("david2")
+        zbynek_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertIn(zbynek_blob, blobs)
+
+    def test_david3_gets_zbynek_controller_key(self):
+        """david3 is in zbynek's dashboard → zbynek controller blob in desired set."""
+        keys = cli_webterm_only.desired_keys_for_user("david3")
+        zbynek_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertIn(zbynek_blob, blobs)
+
+    def test_david4_does_not_get_zbynek_controller_key(self):
+        """david4 is NOT in zbynek's dashboard → zbynek controller blob absent."""
+        keys = cli_webterm_only.desired_keys_for_user("david4")
+        zbynek_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertNotIn(zbynek_blob, blobs)
+
+    def test_dominika_does_not_get_zbynek_controller_key(self):
+        """dominika is NOT in zbynek's dashboard → zbynek controller blob absent."""
+        keys = cli_webterm_only.desired_keys_for_user("dominika")
+        zbynek_blob = cli_webterm_only._key_blob(
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+        blobs = {cli_webterm_only._key_blob(k) for k in keys}
+        self.assertNotIn(zbynek_blob, blobs)
+
+    def test_zbynek_forced_command_line_not_quarantined(self):
+        """The exact incident: a david1 authorized_keys containing the zbynek
+        forced-command line must NOT have it quarantined. Reproduces the bug."""
+        zbynek_key_line = cli_webterm_only._controller_lane_key_line(
+            "david1",
+            cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+        # Build authorized_keys with the fleet key + zbynek forced-command line
+        content = (
+            cli_webterm_only.FLEET_PUSH_PUBKEY + "\n"
+            + zbynek_key_line + "\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            ssh_dir = os.path.join(td, ".ssh")
+            os.makedirs(ssh_dir)
+            ak_path = os.path.join(ssh_dir, "authorized_keys")
+            with open(ak_path, "w") as f:
+                f.write(content)
+            log_dir = os.path.join(td, ".claude")
+            r = cli_webterm_only.manage_webterm_only_keys(
+                user="david1", ssh_dir=ssh_dir,
+                run=_fake_run_ok, log_dir=log_dir,
+            )
+            # Read back the live file
+            with open(ak_path) as f:
+                live = f.read()
+            zbynek_blob = cli_webterm_only._key_blob(
+                cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["zbynek"])
+            self.assertIn(zbynek_blob, live,
+                          "zbynek controller key quarantined from david1 — "
+                          "the #870 incident 2 bug")
+            # No quarantine file with the zbynek blob
+            removed_files = [
+                fn for fn in os.listdir(ssh_dir)
+                if fn.startswith("authorized_keys.airuleset-removed-")
+            ]
+            for rf in removed_files:
+                with open(os.path.join(ssh_dir, rf)) as f:
+                    self.assertNotIn(zbynek_blob, f.read(),
+                                     "zbynek controller key in quarantine file")
+
+    def test_targets_constant_matches_dashboard_tabs(self):
+        """_CONTROLLER_LANE_WEBTERM_ONLY_TARGETS must agree with
+        WEBTERM_DASHBOARD_TABS — a test-lock against drift."""
+        from cli_webterm import WEBTERM_DASHBOARD_TABS
+        targets = cli_webterm_only._CONTROLLER_LANE_WEBTERM_ONLY_TARGETS
+        # For each human, derive the webterm-only users from the dashboard tabs
+        for human, tab_ids in WEBTERM_DASHBOARD_TABS.items():
+            # tab ids like "david1-subdev" → user "david1"
+            wt_targets = set()
+            for tid in tab_ids:
+                # Extract the user from the tab id: "david1-subdev" → "david1"
+                if tid.endswith("-subdev"):
+                    user = tid[:-len("-subdev")]
+                    if user in WEBTERM_ONLY_USERS:
+                        wt_targets.add(user)
+            expected = frozenset(wt_targets)
+            actual = targets.get(human, frozenset())
+            self.assertEqual(
+                actual, expected,
+                "Drift: %s targets %s != dashboard-derived %s" % (
+                    human, actual, expected),
+            )
+
+    def test_david1_total_key_count_with_multi_human(self):
+        """david1 gets fleet(2) + owner(2) + subdev-lane(1) + controller-david(1)
+        + controller-zbynek(1) = 7."""
+        keys = cli_webterm_only.desired_keys_for_user("david1")
+        from cli_owner_keys import OWNER_PUBKEYS
+        expected = (len(cli_webterm_only.FLEET_PUSH_PUBKEYS)
+                    + len(OWNER_PUBKEYS)
+                    + 1   # subdev david lane key
+                    + 2)  # controller david + zbynek lane keys
+        self.assertEqual(len(keys), expected)
+
+
 if __name__ == "__main__":
     unittest.main()
