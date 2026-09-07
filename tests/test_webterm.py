@@ -234,27 +234,6 @@ def _run_revive_harness(html):
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-# A small, controlled fleet: one owner box (identity), one owner box (no
-# identity/sshpass), one stream (identity), one stream (no identity), and one
-# PENDING host that must be filtered out.
-_FAKE_HOSTS = [
-    {"name": "dev2", "host": "10.0.0.2", "user": "newlevel"},
-    {"name": "gatekeeper", "host": "10.0.0.9", "user": "gatekeeper",
-     "identity": "~/.secrets/gatekeeper_access_ed25519"},
-    {"name": "david@subdev", "host": "10.0.0.5", "user": "david",
-     "identity": "~/.secrets/gatekeeper_access_ed25519"},
-    {"name": "montalu@subdev", "host": "10.0.0.5", "user": "montalu"},
-    {"name": "ghost@subdev", "host": "10.0.0.5", "user": "ghost", "pending": True},
-]
-_FAKE_AUTHORITY = {"david": "fork-no-merge", "montalu": "branch-merge"}
-
-
-def _fake_inventory():
-    import airuleset
-    with m.patch.object(airuleset, "REMOTE_HOSTS", _FAKE_HOSTS), \
-            m.patch.object(airuleset, "AUTHORITY_BY_USER", _FAKE_AUTHORITY):
-        return w.webterm_inventory()
-
 
 class TestInventory(unittest.TestCase):
     """#870 fix: webterm_inventory(OWNER) now returns zbynek_inventory()

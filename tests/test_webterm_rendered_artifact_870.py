@@ -48,8 +48,8 @@ class TestZbynekRenderedInventory(unittest.TestCase):
         stack.enter_context(m.patch.object(
             zb, "WEBTERM_ZBYNEK_GATEWAY_SERVICE_DEST",
             base / "systemd" / "webterm-zbynek-gateway.service"))
-        # Patch box class to controller so the sshpass guard does not fire
-        # during fleet-derived inventory building (the bug path).
+        # Patch box class to controller — the production box-class for the
+        # zbynek lane (the sshpass guard fires ON the controller).
         stack.enter_context(m.patch(
             "watchdog.reaper.default_box_class", return_value="controller"))
         return claude

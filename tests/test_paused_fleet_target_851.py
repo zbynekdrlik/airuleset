@@ -80,14 +80,15 @@ class TestDeployableHostsExcludesPaused(TestCase):
         self.assertNotIn("simap1@subdev", names)
 
     def test_webterm_inventory_excludes_paused_account(self):
-        # "webterm access" (#851) is satisfied for free — webterm_inventory
-        # already builds its stream-account entries from _deployable_hosts().
+        # #870 fix: webterm_inventory(OWNER) returns zbynek_inventory() — a
+        # declarative constant that never contained simap1. The paused-state
+        # exclusion is satisfied by construction (the owner curates the set).
         import cli_webterm
         inv = cli_webterm.webterm_inventory()
         self.assertFalse(
             any("simap1" in (e.get("id") or "") or "simap1" in (e.get("user") or "")
                 for e in inv),
-            "a paused account must not appear in the webterm inventory")
+            "simap1 must not appear in zbynek_inventory")
 
 
 class TestSoniozLegSkipsPaused(TestCase):

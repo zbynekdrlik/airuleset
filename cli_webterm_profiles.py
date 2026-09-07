@@ -568,9 +568,9 @@ def zbynek_inventory():
     The ``ar`` tab (``local: True``) is the controller's own tmux — the
     ``airuleset`` account's session, managed by the owner, not an ssh target.
 
-    F4c wires this into the live install path (``profile_inventory`` routes
-    OWNER to it when ``LANE_HOST["zbynek"] == "controller"``); until then
-    the owner profile still uses the fleet-derived ``webterm_inventory()``."""
+    #870 fix: ``webterm_inventory(OWNER)`` now routes here directly,
+    symmetric with ``profile_inventory(OWNER)``. The fleet-derived path
+    is removed (fail-loud ValueError on unknown profile)."""
     subdev_host = _subdev_target_host("zbynek")
     return [
         {
@@ -748,11 +748,10 @@ def zbynek_inventory():
 
 
 def profile_inventory(profile, fleet_inventory):
-    """The session set for ``profile``: the david set for ``david``, the marek set
-    for ``marek``, the dominika set for ``dominika``, else the full
-    ``fleet_inventory`` (owner — unchanged). Only the OWNER path needs the fleet
-    (built by the caller via the airuleset facade); the david/marek/dominika sets
-    are self-contained here so this leaf never imports airuleset."""
+    """The session set for ``profile``: every profile routes to its declarative
+    ``*_inventory()`` leaf. The ``fleet_inventory`` param is kept for backward
+    compatibility but is no longer consumed for any known profile (#870 fix:
+    OWNER routes to ``zbynek_inventory()``, not the fleet-derived fallback)."""
     if profile == DAVID:
         return david_inventory()
     if profile == MAREK:
