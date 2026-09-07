@@ -3814,6 +3814,10 @@ GOAL_LANE_STARVED_INTERVAL_S = 15 * 60
 # the starved shortcut is disabled and the session falls back to the 1h cap
 # + #670 dedup. Reset on dispatch (_lane_count_giveup_reset) or backlog change.
 GOAL_LANE_STARVED_MAX_CONSECUTIVE = 2
+# #937-review C1 -- agent_type values that represent IMPLEMENTATION workers
+# whose finished state means "ticket in integration" (coverage). Non-worker
+# subagents (advisor/validator/mechanical/Explore) review/validate, not implement.
+_LANE_WORKER_AGENT_TYPES = frozenset({"autopilot-worker", "sonnet-implementer"})
 GOAL_LANE_MAX_NUDGES = 2
 # #804 mode-1 -- the count give-up is a BACKOFF, not a permanent LATCH. Pre-#804
 # a 0-worker box that ignored 2 nudges latched `skip:gave-up` FOREVER (its only
@@ -4256,7 +4260,7 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters,
     # #530 -- HARD CAP (1h default, #929 15-min for starved full-authority).
     if (now - last) < interval:
         detail = ""
-        if lsc >= GOAL_LANE_STARVED_MAX_CONSECUTIVE and authority == "full":
+        if not starved and lsc >= GOAL_LANE_STARVED_MAX_CONSECUTIVE and authority == "full":
             detail = " (starved-backoff: %d consecutive, no dispatch)" % lsc
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                       "skip:hourly-cap remaining=%ds%s"
@@ -4613,8 +4617,12 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     if wnt.log:
         log = ("lane-occupancy %s waiters=%d workers=%d -> %s"
                % (loc, waiters, live_workers, wnt.log))
-    # #937 -- count recently-finished workers (in integration) from evidence.
-    finished_workers = sum(1 for w in ev if w.state == "finished")
+    # #937 -- count recently-finished IMPLEMENTATION workers (in integration)
+    # from evidence. Non-worker subagents (fable-advisor, ticket-validator,
+    # sonnet-mechanical, Explore) are excluded — they review/validate, not
+    # implement tickets, so their presence is not coverage (#937-review C1).
+    finished_workers = sum(1 for w in ev if w.state == "finished"
+                          and w.agent_type in _LANE_WORKER_AGENT_TYPES)
     return wnt.defer, log, live_workers, backlog_n, finished_workers
 
 

@@ -2812,6 +2812,43 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             any("starved-backoff" in ln or "skip:hourly-cap" in ln
                 for ln in logs), logs)
 
+    def test_937_starved_backoff_resets_on_backlog_change(self):
+        # #937 T1: streak at 2, backlog changes 5→6 → streak resets, starved
+        # shortcut re-engages, nudge fires at +16min (inside 1h, past 15-min).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"llast": now - 16 * 60, "ln": 1, "lsc": 2,
+               "lsb_starved": 5}  # streak started at backlog=5
+        # backlog is now 6 (changed) → streak resets → starved fires
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 6, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # lsc was reset then incremented by the new nudge (fresh streak)
+        self.assertEqual(rec.get("lsc"), 1)
+
+    def test_937_starved_streak_increments_on_landed_nudge(self):
+        # #937 T1: _lane_record_nudge increments lsc when live_workers == 0.
+        rec = {}
+        goal._lane_record_nudge(rec, 0, 5, 0, 100000)
+        self.assertEqual(rec.get("lsc"), 1)
+        self.assertEqual(rec.get("lsb_starved"), 5)
+        goal._lane_record_nudge(rec, 0, 5, 1, 100060)
+        self.assertEqual(rec.get("lsc"), 2)
+
+    def test_937_starved_streak_clears_on_dispatch(self):
+        # #937 T1: _lane_count_giveup_reset clears lsc (dispatch observed).
+        rec = {"lsc": 2, "lsb_starved": 5, "ln": 1}
+        goal._lane_count_giveup_reset(rec)
+        self.assertNotIn("lsc", rec)
+        self.assertNotIn("lsb_starved", rec)
+
+    def test_937_starved_streak_clears_on_nonstarved_nudge(self):
+        # #937 T1: a nudge with live_workers > 0 resets the streak.
+        rec = {"lsc": 2, "lsb_starved": 5}
+        goal._lane_record_nudge(rec, 1, 5, 0, 100000)  # workers=1
+        self.assertNotIn("lsc", rec)
+        self.assertNotIn("lsb_starved", rec)
+
     def test_937_non_full_authority_starved_eligible_uses_1h_cap(self):
         # #937 RED (authority scope lock): a reduced-authority box (fork-no-merge)
         # with workers=0+backlog>0 at +16min (past 15-min, inside 1h) must NOT
@@ -2827,21 +2864,36 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
 
     def test_937_occupancy_covered_suppresses_nudge(self):
-        # #937 RED: when live_workers + recently-finished workers >= backlog_n,
-        # the nudge should be suppressed (skip:covered). Here: 2 live + 1
-        # finished = 3, backlog = 3 → all covered, no nudge needed.
+        # #937 RED: when live_workers + recently-finished IMPLEMENTATION
+        # workers >= backlog_n, the nudge should be suppressed (skip:covered).
+        # Here: 2 live + 1 finished autopilot-worker = 3, backlog = 3.
         # PRE-FIX this fires because saturation only checks live_workers.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        ev = [WorkerLane("w1", "live", 60, None, ""),
-              WorkerLane("w2", "live", 60, None, ""),
-              WorkerLane("w3", "finished", 120, None, "")]
+        ev = [WorkerLane("w1", "live", 60, "autopilot-worker", ""),
+              WorkerLane("w2", "live", 60, "autopilot-worker", ""),
+              WorkerLane("w3", "finished", 120, "autopilot-worker", "")]
         with m.patch.object(wd, "count_live_workers", return_value=(2, ev)):
             logs, owns, tmux = self._call(
                 GOAL_ARMED_CAP, lambda cwd: 3, now, tmtime)
         # Should be suppressed — all workable tickets are covered
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertTrue(any("skip:covered" in ln for ln in logs), logs)
+
+    def test_937_finished_non_worker_not_counted_as_coverage(self):
+        # #937-review C1: a finished fable-advisor/Explore subagent is NOT
+        # an implementation worker and must NOT count as coverage.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        ev = [WorkerLane("w1", "live", 60, "autopilot-worker", ""),
+              WorkerLane("w2", "finished", 120, "fable-advisor", ""),
+              WorkerLane("w3", "finished", 120, "Explore", "")]
+        with m.patch.object(wd, "count_live_workers", return_value=(1, ev)):
+            logs, owns, tmux = self._call(
+                GOAL_ARMED_CAP, lambda cwd: 3, now, tmtime)
+        # Only 1 live worker, 0 implementation-finished → 1 < 3 → nudge fires
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:covered" in ln for ln in logs), logs)
 
     def test_620_giveup_holds_and_fires_when_backlog_unchanged(self):
         # #620: an empty-lane sweep with the give-up already reached HOLDS the
