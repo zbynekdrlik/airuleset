@@ -598,6 +598,12 @@ fi
 #   (c) NO inline body — no fenced code block or blockquote >= 40 chars
 # Same fail-safe as Checks 6-7: away-user turns past Checks 1-7, narrow scope,
 # over-block is safe (model re-adds the body). LC_ALL=C.UTF-8 per #319.
+# Accepted residuals (#936 Fable review): (1) any >= 40-char blockquote
+# satisfies (c), even a quoted CLIENT message that is NOT the proposed reply
+# (under-block); (2) a technical question mentioning .md + a send verb
+# ("upraviť CLAUDE.md a potom poslať") false-positives (over-block, safe);
+# (3) unterminated fence counts everything after it; > inside a fence is
+# double-counted (under-block, rare).
 if [ -z "$VIOLATION" ]; then
     # (a) Approval intent — approval/send verb families in the block.
     APPROVE_INTENT_RX='schv[áa][ľl]|schvaľuje|po[šs]l[ai]|posiel|odosiel|odpoved.{0,20}(klient|z[áa]kazn[íi]k|do[[:space:]]+vl[áa]kn)|spr[áa]v.{0,20}(klient|z[áa]kazn[íi]k|schv[áa]l|po[šs]l)'
@@ -629,7 +635,8 @@ if [ -z "$VIOLATION" ]; then
                 body = body line
             }
             END { print body }')
-        INLINE_LEN=${#INLINE_BODY}
+        # LC_ALL=C.UTF-8 so ${#} counts CHARS not bytes (#936 review 🔵5).
+        INLINE_LEN=$(LC_ALL=C.UTF-8; echo ${#INLINE_BODY})
         if [ "${INLINE_LEN:-0}" -lt 40 ]; then
             VIOLATION="approvebody"
         fi

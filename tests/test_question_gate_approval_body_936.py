@@ -205,6 +205,44 @@ ORDINARY_QUESTION_WITH_PATH = (
     "univerzálne?\n"
 )
 
+# Shape 5: path-only pointer, no redirect phrase — pins POINTER_PATH_RX
+APPROVE_PATH_ONLY = (
+    "**Otázka — projekt odoo-erp (Odoo ERP pre montalu):** "
+    "Pripravil som odpoveď pre klienta.\n"
+    "Vlákno: " + _LQ + "Faktúry 1" + _RQ + " "
+    "— https://erp.montalu.cloud/odoo/discuss?active_id="
+    "discuss.channel_300\n"
+    "Odoo task: " + _LQ + "Faktúry" + _RQ + " "
+    "(stage: V riešení) "
+    "— https://erp.montalu.cloud/odoo/project/4/tasks/550\n"
+    "\n"
+    "Text: ~/work-products/reply-300.md\n"
+    "\n"
+    "• Schváliť a poslať (odporúčam)\n"
+    "• Upraviť\n"
+    "\n"
+    "❓ NEEDS YOU: schváliš správu?\n"
+)
+
+# Approval intent + NO pointer + NO body → PASS (pins the pointer gate)
+APPROVE_NO_POINTER_NO_BODY = (
+    "**Otázka — projekt odoo-erp (Odoo ERP pre montalu):** "
+    "Pripravil som odpoveď pre klienta.\n"
+    "Vlákno: " + _LQ + "Faktúry 1" + _RQ + " "
+    "— https://erp.montalu.cloud/odoo/discuss?active_id="
+    "discuss.channel_300\n"
+    "Odoo task: " + _LQ + "Faktúry" + _RQ + " "
+    "(stage: V riešení) "
+    "— https://erp.montalu.cloud/odoo/project/4/tasks/550\n"
+    "\n"
+    "Mám pripravenú odpoveď.\n"
+    "\n"
+    "• Schváliť a poslať (odporúčam)\n"
+    "• Upraviť\n"
+    "\n"
+    "❓ NEEDS YOU: schváliš správu?\n"
+)
+
 # Approval WITHOUT any pointer — PASS (no file/ticket redirect present)
 APPROVE_NO_POINTER = (
     "**Otázka — projekt odoo-erp (Odoo ERP pre montalu):** "
@@ -255,6 +293,13 @@ class TestApprovalBodyBlock(_HookCase):
                         "approval with 'v drafte' redirect should BLOCK")
         self.assertIn("#936", self._reason(r))
 
+    def test_path_only_no_phrase_blocked(self):
+        """Pins POINTER_PATH_RX — no redirect phrase, just a ~/path."""
+        r = self._run(APPROVE_PATH_ONLY)
+        self.assertTrue(self._blocked(r),
+                        "approval with path-only pointer should BLOCK")
+        self.assertIn("#936", self._reason(r))
+
 
 class TestApprovalBodyPass(_HookCase):
     """Compliant shapes: inline body present or no approval intent."""
@@ -278,6 +323,12 @@ class TestApprovalBodyPass(_HookCase):
         r = self._run(APPROVE_NO_POINTER)
         self.assertFalse(self._blocked(r),
                          "approval with inline body and no pointer PASS")
+
+    def test_no_pointer_no_body_passes(self):
+        """Pins the pointer gate: approval + no pointer + no body = PASS."""
+        r = self._run(APPROVE_NO_POINTER_NO_BODY)
+        self.assertFalse(self._blocked(r),
+                         "approval with no pointer and no body should PASS")
 
 
 class TestApprovalBodyLock(unittest.TestCase):
