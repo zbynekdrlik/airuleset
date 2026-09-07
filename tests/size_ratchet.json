@@ -474,7 +474,7 @@
     "tests/test_wdrain_gate_868.py": 438,
     "tests/test_wdrain_lane_754.py": 188,
     "tests/test_webterm.py": 1971,
-    "tests/test_webterm_access.py": 265,
+    "tests/test_webterm_access.py": 327,
     "tests/test_webterm_active_tab_691.py": 222,
     "tests/test_webterm_ctrlbw_darkening.py": 966,
     "tests/test_webterm_david.py": 376,

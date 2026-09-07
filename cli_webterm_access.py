@@ -90,13 +90,13 @@ WEBTERM_ACCESS_APPS = {
         "hostname": "david.newlevel.media",
         "name": "webterm — david",
         "allowed_emails": ["david@grena.sk"],   # owner-corrected 2026-08-25 (.biz was a mis-given address), #612
-        "session_duration": "24h",
+        "session_duration": "720h",
     },
     "owner": {
         "hostname": "zbynek.newlevel.media",
         "name": "webterm — zbynek",
         "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635
-        "session_duration": "24h",
+        "session_duration": "720h",
     },
     # marek.newlevel.media — Marek's webterm OBSERVER gateway (#882 scope
     # correction 2026-09-05: DEV STREAM cancelled, dashboard survives).
@@ -105,7 +105,7 @@ WEBTERM_ACCESS_APPS = {
         "name": "webterm — marek",
         # repo-evidenced (marek's real box account) — CONFIRM with owner at go-live (R1)
         "allowed_emails": ["drlik.marek@gmail.com"],
-        "session_duration": "24h",
+        "session_duration": "720h",
     },
     # dominika.newlevel.media — the FOURTH webterm gateway (#867 scope-add
     # 2026-09-04, owner request: "pridat noveho webterm uzivatela dominika, email
@@ -117,7 +117,7 @@ WEBTERM_ACCESS_APPS = {
         "hostname": "dominika.newlevel.media",
         "name": "webterm — dominika",
         "allowed_emails": ["nika.sarikova@gmail.com"],   # owner-provided, #867
-        "session_duration": "24h",
+        "session_duration": "720h",
     },
 }
 
