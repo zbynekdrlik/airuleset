@@ -105,6 +105,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "home-worktree",
     # #920 — test runner /tmp leftovers, runner _diag logs, npm/uv cache:
     "tmp-test", "runner-diag", "npm-uv-cache",
+    # #935-B — work-products snapshot backstop:
+    "work-products-snapshot",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -204,6 +206,12 @@ TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-")
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #920 — npm _cacache + uv cache (regenerated on demand)
 NPM_CACACHE_SUBDIR = os.path.join(".npm", "_cacache")
+
+# #935-B — work-products snapshot backstop
+WORK_PRODUCTS_SUBDIR = os.path.join(".claude", "work-products")
+WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD = 10000   # >10k files = snapshot
+WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD = 1_000_000_000  # >1G = snapshot
+WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS = 7
 
 
 def _dbg(msg):
@@ -515,6 +523,27 @@ def _safe_dir_size(path, dir_stats_fn=None):
     except Exception as e:
         _dbg("dir-size failed for %s: %r" % (path, e))
         return 0
+
+
+def _safe_dir_newest_mtime(path, dir_stats_fn=None):
+    """#935-C: the NEWEST file mtime inside ``path`` (recursive walk), or the
+    dir's own mtime if the walk finds no files / is empty. Used by the tmp-test
+    rung to compute age from CONTENT freshness (not the dir entry's own mtime,
+    which is bumped by adding/removing entries and misses stale content).
+    Returns a float epoch, or None on total failure (fail-safe: caller keeps)."""
+    try:
+        if dir_stats_fn is not None:
+            _, newest = dir_stats_fn(path)
+        else:
+            from cli_target_purge import _dir_stats
+            _, newest = _dir_stats(path)
+        if newest is not None:
+            return newest
+        # empty subtree — fall back to the dir's own mtime (#355 pattern)
+        return os.lstat(path).st_mtime
+    except Exception as e:
+        _dbg("dir-newest-mtime failed for %s: %r" % (path, e))
+        return None
 
 
 def discover_toolchain_dirs(home=None, box_class_fn=None, pgrep_fn=None,
@@ -1945,7 +1974,15 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
     ``npmcache-*``, and generic ``tmp*`` dirs owned by THIS uid, older than
     the age floor (#925: 3h on shared-stream, 1d on workstation).
     UID-ownership check prevents a shared-box user from reclaiming a sibling's
-    test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``."""
+    test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``.
+
+    #935-C: age is computed from the NEWEST file mtime inside the dir (recursive
+    walk via ``_safe_dir_newest_mtime``), NOT the dir entry's own ``st_mtime``.
+    The dir's ``st_mtime`` is bumped whenever entries are added/removed FROM
+    the dir (e.g. a background process creating temp files), making a genuinely
+    stale dir appear fresh. The recursive walk matches the safety discipline of
+    ``discover_claude_scratch_candidates`` (``_scratch_stat`` → ``_dir_stats``).
+    """
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
     min_age_days = _effective_tmp_test_age_days(min_age_days, box_class_fn)
@@ -1969,7 +2006,13 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
                 continue
             if st.st_uid != uid:
                 continue  # foreign user — not ours to reclaim
-            age = now - st.st_mtime
+            # #935-C: use the NEWEST file mtime inside the dir, not st_mtime
+            newest_mtime = _safe_dir_newest_mtime(str(entry), dir_stats_fn)
+            if newest_mtime is None:
+                out.append({"cls": "tmp-test", "path": str(entry), "bytes": 0,
+                            "reason": "could not determine newest mtime — kept"})
+                continue
+            age = now - newest_mtime
             size = _safe_dir_size(str(entry), dir_stats_fn) if age >= cutoff else 0
             row = {"cls": "tmp-test", "path": str(entry), "bytes": size,
                    "reason": None}
@@ -2056,6 +2099,94 @@ def discover_npm_uv_cache(home=None, dir_stats_fn=None):
     if shutil.which("uv"):
         out.append({"cls": "npm-uv-cache", "path": "uv cache prune",
                     "bytes": 0, "kind": "uv-cache-prune", "reason": None})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# #935-B — work-products SNAPSHOT backstop
+# --------------------------------------------------------------------------- #
+def _count_files_bounded(path, limit):
+    """Count regular files under ``path``, stopping at ``limit+1``.
+    Returns (count, total_size_bytes, newest_mtime_or_None). Computes ALL
+    three in a single walk (#935 Fable review M3: avoid a second walk).
+    Best-effort: walk errors are silent."""
+    count = 0
+    total = 0
+    newest = None
+    for dirpath, _dns, fns in os.walk(path, topdown=True, onerror=lambda e: None):
+        for f in fns:
+            fp = os.path.join(dirpath, f)
+            try:
+                st = os.lstat(fp)
+                total += st.st_size
+                if newest is None or st.st_mtime > newest:
+                    newest = st.st_mtime
+                count += 1
+            except OSError:
+                count += 1      # count it even if we can't stat it
+            if count > limit:
+                return count, total, newest
+    return count, total, newest
+
+
+def discover_snapshot_work_products(home=None, now=None,
+                                    min_age_days=WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS,
+                                    file_threshold=WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD,
+                                    size_threshold=WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD,
+                                    dir_stats_fn=None):
+    """#935-B: first-level subtrees under ``~/.claude/work-products/`` that look
+    like full-tree snapshots (>10k files OR >1G). Only subtrees older than
+    ``min_age_days`` (newest file) are candidates. Small/doc-like content is
+    never touched. ``.airuleset-keep`` / ``.no-sweep`` at the subtree root opts
+    out (mirrors #861 uploads rung). Fail-safe: uncertain → keep + log.
+    Returns ``[{cls:"work-products-snapshot", path, bytes, kind, reason}]``."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    wp = Path(home) / WORK_PRODUCTS_SUBDIR
+    if not wp.is_dir() or wp.is_symlink():
+        return []
+    out = []
+    try:
+        for entry in sorted(wp.iterdir()):
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            path_s = str(entry)
+            # .airuleset-keep / .no-sweep opt-out (#935 Fable review H3)
+            if _uploads_dir_has_keep_marker(path_s):
+                out.append({"cls": "work-products-snapshot", "path": path_s,
+                            "bytes": 0, "kind": "skip",
+                            "reason": "keep marker — never touched"})
+                continue
+            # Single bounded walk: count + size + newest_mtime (#935 review M3)
+            fcount, fsize, newest = _count_files_bounded(path_s, file_threshold)
+            is_snapshot = (fcount > file_threshold or fsize > size_threshold)
+            if not is_snapshot:
+                continue          # small/doc-like — never touched
+            # empty-tree fallback (#355 pattern)
+            if newest is None:
+                try:
+                    newest = os.lstat(path_s).st_mtime
+                except OSError:
+                    out.append({"cls": "work-products-snapshot", "path": path_s,
+                                "bytes": fsize, "kind": "skip",
+                                "reason": "could not determine age — kept (#935-B fail-safe)"})
+                    continue
+            age_s = now - newest
+            age_d = age_s / 86400.0
+            if age_d < min_age_days:
+                out.append({"cls": "work-products-snapshot", "path": path_s,
+                            "bytes": fsize, "kind": "skip",
+                            "reason": "snapshot too recent (%.1fd < %dd) — kept"
+                            % (age_d, min_age_days)})
+                continue
+            out.append({"cls": "work-products-snapshot", "path": path_s,
+                        "bytes": fsize, "kind": "delete", "reason": None,
+                        "why": "snapshot: %d files, %s, %.1fd old"
+                        % (fcount, _human(fsize), age_d)})
+    except OSError as e:
+        out.append({"cls": "work-products-snapshot", "path": "-", "bytes": 0,
+                    "kind": "skip",
+                    "reason": "work-products walk error: %s" % e})
     return out
 
 
@@ -2287,6 +2418,16 @@ def _plan_npm_uv_cache(home, now):
             for r in discover_npm_uv_cache(home=home)]
 
 
+def _plan_work_products_snapshot(home, now):
+    """#935-B — work-products snapshot backstop."""
+    try:
+        return discover_snapshot_work_products(home=home, now=now)
+    except Exception as e:
+        return [{"cls": "work-products-snapshot", "path": "-", "bytes": 0,
+                 "kind": "skip",
+                 "reason": "work-products-snapshot discovery error: %r" % e}]
+
+
 def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
@@ -2308,6 +2449,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
+        ("work-products-snapshot", lambda: _plan_work_products_snapshot(home, now)),
         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
