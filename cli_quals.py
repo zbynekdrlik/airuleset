@@ -1163,9 +1163,26 @@ def _stream_self_login():
 
     Note (#904): GitHub renders ISSUE ``author.login`` as the ``app/``
     form, but COMMENT ``author.login`` as the bare slug. The
-    ``_is_own_login`` helper normalizes both directions."""
+    ``_is_own_login`` helper normalizes both directions.
+
+    #918: a stray App-token directory on a PAT box
+    (``_is_gh_app_token_box()`` true but the active auth is a PAT)
+    made this function return ``STREAM_APP_BOT_LOGIN`` instead of the
+    real PAT login — every own-comment comparison then failed (wrong
+    identity), producing ``_bounce_round()`` = 1 and invisible own
+    comments in ``_issue_comment_ages()``. Fixed by validating the
+    App-token detection: if ``_gh_login()`` succeeds (returns a real
+    login), the box is NOT operating as an App-token box (a genuine
+    App token makes ``gh api user`` 403 → ``_gh_login()`` = None)."""
     import airuleset
     if _is_gh_app_token_box():
+        # Validate: a genuine App-token box has no user identity
+        # (_gh_login() returns None because gh api user 403s).
+        # If _gh_login() succeeds, the dir is stray and the real
+        # PAT login is the correct identity (#918).
+        real_login = airuleset._gh_login()
+        if real_login is not None:
+            return real_login
         return airuleset.STREAM_APP_BOT_LOGIN
     return airuleset._gh_login()
 
