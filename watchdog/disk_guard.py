@@ -117,7 +117,9 @@ SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-c
                           "runner-superseded",
                           # #906 — cross-user worktrees need `sudo -u <owner>` for
                           # git operations and removal.
-                          "home-worktree"})
+                          "home-worktree",
+                          # #920 — runner _diag logs are under gh-runner's home
+                          "runner-diag"})
 
 DISK_GUARD_DIRNAME = "disk-guard"
 STATUS_CACHE_NAME = "status.json"
@@ -185,7 +187,7 @@ HOME_WORKTREE_MIN_AGE_S = 24 * 3600       # mtime > 24h (protects fresh lanes)
 
 # #920 — test runner /tmp leftovers (jest, pytest, generic tmp* dirs)
 TMP_TEST_MIN_AGE_DAYS = 1
-TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "tmp")
+TMP_TEST_PREFIXES = ("jest_", "pytest-of-")
 # #920 — runner _diag logs (diagnostic, safe to age out)
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #920 — npm _cacache + uv cache (regenerated on demand)
@@ -2234,9 +2236,10 @@ def _default_planners(home, now, scratch_rows=None):
 
 def _prevention_planners(home, now, scratch_rows=None):
     """#920 — cheapest/safest rungs ONLY, for the PREVENTION pass at 70-79%.
-    These are pure age-out operations on genuinely disposable content (test
-    runner tmp dirs, scratch age-out, one-off venvs) — nothing box-wide,
-    nothing that needs sudo, nothing with a process-liveness gate."""
+    These are age-out operations on genuinely disposable content (test
+    runner tmp dirs, scratch age-out, one-off venvs, npm/uv cache) — nothing
+    box-wide, nothing that needs sudo. The scratch rung has its own session
+    liveness gate internally (#863)."""
     return [
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
@@ -2462,14 +2465,18 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
 
 
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
-                  geteuid_fn=None, log_path=None, now=None, dry_run=False):
+                  geteuid_fn=None, log_path=None, now=None, dry_run=False,
+                  target_pct=None):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
-    it is back under :data:`TARGET_PCT`. Every action AND skip is logged; a
-    class outside :data:`RECLAIMABLE_CLASSES` is skip-fenced, never acted on.
-    Under `dry_run` the action verbs are tagged `WOULD-…` so the audit log never
-    records a deletion that did not happen (review 🟡). Returns the log lines
-    (also appended to `log_path`)."""
+    it is back under ``target_pct`` (default :data:`TARGET_PCT`). Every action
+    AND skip is logged; a class outside :data:`RECLAIMABLE_CLASSES` is
+    skip-fenced, never acted on. Under `dry_run` the action verbs are tagged
+    `WOULD-…` so the audit log never records a deletion that did not happen
+    (review 🟡). #920: ``target_pct`` is parametrized so the prevention pass
+    can stop at ``PREVENTION_PCT`` instead of ``TARGET_PCT``. Returns the log
+    lines (also appended to `log_path`)."""
+    target_pct = TARGET_PCT if target_pct is None else target_pct
     geteuid_fn = geteuid_fn or os.geteuid
     now = time.time() if now is None else now
     logs = []
@@ -2501,10 +2508,10 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         if pending is not None:
             _emit_summary(pending, worst)
             pending = None
-        if worst < TARGET_PCT:
+        if worst < target_pct:
             line = _log_line(now, "STOP", "-", 0,
                              "worst mount %d%% < target %d%% (dim=%s) — drain complete"
-                             % (worst, TARGET_PCT, dim))
+                             % (worst, target_pct, dim))
             logs.append(line)
             _append_log(log_path, [line])
             break
@@ -2921,11 +2928,16 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
                          statvfs_fn=None, dev_fn=None, mounts=None,
                          geteuid_fn=None):
     """#920: extracted prevention helper — runs the cheapest age-out rungs
-    at 70-79% pressure. Keeps ``run_disk_guard`` under its function ceiling."""
+    at 70-79% pressure. Uses ``PREVENTION_PCT`` as the stop target (not
+    ``TARGET_PCT=75``) so the ladder engages at 70-74%. Does NOT stamp
+    ``last-drain`` (the full drain's cadence marker) — the prevention pass
+    must never delay the real >=80% drain (#920 review finding)."""
     logs = []
     lock = _acquire_lock(home)
-    if lock is None or lock is _LOCK_UNAVAILABLE:
+    if lock is None:
         return logs
+    if lock is _LOCK_UNAVAILABLE:
+        logs.append("disk-guard: prevention lock uncreatable — draining lockless")
     try:
         prev_planners = _prevention_planners(home, now, scratch_rows=scratch_rows)
 
@@ -2936,9 +2948,11 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
         do_action = _make_do_action(dry_run, sudo_ok=False, run_fn=None, now=now)
         logs += execute_drain(status, home, prev_planners, prev_recheck,
                               do_action, geteuid_fn=geteuid_fn,
-                              log_path=_log_path(home), now=now, dry_run=dry_run)
-        if not dry_run:
-            _mark_drained(home, now)
+                              log_path=_log_path(home), now=now, dry_run=dry_run,
+                              target_pct=PREVENTION_PCT)
+        # NOTE: intentionally NOT calling _mark_drained here — the prevention
+        # pass has its own cadence check in run_disk_guard via _drain_due, and
+        # stamping here would delay the real >=80% drain.
     finally:
         _release_lock(lock)
     return logs

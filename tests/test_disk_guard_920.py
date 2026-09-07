@@ -127,6 +127,56 @@ class TestPreventionThreshold:
         assert hasattr(dg, "PREVENTION_PCT")
         assert dg.PREVENTION_PCT == 70
 
+    def test_execute_drain_target_pct_param(self, tmp_path):
+        """execute_drain must accept target_pct and stop at that value,
+        not at TARGET_PCT=75 — the blocking review finding."""
+        status = {"worst_pct": 72, "dim": "bytes", "level": "notice"}
+        # Recheck always returns 72 — below TARGET_PCT=75 but ABOVE
+        # PREVENTION_PCT=70, so the drain must NOT stop immediately.
+        recheck_calls = []
+
+        def recheck():
+            recheck_calls.append(1)
+            return 72
+
+        # A planner that returns one actionable candidate
+        actions = [{"cls": "tmp-test", "path": "/tmp/jest_old",
+                    "bytes": 1000, "kind": "delete", "reason": None}]
+
+        def plan():
+            return actions
+
+        planners = [("tmp-test", plan)]
+        acted = []
+
+        def do_action(a):
+            acted.append(a)
+            return a.get("bytes", 0)
+
+        logs = dg.execute_drain(
+            status, str(tmp_path), planners, recheck, do_action,
+            geteuid_fn=lambda: 1000, log_path=str(tmp_path / "test.log"),
+            now=time.time(), target_pct=dg.PREVENTION_PCT)
+        # At 72% with target_pct=70, the ladder should NOT stop at the first
+        # recheck — it should run the planner and act on the candidate.
+        assert len(acted) == 1, (
+            "prevention drain at 72%% with target_pct=70 should act, not stop; "
+            "logs: %s" % logs)
+
+
+class TestReviewFindings:
+    """Tests for review findings — structural correctness locks."""
+
+    def test_tmp_prefix_not_in_prefixes(self):
+        """The bare 'tmp' prefix must NOT be in TMP_TEST_PREFIXES — it overlaps
+        with the safer tmp-stray rung (review finding)."""
+        assert "tmp" not in dg.TMP_TEST_PREFIXES
+
+    def test_runner_diag_in_sudo_classes(self):
+        """runner-diag must be in SUDO_CLASSES — gh-runner home is a foreign
+        user (review finding, same as #862 runner-superseded)."""
+        assert "runner-diag" in dg.SUDO_CLASSES
+
 
 # --------------------------------------------------------------------------- #
 # 4. New rungs in the ladder and top_consumers
