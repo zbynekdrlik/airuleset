@@ -2308,27 +2308,20 @@ class ContextCostSegment(unittest.TestCase):
         self.assertIn("\033[38;5;196m", seg)
         self.assertIn("ctx 500K", seg)
 
-    def test_cost_uses_the_burn_price_table(self):
-        # fable cache_read $1.0/Mtok * 570,000 = $0.57 exactly — the example
-        # in the cost-fix package's own spec.
+    def test_no_dollar_cost_suffix_928(self):
+        # #928 (owner directive 2026-09-07): the ~$<cost> suffix is removed
+        # from the ctx segment — only 'ctx <size>' renders.
         seg = statusbar.context_cost_segment(
             self._payload("claude-fable-5-1[1m]", cr=570000))
         self.assertIn("ctx 570K", seg)
-        self.assertIn("$0.57", seg)
+        self.assertNotIn("$", seg)
 
-    def test_compaction_turn_prices_at_cache_read_rate_not_write_rate(self):
-        # LIVE BUG (2026-07-25, gatekeeper): right after a compaction the LAST
-        # billed call has a huge cache_creation (a full context re-write) and
-        # a tiny cache_read — pricing the ACTUAL per-call mix showed
-        # 'ctx 175K · ~$1.10/ťah' (priced mostly at Opus's cache-WRITE rate,
-        # $6.25/Mtok) when the STEADY-STATE cost of carrying 175K forward is
-        # ctx * cache-READ rate ($0.50/Mtok) = 175000*0.5/1e6 = ~$0.09. The
-        # estimate must reflect what an ORDINARY turn pays to resend this
-        # context, never what one freak compaction/cache-miss turn billed.
+    def test_no_dollar_cost_suffix_on_compaction_turn_928(self):
+        # #928: even after a compaction the cost suffix must not render.
         seg = statusbar.context_cost_segment(
             self._payload("claude-opus-5", cw=170000, cr=5000, o=2000))
         self.assertIn("ctx 175K", seg)
-        self.assertIn("$0.09", seg)
+        self.assertNotIn("$", seg)
 
     def test_empty_on_missing_or_garbage_data(self):
         self.assertEqual(statusbar.context_cost_segment({}), "")
@@ -2357,18 +2350,14 @@ class ContextCostSegment(unittest.TestCase):
     def test_shim_renders_the_context_cost_segment(self):
         self.assertIn("context_cost_segment", airuleset.CAVEMAN_SHIM_CONTENT)
 
-    def test_show_cost_false_drops_the_dollar_suffix(self):
-        # #313 pt 4: the width-budget trim's last-resort shortening -- keep
-        # the size, drop only the '~$<cost>' tail.
-        full = statusbar.context_cost_segment(
+    def test_no_show_cost_param_928(self):
+        # #928: the show_cost parameter is removed — calling without it must
+        # render just 'ctx <size>' with no dollar suffix.
+        seg = statusbar.context_cost_segment(
             self._payload("claude-opus-5", cr=50000))
-        short = statusbar.context_cost_segment(
-            self._payload("claude-opus-5", cr=50000), show_cost=False)
-        self.assertIn("ctx 50K", short)
-        self.assertNotIn("~$", short)
-        self.assertIn("~$", full)
-        self.assertLess(statusbar.visible_len(short), statusbar.visible_len(full))
-        self.assertIn("\033[38;5;40m", short)   # same colour as the full form
+        self.assertIn("ctx 50K", seg)
+        self.assertNotIn("~$", seg)
+        self.assertIn("\033[38;5;40m", seg)
 
 
 class WidthBudget(unittest.TestCase):
@@ -2423,15 +2412,15 @@ class WidthBudget(unittest.TestCase):
 
     def test_fit_statusline_untrimmed_when_it_fits(self):
         segs = ["\033[38;5;75mI 5\033[0m"]
-        line = statusbar.fit_statusline(segs, "email sub", "cm", "", "", 999)
+        line = statusbar.fit_statusline(segs, "user@x.com", "cm", "", "", 999)
         self.assertIn("I 5", line)
-        self.assertIn("email sub", line)
+        self.assertIn("user@x.com", line)
         self.assertIn("cm", line)
 
     def test_fit_statusline_none_width_never_trims(self):
         segs = ["I 5"]
-        line = statusbar.fit_statusline(segs, "email sub", "cm", "", "", None)
-        self.assertIn("email sub", line)
+        line = statusbar.fit_statusline(segs, "user@x.com", "cm", "", "", None)
+        self.assertIn("user@x.com", line)
         self.assertIn("cm", line)
 
     def test_shim_clamps_the_budget_at_zero_for_a_measured_width_this_small(self):
@@ -2447,7 +2436,7 @@ class WidthBudget(unittest.TestCase):
 
     def test_fit_statusline_drops_identity_first(self):
         segs = ["I 5"]
-        identity = "drlik.marek@gmail.com sub 12.8.(4d)"
+        identity = "drlik.marek@gmail.com"
         # width fits segs+cm but not segs+identity+cm
         width = statusbar.visible_len("  ".join(["I 5", "cm"]))
         line = statusbar.fit_statusline(segs, identity, "cm", "", "", width)
@@ -2457,27 +2446,12 @@ class WidthBudget(unittest.TestCase):
 
     def test_fit_statusline_drops_caveman_tag_next(self):
         segs = ["I 5"]
-        identity = "drlik.marek@gmail.com sub 12.8.(4d)"
+        identity = "drlik.marek@gmail.com"
         width = statusbar.visible_len("I 5")   # only the core segment fits
         line = statusbar.fit_statusline(segs, identity, "cm", "", "", width)
         self.assertIn("I 5", line)
         self.assertNotIn("cm", line)
         self.assertNotIn("drlik.marek", line)
-
-    def test_fit_statusline_shortens_ctx_as_last_resort(self):
-        ctx_full = "ctx 50K ~$0.05"
-        ctx_short = "ctx 50K"
-        segs = ["I 5", ctx_full]
-        # width fits everything except identity/cm AND fits the SHORT ctx
-        # form but not the full one alongside "I 5"
-        width = statusbar.visible_len("  ".join(["I 5", ctx_short]))
-        line = statusbar.fit_statusline(segs, "email sub", "cm",
-                                        ctx_full, ctx_short, width)
-        self.assertIn("I 5", line)
-        self.assertIn(ctx_short, line)
-        self.assertNotIn("~$", line)
-        self.assertNotIn("email sub", line)
-        self.assertNotIn("cm", line)
 
     def test_fit_statusline_gives_up_gracefully_when_nothing_fits(self):
         # Even the core segments alone don't fit -- returns the smallest
@@ -2627,85 +2601,19 @@ def _write_claude_json(home, data):
     (Path(home) / ".claude.json").write_text(json.dumps(data))
 
 
-class SubscriptionSegment(unittest.TestCase):
-    """'sub <D.M.>(<Nd>)' -- the monthly subscription-renewal anchor of the
-    Claude account logged in on THIS box (#223). Source:
-    ~/.claude.json -> oauthAccount.subscriptionCreatedAt; the renewal is
-    the NEXT occurrence of that day-of-month at/after today, clamped for
-    short months (31 -> the month's last day). Fails silently on any
-    missing/malformed input -- a statusline segment must never raise."""
+class SubscriptionSegmentRemoved928(unittest.TestCase):
+    """#928 (owner directive 2026-09-07): the subscription renewal anchor
+    'sub <D.M.>(<Nd>)' is REMOVED from the statusline — the function is
+    deleted. These tests lock the removal: subscription_segment must not
+    exist, and the shim must not reference it."""
 
-    def test_renders_days_until_next_anniversary(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {
-                "subscriptionCreatedAt": "2026-01-12T16:34:03.439322Z"}})
-            now = datetime(2026, 8, 4, tzinfo=timezone.utc).timestamp()
-            seg = statusbar.subscription_segment(home=home, now=now)
-            self.assertIn("sub 12.8.(8d)", seg)
+    def test_subscription_segment_removed(self):
+        # The function is deleted — calling it must raise AttributeError.
+        self.assertFalse(hasattr(statusbar, "subscription_segment"))
 
-    def test_renewal_today_renders_zero_days_and_red(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {
-                "subscriptionCreatedAt": "2026-01-12T16:34:03Z"}})
-            now = datetime(2026, 8, 12, 10, tzinfo=timezone.utc).timestamp()
-            seg = statusbar.subscription_segment(home=home, now=now)
-            self.assertIn("sub 12.8.(0d)", seg)
-            self.assertIn("38;5;196m", seg)             # red on the last day
-
-    def test_renewal_far_away_renders_green(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {
-                "subscriptionCreatedAt": "2026-01-12T00:00:00Z"}})
-            now = datetime(2026, 8, 4, tzinfo=timezone.utc).timestamp()
-            seg = statusbar.subscription_segment(home=home, now=now)
-            self.assertIn("38;5;40m", seg)
-
-    def test_short_month_clamps_the_day(self):
-        # anniversary day-of-month 31; the current month (Feb 2026) only has
-        # 28 days -- clamp to the 28th, never crash / overflow into March.
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {
-                "subscriptionCreatedAt": "2026-01-31T00:00:00Z"}})
-            now = datetime(2026, 2, 5, tzinfo=timezone.utc).timestamp()
-            seg = statusbar.subscription_segment(home=home, now=now)
-            self.assertIn("sub 28.2.", seg)
-
-    def test_missing_claude_json_is_silent(self):
-        with TemporaryDirectory() as home:
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
-
-    def test_missing_oauth_account_is_silent(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {})
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
-
-    def test_missing_subscription_created_at_is_silent(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {"emailAddress": "x@y.z"}})
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
-
-    def test_unparseable_date_is_silent(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {
-                "subscriptionCreatedAt": "not-a-date"}})
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
-
-    def test_garbage_claude_json_is_silent(self):
-        with TemporaryDirectory() as home:
-            Path(home).mkdir(parents=True, exist_ok=True)
-            (Path(home) / ".claude.json").write_text("not json at all")
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
-
-    def test_non_dict_claude_json_is_silent(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, [1, 2, 3])
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
-
-    def test_never_raises_on_hostile_nested_input(self):
-        with TemporaryDirectory() as home:
-            _write_claude_json(home, {"oauthAccount": {
-                "subscriptionCreatedAt": {"nested": "garbage"}}})
-            self.assertEqual(statusbar.subscription_segment(home=home), "")
+    def test_shim_does_not_reference_subscription_segment(self):
+        self.assertNotIn("subscription_segment",
+                         airuleset.CAVEMAN_SHIM_CONTENT)
 
 
 class AccountEmailSegment(unittest.TestCase):
