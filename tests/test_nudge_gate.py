@@ -255,27 +255,30 @@ class TestComposeBatch923(unittest.TestCase):
     """#923: compose_batch formats items into a BATCH_PREFIX-headed message."""
 
     def test_prefix_leads(self):
-        result = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
-        self.assertTrue(result.startswith(ng.BATCH_PREFIX))
+        text, included = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
+        self.assertTrue(text.startswith(ng.BATCH_PREFIX))
+        self.assertIn("lane-occupancy", included)
 
     def test_orders_wd_first(self):
         items = [("partition-audit", "I5 U0"),
                  ("lane-occupancy", "refill 3")]
-        result = ng.compose_batch(items)
-        lo_pos = result.index("[lane-occupancy]")
-        pa_pos = result.index("[partition-audit]")
+        text, included = ng.compose_batch(items)
+        lo_pos = text.index("[lane-occupancy]")
+        pa_pos = text.index("[partition-audit]")
         self.assertLess(lo_pos, pa_pos)
 
-    def test_empty_returns_empty_string(self):
-        self.assertEqual(ng.compose_batch([]), "")
+    def test_empty_returns_empty_tuple(self):
+        text, included = ng.compose_batch([])
+        self.assertEqual(text, "")
+        self.assertEqual(included, [])
 
     def test_max_chars_trims_audit_first(self):
         items = [("lane-occupancy", "refill"),
                  ("partition-audit", "I5 U0 W0 skip0")]
-        result = ng.compose_batch(items, max_chars=50)
+        text, included = ng.compose_batch(items, max_chars=50)
         # Work-driving kept, audit trimmed if needed
-        self.assertIn("[lane-occupancy]", result)
-        self.assertTrue(len(result) <= 50)
+        self.assertIn("[lane-occupancy]", text)
+        self.assertTrue(len(text) <= 50)
 
     def test_batch_prefix_is_machine_recognized(self):
         """BATCH_PREFIX must be 'nudge:' — already in goal.py
@@ -328,6 +331,54 @@ class TestPrune(unittest.TestCase):
     def test_prune_tolerates_missing_namespace(self):
         st = {}
         ng.prune(st, set(), NOW)  # never raises
+
+
+class TestBatchCallerRefactor923(unittest.TestCase):
+    """#923 CALLER-REFACTOR: compose_batch returns (text, included_categories)
+    so callers know which families survived trimming, and mark_batch_sent marks
+    only the included ones."""
+
+    def test_compose_batch_returns_tuple_with_included(self):
+        """compose_batch returns (text, included_categories), not just text."""
+        items = [("lane-occupancy", "refill 3"),
+                 ("u-freshness", "U=2")]
+        result = ng.compose_batch(items)
+        # Must be a 2-tuple: (text, included_categories)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        text, included = result
+        self.assertTrue(text.startswith(ng.BATCH_PREFIX))
+        self.assertIn("lane-occupancy", included)
+        self.assertIn("u-freshness", included)
+
+    def test_compose_batch_trim_excludes_audit(self):
+        """When max_chars trims audit, included_categories omits the trimmed."""
+        items = [("lane-occupancy", "refill 3"),
+                 ("partition-audit", "I5 U0 W0 gk0 skip0")]
+        text, included = ng.compose_batch(items, max_chars=50)
+        self.assertIn("lane-occupancy", included)
+        # audit may or may not be trimmed depending on exact lengths,
+        # but included must match what's actually in the text
+        for cat in included:
+            self.assertIn("[%s]" % cat, text)
+
+    def test_compose_batch_empty_returns_empty(self):
+        """Empty items still returns a 2-tuple."""
+        text, included = ng.compose_batch([])
+        self.assertEqual(text, "")
+        self.assertEqual(included, [])
+
+    def test_two_families_both_marked_after_batch(self):
+        """When two families are batched, mark_batch_sent stamps BOTH at once
+        so the family gap blocks the NEXT batch, not the members of THIS one."""
+        st = {}
+        cats = ["lane-occupancy", "u-freshness"]
+        ng.mark_batch_sent(st, "s", cats, NOW)
+        sess = st["nudge_cadence"]["s"]
+        self.assertEqual(sess["lane-occupancy"], NOW)
+        self.assertEqual(sess["u-freshness"], NOW)
+        # Both are now within the gap — the NEXT batch_eligible returns []
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])
 
 
 if __name__ == "__main__":

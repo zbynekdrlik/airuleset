@@ -234,6 +234,13 @@ def mark_sent(state, sid, category, now):
 # `_JANITOR_OWN_PREFIXES` for stranded-nudge cleanup.
 BATCH_PREFIX = "nudge:"
 
+# The max-chars hard cap for a BATCHED delivery (#923). Individual riders cap
+# their own text at 700; the batch adds a prefix + per-section headers, so the
+# batch cap must be > 700 to fit at least one full rider section. Set to 1400
+# (two full riders). send_verified's _type_literal chunk-typing handles texts
+# up to several KB (CC's input box accepts them) — the limit is readability.
+BATCH_MAX_CHARS = 1400
+
 
 def batch_eligible(state, sid, now):
     """Return the list of categories eligible for batched delivery at `now`.
@@ -277,20 +284,23 @@ def compose_batch(items, max_chars=None):
     When `max_chars` is given and the composed message exceeds it, AUDIT sections
     are trimmed from the end first (the priority taxonomy's trim order), then
     WORK_DRIVING from the end — work-driving is never trimmed while audit
-    sections remain. Returns the composed string, or '' if items is empty."""
+    sections remain.
+
+    Returns `(composed_text, included_categories)` — a 2-tuple so callers know
+    which families survived trimming and can mark only those (#923 caller-refactor).
+    Empty items returns `('', [])`."""
     if not items:
-        return ""
+        return "", []
     wd = [(c, t) for c, t in items if c in WORK_DRIVING_CATEGORIES]
     au = [(c, t) for c, t in items if c in AUDIT_CATEGORIES]
-    ordered = wd + au
 
     def _build(sections):
         parts = [BATCH_PREFIX]
         for cat, text in sections:
-            parts.append("\n[%s] %s" % (cat, text))
+            parts.append(" [%s] %s" % (cat, text))
         return "".join(parts)
 
-    result = _build(ordered)
+    result = _build(wd + au)
     if max_chars is not None and len(result) > max_chars:
         # Trim audit from the end, then work-driving if still over.
         while au and len(result) > max_chars:
@@ -299,7 +309,10 @@ def compose_batch(items, max_chars=None):
         while wd and len(result) > max_chars:
             wd.pop()
             result = _build(wd + au)
-    return result
+    included = [c for c, _ in wd + au]
+    if not included:
+        return "", []   # every section trimmed — nothing to deliver
+    return result, included
 
 
 def mark_batch_sent(state, sid, categories, now):

@@ -74,7 +74,7 @@ else
         "bounce-backstop: "*)     AUTO="machine-nudge-bounce-backstop" ;;
         "gk-request backstop: "*) AUTO="machine-nudge-gk-request-backstop" ;;
         "goal-guard: "*)          AUTO="machine-nudge-goal-guard" ;;
-        "nudge:"*)                AUTO="machine-nudge-batched" ;;
+        "nudge:"*)               AUTO="machine-nudge-batch" ;;
         "oauth-resume:"*)         AUTO="machine-nudge-oauth-resume" ;;
         "continue")               AUTO="machine-nudge-continue" ;;
     esac

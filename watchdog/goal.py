@@ -2663,15 +2663,17 @@ _GOAL_GUARD_TEXT = (
 
 
 def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
-                        sleep_fn, dry_run, projects_dir):
+                        sleep_fn, dry_run, projects_dir, batch_collect=None):
     """#878 — delivery half of the goal-guard rider. Called when
     `_goal_guard_decide` returned a truthy decision. Handles nudge_gate,
     recent-human, boundary classification, keystroke delivery, and mark_sent.
     Returns a list of decision-log lines (may be empty)."""
     logs = []
-    if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
-        logs.append("goal-guard %s sid=%s -> hold:cadence-gate" % (loc, sid))
-        return logs
+    # #923 BATCH MODE: gate_ok is handled once by the caller.
+    if batch_collect is None:
+        if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
+            logs.append("goal-guard %s sid=%s -> hold:cadence-gate" % (loc, sid))
+            return logs
     if dry_run:
         logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
                      % (loc, sid))
@@ -2702,6 +2704,12 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
         return logs
     if draft:
         logs.append("goal-guard %s sid=%s -> skip:draft" % (loc, sid))
+        return logs
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        # goal-guard's post-delivery is just mark_sent (handled by batch path).
+        batch_collect.append(("goal-guard", _GOAL_GUARD_TEXT, None))
+        logs.append("goal-guard %s sid=%s -> batch-collected" % (loc, sid))
         return logs
     ok = _send_goal_verified(pid, _GOAL_GUARD_TEXT, run,
                              captured=captured, sleep_fn=sleep_fn,
@@ -3348,9 +3356,17 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                                                 else None))
             if gg:
                 logs.append(gg)
+                # #923: collect into state["nudge_batch"] for goal_lane_sweep
+                # to compose; goal-guard's gate_ok skipped here, checked by
+                # batch_eligible in the sweep. Single-slot write (Y2 fix) —
+                # no unbounded append per sweep.
+                _gg_batch = []
                 logs += _goal_guard_deliver(
                     sid, pid, captured, cwd, state, now, loc, run,
-                    sleep_fn, dry_run, projects_dir)
+                    sleep_fn, dry_run, projects_dir,
+                    batch_collect=_gg_batch)
+                if _gg_batch:
+                    state.setdefault("nudge_batch", {})[sid] = _gg_batch
             continue
         if armed is None:
             # #524 -- undeterminable footer (busy / chrome / dialog -> None):
@@ -4553,7 +4569,7 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
                               projects_dir, backlog_fetch=None, state=None,
-                              sleep_fn=None):
+                              sleep_fn=None, batch_collect=None):
     """The lane-occupancy branch (#365). Mutates `rec` (the caller
     persists it); returns `(logs, owns)` -- `owns` is the explicit
     ownership signal set from the moment `live_workers`/`backlog_n` are
@@ -4816,10 +4832,12 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # cross-sweep burst. The family gap IGNORES the SAME category, so the lane's
     # own cadence is untouched. `dry_run` READY below is unaffected (a dry-run
     # never sends), so the gate sits before it.
-    if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
-        logs.append("lane-occupancy %s -> hold:cadence-gate (shared family gap; "
-                    "retry next sweep)" % loc)
-        return logs, True
+    # #923 BATCH MODE: gate_ok is handled once by the caller.
+    if batch_collect is None:
+        if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
+            logs.append("lane-occupancy %s -> hold:cadence-gate (shared family gap; "
+                        "retry next sweep)" % loc)
+            return logs, True
     if dry_run:
         logs.append("READY (lane-occupancy) %s workers=%d waiters=%d "
                     "backlog=%d idle=%dm" % (loc, live_workers, waiters,
@@ -4845,6 +4863,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #848: the refill nudge reaches here for ANY live_workers < floor (0..4) --
     # only a SATURATED box (>= floor lanes) returned at the saturated skip above.
     text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        def _on_deliver(_rec=rec, _lw=live_workers, _bn=backlog_n, _n_=n, _now=now):
+            _lane_record_nudge(_rec, _lw, _bn, _n_, _now)
+        batch_collect.append(("lane-occupancy", text, _on_deliver))
+        logs.append("lane-occupancy %s -> batch-collected (workers=%d backlog=%d)"
+                    % (loc, live_workers, backlog_n))
+        return logs, True
     if fresh_draft:
         # #442 -- deliver INTO the held draft via the stash protocol (the
         # primitive re-verifies idle-with-draft itself and undoes its own
@@ -5241,10 +5267,31 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         rec = recs.get(sid)
         if not isinstance(rec, dict):
             rec = {}
+        # #923 BATCHING: check batch_eligible ONCE for this sid. If eligible,
+        # each rider contributes text to batch_collect instead of delivering
+        # individually. Eligible categories from goal_dark_watch (goal-guard)
+        # are already in state["nudge_batch"][sid].
+        _eligible = _nudge_gate.batch_eligible(state, sid, now)
+        _batch_collect = None
+        if _eligible and (handled is None or sid not in handled) and not dry_run:
+            # R2 (#923 review): common delivery guards checked ONCE.
+            from watchdog import compact as _compact_mod
+            from watchdog import ops_wait_recheck as _owr_mod
+            _b_compact = _compact_mod.pending_compact_hold(sid, now)
+            _b_kind, _ = watchdog._classify_boundary(captured)
+            _b_busy, _b_aged = _owr_mod._busy_waiting_with_age(
+                captured, state, sid, now, _b_kind)
+            if not _b_compact and not (_b_busy and not _b_aged):
+                # Pick up any goal-guard contribution from dark_watch.
+                _nb = state.get("nudge_batch", {}).get(sid, [])
+                _batch_collect = [entry for entry in _nb
+                                  if entry[0] in _eligible] if _nb else []
         llogs, _owns = goal_lane_occupancy_nudge(
             now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
             send_fn, dry_run, handled, projects_dir,
-            backlog_fetch=backlog_fetch, state=state, sleep_fn=sleep_fn)
+            backlog_fetch=backlog_fetch, state=state, sleep_fn=sleep_fn,
+            batch_collect=(_batch_collect if _batch_collect is not None
+                           and "lane-occupancy" in _eligible else None))
         rec["lts"] = now   # #531 -- write-time age anchor for the orphan reaper
         recs[sid] = rec
         logs += llogs
@@ -5261,57 +5308,79 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             stuck_seen.add(sid)
             logs += _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid,
                                             loc, send_fn, dry_run)
-        # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane;
-        # runs AFTER the lane nudge (a pane it already typed is deferred), owns
-        # its own handled check + verified send + dry-run-safe state writes. The
-        # I count is the ALREADY-cached `glance.backlog` (`_cached_backlog_count`)
-        # -- ZERO new fetch; None (cheap/awaiting-user) fails the I direction safe.
+        # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane.
         if ops_wait_fetch is not None:
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
                 i_count=glance.backlog, captured=captured,
-                release_state_fetch=release_state_fetch)  # #698 + #714 busy-gate
-        # #616 -- release-gap re-check for this armed pane; runs AFTER the lane +
-        # ops-wait riders (a pane they typed is deferred), owns its own handled
-        # check + verified send + dry-run-safe writes, full-authority gated (#618
-        # MIRROR).
+                release_state_fetch=release_state_fetch,
+                batch_collect=(_batch_collect if _batch_collect is not None
+                               and "partition-audit" in _eligible else None))
+        # #616 -- release-gap re-check for this armed pane.
         if release_state_fetch is not None:
             logs += _release_gap.goal_release_gap_recheck(
                 now, run, rrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 release_state_fetch=release_state_fetch, state=state,
-                sleep_fn=sleep_fn, captured=captured)  # #749 busy-pane gate
-        # #733 -- gk queue-ARRIVAL watcher for this armed pane; runs after the
-        # release-gap rider (a pane an earlier keystroke job typed is deferred),
-        # owns its own handled + busy-gate check + verified send + dry-run-safe
-        # writes, full-authority gated (#616 MIRROR). (#797 added the u-freshness
-        # rider AFTER this one — this is no longer the last rider in the loop.)
+                sleep_fn=sleep_fn, captured=captured,
+                batch_collect=(_batch_collect if _batch_collect is not None
+                               and "release-gap" in _eligible else None))
+        # #733 -- gk queue-ARRIVAL watcher for this armed pane.
         if queue_fetch is not None:
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 queue_fetch=queue_fetch, state=state, sleep_fn=sleep_fn,
-                captured=captured)
-        # #797 -- U-freshness reconcile for this armed pane; runs LAST (a pane an
-        # earlier keystroke job already typed is deferred via `handled`), owns its
-        # own compact-latch + busy-gate + shared cadence-gate + verified send +
-        # dry-run-safe writes. Reads the SAME tickets-status cache the footer
-        # renders (ZERO gh calls); keystroke-only into the session, NEVER an owner
-        # ping (#795 invariant BY CONSTRUCTION -- the module imports no notify).
+                captured=captured,
+                batch_collect=(_batch_collect if _batch_collect is not None
+                               and "queue-arrival" in _eligible else None))
+        # #797 -- U-freshness reconcile for this armed pane.
         if u_fetch is not None:
             logs += _u_freshness.goal_u_freshness_recheck(
                 now, run, urecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 u_fetch=u_fetch, state=state, sleep_fn=sleep_fn,
-                captured=captured)
-        # #844 -- post-compact lane reconcile for this armed pane; runs LAST (a
-        # pane an earlier keystroke job already typed is deferred via `handled`),
-        # owns its own observed-compaction trigger + full-authority + compact-latch
-        # + busy-gate + shared cadence-gate + verified send + dry-run-safe writes.
-        # Keystroke-only into the session, NEVER an owner ping (imports no notify).
+                captured=captured,
+                batch_collect=(_batch_collect if _batch_collect is not None
+                               and "u-freshness" in _eligible else None))
+        # #844 -- post-compact lane reconcile for this armed pane.
         if reconcile_fetch is not None:
             logs += _lane_reconcile.goal_lane_reconcile_recheck(
                 now, run, lrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 reconcile_fetch=reconcile_fetch, state=state, sleep_fn=sleep_fn,
-                captured=captured)
+                captured=captured,
+                batch_collect=(_batch_collect if _batch_collect is not None
+                               and "lane-reconcile" in _eligible else None))
+        # #923 BATCH DELIVERY: compose + deliver all collected texts as ONE prompt.
+        if _batch_collect:
+            _items = [(c, t) for c, t, _ in _batch_collect]
+            _bt, _incl = _nudge_gate.compose_batch(
+                _items, max_chars=_nudge_gate.BATCH_MAX_CHARS)
+            if _bt and not dry_run:
+                watchdog._janitor_mark_watch(state, pid, now)
+                send_out = {}
+                _bok = watchdog.send_verified(
+                    pid, _bt, run, tpath, sleep_fn=sleep_fn,
+                    logs=logs, out=send_out)
+                _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
+                if _bdeliv:
+                    watchdog._janitor_clear_watch(state, pid)
+                    _nudge_gate.mark_batch_sent(state, sid, _incl, now)
+                    if handled is not None:
+                        handled.add(sid)
+                    # Call per-rider post-delivery callbacks for included cats.
+                    _incl_set = set(_incl)
+                    for _bc, _, _bfn in _batch_collect:
+                        if _bc in _incl_set and _bfn is not None:
+                            _bfn()
+                    _bnote = ("" if _bok else
+                              " (delivered-unconfirmed)")
+                    logs.append("batch-nudge %s -> %d section(s): %s%s"
+                                % (loc, len(_incl),
+                                   ", ".join(_incl), _bnote))
+                else:
+                    logs.append("batch-nudge %s -> swallowed (%d section(s))"
+                                % (loc, len(_incl)))
+        # Clear the dark_watch batch entry for this sid (consumed or empty).
+        state.get("nudge_batch", {}).pop(sid, None)
     # #804 -- DEAD-SESSION census: a rostered EXPECTED-armed stream with NO live
     # claude candidate pane this sweep is a mode-5 death (the session died and
     # fell off the radar). Surface ONE verdict line per dead stream, cadenced at

@@ -336,7 +336,8 @@ def _prune_queue_arrival_orphans(qrecs, visited_sids, now,
 
 def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                                dry_run, handled, queue_fetch, state,
-                               sleep_fn=None, captured=None):
+                               sleep_fn=None, captured=None,
+                               batch_collect=None):
     """Audit ONE armed candidate pane's gk-queue snapshot and, on a NEW arrival,
     deliver ONE verified nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -451,43 +452,52 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # is also fine, goal.py:173 does it), kept local to avoid any dependence on the
     # watchdog package-init ordering; fail-safe False on any error (writer proceeds
     # as pre-#741).
-    from watchdog import compact as _compact
-    if _compact.pending_compact_hold(sid, now):   # #848 bounded
-        logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
-                    "no arrival nudge until it delivers, %d new)"
-                    % (loc, len(arrivals)))
-        return logs
-    if handled is not None and sid in handled:
-        logs.append("queue-arrival %s -> skip:already-handled (another sweep "
-                    "job typed this pane; retry next sweep, %d new)"
-                    % (loc, len(arrivals)))
-        return logs
-    # #714/#921 BUSY-PANE GATE: age-bounded busy-waiting — after >= 10 min of
-    # persistent Waiting with a bare prompt, deliver anyway. Defer WITHOUT a
-    # keystroke when below the age bound.
-    _qa_kind, _qa_draft = watchdog._classify_boundary(captured)
-    _qa_busy, _qa_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, _qa_kind)
-    if _qa_busy and not _qa_aged:
-        logs.append("queue-arrival %s -> skip:busy-bg-agent (pane waiting on a "
-                    "background agent — deferred, retry next sweep, %d new)"
-                    % (loc, len(arrivals)))
-        return logs
-    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
-    # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke, base &
-    # last_nudge unadvanced so the arrival re-detects, `handled` unclaimed) so it
-    # retries a later sweep. queue-arrival carries NO per-category floor (its own
-    # #780 nudge floor governs), so the gate only spaces DISTINCT categories.
-    if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):
-        logs.append("queue-arrival %s -> hold:cadence-gate (shared family gap; "
-                    "retry next sweep, %d new)" % (loc, len(arrivals)))
-        return logs
+    # #923 BATCH MODE: common delivery guards handled once by the caller.
+    if batch_collect is None:
+        from watchdog import compact as _compact
+        if _compact.pending_compact_hold(sid, now):   # #848 bounded
+            logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
+                        "no arrival nudge until it delivers, %d new)"
+                        % (loc, len(arrivals)))
+            return logs
+        if handled is not None and sid in handled:
+            logs.append("queue-arrival %s -> skip:already-handled (another sweep "
+                        "job typed this pane; retry next sweep, %d new)"
+                        % (loc, len(arrivals)))
+            return logs
+        _qa_kind, _qa_draft = watchdog._classify_boundary(captured)
+        _qa_busy, _qa_aged = _ops_wait_recheck._busy_waiting_with_age(
+            captured, state, sid, now, _qa_kind)
+        if _qa_busy and not _qa_aged:
+            logs.append("queue-arrival %s -> skip:busy-bg-agent (pane waiting on a "
+                        "background agent — deferred, retry next sweep, %d new)"
+                        % (loc, len(arrivals)))
+            return logs
+        if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):
+            logs.append("queue-arrival %s -> hold:cadence-gate (shared family gap; "
+                        "retry next sweep, %d new)" % (loc, len(arrivals)))
+            return logs
     if dry_run:
         logs.append("queue-arrival %s -> WOULD-NUDGE (%d new: %s)"
                     % (loc, len(arrivals), _fmt_arrivals(arrivals)))
         return logs
 
     text = _nudge_text(arrivals, len(cur))
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        def _on_deliver(_nr=new_rec, _q=qrecs, _s=sid, _n=now, _h=handled,
+                        _st=state, _p=pid, _cs=cur_sorted):
+            watchdog._janitor_clear_watch(_st, _p)
+            _nr["base"] = _cs
+            _nr["last_nudge"] = _n
+            _nr["send_fails"] = 0
+            _q[_s] = _nr
+            if _h is not None:
+                _h.add(_s)
+        batch_collect.append(("queue-arrival", text, _on_deliver))
+        logs.append("queue-arrival %s -> batch-collected (%d new)"
+                    % (loc, len(arrivals)))
+        return logs
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
     # residual stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

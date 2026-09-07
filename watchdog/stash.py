@@ -1389,10 +1389,11 @@ def _own_prefix_stray_offset(itext):
 # reach the content-alone submit path (HARD CONSTRAINT a — the foreign-draft
 # protection is never weakened). Every prefix here is asserted machine-only by
 # `_JANITOR_OWN_PREFIXES`' own registration ("a human never types a message
-# starting with it"): `lane-check: ` (the lane-fill nudge, #490), and the two
-# cross_stream transcript-proof nudges (#497).
+# starting with it"): `lane-check: ` (the lane-fill nudge, #490), the two
+# cross_stream transcript-proof nudges (#497), and `nudge:` (the #923 batched
+# nudge prefix — machine-only, safe for content-alone auto-submit).
 _OWN_NUDGE_SUBMIT_PREFIXES = ("lane-check: ", "bounce-backstop: ",
-                              "gk-request backstop: ")
+                              "gk-request backstop: ", "nudge:")
 
 
 def _own_nudge_submit_prefix(text):

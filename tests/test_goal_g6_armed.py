@@ -111,7 +111,8 @@ class TestG6StructuredArmedGate(unittest.TestCase):
         self.assertIsNone(wd.pane_goal_armed(OBSCURED_IDLE_CAP))
         logs, tmux = self._run_sweep(goal_mark_state="set", hb_goal_armed=False,
                                      backlog=5, cap=OBSCURED_IDLE_CAP)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs),
+        self.assertTrue(any("lane-occupancy" in ln and ("nudge" in ln or "batch" in ln)
+                            for ln in logs),
                         "structured-armed obscured pane must deliver a nudge: %r"
                         % logs)
         self.assertTrue(any("-l" in a for a in tmux.sent),
