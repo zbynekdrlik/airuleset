@@ -129,7 +129,8 @@ def _nudge_text(branches):
 
 def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                                 dry_run, handled, reconcile_fetch, state,
-                                sleep_fn=None, captured=None):
+                                sleep_fn=None, captured=None,
+                                batch_collect=None):
     """Audit ONE armed candidate pane after a compaction and, on a NEW observed
     compaction with returned worktree lanes, deliver ONE reconcile nudge. Called
     from `goal.goal_lane_sweep`'s armed-pane loop with the resolved pane context
@@ -184,41 +185,31 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                     % (loc, authority))
         return logs
 
-    # #741 WRITER-SIDE LATCH: a NEW /compact pending for this session HOLDS the
-    # nudge (never push a reconcile into the armed loop while a fresh drained-
-    # boundary compact waits for its quiet window). Deferral does NOT advance the
-    # dedup anchor, so it retries once the compact delivers. Lazy import (goal.py
-    # convention); fail-safe False on any error.
-    from watchdog import compact as _compact
-    if _compact.pending_compact_hold(sid, now):   # #848 bounded
-        logs.append("lane-reconcile %s -> hold:compact-pending "
-                    "(a new /compact is pending; reconcile after it delivers)"
-                    % loc)
-        return logs
-    if handled is not None and sid in handled:
-        logs.append("lane-reconcile %s -> skip:already-handled "
-                    "(another sweep job typed this pane; retry next sweep)" % loc)
-        return logs
-    # BUSY-PANE gate (#714/#921): age-bounded busy-waiting — after >= 10 min
-    # of persistent Waiting with a bare prompt, deliver anyway (CC queues the
-    # prompt). Defer WITHOUT advancing the dedup anchor when below the bound.
-    from watchdog import ops_wait_recheck as _ops
-    _lr_kind, _lr_draft = watchdog._classify_boundary(captured)
-    _lr_busy, _lr_aged = _ops._busy_waiting_with_age(
-        captured, state, sid, now, _lr_kind)
-    if _lr_busy and not _lr_aged:
-        logs.append("lane-reconcile %s -> skip:busy-bg-agent "
-                    "(pane waiting on a background agent — retry next sweep)"
-                    % loc)
-        return logs
-    # SHARED CADENCE GATE (#797 family spacing): a DIFFERENT gated-family category
-    # nudged this session recently -> DEFER (dedup anchor unadvanced) so it retries
-    # a later sweep. lane-reconcile carries NO per-category floor (its own
-    # observed-compaction dedup governs).
-    if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-        logs.append("lane-reconcile %s -> hold:cadence-gate "
-                    "(shared family gap; retry next sweep)" % loc)
-        return logs
+    # #923 BATCH MODE: common delivery guards handled once by the caller.
+    if batch_collect is None:
+        from watchdog import compact as _compact
+        if _compact.pending_compact_hold(sid, now):   # #848 bounded
+            logs.append("lane-reconcile %s -> hold:compact-pending "
+                        "(a new /compact is pending; reconcile after it delivers)"
+                        % loc)
+            return logs
+        if handled is not None and sid in handled:
+            logs.append("lane-reconcile %s -> skip:already-handled "
+                        "(another sweep job typed this pane; retry next sweep)" % loc)
+            return logs
+        from watchdog import ops_wait_recheck as _ops
+        _lr_kind, _lr_draft = watchdog._classify_boundary(captured)
+        _lr_busy, _lr_aged = _ops._busy_waiting_with_age(
+            captured, state, sid, now, _lr_kind)
+        if _lr_busy and not _lr_aged:
+            logs.append("lane-reconcile %s -> skip:busy-bg-agent "
+                        "(pane waiting on a background agent — retry next sweep)"
+                        % loc)
+            return logs
+        if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
+            logs.append("lane-reconcile %s -> hold:cadence-gate "
+                        "(shared family gap; retry next sweep)" % loc)
+            return logs
 
     # This compaction is now the one we ACT on. Fetch the returned lanes.
     try:
@@ -258,6 +249,21 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
         return logs
 
     text = _nudge_text(branches)
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        def _on_deliver(_r=rec, _lr=lrecs, _s=sid, _n=now, _h=handled,
+                        _st=state, _p=pid, _ct=comp_ts):
+            watchdog._janitor_clear_watch(_st, _p)
+            _r["last_reconcile_ts"] = _ct
+            _r["send_fails"] = 0
+            _r["lts"] = _n
+            _lr[_s] = _r
+            if _h is not None:
+                _h.add(_s)
+        batch_collect.append((CATEGORY, text, _on_deliver))
+        logs.append("lane-reconcile %s -> batch-collected (%d lane(s))"
+                    % (loc, len(branches)))
+        return logs
     watchdog._janitor_mark_watch(state, pid, now)
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,

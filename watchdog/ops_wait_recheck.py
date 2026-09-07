@@ -1010,7 +1010,8 @@ def _book_unverified_send(rec, new_rec, loc, sig, now):
 def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                           dry_run, handled, ops_wait_fetch, state,
                           sleep_fn=None, cadence=None, i_count=None,
-                          release_state_fetch=None, captured=None):
+                          release_state_fetch=None, captured=None,
+                          batch_collect=None):
     """Audit ONE armed candidate pane's partition (I→W/U + W→I) and, on cadence,
     deliver ONE verified re-audit nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -1116,40 +1117,28 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # choice (a top-level import is also fine, goal.py:173 does it), kept local to
     # avoid any dependence on the watchdog package-init ordering; fail-safe False on
     # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
-    from watchdog import compact as _compact
-    if _compact.pending_compact_hold(sid, now):   # #848 bounded
-        logs.append("ops-wait-recheck %s -> hold:compact-pending (pending "
-                    "/compact; no nudge until it delivers)" % loc)
-        return logs
-    if handled is not None and sid in handled:
-        logs.append("ops-wait-recheck %s -> skip:already-handled (another sweep "
-                    "job typed this pane; retry next sweep)" % loc)
-        return logs
-    # #714 BUSY-PANE GATE (the primary fix): NEVER type into a pane showing CC's
-    # "Waiting for N background agents to finish" state — the submit is swallowed
-    # and the text parks ORPHANED in the input box (the david2 incident). Defer
-    # WITHOUT a keystroke (no type-and-fail loop, no send_fails increment); the
-    # transient Waiting state clears between turns and a later sweep delivers into
-    # the genuinely-idle `❯`. last_nudge stays unadvanced (the persisted rec above
-    # keeps first_seen/w_seen/sig), the pane is NOT claimed in `handled`.
-    # #921: age-bounded override — same as goal.py's deliver_goal
-    _owr_kind, _owr_draft = watchdog._classify_boundary(captured)
-    _owr_busy, _owr_aged = _busy_waiting_with_age(
-        captured, state, sid, now, _owr_kind)
-    if _owr_busy and not _owr_aged:
-        logs.append("ops-wait-recheck %s -> skip:busy-bg-agent (pane waiting on a "
-                    "background agent — deferred, retry next sweep)" % loc)
-        return logs
-    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
-    # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke,
-    # last_nudge unadvanced, `handled` unclaimed) so it retries a later sweep,
-    # killing cross-sweep bursts. partition-audit carries NO per-category floor
-    # (its own ~22h cadence governs), so the gate is a pure family-spacing no-op
-    # here except when a sibling category fired recently — semantics unchanged.
-    if not _nudge_gate.gate_ok(state, sid, "partition-audit", now):
-        logs.append("ops-wait-recheck %s -> hold:cadence-gate (shared family gap; "
-                    "retry next sweep, partition %s)" % (loc, sig))
-        return logs
+    # #923 BATCH MODE: common delivery guards handled once by the caller.
+    if batch_collect is None:
+        from watchdog import compact as _compact
+        if _compact.pending_compact_hold(sid, now):   # #848 bounded
+            logs.append("ops-wait-recheck %s -> hold:compact-pending (pending "
+                        "/compact; no nudge until it delivers)" % loc)
+            return logs
+        if handled is not None and sid in handled:
+            logs.append("ops-wait-recheck %s -> skip:already-handled (another sweep "
+                        "job typed this pane; retry next sweep)" % loc)
+            return logs
+        _owr_kind, _owr_draft = watchdog._classify_boundary(captured)
+        _owr_busy, _owr_aged = _busy_waiting_with_age(
+            captured, state, sid, now, _owr_kind)
+        if _owr_busy and not _owr_aged:
+            logs.append("ops-wait-recheck %s -> skip:busy-bg-agent (pane waiting on a "
+                        "background agent — deferred, retry next sweep)" % loc)
+            return logs
+        if not _nudge_gate.gate_ok(state, sid, "partition-audit", now):
+            logs.append("ops-wait-recheck %s -> hold:cadence-gate (shared family gap; "
+                        "retry next sweep, partition %s)" % (loc, sig))
+            return logs
     if dry_run:
         logs.append("ops-wait-recheck %s -> WOULD-NUDGE partition %s" % (loc, sig))
         return logs
@@ -1219,6 +1208,20 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                        unpark_audit_n=(len(_acceptance_numbers(members))
                                        if _dscope else 0),
                        stagnation_count=stag_count)
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        def _on_deliver(_nr=new_rec, _w=wrecs, _s=sid, _n=now, _h=handled,
+                        _st=state, _p=pid):
+            _nr["last_nudge"] = _n
+            _nr["send_fails"] = 0
+            _w[_s] = _nr
+            watchdog._janitor_clear_watch(_st, _p)
+            if _h is not None:
+                _h.add(_s)
+        batch_collect.append(("partition-audit", text, _on_deliver))
+        logs.append("ops-wait-recheck %s -> batch-collected (partition %s)"
+                    % (loc, sig))
+        return logs
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

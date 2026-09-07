@@ -624,7 +624,7 @@ def _book_unverified_send(rec, new_rec, loc, ahead, now):
 def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                              dry_run, handled, release_state_fetch, state,
                              sleep_fn=None, cadence=None, min_ahead=None,
-                             captured=None):
+                             captured=None, batch_collect=None):
     """Audit ONE armed candidate pane's release-gap and, on cadence, deliver ONE
     verified nudge into that session. Called from `goal.goal_lane_sweep`'s
     existing armed-pane loop with the already-resolved pane context (ZERO new
@@ -763,37 +763,29 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     # choice (a top-level import is also fine, goal.py:173 does it), kept local to
     # avoid any dependence on the watchdog package-init ordering; fail-safe False on
     # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
-    from watchdog import compact as _compact
-    if _compact.pending_compact_hold(sid, now):   # #848 bounded
-        logs.append("release-gap %s -> hold:compact-pending (pending /compact; "
-                    "no nudge until it delivers)" % loc)
-        return logs
-    if handled is not None and sid in handled:
-        logs.append("release-gap %s -> skip:already-handled (another sweep job "
-                    "typed this pane; retry next sweep)" % loc)
-        return logs
-    # #749/#714/#921 BUSY-PANE GATE: age-bounded busy-waiting — after >= 10 min
-    # of persistent Waiting with a bare prompt, deliver anyway. Defer WITHOUT
-    # a keystroke when below the age bound. last_nudge stays unadvanced, the
-    # pane is NOT claimed in `handled`, and `send_fails` is NEITHER incremented
-    # NOR carried (same sibling parity as before).
-    from watchdog import ops_wait_recheck as _owr
-    _rg_kind, _rg_draft = watchdog._classify_boundary(captured)
-    _rg_busy, _rg_aged = _owr._busy_waiting_with_age(
-        captured, state, sid, now, _rg_kind)
-    if _rg_busy and not _rg_aged:
-        logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
-                    "background agent — deferred, retry next sweep)" % loc)
-        return logs
-    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
-    # nudged this session within NUDGE_FAMILY_GAP_S -> DEFER (no keystroke,
-    # last_nudge unadvanced, `handled` unclaimed) so it retries a later sweep.
-    # release-gap carries NO per-category floor (its own ~1h cadence governs), so
-    # the gate is a pure family-spacing no-op except when a sibling fired recently.
-    if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
-        logs.append("release-gap %s -> hold:cadence-gate (shared family gap; "
-                    "retry next sweep)" % loc)
-        return logs
+    # #923 BATCH MODE: common delivery guards handled once by the caller.
+    if batch_collect is None:
+        from watchdog import compact as _compact
+        if _compact.pending_compact_hold(sid, now):   # #848 bounded
+            logs.append("release-gap %s -> hold:compact-pending (pending /compact; "
+                        "no nudge until it delivers)" % loc)
+            return logs
+        if handled is not None and sid in handled:
+            logs.append("release-gap %s -> skip:already-handled (another sweep job "
+                        "typed this pane; retry next sweep)" % loc)
+            return logs
+        from watchdog import ops_wait_recheck as _owr
+        _rg_kind, _rg_draft = watchdog._classify_boundary(captured)
+        _rg_busy, _rg_aged = _owr._busy_waiting_with_age(
+            captured, state, sid, now, _rg_kind)
+        if _rg_busy and not _rg_aged:
+            logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
+                        "background agent — deferred, retry next sweep)" % loc)
+            return logs
+        if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
+            logs.append("release-gap %s -> hold:cadence-gate (shared family gap; "
+                        "retry next sweep)" % loc)
+            return logs
     if dry_run:
         logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, reason=%s)"
                     % (loc, ahead, reason))
@@ -807,6 +799,21 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     text = _nudge_text(ahead, _integration_branch(), _prod_branch(),
                        lane=lane, deploy_age_h=deploy_age_h,
                        inactive_m=inactive_m)
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        def _on_deliver(_nr=new_rec, _rr=rrecs, _s=sid, _n=now, _h=handled,
+                        _st=state, _p=pid, _reason=reason):
+            watchdog._janitor_clear_watch(_st, _p)
+            _nr["last_nudge"] = _n
+            if _reason == "stalled":
+                _nr["last_stall_nudge"] = _n
+            _nr["send_fails"] = 0
+            _rr[_s] = _nr
+            if _h is not None:
+                _h.add(_s)
+        batch_collect.append(("release-gap", text, _on_deliver))
+        logs.append("release-gap %s -> batch-collected (ahead=%d)" % (loc, ahead))
+        return logs
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
     # residual stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)

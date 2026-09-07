@@ -255,27 +255,30 @@ class TestComposeBatch923(unittest.TestCase):
     """#923: compose_batch formats items into a BATCH_PREFIX-headed message."""
 
     def test_prefix_leads(self):
-        result = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
-        self.assertTrue(result.startswith(ng.BATCH_PREFIX))
+        text, included = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
+        self.assertTrue(text.startswith(ng.BATCH_PREFIX))
+        self.assertIn("lane-occupancy", included)
 
     def test_orders_wd_first(self):
         items = [("partition-audit", "I5 U0"),
                  ("lane-occupancy", "refill 3")]
-        result = ng.compose_batch(items)
-        lo_pos = result.index("[lane-occupancy]")
-        pa_pos = result.index("[partition-audit]")
+        text, included = ng.compose_batch(items)
+        lo_pos = text.index("[lane-occupancy]")
+        pa_pos = text.index("[partition-audit]")
         self.assertLess(lo_pos, pa_pos)
 
-    def test_empty_returns_empty_string(self):
-        self.assertEqual(ng.compose_batch([]), "")
+    def test_empty_returns_empty_tuple(self):
+        text, included = ng.compose_batch([])
+        self.assertEqual(text, "")
+        self.assertEqual(included, [])
 
     def test_max_chars_trims_audit_first(self):
         items = [("lane-occupancy", "refill"),
                  ("partition-audit", "I5 U0 W0 skip0")]
-        result = ng.compose_batch(items, max_chars=50)
+        text, included = ng.compose_batch(items, max_chars=50)
         # Work-driving kept, audit trimmed if needed
-        self.assertIn("[lane-occupancy]", result)
-        self.assertTrue(len(result) <= 50)
+        self.assertIn("[lane-occupancy]", text)
+        self.assertTrue(len(text) <= 50)
 
     def test_batch_prefix_is_machine_recognized(self):
         """BATCH_PREFIX must be 'nudge:' — already in goal.py

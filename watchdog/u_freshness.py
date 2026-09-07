@@ -224,7 +224,8 @@ def _prune_u_freshness_orphans(urecs, visited_sids, now,
 
 def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
                              dry_run, handled, u_fetch, state,
-                             sleep_fn=None, refresh_fn=None, captured=None):
+                             sleep_fn=None, refresh_fn=None, captured=None,
+                             batch_collect=None):
     """Audit ONE armed candidate pane's footer U count and, on cadence, deliver
     ONE verified U-reconcile nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -300,43 +301,47 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
         return logs
 
     # action == "nudge"
-    # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the nudge —
-    # never push work into the armed loop while a drained-boundary compact waits
-    # for its quiet window. Defer WITHOUT a keystroke (last_nudge unadvanced,
-    # `handled` unclaimed) so it retries a later sweep once the compact delivers.
-    from watchdog import compact as _compact
-    if _compact.pending_compact_hold(sid, now):   # #848 bounded
-        logs.append("u-freshness %s -> hold:compact-pending (pending /compact; "
-                    "no nudge until it delivers)" % loc)
-        return logs
-    if handled is not None and sid in handled:
-        logs.append("u-freshness %s -> skip:already-handled (another sweep job "
-                    "typed this pane; retry next sweep)" % loc)
-        return logs
-    # #714/#921 BUSY-PANE GATE: age-bounded busy-waiting — after >= 10 min of
-    # persistent Waiting with a bare prompt, deliver anyway. Defer WITHOUT
-    # a keystroke when below the age bound.
-    _uf_kind, _uf_draft = watchdog._classify_boundary(captured)
-    _uf_busy, _uf_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, _uf_kind)
-    if _uf_busy and not _uf_aged:
-        logs.append("u-freshness %s -> skip:busy-bg-agent (pane waiting on a "
-                    "background agent — deferred, retry next sweep)" % loc)
-        return logs
-    # #797 SHARED CADENCE GATE: the owner's hard 1×/hour U strop AND the
-    # cross-category family-spacing floor. A closed gate DEFERS (no keystroke,
-    # last_nudge unadvanced, `handled` unclaimed) so it retries a later sweep —
-    # never cancels. (u-freshness also has its own last_nudge cadence above; the
-    # gate is the cross-rider authority + the owner's env-clampable strop.)
-    if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-        logs.append("u-freshness %s -> hold:cadence-gate (shared 1x/hour U strop "
-                    "or family gap; retry next sweep)" % loc)
-        return logs
+    # #923 BATCH MODE: common delivery guards are handled once by the caller
+    # (goal_lane_sweep). In individual mode, each guard is checked here.
+    if batch_collect is None:
+        from watchdog import compact as _compact
+        if _compact.pending_compact_hold(sid, now):   # #848 bounded
+            logs.append("u-freshness %s -> hold:compact-pending (pending /compact; "
+                        "no nudge until it delivers)" % loc)
+            return logs
+        if handled is not None and sid in handled:
+            logs.append("u-freshness %s -> skip:already-handled (another sweep job "
+                        "typed this pane; retry next sweep)" % loc)
+            return logs
+        _uf_kind, _uf_draft = watchdog._classify_boundary(captured)
+        _uf_busy, _uf_aged = _ops_wait_recheck._busy_waiting_with_age(
+            captured, state, sid, now, _uf_kind)
+        if _uf_busy and not _uf_aged:
+            logs.append("u-freshness %s -> skip:busy-bg-agent (pane waiting on a "
+                        "background agent — deferred, retry next sweep)" % loc)
+            return logs
+        if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
+            logs.append("u-freshness %s -> hold:cadence-gate (shared 1x/hour U strop "
+                        "or family gap; retry next sweep)" % loc)
+            return logs
     if dry_run:
         logs.append("u-freshness %s -> WOULD-NUDGE (U=%d)" % (loc, u_count))
         return logs
 
     text = _nudge_text(u_count)
+    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
+    if batch_collect is not None:
+        def _on_deliver(_nr=new_rec, _u=urecs, _s=sid, _n=now, _h=handled,
+                        _st=state, _p=pid):
+            watchdog._janitor_clear_watch(_st, _p)
+            _nr["last_nudge"] = _n
+            _nr["send_fails"] = 0
+            _u[_s] = _nr
+            if _h is not None:
+                _h.add(_s)
+        batch_collect.append((CATEGORY, text, _on_deliver))
+        logs.append("u-freshness %s -> batch-collected (U=%d)" % (loc, u_count))
+        return logs
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
     # residual stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)
