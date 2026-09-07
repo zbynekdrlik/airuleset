@@ -105,6 +105,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "home-worktree",
     # #920 — test runner /tmp leftovers, runner _diag logs, npm/uv cache:
     "tmp-test", "runner-diag", "npm-uv-cache",
+    # #935 — project-local worktrees + work-products snapshot backstop:
+    "project-worktree", "work-products-snapshot",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -204,6 +206,16 @@ TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-")
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #920 — npm _cacache + uv cache (regenerated on demand)
 NPM_CACACHE_SUBDIR = os.path.join(".npm", "_cacache")
+
+# #935-A — project-local worktree age-out (shared-stream boxes)
+PROJECT_WORKTREE_MIN_AGE_DAYS = 2
+PROJECT_WORKTREE_GLOB_PATTERN = "devel"       # scan ~/devel/**/.claude/worktrees/agent-*
+
+# #935-B — work-products snapshot backstop
+WORK_PRODUCTS_SUBDIR = os.path.join(".claude", "work-products")
+WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD = 10000   # >10k files = snapshot
+WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD = 1_000_000_000  # >1G = snapshot
+WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS = 7
 
 
 def _dbg(msg):
@@ -515,6 +527,27 @@ def _safe_dir_size(path, dir_stats_fn=None):
     except Exception as e:
         _dbg("dir-size failed for %s: %r" % (path, e))
         return 0
+
+
+def _safe_dir_newest_mtime(path, dir_stats_fn=None):
+    """#935-C: the NEWEST file mtime inside ``path`` (recursive walk), or the
+    dir's own mtime if the walk finds no files / is empty. Used by the tmp-test
+    rung to compute age from CONTENT freshness (not the dir entry's own mtime,
+    which is bumped by adding/removing entries and misses stale content).
+    Returns a float epoch, or None on total failure (fail-safe: caller keeps)."""
+    try:
+        if dir_stats_fn is not None:
+            _, newest = dir_stats_fn(path)
+        else:
+            from cli_target_purge import _dir_stats
+            _, newest = _dir_stats(path)
+        if newest is not None:
+            return newest
+        # empty subtree — fall back to the dir's own mtime (#355 pattern)
+        return os.lstat(path).st_mtime
+    except Exception as e:
+        _dbg("dir-newest-mtime failed for %s: %r" % (path, e))
+        return None
 
 
 def discover_toolchain_dirs(home=None, box_class_fn=None, pgrep_fn=None,
@@ -1945,7 +1978,15 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
     ``npmcache-*``, and generic ``tmp*`` dirs owned by THIS uid, older than
     the age floor (#925: 3h on shared-stream, 1d on workstation).
     UID-ownership check prevents a shared-box user from reclaiming a sibling's
-    test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``."""
+    test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``.
+
+    #935-C: age is computed from the NEWEST file mtime inside the dir (recursive
+    walk via ``_safe_dir_newest_mtime``), NOT the dir entry's own ``st_mtime``.
+    The dir's ``st_mtime`` is bumped whenever entries are added/removed FROM
+    the dir (e.g. a background process creating temp files), making a genuinely
+    stale dir appear fresh. The recursive walk matches the safety discipline of
+    ``discover_claude_scratch_candidates`` (``_scratch_stat`` → ``_dir_stats``).
+    """
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
     min_age_days = _effective_tmp_test_age_days(min_age_days, box_class_fn)
@@ -1969,7 +2010,13 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
                 continue
             if st.st_uid != uid:
                 continue  # foreign user — not ours to reclaim
-            age = now - st.st_mtime
+            # #935-C: use the NEWEST file mtime inside the dir, not st_mtime
+            newest_mtime = _safe_dir_newest_mtime(str(entry), dir_stats_fn)
+            if newest_mtime is None:
+                out.append({"cls": "tmp-test", "path": str(entry), "bytes": 0,
+                            "reason": "could not determine newest mtime — kept"})
+                continue
+            age = now - newest_mtime
             size = _safe_dir_size(str(entry), dir_stats_fn) if age >= cutoff else 0
             row = {"cls": "tmp-test", "path": str(entry), "bytes": size,
                    "reason": None}
@@ -2057,6 +2104,265 @@ def discover_npm_uv_cache(home=None, dir_stats_fn=None):
         out.append({"cls": "npm-uv-cache", "path": "uv cache prune",
                     "bytes": 0, "kind": "uv-cache-prune", "reason": None})
     return out
+
+
+# --------------------------------------------------------------------------- #
+# #935-B — work-products SNAPSHOT backstop
+# --------------------------------------------------------------------------- #
+def _count_files_bounded(path, limit):
+    """Count regular files under ``path``, stopping at ``limit+1``.
+    Returns (count, total_size_bytes). Best-effort: walk errors are silent."""
+    count = 0
+    total = 0
+    for dirpath, _dns, fns in os.walk(path, topdown=True, onerror=lambda e: None):
+        for f in fns:
+            fp = os.path.join(dirpath, f)
+            try:
+                st = os.lstat(fp)
+                total += st.st_size
+                count += 1
+            except OSError:
+                count += 1      # count it even if we can't stat it
+            if count > limit:
+                return count, total
+    return count, total
+
+
+def discover_snapshot_work_products(home=None, now=None,
+                                    min_age_days=WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS,
+                                    file_threshold=WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD,
+                                    size_threshold=WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD,
+                                    dir_stats_fn=None):
+    """#935-B: first-level subtrees under ``~/.claude/work-products/`` that look
+    like full-tree snapshots (>10k files OR >1G). Only subtrees older than
+    ``min_age_days`` (newest file) are candidates. Small/doc-like content is
+    never touched. Fail-safe: uncertain → keep + log.
+    Returns ``[{cls:"work-products-snapshot", path, bytes, kind, reason}]``."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    wp = Path(home) / WORK_PRODUCTS_SUBDIR
+    if not wp.is_dir() or wp.is_symlink():
+        return []
+    out = []
+    try:
+        for entry in sorted(wp.iterdir()):
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            path_s = str(entry)
+            # Count files + total size, bounded to avoid expensive walks on
+            # genuinely small subtrees.
+            fcount, fsize = _count_files_bounded(path_s, file_threshold)
+            is_snapshot = (fcount > file_threshold or fsize > size_threshold)
+            if not is_snapshot:
+                continue          # small/doc-like — never touched
+            # Check age via newest-file mtime
+            newest = _safe_dir_newest_mtime(path_s, dir_stats_fn)
+            if newest is None:
+                out.append({"cls": "work-products-snapshot", "path": path_s,
+                            "bytes": fsize, "kind": "skip",
+                            "reason": "could not determine age — kept (#935-B fail-safe)"})
+                continue
+            age_s = now - newest
+            age_d = age_s / 86400.0
+            if age_d < min_age_days:
+                out.append({"cls": "work-products-snapshot", "path": path_s,
+                            "bytes": fsize, "kind": "skip",
+                            "reason": "snapshot too recent (%.1fd < %dd) — kept"
+                            % (age_d, min_age_days)})
+                continue
+            out.append({"cls": "work-products-snapshot", "path": path_s,
+                        "bytes": fsize, "kind": "delete", "reason": None,
+                        "why": "snapshot: %d files, %s, %.1fd old"
+                        % (fcount, _human(fsize), age_d)})
+    except OSError as e:
+        out.append({"cls": "work-products-snapshot", "path": "-", "bytes": 0,
+                    "kind": "skip",
+                    "reason": "work-products walk error: %s" % e})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# #935-A — project-local worktree age-out (shared-stream boxes)
+# --------------------------------------------------------------------------- #
+def _worktree_branch_contained_in_origin(worktree_path, repo_path):
+    """True when the worktree's HEAD is reachable from ANY fetched origin ref.
+    This is the stronger discriminator the dispatch identified: a 2-day
+    newest-file test alone kept 46/48 dead worktrees because a loop touches
+    files. If HEAD is already on origin (merged, wip-backed-up, or hand-off'd),
+    the worktree's content is safely elsewhere and the dir can go.
+    Returns True (reclaimable), False (keep — not on origin), or None (error).
+    """
+    try:
+        # Get the worktree HEAD
+        r = subprocess.run(
+            ["git", "-C", worktree_path, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None      # can't read HEAD — fail-safe keep
+        head = r.stdout.strip()
+        if not head:
+            return None
+        # Check if HEAD is contained in any origin ref
+        r2 = subprocess.run(
+            ["git", "-C", repo_path, "branch", "-r", "--contains", head],
+            capture_output=True, text=True, timeout=30)
+        if r2.returncode == 0 and r2.stdout.strip():
+            return True      # HEAD is reachable from at least one remote branch
+        # Also check refs/autopilot-wip/* via ls-remote (#834 pattern)
+        branch_name = None
+        r3 = subprocess.run(
+            ["git", "-C", worktree_path, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if r3.returncode == 0:
+            branch_name = r3.stdout.strip()
+        if branch_name:
+            r4 = subprocess.run(
+                ["git", "-C", repo_path, "ls-remote", "origin",
+                 "refs/autopilot-wip/%s" % branch_name],
+                capture_output=True, text=True, timeout=30)
+            if r4.returncode == 0 and r4.stdout.strip():
+                # Verify the local HEAD is an ancestor of the remote wip ref
+                wip_sha = r4.stdout.strip().split()[0]
+                r5 = subprocess.run(
+                    ["git", "-C", repo_path, "merge-base", "--is-ancestor",
+                     head, wip_sha],
+                    capture_output=True, text=True, timeout=10)
+                if r5.returncode == 0:
+                    return True
+        return False     # HEAD not found on any origin ref
+    except Exception:
+        return None          # fail-safe keep on any error
+
+
+def _worktree_has_live_agent(worktree_path):
+    """True when a live agent process has this worktree as its cwd or holds
+    an fd inside it. Reuses ``_target_in_live_use`` from cli_target_purge.
+    Fail-safe True on error (keep)."""
+    try:
+        from cli_target_purge import _target_in_live_use
+        return _target_in_live_use(worktree_path)
+    except Exception:
+        return True
+
+
+def discover_stale_project_worktrees(home=None, now=None,
+                                      min_age_days=PROJECT_WORKTREE_MIN_AGE_DAYS,
+                                      dir_stats_fn=None, git_fn=None,
+                                      live_check_fn=None):
+    """#935-A: project-local worktrees under ``~/devel/**/.claude/worktrees/
+    agent-*`` that are safe to reclaim. On shared-stream boxes these accumulate
+    without limit (19G on david3).
+
+    Safety gates (cheapest-first, fail-safe KEEP):
+    1. Not a symlink
+    2. ``.airuleset-keep`` marker → KEEP
+    3. ``live_check_fn`` / ``_target_in_live_use`` (open-fd) → KEEP
+    4. Newest file mtime > ``min_age_days``
+    5. **Reachability**: HEAD contained in origin refs → DELETE
+
+    Returns ``[{cls:"project-worktree", path, bytes, kind, reason, repo}]``."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    live_fn = live_check_fn or _worktree_has_live_agent
+    devel = Path(home) / PROJECT_WORKTREE_GLOB_PATTERN
+    if not devel.is_dir():
+        return []
+    out = []
+    cutoff = min_age_days * 86400
+    # Walk ~/devel/ looking for .claude/worktrees/agent-* dirs
+    try:
+        for repo_dir in sorted(devel.iterdir()):
+            if not repo_dir.is_dir() or repo_dir.is_symlink():
+                continue
+            # Check direct repos (~/devel/<repo>)
+            _scan_repo_worktrees(repo_dir, now, cutoff, min_age_days,
+                                 dir_stats_fn, git_fn, live_fn, out)
+            # Also check one level deeper for org/repo structure (~/devel/<org>/<repo>)
+            try:
+                for sub in sorted(repo_dir.iterdir()):
+                    if not sub.is_dir() or sub.is_symlink():
+                        continue
+                    _scan_repo_worktrees(sub, now, cutoff, min_age_days,
+                                         dir_stats_fn, git_fn, live_fn, out)
+            except OSError as e:
+                _dbg("project-worktree sub-walk %s: %r" % (repo_dir, e))
+    except OSError as e:
+        out.append({"cls": "project-worktree", "path": str(devel), "bytes": 0,
+                    "kind": "skip",
+                    "reason": "could not walk ~/devel: %s" % e})
+    return out
+
+
+def _scan_repo_worktrees(repo_dir, now, cutoff, min_age_days,
+                          dir_stats_fn, git_fn, live_fn, out):
+    """Scan a single repo's ``.claude/worktrees/`` for stale agent dirs."""
+    wt_dir = repo_dir / ".claude" / "worktrees"
+    if not wt_dir.is_dir():
+        return
+    try:
+        for agent_dir in sorted(wt_dir.iterdir()):
+            name = agent_dir.name
+            if not name.startswith("agent-"):
+                continue
+            if agent_dir.is_symlink() or not agent_dir.is_dir():
+                continue
+            path_s = str(agent_dir)
+            repo_s = str(repo_dir)
+            # Gate 1: .airuleset-keep marker
+            keep_marker = agent_dir / ".airuleset-keep"
+            try:
+                if keep_marker.exists():
+                    out.append({"cls": "project-worktree", "path": path_s,
+                                "bytes": 0, "kind": "skip", "repo": repo_s,
+                                "reason": ".airuleset-keep marker — kept"})
+                    continue
+            except OSError:
+                out.append({"cls": "project-worktree", "path": path_s,
+                            "bytes": 0, "kind": "skip", "repo": repo_s,
+                            "reason": "could not check keep marker — kept"})
+                continue
+            # Gate 2: live-use check (open fd)
+            if live_fn(path_s):
+                out.append({"cls": "project-worktree", "path": path_s,
+                            "bytes": 0, "kind": "skip", "repo": repo_s,
+                            "reason": "in live use — kept"})
+                continue
+            # Gate 3: age check (newest file mtime)
+            newest = _safe_dir_newest_mtime(path_s, dir_stats_fn)
+            if newest is None:
+                out.append({"cls": "project-worktree", "path": path_s,
+                            "bytes": 0, "kind": "skip", "repo": repo_s,
+                            "reason": "could not determine age — kept"})
+                continue
+            age_s = now - newest
+            if age_s < cutoff:
+                out.append({"cls": "project-worktree", "path": path_s,
+                            "bytes": 0, "kind": "skip", "repo": repo_s,
+                            "reason": "too recent (%.1fd < %dd) — kept"
+                            % (age_s / 86400.0, min_age_days)})
+                continue
+            # Gate 4: reachability check — branch tip on origin?
+            contained = (git_fn(path_s, repo_s)
+                         if git_fn is not None
+                         else _worktree_branch_contained_in_origin(path_s, repo_s))
+            if contained is None:
+                out.append({"cls": "project-worktree", "path": path_s,
+                            "bytes": 0, "kind": "skip", "repo": repo_s,
+                            "reason": "could not check reachability — kept"})
+                continue
+            if not contained:
+                out.append({"cls": "project-worktree", "path": path_s,
+                            "bytes": 0, "kind": "skip", "repo": repo_s,
+                            "reason": "HEAD not on origin — kept (may have unmerged work)"})
+                continue
+            # All gates passed — genuine candidate
+            size = _safe_dir_size(path_s, dir_stats_fn)
+            out.append({"cls": "project-worktree", "path": path_s,
+                        "bytes": size, "kind": "worktree-remove",
+                        "reason": None, "repo": repo_s,
+                        "why": "stale %.1fd, HEAD on origin" % (age_s / 86400.0)})
+    except OSError as e:
+        _dbg("project-worktree scan %s: %r" % (repo_dir, e))
 
 
 # --------------------------------------------------------------------------- #
@@ -2287,6 +2593,25 @@ def _plan_npm_uv_cache(home, now):
             for r in discover_npm_uv_cache(home=home)]
 
 
+def _plan_project_worktrees(home, now):
+    """#935-A — project-local stale worktrees under ~/devel/."""
+    try:
+        return discover_stale_project_worktrees(home=home, now=now)
+    except Exception as e:
+        return [{"cls": "project-worktree", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "project-worktree discovery error: %r" % e}]
+
+
+def _plan_work_products_snapshot(home, now):
+    """#935-B — work-products snapshot backstop."""
+    try:
+        return discover_snapshot_work_products(home=home, now=now)
+    except Exception as e:
+        return [{"cls": "work-products-snapshot", "path": "-", "bytes": 0,
+                 "kind": "skip",
+                 "reason": "work-products-snapshot discovery error: %r" % e}]
+
+
 def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
@@ -2308,6 +2633,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
+        ("work-products-snapshot", lambda: _plan_work_products_snapshot(home, now)),
         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
@@ -2315,6 +2641,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("docker-image", lambda: _plan_docker(home, now)),
         ("runner-checkout", lambda: _plan_runner_checkouts(home, now)),
         ("home-worktree", lambda: _plan_home_worktrees(home, now)),
+        ("project-worktree", lambda: _plan_project_worktrees(home, now)),
         ("worktree", lambda: _plan_worktrees(home, now)),
         ("toolchain", lambda: _plan_toolchain(home, now)),
         ("transcript", lambda: _plan_transcripts(home, now)),
