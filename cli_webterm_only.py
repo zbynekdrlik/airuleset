@@ -91,6 +91,17 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
     ),
 }
 
+# #870 incident 2 fix: which webterm-only user accounts each human's
+# controller connects to.  Derived from WEBTERM_DASHBOARD_TABS — zbynek's
+# dashboard has david1-3 tabs; david's has david1-4; marek and dominika have
+# no webterm-only targets.  Test-locked against WEBTERM_DASHBOARD_TABS drift.
+_CONTROLLER_LANE_WEBTERM_ONLY_TARGETS = {
+    "zbynek": frozenset({"david1", "david2", "david3"}),
+    "david": frozenset({"david1", "david2", "david3", "david4"}),
+    "marek": frozenset(),
+    "dominika": frozenset(),
+}
+
 # ---------------------------------------------------------------------------
 # Options-aware authorized_keys parser (#870 F4a D5)
 # ---------------------------------------------------------------------------
@@ -207,11 +218,22 @@ def desired_keys_for_user(user):
     if user.startswith("david") and user[5:].isdigit():
         keys.append(WEBTERM_DAVID_LANE_PUBKEY)
 
-    # Controller lane key with forced-command options (#870 F4b)
-    human = _webterm_only_user_to_human(user)
-    if human and human in WEBTERM_CONTROLLER_LANE_PUBKEYS:
-        pubkey = WEBTERM_CONTROLLER_LANE_PUBKEYS[human]
-        keys.append(_controller_lane_key_line(user, pubkey))
+    # Controller lane keys with forced-command options (#870 F4b + incident 2
+    # fix): a user gets its own human's controller key (baseline — e.g.
+    # dominika gets the dominika controller key) AND keys from any OTHER
+    # human whose dashboard connects to this user (e.g. david1 also gets the
+    # zbynek controller key, because zbynek's dashboard has a david1 tab).
+    humans_for_user = set()
+    own_human = _webterm_only_user_to_human(user)
+    if own_human:
+        humans_for_user.add(own_human)
+    for human, targets in _CONTROLLER_LANE_WEBTERM_ONLY_TARGETS.items():
+        if user in targets:
+            humans_for_user.add(human)
+    for human in sorted(humans_for_user):
+        if human in WEBTERM_CONTROLLER_LANE_PUBKEYS:
+            pubkey = WEBTERM_CONTROLLER_LANE_PUBKEYS[human]
+            keys.append(_controller_lane_key_line(user, pubkey))
 
     # Sort by blob for deterministic output
     keys.sort(key=lambda k: _key_blob(k) or "")
