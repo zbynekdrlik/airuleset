@@ -148,6 +148,92 @@ class TestGateOk(unittest.TestCase):
         self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW))   # family gap
 
 
+class TestWorkDrivingPriority923(unittest.TestCase):
+    """#923: work-driving families (lane-occupancy, release-gap, queue-arrival,
+    lane-reconcile) have PRIORITY over audit families (partition-audit,
+    u-freshness, goal-guard) within the shared 1h slot. An audit family must
+    NOT claim the slot when a work-driving family is due."""
+
+    def test_classification_covers_all_gated(self):
+        """Every GATED_CATEGORIES member is in exactly one class."""
+        self.assertEqual(ng.WORK_DRIVING_CATEGORIES | ng.AUDIT_CATEGORIES,
+                         ng.GATED_CATEGORIES)
+        self.assertEqual(len(ng.WORK_DRIVING_CATEGORIES & ng.AUDIT_CATEGORIES),
+                         0)
+
+    def test_work_driving_members(self):
+        self.assertEqual(ng.WORK_DRIVING_CATEGORIES, frozenset({
+            "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
+        }))
+
+    def test_audit_members(self):
+        self.assertEqual(ng.AUDIT_CATEGORIES, frozenset({
+            "partition-audit", "u-freshness", "goal-guard",
+        }))
+
+    def test_audit_defers_when_work_driving_is_due(self):
+        """The gk starvation shape: audit fired recently, work-driving is
+        old/due. Audit must defer so work-driving gets the next slot."""
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW - 2 * HOUR)
+        ng.mark_sent(st, "s", "partition-audit", NOW)
+        # After 1h: lane-occupancy (work-driving) should pass
+        self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", NOW + HOUR))
+        # partition-audit (audit) must DEFER — work-driving hasn't had its turn
+        self.assertFalse(ng.gate_ok(st, "s", "partition-audit", NOW + HOUR))
+
+    def test_audit_allowed_after_work_driving_fires(self):
+        """After work-driving fires, audit gets the next slot."""
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # After 1h: audit should be allowed (work-driving had its turn)
+        self.assertTrue(ng.gate_ok(st, "s", "partition-audit", NOW + HOUR))
+
+    def test_audit_allowed_when_no_work_driving_history(self):
+        """When work-driving has NEVER fired for this session, audit doesn't
+        defer — there is nothing to yield to."""
+        st = {}
+        ng.mark_sent(st, "s", "partition-audit", NOW)
+        self.assertTrue(ng.gate_ok(st, "s", "partition-audit", NOW + HOUR))
+
+    def test_work_driving_unaffected_by_priority_check(self):
+        """Work-driving categories are NEVER deferred by the priority check —
+        only the existing (a)+(b) checks apply."""
+        st = {}
+        ng.mark_sent(st, "s", "partition-audit", NOW)
+        # work-driving should pass regardless of audit history
+        self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", NOW + HOUR))
+
+    def test_alternation_over_three_windows(self):
+        """Work-driving and audit alternate slots, never starving either."""
+        st = {}
+        # Window 1: work-driving fires
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # Window 2: audit gets its turn
+        self.assertTrue(ng.gate_ok(st, "s", "u-freshness", NOW + HOUR))
+        ng.mark_sent(st, "s", "u-freshness", NOW + HOUR)
+        # Window 3: work-driving gets priority again (audit fired last)
+        self.assertFalse(ng.gate_ok(st, "s", "partition-audit",
+                                    NOW + 2 * HOUR))
+        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 2 * HOUR))
+
+    def test_starvation_shape_63_sweeps_red(self):
+        """RED repro of the gk incident: audit claims 3+ consecutive slots,
+        lane-occupancy defers every time."""
+        st = {}
+        # Initial: lane-occupancy was active but audit took over
+        ng.mark_sent(st, "s", "lane-occupancy", NOW - 5 * HOUR)
+        for i in range(3):
+            t = NOW + i * HOUR
+            # Audit claims the slot
+            ng.mark_sent(st, "s", "partition-audit", t)
+        # After 3 hours of audit monopoly, lane-occupancy must be allowed
+        # and audit must defer
+        t_check = NOW + 3 * HOUR
+        self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", t_check))
+        self.assertFalse(ng.gate_ok(st, "s", "partition-audit", t_check))
+
+
 class TestMarkSent(unittest.TestCase):
     def test_mark_sent_records_per_sid_per_category(self):
         st = {}
