@@ -280,12 +280,13 @@ class TestCavemanShimBehavior(TestCase):
 
 
 class TestCavemanShimAccountSegments(TestCase):
-    """End-to-end: the 'sub <D.M.>(<Nd>)' renewal + account-email segments
-    (#223), sourced from ~/.claude.json, rendered through the REAL shim.
-    Every degraded case (no ~/.claude.json, no oauthAccount, unparseable
-    date, stale per-model usage cache) must render the REST of the line and
-    simply omit the affected segment -- never raise, never break the
-    prompt render (the shim's existing contract)."""
+    """End-to-end: the account-email segment (#223), sourced from
+    ~/.claude.json, rendered through the REAL shim. #928 removed the
+    'sub <D.M.>(<Nd>)' renewal anchor — only the email remains.
+    Every degraded case (no ~/.claude.json, no oauthAccount, stale
+    per-model usage cache) must render the REST of the line and simply
+    omit the affected segment -- never raise, never break the prompt
+    render (the shim's existing contract)."""
 
     def _render(self, payload, claude_json=None, usage_cache=None):
         import json as _json
@@ -308,21 +309,16 @@ class TestCavemanShimAccountSegments(TestCase):
             return _subprocess.run(["bash", shim], input=_json.dumps(payload),
                                    capture_output=True, text=True, env=env)
 
-    def test_sub_and_email_render_together_in_order(self):
-        # #313 pt 6: 'sub' moved NEXT TO the email, single space, EMAIL
-        # first ("drlik.marek@gmail.com sub 12.8.(4d)") -- reversed from the
-        # #223-era order (sub mid-footer, email trailing separately).
+    def test_email_renders_without_sub_928(self):
+        # #928: 'sub' is removed — only the email renders in the identity block.
         r = self._render(
             {"workspace": {"current_dir": "/tmp/nowhere"}},
             claude_json={"oauthAccount": {
                 "subscriptionCreatedAt": "2026-01-12T16:34:03.439322Z",
                 "emailAddress": "drlik.marek@gmail.com"}})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("sub ", r.stdout)
+        self.assertNotIn("sub ", r.stdout)
         self.assertIn("drlik.marek@gmail.com", r.stdout)
-        # the email comes BEFORE the sub segment in the rendered line (#313 pt 6)
-        self.assertLess(r.stdout.index("drlik.marek@gmail.com"),
-                        r.stdout.index("sub "))
 
     def test_missing_claude_json_omits_both_but_renders_the_rest(self):
         r = self._render({"rate_limits": {
@@ -340,7 +336,8 @@ class TestCavemanShimAccountSegments(TestCase):
         self.assertNotIn("sub ", r.stdout)
         self.assertNotIn("@", r.stdout)
 
-    def test_unparseable_subscription_created_at_omits_only_sub(self):
+    def test_email_renders_even_without_subscription_created_at_928(self):
+        # #928: sub is removed, so an unparseable date has no effect.
         r = self._render(
             {"rate_limits": {"five_hour": {"used_percentage": 13}}},
             claude_json={"oauthAccount": {
@@ -349,7 +346,7 @@ class TestCavemanShimAccountSegments(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("5h 13%", r.stdout)
         self.assertNotIn("sub ", r.stdout)
-        self.assertIn("drlik.marek@gmail.com", r.stdout)     # email unaffected
+        self.assertIn("drlik.marek@gmail.com", r.stdout)
 
     def test_stale_usage_cache_omits_only_the_per_model_window(self):
         r = self._render(
@@ -363,8 +360,8 @@ class TestCavemanShimAccountSegments(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("5h 13%", r.stdout)
         self.assertNotIn("F 25%", r.stdout)
-        # everything else on the line still renders fine
-        self.assertIn("sub ", r.stdout)
+        # everything else on the line still renders fine (#928: no sub)
+        self.assertNotIn("sub ", r.stdout)
         self.assertIn("drlik.marek@gmail.com", r.stdout)
 
     def test_garbage_claude_json_never_breaks_the_render(self):

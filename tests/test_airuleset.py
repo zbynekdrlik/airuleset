@@ -15606,9 +15606,12 @@ class TestStatuslineVocabularyModule(TestCase):
         # needs-gatekeeper decoration) entirely -- `I N`/`· gk N`/`· skip K`/
         # `Q N` are the ONLY rendered forms left.
         t = self.MODULE.read_text(encoding="utf-8")
-        for phrase in ("`I N`", "`· gk N`", "`· skip K`", "`Q N`",
-                       "sub <D.M.>"):
+        for phrase in ("`I N`", "`· gk N`", "`· skip K`", "`Q N`"):
             self.assertIn(phrase, t, phrase)
+        # #928: sub <D.M.> is removed from the live rendering; the module
+        # still documents the removal so the phrase exists, but it is no
+        # longer a RENDERED form to lock.
+        self.assertIn("#928", t)
 
     def test_module_names_the_backing_caches(self):
         # The session should read the SAME local cache the segment renders

@@ -203,8 +203,8 @@ def colr(pct, lo, hi):  # green below lo, yellow below hi, red at/above hi
     return 40 if pct < lo else (220 if pct < hi else 196)
 # --- usage limits (5h + weekly), high % = near the cap ---
 # (#223 dropped the fill-percentage bar that used to render right here — the
-# context size stays visible via the 'ctx <size> ~$<cost>' segment further
-# down, composed by statusbar.context_cost_segment)
+# context size stays visible via the 'ctx <size>' segment further down,
+# composed by statusbar.context_cost_segment; #928 removed the cost suffix)
 rl = d.get("rate_limits") or {}
 now = time.time()
 def reset(ts):
@@ -297,29 +297,25 @@ try:
     rel = statusbar.release_idle_segment(cwd=cwd)
     if rel:
         segs.append(rel)
-    # --- session context/cost: 'ctx 570K ~$0.57' (2026-07-25, #37; shortened #223) ---
+    # --- session context size: 'ctx 570K' (#37; shortened #223; #928 removed
+    # the '~$<cost>' suffix — owner directive 2026-09-07). ---
     cc_full = statusbar.context_cost_segment(d)
-    cc_short = statusbar.context_cost_segment(d, show_cost=False) if cc_full else ""
+    cc_short = ""   # no short form needed since #928 removed cost
     if cc_full:
         segs.append(cc_full)
-    # --- account identity: email + monthly renewal, combined as ONE
-    # trailing unit (#313 pt 6 -- 'sub' moves NEXT TO the email, single
-    # space, email first: 'drlik.marek@gmail.com sub 12.8.(4d)' -- both are
-    # properties of the SAME oauthAccount, so they belong together instead
-    # of scattered across the line). ---
-    acct = statusbar.account_email_segment()
-    sub = statusbar.subscription_segment()
-    identity = " ".join(p for p in (acct, sub) if p)
+    # --- account identity: email only (#928 removed the 'sub <D.M.>(<Nd>)'
+    # renewal anchor — owner directive 2026-09-07). ---
+    identity = statusbar.account_email_segment()
     # --- caveman's own (already faint-toned) tag, composed in bash above ---
     cm_tag = os.environ.get("CM_TAG") or ""
     # --- width budget (#313 pt 4): fit inside the pane MINUS a reserve for
     # Claude Code's own right-edge indicators (the armed-'/goal' glyph --
     # live evidence: a 176-col row fully consumed truncated it clean off,
     # twice misread as "the goal died"). Trims least-important segments
-    # FIRST -- the account identity block, then the caveman tag, then just
-    # the ctx segment's own '~$<cost>' suffix -- dynamically, before ever
-    # overflowing. An unmeasurable pane width (no TMUX_PANE, tmux missing,
-    # any failure) never trims -- a statusline segment must never guess. ---
+    # FIRST -- the account email, then the caveman tag -- dynamically,
+    # before ever overflowing. An unmeasurable pane width (no TMUX_PANE,
+    # tmux missing, any failure) never trims -- a statusline segment must
+    # never guess. ---
     width = statusbar.pane_width()
     # adversarial review MINOR-3 (round 1: `width` measured as `0` must
     # count as MEASURED, `is not None` not truthiness) + round-2 THEORETICAL
