@@ -155,17 +155,17 @@ def _is_gh_app_token_box():
     `.is_dir()`, never a bare `.exists()` — a stray FILE at this path must
     not be misread as "provisioned".
 
-    Known, accepted residual (adversarial review of #356): a stray or
-    stale App-token directory delivered to an OWN-account (PAT) box —
-    e.g. a misdirected `push-stream-tokens.sh` delivery, or a leftover
-    from an App-token-to-PAT migration — silently NARROWS that box's own
-    slice from 3 quals (assignee ∪ author ∪ label) down to 1 (label
-    alone), dropping any assigned/authored-but-unlabeled ticket from the
-    stop-proof with no refusal (the existing empty-result validators check
-    the LABEL dimension, never the missing assignee/author one). This is
-    an operational-error trigger, not something this local, static check
-    can distinguish from a genuine App-token box — a real App token proves
-    nothing beyond "this directory exists" either."""
+    Known residual (adversarial review of #356, MITIGATED by #918): a
+    stray or stale App-token directory delivered to an OWN-account (PAT)
+    box — e.g. a misdirected ``push-stream-tokens.sh`` delivery, or a
+    leftover from an App-token-to-PAT migration — silently NARROWS that
+    box's own slice from 3 quals (assignee ∪ author ∪ label) down to 1
+    (label alone). #918 mitigated the IDENTITY side: ``_stream_self_
+    login()`` now validates via ``_gh_login()`` and returns the real PAT
+    login when the active auth is a PAT, so own-comment matching and
+    bounce-round derivation are correct even with a stray directory.
+    The slice-narrowing residual (this function still returns True →
+    ``_slice_quals`` takes the label-only branch) remains accepted."""
     try:
         return _gh_app_token_dir().is_dir()
     except OSError:
@@ -1163,9 +1163,26 @@ def _stream_self_login():
 
     Note (#904): GitHub renders ISSUE ``author.login`` as the ``app/``
     form, but COMMENT ``author.login`` as the bare slug. The
-    ``_is_own_login`` helper normalizes both directions."""
+    ``_is_own_login`` helper normalizes both directions.
+
+    #918: a stray App-token directory on a PAT box
+    (``_is_gh_app_token_box()`` true but the active auth is a PAT)
+    made this function return ``STREAM_APP_BOT_LOGIN`` instead of the
+    real PAT login — every own-comment comparison then failed (wrong
+    identity), producing ``_bounce_round()`` = 1 and invisible own
+    comments in ``_issue_comment_ages()``. Fixed by validating the
+    App-token detection: if ``_gh_login()`` succeeds (returns a real
+    login), the box is NOT operating as an App-token box (a genuine
+    App token makes ``gh api user`` 403 → ``_gh_login()`` = None)."""
     import airuleset
     if _is_gh_app_token_box():
+        # Validate: a genuine App-token box has no user identity
+        # (_gh_login() returns None because gh api user 403s).
+        # If _gh_login() succeeds, the dir is stray and the real
+        # PAT login is the correct identity (#918).
+        real_login = airuleset._gh_login()
+        if real_login is not None:
+            return real_login
         return airuleset.STREAM_APP_BOT_LOGIN
     return airuleset._gh_login()
 
@@ -1782,17 +1799,13 @@ def cmd_authority(args):
         return
     if getattr(args, "self_login", False):
         # THIS box's own gh identity for the self-authored-close carve-out
-        # (block-fork-no-merge-issue-close.sh, #463). An App installation token
-        # 403s on `gh api user` structurally, so an App-token box's identity is
-        # the fixed bot login every ticket it FILES carries, resolved WITHOUT a
-        # network call (`gh api user` would only 403 anyway). Every other box
-        # uses its real gh login. Prints nothing (empty) when the login cannot
-        # be resolved -> the hook's fail-safe refuses the exemption (blocks),
-        # never guesses.
-        if _is_gh_app_token_box():
-            print(airuleset.STREAM_APP_BOT_LOGIN)
-            return
-        login = airuleset._gh_login()
+        # (block-fork-no-merge-issue-close.sh, #463). Delegates to
+        # _stream_self_login() which validates App-token-box detection
+        # against the real gh auth (#918 — a stray App-token dir on a
+        # PAT box no longer returns the wrong identity). Prints nothing
+        # (empty) when the login cannot be resolved -> the hook's
+        # fail-safe refuses the exemption (blocks), never guesses.
+        login = _stream_self_login()
         if login:
             print(login)
         return
