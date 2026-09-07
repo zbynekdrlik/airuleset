@@ -167,11 +167,13 @@ class TestPreventionThreshold:
 class TestReviewFindings:
     """Tests for review findings — structural correctness locks."""
 
-    def test_tmp_prefix_in_prefixes(self):
-        """#925 owner ruling: bare 'tmp' prefix IS in TMP_TEST_PREFIXES —
-        observed litter shape on subdev (overrides #920 review finding;
-        safety: uid-owned + age-gated + dir-only)."""
-        assert "tmp" in dg.TMP_TEST_PREFIXES
+    def test_tmp_prefix_not_in_prefixes(self):
+        """The bare 'tmp' prefix must NOT be in TMP_TEST_PREFIXES — it lacks
+        the live-use gate the tmp-stray rung has (#920 review finding; #925
+        review F2 confirmed: the stray rung at cli_scratch_sweep.py covers
+        tmp* with _scan_live_tmp_tops, so adding it here pre-empts the safe
+        rung with no gate)."""
+        assert "tmp" not in dg.TMP_TEST_PREFIXES
 
     def test_runner_diag_in_sudo_classes(self):
         """runner-diag must be in SUDO_CLASSES — gh-runner home is a foreign

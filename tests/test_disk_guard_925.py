@@ -31,8 +31,11 @@ class TestExtendedTmpTestPrefixes(unittest.TestCase):
     def test_npmcache_prefix_present(self):
         self.assertIn("npmcache-", dg.TMP_TEST_PREFIXES)
 
-    def test_tmp_prefix_present(self):
-        self.assertIn("tmp", dg.TMP_TEST_PREFIXES)
+    def test_tmp_prefix_not_present(self):
+        """#925 review F2: bare 'tmp' must NOT be in TMP_TEST_PREFIXES —
+        the tmp-stray rung (cli_scratch_sweep) covers tmp* WITH a live-use
+        gate; adding it here pre-empts the safe rung."""
+        self.assertNotIn("tmp", dg.TMP_TEST_PREFIXES)
 
     def test_jest_prefix_still_present(self):
         self.assertIn("jest_", dg.TMP_TEST_PREFIXES)
@@ -58,7 +61,9 @@ class TestTmpTestDiscoveryNpmcache(unittest.TestCase):
                 any("npmcache-abc" in r["path"] for r in candidates),
                 "npmcache-abc should be a genuine candidate")
 
-    def test_finds_old_tmp_dir(self):
+    def test_tmp_dir_not_discovered_by_tmp_test_rung(self):
+        """#925 review F2: bare tmp* dirs are covered by the stray rung
+        (with live-use gate), NOT by the tmp-test rung."""
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             td = os.path.join(tmp, "tmpXXXlonger")
@@ -68,9 +73,9 @@ class TestTmpTestDiscoveryNpmcache(unittest.TestCase):
                 tmp_dir=tmp, now=time.time(), min_age_days=1,
                 uid=os.getuid())
             candidates = [r for r in rows if r.get("reason") is None]
-            self.assertTrue(
+            self.assertFalse(
                 any("tmpXXXlonger" in r["path"] for r in candidates),
-                "tmpXXXlonger should be a genuine candidate")
+                "tmpXXXlonger should NOT be found by tmp-test rung (stray rung owns it)")
 
 
 class TestSharedStreamTmpTestAge(unittest.TestCase):
