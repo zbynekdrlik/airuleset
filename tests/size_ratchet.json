@@ -597,7 +597,7 @@
     "watchdog/compact.py::deliver_compact": 321,
     "watchdog/cross_stream.py::gk_request_backstop": 240,
     "watchdog/discord_replies.py::deliver_discord_replies": 499,
-    "watchdog/disk_guard.py::run_disk_guard": 275,
+    "watchdog/disk_guard.py::run_disk_guard": 276,
     "watchdog/goal.py::deliver_goal": 341,
     "watchdog/goal.py::goal_dark_watch": 555,
     "watchdog/goal.py::goal_lane_occupancy_nudge": 436,

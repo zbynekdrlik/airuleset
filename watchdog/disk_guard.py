@@ -2263,8 +2263,15 @@ def _plan_worktrees(home, now):
                             "kind": "skip", "reason": reason})
             continue
         kind = "worktree-remove" if r.get("kind") == "worktree" else "delete"
+        # #939: carry dirty+reachable_via for decision-log (reason stays None = reclaimable)
+        info = ""
+        if r.get("reachable_via"):
+            info = "reachable via %s" % r["reachable_via"]
+            if r.get("dirty"):
+                info += ", dirty tree discarded"
         actions.append({"cls": "worktree", "path": path, "bytes": size, "kind": kind,
-                        "reason": None, "branch": r.get("branch"), "repo": r.get("repo")})
+                        "reason": None, "branch": r.get("branch"), "repo": r.get("repo"),
+                        "info": info or None})
     return actions
 
 
@@ -2511,11 +2518,13 @@ def _remove_worktree_dir(a):
     #939: uses `--force` because the planner now classifies dirty-but-reachable
     worktrees as reclaimable (HEAD preserved on origin, only scratch/temp files
     lost). A git refusal is a SKIP (raise → logged FAIL), NEVER a raw `rm -rf`
-    (review 🔴). No clean-tree TOCTOU re-check — the planner verified
-    reachability, which is the correct safety invariant."""
+    (review 🔴). TOCTOU re-check: live-use (a `claude --resume` that cd'd in
+    between plan and act, #939 Fable review F5)."""
     repo, path = a.get("repo"), a.get("path")
     if not repo:
         raise OSError("worktree-remove with no repo for %s" % path)
+    if _target_in_live_use_pw(path):
+        raise OSError("worktree %s now in live use at remove time — SKIP" % path)
     r = subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", "--", path],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
@@ -2580,20 +2589,6 @@ def _remove_home_worktree_dir(a, run_fn=None):
                capture_output=True, text=True, timeout=60)
     except Exception as e:
         _dbg("home-worktree prune failed for %s: %r" % (repo, e))
-
-
-def _worktree_status_clean_recheck(path):
-    """True only when `git status --porcelain` in `path` is empty NOW; False if
-    it reports changes; None if unmeasurable. A pre-delete TOCTOU guard using
-    the SAME check the planner used (review 🟡)."""
-    try:
-        r = subprocess.run(["git", "-C", path, "status", "--porcelain"],
-                           capture_output=True, text=True, timeout=30)
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    return r.stdout.strip() == ""
 
 
 def _sudo_available(probe_fn=None):
@@ -3336,12 +3331,16 @@ def _largest_live_scratch(rows):
 
 def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
                          statvfs_fn=None, dev_fn=None, mounts=None,
-                         geteuid_fn=None):
+                         geteuid_fn=None, target_pct=None):
     """#920: extracted prevention helper — runs the cheapest age-out rungs
     at 70-79% pressure. Uses ``PREVENTION_PCT`` as the stop target (not
     ``TARGET_PCT=75``) so the ladder engages at 70-74%. Does NOT stamp
     ``last-drain`` (the full drain's cadence marker) — the prevention pass
-    must never delay the real >=80% drain (#920 review finding)."""
+    must never delay the real >=80% drain (#920 review finding).
+    #939: ``target_pct=0`` for proactive worktree sweep on shared-stream boxes
+    at <70% — execute_drain's under-target STOP is bypassed (worst always >=0)."""
+    if target_pct is None:
+        target_pct = PREVENTION_PCT
     logs = []
     lock = _acquire_lock(home)
     if lock is None:
@@ -3359,7 +3358,7 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
         logs += execute_drain(status, home, prev_planners, prev_recheck,
                               do_action, geteuid_fn=geteuid_fn,
                               log_path=_log_path(home), now=now, dry_run=dry_run,
-                              target_pct=PREVENTION_PCT)
+                              target_pct=target_pct)
         # NOTE: intentionally NOT calling _mark_drained here — the prevention
         # pass has its own cadence check in run_disk_guard via _drain_due, and
         # stamping here would delay the real >=80% drain.
@@ -3492,10 +3491,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     except Exception as e:
         logs.append("disk-guard: cache write failed: %r" % e)
     # #920: prevention pass at 70-79%
-    # #939: on shared-stream boxes, the prevention pass fires at ANY pressure
-    # level (not just >=70%) so worktree cleanup runs proactively on the hourly
-    # cadence, preventing the 55-worktree / 20G accumulation that hits >=90%.
+    # #939: on shared-stream boxes, fire at ANY pressure level with target_pct=0
+    # (execute_drain's under-target STOP never fires when target=0) so worktree
+    # cleanup runs proactively on the hourly cadence.
     _prev_threshold = 0 if _is_shared else PREVENTION_PCT
+    _prev_target = 0 if _is_shared and status["worst_pct"] < PREVENTION_PCT else None
     if (status["level"] in ("ok", "notice")
             and status["worst_pct"] >= _prev_threshold
             and not is_root
@@ -3505,7 +3505,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         logs += _run_prevention_pass(
             status, home, now, dry_run, scratch_rows,
             statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts,
-            geteuid_fn=geteuid_fn)
+            geteuid_fn=geteuid_fn, target_pct=_prev_target)
         return logs
     if status["level"] in ("ok", "notice"):
         return logs
