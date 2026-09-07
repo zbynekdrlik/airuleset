@@ -70,6 +70,7 @@ from pathlib import Path
 
 # --- thresholds (#834 req 1) ------------------------------------------------ #
 NOTICE_PCT = 75            # footer NOTICE band (footer render itself narrowed to >=90% by #854)
+PREVENTION_PCT = 70        # #920: cheapest age-out rungs fire from here (prevention, not just drain)
 DRAIN_PCT = 80             # AUTO-DRAIN at/above this
 CRITICAL_PCT = 90          # machine-channel escalation at/above this (red footer)
 DISK_CRITICAL_PCT = 95     # #854: at/above this the drain runs EVERY poll (cadence gate bypassed)
@@ -102,6 +103,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "playwright-browser",
     # #906 — cross-user stale worktrees under /home/*/devel/:
     "home-worktree",
+    # #920 — test runner /tmp leftovers, runner _diag logs, npm/uv cache:
+    "tmp-test", "runner-diag", "npm-uv-cache",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -114,7 +117,9 @@ SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-c
                           "runner-superseded",
                           # #906 — cross-user worktrees need `sudo -u <owner>` for
                           # git operations and removal.
-                          "home-worktree"})
+                          "home-worktree",
+                          # #920 — runner _diag logs are under gh-runner's home
+                          "runner-diag"})
 
 DISK_GUARD_DIRNAME = "disk-guard"
 STATUS_CACHE_NAME = "status.json"
@@ -179,6 +184,14 @@ CLAUDE_METADATA_MIN_AGE_DAYS = 7
 # #906 — cross-user stale worktrees under /home/*/devel/**/.claude/worktrees/
 HOME_WORKTREE_GLOB = "/home/*"
 HOME_WORKTREE_MIN_AGE_S = 24 * 3600       # mtime > 24h (protects fresh lanes)
+
+# #920 — test runner /tmp leftovers (jest, pytest, generic tmp* dirs)
+TMP_TEST_MIN_AGE_DAYS = 1
+TMP_TEST_PREFIXES = ("jest_", "pytest-of-")
+# #920 — runner _diag logs (diagnostic, safe to age out)
+RUNNER_DIAG_MIN_AGE_DAYS = 2
+# #920 — npm _cacache + uv cache (regenerated on demand)
+NPM_CACACHE_SUBDIR = os.path.join(".npm", "_cacache")
 
 
 def _dbg(msg):
@@ -1862,6 +1875,128 @@ def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
 
 
 # --------------------------------------------------------------------------- #
+# #920 — test-runner /tmp leftovers, runner _diag logs, npm/uv cache
+# --------------------------------------------------------------------------- #
+def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
+                                 min_age_days=TMP_TEST_MIN_AGE_DAYS,
+                                 uid=None, dir_stats_fn=None):
+    """#920: stale test-runner leftovers in /tmp — ``jest_*``, ``pytest-of-*``,
+    and generic ``tmp*`` dirs owned by THIS uid, older than ``min_age_days``.
+    UID-ownership check prevents a shared-box user from reclaiming a sibling's
+    test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``."""
+    now = time.time() if now is None else now
+    uid = os.getuid() if uid is None else uid
+    cutoff = min_age_days * 86400
+    out = []
+    d = Path(tmp_dir)
+    if not d.is_dir():
+        return out
+    try:
+        for entry in d.iterdir():
+            name = entry.name
+            if not any(name.startswith(pfx) for pfx in TMP_TEST_PREFIXES):
+                continue
+            if not entry.is_dir() or entry.is_symlink():
+                continue
+            try:
+                st = os.lstat(str(entry))
+            except OSError as e:
+                out.append({"cls": "tmp-test", "path": str(entry), "bytes": 0,
+                            "reason": "could not stat: %s" % e})
+                continue
+            if st.st_uid != uid:
+                continue  # foreign user — not ours to reclaim
+            age = now - st.st_mtime
+            size = _safe_dir_size(str(entry), dir_stats_fn) if age >= cutoff else 0
+            row = {"cls": "tmp-test", "path": str(entry), "bytes": size,
+                   "reason": None}
+            if age < cutoff:
+                row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, min_age_days)
+            out.append(row)
+    except OSError as e:
+        return [{"cls": "tmp-test", "path": None,
+                 "reason": "could not walk %s: %s" % (tmp_dir, e)}]
+    return out
+
+
+def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
+                              min_age_days=RUNNER_DIAG_MIN_AGE_DAYS,
+                              pgrep_fn=None, dir_stats_fn=None):
+    """#920: runner ``_work/_diag`` diagnostic logs older than ``min_age_days``.
+    These are diagnostic output logs the runner writes per-job — safe to age
+    out. SKIPPED ENTIRELY when ANY ``Runner.Worker`` process is live (a job
+    may be writing to ``_diag`` right now). Returns individual LOG FILES as
+    candidates (not the whole ``_diag`` dir) so the guard can reclaim selectively.
+    Rows ``{cls:"runner-diag", path, bytes, reason}``."""
+    now = time.time() if now is None else now
+    root = Path(runner_root)
+    if not root.is_dir():
+        return []
+    pgrep_fn = pgrep_fn or _default_pgrep_any
+    try:
+        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
+    except Exception as e:
+        _dbg("runner-diag pgrep failed: %r" % e)
+        live = "PGREP-ERROR"
+    if live.strip():
+        return [{"cls": "runner-diag", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "Runner.Worker live — _diag may be written, kept"}]
+    cutoff = min_age_days * 86400
+    out = []
+    try:
+        for rd in sorted(root.glob("actions-runner*")):
+            diag = rd / "_work" / "_diag"
+            if not diag.is_dir() or diag.is_symlink():
+                continue
+            try:
+                for logfile in sorted(diag.iterdir()):
+                    if logfile.is_symlink() or not logfile.is_file():
+                        continue
+                    try:
+                        st = os.lstat(str(logfile))
+                    except OSError as e:
+                        out.append({"cls": "runner-diag", "path": str(logfile),
+                                    "bytes": 0, "reason": "could not stat: %s" % e})
+                        continue
+                    age = now - st.st_mtime
+                    row = {"cls": "runner-diag", "path": str(logfile),
+                           "bytes": st.st_size, "reason": None}
+                    if age < cutoff:
+                        row["reason"] = ("too recent (%.1fd < %dd)"
+                                         % (age / 86400.0, min_age_days))
+                    out.append(row)
+            except OSError as e:
+                out.append({"cls": "runner-diag", "path": str(diag),
+                            "bytes": 0, "reason": "could not walk: %s" % e})
+    except OSError as e:
+        return [{"cls": "runner-diag", "path": None,
+                 "reason": "could not walk %s: %s" % (runner_root, e)}]
+    return out
+
+
+def discover_npm_uv_cache(home=None, dir_stats_fn=None):
+    """#920: npm ``~/.npm/_cacache`` (pure download cache, regenerated on demand)
+    and the ``uv`` tool cache (pruned via ``uv cache prune``). Returns rows
+    ``{cls:"npm-uv-cache", path, bytes, kind, reason}``. The npm _cacache is
+    a ``delete`` (rm -rf); the uv cache is a ``uv-cache-prune`` action kind
+    executed in ``_perform_action``."""
+    home = home or os.path.expanduser("~")
+    out = []
+    cacache = Path(home) / NPM_CACACHE_SUBDIR
+    if cacache.is_dir() and not cacache.is_symlink():
+        size = _safe_dir_size(str(cacache), dir_stats_fn)
+        if size > 0:
+            out.append({"cls": "npm-uv-cache", "path": str(cacache),
+                        "bytes": size, "kind": "delete", "reason": None})
+    # uv cache prune — only when uv is installed
+    import shutil
+    if shutil.which("uv"):
+        out.append({"cls": "npm-uv-cache", "path": "uv cache prune",
+                    "bytes": 0, "kind": "uv-cache-prune", "reason": None})
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # rung PLANNERS (adapters over the existing per-class discovery functions)
 # --------------------------------------------------------------------------- #
 def _row_to_action(cls, row, kind):
@@ -2047,6 +2182,24 @@ def _plan_home_worktrees(home, now):
                  "reason": "home-worktree discovery error: %r" % e}]
 
 
+def _plan_tmp_test(home, now):
+    """#920 — test-runner /tmp leftovers (jest, pytest, generic tmp*)."""
+    return [_norm_action("tmp-test", r, "delete")
+            for r in discover_stale_tmp_test_dirs(now=now)]
+
+
+def _plan_runner_diag(home, now):
+    """#920 — runner _diag diagnostic logs."""
+    return [_norm_action("runner-diag", r, "delete")
+            for r in discover_runner_diag_logs(now=now)]
+
+
+def _plan_npm_uv_cache(home, now):
+    """#920 — npm _cacache + uv cache prune."""
+    return [_norm_action("npm-uv-cache", r, "delete")
+            for r in discover_npm_uv_cache(home=home)]
+
+
 def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
@@ -2055,6 +2208,10 @@ def _default_planners(home, now, scratch_rows=None):
     transcripts-gzip stays LAST (the most conservative reclaim). Docker + stale
     runner checkouts are Runner.Worker-gated inside their planners."""
     return [
+        # #920 — cheapest/safest first: test-runner /tmp + runner diag + npm/uv cache
+        ("tmp-test", lambda: _plan_tmp_test(home, now)),
+        ("runner-diag", lambda: _plan_runner_diag(home, now)),
+        ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
         ("apt-cache", lambda: _plan_apt_cache(home, now)),
         ("rotated-log", lambda: _plan_rotated_logs(home, now)),
         ("runner-update", lambda: _plan_runner_update(home, now)),
@@ -2074,6 +2231,20 @@ def _default_planners(home, now, scratch_rows=None):
         ("worktree", lambda: _plan_worktrees(home, now)),
         ("toolchain", lambda: _plan_toolchain(home, now)),
         ("transcript", lambda: _plan_transcripts(home, now)),
+    ]
+
+
+def _prevention_planners(home, now, scratch_rows=None):
+    """#920 — cheapest/safest rungs ONLY, for the PREVENTION pass at 70-79%.
+    These are age-out operations on genuinely disposable content (test
+    runner tmp dirs, scratch age-out, one-off venvs, npm/uv cache) — nothing
+    box-wide, nothing that needs sudo. The scratch rung has its own session
+    liveness gate internally (#863)."""
+    return [
+        ("tmp-test", lambda: _plan_tmp_test(home, now)),
+        ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
+        ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
+        ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
     ]
 
 
@@ -2254,6 +2425,10 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         cmd = (["sudo", "-n"] if use_sudo else []) + ["apt-get", "clean"]
         run_fn(cmd, check=True, capture_output=True, text=True, timeout=120)
         return nbytes
+    if kind == "uv-cache-prune":             # #920 — `uv cache prune` (per-account)
+        run_fn(["uv", "cache", "prune"],
+               check=True, capture_output=True, text=True, timeout=120)
+        return nbytes
     if kind == "docker-rmi":                # #854 rung (d) — `path` is the image id (docker group, no sudo)
         run_fn(["docker", "rmi", path],
                check=True, capture_output=True, text=True, timeout=120)
@@ -2290,14 +2465,18 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
 
 
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
-                  geteuid_fn=None, log_path=None, now=None, dry_run=False):
+                  geteuid_fn=None, log_path=None, now=None, dry_run=False,
+                  target_pct=None):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
-    it is back under :data:`TARGET_PCT`. Every action AND skip is logged; a
-    class outside :data:`RECLAIMABLE_CLASSES` is skip-fenced, never acted on.
-    Under `dry_run` the action verbs are tagged `WOULD-…` so the audit log never
-    records a deletion that did not happen (review 🟡). Returns the log lines
-    (also appended to `log_path`)."""
+    it is back under ``target_pct`` (default :data:`TARGET_PCT`). Every action
+    AND skip is logged; a class outside :data:`RECLAIMABLE_CLASSES` is
+    skip-fenced, never acted on. Under `dry_run` the action verbs are tagged
+    `WOULD-…` so the audit log never records a deletion that did not happen
+    (review 🟡). #920: ``target_pct`` is parametrized so the prevention pass
+    can stop at ``PREVENTION_PCT`` instead of ``TARGET_PCT``. Returns the log
+    lines (also appended to `log_path`)."""
+    target_pct = TARGET_PCT if target_pct is None else target_pct
     geteuid_fn = geteuid_fn or os.geteuid
     now = time.time() if now is None else now
     logs = []
@@ -2329,10 +2508,10 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         if pending is not None:
             _emit_summary(pending, worst)
             pending = None
-        if worst < TARGET_PCT:
+        if worst < target_pct:
             line = _log_line(now, "STOP", "-", 0,
                              "worst mount %d%% < target %d%% (dim=%s) — drain complete"
-                             % (worst, TARGET_PCT, dim))
+                             % (worst, target_pct, dim))
             logs.append(line)
             _append_log(log_path, [line])
             break
@@ -2442,7 +2621,11 @@ def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
                         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
                         ("claude-version", lambda: _plan_claude_versions(home, now)),
                         ("playwright-browser", lambda: _plan_playwright_browsers(home, now)),
-                        ("user-cache", lambda: _plan_user_cache(home, now))):
+                        ("user-cache", lambda: _plan_user_cache(home, now)),
+                        # #920 — include new rung classes in top-consumers
+                        ("tmp-test", lambda: _plan_tmp_test(home, now)),
+                        ("runner-diag", lambda: _plan_runner_diag(home, now)),
+                        ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now))):
         try:
             all_actions.extend(plan())
         except Exception as e:
@@ -2741,6 +2924,40 @@ def _largest_live_scratch(rows):
     return best
 
 
+def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
+                         statvfs_fn=None, dev_fn=None, mounts=None,
+                         geteuid_fn=None):
+    """#920: extracted prevention helper — runs the cheapest age-out rungs
+    at 70-79% pressure. Uses ``PREVENTION_PCT`` as the stop target (not
+    ``TARGET_PCT=75``) so the ladder engages at 70-74%. Does NOT stamp
+    ``last-drain`` (the full drain's cadence marker) — the prevention pass
+    must never delay the real >=80% drain (#920 review finding)."""
+    logs = []
+    lock = _acquire_lock(home)
+    if lock is None:
+        return logs
+    if lock is _LOCK_UNAVAILABLE:
+        logs.append("disk-guard: prevention lock uncreatable — draining lockless")
+    try:
+        prev_planners = _prevention_planners(home, now, scratch_rows=scratch_rows)
+
+        def prev_recheck():
+            return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
+                               mounts=mounts or MOUNTS, now=now)["worst_pct"]
+
+        do_action = _make_do_action(dry_run, sudo_ok=False, run_fn=None, now=now)
+        logs += execute_drain(status, home, prev_planners, prev_recheck,
+                              do_action, geteuid_fn=geteuid_fn,
+                              log_path=_log_path(home), now=now, dry_run=dry_run,
+                              target_pct=PREVENTION_PCT)
+        # NOTE: intentionally NOT calling _mark_drained here — the prevention
+        # pass has its own cadence check in run_disk_guard via _drain_due, and
+        # stamping here would delay the real >=80% drain.
+    finally:
+        _release_lock(lock)
+    return logs
+
+
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
@@ -2830,6 +3047,18 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         write_status_cache(status, home=home)
     except Exception as e:
         logs.append("disk-guard: cache write failed: %r" % e)
+    # #920: prevention pass at 70-79%
+    if (status["level"] in ("ok", "notice")
+            and status["worst_pct"] >= PREVENTION_PCT
+            and not is_root
+            and _cadence_allows_drain(status["worst_pct"],
+                                      _drain_due(home, now, effective_interval),
+                                      dry_run=dry_run)):
+        logs += _run_prevention_pass(
+            status, home, now, dry_run, scratch_rows,
+            statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts,
+            geteuid_fn=geteuid_fn)
+        return logs
     if status["level"] in ("ok", "notice"):
         return logs
     if is_root:
