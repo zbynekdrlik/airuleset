@@ -489,9 +489,6 @@ class TestPostCutover870(unittest.TestCase):
                 expanded.parent.mkdir(parents=True, exist_ok=True)
                 if priv.kind == p.KIND_SSH_KEY:
                     _gen_ed25519(expanded)
-                elif priv.kind == p.KIND_STORE and priv.local_path.endswith("/"):
-                    expanded.mkdir(parents=True, exist_ok=True)
-                    os.chmod(expanded, 0o700)
                 elif priv.kind == p.KIND_STORE:
                     expanded.mkdir(parents=True, exist_ok=True)
                     os.chmod(expanded, 0o700)

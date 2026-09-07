@@ -820,6 +820,11 @@ def build_report(home: Optional[Path] = None, *,
     wrong_mode = [e for e in entries if e.get("wrong_mode")]
 
     # Post-cutover gate (#870 F1): absent must_move credentials are findings.
+    # The ``local_path`` guard is a defensive double-check: entries without a
+    # local_path (HOP, PASSWORD, SUDO) are always ``present=True`` via
+    # ``probe_entry`` (line ~600), so the filter is a no-op for them — kept
+    # explicitly so the gate never fires on a derived-reach entry that has
+    # no file to be "absent".
     absent_must_move: List[dict] = []
     if post_cutover:
         absent_must_move = [
