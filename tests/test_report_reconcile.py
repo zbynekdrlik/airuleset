@@ -195,7 +195,9 @@ class ReportReconcileNudge(unittest.TestCase):
         pane_id, text, tpath = vs.calls[0]
         self.assertEqual("%42", pane_id)
         self.assertIn("#41", text)
-        self.assertIn("compact-request --self", text)
+        self.assertIn("compact", text)
+        self.assertNotIn("compact-request --self", text,
+                         "#940: stale compact-request text must be removed")
         # marked nudged so it never fires again
         self.assertIn("41", state["report_owed"][SUP_ROOT]["nudged"])
 

@@ -15506,10 +15506,12 @@ class TestCompletionReportClientAppArtifacts(TestCase):
         self.assertIn("search the transcript for an artifact URL", t)
         self.assertIn("REPEAT it in the report", t)
 
-    def test_template_carries_demo_and_apk_example_lines(self):
+    def test_template_carries_demo_and_apk_requirements(self):
+        # #940: compact template uses generic `🌐 <url>`, the Demo/APK
+        # requirement is in the hard rules, not the template itself.
         t = self._combined()
-        self.assertIn("\U0001F310 Demo: <url>", t)
-        self.assertIn("\U0001F4F1 APK:  <url>", t)
+        self.assertIn("\U0001F310 Demo:", t)  # hard rules name the Demo shape
+        self.assertIn("APK/IPA/signed binary", t)  # the APK class
 
     def test_reserves_apk_marker_exclusively_like_globe(self):
         t = self._combined()
