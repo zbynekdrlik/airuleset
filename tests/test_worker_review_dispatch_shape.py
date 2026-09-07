@@ -47,8 +47,8 @@ COMPLETION_REPORT_DEEP = ROOT / "skills" / "completion-report-deep" / "DEEP.md"
 # test_design_gate.py, test_airuleset.py) -- this fix must NEVER touch them,
 # it only clarifies the DISPATCH MECHANISM that satisfies them.
 LOCKED_AUDIT_LINES = (
-    "✅ /review: clean — 0 🔴 0 🟡 0 🔵",
-    "✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵",
+    "/review: 0 🔴 0 🟡 0 🔵",
+    "/requesting-code-review: 0 🔴 0 🟡 0 🔵",
 )
 
 # The literal invocation shape that must never be recommended anywhere in
@@ -183,7 +183,7 @@ class TestAutopilotSkillDoesNotImplyLiteralSkillReruns(unittest.TestCase):
                        "must point at #363's dispatch-shape guidance")
 
     def test_round_completion_relay_note_points_at_363(self):
-        marker = "never re-running the"
+        marker = "you never re-run plan-check or review yourself"
         self.assertIn(marker, self.text,
                        "expected the round-completion relay sentence to "
                        "still exist near the audit lines")
