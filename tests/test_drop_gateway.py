@@ -239,7 +239,9 @@ class TestRestartArgv(unittest.TestCase):
         self.assertIn("spinbike-tunnel.service", argv)
 
     def test_user_unit_uses_user_flag(self):
-        argv = dg._restart_argv(dg.drop_lane_for_account("subdev", "david1"))
+        # #931: use marek (local-topology, --user unit) — david1 is now
+        # controller-topology (no local tunnel_service).
+        argv = dg._restart_argv(dg.drop_lane_for_account("subdev", "marek"))
         self.assertNotIn("sudo", argv)
         self.assertEqual(argv[:2], ["systemctl", "--user"])
 
@@ -255,12 +257,14 @@ class TestRestartEnv(unittest.TestCase):
     def test_user_unit_env_carries_the_user_bus(self):
         import unittest.mock as m
         uid = os.getuid()
+        # #931: use marek (local-topology, --user unit) — david1 is now
+        # controller-topology (no local tunnel_service).
         # Clear any ambient values so we exercise the deterministic fallback a
         # non-login ssh install session actually gets (both genuinely unset there).
         with m.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("XDG_RUNTIME_DIR", None)
             os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
-            env = dg._restart_env(dg.drop_lane_for_account("subdev", "david1"))
+            env = dg._restart_env(dg.drop_lane_for_account("subdev", "marek"))
         self.assertIsNotNone(env, "a --user restart MUST carry an explicit env")
         self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/%d" % uid)
         self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
@@ -276,7 +280,7 @@ class TestRestartEnv(unittest.TestCase):
         with m.patch.dict(os.environ,
                           {"XDG_RUNTIME_DIR": "/run/user/4242"}, clear=False):
             os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
-            env = dg._restart_env(dg.drop_lane_for_account("subdev", "david1"))
+            env = dg._restart_env(dg.drop_lane_for_account("subdev", "marek"))
         self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/4242")
         self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"),
                          "unix:path=/run/user/4242/bus")
@@ -366,13 +370,16 @@ class TestSecretPublicLaneHelper(unittest.TestCase):
     def test_account_with_live_marker_uses_public(self):
         from unittest import mock
         # #889: public is the default — no tailscale check needed.
+        # #931: _secret_public_lane now returns (host, port, bind_ip).
         dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
         lane = dg.drop_lane_for_account("subdev", "david1")
         with mock.patch.object(dg, "drop_lane_for_account", return_value=lane), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
-            host, port = self.cli_vault._secret_public_lane(
+            host, port, bind_ip = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
         self.assertEqual((host, port), ("drop-david.newlevel.media", 8870))
+        # Controller-topology → bind_ip is the tailscale IP, not loopback.
+        self.assertEqual(bind_ip, "100.118.174.27")
 
     def test_account_without_marker_returns_none(self):
         from unittest import mock
@@ -380,15 +387,15 @@ class TestSecretPublicLaneHelper(unittest.TestCase):
         with mock.patch.object(dg, "drop_lane_for_account",
                                return_value=dg.drop_lane_for_account("subdev", "david1")), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
-            host, port = self.cli_vault._secret_public_lane(
+            host, port, bind_ip = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
         self.assertIsNone(host)
 
 
 class TestUploadPublicLaneEndToEnd(unittest.TestCase):
-    """Full round-trip (#664): with a live drop lane, `cmd_upload` binds loopback
-    on the drop port and advertises ONE public HTTPS URL — never the un-routable
-    loopback address, never an scp/ssh -L ask."""
+    """Full round-trip (#664/#931): with a live drop lane, `cmd_upload` binds on
+    the lane's origin IP at the drop port and advertises ONE public HTTPS URL —
+    never the un-routable loopback address, never an scp/ssh -L ask."""
 
     def test_cmd_upload_public_lane(self):
         import airuleset
@@ -398,8 +405,10 @@ class TestUploadPublicLaneEndToEnd(unittest.TestCase):
         from unittest import mock
         port = _free_port()          # ephemeral so parallel runs never collide
         dest = tempfile.mkdtemp()
-        with mock.patch.object(dg, "resolve_public_lane",
-                               return_value=("drop-david.newlevel.media", port)):
+        # #931: cmd_upload now calls resolve_public_lane_full (3-tuple).
+        with mock.patch.object(dg, "resolve_public_lane_full",
+                               return_value=("drop-david.newlevel.media",
+                                             port, "127.0.0.1")):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_upload(types.SimpleNamespace(
@@ -623,29 +632,33 @@ class TestReconcileRestartCarriesUserBusEnv(unittest.TestCase):
     """#826: the restart INSIDE reconcile_drop_ingress_on_install must pass the
     user-bus env to `run` for a --user lane — the exact call that failed 'No
     medium found' on david1@subdev over a non-login ssh install (bare
-    subprocess.run with no env)."""
+    subprocess.run with no env).
+
+    #931: david1 is now controller topology (no local tunnel config), so this
+    test uses the marek lane (still local topology, --user unit on subdev)."""
 
     def setUp(self):
         import tempfile
         self.tmp = tempfile.mkdtemp()
         self.cfg = os.path.join(self.tmp, "config.yml")
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
-        # A david-shaped config (subdev lane uuid, --user unit) WITHOUT the drop
+        # A marek-shaped config (subdev lane uuid, --user unit) WITHOUT the drop
         # ingress, but the marker says the lane already went live → reconcile
         # re-adds the ingress and restarts.
         Path(self.cfg).write_text(
-            "tunnel: 1564fe31-a95f-4053-93d4-baff2b8a6e97\n"
-            "credentials-file: /home/david1/.cloudflared/x.json\n\n"
+            "tunnel: 1e9555d1-4d19-4e86-8064-361506fbc2cd\n"
+            "credentials-file: /home/marek/.cloudflared/x.json\n\n"
             "ingress:\n"
-            "  - hostname: david.newlevel.media\n"
-            "    service: http://127.0.0.1:8081\n"
+            "  - hostname: marek.newlevel.media\n"
+            "    service: http://127.0.0.1:8082\n"
             "  - service: http_status:404\n", encoding="utf-8")
-        self._orig = dg.DROP_LANES[("subdev", "david1")].tunnel_config
-        dg.DROP_LANES[("subdev", "david1")].tunnel_config = Path(self.cfg)
-        dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
+        self._orig = dg.DROP_LANES[("subdev", "marek")].tunnel_config
+        dg.DROP_LANES[("subdev", "marek")].tunnel_config = Path(self.cfg)
+        dg.write_drop_marker("drop-subdev-marek.newlevel.media", 8874,
+                             path=self.marker)
 
     def tearDown(self):
-        dg.DROP_LANES[("subdev", "david1")].tunnel_config = self._orig
+        dg.DROP_LANES[("subdev", "marek")].tunnel_config = self._orig
 
     def test_user_lane_restart_receives_env_with_the_bus(self):
         captured = {}
@@ -655,10 +668,9 @@ class TestReconcileRestartCarriesUserBusEnv(unittest.TestCase):
             captured["kw"] = kw
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        # #838: pin the GATEWAY account (david1) so the shape-(b) restart runs —
-        # a sibling account would (correctly) divert to a benign no-op before it.
+        # marek is the gateway account for its own tunnel (no sibling divert).
         dg.reconcile_drop_ingress_on_install(
-            run=r, nodename="subdev", marker_path=self.marker, username="david1")
+            run=r, nodename="subdev", marker_path=self.marker, username="marek")
         self.assertEqual(captured["argv"][:2], ["systemctl", "--user"])
         env = captured["kw"].get("env")
         self.assertIsNotNone(env, "the --user restart MUST carry an env (#826)")
@@ -679,29 +691,30 @@ DAVID_CONFIG_NO_DROP = (
 
 
 class TestReconcileSiblingAccount838(unittest.TestCase):
-    """#838: on subdev, DROP_LANES is nodename-keyed, so BOTH the gateway account
-    david1 (which OWNS the tunnel config + --user unit) AND a SIBLING account
-    david2 (marker seeded per the #786 runbook, but no own ~/.cloudflared/config.yml)
-    resolve to the SAME subdev lane. Before this fix, the sibling's absent config
-    raised OSError → reconcile returned False → cmd_install latched install_failed
-    → `DEPLOY FAILED david2@subdev: rc=1` on EVERY release push. A sibling account
-    of a shared drop tunnel has nothing to re-assert (the gateway account's own
-    install pass heals the ingress), so it must be a benign no-op — while #826's
-    loud failure STAYS on the account that actually OWNS the tunnel (david1)."""
+    """#838: on subdev, the sibling-account reconcile divert. Originally tested
+    with david1/david2 (local-topology, shared tunnel). Since #931, david lanes
+    are controller-topology (the controller-topology branch in reconcile returns
+    True before reaching the sibling/gateway check), so the LOCAL-topology
+    sibling behavior is now tested on an EXPLICITLY LOCAL-TOPOLOGY fixture.
+
+    The controller-topology sibling tests live in
+    test_drop_gateway_controller_931.py."""
 
     def setUp(self):
         import tempfile
         self.tmp = tempfile.mkdtemp()
         self.cfg = os.path.join(self.tmp, "config.yml")
         self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
-        self._orig = dg.DROP_LANES[("subdev", "david1")].tunnel_config
-        dg.DROP_LANES[("subdev", "david1")].tunnel_config = Path(self.cfg)
-        # The lane went LIVE (marker present) — the sibling's marker is seeded
-        # per the #786 runbook so its secret request/upload uses the public lane.
-        dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
+        # Use a LOCAL-topology lane fixture (marek is local, gateway_account=
+        # "marek", no siblings in the current registry — but we can test the
+        # gateway_account == self path).
+        self._orig_config = dg.DROP_LANES[("subdev", "marek")].tunnel_config
+        dg.DROP_LANES[("subdev", "marek")].tunnel_config = Path(self.cfg)
+        dg.write_drop_marker("drop-subdev-marek.newlevel.media", 8874,
+                             path=self.marker)
 
     def tearDown(self):
-        dg.DROP_LANES[("subdev", "david1")].tunnel_config = self._orig
+        dg.DROP_LANES[("subdev", "marek")].tunnel_config = self._orig_config
 
     def _run_recorder(self):
         calls = []
@@ -712,71 +725,115 @@ class TestReconcileSiblingAccount838(unittest.TestCase):
         return calls, r
 
     def test_sibling_account_missing_config_is_a_benign_noop(self):
-        # david2: marker present, own config.yml ABSENT (it lives under david1).
-        # self.cfg was never written → read_text would raise OSError. The sibling
-        # divert must return True BEFORE any read/restart is attempted.
+        # A sibling account of marek's tunnel with a marker but no own config
+        # should be a benign no-op.  To test this, we temporarily add a sibling
+        # lane entry.
         from unittest import mock
-        calls, r = self._run_recorder()
-        with mock.patch.object(dg, "_current_username", return_value="david2"):
+        sibling = dg.DropLane(
+            host="drop-subdev-marek-sib.newlevel.media", port=8876,
+            tunnel_uuid="1e9555d1-4d19-4e86-8064-361506fbc2cd",
+            tunnel_config=Path(self.cfg),
+            tunnel_service="webterm-marek-tunnel.service",
+            tunnel_system_unit=False, access=False,
+            gateway_account="marek")
+        with mock.patch.object(dg, "drop_lane_for_account",
+                               return_value=sibling), \
+             mock.patch.object(dg, "_current_username",
+                               return_value="marek-sib"):
+            calls, r = self._run_recorder()
             self.assertTrue(dg.reconcile_drop_ingress_on_install(
                 run=r, nodename="subdev", marker_path=self.marker))
         self.assertEqual(calls, [], "a sibling account attempts no restart")
 
     def test_sibling_account_never_touches_a_stale_config(self):
-        # Even a STALE own config.yml (a home-dir-migration leftover) is NOT the
-        # live tunnel's config — a sibling never reads/rewrites/restarts it.
+        # Even a STALE config is untouched by a sibling.
         from unittest import mock
-        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        marek_cfg = (
+            "tunnel: 1e9555d1-4d19-4e86-8064-361506fbc2cd\n"
+            "credentials-file: /home/marek/.cloudflared/x.json\n\n"
+            "ingress:\n"
+            "  - hostname: marek.newlevel.media\n"
+            "    service: http://127.0.0.1:8082\n"
+            "  - service: http_status:404\n")
+        Path(self.cfg).write_text(marek_cfg, encoding="utf-8")
         before = Path(self.cfg).read_text(encoding="utf-8")
-        calls, r = self._run_recorder()
-        with mock.patch.object(dg, "_current_username", return_value="david2"):
+        sibling = dg.DropLane(
+            host="drop-subdev-marek-sib.newlevel.media", port=8876,
+            tunnel_uuid="1e9555d1-4d19-4e86-8064-361506fbc2cd",
+            tunnel_config=Path(self.cfg),
+            tunnel_service="webterm-marek-tunnel.service",
+            tunnel_system_unit=False, access=False,
+            gateway_account="marek")
+        with mock.patch.object(dg, "drop_lane_for_account",
+                               return_value=sibling), \
+             mock.patch.object(dg, "_current_username",
+                               return_value="marek-sib"):
+            calls, r = self._run_recorder()
             self.assertTrue(dg.reconcile_drop_ingress_on_install(
                 run=r, nodename="subdev", marker_path=self.marker))
         self.assertEqual(calls, [], "a sibling account attempts no restart")
-        self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before,
-                         "a sibling account never rewrites the stale config")
+        self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before)
 
     def test_gateway_account_missing_config_still_fails_loud(self):
-        # #838 must NOT silently undo #826: the GATEWAY account (david1) that OWNS
-        # the tunnel, with a live marker but a genuinely absent/broken config, is a
-        # REAL failure (False) — the sibling divert applies ONLY to non-owners.
+        # The GATEWAY account (marek) with a live marker but absent config is a
+        # REAL failure (False).
         from unittest import mock
         calls, r = self._run_recorder()
-        with mock.patch.object(dg, "_current_username", return_value="david1"):
+        with mock.patch.object(dg, "_current_username", return_value="marek"):
             self.assertFalse(dg.reconcile_drop_ingress_on_install(
                 run=r, nodename="subdev", marker_path=self.marker))
-        self.assertEqual(calls, [], "no restart when the owner's config is unreadable")
+        self.assertEqual(calls, [], "no restart when the config is unreadable")
 
     def test_gateway_account_reasserts_and_restarts(self):
-        # The gateway account (david1) with a clobbered-but-present config re-adds
-        # the ingress and restarts — shape (b) proceeds normally for the owner.
+        # The gateway account (marek) with a clobbered-but-present config
+        # re-adds the ingress and restarts.
         from unittest import mock
-        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        marek_cfg = (
+            "tunnel: 1e9555d1-4d19-4e86-8064-361506fbc2cd\n"
+            "credentials-file: /home/marek/.cloudflared/x.json\n\n"
+            "ingress:\n"
+            "  - hostname: marek.newlevel.media\n"
+            "    service: http://127.0.0.1:8082\n"
+            "  - service: http_status:404\n")
+        Path(self.cfg).write_text(marek_cfg, encoding="utf-8")
         calls, r = self._run_recorder()
-        with mock.patch.object(dg, "_current_username", return_value="david1"):
+        with mock.patch.object(dg, "_current_username", return_value="marek"):
             self.assertTrue(dg.reconcile_drop_ingress_on_install(
                 run=r, nodename="subdev", marker_path=self.marker))
-        self.assertIn("- hostname: drop-david.newlevel.media",
+        self.assertIn("- hostname: drop-subdev-marek.newlevel.media",
                       Path(self.cfg).read_text(encoding="utf-8"))
-        self.assertTrue(calls, "gateway account restarts after re-adding the ingress")
+        self.assertTrue(calls, "gateway account restarts after re-adding")
 
     def test_injected_username_overrides_current_username(self):
-        # The injectable `username=` seam (the #786 pin-the-account lesson) drives
-        # the divert directly. TEETH: pin _current_username to the GATEWAY account
-        # (david1) — which would NOT divert and WOULD restart the clobbered config
-        # — while passing the SIBLING account david2. Only if the param is honored
-        # does the divert fire (True, no restart, config untouched); a param-
-        # ignoring impl resolves david1 → shape (b) → rewrites+restarts → fails.
+        # The injectable `username=` seam (the #786 pin-the-account lesson).
         from unittest import mock
-        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        marek_cfg = (
+            "tunnel: 1e9555d1-4d19-4e86-8064-361506fbc2cd\n"
+            "credentials-file: /home/marek/.cloudflared/x.json\n\n"
+            "ingress:\n"
+            "  - hostname: marek.newlevel.media\n"
+            "    service: http://127.0.0.1:8082\n"
+            "  - service: http_status:404\n")
+        Path(self.cfg).write_text(marek_cfg, encoding="utf-8")
         before = Path(self.cfg).read_text(encoding="utf-8")
+        sibling = dg.DropLane(
+            host="drop-subdev-marek-sib.newlevel.media", port=8876,
+            tunnel_uuid="1e9555d1-4d19-4e86-8064-361506fbc2cd",
+            tunnel_config=Path(self.cfg),
+            tunnel_service="webterm-marek-tunnel.service",
+            tunnel_system_unit=False, access=False,
+            gateway_account="marek")
         calls, r = self._run_recorder()
-        with mock.patch.object(dg, "_current_username", return_value="david1"):
+        with mock.patch.object(dg, "drop_lane_for_account",
+                               return_value=sibling), \
+             mock.patch.object(dg, "_current_username",
+                               return_value="marek"):
+            # Pass username="marek-sib" — the injected sibling overrides.
             self.assertTrue(dg.reconcile_drop_ingress_on_install(
-                run=r, nodename="subdev", marker_path=self.marker, username="david2"))
-        self.assertEqual(calls, [], "injected sibling account is a benign no-op")
-        self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before,
-                         "the injected sibling account never rewrites the config")
+                run=r, nodename="subdev", marker_path=self.marker,
+                username="marek-sib"))
+        self.assertEqual(calls, [], "injected sibling is a benign no-op")
+        self.assertEqual(Path(self.cfg).read_text(encoding="utf-8"), before)
 
 
 class TestStaleMarkerHeal927(unittest.TestCase):

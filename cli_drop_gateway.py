@@ -22,10 +22,12 @@ already ships (`cli_webterm_tunnel.render_cloudflared_tunnel_config` shape) and
 the Cloudflare Access client library (`cli_webterm_access.apply_profile`), both
 imported LAZILY inside the reconcile command so there is no import-order coupling.
 
-Both target boxes ALREADY run a cloudflared tunnel fronting `newlevel.media`
-subdomains (spinbike UUID 4093c494…, subdev/david UUID 1564fe31…), so the fix
-adds ONE drop-host ingress → 127.0.0.1:<drop-port> to each EXISTING tunnel — no new
-tunnel is created (that would need dev2's origin cert, #635).
+Two tunnel topologies exist (#931):
+- LOCAL (spinbike): the tunnel runs ON the box, ingress → 127.0.0.1:<drop-port>.
+- CONTROLLER (subdev/david): the per-box tunnel was retired in #870; the
+  controller's multi-ingress tunnel fronts the drop hostname, ingress →
+  <tailscale-ip>:<drop-port> (the drop server binds all private interfaces).
+  The controller's ``install`` renders the ingress declaratively.
 """
 import os
 import re
@@ -90,7 +92,8 @@ class DropLane:
     → #826's loud failure stays intact on the tunnel-owning account."""
 
     def __init__(self, host, port, tunnel_uuid, tunnel_config, tunnel_service,
-                 tunnel_system_unit, access, gateway_account=None):
+                 tunnel_system_unit, access, gateway_account=None,
+                 topology="local", origin_host=None):
         self.host = host
         self.port = port
         self.tunnel_uuid = tunnel_uuid
@@ -102,6 +105,13 @@ class DropLane:
         self.access = access
         # #838: the tunnel-owning unix account, or None (no sibling concept).
         self.gateway_account = gateway_account
+        # #931: "local" = the tunnel runs on this box (ingress → 127.0.0.1:port);
+        # "controller" = the tunnel runs on the controller (ingress → origin_host:port,
+        # where origin_host is this box's tailscale IP). No local tunnel config/service
+        # exists; the controller's install manages the ingress.
+        self.topology = topology
+        # The tailscale IP the controller's tunnel proxies to (controller topology only).
+        self.origin_host = origin_host
 
 
 # Per-account drop lanes (#889), keyed by (nodename, username) — each account
@@ -110,12 +120,19 @@ class DropLane:
 # incident). On single-account boxes the tuple key is the ONLY representation
 # (no bare-nodename fallback — the registry is an EXPLICIT allowlist).
 #
-# TUNNEL TOPOLOGY on subdev: david1-4 ride the david tunnel (1564fe31), marek
-# rides the marek tunnel (1e9555d1), dominika rides the dominika tunnel
-# (7792f710). montalu1-8 and miva1 ride the david tunnel (provisioned at
-# go-live). The gateway_account of each shared tunnel is the tunnel OWNER.
-_SUBDEV_DAVID_TUNNEL = "1564fe31-a95f-4053-93d4-baff2b8a6e97"
-_SUBDEV_DAVID_SERVICE = "webterm-david-tunnel.service"
+# TUNNEL TOPOLOGY on subdev: david1-4 ride the CONTROLLER tunnel (f85ea304,
+# #931 — the old per-box david tunnel 1564fe31 was RETIRED in #870's
+# controller consolidation), marek rides the marek tunnel (1e9555d1),
+# dominika rides the dominika tunnel (7792f710). montalu1-8 and miva1 ride
+# the controller tunnel (provisioned at go-live). The controller tunnel is
+# managed on the controller box (airuleset@100.101.214.103).
+#
+# The controller tunnel UUID is duplicated here (vs cli_webterm.py's
+# CONTROLLER_TUNNEL_UUID) to keep this leaf self-contained (#433 rule).
+_CONTROLLER_TUNNEL_UUID = "f85ea304-920b-4ba4-96bc-a68001ce6fb4"
+_SUBDEV_TAILSCALE = "100.118.174.27"
+
+
 
 DROP_LANES = {
     # --- spinbike (single-account, SYSTEM unit, no Access) ---
@@ -126,35 +143,38 @@ DROP_LANES = {
         tunnel_service="spinbike-tunnel.service",
         tunnel_system_unit=True, access=False),
 
-    # --- subdev / david tunnel (david1-4) ---
+    # --- subdev / david accounts (controller-ingress topology, #931) ---
+    # The per-box david tunnel (1564fe31) was RETIRED in #870's controller
+    # consolidation. These lanes ride the controller's multi-ingress tunnel;
+    # tunnel_config/tunnel_service are None (no local tunnel to edit/restart).
     ("subdev", "david1"): DropLane(
         host=DROP_HOST_DAVID, port=8870,
-        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
-        tunnel_config=_CFDIR / "config.yml",
-        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+        tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
-        gateway_account="david1"),
+        gateway_account="david1",
+        topology="controller", origin_host=_SUBDEV_TAILSCALE),
     ("subdev", "david2"): DropLane(
         host="drop-subdev-david2.newlevel.media", port=8871,
-        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
-        tunnel_config=_CFDIR / "config.yml",
-        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+        tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
-        gateway_account="david1"),
+        gateway_account="david1",
+        topology="controller", origin_host=_SUBDEV_TAILSCALE),
     ("subdev", "david3"): DropLane(
         host="drop-subdev-david3.newlevel.media", port=8872,
-        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
-        tunnel_config=_CFDIR / "config.yml",
-        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+        tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
-        gateway_account="david1"),
+        gateway_account="david1",
+        topology="controller", origin_host=_SUBDEV_TAILSCALE),
     ("subdev", "david4"): DropLane(
         host="drop-subdev-david4.newlevel.media", port=8873,
-        tunnel_uuid=_SUBDEV_DAVID_TUNNEL,
-        tunnel_config=_CFDIR / "config.yml",
-        tunnel_service=_SUBDEV_DAVID_SERVICE,
+        tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+        tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
-        gateway_account="david1"),
+        gateway_account="david1",
+        topology="controller", origin_host=_SUBDEV_TAILSCALE),
 
     # --- subdev / marek tunnel ---
     ("subdev", "marek"): DropLane(
@@ -174,7 +194,7 @@ DROP_LANES = {
         tunnel_system_unit=False, access=True,
         gateway_account="dominika"),
     # NOTE: simap1 is PAUSED (#851) — no entry. montalu1-8 and miva1 ride the
-    # david tunnel once provisioned (go-live step, same gateway_account shape).
+    # controller tunnel once provisioned (go-live step, same topology shape).
 }
 
 # Access specs for Access-gated drop hostnames — reconciled via
@@ -329,6 +349,34 @@ def resolve_public_lane(want_public=True, have_encrypted_private=None,
     return lane.host, lane.port                 # authoritative, from the registry
 
 
+def resolve_public_lane_full(marker_path=None, nodename=None, username=None):
+    """(host, port, bind_ip) for the public drop lane, or None.
+
+    Like `resolve_public_lane` but also returns the IP the drop server must
+    BIND on so the tunnel origin can reach it (#931):
+    - LOCAL topology: `"127.0.0.1"` (cloudflared on the same box → loopback).
+    - CONTROLLER topology: `lane.origin_host` (cloudflared on the controller →
+      this box's tailscale IP).
+
+    Fail-closed: a controller lane with no `origin_host` → None (never fall
+    back to loopback when the tunnel origin is remote).
+    """
+    lane = drop_lane_for_account(nodename, username)
+    if lane is None:
+        return None
+    marker = read_drop_marker(marker_path)
+    if marker is None:
+        return None
+    marker_host, _marker_port = marker
+    if marker_host != lane.host:
+        return None
+    if lane.topology == "controller":
+        if not lane.origin_host:
+            return None                          # fail-closed: no origin → no lane
+        return lane.host, lane.port, lane.origin_host
+    return lane.host, lane.port, "127.0.0.1"
+
+
 _CATCHALL_RE = re.compile(r"^(\s*)-\s*service:\s*http_status:404\s*$")
 
 
@@ -465,6 +513,36 @@ def _lanes_for_tunnel(nodename, tunnel_uuid):
             if n == nodename and lane.tunnel_uuid == tunnel_uuid]
 
 
+def drop_ingress_rules_for_controller():
+    """Ingress rules for controller-topology drop lanes (#931).
+
+    Returns ``[(hostname, service_url), ...]`` for the controller tunnel's
+    multi-ingress config.  Called from ``_setup_controller_webterm`` in
+    ``cli_webterm.py`` at install time — the drop ingress entries ride the SAME
+    controller tunnel that fronts the webterm hostnames.
+
+    The ``service_url`` uses the lane's ``origin_host`` (the box's tailscale
+    IP) + ``port`` — cloudflared on the controller proxies to
+    ``http://<tailscale>:<port>`` where the drop server listens.
+    """
+    rules = []
+    seen = {}  # host -> service_url (dedup + conflict detection)
+    for (_n, _u), lane in sorted(DROP_LANES.items()):
+        if lane.topology != "controller" or not lane.origin_host:
+            continue
+        svc = "http://%s:%d" % (lane.origin_host, lane.port)
+        prev = seen.get(lane.host)
+        if prev is not None:
+            if prev != svc:
+                raise ValueError(
+                    "conflicting controller ingress for %s: %s vs %s"
+                    % (lane.host, prev, svc))
+            continue  # same host + same service — dedup
+        seen[lane.host] = svc
+        rules.append((lane.host, svc))
+    return rules
+
+
 def cmd_drop_gateway(args):
     """Reconcile THIS account's drop lane on THIS box (#889). DEFAULT is DRY-RUN
     (no writes, prints the plan) — the `cmd_webterm_access` pattern.
@@ -500,6 +578,43 @@ def cmd_drop_gateway(args):
         print("drop-gateway: no registered drop lane for %s@%s — nothing to do "
               "(drop lanes exist for boxes: %s)."
               % (username or "?", node, ", ".join(all_boxes)))
+        return 0
+
+    # #931: controller-topology lanes have no local tunnel config/service to
+    # edit or restart — the controller's install manages the ingress. On the
+    # lane account: validate + reconcile Access + write the marker.
+    if my_lane.topology == "controller":
+        mode = "DRY-RUN (no writes)" if dry_run else "APPLY"
+        print("drop-gateway [%s] account=%s@%s topology=controller "
+              "tunnel=%s origin=%s:%d"
+              % (mode, username, node, my_lane.tunnel_uuid,
+                 my_lane.origin_host, my_lane.port))
+        if dry_run:
+            print("  ingress: controller-managed -> http://%s:%d"
+                  % (my_lane.origin_host, my_lane.port))
+            if my_lane.access:
+                print("  access:  [%s] %s"
+                      % (username, _reconcile_access(my_lane, dry_run=True)[1]))
+            print("  DNS (manual runbook): CNAME %s -> %s.cfargotunnel.com "
+                  "(proxied)" % (my_lane.host, my_lane.tunnel_uuid))
+            print("  (dry-run -- nothing changed; re-run with --apply)")
+            return 0
+        # Reconcile Access for this lane.
+        if my_lane.access:
+            access_ok, access_msg = _reconcile_access(my_lane, dry_run=False)
+            print("  access:  [%s] %s" % (username, access_msg))
+            if not access_ok:
+                print("  NOT marking LIVE -- Access reconcile did not succeed "
+                      "on an access-gated lane; fix the token/app and re-run "
+                      "--apply", file=sys.stderr)
+                return 1
+        write_drop_marker(my_lane.host, my_lane.port, path=marker_path)
+        print("  marker written (%s) -- public drop lane is now ARMED for %s"
+              % (marker_path or DROP_MARKER, username or "this account"))
+        print("  DNS: ensure CNAME %s -> %s.cfargotunnel.com (proxied) exists"
+              % (my_lane.host, my_lane.tunnel_uuid))
+        print("  NOTE: the ingress is managed on the controller -- run "
+              "'airuleset.py install' there to provision it")
         return 0
 
     # Process only lanes sharing THIS account's tunnel (#889 review C1: subdev
@@ -652,6 +767,21 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
             return True                         # no drop lane for this account — benign no-op
         if read_drop_marker(marker_path) is None:
             return True                         # lane never went live — nothing to preserve (ok)
+        # #931: controller-topology lanes have no local tunnel config — the
+        # controller's own install manages the ingress. Heal a stale marker
+        # (host/port mismatch from pre-#931 registry) and return True.
+        if lane.topology == "controller":
+            marker = read_drop_marker(marker_path)
+            if marker is not None:
+                marker_host, marker_port = marker
+                if marker_host != lane.host or marker_port != lane.port:
+                    write_drop_marker(lane.host, lane.port, path=marker_path)
+                    _me = username if username is not None else _current_username()
+                    print("  drop-gateway: rewrote stale marker for %s (%s:%d "
+                          "-> %s:%d) (#931)"
+                          % (_me, marker_host, marker_port,
+                             lane.host, lane.port), file=sys.stderr)
+            return True
         if lane.gateway_account is not None:
             # #838: a sibling account of a shared drop tunnel owns no config —
             # nothing to re-assert here. Fail-safe: an unresolvable account does
