@@ -779,6 +779,99 @@ class TestReconcileSiblingAccount838(unittest.TestCase):
                          "the injected sibling account never rewrites the config")
 
 
+class TestStaleMarkerHeal927(unittest.TestCase):
+    """#927: a sibling account with a stale marker (host/port from before #889
+    per-account lanes) must have its marker REWRITTEN by
+    reconcile_drop_ingress_on_install — the marker is PER-ACCOUNT (lives in the
+    sibling's own ~/.cloudflared/), so the sibling owns it even though it does
+    NOT own the tunnel config.
+
+    RED shape: the existing reconciler bails out at the sibling early-return
+    (line 663) WITHOUT reading or rewriting the marker, so a stale marker
+    persists across every push and resolve_public_lane returns None forever."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+        self._orig = dg.DROP_LANES[("subdev", "david1")].tunnel_config
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = Path(self.cfg)
+        # Write a stale marker: the OLD shared host+port from before #889.
+        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+
+    def tearDown(self):
+        dg.DROP_LANES[("subdev", "david1")].tunnel_config = self._orig
+
+    def _run_noop(self):
+        calls = []
+
+        def r(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return calls, r
+
+    def test_sibling_stale_marker_is_rewritten(self):
+        """A sibling (david3) with a stale marker (drop-david:8828) must have
+        it rewritten to its registered lane (drop-subdev-david3:8872) by
+        reconcile_drop_ingress_on_install. After the reconcile, resolve_public_lane
+        must return the correct lane, not None."""
+        from unittest import mock
+        calls, r = self._run_noop()
+        with mock.patch.object(dg, "_current_username", return_value="david3"):
+            result = dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker)
+        self.assertTrue(result, "reconcile must still succeed (True)")
+        # The marker MUST now carry the correct host+port for david3's lane.
+        marker = dg.read_drop_marker(self.marker)
+        self.assertIsNotNone(marker, "marker must still exist after reconcile")
+        self.assertEqual(marker, ("drop-subdev-david3.newlevel.media", 8872),
+                         "stale marker must be rewritten to match the registry")
+
+    def test_sibling_correct_marker_is_not_rewritten(self):
+        """A sibling (david3) whose marker ALREADY matches its registered lane
+        must be left alone (idempotent)."""
+        from unittest import mock
+        # Write a CORRECT marker for david3.
+        dg.write_drop_marker("drop-subdev-david3.newlevel.media", 8872,
+                             path=self.marker)
+        calls, r = self._run_noop()
+        with mock.patch.object(dg, "_current_username", return_value="david3"):
+            result = dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker)
+        self.assertTrue(result)
+        marker = dg.read_drop_marker(self.marker)
+        self.assertEqual(marker, ("drop-subdev-david3.newlevel.media", 8872))
+
+    def test_resolve_public_lane_after_heal(self):
+        """After the marker is healed, resolve_public_lane must return the
+        correct (host, port), not None."""
+        # Simulate what a healed marker looks like.
+        dg.write_drop_marker("drop-subdev-david3.newlevel.media", 8872,
+                             path=self.marker)
+        result = dg.resolve_public_lane(
+            marker_path=self.marker, nodename="subdev", username="david3")
+        self.assertEqual(result, ("drop-subdev-david3.newlevel.media", 8872))
+
+    def test_owner_stale_marker_is_rewritten(self):
+        """The tunnel-owning account (david1) with a stale marker (wrong port)
+        must also have its marker rewritten."""
+        from unittest import mock
+        # david1's registered lane is drop-david.newlevel.media:8870.
+        # Write a stale marker with the old port 8828.
+        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+        Path(self.cfg).write_text(DAVID_CONFIG_NO_DROP, encoding="utf-8")
+        calls, r = self._run_noop()
+        with mock.patch.object(dg, "_current_username", return_value="david1"):
+            result = dg.reconcile_drop_ingress_on_install(
+                run=r, nodename="subdev", marker_path=self.marker)
+        self.assertTrue(result)
+        marker = dg.read_drop_marker(self.marker)
+        self.assertIsNotNone(marker)
+        self.assertEqual(marker, ("drop-david.newlevel.media", 8870),
+                         "tunnel owner's stale marker must be rewritten")
+
+
 class TestSecretShowLeadingFlagName(unittest.TestCase):
     """#664 review: `secret show --public NAME` (flag before name) must recover
     the NAME that argparse's REMAINDER swallowed, mirroring `secret request`."""
