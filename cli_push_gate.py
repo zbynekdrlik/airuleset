@@ -99,16 +99,15 @@ def _tracked_tree_fingerprint(repo_dir):
     try:
         ls = subprocess.run(
             ["git", "-C", repo, "ls-files", "-z"],
-            capture_output=True, timeout=120)
+            capture_output=True, text=True, errors="surrogateescape",
+            timeout=120)
         if ls.returncode != 0:
             return {"head": None, "files": None,
                     "error": "git ls-files rc=%s: %s" % (
-                        ls.returncode,
-                        ls.stderr.decode("utf-8", "replace").strip())}
-        rels = [p for p in ls.stdout.split(b"\0") if p]
+                        ls.returncode, ls.stderr.strip())}
+        rels = [p for p in ls.stdout.split("\0") if p]
         files = {}
-        for rel in rels:
-            relpath = rel.decode("utf-8", "surrogateescape")
+        for relpath in rels:
             try:
                 with open(os.path.join(repo, relpath), "rb") as fh:
                     files[relpath] = hashlib.sha256(fh.read()).hexdigest()
@@ -209,9 +208,10 @@ def _classify_push_gate_outcome(test_returncode, fp_before, fp_after):
                 _render_tree_moved_report(fp_before, fp_after, changed, test_returncode))
     skip_note = ""
     if not available:
-        skip_note = ("\n  [tree-move detection skipped: %s — a mid-run mutation "
-                     "could not be ruled out]"
-                     % _fp_unavailable_reason(fp_before, fp_after))
+        reason_str = _fp_unavailable_reason(fp_before, fp_after)
+        skip_note = ("\n  WARN: tree-move detection UNAVAILABLE: %s "
+                     "— a mid-run mutation could not be ruled out (#941)"
+                     % reason_str)
     if test_returncode != 0:
         return (False, "tests-failed",
                 "  TESTS FAILED — refusing to push untested code." + skip_note)

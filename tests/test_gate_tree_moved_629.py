@@ -281,5 +281,65 @@ class TestCmdPushWiring(unittest.TestCase):
         self.assertIn("sys.exit(1)", src)
 
 
+# --------------------------------------------------------------------------- #
+# #941: str stdout from subprocess must not crash the fingerprint.
+# --------------------------------------------------------------------------- #
+
+class TestStrStdoutNoCrash941(unittest.TestCase):
+    """When subprocess.run returns str stdout (the shape that triggers
+    TypeError: must be str or None, not bytes on str.split(b'\\0')),
+    the fingerprint must still succeed — never crash."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-941-")
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name)
+        _init_repo(self.repo)
+        (self.repo / "a.py").write_text("x = 1\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "init")
+
+    def test_fingerprint_works_when_ls_files_returns_str_stdout(self):
+        """Simulate the #941 failure: subprocess.run for git-ls-files
+        returns str stdout (no text=True → bytes is expected, but str
+        arrived). The function must not crash with TypeError."""
+        from unittest import mock
+        real_run = subprocess.run
+
+        def _str_stdout_run(cmd, **kw):
+            result = real_run(cmd, **kw)
+            # Only intercept the git ls-files -z call
+            if (isinstance(cmd, list) and "ls-files" in cmd
+                    and "-z" in cmd and isinstance(result.stdout, bytes)):
+                # Return str stdout (the trigger for the #941 TypeError)
+                result = subprocess.CompletedProcess(
+                    cmd, result.returncode,
+                    result.stdout.decode("utf-8", "surrogateescape"),
+                    result.stderr.decode("utf-8", "surrogateescape")
+                    if isinstance(result.stderr, bytes) else result.stderr,
+                )
+            return result
+
+        with mock.patch("subprocess.run", side_effect=_str_stdout_run):
+            fp = cli_remote._tracked_tree_fingerprint(self.repo)
+
+        # Must succeed — no error, files populated
+        self.assertIsNone(fp["error"],
+                          "str stdout must not crash the fingerprint: %s"
+                          % fp.get("error"))
+        self.assertIsInstance(fp["files"], dict)
+        self.assertIn("a.py", fp["files"])
+
+    def test_classify_warns_loudly_when_detection_unavailable(self):
+        """#941 LOUD: when detection is unavailable, the gate message must
+        contain a prominent WARN marker, not just a buried inline note."""
+        fp = {"head": None, "files": None, "error": "some error"}
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(0, fp, fp)
+        self.assertTrue(ok, "unavailable detection must not block a clean run")
+        # The WARN must be a separate line, not buried inline
+        self.assertIn("WARN", msg,
+                      "unavailable detection must produce a WARN marker")
+
+
 if __name__ == "__main__":
     unittest.main()
