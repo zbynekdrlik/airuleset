@@ -7329,6 +7329,10 @@ def main():
              "a token value.")
     p_priv.add_argument("--json", action="store_true",
                         help="Emit the full report as JSON instead of a table")
+    p_priv.add_argument("--post-cutover", action="store_true",
+                        dest="post_cutover",
+                        help="Post-cutover migration gate (#870 F1): absent "
+                             "must_move=True credentials are findings (exit 1)")
 
     p_wacc = sub.add_parser(
         "webterm-access",
