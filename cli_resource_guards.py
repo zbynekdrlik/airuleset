@@ -72,7 +72,16 @@ SYSCTL_VM_PATH = "/etc/sysctl.d/50-airuleset-vm.conf"
 MEMORY_HIGH_PCT = 12
 MEMORY_MAX_PCT = 18
 TASKS_MAX = 512
-CPU_WEIGHT = 100
+# #922: CPUWeight lowered from 100 (default, no advantage) to 30 — gives
+# stream users 30/130 (~23%) of CPU when contending with root (weight 100
+# via the root-exempt drop-in). Under no contention, streams use any idle
+# CPU. The root-exempt drop-in restores CPUWeight=100 for uid 0.
+CPU_WEIGHT = 30
+# #922: CPUQuota hard-caps each stream at 300% (3 of 8 vCPU cores). Was
+# DELIBERATELY absent in #775 (the collapse was memory thrash, not CPU),
+# but the owner's live incident (david3 test at 98% CPU, owner can't
+# scroll) showed the CPU gap is real.
+CPU_QUOTA_PCT = 300
 OOM_SCORE_ADJUST = -900
 MEMORY_MIN = "128M"
 VM_SWAPPINESS = 10
@@ -81,7 +90,7 @@ VM_SWAPPINESS = 10
 def render_guard_dropin() -> str:
     """The TEMPLATE `user-.slice` guardrail (applies to every stream user)."""
     return (
-        "# Managed by airuleset (#775) — mechanical per-stream-user resource\n"
+        "# Managed by airuleset (#775/#922) — mechanical per-stream-user resource\n"
         "# guardrails on shared-stream boxes (subdev). TEMPLATE drop-in: applies\n"
         "# to EVERY user-<uid>.slice (present AND future streams), so a new or\n"
         "# renamed stream is covered automatically — no per-uid list to drift.\n"
@@ -91,7 +100,9 @@ def render_guard_dropin() -> str:
         "MemoryMax=%d%%\n"
         "TasksMax=%d\n"
         "CPUWeight=%d\n"
-        % (MEMORY_HIGH_PCT, MEMORY_MAX_PCT, TASKS_MAX, CPU_WEIGHT)
+        "CPUQuota=%d%%\n"
+        % (MEMORY_HIGH_PCT, MEMORY_MAX_PCT, TASKS_MAX, CPU_WEIGHT,
+           CPU_QUOTA_PCT)
     )
 
 
@@ -99,14 +110,16 @@ def render_root_exempt_dropin() -> str:
     """Restore an UNLIMITED root recovery session (uid 0 also matches the
     `user-.slice` template)."""
     return (
-        "# Managed by airuleset (#775) — the user-.slice TEMPLATE guardrail also\n"
-        "# matches uid 0, so this drop-in restores an UNLIMITED root recovery\n"
-        "# session. A root session throttled by its own guardrail could not\n"
-        "# recover a thrashing box.\n"
+        "# Managed by airuleset (#775/#922) — the user-.slice TEMPLATE guardrail\n"
+        "# also matches uid 0, so this drop-in restores an UNLIMITED root\n"
+        "# recovery session. A root session throttled by its own guardrail\n"
+        "# could not recover a thrashing box.\n"
         "[Slice]\n"
         "MemoryHigh=infinity\n"
         "MemoryMax=infinity\n"
         "TasksMax=infinity\n"
+        "CPUWeight=100\n"
+        "CPUQuota=\n"
     )
 
 
@@ -240,15 +253,17 @@ def build_apply_script() -> str:
         '        continue\n'
         '    fi\n'
         '    systemctl set-property --runtime "$slice" MemoryHigh=%d%% '
-        'MemoryMax=%d%% TasksMax=%d '
+        'MemoryMax=%d%% TasksMax=%d CPUWeight=%d CPUQuota=%d%% '
         '|| echo "  ⚠ resource-guards: set-property failed for $slice"\n'
         'done'
-        % (MEMORY_HIGH_PCT, MEMORY_MAX_PCT, TASKS_MAX)
+        % (MEMORY_HIGH_PCT, MEMORY_MAX_PCT, TASKS_MAX, CPU_WEIGHT,
+           CPU_QUOTA_PCT)
     )
     parts.append("")
     # Read-back verify (fail-loud). A skipped slice is exempt (infinity expected
     # there); every applied slice must show finite MemoryMax/MemoryHigh within a
-    # tolerance band and TasksMax exactly the policy value.
+    # tolerance band, TasksMax exactly the policy value, CPUWeight exactly 30,
+    # and CPUQuotaPerSecUSec exactly 3s (= 300%).
     parts.append(
         'lo_max=$((exp_max * 3 / 4)); hi_max=$((exp_max * 3 / 2))\n'
         'lo_high=$((exp_high * 3 / 4)); hi_high=$((exp_high * 3 / 2))\n'
@@ -262,6 +277,8 @@ def build_apply_script() -> str:
         '    mhigh=$(systemctl show -p MemoryHigh --value "$slice" 2>/dev/null '
         '|| echo "")\n'
         '    tmax=$(systemctl show -p TasksMax --value "$slice" 2>/dev/null '
+        '|| echo "")\n'
+        '    cpuw=$(systemctl show -p CPUWeight --value "$slice" 2>/dev/null '
         '|| echo "")\n'
         '    if [ "$mmax" = infinity ] || [ "$mhigh" = infinity ] '
         '|| [ -z "$mmax" ]; then\n'
@@ -281,14 +298,20 @@ def build_apply_script() -> str:
         '        echo "  ⚠ RESOURCE-GUARDS VERIFY FAIL: $slice TasksMax=$tmax '
         '(expected %d)" >&2; fail=1\n'
         '    fi\n'
+        '    if [ "$cpuw" != "%d" ]; then\n'
+        '        echo "  ⚠ RESOURCE-GUARDS VERIFY FAIL: $slice CPUWeight=$cpuw '
+        '(expected %d)" >&2; fail=1\n'
+        '    fi\n'
         'done\n'
         'if [ "$fail" -ne 0 ]; then\n'
         '    echo "  ⚠ RESOURCE-GUARDS FAILED read-back verify" >&2\n'
         '    exit 4\n'
         'fi\n'
         'echo "  resource-guards: applied + verified (MemTotal=${memtotal_b}B '
-        'MemoryMax~${exp_max}B MemoryHigh~${exp_high}B)"'
-        % (TASKS_MAX, TASKS_MAX)
+        'MemoryMax~${exp_max}B MemoryHigh~${exp_high}B CPUWeight=%d '
+        'CPUQuota=%d%%)"'
+        % (TASKS_MAX, TASKS_MAX, CPU_WEIGHT, CPU_WEIGHT, CPU_WEIGHT,
+           CPU_QUOTA_PCT)
     )
     return "\n".join(parts) + "\n"
 

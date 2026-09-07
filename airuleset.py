@@ -6285,8 +6285,14 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
                      % (user, rc, (getattr(r, "stderr", "") or "").strip()))
     except Exception as e:
         return "FAILED to create session '%s': %s" % (user, e)
+    # #922: launch claude with nice -n 10 so all processes spawned inside
+    # inherit a lower scheduling priority. The cgroup CPUWeight=30 is the
+    # primary mechanism (kernel-enforced); nice is belt-and-suspenders at
+    # the process level, ensuring the owner's interactive session (nice 0)
+    # always wins the scheduler even within the same cgroup.
     try:
-        run(["tmux", "send-keys", "-t", user, "%s default" % script, "Enter"])
+        run(["tmux", "send-keys", "-t", user,
+             "nice -n 10 %s default" % script, "Enter"])
     except Exception as e:
         return ("session '%s' created in %s, but claude launch failed: %s"
                  % (user, cwd, e))
