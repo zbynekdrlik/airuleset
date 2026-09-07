@@ -235,5 +235,49 @@ class TestRiderBusyWaitingAge(unittest.TestCase):
                          "busy-waiting (use _busy_waiting_with_age)")
 
 
+class TestStashAbortLivelock(unittest.TestCase):
+    """#921 residual item 3: the foreign-slot stash-abort livelock —
+    counter exceeds cap, drop+re-create ping-pong, no escalation."""
+
+    def test_abort_counter_preserved_across_request_expiry(self):
+        """When a goal request expires (terminal) after N slot-occupied
+        aborts, the abort counter must NOT be reset to 0 — the next
+        request must inherit the accumulated count so the escalation
+        threshold is reachable across request lifetimes."""
+        import inspect
+        src = inspect.getsource(goal.goal_sweep)
+        # Find the terminal-word pop: `aborts.pop(sid, None)` inside the
+        # `if word in _GOAL_TERMINAL_WORDS:` block.
+        # After the fix, the pop should be conditioned — NOT popping
+        # when the sid has accumulated slot-occupied aborts.
+        lines = src.split("\n")
+        # Find the TERMINAL_WORDS block
+        terminal_idx = None
+        for i, ln in enumerate(lines):
+            if "_GOAL_TERMINAL_WORDS" in ln and "if word in" in ln:
+                terminal_idx = i
+                break
+        self.assertIsNotNone(terminal_idx)
+        # The pop should be conditioned, not unconditional.
+        # After the fix: only pop aborts on "sent", not on all terminal words.
+        # We check that aborts.pop is NOT in the generic terminal block,
+        # but only in the "sent" branch.
+        terminal_block = "\n".join(lines[terminal_idx:terminal_idx + 5])
+        self.assertNotIn("aborts.pop(sid",
+                         terminal_block,
+                         "aborts.pop must NOT be in the generic terminal-word "
+                         "block — only in the 'sent' branch (preserve abort "
+                         "history across request lifetimes)")
+
+    def test_escalation_threshold_exists(self):
+        """A GOAL_STASH_ABORT_ESCALATION constant must exist, larger than
+        GOAL_STASH_ABORT_LIVELOCK, to bound the foreign-slot livelock."""
+        self.assertTrue(hasattr(goal, "GOAL_STASH_ABORT_ESCALATION"),
+                        "GOAL_STASH_ABORT_ESCALATION constant must exist")
+        self.assertGreater(goal.GOAL_STASH_ABORT_ESCALATION,
+                           goal.GOAL_STASH_ABORT_LIVELOCK,
+                           "escalation must be > the livelock threshold")
+
+
 if __name__ == "__main__":
     unittest.main()
