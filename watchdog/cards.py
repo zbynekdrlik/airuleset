@@ -1003,8 +1003,8 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                 continue
 
             shown = ", ".join("#%d" % n for n in owed[:REPORT_MAX_LISTED])
-            text = ("report-owed: %s — napíš per-ticket ## ✅ Work Complete "
-                    "report + spusti compact-request --self" % shown)
+            text = ("report-owed: %s — napíš ## ✅ Work Complete "
+                    "report (compact, ~6 riadkov)" % shown)
             ok = verified_send(pane_id, text, tpath)
             last_try = now
             if ok:

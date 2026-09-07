@@ -6,12 +6,6 @@
 - `e2e-real-user-testing.md` — E2E rows reference real Playwright tests, not API smokes
 - `pr-merge-policy.md` — auto-merge default: the report is sent AFTER merged + deployed + verified; manual-marker (`airuleset:merge=manual`) projects stop at the green PR with ❓
 
-**MANDATORY template:** `## ✅ Work Complete` → Audits block (CI / plan-check / review / requesting-code-review / Deploy / Regression test / Výstup) → `---` → Goal / What changed / 🌐 URLs / PR line / ❓ Question. Use ❌/⏳ if failed/in-progress — then NOT done. Audits at TOP, user-facing answers at BOTTOM.
+**MANDATORY compact template (~7 lines, #940):** `## ✅ Work Complete` heading + ONE audit-summary line (plan-check + review + requesting-code-review) + `✅ Výstup:` line + `🌐` URL (if UI) + Goal/What changed + `📔 Playbook:` + terminal marker. All quality gates stay mechanically enforced. `✅ Výstup:` is ALWAYS present — concrete OBSERVED values, or `n/a — <prečo>`. Hook-enforced (`stop-check-prose-violations.sh`).
 
-**`✅ Výstup:` is ALWAYS present** — concrete OBSERVED values read back from the REAL artifact, or an explicit `n/a — <prečo>`. Hook-enforced (`stop-check-prose-violations.sh`): line missing, value-free, or `n/a` alongside a 🌐/📱 line = blocked.
-
-**`❓` questions shaped as the structured Slovak block** (`**Otázka — projekt …:**` briefing + options + the ❓ line — `user-questions-slovak.md`, hook-enforced `stop-check-question-quality.sh`).
-
-**Compact at your own boundary — DISABLED (#911).** Callback compact disabled by owner flag; native autocompact in force.
-
-The full template skeleton, hard rules, pre-completion gate, reduced-authority variant, enforcement details, and compact-at-boundary mechanics are in the situational companion `skills/completion-report-deep/DEEP.md` — loaded automatically on `compact-request`/`plan-check`/`gh pr merge` commands. History + rationale: `.claude/rules-reference/completion-report-history.md` (#859).
+The full template, hard rules, and enforcement details are in the situational companion `skills/completion-report-deep/DEEP.md` — loaded automatically on `compact-request`/`plan-check`/`gh pr merge` commands. History + rationale: `.claude/rules-reference/completion-report-history.md` (#859).

@@ -66,7 +66,7 @@ After writing: check everything you touched for bloat.
 
 ## Step 4 — Emit the completion-report line
 
-Add **exactly one** `📔 Playbook:` line to the completion report (in the `**Audits & deploy:**` block or immediately before it):
+Add **exactly one** `📔 Playbook:` line to the completion report (after the `**Goal:**`/`**What changed:**` line, before the terminal `✅ DONE:` marker):
 
 ```
 📔 Playbook: <1–2 lines — what was learned, what was updated, which skill file was touched>

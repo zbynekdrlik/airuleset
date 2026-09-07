@@ -65,7 +65,7 @@ Before ANY command that copies local files to a remote/production target — `rs
 3. **Post-deploy diff-verify against HEAD** — after copying, hash/byte-compare each deployed file against the committed HEAD (`git hash-object` vs the remote file's hash, or `rsync --dry-run --checksum` showing zero diffs). Liveness ("process is up") does NOT prove the right bytes landed. The deploy is verified only when the remote matches the committed ref byte-for-byte.
 4. **Record what was deployed on the target** — write the deployed commit SHA to the target (a `DEPLOYED_SHA` file, a version label, or the app's `/api/version`). A deploy with no recorded SHA is a deploy you cannot audit.
 
-The completion-report `✅ Deploy:` line MUST state the deployed commit SHA and that the remote matches HEAD, e.g. `✅ Deploy: synced 9a048c5 (HEAD=origin/main) to prod, diff-verify clean — all 5 files byte-match HEAD`.
+The completion-report `✅ Výstup:` line MUST state the deployed commit SHA and that the remote matches HEAD, e.g. `✅ Výstup: synced 9a048c5 (HEAD=origin/main) to prod, diff-verify clean — all 5 files byte-match HEAD` — deploy evidence merges into Výstup (#940).
 
 #### Enforcement vs. discipline — the hook covers a subset
 

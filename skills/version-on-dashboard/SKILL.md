@@ -42,7 +42,7 @@ After every deploy, the agent MUST:
 3. Compare against the version that was just deployed (`git describe`, package.json, the backend `/api/version` endpoint).
 4. If they don't match → the deploy failed silently. Investigate (cache, CDN, build skipped, wrong target) and fix before reporting done.
 
-The completion-report `✅ Deploy:` line must include the version that's visible on the dashboard, e.g. `✅ Deploy: dev frontend shows v1.0.97-dev.9 (matches backend)`.
+The completion-report `✅ Výstup:` line must include the version that's visible on the dashboard, e.g. `✅ Výstup: dev frontend shows v1.0.97-dev.9 (matches backend)` — deploy evidence merges into Výstup (#940).
 
 #### Foundation gate — file an issue if the project has no version display
 

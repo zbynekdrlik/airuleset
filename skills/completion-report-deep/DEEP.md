@@ -8,46 +8,21 @@
 
 **The completion report's audience is the USER, not you.** Terminal scrolls — only the LAST passage is visible without scrolling back. Audits at TOP, user-facing answers at BOTTOM. Send the report as the LAST thing in your message.
 
-#### MANDATORY structure (use this EXACT template)
+#### MANDATORY compact template (#940 — ~7 lines, not ~20)
 
 ```
 ## ✅ Work Complete
 
-**Audits & deploy:**
-✅ CI: green
-✅ /plan-check: N/N fulfilled
-✅ /review: clean — 0 🔴 0 🟡 0 🔵
-✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)
-✅ Deploy: <user-visible behavior verified on the live target — include version label read from DOM>
-✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>   ← REQUIRED for bug-fix PRs (see regression-test-first.md); OMIT for non-bug PRs
-✅ Výstup: <konkrétne hodnoty ODČÍTANÉ z reálneho artefaktu — email/dokument/render/UI/notifikácia> | n/a — <prečo>   ← ALWAYS required (see Hard rules); never "sent OK"
-
-**Plan steps:**           ← OPTIONAL: multi-step work only; terse user-visible one-liners
-- <step 1>
-- <step 2>
-
-**E2E test coverage:**    ← OPTIONAL: only when this work ADDED new E2E tests
-| Feature/Fix | E2E Test File | What It Verifies |
-|---|---|---|
-| <new feature> | <new test file> | <user workflow> |
-
----
-
-**Goal:** <1 sentence — restate the user's ask in their words, no jargon>
-**What changed:** <1-2 sentences — user-visible outcome in plain language>
-
-🌐 Dev:  <url>          ← USER-CLICKABLE web URLs only (one per env × user-facing surface)
-🌐 Prod: <url>          ← never list backend/API URLs
-🌐 Demo: <url>          ← client-app projects: the running demo the user can click NOW — every ticket that touched the app
-📱 APK:  <url>          ← client-app projects: the installable build (APK/IPA/signed binary) — same rule, every ticket
-
-**[<project>] PR #<N>: <full PR title>**
-<full PR URL> — merged <merge-sha>        ← default-auto; manual-marker projects: `— mergeable, clean` + end with ❓ approve merge
-
-❓ **Question:** <concise 1-2 sentence question>   ← only if you actually need an answer
+✅ /plan-check: N/N · /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵
+✅ Výstup: <konkrétne hodnoty z artefaktu> | n/a — <prečo>
+✅ Regression test: <test>:<line> — RED <sha>, GREEN <sha>  ← bug-fix PRs only; OMIT for non-bug
+🌐 <url>                    ← user-clickable URL; one per env × surface; omit if no web UI
+**Goal:** <1 sentence> — **What changed:** <1-2 sentences>
+📔 Playbook: <captured | n/a>
+✅ DONE: <one-line>
 ```
 
-Use ❌ instead of ✅ if something failed. Use ⏳ if still in progress — then you are NOT done; wait until everything is ✅ before sending.
+The audit-summary line packs plan-check + review + requesting-code-review into ONE line. Výstup stays its own `✅`-prefixed line (hook-enforced). Deploy evidence merges into Výstup (the deployed version IS the read-back value). CI is implicit (merged = CI green). Use ❌/⏳ if failed/in-progress — then NOT done.
 
 #### Reduced-authority (fork-no-merge / branch-merge) variant — SAME template, hand-off lines instead of merge/deploy
 
@@ -69,10 +44,10 @@ tickets were self-closed with no hand-off at all and sat neither queued nor revi
 #### Hard rules
 
 - **FULL template every time.** Writing `## ✅ Work Complete` is a contract — every required field MUST appear. Prose substitutes ("STOP at green PR URL", "Awaiting merge", "Phase N gated") are banned. Any rewording of the same intent is also banned.
-- **Order matters.** Audits at TOP, `---` separator, Goal/What changed/URLs/PR/Question at BOTTOM. The user reads the bottom of the terminal first.
-- **🌐 lines = USER-CLICKABLE web URLs only.** Backend/API URLs (`:8000`, `/api/`, `backend:`) go in `✅ Deploy:` as evidence, never in 🌐. URLs in prose (`curl http://...`, `verified at https://...`) do NOT count.
+- **Order matters.** Audits at TOP, Goal/What changed/URLs at BOTTOM. The user reads the bottom of the terminal first.
+- **🌐 lines = USER-CLICKABLE web URLs only.** Backend/API URLs (`:8000`, `/api/`, `backend:`) go in the `✅ Výstup:` line as evidence context, never in 🌐. URLs in prose (`curl http://...`, `verified at https://...`) do NOT count.
 - **Multi-env deploy ⇒ ≥2 🌐 lines** (one per env × user-facing surface). Read project CLAUDE.md `## Dashboards` / `## URLs` for declared URLs. If you cannot determine the URL set, ask via `❓ Question:` rather than ship a report missing URLs.
-- **The 🌐/📱 requirement is "every user-facing artifact this work produced or affects" — the env×surface rule above is the deploy-shaped CASE of it, not the whole rule.** For a client-app project (a mobile/desktop app the user installs, not just a web dashboard) this means BOTH `🌐 Demo:` (the running app the user can click NOW) AND `📱 <platform>:` (the installable build — APK/IPA/signed binary) — on EVERY ticket that touched the app, not only the ticket that happened to produce them. Both verified LIVE (HTTP 200 / a real, current download) before pasting, same no-dead-links discipline as any other 🌐 line — see `no-localhost-urls.md`.
+- **The 🌐/📱 requirement is "every user-facing artifact this work produced or affects" — the env×surface rule above is the deploy-shaped CASE of it, not the whole rule.** For a client-app project (a mobile/desktop app the user installs, not just a web dashboard) this means BOTH `🌐 Demo:` (the running app the user can click NOW) AND `📱 <platform>:` (the installable build — APK/IPA/signed binary) — on every ticket that touched the app, not only the ticket that happened to produce them. Both verified LIVE (HTTP 200 / a real, current download) before pasting, same no-dead-links discipline as any other 🌐 line — see `no-localhost-urls.md`.
 - **📱 lines = the installable-build DOWNLOAD URL only — reserved exactly like 🌐, never a decorative "mobile" note in prose.** `📱 iOS: <url>` / `📱 <platform>: <url>` names the artifact link itself; a sentence merely mentioning mobile testing, an emulator, or a phone does NOT get a 📱-prefixed line just because it discusses mobile — put that in prose without the marker.
 - **Never make the user search the transcript for an artifact URL.** If a link (demo, APK, dashboard, anything else) was produced earlier in THIS session and is still current, REPEAT it in the report — never a back-reference ("see above", "same URL as before", "unchanged from last ticket"). The report is self-contained; the user does not scroll back through the terminal to find it.
 - **Goal + What changed = plain language.** Restate the user's ask in their words. NOT implementation jargon. If you cannot summarize in 1+2 sentences a non-engineer would understand, you don't understand the work yet.
@@ -92,17 +67,17 @@ tickets were self-closed with no hand-off at all and sat neither queued nor revi
 2. Apply `/review` standards (Correctness / Security / Performance / Maintainability / Style) — fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. **Never invoke the built-in `Skill({skill: "review"})`/`code-review` tool for this** — it is a Claude Code platform skill this repo does not own, and it has proven to spiral into a disproportionate multi-agent fan-out, become cross-task addressable, and orphan silently across a session-limit reset (`agents/autopilot-worker.md` CYCLE step 6, #363). Self-apply the standards directly, or dispatch ONE self-contained fresh-context `general-purpose` subagent — never the built-in skill.
 3. Invoke `superpowers:requesting-code-review` skill — the DEEP pass. Fix every 🔴/🟡/🔵 it surfaces. This historically catches issues `/review` misses; the user always runs it after the report, so skipping = guaranteed rework.
 4. Read back the OUTPUT artifact the work produced/changed — open the real thing (the sent email from the DB, the rendered document, the live UI screen) and note the concrete values you SEE; that read-back is what the `✅ Výstup:` line cites (or establish honestly that no user-facing output exists → the explicit `n/a — <prečo>` form).
-5. All FOUR audit lines MUST appear in the audits block:
-   - `✅ /plan-check: N/N fulfilled`
-   - `✅ /review: clean — 0 🔴 0 🟡 0 🔵`
-   - `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵`
-   - `✅ Výstup: <konkrétne pozorované hodnoty> | n/a — <prečo>`
+5. The audit-summary line + `✅ Výstup:` line MUST carry all FOUR tokens:
+   - `/plan-check: N/N` (on the audit-summary line)
+   - `/review:` with `0 🔴 0 🟡 0 🔵` (spaces between number and emoji — hook-enforced)
+   - `/requesting-code-review:` with `0 🔴 0 🟡 0 🔵`
+   - `✅ Výstup:` on its OWN `✅`-prefixed line (hook requires `✅` adjacent to `Výstup:`)
 
 If ANY audit fails, you are NOT done — fix the findings, re-run, then send.
 
-#### Length budget — ~20 lines
+#### Length budget — ~7 lines (#940)
 
-The whole report fits in ~20 lines (audits + optional plan steps + Goal + What changed + 🌐 + PR + maybe ❓). The diff is the evidence; the report is the summary. If you're writing more, you're over-explaining.
+The whole report fits in ~7 lines (audit-summary + Vystup + optional regression + 🌐 + Goal/What changed + Playbook + marker). The diff is the evidence; the report is the summary. If you're writing more, you're over-explaining.
 
 #### Enforcement
 
