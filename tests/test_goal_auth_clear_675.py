@@ -388,7 +388,13 @@ class AuthClearRearm(unittest.TestCase):
         for i in range(2):
             self._watch(tmux, proj, "sess-auth-cap", now=100000 + i,
                         state=state, reqs=reqs)
-            goal.clear_goal_request("sess-auth-cap", path=reqs)  # simulate delivery
+            # #921: attempts are recorded ONLY on verified delivery — a full
+            # delivery simulation is clear_goal_request + the delivered-attempt
+            # record (the sweep records it after "sent").
+            goal.clear_goal_request("sess-auth-cap", path=reqs)
+            goal._record_delivered_attempt(
+                state, goal._GOAL_AUTH_REARM_ORIGIN, "sess-auth-cap",
+                100000 + i)
         # third attempt within 24h is capped -> no new record.
         self._watch(tmux, proj, "sess-auth-cap", now=100002, state=state, reqs=reqs)
         self.assertEqual(goal.load_goal_requests(reqs), {})
