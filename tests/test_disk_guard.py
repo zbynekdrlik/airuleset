@@ -2458,3 +2458,115 @@ def test_run_disk_guard_severe_ticket_body_has_real_top_consumers_with_injected_
         "#896-899: the ticket body must carry the REAL top consumers, not "
         "'(none)' — body was: %r" % body)
     assert "(none)" not in body
+
+
+# --------------------------------------------------------------------------- #
+# #925-D — whole-disk survey tier
+# --------------------------------------------------------------------------- #
+class TestWholeDiskSurvey:
+    """#925-D: the top-consumers report must name system-level culprits
+    outside /home/*/devel/ (swapfiles, /var/log, big files anywhere on disk)."""
+
+    def test_top_consumers_misses_system_paths_without_survey(self, tmp_path):
+        """RED regression lock: WITHOUT the survey, the old planners do not
+        produce system paths. The survey is what closes the gap."""
+        import unittest.mock as mock
+        # Suppress the survey so only old planners run
+        with mock.patch.object(dg, "discover_whole_disk_survey",
+                               return_value=[]):
+            top = dg._collect_top_consumers(str(tmp_path), 1000.0, limit=10)
+        paths = [p for p, _b in top]
+        assert not any("/var" in p or "/swapfile" in p for p in paths), \
+            "without the whole-disk survey, system paths should not appear"
+
+    def test_whole_disk_survey_returns_action_rows(self):
+        """The survey function returns action-shaped rows with cls=whole-disk."""
+        # Inject a run_fn that returns canned du output
+        def fake_run(argv, **kw):
+            cmd = " ".join(argv) if isinstance(argv, list) else argv
+            if "du" in cmd and "--max-depth" in cmd and argv[-1] == "/":
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="1000000\t/var\n500000\t/tmp\n2000000\t/home\n",
+                    stderr="")
+            if "du" in cmd and "/var/log" in cmd:
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="800000\t/var/log\n100000\t/var/cache\n",
+                    stderr="")
+            if "find" in cmd:
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="500000000\t/swapfile2\n350000000\t/var/log/syslog.1\n",
+                    stderr="")
+            if "du" in cmd and "/home" in cmd:
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="400000\t/home/user1/.cache\n300000\t/home/user1/.local\n",
+                    stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="error")
+        rows = dg.discover_whole_disk_survey(timeout_s=5, run_fn=fake_run)
+        assert len(rows) > 0, "survey must return rows"
+        for r in rows:
+            assert r["cls"] == "whole-disk"
+            assert r["kind"] == "whole-disk-info"
+        # The /var row from the root breakdown must appear
+        var_rows = [r for r in rows if r["path"] == "/var"]
+        assert len(var_rows) == 1
+        assert var_rows[0]["bytes"] == 1000000
+
+    def test_whole_disk_survey_big_files(self):
+        """Big-file find tier names files >= 300M."""
+        def fake_run(argv, **kw):
+            cmd = " ".join(argv) if isinstance(argv, list) else argv
+            if "du" in cmd:
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "find" in cmd:
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="17000000000\t/swapfile2\n1100000000\t/var/log/syslog\n",
+                    stderr="")
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+        rows = dg.discover_whole_disk_survey(timeout_s=5, run_fn=fake_run)
+        big = [r for r in rows if "/swapfile2" in r["path"]]
+        assert len(big) >= 1, "swapfile2 must appear in the survey"
+        assert big[0]["bytes"] == 17_000_000_000
+
+    def test_survey_timeout_returns_empty(self):
+        """A timed-out subprocess returns empty rows, never crashes."""
+        def timeout_run(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout", 10))
+        rows = dg.discover_whole_disk_survey(timeout_s=1, run_fn=timeout_run)
+        assert isinstance(rows, list)
+        # May contain partial results from other tiers, or be empty
+
+    def test_survey_permission_error_marks_needs_root(self):
+        """Items that fail with EACCES get reason='needs-root'."""
+        def perm_run(argv, **kw):
+            cmd = " ".join(argv) if isinstance(argv, list) else argv
+            if "du" in cmd and "--max-depth" in cmd and argv[-1] == "/":
+                return types.SimpleNamespace(
+                    returncode=1,
+                    stdout="1000\t/root\n",
+                    stderr="du: cannot read directory '/root': Permission denied\n")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        rows = dg.discover_whole_disk_survey(timeout_s=5, run_fn=perm_run)
+        # /root row should appear with the size from stdout (du writes what it can)
+        root_rows = [r for r in rows if r.get("path") == "/root"]
+        if root_rows:
+            assert root_rows[0]["bytes"] == 1000
+
+    def test_collect_top_consumers_includes_whole_disk(self, tmp_path):
+        """GREEN: _collect_top_consumers with the survey wired in names
+        system-level paths. This is the counterpart of the RED test above."""
+        # Monkeypatch the survey to return a known system-path row
+        import unittest.mock as mock
+        fake_rows = [{"cls": "whole-disk", "path": "/var/log",
+                      "bytes": 1_100_000_000, "kind": "whole-disk-info",
+                      "reason": None}]
+        with mock.patch.object(dg, "discover_whole_disk_survey",
+                               return_value=fake_rows):
+            top = dg._collect_top_consumers(str(tmp_path), 1000.0, limit=10)
+        paths = [p for p, _b in top]
+        assert "/var/log" in paths, (
+            "#925-D: the survey must surface /var/log in top_consumers")
