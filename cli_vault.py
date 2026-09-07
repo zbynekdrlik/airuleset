@@ -193,17 +193,20 @@ def _secret_select_ips(ips, allow_plain=False):
 
 
 def _secret_public_lane(args):
-    """(public_host, port) for the public-TLS drop lane, or (None, None).
+    """(public_host, port, bind_ip) for the public-TLS drop lane, or
+    (None, None, None).
 
     #889: public HTTPS is the DEFAULT for every account. Delegates to
-    `cli_drop_gateway.resolve_public_lane` which returns the lane whenever a
-    registered lane + live marker exist. No tailscale check needed.
+    `cli_drop_gateway.resolve_public_lane_full` which returns the lane whenever
+    a registered lane + live marker exist. #931: bind_ip is "127.0.0.1" for
+    local-topology lanes (tunnel on this box) or the tailscale IP for
+    controller-topology lanes (tunnel on the controller).
     """
     import cli_drop_gateway as _dg
-    lane = _dg.resolve_public_lane()
+    lane = _dg.resolve_public_lane_full()
     if lane:
-        return lane[0], lane[1]
-    return None, None
+        return lane[0], lane[1], lane[2]
+    return None, None, None
 
 
 def _secret_public_url_line(host, token):
@@ -502,13 +505,13 @@ def _secret_show(args):
                                       allow_plain=getattr(args, "allow_plain", False))
 
     # Public-TLS drop lane (#664): same tailscale -> public fallback as request.
-    public_host, port = _secret_public_lane(args)
+    public_host, port, bind_ip = _secret_public_lane(args)
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret show: public drop lane — ignoring --port/--allow-plain "
-                  "(fixed loopback port %d, TLS via the tunnel)" % port,
+                  "(fixed port %d, TLS via the tunnel)" % port,
                   file=sys.stderr)
-        ips, dropped = ["127.0.0.1"], []
+        ips, dropped = [bind_ip], []
         if _pick_free_port(ips, [port]) is None:
             print("secret show: public drop port %d is busy — another drop "
                   "endpoint (secret/upload) holds it; wait for it to close" % port,
@@ -754,13 +757,13 @@ def _secret_request(args):
     # this box has a LIVE drop lane AND (--public OR no tailscale), bind loopback
     # on the fixed drop port that a managed cloudflared tunnel fronts and
     # advertise ONE public HTTPS URL — never an ssh -L instruction.
-    public_host, port = _secret_public_lane(args)
+    public_host, port, bind_ip = _secret_public_lane(args)
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret: public drop lane — ignoring --port/--allow-plain "
-                  "(fixed loopback port %d, TLS via the tunnel)" % port,
+                  "(fixed port %d, TLS via the tunnel)" % port,
                   file=sys.stderr)
-        ips, dropped = ["127.0.0.1"], []
+        ips, dropped = [bind_ip], []
         if _pick_free_port(ips, [port]) is None:
             print("secret: public drop port %d is busy — another drop endpoint "
                   "(secret/upload) holds it; wait for it to close" % port,

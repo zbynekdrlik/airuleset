@@ -131,8 +131,8 @@ class DropLane:
 # CONTROLLER_TUNNEL_UUID) to keep this leaf self-contained (#433 rule).
 _CONTROLLER_TUNNEL_UUID = "f85ea304-920b-4ba4-96bc-a68001ce6fb4"
 _SUBDEV_TAILSCALE = "100.118.174.27"
-# Legacy: still used by marek/dominika LOCAL tunnels on subdev.
-_SUBDEV_DAVID_SERVICE = "webterm-david-tunnel.service"  # unused but kept for grep
+
+
 
 DROP_LANES = {
     # --- spinbike (single-account, SYSTEM unit, no Access) ---
@@ -349,6 +349,34 @@ def resolve_public_lane(want_public=True, have_encrypted_private=None,
     return lane.host, lane.port                 # authoritative, from the registry
 
 
+def resolve_public_lane_full(marker_path=None, nodename=None, username=None):
+    """(host, port, bind_ip) for the public drop lane, or None.
+
+    Like `resolve_public_lane` but also returns the IP the drop server must
+    BIND on so the tunnel origin can reach it (#931):
+    - LOCAL topology: `"127.0.0.1"` (cloudflared on the same box → loopback).
+    - CONTROLLER topology: `lane.origin_host` (cloudflared on the controller →
+      this box's tailscale IP).
+
+    Fail-closed: a controller lane with no `origin_host` → None (never fall
+    back to loopback when the tunnel origin is remote).
+    """
+    lane = drop_lane_for_account(nodename, username)
+    if lane is None:
+        return None
+    marker = read_drop_marker(marker_path)
+    if marker is None:
+        return None
+    marker_host, _marker_port = marker
+    if marker_host != lane.host:
+        return None
+    if lane.topology == "controller":
+        if not lane.origin_host:
+            return None                          # fail-closed: no origin → no lane
+        return lane.host, lane.port, lane.origin_host
+    return lane.host, lane.port, "127.0.0.1"
+
+
 _CATCHALL_RE = re.compile(r"^(\s*)-\s*service:\s*http_status:404\s*$")
 
 
@@ -498,16 +526,20 @@ def drop_ingress_rules_for_controller():
     ``http://<tailscale>:<port>`` where the drop server listens.
     """
     rules = []
-    seen = set()
+    seen = {}  # host -> service_url (dedup + conflict detection)
     for (_n, _u), lane in sorted(DROP_LANES.items()):
         if lane.topology != "controller" or not lane.origin_host:
             continue
-        key = (lane.host, lane.origin_host, lane.port)
-        if key in seen:
-            continue
-        seen.add(key)
-        rules.append((lane.host,
-                       "http://%s:%d" % (lane.origin_host, lane.port)))
+        svc = "http://%s:%d" % (lane.origin_host, lane.port)
+        prev = seen.get(lane.host)
+        if prev is not None:
+            if prev != svc:
+                raise ValueError(
+                    "conflicting controller ingress for %s: %s vs %s"
+                    % (lane.host, prev, svc))
+            continue  # same host + same service — dedup
+        seen[lane.host] = svc
+        rules.append((lane.host, svc))
     return rules
 
 

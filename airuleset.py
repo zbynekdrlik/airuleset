@@ -6629,18 +6629,18 @@ def cmd_upload(args):
     # FRESH here (unsandboxed) so it always reflects the current network.
     ips = bind_ips()
 
-    # Public-TLS drop lane (#889): public HTTPS is the DEFAULT for every account.
-    # When a registered lane + live marker exist, bind loopback on the per-account
-    # drop port a managed cloudflared tunnel fronts and advertise ONE public HTTPS
-    # URL — never an scp/ssh -L ask.
+    # Public-TLS drop lane (#889/#931): public HTTPS is the DEFAULT for every
+    # account. When a registered lane + live marker exist, bind on the lane's
+    # origin IP (127.0.0.1 for local topology, tailscale IP for controller
+    # topology) at the per-account drop port and advertise ONE public HTTPS URL.
     import cli_drop_gateway as _dg
-    public_lane = _dg.resolve_public_lane()
+    public_lane = _dg.resolve_public_lane_full()
     if public_lane:
-        public_host, port = public_lane
+        public_host, port, bind_ip = public_lane
         if getattr(args, "port", None):
-            print("upload: public drop lane — ignoring --port (fixed loopback "
+            print("upload: public drop lane — ignoring --port (fixed "
                   "port %d, TLS via the tunnel)" % port, file=sys.stderr)
-        ips = ["127.0.0.1"]
+        ips = [bind_ip]
         if _pick_free_port(ips, [port]) is None:
             print("upload: public drop port %d is busy — another drop endpoint "
                   "(secret/upload) holds it; wait for it to close" % port,

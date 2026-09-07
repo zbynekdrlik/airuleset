@@ -92,9 +92,12 @@ class TestCmdDropGatewayController(unittest.TestCase):
     def test_dry_run_controller_topology(self):
         """Dry-run for a controller-topology lane prints the plan without
         writing anything."""
-        rc = dg.cmd_drop_gateway(_args(
-            apply=False, _nodename="subdev", _username="david2",
-            _marker_path=self.marker))
+        from unittest import mock
+        with mock.patch.object(dg, "_reconcile_access",
+                               return_value=(True, "Access ok (dry-run)")):
+            rc = dg.cmd_drop_gateway(_args(
+                apply=False, _nodename="subdev", _username="david2",
+                _marker_path=self.marker))
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(self.marker),
                          "dry-run must not write the marker")
@@ -219,6 +222,58 @@ class TestReconcileControllerTopology(unittest.TestCase):
             run=r, nodename="subdev", marker_path=self.marker,
             username="david2"))
         self.assertEqual(calls, [])
+
+
+class TestResolvePublicLaneFull(unittest.TestCase):
+    """#931 F1 fix: resolve_public_lane_full returns the correct bind IP —
+    tailscale IP for controller topology, loopback for local topology."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+
+    def test_controller_lane_returns_tailscale_bind_ip(self):
+        """Controller-topology: the bind IP must be the origin_host (tailscale
+        IP), NOT 127.0.0.1 — the controller's cloudflared proxies to this IP."""
+        dg.write_drop_marker("drop-subdev-david2.newlevel.media", 8871,
+                             path=self.marker)
+        result = dg.resolve_public_lane_full(
+            marker_path=self.marker, nodename="subdev", username="david2")
+        self.assertIsNotNone(result)
+        host, port, bind_ip = result
+        self.assertEqual(host, "drop-subdev-david2.newlevel.media")
+        self.assertEqual(port, 8871)
+        self.assertEqual(bind_ip, "100.118.174.27",
+                         "controller-topology bind IP must be the tailscale "
+                         "IP, not loopback — the controller tunnel proxies "
+                         "to this address")
+
+    def test_local_lane_returns_loopback_bind_ip(self):
+        """Local-topology: the bind IP must be 127.0.0.1 — the local tunnel
+        proxies to loopback."""
+        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828,
+                             path=self.marker)
+        result = dg.resolve_public_lane_full(
+            marker_path=self.marker, nodename="spinbike", username="newlevel")
+        self.assertIsNotNone(result)
+        host, port, bind_ip = result
+        self.assertEqual(bind_ip, "127.0.0.1")
+
+    def test_no_marker_returns_none(self):
+        result = dg.resolve_public_lane_full(
+            marker_path=self.marker, nodename="subdev", username="david2")
+        self.assertIsNone(result)
+
+    def test_backward_compat_resolve_public_lane_still_2tuple(self):
+        """resolve_public_lane (the old 2-tuple API) still works for backward
+        compatibility."""
+        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828,
+                             path=self.marker)
+        result = dg.resolve_public_lane(
+            marker_path=self.marker, nodename="spinbike", username="newlevel")
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 2)
 
 
 class TestDropIngressRulesForController(unittest.TestCase):

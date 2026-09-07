@@ -370,13 +370,16 @@ class TestSecretPublicLaneHelper(unittest.TestCase):
     def test_account_with_live_marker_uses_public(self):
         from unittest import mock
         # #889: public is the default — no tailscale check needed.
+        # #931: _secret_public_lane now returns (host, port, bind_ip).
         dg.write_drop_marker("drop-david.newlevel.media", 8870, path=self.marker)
         lane = dg.drop_lane_for_account("subdev", "david1")
         with mock.patch.object(dg, "drop_lane_for_account", return_value=lane), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
-            host, port = self.cli_vault._secret_public_lane(
+            host, port, bind_ip = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
         self.assertEqual((host, port), ("drop-david.newlevel.media", 8870))
+        # Controller-topology → bind_ip is the tailscale IP, not loopback.
+        self.assertEqual(bind_ip, "100.118.174.27")
 
     def test_account_without_marker_returns_none(self):
         from unittest import mock
@@ -384,15 +387,15 @@ class TestSecretPublicLaneHelper(unittest.TestCase):
         with mock.patch.object(dg, "drop_lane_for_account",
                                return_value=dg.drop_lane_for_account("subdev", "david1")), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
-            host, port = self.cli_vault._secret_public_lane(
+            host, port, bind_ip = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
         self.assertIsNone(host)
 
 
 class TestUploadPublicLaneEndToEnd(unittest.TestCase):
-    """Full round-trip (#664): with a live drop lane, `cmd_upload` binds loopback
-    on the drop port and advertises ONE public HTTPS URL — never the un-routable
-    loopback address, never an scp/ssh -L ask."""
+    """Full round-trip (#664/#931): with a live drop lane, `cmd_upload` binds on
+    the lane's origin IP at the drop port and advertises ONE public HTTPS URL —
+    never the un-routable loopback address, never an scp/ssh -L ask."""
 
     def test_cmd_upload_public_lane(self):
         import airuleset
@@ -402,8 +405,10 @@ class TestUploadPublicLaneEndToEnd(unittest.TestCase):
         from unittest import mock
         port = _free_port()          # ephemeral so parallel runs never collide
         dest = tempfile.mkdtemp()
-        with mock.patch.object(dg, "resolve_public_lane",
-                               return_value=("drop-david.newlevel.media", port)):
+        # #931: cmd_upload now calls resolve_public_lane_full (3-tuple).
+        with mock.patch.object(dg, "resolve_public_lane_full",
+                               return_value=("drop-david.newlevel.media",
+                                             port, "127.0.0.1")):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_upload(types.SimpleNamespace(
