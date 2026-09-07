@@ -3941,8 +3941,9 @@ def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
 # captured, via the shared check's symmetric clamp). Un-submitted
 # COMPOSITION stamps neither signal and is caught separately, by the
 # two-capture draft-diff check at the send point below. Worst-case
-# annoyance stays bounded by GOAL_LANE_INTERVAL_S + GOAL_LANE_MAX_NUDGES
-# regardless.
+# annoyance stays bounded by the cadence cap (GOAL_LANE_INTERVAL_S, or the
+# #929 GOAL_LANE_STARVED_INTERVAL_S for a starved full-authority box) +
+# GOAL_LANE_MAX_NUDGES regardless.
 GOAL_LANE_LIVE_CONVO_S = 3 * 60
 
 # #442-review F2 -- bound on CONSECUTIVE zero-progress stash aborts. A
@@ -4760,7 +4761,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # `skip:batch-running` (NO refill while a batch runs) branch is REMOVED; the
     # 0<lw<floor case now falls through to the same nudge path. (#620's give-up
     # reset already fired above for any live_workers>0, and the #530 min-backlog
-    # floor + #670 dedup + #530 hourly cap below bound the refill nudge cadence.)
+    # floor + #670 dedup + cadence cap (#530 hourly / #929 15-min starved) below
+    # bound the refill nudge cadence.)
     # #530 refill floor: a lone/tiny backlog is not worth a fresh lane for a
     # FRESHLY-idle box (the anti-storm gate against nudge->"nič workable"->nudge).
     # #804 mode-4: but a loop that has STOOD idle > 1h over just 1-2 workable
