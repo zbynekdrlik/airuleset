@@ -73,20 +73,6 @@ which auto-load when you read `cli_webterm.py`):
   that is SMALLER than the window gets a cursor-following CROP of the window — everything below
   the cursor (the CC statusline footer + agent strip) is clipped. `capture-pane` shows the footer
   IS in the pane; only the client's render clips it. This is the whole #672 bug.
-- **A webterm crop fix is BROWSER-GRID-bound, NOT tmux-side (#672).** `-f ignore-size` is REQUIRED
-  to keep the target's OWN client un-resized (removing it lets the owner's client resize the
-  window = degradation; proven by a control). With ignore-size, the client viewport == its ttyd
-  pty == the browser xterm grid (`fitFixedGrid` clamps `term.resize`). So the ONLY non-degrading
-  way to stop the crop is to make the browser grid ≥ the target window. No `window-size` mode
-  helps (smallest degrades the owner; largest/latest keep their size and the small client still
-  crops). Do NOT chase a tmux-side fix — the geometry forbids it.
-- **Owner box vs foreign-stream box grid (#672).** An OWNER box pins `window-size manual` +
-  `default-size 176x50` (cli_tmux_provisioning), so the owner grid `_webterm_term_grid()` = 176x51
-  matches the window → no crop, no dark border. A FOREIGN-STREAM box does NOT pin — its window
-  follows the stream dev's own client (David 305x57). So foreign-stream tabs get their own larger
-  `WEBTERM_STREAM_TERM_GRID` (per-tab `tcols`/`trows` in `_tab_sessions`, kind=="stream" only);
-  owner tabs keep 176x51 or a dark border returns. A grid too LARGE for a small-terminal stream is
-  a harmless dark border (everything visible), a grid too SMALL crops — prefer generous.
 - **Keep the churned `fitFixedGrid`/`fillFixedGrid` FILL region UNTOUCHED (#672).** Per-tab grid is
   delivered via a getter over `CFG.term_cols`/`CFG.term_rows` placed right after `const CFG` (an
   uncontended spot), so the fill algorithm reads them unchanged.

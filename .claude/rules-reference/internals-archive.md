@@ -1822,3 +1822,23 @@ Consequences that keep biting:
   (dev1 owner lane; subdev lane sockety: `webterm-<lane>-gateway.sock`).
 - Cross-account izolácia sa overuje NEGATÍVNE: cudzí účet dostane
   "Couldn't connect" + `ls /run/user/<uid>` Permission denied (0700 runtime dir).
+
+### internals-webterm — #672 SUPERSEDED bullets (archived at 50KB cap, #870 incident-2 playbook growth)
+
+The #672 REWORK bullet in internals-webterm.md marks these two as the OLD design (superseded by the tmux-side `window-size manual` pin):
+
+- **A webterm crop fix is BROWSER-GRID-bound, NOT tmux-side (#672).** `-f ignore-size` is REQUIRED
+  to keep the target's OWN client un-resized (removing it lets the owner's client resize the
+  window = degradation; proven by a control). With ignore-size, the client viewport == its ttyd
+  pty == the browser xterm grid (`fitFixedGrid` clamps `term.resize`). So the ONLY non-degrading
+  way to stop the crop is to make the browser grid ≥ the target window. No `window-size` mode
+  helps (smallest degrades the owner; largest/latest keep their size and the small client still
+  crops). Do NOT chase a tmux-side fix — the geometry forbids it.
+- **Owner box vs foreign-stream box grid (#672).** An OWNER box pins `window-size manual` +
+  `default-size 176x50` (cli_tmux_provisioning), so the owner grid `_webterm_term_grid()` = 176x51
+  matches the window → no crop, no dark border. A FOREIGN-STREAM box does NOT pin — its window
+  follows the stream dev's own client (David 305x57). So foreign-stream tabs get their own larger
+  `WEBTERM_STREAM_TERM_GRID` (per-tab `tcols`/`trows` in `_tab_sessions`, kind=="stream" only);
+  owner tabs keep 176x51 or a dark border returns. A grid too LARGE for a small-terminal stream is
+  a harmless dark border (everything visible), a grid too SMALL crops — prefer generous.
+
