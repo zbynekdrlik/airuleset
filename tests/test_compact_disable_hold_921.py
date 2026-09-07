@@ -7,7 +7,6 @@ record_compact_request does NOT check the disable flag, so requests accumulate
 even though compact delivery is disabled.
 """
 
-import json
 import os
 import unittest
 import unittest.mock as m
@@ -107,7 +106,7 @@ class TestRecordCompactRequestDisabled(_DisableBase):
         """Disable flag → record_compact_request writes nothing."""
         sid = "test-921-record"
         self._disable_compact()
-        result = wd_compact.record_compact_request(
+        wd_compact.record_compact_request(
             sid, "/tmp/x", now=100000, path=self.creqp, origin="self-callback")
         # Should return False (no-op) or at least not create a pending request
         self.assertFalse(wd_compact.has_pending_request(sid, path=self.creqp))

@@ -5288,6 +5288,13 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547
         _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)     # #616
+        # #921 M1 review fix: prune busy_first_seen for gone sessions — mirrors
+        # the wrecs/lnpark/rrecs orphan prune pattern. A session that exits while
+        # Waiting leaves its key forever (no reset fires for a vanished pane).
+        bfs = state.get("busy_first_seen") if state is not None else None
+        if isinstance(bfs, dict):
+            for _dead_sid in [k for k in bfs if k not in visited_sids]:
+                bfs.pop(_dead_sid, None)
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797

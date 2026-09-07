@@ -8,28 +8,19 @@ deliver_goal always returns skip:busy on a Waiting pane regardless of how
 long the state has persisted.
 """
 
-import json
-import os
-import re
-import time
 import unittest
-import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import watchdog as wd                                    # noqa: E402
 from watchdog import goal                                # noqa: E402
-from watchdog import compact as wd_compact               # noqa: E402
 from watchdog import ops_wait_recheck as _owr             # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
-    GOAL_ARMED_CAP,
     GOAL_IDLE_CAP,
     DeliverGoalFakeTmux,
-    _encode,
     _isolate_goal_state,
     _write_marker_transcript,
 )
@@ -131,6 +122,10 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
                          "After 10+ min of persistent Waiting, deliver_goal "
                          "must NOT return skip:busy — the age bound should "
                          "allow delivery")
+        # L3 review fix: tighten — verify a keystroke was actually attempted
+        self.assertNotEqual(tmux2.sent, [],
+                            "After the age bound, a keystroke should have been "
+                            "attempted (sent list should be non-empty)")
 
     def test_busy_waiting_resets_when_waiting_clears(self):
         """When the Waiting line disappears between sweeps, the first-seen
@@ -149,9 +144,9 @@ class TestGoalSweepBusyAgeOut(unittest.TestCase):
                                  origin="self-callback")
         tmux2 = DeliverGoalFakeTmux([("%9", "claude", self.CWD, sid)],
                                     GOAL_IDLE_CAP, model_type=True)
-        logs2 = goal.goal_sweep(100400.0, run=tmux2, projects_dir=proj,
-                                requests_path=self.reqp, sleep_fn=lambda s: None,
-                                state=self.state)
+        goal.goal_sweep(100400.0, run=tmux2, projects_dir=proj,
+                        requests_path=self.reqp, sleep_fn=lambda s: None,
+                        state=self.state)
         # Normal pane — not busy (delivery proceeds, resets first-seen)
 
         # Third sweep: Waiting again at t=100500 — should be treated as
