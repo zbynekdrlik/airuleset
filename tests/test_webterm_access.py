@@ -59,7 +59,7 @@ DAVID_SPEC = {
     "hostname": "david.newlevel.media",
     "name": "webterm — david",
     "allowed_emails": ["david@example.com"],
-    "session_duration": "24h",
+    "session_duration": "720h",
 }
 
 
