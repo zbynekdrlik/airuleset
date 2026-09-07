@@ -70,7 +70,7 @@ NEW_SKILLS = {
         [
             "**Verification has THREE mandatory layers — liveness, version "
             "match, AND functional.**",
-            "The completion-report `✅ Deploy:` line MUST include the "
+            "The completion-report `✅ Výstup:` line MUST include the "
             "version read from the DOM",
             "Curl proves the server is running. Playwright proves the "
             "feature works.",

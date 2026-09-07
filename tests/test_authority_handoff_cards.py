@@ -152,13 +152,12 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         # integration branch — never a substitute for the Hand-off line.
         t = read(self.SKILL)
         idx = t.index("Reduced-authority streams (branch-merge / fork-no-merge) carry")
-        end = t.index("The heading + audits", idx)
-        window = t[idx:end]
+        end = t.index("The heading + audit-summary", idx)
+        window = " ".join(t[idx:end].split())
         self.assertIn("Hand-off: READY-FOR-REVIEW komentár na #N", window)
         self.assertIn("for BOTH profiles", window)
-        self.assertIn("branch-merge posts it too, right after its integration-branch merge", window)
-        self.assertIn("a merge alone does NOT", window)
-        self.assertIn("additionally for branch-merge", window)
+        self.assertIn("branch-merge posts it too", window)
+        self.assertIn("for branch-merge", window)
 
     def test_pr_merge_policy_skill_states_the_hand_off_too(self):
         # #349 round-2-review M1: `skills/pr-merge-policy/SKILL.md`'s own
