@@ -323,13 +323,16 @@ class TestZbynekInventory870(unittest.TestCase):
         ar = local_entries[0]
         self.assertEqual(ar["id"], "ar")
 
-    def test_zbynek_inventory_non_local_ids_match_dashboard_tabs(self):
-        """Pairwise lock: zbynek_inventory()'s NON-LOCAL ids == the dashboard
-        tabs (the local 'ar' tab is controller-only and added to the tabs by
-        F4c when LANE_HOST["zbynek"] flips to "controller")."""
-        inv_ids = {e["id"] for e in p.zbynek_inventory() if not e.get("local")}
+    def test_zbynek_inventory_ids_match_dashboard_tabs(self):
+        """Pairwise lock: EVERY zbynek_inventory() id — the local 'ar' tab
+        included — == the dashboard tabs. F4c flipped LANE_HOST["zbynek"] to
+        "controller" but nobody added 'ar' to the tabs and the old NON-LOCAL
+        variant of this lock enshrined that gap (#938: the owner had no tab
+        to reach the controller supervisor session)."""
+        inv_ids = {e["id"] for e in p.zbynek_inventory()}
         tab_ids = set(w.WEBTERM_DASHBOARD_TABS["zbynek"])
         self.assertEqual(inv_ids, tab_ids)
+        self.assertEqual(w.WEBTERM_DASHBOARD_TABS["zbynek"][0], "ar")
 
 
 class TestLaneSpecFields870(unittest.TestCase):
