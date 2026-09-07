@@ -256,6 +256,13 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     session = str(session or "").strip()
     if not session:
         return False
+    # #921: when compact delivery is disabled by the owner flag file, recording
+    # a request is a no-op — prevents stale requests from accumulating on disk
+    # that can never be delivered (the supervisor already had to clean fleet-wide
+    # `.bak-911` backups from this exact accumulation). Belt-and-suspenders with
+    # the `pending_compact_hold` guard.
+    if watchdog._owner_disabled("compact"):
+        return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
     # #848: the #844 live-hold CAP is retired (the live-tasks/bg-bash veto it
@@ -333,6 +340,12 @@ def pending_compact_hold(sid, now=None, sweeps=None, path=None):
     rider stops freezing and retries. The in-sweep `compact_sweep(handled=...)` set
     still prevents a same-sweep keystroke collision, independent of this bound.
 
+    #921: returns False unconditionally when `_owner_disabled("compact")` is True —
+    a disabled compact delivery can never clear the hold, so the hold must never
+    engage. This closes the starvation where riders were blocked at
+    `hold:compact-pending` indefinitely while compact_sweep returned early on the
+    disable flag.
+
     Fail-OPEN (never a hold) on: a blank sid, no pending request, a corrupt/non-dict
     entry, an unreadable/malformed age anchor, OR a FUTURE-skewed anchor
     (`age < 0` — a corrupt anchor timestamped after `now`; the retired `hbts` path
@@ -340,6 +353,9 @@ def pending_compact_hold(sid, now=None, sweeps=None, path=None):
     behaviour, so a read that cannot trust the store never wedges a writer."""
     sid = str(sid or "").strip()
     if not sid:
+        return False
+    # #921: a disabled compact delivery can never clear the hold — fail-open
+    if watchdog._owner_disabled("compact"):
         return False
     entry = load_compact_requests(path).get(sid)
     if not isinstance(entry, dict):

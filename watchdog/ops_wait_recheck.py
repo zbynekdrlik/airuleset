@@ -281,6 +281,78 @@ def _pane_busy_waiting(captured):
     return bool(captured) and bool(watchdog._BG_AGENTS_WAIT_RX.search(captured))
 
 
+# #921 — the age bound for the busy-waiting override. When the "Waiting for N
+# background agents" state has persisted for this long AND the input box is a
+# bare free `❯` (kind=="input"), the keystroke is delivered anyway. CC queues a
+# submitted prompt and fires it when the agents-wait turn unblocks — the submit
+# is NOT lost, it is deferred by CC itself (accepted premise; the threshold is
+# conservative at 10 min to give transient Waiting states ample time to clear
+# naturally before the override kicks in).
+BUSY_WAITING_AGE_BOUND_S = 600   # 10 min
+
+
+def _busy_waiting_with_age(captured, state, sid, now, kind):
+    """#921 age-bounded busy-waiting check. Returns `(is_busy, aged_out)`:
+
+    - `(False, False)` — pane is NOT in the Waiting state (or empty/None).
+      ALSO resets the per-sid first-seen tracking (the Waiting state cleared).
+    - `(True, False)` — pane IS in the Waiting state, age < bound or
+      kind != "input" (a draft/busy/no-input-line pane should not be overridden).
+      The caller should DEFER (today's behavior, skip:busy).
+    - `(True, True)` — pane IS in the Waiting state, age >= BUSY_WAITING_AGE_BOUND_S
+      AND kind == "input" (bare `❯` prompt). The caller should DELIVER anyway.
+
+    Per-sid first-seen tracking is stored in `state["busy_first_seen"]` (a dict
+    keyed by sid → timestamp), following the existing `wrecs`/`lnpark` state dict
+    pattern. `state` is the run_once state dict passed through `goal_sweep` /
+    `goal_dark_watch` / `ops_wait_recheck.orchestrate_ops_wait_recheck`.
+
+    Fail-safe: age unknown (no `state`, corrupt/missing first-seen, `now` is
+    None) → `(True, False)` — keep deferring (today's behavior)."""
+    is_busy = _pane_busy_waiting(captured)
+    # #921 M2 review fix: a blank/None sid is treated as "age unknown" → fail-safe
+    # defer when busy, and never writes to the tracking dict (so it cannot become
+    # a shared key that false-ages every pane).
+    _sid = str(sid or "").strip() if sid is not None else ""
+    if not is_busy:
+        # Waiting state is NOT present — reset the first-seen tracking
+        if _sid and isinstance(state, dict) and isinstance(state.get("busy_first_seen"), dict):
+            state["busy_first_seen"].pop(_sid, None)
+        return (False, False)
+
+    # Waiting IS present. Track first-seen, check age.
+    if not _sid:
+        return (True, False)   # fail-safe: no sid → defer (never track None)
+    if not isinstance(state, dict):
+        return (True, False)   # fail-safe: no state → defer
+    bfs = state.setdefault("busy_first_seen", {})
+    if not isinstance(bfs, dict):
+        state["busy_first_seen"] = {}
+        bfs = state["busy_first_seen"]
+
+    if _sid not in bfs:
+        if now is not None:
+            bfs[_sid] = float(now)
+        return (True, False)   # first observation — defer
+
+    first_seen = bfs.get(_sid)
+    if not isinstance(first_seen, (int, float)) or isinstance(first_seen, bool):
+        return (True, False)   # corrupt first-seen → fail-safe defer
+    if now is None:
+        return (True, False)   # no clock → fail-safe defer
+
+    age = float(now) - float(first_seen)
+    if age < 0:
+        # Future-skewed first-seen (corrupt/clock-drift) — reset and defer
+        bfs[_sid] = float(now)
+        return (True, False)
+
+    if age >= BUSY_WAITING_AGE_BOUND_S and kind == "input":
+        return (True, True)    # aged out + bare prompt → DELIVER
+
+    return (True, False)       # still under the bound → defer
+
+
 def _env_int(key, default_s):
     try:
         return int(os.environ.get(key, default_s))
@@ -1060,7 +1132,11 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # transient Waiting state clears between turns and a later sweep delivers into
     # the genuinely-idle `❯`. last_nudge stays unadvanced (the persisted rec above
     # keeps first_seen/w_seen/sig), the pane is NOT claimed in `handled`.
-    if _pane_busy_waiting(captured):
+    # #921: age-bounded override — same as goal.py's deliver_goal
+    _owr_kind, _owr_draft = watchdog._classify_boundary(captured)
+    _owr_busy, _owr_aged = _busy_waiting_with_age(
+        captured, state, sid, now, _owr_kind)
+    if _owr_busy and not _owr_aged:
         logs.append("ops-wait-recheck %s -> skip:busy-bg-agent (pane waiting on a "
                     "background agent — deferred, retry next sweep)" % loc)
         return logs

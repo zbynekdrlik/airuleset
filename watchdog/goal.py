@@ -1192,7 +1192,10 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
             # there would interrupt a live turn. _recovery_pane_ready already
             # ruled out copy-mode / recent-human / an open dialog.
             bkind, _bd = watchdog._classify_boundary(captured)
-            if bkind != "input" or _ops_wait_recheck._pane_busy_waiting(captured):
+            # #921: age-bounded busy-waiting override applies here too
+            _rc_busy, _rc_aged = _ops_wait_recheck._busy_waiting_with_age(
+                captured, state, sid, now, bkind)
+            if bkind != "input" or (_rc_busy and not _rc_aged):
                 logs.append("attempt-cap: cleanup SKIP non-input-boundary (%s)"
                             % loc)
             else:
@@ -1606,9 +1609,20 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # `_pane_busy_waiting`: a "Waiting for N background agents" pane reads
     # kind="input" (bare `❯`, spinner a row above) so a submit is swallowed and
     # the /goal parks orphaned -- defer, no keystroke (#720/#714 primitive).
-    if kind == "busy" or _ops_wait_recheck._pane_busy_waiting(captured):
+    # #921: age-bounded override — after >= 10 min of persistent Waiting with a
+    # bare `❯` prompt, deliver anyway (CC queues the prompt and fires on unblock).
+    if kind == "busy":
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
+    _bw_busy, _bw_aged = _ops_wait_recheck._busy_waiting_with_age(
+        captured, state, sid, now, kind)
+    if _bw_busy and not _bw_aged:
+        _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
+        return "skip:busy"
+    if _bw_busy and _bw_aged:
+        _log_goal_sync("DELIVER busy-aged-out sid=%s cwd=%s (Waiting "
+                       "persistent >= %ds, bare prompt — delivering anyway)"
+                       % (sid, cwd, _ops_wait_recheck.BUSY_WAITING_AGE_BOUND_S))
 
     if draft:
         # Mark provenance BEFORE the attempt (regardless of outcome) so
@@ -2611,7 +2625,13 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
         logs.append("goal-guard %s sid=%s -> skip:stopped-pane"
                      % (loc, sid))
         return logs
-    if kind == "busy" or _ops_wait_recheck._pane_busy_waiting(captured):
+    if kind == "busy":
+        logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
+        return logs
+    # #921: age-bounded busy-waiting — same as deliver_goal
+    _gg_busy, _gg_aged = _ops_wait_recheck._busy_waiting_with_age(
+        captured, state, sid, now, kind)
+    if _gg_busy and not _gg_aged:
         logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
         return logs
     if draft:
@@ -3474,7 +3494,8 @@ _QDISARM_TRANSIENT_SKIPS = frozenset(
     ("skip:busy", "skip:no-input-line", "skip:draft"))
 
 
-def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs):
+def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs,
+                        sid=None):
     """#522 -- deliver the `/goal clear` disarm keystroke to a BARE input box via
     a verified typed send (`_send_goal_verified`, the 'symmetric inverse' of the
     arm keystroke), with the shared janitor (#372) provenance mark so a stuck send
@@ -3500,7 +3521,12 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs):
     # #720/#714 -- the disarm keystroke path shares the arm path's busy-Waiting
     # gap: never submit `/goal clear` into a "Waiting for N background agents"
     # pane (the submit is swallowed). Defer, retry next sweep.
-    if kind == "busy" or _ops_wait_recheck._pane_busy_waiting(captured):
+    # #921: age-bounded override — same as deliver_goal
+    if kind == "busy":
+        return "skip:busy"
+    _dc_busy, _dc_aged = _ops_wait_recheck._busy_waiting_with_age(
+        captured, state, sid, now, kind)
+    if _dc_busy and not _dc_aged:
         return "skip:busy"
     if draft:
         return "skip:draft"          # user is composing -- never disturb, retry next sweep
@@ -3647,7 +3673,7 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
                         "would disarm (dry-run)" % (loc, sid, streak))
             continue
         word = _deliver_goal_clear(pid, GOAL_CLEAR_TEXT, run, captured, state,
-                                   now, sleep_fn, logs)
+                                   now, sleep_fn, logs, sid=sid)
         if word in _QDISARM_TRANSIENT_SKIPS:
             logs.append("qrepoke %s sid=%s -> disarm deferred (%s), retry next "
                         "sweep" % (loc, sid, word))
@@ -5262,6 +5288,13 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547
         _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)     # #616
+        # #921 M1 review fix: prune busy_first_seen for gone sessions — mirrors
+        # the wrecs/lnpark/rrecs orphan prune pattern. A session that exits while
+        # Waiting leaves its key forever (no reset fires for a vanished pane).
+        bfs = state.get("busy_first_seen") if state is not None else None
+        if isinstance(bfs, dict):
+            for _dead_sid in [k for k in bfs if k not in visited_sids]:
+                bfs.pop(_dead_sid, None)
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797
