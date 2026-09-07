@@ -74,9 +74,13 @@ class TestInputBuffer933(unittest.TestCase):
         )
 
     def test_enter_key_buffered(self) -> None:
-        r"""Enter is buffered as \\r (the PTY newline)."""
-        # The buffer must handle Enter specially
-        self.assertIn("Enter", DASHBOARD_TEMPLATE.split("_wtInputBuf")[1][:2000])
+        r"""Enter is buffered as \r (the PTY newline)."""
+        # The buffer handler must check for the Enter key and append \r.
+        # In the triple-quoted DASHBOARD_TEMPLATE, '\r' is a literal CR char.
+        buf_section = DASHBOARD_TEMPLATE[DASHBOARD_TEMPLATE.index("_wtInputBuf"):]
+        self.assertIn("'Enter'", buf_section)
+        # The += '\r' line exists (literal CR in the Python string)
+        self.assertIn("_wtInputBuf += '", buf_section)
 
 
 class TestOfflineIndicator933(unittest.TestCase):

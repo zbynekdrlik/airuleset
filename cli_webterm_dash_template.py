@@ -77,6 +77,13 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
    contrast). Replaces the retired .udot badge; applyUStatus's .has-u toggle and
    the whole U-collector plumbing are UNCHANGED. */
 .tab.has-u .ico { color: #E74856; }
+/* #933: subtle offline indicator — the tab's green arrow turns Campbell dim
+   grey while the WS connection is down. Specificity (0,3,0) matches .has-u
+   and beats .tab .ico (0,2,0); an offline+U tab shows grey (offline wins
+   visually — no point showing "you have a question" when you can't reach the
+   box). No text banner, no toast, no ::after content — per #671 "ziadne
+   vysvetlivky". */
+.tab.wt-offline .ico { color: #666666; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
 #nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;
   padding-right: 4px; margin-right: 2px; background: #0C0C0C; flex: 0 0 auto; }
@@ -812,6 +819,159 @@ if (CFG.u_status) {     // #677 owner; #703 lane (per-tenant scoped gateway map)
   [4000, 12000, 30000].forEach((ms) => setTimeout(pollUStatus, ms));   // burst after a fresh collect
   setInterval(pollUStatus, 120000);                                     // then minutes-fresh
 }
+// #933: network resilience — connection monitor + input buffer + offline indicator.
+// Tolerates brief WS drops (grace period), auto-reconnects with exponential backoff,
+// buffers printable keystrokes during disconnection and replays them on reconnect,
+// and shows a subtle per-tab offline indicator (the .ico arrow turns grey).
+const WT_CONN_GRACE_MS = 5000;       // tolerate a WS drop this long before declaring offline
+const WT_RECONNECT_BASE_MS = 2000;   // initial reconnect interval (exponential backoff)
+const WT_RECONNECT_MAX_MS = 60000;   // cap on the reconnect interval
+// Per-frame connection state. Each frame gets its own monitor instance.
+// _wtState: 'connected' | 'grace' | 'disconnected'
+// _wtInputBuf: string of buffered printable keystrokes
+// _wtGraceTimer: timeout id for the grace period
+// _wtReconnTimer: timeout id for the next reconnect attempt
+// _wtReconnDelay: current reconnect interval (doubles each attempt)
+// _wtBufListener: the keydown capture listener (to remove on reconnect)
+function _wtIsWsDown(win) {
+  // Check if the ttyd WebSocket is closed/closing. ttyd stores the WS on
+  // window.ws (ttyd 1.7.x). If inaccessible, fall back to the overlay check.
+  try {
+    if (win.ws && typeof win.ws.readyState === 'number') {
+      // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+      return win.ws.readyState >= 2;
+    }
+  } catch (e) { /* cross-origin or ws not exposed */ }
+  // Fallback: check for ttyd's reconnect overlay (the #673 detector)
+  return !!ttydReconnectOverlay(win);
+}
+function _wtSetOffline(idx, offline) {
+  // Toggle the .wt-offline class on the tab button for visual feedback.
+  try {
+    const tab = document.querySelector('.tab[data-idx="' + idx + '"]');
+    if (tab) tab.classList.toggle('wt-offline', offline);
+  } catch (e) {}
+}
+function _wtStartBuffer(f, idx) {
+  // Begin capturing printable keystrokes in the iframe while disconnected.
+  if (f.__wtBufListener) return;         // already buffering
+  f._wtInputBuf = '';
+  const win = f.contentWindow;
+  if (!win) return;
+  const listener = function (e) {
+    // Buffer printable characters (key.length === 1) and Enter.
+    // Control sequences (Ctrl+X, arrows, function keys) pass through —
+    // they're silently dropped by the dead WS anyway, and replaying
+    // context-dependent sequences out of order would be harmful.
+    if (e.key === 'Enter') {
+      f._wtInputBuf += '\r';
+      e.preventDefault();
+      e.stopPropagation();
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      f._wtInputBuf += e.key;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    // All other keys (arrows, Ctrl+C, function keys, etc.) fall through
+    // to xterm — harmless on a dead WS, and NOT buffered.
+  };
+  try {
+    win.addEventListener('keydown', listener, true);   // capture phase
+    f.__wtBufListener = listener;
+  } catch (e) {}
+}
+function _wtStopBufferAndReplay(f, idx) {
+  // Stop capturing and replay the buffered text into the terminal.
+  const win = f.contentWindow;
+  if (f.__wtBufListener && win) {
+    try { win.removeEventListener('keydown', f.__wtBufListener, true); }
+    catch (e) {}
+  }
+  f.__wtBufListener = null;
+  const buf = f._wtInputBuf || '';
+  f._wtInputBuf = '';
+  if (buf && win && win.term && typeof win.term.paste === 'function') {
+    try { win.term.paste(buf); } catch (e) {}
+  }
+}
+function _wtAutoReconnect(f, idx) {
+  // Press Enter to trigger ttyd's reconnect — the proven #673 mechanism.
+  try {
+    const win = f.contentWindow;
+    if (!win || !ttydReconnectOverlay(win)) return;
+    const ta = win.document.querySelector('.xterm-helper-textarea, textarea');
+    if (ta) {
+      try { ta.focus(); } catch (e) {}
+      const ev = new win.KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true});
+      ta.dispatchEvent(ev);
+    }
+  } catch (e) {}
+}
+function monitorConnection(f, idx) {
+  // Poll the iframe's WS state and manage the grace -> disconnected ->
+  // reconnected lifecycle. Called once per frame after preloadAll.
+  if (!f || f.__wtMonitor) return;
+  f.__wtMonitor = true;
+  f._wtState = 'connected';
+  f._wtReconnDelay = WT_RECONNECT_BASE_MS;
+  const check = function () {
+    const win = f.contentWindow;
+    if (!win) return;
+    const down = _wtIsWsDown(win);
+    if (f._wtState === 'connected') {
+      if (down) {
+        // WS just dropped — enter grace period before declaring offline
+        f._wtState = 'grace';
+        f.__wtGraceTimer = setTimeout(function () {
+          // Still down after grace? Declare disconnected.
+          if (_wtIsWsDown(f.contentWindow)) {
+            f._wtState = 'disconnected';
+            f._wtReconnDelay = WT_RECONNECT_BASE_MS;
+            _wtSetOffline(idx, true);
+            _wtStartBuffer(f, idx);
+            _wtScheduleReconnect(f, idx);
+          } else {
+            // Recovered during grace — back to connected
+            f._wtState = 'connected';
+          }
+        }, WT_CONN_GRACE_MS);
+      }
+    } else if (f._wtState === 'grace') {
+      if (!down) {
+        // Recovered during grace period — cancel the timer
+        clearTimeout(f.__wtGraceTimer);
+        f._wtState = 'connected';
+      }
+    } else if (f._wtState === 'disconnected') {
+      if (!down) {
+        // Reconnected! Replay buffer and clear state.
+        f._wtState = 'connected';
+        _wtSetOffline(idx, false);
+        _wtStopBufferAndReplay(f, idx);
+        clearTimeout(f.__wtReconnTimer);
+        f._wtReconnDelay = WT_RECONNECT_BASE_MS;
+      }
+    }
+  };
+  setInterval(check, 1000);   // 1s poll — lightweight (no DOM query on happy path)
+}
+function _wtScheduleReconnect(f, idx) {
+  // Exponential backoff auto-reconnect: try pressing Enter, then double
+  // the interval up to the cap.
+  f.__wtReconnTimer = setTimeout(function () {
+    if (f._wtState !== 'disconnected') return;
+    _wtAutoReconnect(f, idx);
+    f._wtReconnDelay = Math.min(f._wtReconnDelay * 2, WT_RECONNECT_MAX_MS);
+    _wtScheduleReconnect(f, idx);   // schedule the next attempt
+  }, f._wtReconnDelay);
+}
+// Wire the monitor onto every preloaded frame (after preloadAll).
+CFG.sessions.forEach(function (s, i) {
+  const f = made[i];
+  if (f) monitorConnection(f, i);
+});
 </script>
 </body>
 </html>
