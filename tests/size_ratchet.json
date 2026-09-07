@@ -497,7 +497,7 @@
     "tests/test_webterm_marek.py": 636,
     "tests/test_webterm_only.py": 1191,
     "tests/test_webterm_per_human_tabs.py": 351,
-    "tests/test_webterm_profiles.py": 415,
+    "tests/test_webterm_profiles.py": 418,
     "tests/test_webterm_pwa.py": 201,
     "tests/test_webterm_rendered_artifact_870.py": 242,
     "tests/test_webterm_short_viewport_798.py": 306,
