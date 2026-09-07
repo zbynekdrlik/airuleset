@@ -619,15 +619,15 @@ def test_disk_segment_hidden_in_drain_band(tmp_path):
 
 
 def test_disk_segment_shown_red_at_critical(tmp_path):
-    # #854: shown ONLY at >= 90 %, and RED (colour 196), never yellow.
+    # #854 (refined #925): shown at >= 95 %, RED (colour 196), never yellow.
     _write_disk_cache(tmp_path, 95, 1000.0)
     seg = statusbar.disk_segment(home=str(tmp_path), now=1000.0)
     assert "95%" in seg and "disk" in seg
     assert "38;5;196m" in seg          # red, not yellow (214)
     assert "214m" not in seg
-    # exactly at the 90 % boundary it is shown
+    # #925: 90 % is now hidden (the guard handles it autonomously)
     _write_disk_cache(tmp_path, 90, 1000.0)
-    assert "90%" in statusbar.disk_segment(home=str(tmp_path), now=1000.0)
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
 
 
 def test_disk_segment_hidden_when_cache_stale(tmp_path):
@@ -638,6 +638,221 @@ def test_disk_segment_hidden_when_cache_stale(tmp_path):
 
 def test_disk_segment_absent_cache(tmp_path):
     assert statusbar.disk_segment(home=str(tmp_path), now=1.0) == ""
+
+
+# --------------------------------------------------------------------------- #
+# #925 — badge at ≥95 % or exhausted, hidden at 90-94 %
+# --------------------------------------------------------------------------- #
+def test_disk_segment_hidden_at_90_94_band(tmp_path):
+    """#925: the 90-94 % band the guard resolves autonomously is hidden."""
+    _write_disk_cache(tmp_path, 92, 1000.0)
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
+    _write_disk_cache(tmp_path, 90, 1000.0)
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
+    _write_disk_cache(tmp_path, 94, 1000.0)
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
+
+
+def test_disk_segment_shown_at_95(tmp_path):
+    """#925: shown at ≥95 %, RED."""
+    _write_disk_cache(tmp_path, 95, 1000.0)
+    seg = statusbar.disk_segment(home=str(tmp_path), now=1000.0)
+    assert "95%" in seg and "disk" in seg
+    assert "38;5;196m" in seg          # red
+
+
+def test_disk_segment_shown_when_exhausted(tmp_path):
+    """#925: shown when drain_exhausted is True even at <95 %."""
+    d = tmp_path / ".claude" / "disk-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps(
+        {"worst_pct": 88, "dim": "bytes", "level": dg.level_for(88),
+         "ts": 1000.0, "drain_exhausted": True,
+         "mounts": [{"mount": "/", "worst_pct": 88}]}))
+    seg = statusbar.disk_segment(home=str(tmp_path), now=1000.0)
+    assert "88%" in seg and "disk" in seg
+    assert "38;5;196m" in seg
+
+
+def test_disk_segment_hidden_when_not_exhausted_at_88(tmp_path):
+    """#925: 88 % without exhausted flag is hidden."""
+    d = tmp_path / ".claude" / "disk-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps(
+        {"worst_pct": 88, "dim": "bytes", "level": dg.level_for(88),
+         "ts": 1000.0, "drain_exhausted": False,
+         "mounts": [{"mount": "/", "worst_pct": 88}]}))
+    assert statusbar.disk_segment(home=str(tmp_path), now=1000.0) == ""
+
+
+# --------------------------------------------------------------------------- #
+# #925 — growth-aware boost + shared-stream hourly cadence
+# --------------------------------------------------------------------------- #
+def test_growth_detected_true_when_pct_rose(tmp_path):
+    """#925: growth_detected returns True when current > prior cached pct."""
+    _write_disk_cache(tmp_path, 85, 1000.0)
+    assert dg._growth_detected(str(tmp_path), 87) is True
+
+
+def test_growth_detected_false_when_pct_stable(tmp_path):
+    """#925: growth_detected returns False when current == prior."""
+    _write_disk_cache(tmp_path, 85, 1000.0)
+    assert dg._growth_detected(str(tmp_path), 85) is False
+
+
+def test_growth_detected_false_no_prior(tmp_path):
+    """#925: growth_detected returns False with no prior cache (cold start)."""
+    assert dg._growth_detected(str(tmp_path), 85) is False
+
+
+def test_shared_stream_hourly_cadence(tmp_path):
+    """#925: on a shared-stream box, the drain uses hourly cadence at 80-94 %."""
+    _seed_last_drain(tmp_path, 1000.0)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    # 85 % at now=1000+700 → only 700 s since last drain, 600 s MIN_DRAIN would
+    # allow it on a workstation but 3600 s SHARED_STREAM should gate it.
+    # dry_run=False so _cadence_allows_drain does NOT bypass the gate.
+    logs = dg.run_disk_guard(
+        now=1000.0 + 700, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=_noop,
+        box_class_fn=lambda: "shared-stream",
+    )
+    # With hourly cadence, 700 s is NOT enough → drain cadence-gated
+    assert not ran["drained"]
+    assert any("cadence-gated" in ln for ln in logs)
+
+
+def test_shared_stream_growth_boost(tmp_path):
+    """#925: on a shared-stream box, growth bypasses cadence."""
+    _seed_last_drain(tmp_path, 1000.0)
+    # Seed a PRIOR cache at 83 %
+    _write_disk_cache(tmp_path, 83, 999.0)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    # 85 % at now=1000+700 → only 700 s since last drain. Without growth
+    # boost, hourly cadence gates it. But pct rose from 83 → 85 → boost.
+    dg.run_disk_guard(
+        now=1000.0 + 700, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=_noop,
+        box_class_fn=lambda: "shared-stream",
+    )
+    assert ran["drained"]
+
+
+def test_drain_exhausted_flag_set(tmp_path):
+    """#925: drain_exhausted is True when drain at >=90 % freed nothing."""
+    _seed_last_drain(tmp_path, 0.0)
+    severe_calls = []
+    # 96 % → drain runs (every-poll at >=95 %). The noop planner frees nothing,
+    # so worst stays at 96 % → drain_exhausted should be True.
+    dg.run_disk_guard(
+        now=1000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=40, f_bavail=40,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=lambda _h, _n: [("noop", lambda: [])],
+        severe_run_fn=lambda *a, **kw: severe_calls.append(a),
+        top_consumers_fn=lambda *a, **kw: [],
+    )
+    cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert cache.get("drain_exhausted") is True
+
+
+def test_drain_exhausted_false_at_88(tmp_path):
+    """#925 F1: drain at 88 % that cannot reach 75 % target → NOT exhausted
+    (88 % < CRITICAL_PCT=90, so the badge band is not reached)."""
+    _seed_last_drain(tmp_path, 0.0)
+    dg.run_disk_guard(
+        now=1000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=120, f_bavail=120,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=lambda _h, _n: [("noop", lambda: [])],
+    )
+    cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert cache.get("drain_exhausted") is False
+
+
+def test_drain_exhausted_clear_below_critical(tmp_path):
+    """#925 F1: carry-forward clears drain_exhausted when < CRITICAL_PCT."""
+    # Seed a prior cache with drain_exhausted=True at 91 %
+    d = tmp_path / ".claude" / "disk-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps(
+        {"worst_pct": 91, "dim": "bytes", "level": "critical",
+         "ts": 999.0, "drain_exhausted": True,
+         "mounts": [{"mount": "/", "worst_pct": 91}]}))
+    # Now the box is at 85 % (below CRITICAL_PCT=90) — non-drain poll
+    dg.run_disk_guard(
+        now=1000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        min_drain_interval_s=999999,  # prevent drain from running
+    )
+    cache = json.loads((tmp_path / ".claude" / "disk-guard" / "status.json").read_text())
+    assert cache.get("drain_exhausted") is False
+
+
+def test_growth_boost_not_on_workstation(tmp_path):
+    """#925 F2: growth boost applies ONLY to shared-stream boxes."""
+    _seed_last_drain(tmp_path, 1000.0)
+    _write_disk_cache(tmp_path, 83, 999.0)
+    ran = {"drained": False}
+
+    def _noop(_home, _now):
+        def _p():
+            ran["drained"] = True
+            return []
+        return [("noop", _p)]
+
+    # 85 % at 1700, last drain 1000 (700 s). Growth 83→85. On workstation,
+    # MIN_DRAIN_INTERVAL_S=600 makes 700 s due, but there is NO growth boost.
+    # The drain DOES run because 700 > 600 (normal cadence), not because of
+    # growth. To test growth-boost exclusion: set min_drain_interval_s=3600
+    # so the normal cadence gates it, and growth boost does NOT apply.
+    dg.run_disk_guard(
+        now=1000.0 + 700, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1,
+        geteuid_fn=lambda: 1000,
+        planners_fn=_noop,
+        box_class_fn=lambda: "workstation",
+        min_drain_interval_s=3600,
+    )
+    # On workstation, _is_shared=False, so growth_boost=False. 700 < 3600 → gated.
+    assert not ran["drained"]
 
 
 # --------------------------------------------------------------------------- #
