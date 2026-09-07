@@ -11,6 +11,7 @@ skip-reasons and injected seams — never on a real deletion path.
 import json
 import os
 import subprocess
+import time
 import types
 from pathlib import Path
 
@@ -1128,17 +1129,20 @@ def test_user_cache_selects_stale_only(tmp_path):
 
 def test_claude_versions_keep_running_delete_rest_failsafe(tmp_path):
     vdir = tmp_path / ".local" / "share" / "claude" / "versions"
+    now = time.time()
+    old_mtime = now - 5 * 86400     # 5 days ago — past the 2d age gate
     for v in ("2.1.252", "2.1.257", "2.1.258"):
         (vdir / v).mkdir(parents=True)
+        os.utime(str(vdir / v), (old_mtime, old_mtime))
     rows = dg.discover_stale_claude_versions(
-        home=str(tmp_path), running_fn=lambda: "2.1.258")
+        home=str(tmp_path), running_fn=lambda: "2.1.258", now=now)
     by = {os.path.basename(r["path"]): r for r in rows}
     assert by["2.1.258"]["kind"] == "skip"          # running → kept
     assert by["2.1.252"]["kind"] == "delete"
     assert by["2.1.257"]["kind"] == "delete"
     # FAIL-SAFE: running unknown → keep everything
     rows_fs = dg.discover_stale_claude_versions(
-        home=str(tmp_path), running_fn=lambda: None)
+        home=str(tmp_path), running_fn=lambda: None, now=now)
     assert rows_fs and all(r["kind"] == "skip" for r in rows_fs)
 
 
@@ -2164,20 +2168,26 @@ def test_claude_version_keeps_staged_newer_version(tmp_path):
     (it is a staged self-update), not deleted."""
     vdir = tmp_path / ".local" / "share" / "claude" / "versions"
     vdir.mkdir(parents=True)
+    now = time.time()
+    old_mtime = now - 5 * 86400     # 5 days ago — past the #925-C 2d age gate
     # Running version
     (vdir / "2.1.258").mkdir()
     (vdir / "2.1.258" / "claude").write_text("binary")
+    os.utime(str(vdir / "2.1.258"), (old_mtime, old_mtime))
     # Staged newer version — MUST be kept
     (vdir / "2.1.260").mkdir()
     (vdir / "2.1.260" / "claude").write_text("binary")
+    os.utime(str(vdir / "2.1.260"), (old_mtime, old_mtime))
     # Old version — should be deleted
     (vdir / "2.1.255").mkdir()
     (vdir / "2.1.255" / "claude").write_text("binary")
+    os.utime(str(vdir / "2.1.255"), (old_mtime, old_mtime))
 
     rows = dg.discover_stale_claude_versions(
         home=str(tmp_path),
         running_fn=lambda: "2.1.258",
-        versions_dir=str(vdir))
+        versions_dir=str(vdir),
+        now=now)
     by_path = {os.path.basename(r["path"]): r for r in rows if r.get("path")}
     # The newer version must be a SKIP (staged), not a delete
     assert "2.1.260" in by_path, "the newer version dir must appear in results"
@@ -2189,6 +2199,42 @@ def test_claude_version_keeps_staged_newer_version(tmp_path):
     assert by_path["2.1.255"].get("reason") is None, (
         "#892: a strictly-older version (2.1.255 < running 2.1.258) must be "
         "a delete candidate, not kept")
+
+
+def test_claude_version_age_gate_keeps_recent(tmp_path):
+    """#925-C: a version dir younger than min_age_days is kept even if
+    strictly older than the running version — avoids racing an in-progress
+    self-update."""
+    vdir = tmp_path / ".local" / "share" / "claude" / "versions"
+    vdir.mkdir(parents=True)
+    now = time.time()
+    old_mtime = now - 5 * 86400     # 5 days ago — past the 2d gate
+    fresh_mtime = now - 3600        # 1 hour ago — within the 2d gate
+    # Running version (old mtime — doesn't matter, it's running)
+    (vdir / "2.1.260").mkdir()
+    os.utime(str(vdir / "2.1.260"), (old_mtime, old_mtime))
+    # Old version, OLD mtime → should be deleted
+    (vdir / "2.1.255").mkdir()
+    os.utime(str(vdir / "2.1.255"), (old_mtime, old_mtime))
+    # Old version, FRESH mtime → should be KEPT by the age gate
+    (vdir / "2.1.256").mkdir()
+    os.utime(str(vdir / "2.1.256"), (fresh_mtime, fresh_mtime))
+
+    rows = dg.discover_stale_claude_versions(
+        home=str(tmp_path), running_fn=lambda: "2.1.260",
+        versions_dir=str(vdir), now=now)
+    by = {os.path.basename(r["path"]): r for r in rows if r.get("path")}
+    assert by["2.1.260"]["kind"] == "skip"          # running → kept
+    assert by["2.1.255"]["reason"] is None           # old + old mtime → delete
+    assert by["2.1.256"]["kind"] == "skip"           # old but FRESH mtime → kept
+    assert "#925-C" in by["2.1.256"]["reason"]       # reason cites the ticket
+
+    # With min_age_days=0, the fresh version IS deleted (gate disabled)
+    rows_no_gate = dg.discover_stale_claude_versions(
+        home=str(tmp_path), running_fn=lambda: "2.1.260",
+        versions_dir=str(vdir), now=now, min_age_days=0)
+    by2 = {os.path.basename(r["path"]): r for r in rows_no_gate if r.get("path")}
+    assert by2["2.1.256"]["reason"] is None          # no age gate → delete
 
 
 def test_playwright_browser_rung_discovers_stale_revisions(tmp_path):

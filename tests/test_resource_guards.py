@@ -156,11 +156,21 @@ class TestApplyScript(unittest.TestCase):
         self.assertIn('cpuw" != "30"', self.s)
         self.assertIn('cpuq" != "3s"', self.s)
 
-    def test_swap_is_verify_only_never_created(self):
+    def test_swap_verify_only_on_non_shared_stream(self):
+        """#925-C: non-shared-stream path retains verify-only swap check."""
         self.assertIn("SwapTotal", self.s)
-        self.assertNotIn("mkswap", self.s)
-        self.assertNotIn("fallocate", self.s)
-        self.assertNotIn("swapon", self.s)
+        # Shared-stream path now provisions swap (mkswap, fallocate, swapon),
+        # but the non-shared-stream else branch still only verifies.
+        self.assertIn("swap_is_shared_stream", self.s)
+
+    def test_swap_shared_stream_provisions_10g(self):
+        """#925-C: shared-stream path provisions exactly 10G /swapfile."""
+        self.assertIn("mkswap", self.s)
+        self.assertIn("fallocate", self.s)
+        self.assertIn("swapon", self.s)
+        self.assertIn("10G", self.s)
+        # Never leaves two swapfiles — the old is swapped off before rm
+        self.assertIn("swapoff", self.s)
 
     def test_script_is_valid_bash(self):
         import subprocess
@@ -404,6 +414,72 @@ class TestRunOnceWiring(unittest.TestCase):
     def test_tracking_constants(self):
         self.assertEqual(TRACKING_ISSUE, 775)
         self.assertEqual(TRACKING_REPO, "zbynekdrlik/airuleset")
+
+
+class TestRsyslogQuiet925C(unittest.TestCase):
+    """#925-C: rsyslog quiet rule renders correctly and is in the guard set."""
+
+    def test_render_content(self):
+        body = g.render_rsyslog_quiet()
+        self.assertIn("api-watchdog.service", body)
+        self.assertIn("then stop", body)
+
+    def test_in_guard_files(self):
+        paths = [p for p, _ in g.guard_files()]
+        self.assertIn(g.RSYSLOG_QUIET_PATH, paths)
+
+    def test_path_is_rsyslog_d(self):
+        self.assertTrue(g.RSYSLOG_QUIET_PATH.startswith("/etc/rsyslog.d/"))
+
+    def test_apply_script_restarts_rsyslog(self):
+        s = g.build_apply_script()
+        self.assertIn("restart rsyslog", s)
+
+
+class TestJournaldCap925C(unittest.TestCase):
+    """#925-C: journald cap renders correctly for shared-stream boxes."""
+
+    def test_render_content(self):
+        body = g.render_journald_cap()
+        self.assertIn("SystemMaxUse=300M", body)
+        self.assertIn("[Journal]", body)
+
+    def test_in_guard_files(self):
+        paths = [p for p, _ in g.guard_files()]
+        self.assertIn(g.JOURNALD_CAP_PATH, paths)
+
+    def test_path_uses_60_prefix(self):
+        """60- prefix ensures it sorts AFTER cli_disk_guard_root's 50-."""
+        self.assertIn("/60-airuleset-", g.JOURNALD_CAP_PATH)
+
+    def test_apply_script_restarts_journald(self):
+        s = g.build_apply_script()
+        self.assertIn("try-restart systemd-journald", s)
+        self.assertIn("journalctl --rotate", s)
+
+
+class TestSwapPolicy925C(unittest.TestCase):
+    """#925-C: swap policy provisions 10G /swapfile on shared-stream boxes."""
+
+    def test_swap_size_constant(self):
+        self.assertEqual(g.SWAP_SIZE_GB, 10)
+
+    def test_apply_script_idempotent_noopcheck(self):
+        s = g.build_apply_script()
+        # Idempotent check: if swapfile already has the right size, no-op
+        self.assertIn("already", s)
+        self.assertIn("no-op", s)
+
+    def test_apply_script_cleans_old_swapfiles(self):
+        s = g.build_apply_script()
+        # Must remove old swapfile2, swapfile3
+        self.assertIn("swapfile2", s)
+        self.assertIn("swapfile3", s)
+
+    def test_apply_script_fstab_entry(self):
+        s = g.build_apply_script()
+        self.assertIn("/etc/fstab", s)
+        self.assertIn("/swapfile none swap sw 0 0", s)
 
 
 if __name__ == "__main__":
