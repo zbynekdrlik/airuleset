@@ -150,9 +150,9 @@ class TestDesiredKeysForUser(unittest.TestCase):
         for ok in OWNER_PUBKEYS:
             self.assertIn(cli_webterm_only._key_blob(ok), blobs)
         # total = fleet(2 during F1 rotation) + owner(2) + subdev-lane(1)
-        #         + controller-lane(1) = 6
+        #         + controller-david(1) + controller-zbynek(1) = 7
         self.assertEqual(len(keys), len(cli_webterm_only.FLEET_PUSH_PUBKEYS)
-                         + len(OWNER_PUBKEYS) + 2)
+                         + len(OWNER_PUBKEYS) + 3)
         # sorted by blob
         key_blobs = [cli_webterm_only._key_blob(k) for k in keys]
         self.assertEqual(key_blobs, sorted(key_blobs))
@@ -1006,13 +1006,14 @@ class TestControllerLaneKeyDesiredSet(unittest.TestCase):
         self.fail("david controller key not found")
 
     def test_david1_total_key_count(self):
-        """david1 gets fleet(2) + owner(2) + subdev-lane(1) + controller(1) = 6."""
+        """david1 gets fleet(2) + owner(2) + subdev-lane(1)
+        + controller-david(1) + controller-zbynek(1) = 7."""
         keys = cli_webterm_only.desired_keys_for_user("david1")
         from cli_owner_keys import OWNER_PUBKEYS
         expected = (len(cli_webterm_only.FLEET_PUSH_PUBKEYS)
                     + len(OWNER_PUBKEYS)
                     + 1   # subdev david lane key
-                    + 1)  # controller david lane key
+                    + 2)  # controller david + zbynek lane keys
         self.assertEqual(len(keys), expected)
 
     def test_dominika_total_key_count(self):
@@ -1129,7 +1130,7 @@ class TestMultiHumanControllerKeys870(unittest.TestCase):
             with open(ak_path, "w") as f:
                 f.write(content)
             log_dir = os.path.join(td, ".claude")
-            r = cli_webterm_only.manage_webterm_only_keys(
+            cli_webterm_only.manage_webterm_only_keys(
                 user="david1", ssh_dir=ssh_dir,
                 run=_fake_run_ok, log_dir=log_dir,
             )
