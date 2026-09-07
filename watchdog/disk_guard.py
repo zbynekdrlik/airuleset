@@ -132,6 +132,7 @@ UPLOADS_MAX_AGE_DAYS = 14
 UPLOADS_KEEP_MARKERS = (".airuleset-keep", ".no-sweep")  # #861 opt-out
 DELETIONS_JOURNAL_PREFIX = "deletions-"                   # #861 durable journal
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS = 7        # owner-authorised pressure path (#834 rung e)
+TRANSCRIPT_PRESSURE_MIN_AGE_DAYS_SHARED_STREAM = 2  # #925: tighter on shared-stream
 TOOLCHAIN_DIRS = ("Android", ".gradle", ".android")
 TOOLCHAIN_PROC_RE = "gradle|java|emulator|qemu-system"
 
@@ -191,8 +192,10 @@ HOME_WORKTREE_GLOB = "/home/*"
 HOME_WORKTREE_MIN_AGE_S = 24 * 3600       # mtime > 24h (protects fresh lanes)
 
 # #920 — test runner /tmp leftovers (jest, pytest, generic tmp* dirs)
+# #925 — extended with npmcache-* and tmp* (observed litter shapes on subdev)
 TMP_TEST_MIN_AGE_DAYS = 1
-TMP_TEST_PREFIXES = ("jest_", "pytest-of-")
+TMP_TEST_MIN_AGE_HOURS_SHARED_STREAM = 3   # #925 owner ruling: 3h on shared-stream
+TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-", "tmp")
 # #920 — runner _diag logs (diagnostic, safe to age out)
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #920 — npm _cacache + uv cache (regenerated on demand)
@@ -1882,15 +1885,33 @@ def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
 # --------------------------------------------------------------------------- #
 # #920 — test-runner /tmp leftovers, runner _diag logs, npm/uv cache
 # --------------------------------------------------------------------------- #
+def _effective_tmp_test_age_days(min_age_days=None, box_class_fn=None):
+    """#925: on a shared-stream box, use the tighter 3h age floor for test
+    runner /tmp leftovers. On a workstation, use the default 1d. When
+    ``min_age_days`` is explicitly passed (e.g. from a test), honour it."""
+    if min_age_days is not None:
+        return min_age_days
+    bcfn = box_class_fn or _default_box_class
+    try:
+        if bcfn() == "shared-stream":
+            return TMP_TEST_MIN_AGE_HOURS_SHARED_STREAM / 24.0
+    except Exception as e:
+        _dbg("box-class for tmp-test age: %r" % e)
+    return TMP_TEST_MIN_AGE_DAYS
+
+
 def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
-                                 min_age_days=TMP_TEST_MIN_AGE_DAYS,
-                                 uid=None, dir_stats_fn=None):
+                                 min_age_days=None,
+                                 uid=None, dir_stats_fn=None,
+                                 box_class_fn=None):
     """#920: stale test-runner leftovers in /tmp — ``jest_*``, ``pytest-of-*``,
-    and generic ``tmp*`` dirs owned by THIS uid, older than ``min_age_days``.
+    ``npmcache-*``, and generic ``tmp*`` dirs owned by THIS uid, older than
+    the age floor (#925: 3h on shared-stream, 1d on workstation).
     UID-ownership check prevents a shared-box user from reclaiming a sibling's
     test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``."""
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
+    min_age_days = _effective_tmp_test_age_days(min_age_days, box_class_fn)
     cutoff = min_age_days * 86400
     out = []
     d = Path(tmp_dir)
@@ -2016,15 +2037,30 @@ def _row_to_action(cls, row, kind):
     return {"cls": cls, "path": path, "bytes": size, "kind": kind, "reason": None}
 
 
-def _plan_scratch(home, now, scratch_rows=None):
+def _effective_scratch_age_days(box_class_fn=None):
+    """#925: on a shared-stream box, use 3h scratch age-out instead of 7d."""
+    from cli_scratch_sweep import (CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT,
+                                   CLAUDE_SCRATCH_MIN_AGE_HOURS_SHARED_STREAM)
+    bcfn = box_class_fn or _default_box_class
+    try:
+        if bcfn() == "shared-stream":
+            return CLAUDE_SCRATCH_MIN_AGE_HOURS_SHARED_STREAM / 24.0
+    except Exception as e:
+        _dbg("box-class for scratch age: %r" % e)
+    return CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT
+
+
+def _plan_scratch(home, now, scratch_rows=None, box_class_fn=None):
     from cli_scratch_sweep import (discover_claude_scratch_candidates,
                                    discover_stray_tmp_candidates)
     actions = []
+    scratch_age = _effective_scratch_age_days(box_class_fn)
     try:
         # #863 review 2: reuse the rows run_disk_guard already discovered for
         # largest_live_scratch (no 2nd du-walk); else discover here.
         rows = (scratch_rows if scratch_rows is not None
-                else (discover_claude_scratch_candidates(now=now, home=home) or []))
+                else (discover_claude_scratch_candidates(
+                    now=now, home=home, min_age_days=scratch_age) or []))
         for r in rows:
             actions.append(_row_to_action("scratch", r, "delete"))
             # #849 ask 2: stale scratchpad children inside a LIVE/UNDET session
@@ -2087,11 +2123,26 @@ def _plan_claude_metadata(home, now):
             for r in discover_stale_claude_metadata(home=home, now=now)]
 
 
-def _plan_transcripts(home, now):
+def _effective_transcript_age_days(box_class_fn=None):
+    """#925: on a shared-stream box, use 2d transcript gzip-at-rest age instead
+    of the default 7d. The ``_target_in_live_use`` open-fd exclusion inside
+    ``discover_old_transcript_candidates`` stays unchanged — a live transcript
+    is never gzipped regardless of the age floor."""
+    bcfn = box_class_fn or _default_box_class
+    try:
+        if bcfn() == "shared-stream":
+            return TRANSCRIPT_PRESSURE_MIN_AGE_DAYS_SHARED_STREAM
+    except Exception as e:
+        _dbg("box-class for transcript age: %r" % e)
+    return TRANSCRIPT_PRESSURE_MIN_AGE_DAYS
+
+
+def _plan_transcripts(home, now, box_class_fn=None):
     from cli_scratch_sweep import discover_old_transcript_candidates
+    age_days = _effective_transcript_age_days(box_class_fn)
     try:
         rows = discover_old_transcript_candidates(
-            home=home, now=now, min_age_days=TRANSCRIPT_PRESSURE_MIN_AGE_DAYS) or []
+            home=home, now=now, min_age_days=age_days) or []
     except Exception as e:
         return [{"cls": "transcript", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "transcript discovery error: %r" % e}]
@@ -2188,7 +2239,7 @@ def _plan_home_worktrees(home, now):
 
 
 def _plan_tmp_test(home, now):
-    """#920 — test-runner /tmp leftovers (jest, pytest, generic tmp*)."""
+    """#920/#925 — test-runner /tmp leftovers (jest, pytest, npmcache, tmp*)."""
     return [_norm_action("tmp-test", r, "delete")
             for r in discover_stale_tmp_test_dirs(now=now)]
 
