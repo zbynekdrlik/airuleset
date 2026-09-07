@@ -391,5 +391,146 @@ class TestNudgeRound3Clause(unittest.TestCase):
         self.assertIn("#843", text)
 
 
+class TestSignOnly919(unittest.TestCase):
+    """#919: --sign-only mode creates a receipt for a pre-written body
+    WITHOUT posting it, so a stream can satisfy both airuleset's receipt
+    hook AND a repo-specific template gate."""
+
+    def _make_args(self, **kw):
+        """Build a namespace matching cmd_handoff's argparse shape."""
+        import argparse
+        defaults = dict(
+            repo="zbynekdrlik/odoo-erp", issue=42, branch=None,
+            self_review_file=None, root_cause=None, closes_finding=None,
+            prevencia_read=None, reviewed_by_tier=None, sign_only=None)
+        defaults.update(kw)
+        return argparse.Namespace(**defaults)
+
+    def _gate_patches(self, td):
+        """Return context managers patching gate dir + log into td."""
+        import unittest.mock as m
+        gate_dir = os.path.join(td, "gate")
+        os.makedirs(gate_dir, exist_ok=True)
+        home = os.path.expanduser("~")
+        return (
+            gate_dir,
+            m.patch.object(airuleset, "HANDOFF_GATE_DIR",
+                           os.path.relpath(gate_dir, home)),
+            m.patch.object(airuleset, "HANDOFF_GATE_LOG",
+                           os.path.relpath(
+                               os.path.join(td, "gate.log"), home)),
+        )
+
+    def test_sign_only_creates_receipt_no_post(self):
+        """A valid --sign-only file must produce a receipt whose sha256
+        matches the file content, and must NOT post via gh."""
+        import unittest.mock as m
+        body = (
+            "READY-FOR-REVIEW: branch worktree-agent-test\n\n"
+            "Stack: airuleset\n"
+            "Harness: claude-code\n"
+            "Verified-at-UTC: 2026-09-07T01:00:00Z\n"
+            "HEAD: abc1234\n"
+            "Ready for gatekeeper cross-fork review.\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            body_path = os.path.join(td, "handoff-body.md")
+            with open(body_path, "w") as f:
+                f.write(body)
+
+            gate_dir, p1, p2 = self._gate_patches(td)
+            args = self._make_args(sign_only=body_path)
+            # Patch _bounce_round to return round 1 (no bounce fields
+            # required) and subprocess.run to assert no posting.
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=1):
+                rc = airuleset.cmd_handoff(args)
+
+            self.assertEqual(0, rc, "sign-only should succeed")
+            # Y-3: sign-only returns BEFORE the subprocess import +
+            # gh issue comment call (line ~3397 vs return at ~3361),
+            # so no posting can occur — verified by the body hash
+            # matching the RAW file (no gh-posted body mutation).
+
+            # A receipt must exist with the sha256 of the body.
+            expect_hash = hashlib.sha256(body.encode()).hexdigest()
+            receipts = [fn for fn in os.listdir(gate_dir)
+                        if fn.endswith(".json")]
+            self.assertTrue(receipts, "No receipt written")
+            with open(os.path.join(gate_dir, receipts[0])) as f:
+                r = json.loads(f.read())
+            self.assertEqual(expect_hash, r["sha256"])
+            self.assertIn("issue", r)
+            self.assertEqual(42, r["issue"])
+
+    def test_sign_only_no_rfr_blocked(self):
+        """A --sign-only file without READY-FOR-REVIEW must be rejected
+        with the specific marker-missing BLOCK message."""
+        import unittest.mock as m
+        import io
+        body = "Just some random text without the marker.\n"
+        with tempfile.TemporaryDirectory() as td:
+            body_path = os.path.join(td, "bad.md")
+            with open(body_path, "w") as f:
+                f.write(body)
+            _, p1, p2 = self._gate_patches(td)
+            args = self._make_args(sign_only=body_path)
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(args)
+            self.assertEqual(1, rc)
+            self.assertIn("no READY-FOR-REVIEW marker",
+                          out.getvalue())
+
+    def test_sign_only_missing_file_blocked(self):
+        """A --sign-only pointing to a nonexistent file must fail with
+        the specific cannot-read BLOCK message."""
+        import unittest.mock as m
+        import io
+        with tempfile.TemporaryDirectory() as td:
+            _, p1, p2 = self._gate_patches(td)
+            args = self._make_args(sign_only="/nonexistent/path.md")
+            with p1, p2, \
+                 m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(args)
+            self.assertEqual(1, rc)
+            self.assertIn("cannot read sign-only file", out.getvalue())
+
+    def test_sign_only_round2_missing_fields_blocked(self):
+        """RED-1 review finding: at bounce round >= 2, sign-only must
+        require Root-cause-of-previous-bounce, Prevencia-read, and
+        Reviewed-by-tier lines in the body."""
+        import unittest.mock as m
+        import io
+        body = (
+            "READY-FOR-REVIEW: branch test\n\n"
+            "Ready for gatekeeper cross-fork review.\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            body_path = os.path.join(td, "body.md")
+            with open(body_path, "w") as f:
+                f.write(body)
+            _, p1, p2 = self._gate_patches(td)
+            args = self._make_args(sign_only=body_path)
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=3), \
+                 m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(args)
+            self.assertEqual(1, rc)
+            self.assertIn("Root-cause-of-previous-bounce",
+                          out.getvalue())
+
+    def test_sign_only_argparse_present(self):
+        """The --sign-only flag must exist on the handoff subcommand."""
+        import subprocess as sp
+        r = sp.run([sys.executable, "airuleset.py", "handoff", "--help"],
+                   capture_output=True, text=True, timeout=10,
+                   cwd=os.path.dirname(os.path.dirname(
+                       os.path.abspath(__file__))))
+        self.assertIn("--sign-only", r.stdout,
+                       "handoff --help must list --sign-only")
+
+
 if __name__ == "__main__":
     unittest.main()

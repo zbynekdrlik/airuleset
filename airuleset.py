@@ -3282,6 +3282,95 @@ def cmd_handoff(args):
     closes_finding = getattr(args, "closes_finding", None) or []
     prevencia_read = getattr(args, "prevencia_read", None)
     reviewed_by_tier = getattr(args, "reviewed_by_tier", None)
+    sign_only = getattr(args, "sign_only", None)
+
+    # --- sign-only mode (#919) -------------------------------------------
+    # Create a receipt for an existing body file without posting it.
+    # The stream writes its own template-compliant body, calls --sign-only
+    # to get the receipt, then posts with `gh issue comment --body-file`.
+    if sign_only:
+        if not repo or not issue:
+            print("handoff: --repo and --issue required for --sign-only")
+            return 1
+        try:
+            with open(sign_only) as f:
+                body = f.read()
+        except OSError as e:
+            print("handoff BLOCK: cannot read sign-only file: %s" % e)
+            return 1
+        if not body.strip():
+            print("handoff BLOCK: sign-only file is empty")
+            return 1
+        # The body must contain the READY-FOR-REVIEW marker (the same
+        # marker the hook checks — without it the receipt is useless).
+        import re as _re
+        _rfr = _re.compile(
+            r'^\s*([#*_-]+\s*)?READY-FOR-REVIEW', _re.MULTILINE)
+        _cfr = _re.compile(
+            r'Ready for gatekeeper cross-fork review[.!]?\s*$', _re.MULTILINE)
+        if not _rfr.search(body) and not _cfr.search(body):
+            print("handoff BLOCK: sign-only file has no "
+                  "READY-FOR-REVIEW marker")
+            return 1
+        # Round >= 2 validation (#919 review RED-1): airuleset's OWN
+        # cross-repo fields must be present even in sign-only mode,
+        # because subagent-stop-check-review-tier.sh trusts the CLI.
+        self_login = _stream_self_login()
+        rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
+        if rnd >= 2:
+            _rc_re = _re.compile(
+                r'^Root-cause-of-previous-bounce:', _re.MULTILINE)
+            _prev_re = _re.compile(
+                r'^Prevencia-read:', _re.MULTILINE)
+            _tier_re = _re.compile(
+                r'^Reviewed-by-tier:\s*(\S+)', _re.MULTILINE)
+            if not _rc_re.search(body):
+                print("handoff BLOCK: sign-only round %d body missing "
+                      "Root-cause-of-previous-bounce:" % rnd)
+                return 1
+            if not _prev_re.search(body):
+                print("handoff BLOCK: sign-only round %d body missing "
+                      "Prevencia-read:" % rnd)
+                return 1
+            _tier_m = _tier_re.search(body)
+            if not _tier_m:
+                print("handoff BLOCK: sign-only round %d body missing "
+                      "Reviewed-by-tier:" % rnd)
+                return 1
+            _tier_val = _tier_m.group(1).split()[0]
+            if _tier_val not in REVIEWED_BY_TIER_VALUES:
+                print("handoff BLOCK: sign-only Reviewed-by-tier '%s' "
+                      "must be one of: %s"
+                      % (_tier_val, ", ".join(sorted(
+                          REVIEWED_BY_TIER_VALUES))))
+                return 1
+        body_hash = hashlib.sha256(body.encode()).hexdigest()
+        gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
+        os.makedirs(gate_dir, exist_ok=True)
+        owner_repo = repo.replace("/", "-") if "/" in repo else repo
+        receipt_path = os.path.join(gate_dir,
+                                     "%s-%s.json" % (owner_repo, issue))
+        receipt = json.dumps({"sha256": body_hash,
+                              "ts": _time.time(),
+                              "issue": int(issue),
+                              "sign_only": True})
+        try:
+            with open(receipt_path, "w") as f:
+                f.write(receipt)
+        except OSError as e:
+            print("handoff WARNING: could not write receipt: %s" % e)
+        log_path = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_LOG)
+        now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        try:
+            with open(log_path, "a") as f:
+                f.write("PASS sign-only issue=%s repo=%s ts=%s\n"
+                        % (issue, repo, now_utc))
+        except OSError as e:
+            print("handoff: log write failed: %s" % e)
+        print("handoff: sign-only receipt written for #%s (sha256=%s)"
+              % (issue, body_hash[:12]))
+        return 0
 
     if not repo or not issue or not branch or not self_review_file:
         print("handoff: --repo, --issue, --branch, --self-review-file required")
@@ -7180,6 +7269,12 @@ def main():
     p_ho.add_argument("--reviewed-by-tier",
                       help="Reviewed-by-tier: claude-fable-5-1 | claude-opus-4-6 "
                            "(required round >= 2)")
+    p_ho.add_argument("--sign-only", dest="sign_only",
+                      help="Sign-only mode (#919): create a receipt for an "
+                           "existing body file without posting it. The stream "
+                           "writes its own template-compliant body, calls "
+                           "--sign-only to get the receipt, then posts with "
+                           "gh issue comment --body-file.")
 
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "

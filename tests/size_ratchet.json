@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 7773,
+    "airuleset.py": 7868,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -228,7 +228,7 @@
     "tests/test_goal_turn_boundary.py": 130,
     "tests/test_goal_undeterminable_pane.py": 111,
     "tests/test_guard_jq_fork_fallback_835.py": 205,
-    "tests/test_handoff_gate.py": 395,
+    "tests/test_handoff_gate.py": 536,
     "tests/test_handover_proposal_rules.py": 958,
     "tests/test_heavy_build_reaper.py": 311,
     "tests/test_hook_deny_stderr.py": 223,
@@ -571,7 +571,7 @@
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 235,
     "airuleset.py::cmd_watchdog": 261,
-    "airuleset.py::main": 886,
+    "airuleset.py::main": 892,
     "cli_quals.py::_slice_mine_and_handed": 217,
     "cli_quals_cmd.py::cmd_core_quals": 222,
     "cli_quals_cmd.py::cmd_slice_quals": 220,
