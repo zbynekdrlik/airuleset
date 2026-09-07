@@ -29,7 +29,7 @@ DESIGN — a pure helper over ONE new state namespace, no new I/O, no new job:
   state["nudge_cadence"] = {sid: {category: last_delivered_ts}}
 
 persisted in the ONE existing `~/.claude/api-watchdog-state.json` (run_once's
-`state`). `gate_ok(state, sid, category, now)` returns True iff ALL THREE hold:
+`state`). `gate_ok(state, sid, category, now)` returns True iff BOTH hold:
 
   (a) PER-CATEGORY FLOOR — at least `_category_floor(category)` since THIS
       category's last DELIVERED nudge to this sid. `u-freshness` carries the
@@ -40,11 +40,13 @@ persisted in the ONE existing `~/.claude/api-watchdog-state.json` (run_once's
       EXCLUDED from this check on purpose: a rider's own back-to-back cadence is
       governed solely by its own last_nudge + (a), so the gate NEVER changes a
       rider's own semantics — it only spaces DISTINCT categories.
-  (c) WORK-DRIVING PRIORITY (#923) — an AUDIT category defers when a
-      WORK_DRIVING category is "due" (its mark_sent exists AND >= gap old) and
-      the most recent overall nudge was NOT work-driving. BOUNDED: audit defers
-      at most one extra window (2× gap from the newest overall nudge), so a
-      quiescent work-driving family never permanently mutes audit.
+
+#923 BATCHING (owner ROZHODNUTÉ): instead of individual delivery, ALL eligible
+families compose into ONE combined prompt per 1h slot. `batch_eligible()` returns
+the ordered list (WORK_DRIVING first, AUDIT second); `compose_batch()` formats them
+into a single `BATCH_PREFIX`-headed message; `mark_batch_sent()` stamps all at once.
+The classification (WORK_DRIVING vs AUDIT) determines section ORDER within the batch
+and the TRIM ORDER when the batch exceeds max_chars (audit trimmed first).
 
 `mark_sent` is written ONLY on a VERIFIED delivered send (a swallowed send never
 advances the clock — the #714 MAX_SEND_FAILS retry bound stays each rider's storm
@@ -182,8 +184,9 @@ def _gate_ts(v, now):
 
 def gate_ok(state, sid, category, now):
     """True iff a nudge of `category` to `sid` is allowed at `now` — see the
-    module docstring for (a) the per-category floor, (b) the family spacing,
-    and (c) the work-driving priority (#923).
+    module docstring for (a) the per-category floor and (b) the family spacing.
+    Used by individual riders for per-category eligibility; for batched delivery
+    (#923 ROZHODNUTÉ) use `batch_eligible()` which collects ALL eligible categories.
     Fail-safe ALLOWS on any malformed state (never suppress a legit nudge) —
     including a FUTURE-skewed / corrupt-huge numeric ts, which `_gate_ts` ignores
     so it can never mute a session indefinitely."""
@@ -200,40 +203,6 @@ def gate_ok(state, sid, category, now):
         ts = _gate_ts(raw, now)
         if ts is not None and now - ts < gap:
             return False
-    # (c) #923: work-driving PRIORITY — an AUDIT category defers when a
-    # work-driving category is "due" (its last nudge exists AND is >= gap old)
-    # AND the most recent nudge overall was NOT work-driving (meaning
-    # work-driving hasn't had its turn yet). BOUNDED (#923 review C1): audit
-    # defers at most ONE extra window (2× gap from the newest overall nudge),
-    # so a quiescent work-driving family (lanes full, nothing to refill) can
-    # delay audit by at most 1 h, never permanently mute it — the module's
-    # cardinal sin (permanent mute of u-freshness, the owner's ONLY question
-    # surface). If work-driving NEVER fired (newest_wd is None), audit
-    # proceeds — nothing to yield to.
-    if category in AUDIT_CATEGORIES:
-        newest_wd = None
-        newest_overall = None
-        for cat, raw in sess.items():
-            ts = _gate_ts(raw, now)
-            if ts is None:
-                continue
-            if newest_overall is None or ts > newest_overall:
-                newest_overall = ts
-            if cat in WORK_DRIVING_CATEGORIES:
-                if newest_wd is None or ts > newest_wd:
-                    newest_wd = ts
-        if newest_overall is not None:
-            # Bound: only defer while within 2× gap of the last overall nudge.
-            # Past that, audit stops deferring — a quiescent WD family must
-            # not mute audit indefinitely.
-            if now - newest_overall < 2 * gap:
-                wd_had_turn = (newest_wd is not None
-                               and newest_wd >= newest_overall)
-                if not wd_had_turn:
-                    wd_due = (newest_wd is not None
-                              and now - newest_wd >= gap)
-                    if wd_due:
-                        return False
     return True
 
 
@@ -254,6 +223,93 @@ def mark_sent(state, sid, category, now):
         sess = {}
         cad[sid] = sess
     sess[category] = now
+
+
+# --------------------------------------------------------------------------- #
+# #923 BATCHING — compose all eligible families into ONE prompt per 1h slot.
+# --------------------------------------------------------------------------- #
+
+# The batch message leads with this prefix — a recognized machine-nudge prefix
+# in goal.py `_machine_prefixes` ("nudge:") AND must be added to stash.py
+# `_JANITOR_OWN_PREFIXES` for stranded-nudge cleanup.
+BATCH_PREFIX = "nudge:"
+
+
+def batch_eligible(state, sid, now):
+    """Return the list of categories eligible for batched delivery at `now`.
+
+    A category is eligible when BOTH hold:
+      (1) The session's family gap is OPEN — no mark_sent of ANY category
+          within `_family_gap()` (the 1h total cap, #913).
+      (2) The category's own per-category floor has expired.
+
+    Returns categories ordered: WORK_DRIVING first, AUDIT second (#923).
+    Returns [] when the gap is closed or no category is eligible.
+    Fail-safe: malformed state → [] (the safe direction for batching — no
+    batch, the individual riders' own gates still work)."""
+    sess = _session(state, sid)
+    gap = _family_gap()
+    # (1) Is the gap open? Any category sent within the gap → closed.
+    for cat, raw in sess.items():
+        ts = _gate_ts(raw, now)
+        if ts is not None and now - ts < gap:
+            return []
+    # (2) Collect categories whose per-category floor has expired.
+    eligible = []
+    for cat in sorted(GATED_CATEGORIES):  # sorted for determinism
+        last_cat = _gate_ts(sess.get(cat), now)
+        if last_cat is not None and now - last_cat < _category_floor(cat):
+            continue
+        eligible.append(cat)
+    # Order: work-driving first, audit second (each sub-group sorted).
+    wd = sorted(c for c in eligible if c in WORK_DRIVING_CATEGORIES)
+    au = sorted(c for c in eligible if c in AUDIT_CATEGORIES)
+    return wd + au
+
+
+def compose_batch(items, max_chars=None):
+    """Compose a batch message from `[(category, text), ...]`.
+
+    Orders WORK_DRIVING sections first, AUDIT second. Each section is formatted
+    as `[category] text`. The message leads with `BATCH_PREFIX` so machine-prefix
+    recognition classifies it as a machine nudge.
+
+    When `max_chars` is given and the composed message exceeds it, AUDIT sections
+    are trimmed from the end first (the priority taxonomy's trim order), then
+    WORK_DRIVING from the end — work-driving is never trimmed while audit
+    sections remain. Returns the composed string, or '' if items is empty."""
+    if not items:
+        return ""
+    wd = [(c, t) for c, t in items if c in WORK_DRIVING_CATEGORIES]
+    au = [(c, t) for c, t in items if c in AUDIT_CATEGORIES]
+    ordered = wd + au
+
+    def _build(sections):
+        parts = [BATCH_PREFIX]
+        for cat, text in sections:
+            parts.append("\n[%s] %s" % (cat, text))
+        return "".join(parts)
+
+    result = _build(ordered)
+    if max_chars is not None and len(result) > max_chars:
+        # Trim audit from the end, then work-driving if still over.
+        while au and len(result) > max_chars:
+            au.pop()
+            result = _build(wd + au)
+        while wd and len(result) > max_chars:
+            wd.pop()
+            result = _build(wd + au)
+    return result
+
+
+def mark_batch_sent(state, sid, categories, now):
+    """Mark ALL `categories` as sent at `now` in one call.
+
+    Used after a batched delivery: every category in the batch gets the SAME
+    timestamp, so the family gap blocks the NEXT batch (not the members of
+    THIS one). Delegates to `mark_sent` per category."""
+    for cat in categories:
+        mark_sent(state, sid, cat, now)
 
 
 def _stale_entry(v, now, ttl_s):

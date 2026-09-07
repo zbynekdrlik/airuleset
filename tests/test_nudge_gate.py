@@ -148,11 +148,8 @@ class TestGateOk(unittest.TestCase):
         self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW))   # family gap
 
 
-class TestWorkDrivingPriority923(unittest.TestCase):
-    """#923: work-driving families (lane-occupancy, release-gap, queue-arrival,
-    lane-reconcile) have PRIORITY over audit families (partition-audit,
-    u-freshness, goal-guard) within the shared 1h slot. An audit family must
-    NOT claim the slot when a work-driving family is due."""
+class TestClassification923(unittest.TestCase):
+    """#923: WORK_DRIVING vs AUDIT classification of gated categories."""
 
     def test_classification_covers_all_gated(self):
         """Every GATED_CATEGORIES member is in exactly one class."""
@@ -171,87 +168,119 @@ class TestWorkDrivingPriority923(unittest.TestCase):
             "partition-audit", "u-freshness", "goal-guard",
         }))
 
-    def test_audit_defers_when_work_driving_is_due(self):
-        """The gk starvation shape: audit fired recently, work-driving is
-        old/due. Audit must defer so work-driving gets the next slot."""
+
+class TestBatchEligible923(unittest.TestCase):
+    """#923 BATCHING: batch_eligible collects ALL eligible categories when
+    the 1h slot opens, ordered work-driving first, audit second."""
+
+    def test_empty_state_all_eligible(self):
+        st = {}
+        result = ng.batch_eligible(st, "s", NOW)
+        # All categories eligible (no history, no floor blocks)
+        self.assertEqual(len(result), len(ng.GATED_CATEGORIES))
+        # Work-driving comes first
+        wd_end = 0
+        for cat in result:
+            if cat in ng.WORK_DRIVING_CATEGORIES:
+                wd_end += 1
+            else:
+                break
+        self.assertEqual(wd_end, len(ng.WORK_DRIVING_CATEGORIES))
+
+    def test_gap_closed_returns_empty(self):
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # Within the gap: no batch
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])
+
+    def test_gap_open_returns_all_eligible(self):
+        st = {}
+        ng.mark_sent(st, "s", "lane-occupancy", NOW)
+        # After 1h: gap open → all eligible
+        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertGreater(len(result), 0)
+        self.assertIn("lane-occupancy", result)
+        self.assertIn("partition-audit", result)
+
+    def test_per_category_floor_excludes(self):
+        """u-freshness has a 1h floor — if sent at NOW, it's excluded from
+        a batch at NOW+HOUR-1 (floor not expired) but included at NOW+HOUR
+        (floor exactly expired)."""
+        st = {}
+        ng.mark_sent(st, "s", "u-freshness", NOW)
+        # At NOW+HOUR-1: gap open (only u-freshness in state, 3599 < 3600
+        # is True → gap closed). Actually the gap IS closed because
+        # u-freshness was sent 3599s ago which is < 3600.
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR - 1), [])
+        # At NOW+HOUR: gap open (3600 >= 3600) AND floor expired → included
+        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertIn("u-freshness", result)
+
+    def test_starvation_impossible_with_batching(self):
+        """The gk starvation shape is impossible with batching: when the slot
+        opens, BOTH lane-occupancy AND partition-audit are in the batch."""
         st = {}
         ng.mark_sent(st, "s", "lane-occupancy", NOW - 2 * HOUR)
         ng.mark_sent(st, "s", "partition-audit", NOW)
-        # After 1h: lane-occupancy (work-driving) should pass
-        self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", NOW + HOUR))
-        # partition-audit (audit) must DEFER — work-driving hasn't had its turn
-        self.assertFalse(ng.gate_ok(st, "s", "partition-audit", NOW + HOUR))
+        # After 1h from the latest mark_sent: gap opens
+        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertIn("lane-occupancy", result)
+        self.assertIn("partition-audit", result)
 
-    def test_audit_allowed_after_work_driving_fires(self):
-        """After work-driving fires, audit gets the next slot."""
+    def test_mark_batch_sent_stamps_all(self):
+        """mark_batch_sent marks all categories at once — the family gap then
+        blocks the next batch for 1h."""
         st = {}
-        ng.mark_sent(st, "s", "lane-occupancy", NOW)
-        # After 1h: audit should be allowed (work-driving had its turn)
-        self.assertTrue(ng.gate_ok(st, "s", "partition-audit", NOW + HOUR))
+        cats = ["lane-occupancy", "partition-audit", "u-freshness"]
+        ng.mark_batch_sent(st, "s", cats, NOW)
+        for cat in cats:
+            self.assertEqual(st["nudge_cadence"]["s"][cat], NOW)
+        # Next batch blocked until NOW+HOUR
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 30 * 60), [])
+        self.assertGreater(len(ng.batch_eligible(st, "s", NOW + HOUR)), 0)
 
-    def test_audit_allowed_when_no_work_driving_history(self):
-        """When work-driving has NEVER fired for this session, audit doesn't
-        defer — there is nothing to yield to."""
+    def test_ordering_work_driving_first(self):
+        """Work-driving categories appear before audit in the batch."""
         st = {}
-        ng.mark_sent(st, "s", "partition-audit", NOW)
-        self.assertTrue(ng.gate_ok(st, "s", "partition-audit", NOW + HOUR))
+        result = ng.batch_eligible(st, "s", NOW)
+        wd_idx = [i for i, c in enumerate(result)
+                  if c in ng.WORK_DRIVING_CATEGORIES]
+        au_idx = [i for i, c in enumerate(result)
+                  if c in ng.AUDIT_CATEGORIES]
+        if wd_idx and au_idx:
+            self.assertLess(max(wd_idx), min(au_idx))
 
-    def test_work_driving_unaffected_by_priority_check(self):
-        """Work-driving categories are NEVER deferred by the priority check —
-        only the existing (a)+(b) checks apply."""
-        st = {}
-        ng.mark_sent(st, "s", "partition-audit", NOW)
-        # work-driving should pass regardless of audit history
-        self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", NOW + HOUR))
 
-    def test_alternation_over_three_windows(self):
-        """Work-driving and audit alternate slots, never starving either."""
-        st = {}
-        # Window 1: work-driving fires
-        ng.mark_sent(st, "s", "lane-occupancy", NOW)
-        # Window 2: audit gets its turn
-        self.assertTrue(ng.gate_ok(st, "s", "u-freshness", NOW + HOUR))
-        ng.mark_sent(st, "s", "u-freshness", NOW + HOUR)
-        # Window 3: work-driving gets priority again (audit fired last)
-        self.assertFalse(ng.gate_ok(st, "s", "partition-audit",
-                                    NOW + 2 * HOUR))
-        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 2 * HOUR))
+class TestComposeBatch923(unittest.TestCase):
+    """#923: compose_batch formats items into a BATCH_PREFIX-headed message."""
 
-    def test_starvation_shape_audit_monopoly(self):
-        """RED repro of the gk incident: audit claims 3+ consecutive slots,
-        lane-occupancy defers every time."""
-        st = {}
-        # Initial: lane-occupancy was active but audit took over
-        ng.mark_sent(st, "s", "lane-occupancy", NOW - 5 * HOUR)
-        for i in range(3):
-            t = NOW + i * HOUR
-            # Audit claims the slot
-            ng.mark_sent(st, "s", "partition-audit", t)
-        # After 3 hours of audit monopoly, lane-occupancy must be allowed
-        # and audit must defer
-        t_check = NOW + 3 * HOUR
-        self.assertTrue(ng.gate_ok(st, "s", "lane-occupancy", t_check))
-        self.assertFalse(ng.gate_ok(st, "s", "partition-audit", t_check))
+    def test_prefix_leads(self):
+        result = ng.compose_batch([("lane-occupancy", "refill 3 lanes")])
+        self.assertTrue(result.startswith(ng.BATCH_PREFIX))
 
-    def test_quiescent_wd_does_not_permanently_mute_audit(self):
-        """#923 review C1: when work-driving fires once then goes quiet
-        (lanes full, no more refill needed), audit must NOT be permanently
-        muted. The deferral is BOUNDED: audit yields at most one extra
-        window (2x family_gap from the last overall nudge), then proceeds.
-        Permanent mute of u-freshness is the module's cardinal sin
-        (docstring lines 147-158)."""
-        st = {}
-        # Work-driving fires at T0, then never fires again (lanes full)
-        ng.mark_sent(st, "s", "lane-occupancy", NOW)
-        # Audit fires at T0+1h
-        ng.mark_sent(st, "s", "partition-audit", NOW + HOUR)
-        # At T0+2h: audit yields one window for work-driving
-        self.assertFalse(ng.gate_ok(st, "s", "u-freshness", NOW + 2 * HOUR))
-        # At T0+3h: work-driving didn't fire — audit MUST proceed (bounded)
-        self.assertTrue(ng.gate_ok(st, "s", "u-freshness", NOW + 3 * HOUR))
-        # Also verify partition-audit is allowed at T0+3h
-        self.assertTrue(ng.gate_ok(st, "s", "partition-audit",
-                                   NOW + 3 * HOUR))
+    def test_orders_wd_first(self):
+        items = [("partition-audit", "I5 U0"),
+                 ("lane-occupancy", "refill 3")]
+        result = ng.compose_batch(items)
+        lo_pos = result.index("[lane-occupancy]")
+        pa_pos = result.index("[partition-audit]")
+        self.assertLess(lo_pos, pa_pos)
+
+    def test_empty_returns_empty_string(self):
+        self.assertEqual(ng.compose_batch([]), "")
+
+    def test_max_chars_trims_audit_first(self):
+        items = [("lane-occupancy", "refill"),
+                 ("partition-audit", "I5 U0 W0 skip0")]
+        result = ng.compose_batch(items, max_chars=50)
+        # Work-driving kept, audit trimmed if needed
+        self.assertIn("[lane-occupancy]", result)
+        self.assertTrue(len(result) <= 50)
+
+    def test_batch_prefix_is_machine_recognized(self):
+        """BATCH_PREFIX must be 'nudge:' — already in goal.py
+        _machine_prefixes, so the transcript classifier handles it."""
+        self.assertEqual(ng.BATCH_PREFIX, "nudge:")
 
 
 class TestMarkSent(unittest.TestCase):
