@@ -364,6 +364,12 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   (`hooks/subagent-stop-check-lane-return.sh`): a worktree-mode return claiming a branch + head with
   no LANE-RETURN comment is blocked ONCE per issue (then you still stop if it genuinely cannot post
   — no wedge), exactly like the design-comment gate.
+- **Your worktree is cleaned up by the disk-guard's hourly sweep (#939), NOT by you.** Do NOT
+  `git worktree remove` your own dir — deleting your cwd before SubagentStop hooks run fails them
+  open. The disk-guard's worktree rung runs proactively on shared-stream boxes (hourly cadence,
+  regardless of pressure) and reclaims any worktree whose HEAD is reachable from origin and has
+  no live process. Any uncommitted scratch/temp files in a returned worktree are discarded after
+  24h idle — committed work is preserved via the wip-backup ref on origin.
 - **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
   prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
   checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and

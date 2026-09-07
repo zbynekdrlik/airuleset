@@ -461,13 +461,15 @@ def test_worktree_NOT_reclaimable_when_head_unreachable(tmp_path):
     assert "origin" in row["reason"].lower() or "reachable" in row["reason"].lower()
 
 
-def test_worktree_NOT_reclaimable_when_dirty(tmp_path):
+def test_worktree_reclaimable_when_dirty_but_reachable(tmp_path):
+    """#939: dirty+reachable IS reclaimable — the work is preserved on origin,
+    only scratch/temp files are lost. The old code blocked this permanently."""
     p = tmp_path / "wt"
     p.mkdir()
     gr = _git_run_factory({
         ("rev-parse", "HEAD"): "abc\n",
-        ("merge-base", "--is-ancestor", "abc", "origin/main"): "",   # reachable...
-        ("status", "--porcelain"): " M file.py\n",                    # ...but dirty
+        ("merge-base", "--is-ancestor", "abc", "origin/main"): "",   # reachable
+        ("status", "--porcelain"): " M file.py\n",                    # dirty
     })
     row = wt._worktree_reclaimable(
         root=str(tmp_path), path=str(p), branch="david/z", base="main",
@@ -476,8 +478,9 @@ def test_worktree_NOT_reclaimable_when_dirty(tmp_path):
         recency_fn=lambda _r, _p, _n: 5 * 86400,
         precious_fn=lambda _p: False,
     )
-    assert row["reason"] is not None
-    assert "dirty" in row["reason"].lower() or "clean" in row["reason"].lower()
+    assert row["reason"] is None, "dirty+reachable should be reclaimable (#939)"
+    assert row.get("dirty") is True, "reclaimable row must carry dirty=True flag"
+    assert row.get("reachable_via") is not None
 
 
 def test_worktree_NOT_reclaimable_when_recent(tmp_path):
