@@ -157,5 +157,37 @@ class InjectionDeliversTheWholeSkill(unittest.TestCase):
         )
 
 
+class DispatchMandateForGoalArmed(unittest.TestCase):
+    """#926: Phases 1-3 must dispatch to sonnet-mechanical on a goal-armed box.
+    Content-lock teeth ensure the mandate survives in the skill body."""
+
+    def test_dispatch_section_present(self):
+        b = _body()
+        self.assertIn("Dispatch: Phases 1-3", b,
+                       "#926 dispatch section heading missing")
+
+    def test_dispatch_names_sonnet_mechanical(self):
+        b = _body()
+        lines = [ln for ln in b.splitlines()
+                 if "sonnet-mechanical" in ln and "Dispatch" in ln
+                 or "sonnet-mechanical" in ln and "worker" in ln]
+        self.assertTrue(lines,
+                        "#926: no line carries both sonnet-mechanical + worker/Dispatch")
+
+    def test_dispatch_names_block_main_implementation(self):
+        b = _body()
+        lines = [ln for ln in b.splitlines()
+                 if "block-main-implementation" in ln and "goal" in ln.lower()]
+        self.assertTrue(lines,
+                        "#926: no line names block-main-implementation near /goal")
+
+    def test_phase4_stays_in_main(self):
+        b = _body()
+        lines = [ln for ln in b.splitlines()
+                 if "Phase 4" in ln and "main" in ln]
+        self.assertTrue(lines,
+                        "#926: no line says Phase 4 stays in main")
+
+
 if __name__ == "__main__":
     unittest.main()

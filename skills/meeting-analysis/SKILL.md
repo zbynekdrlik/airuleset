@@ -94,13 +94,17 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
   reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path out of the endpoint's own log:
   `grep SAVED ~/.claude/upload-logs/upload-<port>.log` → `$HOME/uploads/acme-call/<saved-name>`.
-  The name is PRESERVED, not stripped (#116): Slovak diacritics, spaces and parentheses all
-  survive, so `nahrávka test (1).mp4` lands under exactly that name. Only characters that
-  cannot safely be a filename (path separators, control characters, format characters) become
-  `_`, and an absurdly long name is clipped to 200 bytes with its extension kept. Still read
-  the SAVED line rather than guessing — and always QUOTE the path, since it can contain spaces.
-  Confirm the byte count matches the user's file size, then stop the server: `kill <PID>`.
+  The name is PRESERVED (#116) — diacritics, spaces, parentheses survive; always
+  QUOTE the path and read the SAVED line rather than guessing. Confirm byte count
+  matches, then `kill <PID>`.
 - If the recording already lives on a dev box, skip this phase.
+
+## Dispatch: Phases 1-3 on a goal-armed box (#926)
+
+When `/goal` is armed, `block-main-implementation.sh` blocks bulk bash in main. Dispatch
+Phases 1-3 (extract/transcribe/dedup — mechanical) to a `sonnet-mechanical` worker with
+WORK dir + VIDEO path in its prompt; main reads only the returned `frames_kept/` count +
+`summary.json`. Phase 4 (reading screens via Read tool) stays in main — it needs vision.
 
 ## Phase 1 — Extract the three channels (dev1, ffmpeg)
 
