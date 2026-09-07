@@ -170,6 +170,11 @@ ONEOFF_VENV_TMP_RE = _re.compile(r"^lintvenv-")
 # the guard visibly acts). 95 %+ stays every-poll (emergency).
 CRITICAL_DRAIN_INTERVAL_S = 2 * 60
 
+# #925 — on a shared-stream box, the HOURLY cadence replaces both the 600 s
+# and 120 s tiers below DISK_CRITICAL_PCT. Growth-aware boost (worst_pct rose
+# since last poll) fires the drain immediately regardless.
+SHARED_STREAM_DRAIN_INTERVAL_S = 3600
+
 # #892 — playwright browser revision dirs under ~/.cache/ms-playwright/
 PLAYWRIGHT_CACHE_DIR = ".cache/ms-playwright"
 PLAYWRIGHT_MIN_AGE_DAYS = 30
@@ -2847,6 +2852,17 @@ def _drain_due(home, now, min_interval_s=None):
     return (now - last) >= min_interval_s
 
 
+def _growth_detected(home, current_pct):
+    """#925 — True when the current worst_pct is STRICTLY HIGHER than the
+    previously cached value. Fail-safe False (no cached prior → no boost,
+    never a runaway drain on a cold start)."""
+    prior = _read_status_cache(home)
+    prev = prior.get("worst_pct") if isinstance(prior, dict) else None
+    if not isinstance(prev, (int, float)) or isinstance(prev, bool):
+        return False
+    return current_pct > prev
+
+
 def _mark_drained(home, now):
     try:
         p = _guard_dir(home) / LAST_DRAIN_NAME
@@ -2961,7 +2977,7 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
-                   top_consumers_fn=None, severe_run_fn=None):
+                   top_consumers_fn=None, severe_run_fn=None, box_class_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -3003,14 +3019,30 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # #892: third cadence tier — in the 90-94 % footer-red band, the WHOLE
     # ladder runs with a shorter interval (CRITICAL_DRAIN_INTERVAL_S = 120 s)
     # instead of the normal 600 s. 95 %+ stays every-poll (unchanged).
+    # #925: on a shared-stream box, a SINGLE hourly interval replaces both the
+    # 600 s and 120 s tiers at 70-94 %. Growth-aware boost (worst_pct rose
+    # since last poll) fires the drain immediately regardless of cadence.
     effective_interval = min_drain_interval_s
-    if effective_interval is None and CRITICAL_PCT <= status["worst_pct"] < DISK_CRITICAL_PCT:
-        effective_interval = CRITICAL_DRAIN_INTERVAL_S
+    _box_cls_fn = box_class_fn or _default_box_class
+    _is_shared = False
+    try:
+        _is_shared = _box_cls_fn() == "shared-stream"
+    except Exception as e:
+        _dbg("box-class for cadence: %r" % e)
+    if effective_interval is None:
+        if _is_shared and status["worst_pct"] < DISK_CRITICAL_PCT:
+            effective_interval = SHARED_STREAM_DRAIN_INTERVAL_S
+        elif CRITICAL_PCT <= status["worst_pct"] < DISK_CRITICAL_PCT:
+            effective_interval = CRITICAL_DRAIN_INTERVAL_S
+    # #925: growth-aware boost — if worst_pct rose since the last cached value,
+    # bypass the cadence gate (the drain has something new to act on).
+    growth_boost = _is_shared and _growth_detected(home, status["worst_pct"])
+    cadence_due = _drain_due(home, now, effective_interval)
     will_drain = ((not is_root)
                   and status["level"] not in ("ok", "notice")
                   and _cadence_allows_drain(
                       status["worst_pct"],
-                      _drain_due(home, now, effective_interval),
+                      cadence_due or growth_boost,
                       dry_run=dry_run))
     scratch_rows = None
     if will_drain:
@@ -3039,6 +3071,13 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             status["top_consumers"] = prior["top_consumers"]
             if "top_consumers_ts" in prior:
                 status["top_consumers_ts"] = prior["top_consumers_ts"]
+        # #925: carry forward drain_exhausted on non-drain polls, but CLEAR it
+        # when pressure drops below DRAIN_PCT (the guard no longer needs help).
+        if isinstance(prior, dict) and prior.get("drain_exhausted") is True:
+            if status["worst_pct"] < DRAIN_PCT:
+                status["drain_exhausted"] = False
+            else:
+                status["drain_exhausted"] = True
     # #895: top_consumers must ALWAYS be present in status.json (even on a
     # cold-start non-drain poll) so downstream readers never see a missing key.
     if "top_consumers" not in status:
@@ -3052,7 +3091,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             and status["worst_pct"] >= PREVENTION_PCT
             and not is_root
             and _cadence_allows_drain(status["worst_pct"],
-                                      _drain_due(home, now, effective_interval),
+                                      _drain_due(home, now, effective_interval) or growth_boost,
                                       dry_run=dry_run)):
         logs += _run_prevention_pass(
             status, home, now, dry_run, scratch_rows,
@@ -3131,6 +3170,26 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             except Exception as e:
                 logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
+        # #925: drain_exhausted — the ladder ran to completion but could NOT
+        # bring the worst mount below TARGET_PCT. The statusbar reads this to
+        # show the badge at <95 % ONLY when the guard needs human help.
+        # Set on `post` AND written to a SEPARATE cache update so it survives
+        # even when `planners_fn is not None` (test path) skips the top_consumers
+        # write below.
+        if not dry_run:
+            post["drain_exhausted"] = post["worst_pct"] >= TARGET_PCT
+            try:
+                # Re-read the current cache (the pre-drain write), merge
+                # drain_exhausted + the fresh worst_pct, and write back.
+                _cur = _read_status_cache(home)
+                if isinstance(_cur, dict):
+                    _cur["drain_exhausted"] = post["drain_exhausted"]
+                    _cur["worst_pct"] = post["worst_pct"]
+                    _cur["level"] = post["level"]
+                    _cur["ts"] = post["ts"]
+                    write_status_cache(_cur, home=home)
+            except Exception as e:
+                _dbg("drain_exhausted cache write: %r" % e)
         # #892: write top_consumers into the status cache AFTER the drain, so a
         # stream user sees what to clean even before escalation. The pre-drain
         # write_status_cache already ran; this is a SECOND write carrying

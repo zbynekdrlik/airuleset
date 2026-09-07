@@ -396,7 +396,7 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         _stream_split_sfx(cache), skip_sfx)
 
 
-DISK_SEGMENT_RED_PCT = 90           # shown (red) at/above this, HIDDEN below (#854)
+DISK_SEGMENT_RED_PCT = 95           # shown (red) at/above this, HIDDEN below (#925; was 90 per #854)
 DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
 
 RELEASE_IDLE_BREACH_H = 3           # #846: show `rel <Nh>` only at >= 3h deploy age
@@ -404,14 +404,15 @@ RELEASE_IDLE_STALE_S = 3600         # cache older than this → hide (dead watch
 
 
 def disk_segment(home=None, now=None):
-    """The `disk NN%` footer segment (#834 req 1, narrowed by #854): shown ONLY
-    at >= 90 % (`critical`, RED) and HIDDEN otherwise — the owner sees disk
-    pressure the moment it is a real problem, without the footer cluttering
-    while a box oscillates 80-90 % (gk). Also HIDDEN when the disk-guard cache is
-    stale (> DISK_SEGMENT_STALE_S) so a dead watchdog never paints a frozen %
-    forever. Reads ONLY the machine-local cache the watchdog Job 40 writes;
-    renders as no segment on any error (never blocks, never touches the
-    network)."""
+    """The `disk NN%` footer segment (#834 req 1, narrowed by #854, refined by
+    #925): shown ONLY when ACTIONABLE for the owner — at >= 95 % (RED) OR when
+    the drain ladder reported ``drain_exhausted`` (could not reach target, the
+    guard needs human help). The 90-94 % band where the machinery handles
+    pressure autonomously is HIDDEN — the owner's "5x a day" complaint (#925).
+    Also HIDDEN when the disk-guard cache is stale (> DISK_SEGMENT_STALE_S) so
+    a dead watchdog never paints a frozen % forever. Reads ONLY the machine-local
+    cache the watchdog Job 40 writes; renders as no segment on any error (never
+    blocks, never touches the network)."""
     import time as _time
     now = _time.time() if now is None else now
     cache = _load(_claude_dir(home) / "disk-guard" / "status.json")
@@ -423,11 +424,12 @@ def disk_segment(home=None, now=None):
         return ""
     if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
         return ""
-    # Use the guard's own LEVEL from the cache (no threshold re-derivation /
-    # drift; #834 review 🔵). Fall back to the pct threshold only if the cache
-    # predates the level field. #854: shown ONLY at critical (>= 90 %), red.
-    level = cache.get("level")
-    shown = (level == "critical") if level is not None else (worst >= DISK_SEGMENT_RED_PCT)
+    # #925: shown at >= 95 % OR when drain_exhausted (the guard could not
+    # reach target — the owner must act). The 90-94 % band the machinery
+    # resolves autonomously is hidden. Falls back to the pct threshold when
+    # the cache predates the exhausted field.
+    exhausted = cache.get("drain_exhausted") is True
+    shown = (worst >= DISK_SEGMENT_RED_PCT) or exhausted
     if not shown:
         return ""
     return "\033[38;5;196mdisk %d%%\033[0m" % int(worst)
