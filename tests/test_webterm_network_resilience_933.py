@@ -73,14 +73,23 @@ class TestInputBuffer933(unittest.TestCase):
             r"\.key\.length\s*===?\s*1",
         )
 
-    def test_enter_key_buffered(self) -> None:
-        r"""Enter is buffered as \r (the PTY newline)."""
-        # The buffer handler must check for the Enter key and append \r.
-        # In the triple-quoted DASHBOARD_TEMPLATE, '\r' is a literal CR char.
-        buf_section = DASHBOARD_TEMPLATE[DASHBOARD_TEMPLATE.index("_wtInputBuf"):]
-        self.assertIn("'Enter'", buf_section)
-        # The += '\r' line exists (literal CR in the Python string)
-        self.assertIn("_wtInputBuf += '", buf_section)
+    def test_enter_not_buffered(self) -> None:
+        """Enter is NOT buffered — Y1 review finding: replayed Enter in a
+        Claude Code session could accept a permission dialog. The owner's
+        ask is 'nestratit text ktory pisem' — text only, Enter after reconnect."""
+        # The buffer listener should explicitly NOT handle Enter — it passes
+        # through to xterm (harmless on dead WS, and lets manual reconnect work).
+        buf_section = DASHBOARD_TEMPLATE[DASHBOARD_TEMPLATE.index("_wtStartBuffer"):]
+        buf_section = buf_section[:buf_section.index("_wtStopBuffer")]
+        # No \r should appear in the buffer section (no CR buffering)
+        self.assertNotIn("\r", buf_section)
+
+    def test_istrusted_guard(self) -> None:
+        """Synthetic events (from auto-reconnect) must pass through — the
+        buffer listener checks e.isTrusted to avoid swallowing them (R2)."""
+        buf_section = DASHBOARD_TEMPLATE[DASHBOARD_TEMPLATE.index("_wtStartBuffer"):]
+        buf_section = buf_section[:buf_section.index("_wtStopBuffer")]
+        self.assertIn("isTrusted", buf_section)
 
 
 class TestOfflineIndicator933(unittest.TestCase):
@@ -109,6 +118,33 @@ class TestOfflineIndicator933(unittest.TestCase):
             DASHBOARD_TEMPLATE,
             r"classList\.toggle\(\s*['\"]wt-offline['\"]",
         )
+
+
+class TestReconnectGate933(unittest.TestCase):
+    """The reconnected transition must check for ANY overlay, not just
+    the reconnect prompt — Y2 fix."""
+
+    def test_any_overlay_checker_exists(self) -> None:
+        """A _wtHasAnyOverlay function detects all ttyd overlays."""
+        self.assertIn("_wtHasAnyOverlay", DASHBOARD_TEMPLATE)
+
+    def test_reconnected_checks_any_overlay(self) -> None:
+        """The disconnected->connected transition gates on
+        _wtHasAnyOverlay so replay doesn't fire while Reconnecting."""
+        # In the monitorConnection's disconnected branch
+        monitor_section = DASHBOARD_TEMPLATE[
+            DASHBOARD_TEMPLATE.index("monitorConnection") :
+        ]
+        self.assertIn("_wtHasAnyOverlay", monitor_section)
+
+    def test_typeof_key_guard(self) -> None:
+        """The buffer listener guards typeof e.key === 'string' to
+        avoid throwing on synthetic events with undefined key (B3)."""
+        buf_section = DASHBOARD_TEMPLATE[
+            DASHBOARD_TEMPLATE.index("_wtStartBuffer") :
+            DASHBOARD_TEMPLATE.index("_wtStopBuffer")
+        ]
+        self.assertIn("typeof e.key", buf_section)
 
 
 class TestFitLayerUntouched933(unittest.TestCase):

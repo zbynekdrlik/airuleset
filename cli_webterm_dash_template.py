@@ -821,59 +821,72 @@ if (CFG.u_status) {     // #677 owner; #703 lane (per-tenant scoped gateway map)
 }
 // #933: network resilience — connection monitor + input buffer + offline indicator.
 // Tolerates brief WS drops (grace period), auto-reconnects with exponential backoff,
-// buffers printable keystrokes during disconnection and replays them on reconnect,
-// and shows a subtle per-tab offline indicator (the .ico arrow turns grey).
+// buffers printable keystrokes (text only, NEVER Enter — Y1: replayed Enter in a
+// Claude Code session could accept a permission dialog) during disconnection and
+// replays them on reconnect, and shows a subtle per-tab offline indicator (.ico grey).
 const WT_CONN_GRACE_MS = 5000;       // tolerate a WS drop this long before declaring offline
 const WT_RECONNECT_BASE_MS = 2000;   // initial reconnect interval (exponential backoff)
 const WT_RECONNECT_MAX_MS = 60000;   // cap on the reconnect interval
 // Per-frame connection state. Each frame gets its own monitor instance.
 // _wtState: 'connected' | 'grace' | 'disconnected'
 // _wtInputBuf: string of buffered printable keystrokes
-// _wtGraceTimer: timeout id for the grace period
-// _wtReconnTimer: timeout id for the next reconnect attempt
+// __wtGraceTimer: timeout id for the grace period
+// __wtReconnTimer: timeout id for the next reconnect attempt
 // _wtReconnDelay: current reconnect interval (doubles each attempt)
-// _wtBufListener: the keydown capture listener (to remove on reconnect)
-function _wtIsWsDown(win) {
-  // Check if the ttyd WebSocket is closed/closing. ttyd stores the WS on
-  // window.ws (ttyd 1.7.x). If inaccessible, fall back to the overlay check.
+// __wtBufListener: the keydown capture listener (to remove on reconnect)
+// __wtMonitor: true once monitorConnection has been called for this frame
+function _wtHasAnyOverlay(win) {
+  // Return true if ANY ttyd overlay is visible (Reconnect prompt, Reconnecting,
+  // Connection Closed). Unlike ttydReconnectOverlay (which deliberately excludes
+  // "Reconnecting..."), this catches ALL overlays — used to gate the reconnected
+  // transition so we don't replay the buffer while the socket is still CONNECTING.
   try {
-    if (win.ws && typeof win.ws.readyState === 'number') {
-      // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
-      return win.ws.readyState >= 2;
+    var t = win && win.term;
+    if (!t || !t.element) return false;
+    var nodes = t.element.querySelectorAll('div');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (n.style && n.style.fontSize === 'xx-large' && n.parentNode && n.style.opacity !== '0') {
+        return true;   // any visible xx-large overlay = not yet clean
+      }
     }
-  } catch (e) { /* cross-origin or ws not exposed */ }
-  // Fallback: check for ttyd's reconnect overlay (the #673 detector)
+  } catch (e) { /* cross-origin -> treat as no overlay */ }
+  return false;
+}
+function _wtIsWsDown(win) {
+  // Detect a WS drop via ttyd's reconnect overlay — the proven issue-673 detector.
+  // Returns true when ttyd is showing the reconnect prompt or has a closed connection.
   return !!ttydReconnectOverlay(win);
 }
 function _wtSetOffline(idx, offline) {
   // Toggle the .wt-offline class on the tab button for visual feedback.
   try {
-    const tab = document.querySelector('.tab[data-idx="' + idx + '"]');
+    var tab = document.querySelector('.tab[data-idx="' + idx + '"]');
     if (tab) tab.classList.toggle('wt-offline', offline);
   } catch (e) {}
 }
 function _wtStartBuffer(f, idx) {
-  // Begin capturing printable keystrokes in the iframe while disconnected.
+  // Begin capturing PRINTABLE keystrokes in the iframe while disconnected.
+  // Enter is NOT buffered (Y1: replayed Enter in a Claude Code session could
+  // accept a permission dialog or submit a half-typed prompt). The owner's ask
+  // is "nestratit text ktory pisem" — printable text only; Enter after reconnect.
   if (f.__wtBufListener) return;         // already buffering
   f._wtInputBuf = '';
-  const win = f.contentWindow;
+  var win = f.contentWindow;
   if (!win) return;
-  const listener = function (e) {
-    // Buffer printable characters (key.length === 1) and Enter.
-    // Control sequences (Ctrl+X, arrows, function keys) pass through —
-    // they're silently dropped by the dead WS anyway, and replaying
-    // context-dependent sequences out of order would be harmful.
-    if (e.key === 'Enter') {
-      f._wtInputBuf += '\r';
-      e.preventDefault();
-      e.stopPropagation();
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+  var listener = function (e) {
+    // Skip synthetic events — let the auto-reconnect's synthetic Enter reach
+    // xterm's onKey handler (R2 fix: the capture listener must not swallow it).
+    if (!e.isTrusted) return;
+    // Buffer printable characters only (key.length === 1, no modifiers).
+    // Enter, arrows, Ctrl+X, function keys all pass through to xterm —
+    // harmless on a dead WS; Enter specifically must reach the reconnect
+    // overlay's onKey trigger so the user can manually reconnect.
+    if (typeof e.key === 'string' && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
       f._wtInputBuf += e.key;
       e.preventDefault();
       e.stopPropagation();
     }
-    // All other keys (arrows, Ctrl+C, function keys, etc.) fall through
-    // to xterm — harmless on a dead WS, and NOT buffered.
   };
   try {
     win.addEventListener('keydown', listener, true);   // capture phase
@@ -882,27 +895,27 @@ function _wtStartBuffer(f, idx) {
 }
 function _wtStopBufferAndReplay(f, idx) {
   // Stop capturing and replay the buffered text into the terminal.
-  const win = f.contentWindow;
+  var win = f.contentWindow;
   if (f.__wtBufListener && win) {
     try { win.removeEventListener('keydown', f.__wtBufListener, true); }
     catch (e) {}
   }
   f.__wtBufListener = null;
-  const buf = f._wtInputBuf || '';
+  var buf = f._wtInputBuf || '';
   f._wtInputBuf = '';
   if (buf && win && win.term && typeof win.term.paste === 'function') {
     try { win.term.paste(buf); } catch (e) {}
   }
 }
 function _wtAutoReconnect(f, idx) {
-  // Press Enter to trigger ttyd's reconnect — the proven #673 mechanism.
+  // Press Enter to trigger ttyd's reconnect — the proven issue-673 mechanism.
   try {
-    const win = f.contentWindow;
+    var win = f.contentWindow;
     if (!win || !ttydReconnectOverlay(win)) return;
-    const ta = win.document.querySelector('.xterm-helper-textarea, textarea');
+    var ta = win.document.querySelector('.xterm-helper-textarea, textarea');
     if (ta) {
       try { ta.focus(); } catch (e) {}
-      const ev = new win.KeyboardEvent('keydown', {
+      var ev = new win.KeyboardEvent('keydown', {
         key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
         bubbles: true, cancelable: true});
       ta.dispatchEvent(ev);
@@ -910,16 +923,16 @@ function _wtAutoReconnect(f, idx) {
   } catch (e) {}
 }
 function monitorConnection(f, idx) {
-  // Poll the iframe's WS state and manage the grace -> disconnected ->
+  // Poll the iframe's overlay state and manage the grace -> disconnected ->
   // reconnected lifecycle. Called once per frame after preloadAll.
   if (!f || f.__wtMonitor) return;
   f.__wtMonitor = true;
   f._wtState = 'connected';
   f._wtReconnDelay = WT_RECONNECT_BASE_MS;
-  const check = function () {
-    const win = f.contentWindow;
+  var check = function () {
+    var win = f.contentWindow;
     if (!win) return;
-    const down = _wtIsWsDown(win);
+    var down = _wtIsWsDown(win);
     if (f._wtState === 'connected') {
       if (down) {
         // WS just dropped — enter grace period before declaring offline
@@ -945,7 +958,13 @@ function monitorConnection(f, idx) {
         f._wtState = 'connected';
       }
     } else if (f._wtState === 'disconnected') {
-      if (!down) {
+      // Y2 fix: require NO overlay of any kind before declaring reconnected.
+      // ttydReconnectOverlay excludes "Reconnecting..." so _wtIsWsDown returns
+      // false during an active reconnect attempt — but the socket is still
+      // CONNECTING and term.paste would be dropped. _wtHasAnyOverlay catches
+      // the "Reconnecting..." phase too, so replay fires only when the terminal
+      // is fully back and the overlay has been dismissed.
+      if (!down && !_wtHasAnyOverlay(win)) {
         // Reconnected! Replay buffer and clear state.
         f._wtState = 'connected';
         _wtSetOffline(idx, false);
@@ -955,7 +974,7 @@ function monitorConnection(f, idx) {
       }
     }
   };
-  setInterval(check, 1000);   // 1s poll — lightweight (no DOM query on happy path)
+  setInterval(check, 1000);   // 1s poll — overlay check only when state != connected
 }
 function _wtScheduleReconnect(f, idx) {
   // Exponential backoff auto-reconnect: try pressing Enter, then double
@@ -969,7 +988,7 @@ function _wtScheduleReconnect(f, idx) {
 }
 // Wire the monitor onto every preloaded frame (after preloadAll).
 CFG.sessions.forEach(function (s, i) {
-  const f = made[i];
+  var f = made[i];
   if (f) monitorConnection(f, i);
 });
 </script>
