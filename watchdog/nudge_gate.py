@@ -56,10 +56,27 @@ import os
 # The gated keystroke-rider family. Jobs 8/11 (bounce / gk-request backstops) are
 # deliberately OUT — a different lane (idle-pane queue backstops with their own
 # staged schedules), not footer/partition nudges into an armed loop.
-GATED_CATEGORIES = frozenset({
-    "u-freshness", "partition-audit", "release-gap", "queue-arrival",
-    "lane-occupancy", "goal-guard", "lane-reconcile",
+#
+# #923 CLASSIFICATION — families split into two classes:
+#
+#   WORK_DRIVING — families whose nudge directly DRIVES new work output (spawning
+#   workers, starting releases, processing arrivals, reconciling lost lanes).
+#   These have PRIORITY within the shared 1h slot.
+#
+#   AUDIT — families that CHECK state but don't drive new work (footer partition
+#   correctness, U badge freshness, foreign goal condition). These DEFER to a
+#   due work-driving candidate, so the work motor is never starved.
+#
+# Every new gated category MUST be added to exactly ONE of these frozensets.
+WORK_DRIVING_CATEGORIES = frozenset({
+    "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
 })
+
+AUDIT_CATEGORIES = frozenset({
+    "partition-audit", "u-freshness", "goal-guard",
+})
+
+GATED_CATEGORIES = WORK_DRIVING_CATEGORIES | AUDIT_CATEGORIES
 
 # The owner's hard 1×/hour U-reconcile strop. Env AIRULESET_U_RECONCILE_CADENCE_S
 # can only RAISE it (floor-clamped at U_RECONCILE_CADENCE_MIN_S == the strop) —
@@ -162,7 +179,8 @@ def _gate_ts(v, now):
 
 def gate_ok(state, sid, category, now):
     """True iff a nudge of `category` to `sid` is allowed at `now` — see the
-    module docstring for (a) the per-category floor and (b) the family spacing.
+    module docstring for (a) the per-category floor, (b) the family spacing,
+    and (c) the work-driving priority (#923).
     Fail-safe ALLOWS on any malformed state (never suppress a legit nudge) —
     including a FUTURE-skewed / corrupt-huge numeric ts, which `_gate_ts` ignores
     so it can never mute a session indefinitely."""
@@ -179,6 +197,31 @@ def gate_ok(state, sid, category, now):
         ts = _gate_ts(raw, now)
         if ts is not None and now - ts < gap:
             return False
+    # (c) #923: work-driving PRIORITY — an AUDIT category defers when a
+    # work-driving category is "due" (its last nudge exists AND is >= gap old)
+    # AND the most recent nudge overall was NOT work-driving (meaning
+    # work-driving hasn't had its turn yet). If work-driving NEVER fired
+    # (newest_wd is None), audit proceeds — nothing to yield to.
+    if category in AUDIT_CATEGORIES:
+        newest_wd = None
+        newest_overall = None
+        for cat, raw in sess.items():
+            ts = _gate_ts(raw, now)
+            if ts is None:
+                continue
+            if newest_overall is None or ts > newest_overall:
+                newest_overall = ts
+            if cat in WORK_DRIVING_CATEGORIES:
+                if newest_wd is None or ts > newest_wd:
+                    newest_wd = ts
+        if newest_overall is not None:
+            wd_had_turn = (newest_wd is not None
+                           and newest_wd >= newest_overall)
+            if not wd_had_turn:
+                wd_due = (newest_wd is not None
+                          and now - newest_wd >= gap)
+                if wd_due:
+                    return False
     return True
 
 
