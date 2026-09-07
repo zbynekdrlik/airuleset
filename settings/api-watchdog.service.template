@@ -29,6 +29,9 @@ Type=oneshot
 EnvironmentFile=-%h/.claude/watchdog.env
 # Reads ~/.claude transcripts, talks to the user's tmux server (default socket
 # /tmp/tmux-<uid>/), and POSTs to Discord — so NO network/socket sandbox here.
+# #925-C: explicit SyslogIdentifier so rsyslog can filter by $programname
+# (without this, /usr/bin/env makes it "python3" — too broad to filter).
+SyslogIdentifier=api-watchdog
 ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py watchdog --once
 # Generous budget: job 8 runs gh queries (8s timeout each); a run must still
 # never pile up behind a hung network call.

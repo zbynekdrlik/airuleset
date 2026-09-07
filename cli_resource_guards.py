@@ -66,6 +66,25 @@ SSH_OOM_PATH = "/etc/systemd/system/ssh.service.d/50-airuleset-oom-protect.conf"
 TAILSCALED_OOM_PATH = "/etc/systemd/system/tailscaled.service.d/50-airuleset-oom-protect.conf"
 SYSCTL_VM_PATH = "/etc/sysctl.d/50-airuleset-vm.conf"
 
+# #925-C: rsyslog quiet rule — suppress api-watchdog per-poll output from
+# syslog. The journal retains all entries; this only prevents rsyslog from
+# forwarding ~5M lines/day to /var/log/syslog on shared-stream boxes
+# (12 accounts x 60s polls x ~7 lines each).
+RSYSLOG_QUIET_PATH = "/etc/rsyslog.d/30-airuleset-watchdog-quiet.conf"
+
+# #925-C: journald SystemMaxUse cap for shared-stream boxes. Uses a `60-`
+# prefix because cli_disk_guard_root.py already ships
+# `50-airuleset-journal-cap.conf` with 200M for gk — on shared-stream boxes
+# where BOTH provisioning systems run, the `60-` sorts AFTER the `50-` and its
+# 300M value wins (systemd conf.d precedence = lexical last wins for duplicate
+# keys). On gk (not shared-stream), only the 50-/200M applies.
+JOURNALD_CAP_PATH = "/etc/systemd/journald.conf.d/60-airuleset-resource-guard-journal.conf"
+JOURNALD_MAX_USE = "300M"
+
+# #925-C: swap policy for shared-stream boxes (owner ruling, comment
+# 5570068675). Exactly ONE /swapfile of 10G — 16G was wasteful, 4G caused OOM.
+SWAP_SIZE_GB = 10
+
 # The numeric policy (percentages of physical RAM + absolutes). Kept as named
 # constants so the render functions AND the read-back verify in the apply
 # script derive from ONE source.
@@ -151,6 +170,44 @@ def render_sysctl_vm() -> str:
     )
 
 
+def render_rsyslog_quiet():
+    """rsyslog rule to suppress api-watchdog per-poll output from syslog.
+
+    The api-watchdog systemd --user service runs every 60s on each stream
+    account. On a shared-stream box with ~12 accounts, this produces ~5M
+    syslog lines/day (the journal keeps them all — this rule only stops
+    rsyslog from forwarding them to /var/log/syslog). Filters by
+    ``$programname`` which matches the ``SyslogIdentifier=api-watchdog``
+    set in the service template (#925-C review F1: Debian/Ubuntu rsyslog
+    uses ``imuxsock`` not ``imjournal``, so journal fields like
+    ``$!_SYSTEMD_USER_UNIT`` are always empty — ``$programname`` is the
+    correct filter)."""
+    return (
+        "# Managed by airuleset (#925-C) — suppress api-watchdog per-poll\n"
+        "# output from syslog. The journal retains all entries; this only\n"
+        "# prevents rsyslog from forwarding ~5M lines/day to /var/log/syslog\n"
+        "# on shared-stream boxes (12 accounts x 60s polls).\n"
+        "# Requires SyslogIdentifier=api-watchdog in the service template.\n"
+        ':programname, isequal, "api-watchdog" stop\n'
+    )
+
+
+def render_journald_cap():
+    """journald ``SystemMaxUse`` cap for shared-stream boxes — 300M (owner
+    ruling, #925 comment 5570042178). Overrides the 200M from
+    ``cli_disk_guard_root.py``'s ``50-airuleset-journal-cap.conf`` via a
+    ``60-`` prefix (lexical-last wins in systemd conf.d). journald re-reads
+    this ONLY at (re)start, so the apply script restarts systemd-journald."""
+    return (
+        "# Managed by airuleset (#925-C) — shared-stream journal cap. Overrides\n"
+        "# the 200M cap from the disk-guard-root provisioning with a higher\n"
+        "# 300M limit suited to the ~12 accounts on this box. journald re-reads\n"
+        "# conf.d ONLY at (re)start — the apply script restarts it.\n"
+        "[Journal]\n"
+        "SystemMaxUse=%s\n" % JOURNALD_MAX_USE
+    )
+
+
 def guard_files():
     """The (path, content) pairs the apply script installs, in write order.
     ssh + tailscaled share the identical OOM-protect body by design."""
@@ -160,6 +217,9 @@ def guard_files():
         (SSH_OOM_PATH, render_service_oom_dropin()),
         (TAILSCALED_OOM_PATH, render_service_oom_dropin()),
         (SYSCTL_VM_PATH, render_sysctl_vm()),
+        # #925-C: rsyslog quiet + journald cap
+        (RSYSLOG_QUIET_PATH, render_rsyslog_quiet()),
+        (JOURNALD_CAP_PATH, render_journald_cap()),
     ]
 
 
@@ -212,14 +272,117 @@ def build_apply_script() -> str:
         '|| echo "  ⚠ resource-guards: sysctl --system failed (non-fatal)"'
     )
     parts.append("")
-    # Swap: VERIFY-ONLY, never create.
+    # #925-C: restart rsyslog so it picks up the new quiet rule from rsyslog.d/.
+    # rsyslog re-reads .d/ files only at restart. Best-effort LOUD.
     parts.append(
-        'swap_total=$(awk \'/^SwapTotal:/{print $2}\' /proc/meminfo)\n'
-        'if [ -z "$swap_total" ] || [ "$swap_total" -eq 0 ]; then\n'
-        '    echo "  ⚠ RESOURCE-GUARDS: NO SWAP present — swap is the thrash '
-        'safety-net (#775). NOT creating it (would be a separate destructive-ish '
-        'op); provision swap manually." >&2\n'
+        'systemctl restart rsyslog.service >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: rsyslog restart failed (non-fatal)"'
+    )
+    # #925-C: journald cap — re-read ONLY at (re)start (the #841 gotcha:
+    # daemon-reload does NOT make journald re-read its own conf.d, and
+    # `journalctl --rotate` alone vacuums to the OLD limit). So restart
+    # journald FIRST, then rotate so it vacuums to the new SystemMaxUse.
+    parts.append(
+        'systemctl try-restart systemd-journald.service >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: systemd-journald restart failed (non-fatal)"'
+    )
+    parts.append(
+        'journalctl --rotate >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: journalctl --rotate failed (non-fatal)"'
+    )
+    parts.append("")
+    # #925-C: swap policy — idempotent swap management on shared-stream boxes.
+    # Exactly ONE /swapfile of SWAP_SIZE_GB. Guard: only acts when a
+    # shared-stream box-class marker exists under ANY home.
+    # The sequence is: cleanup stale .new → free-space check → create new →
+    # mkswap → swapon new → swapoff old → rm old → rename → fstab.
+    # NEVER leaves two active swapfiles. F2 review fixes: stale .new cleanup,
+    # free-space precheck, no dd fallback (ENOSPC risk), cleanup-on-failure.
+    parts.append(
+        '# Swap policy: exactly ONE /swapfile of %dG (#925-C, owner ruling).\n'
+        '# Guard: only acts when a shared-stream box-class marker exists.\n'
+        'swap_is_shared_stream=false\n'
+        'for bcf in /home/*/.claude/airuleset-box-class; do\n'
+        '    if [ -f "$bcf" ] && grep -q "shared-stream" "$bcf" 2>/dev/null; then\n'
+        '        swap_is_shared_stream=true; break\n'
+        '    fi\n'
+        'done\n'
+        'want_swap_bytes=$((%d * 1024 * 1024 * 1024))\n'
+        'if "$swap_is_shared_stream"; then\n'
+        '    # F2: clean up a stale /swapfile.new from a prior interrupted run\n'
+        '    if [ -f /swapfile.new ]; then\n'
+        '        swapoff /swapfile.new 2>/dev/null || true\n'
+        '        rm -f /swapfile.new\n'
+        '        echo "  resource-guards: cleaned stale /swapfile.new"\n'
+        '    fi\n'
+        '    cur_swap_bytes=0\n'
+        '    if [ -f /swapfile ]; then\n'
+        '        cur_swap_bytes=$(stat -c %%s /swapfile 2>/dev/null || echo 0)\n'
+        '    fi\n'
+        '    # Tolerance: within 1%% of the target size → no-op (also check\n'
+        '    # that swap is active and fstab has an entry — F3 review)\n'
+        '    lo_swap=$((want_swap_bytes * 99 / 100))\n'
+        '    hi_swap=$((want_swap_bytes * 101 / 100))\n'
+        '    swap_active=false\n'
+        '    grep -q "^/swapfile " /proc/swaps 2>/dev/null && swap_active=true\n'
+        '    fstab_ok=false\n'
+        '    grep -qE "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null && fstab_ok=true\n'
+        '    if [ "$cur_swap_bytes" -ge "$lo_swap" ] && [ "$cur_swap_bytes" -le "$hi_swap" ] \\\n'
+        '       && "$swap_active" && "$fstab_ok"; then\n'
+        '        echo "  resource-guards: /swapfile already %dG + active + fstab — no-op"\n'
+        '    else\n'
+        '        # F2: free-space precheck — never fill the disk creating swap\n'
+        '        avail_bytes=$(df --output=avail -B1 / 2>/dev/null | tail -1 | tr -d " ")\n'
+        '        margin=$((1024 * 1024 * 1024))  # 1G margin\n'
+        '        if [ -n "$avail_bytes" ] && [ "$avail_bytes" -lt "$((want_swap_bytes + margin))" ] 2>/dev/null; then\n'
+        '            echo "  ⚠ RESOURCE-GUARDS: cannot provision %dG swap — only $(($avail_bytes / 1024 / 1024))M free, need $(($want_swap_bytes / 1024 / 1024 + 1024))M. Skipping." >&2\n'
+        '        else\n'
+        '            echo "  resource-guards: provisioning /swapfile (%dG)"\n'
+        '            if ! fallocate -l %dG /swapfile.new; then\n'
+        '                rm -f /swapfile.new\n'
+        '                echo "  ⚠ RESOURCE-GUARDS: fallocate failed for %dG swap. Skipping." >&2\n'
+        '            else\n'
+        '                chmod 0600 /swapfile.new\n'
+        '                mkswap /swapfile.new >/dev/null\n'
+        '                swapon /swapfile.new\n'
+        '                # Deactivate + remove old swapfiles\n'
+        '                for old in /swapfile /swapfile2 /swapfile3; do\n'
+        '                    if [ -f "$old" ] && [ "$old" != "/swapfile.new" ]; then\n'
+        '                        swapoff "$old" 2>/dev/null || true\n'
+        '                        rm -f "$old"\n'
+        '                        echo "  resource-guards: removed old $old"\n'
+        '                    fi\n'
+        '                done\n'
+        '                mv /swapfile.new /swapfile\n'
+        '                # Ensure fstab entry (F7: use [[:space:]] for tab compat)\n'
+        '                if ! grep -qE "^/swapfile[[:space:]]" /etc/fstab 2>/dev/null; then\n'
+        '                    echo "/swapfile none swap sw 0 0" >> /etc/fstab\n'
+        '                    echo "  resource-guards: added /swapfile to fstab"\n'
+        '                fi\n'
+        '                # Remove stale fstab entries for old swapfiles\n'
+        '                for old_entry in /swapfile2 /swapfile3; do\n'
+        '                    if grep -qE "^${old_entry}[[:space:]]" /etc/fstab 2>/dev/null; then\n'
+        '                        sed -i "\\\\|^${old_entry}[[:space:]]|d" /etc/fstab\n'
+        '                        echo "  resource-guards: removed $old_entry from fstab"\n'
+        '                    fi\n'
+        '                done\n'
+        '                echo "  resource-guards: /swapfile %dG active"\n'
+        '            fi\n'
+        '        fi\n'
+        '    fi\n'
+        'else\n'
+        '    # Non-shared-stream: verify-only (the original #775 behaviour)\n'
+        '    swap_total=$(awk \'/^SwapTotal:/{print $2}\' /proc/meminfo)\n'
+        '    if [ -z "$swap_total" ] || [ "$swap_total" -eq 0 ]; then\n'
+        '        echo "  ⚠ RESOURCE-GUARDS: NO SWAP present — provision swap manually (#775)." >&2\n'
+        '    fi\n'
         'fi'
+        % (SWAP_SIZE_GB, SWAP_SIZE_GB,
+           SWAP_SIZE_GB,
+           SWAP_SIZE_GB,
+           SWAP_SIZE_GB,
+           SWAP_SIZE_GB, SWAP_SIZE_GB,
+           SWAP_SIZE_GB)
     )
     parts.append("")
     # Expected bytes from MemTotal (the read-back baseline). systemd resolves a

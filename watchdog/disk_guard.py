@@ -160,6 +160,10 @@ PROC_ERROR_SENTINEL = "PROC-ERROR"          # fail-safe: unknown proc state → 
 DOCKER_UNUSED_MIN_AGE_DAYS = 14
 USER_CACHE_MIN_AGE_DAYS = 30
 CLAUDE_VERSIONS_DIR = ".local/share/claude/versions"   # under $HOME; self-update binaries
+# #925-C: age gate — a version dir fresher than this is KEPT even if strictly
+# older than the running version, to avoid racing an in-progress self-update
+# that just downloaded a new binary but has not switched yet.
+CLAUDE_VERSIONS_MIN_AGE_DAYS = 2
 ONEOFF_VENV_MIN_AGE_DAYS = 2
 # one-off numbered venvs: `~/.venvs/lint-3907`, `ruff31522`, `mcp-4574`, … + `/tmp/lintvenv-*`
 ONEOFF_VENV_NAME_RE = _re.compile(r"^(lint|ruff|mcp)[-]?\d+$")
@@ -1295,14 +1299,20 @@ def _default_running_claude_version():
 
 
 def discover_stale_claude_versions(home=None, running_fn=None, dir_stats_fn=None,
-                                   versions_dir=None):
+                                   versions_dir=None, now=None,
+                                   min_age_days=CLAUDE_VERSIONS_MIN_AGE_DAYS):
     """Old Claude Code self-update binaries under `~/.local/share/claude/
     versions/*` — each a full CC install left behind after a self-update. Delete
     every version dir EXCEPT the currently-running one. FAIL-SAFE: when the
     running version cannot be resolved, KEEP EVERYTHING (never delete the active
     binary). A dir whose name matches the running version is always skipped; the
     `versions/` symlink target (if the layout uses one) is also never removed.
-    Rows delete/skip."""
+
+    #925-C: ``min_age_days`` (default 2) gates deletion — a version dir whose
+    mtime is fresher than ``min_age_days`` is KEPT even if strictly older than
+    the running version, to avoid racing an in-progress self-update that just
+    downloaded a new binary but has not switched yet. Rows delete/skip."""
+    now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     vdir = Path(versions_dir) if versions_dir else (Path(home) / CLAUDE_VERSIONS_DIR)
     if not vdir.is_dir():
@@ -1373,6 +1383,25 @@ def discover_stale_claude_versions(home=None, running_fn=None, dir_stats_fn=None
             out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
                         "kind": "skip",
                         "reason": "version %s unparseable — kept (fail-safe)" % entry.name})
+            continue
+        # #925-C: age gate — a version dir fresher than min_age_days is KEPT
+        # even if strictly older than running, to avoid racing an in-progress
+        # self-update that just downloaded but has not switched yet.
+        # F5 review: an unstat-able dir is KEPT (fail-safe), not treated as old.
+        try:
+            entry_mtime = entry.stat().st_mtime
+        except OSError:
+            out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                        "kind": "skip",
+                        "reason": "version %s mtime unreadable — kept (fail-safe)"
+                        % entry.name})
+            continue
+        age_s = now - entry_mtime
+        if age_s < min_age_days * 86400:
+            out.append({"cls": "claude-version", "path": str(entry), "bytes": 0,
+                        "kind": "skip",
+                        "reason": "version %s too recent (%.1fd < %dd) — kept (#925-C)"
+                        % (entry.name, age_s / 86400.0, min_age_days)})
             continue
         out.append({"cls": "claude-version", "path": str(entry),
                     "bytes": _safe_dir_size(str(entry), dir_stats_fn), "kind": "delete",
