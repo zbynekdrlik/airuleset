@@ -846,7 +846,6 @@ class TestStaleMarkerHeal927(unittest.TestCase):
     def test_resolve_public_lane_after_heal(self):
         """After the marker is healed, resolve_public_lane must return the
         correct (host, port), not None."""
-        from unittest import mock
         # Simulate what a healed marker looks like.
         dg.write_drop_marker("drop-subdev-david3.newlevel.media", 8872,
                              path=self.marker)

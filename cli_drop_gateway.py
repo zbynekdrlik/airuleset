@@ -661,6 +661,19 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
             except Exception:
                 me = None
             if me is not None and me != lane.gateway_account:
+                # #927: the sibling DOES own its marker (per-account, under its
+                # own ~/.cloudflared/) — a stale marker (from before #889's
+                # per-account lanes) must be rewritten so resolve_public_lane
+                # sees the correct host+port instead of returning None forever.
+                marker = read_drop_marker(marker_path)
+                if marker is not None:
+                    marker_host, marker_port = marker
+                    if marker_host != lane.host or marker_port != lane.port:
+                        write_drop_marker(lane.host, lane.port, path=marker_path)
+                        print("  drop-gateway: rewrote stale marker for sibling "
+                              "%s (%s:%d -> %s:%d) (#927)"
+                              % (me, marker_host, marker_port,
+                                 lane.host, lane.port), file=sys.stderr)
                 print("  drop-gateway: this account (%s) is a SIBLING of the "
                       "shared drop tunnel owned by the gateway account %r on this "
                       "box — the gateway account re-asserts the ingress; nothing "
@@ -693,6 +706,19 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
                       "drop lane, FAILING the install (#826)"
                       % lane.tunnel_config, file=sys.stderr)
                 return False
+        # #927: also validate the tunnel owner's marker — a stale port (from
+        # before #889's per-account range) must be rewritten so resolve_public_lane
+        # matches. The marker is per-account; the owner's marker was written by
+        # cmd_drop_gateway --apply and may carry pre-#889 values.
+        marker = read_drop_marker(marker_path)
+        if marker is not None:
+            marker_host, marker_port = marker
+            if marker_host != lane.host or marker_port != lane.port:
+                write_drop_marker(lane.host, lane.port, path=marker_path)
+                print("  drop-gateway: rewrote stale marker for %s (%s:%d -> "
+                      "%s:%d) (#927)"
+                      % (username or "this account", marker_host, marker_port,
+                         lane.host, lane.port), file=sys.stderr)
         if augmented == config_text:
             return True                         # all ingresses already present — no restart
         Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
