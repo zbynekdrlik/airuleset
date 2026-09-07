@@ -678,6 +678,12 @@ GOAL_REQUEST_MAX_AGE_S = 30 * 60   # a request older than this is DISCARDED
 # long wait; the janitor's own provenance + own-content + recent-human gates
 # make each ordered recovery safe.
 GOAL_STASH_ABORT_LIVELOCK = 3
+# #921 residual: the ESCALATION threshold for the persistent foreign-slot
+# stash-abort livelock — after this many consecutive slot-occupied aborts
+# (preserved across request lifetimes), emit a LOUD escalation log and stop
+# re-ordering recovery (the janitor already tried and failed). Never auto-
+# clear a possibly-human stash; only surface the problem for the owner.
+GOAL_STASH_ABORT_ESCALATION = 6
 
 # #731 -- the SHARED per-request delivery-attempt cap. The montalu4 retype
 # livelock: `skip:verify-failed` / `skip:stash-abort` alternate with NO shared
@@ -1884,7 +1890,14 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         dsuf = (" (%s)" % _out["detail"]) if _out.get("detail") else ""
         prior_aborts = aborts.get(sid, 0)
         if word in _GOAL_TERMINAL_WORDS:
-            aborts.pop(sid, None)
+            # #921 residual: preserve abort counter across request lifetimes.
+            # Only "sent" (slot freed) pops the counter. On "expired" /
+            # "drop:stale-rearm" etc. the slot is still occupied — keeping the
+            # counter lets the next dark-watch-created request inherit the
+            # accumulated abort history (fixes the drop+re-create ping-pong
+            # that reset the counter to 0 every request lifetime).
+            if word == "sent":
+                aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
         if word == "sent":
             # #921 residual: record the delivered attempt in the origin's
@@ -1910,14 +1923,22 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             # so the stale own stash slot is resolved BEFORE the age cap lapses.
             n = prior_aborts + 1
             aborts[sid] = n
-            logs.append("SKIP (goal-sweep) %s sid=%s -> %s (%d/%d)"
-                        % (loc, sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
-            if n >= GOAL_STASH_ABORT_LIVELOCK:
-                logs += _resolve_stash_abort_livelock(
-                    sid, cwd, run, projects_dir, state, now, send_fn,
-                    dry_run, sleep_fn, own_payload=text)  # #737
-                if handled is not None:
-                    handled.add(sid)
+            # #921 residual: past the ESCALATION threshold the recovery already
+            # tried and failed (foreign slot) — stop re-ordering and log LOUD.
+            if n >= GOAL_STASH_ABORT_ESCALATION:
+                logs.append("ESCALATION (goal-sweep) %s sid=%s -> %s "
+                            "PERSISTENT foreign-slot livelock (%d aborts, "
+                            "recovery exhausted — manual intervention needed)"
+                            % (loc, sid, word, n))
+            else:
+                logs.append("SKIP (goal-sweep) %s sid=%s -> %s (%d/%d)"
+                            % (loc, sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
+                if n >= GOAL_STASH_ABORT_LIVELOCK:
+                    logs += _resolve_stash_abort_livelock(
+                        sid, cwd, run, projects_dir, state, now, send_fn,
+                        dry_run, sleep_fn, own_payload=text)  # #737
+                    if handled is not None:
+                        handled.add(sid)
         else:
             aborts.pop(sid, None)
             # #731 -- a keystroke-delivering skip (verify-failed / stash-abort)
