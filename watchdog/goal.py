@@ -3810,6 +3810,10 @@ GOAL_LANE_INTERVAL_S = 60 * 60
 # intenzivne a paralelne" — a full-authority box sitting idle with a
 # backlog is not a "correctly-declining supervisor", it is starvation.
 GOAL_LANE_STARVED_INTERVAL_S = 15 * 60
+# #937 -- after this many consecutive starved nudges with no observed dispatch,
+# the starved shortcut is disabled and the session falls back to the 1h cap
+# + #670 dedup. Reset on dispatch (_lane_count_giveup_reset) or backlog change.
+GOAL_LANE_STARVED_MAX_CONSECUTIVE = 2
 GOAL_LANE_MAX_NUDGES = 2
 # #804 mode-1 -- the count give-up is a BACKOFF, not a permanent LATCH. Pre-#804
 # a 0-worker box that ignored 2 nudges latched `skip:gave-up` FOREVER (its only
@@ -4235,13 +4239,29 @@ def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters,
     # requires n >= MAX_NUDGES (2 landed nudges) which dedup prevents from
     # ever reaching (ln stays at 1). See #929 design comment approach 2.
     starved = (authority == "full" and live_workers == 0 and backlog_n > 0)
+    # #937 effectiveness backoff: after GOAL_LANE_STARVED_MAX_CONSECUTIVE
+    # consecutive starved nudges with no dispatch observed (lsc), the session
+    # is NOT going to dispatch (non-dispatchable backlog). Fall back to the
+    # 1h interval + re-enable dedup. Reset on dispatch or backlog change.
+    lsc = rec.get("lsc", 0)
+    if starved and lsc >= GOAL_LANE_STARVED_MAX_CONSECUTIVE:
+        # Backlog composition changed since streak started? -> reset streak.
+        if backlog_n != rec.get("lsb_starved"):
+            rec.pop("lsc", None)
+            rec.pop("lsb_starved", None)
+            # Streak reset — allow the starved shortcut again this sweep.
+        else:
+            starved = False  # fall back to 1h + dedup
     interval = GOAL_LANE_STARVED_INTERVAL_S if starved else GOAL_LANE_INTERVAL_S
     # #530 -- HARD CAP (1h default, #929 15-min for starved full-authority).
     if (now - last) < interval:
+        detail = ""
+        if lsc >= GOAL_LANE_STARVED_MAX_CONSECUTIVE and authority == "full":
+            detail = " (starved-backoff: %d consecutive, no dispatch)" % lsc
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "skip:hourly-cap remaining=%ds"
+                      "skip:hourly-cap remaining=%ds%s"
                       % (loc, live_workers, waiters, backlog_n,
-                         int(interval - (now - last))))
+                         int(interval - (now - last)), detail))
     # #929 -- a starved full-authority box bypasses the dedup: the prior nudge
     # failed to revive the loop (workers still 0), so re-nudging at the
     # 15-min cadence is correct pressure, not spam.
@@ -4287,6 +4307,14 @@ def _lane_record_nudge(rec, live_workers, backlog_n, n, now):
     # (workers, backlog) past the cooldown (skip:dedup-unchanged).
     rec["lsw"] = live_workers
     rec["lsb"] = backlog_n
+    # #937 -- track consecutive starved nudges (workers==0). A non-starved nudge
+    # (workers>0, i.e. a refill nudge) resets the streak.
+    if live_workers == 0:
+        rec["lsc"] = rec.get("lsc", 0) + 1
+        rec.setdefault("lsb_starved", backlog_n)
+    else:
+        rec.pop("lsc", None)
+        rec.pop("lsb_starved", None)
 
 
 def _lane_count_giveup_reset(rec):
@@ -4319,6 +4347,9 @@ def _lane_count_giveup_reset(rec):
     (adversarial-review 🔵)."""
     for k in ("ln", "lnbk", "lgn", "lgts"):   # #804 -- also reset the give-up
         rec.pop(k, None)                       # backoff schedule (the box dispatched)
+    # #937 -- dispatch observed, reset the starved-nudge backoff streak.
+    rec.pop("lsc", None)
+    rec.pop("lsb_starved", None)
     if rec.get("lna", 0) < GOAL_LANE_MAX_STASH_ABORTS:
         rec.pop("lpinged", None)
 
@@ -4562,7 +4593,9 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     ``rec['wntd']`` (rides in the existing goal_lane rec, so the #531 orphan
     reaper already covers it -- no new state namespace) -- but ONLY on a REAL
     sweep; ``dry_run`` mutates NO persisted state (#516). Returns
-    ``(defer, log, live_workers, backlog_n)``. #619: the #611 ``escalated`` flag
+    ``(defer, log, live_workers, backlog_n, finished_workers)``.
+    #937: ``finished_workers`` counts ``state=="finished"`` lanes (recently completed,
+    in integration). #619: the #611 ``escalated`` flag
     is retired -- the 15-min idle floor it bypassed is gone, so the escalate
     branch simply stops deferring (``defer=False``) and the flow reaches the
     nudge like any other empty-lane sweep."""
@@ -4580,7 +4613,9 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     if wnt.log:
         log = ("lane-occupancy %s waiters=%d workers=%d -> %s"
                % (loc, waiters, live_workers, wnt.log))
-    return wnt.defer, log, live_workers, backlog_n
+    # #937 -- count recently-finished workers (in integration) from evidence.
+    finished_workers = sum(1 for w in ev if w.state == "finished")
+    return wnt.defer, log, live_workers, backlog_n, finished_workers
 
 
 # #729 -- _lane_lowmem_reset + _lane_lowmem_skip (the low-mem CAPACITY-CAPPED
@@ -4670,7 +4705,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               "delivered to this session this cycle)")
         return logs, False
     waiters = watchdog._pane_live_task_count(captured)
-    _wnt_defer, _wnt_log, live_workers, backlog_n = _lane_wnt_gate(
+    _wnt_defer, _wnt_log, live_workers, backlog_n, finished_workers = _lane_wnt_gate(
         rec, marker, waiters, projects_dir, cwd, sid, now, backlog_fetch, state,
         loc, dry_run, idle=idle)   # #571 -- structured live-lane gate; counts
     #   reused below. #804 mode-4: idle threaded so the #611 escalation clamp uses
@@ -4753,6 +4788,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "saturated (>= %d lanes), skip"
                     % (loc, live_workers, waiters, backlog_n, floor))
+        return logs, False
+    # #937 OCCUPANCY HONESTY: live workers alone don't cover all tickets, but
+    # live + recently-finished (in integration) workers do — no room to dispatch.
+    if finished_workers > 0 and live_workers + finished_workers >= backlog_n:
+        logs.append("lane-occupancy %s workers=%d finished=%d backlog=%d -> "
+                    "skip:covered (live+integration covers all workable)"
+                    % (loc, live_workers, finished_workers, backlog_n))
         return logs, False
     # #848 CONTINUOUS REFILL (retiring #726/#723 batch mode): any
     # live_workers < min(5, backlog) means there is ROOM to refill, so the nudge
