@@ -722,6 +722,18 @@ def zbynek_inventory():
             "collect_identity": ZBYNEK_COLLECT_IDENTITY,
         },
         {
+            "id": "david4-subdev",
+            "label": "david4@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": subdev_host,
+            "user": "david4",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "david4",
+            "u_tenant": True,
+            "collect_identity": ZBYNEK_COLLECT_IDENTITY,
+        },
+        {
             "id": "miva1-subdev",
             "label": "miva1@subdev",
             "kind": "stream",

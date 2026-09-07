@@ -646,13 +646,14 @@ def _tab_order_key(alias):
 WEBTERM_DASHBOARD_TABS = {
     # zbynek.newlevel.media -- owner ROZHODNUTÉ 2026-08-24, EXACT order (verbatim
     # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"); david3 (d3) added after d2 per
-    # owner request 2026-08-26 (#719). EXCLUDES montalu7/8, david4, simap1,
-    # marek@subdev, stepan@forestshop-dev, admin@forestshop-dev.
+    # owner request 2026-08-26 (#719); david4 (d4) added after d3 per owner
+    # request 2026-09-07 (#934). EXCLUDES montalu7/8, simap1, marek@subdev,
+    # stepan@forestshop-dev, admin@forestshop-dev.
     "zbynek": [
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
-        "david1-subdev", "david2-subdev", "david3-subdev",
+        "david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev",
         "miva1-subdev", "spinbike-vps",
     ],
     # marek.newlevel.media -- Marek's OBSERVER set (#882 scope correction
