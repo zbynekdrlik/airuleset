@@ -244,10 +244,14 @@ PRIVILEGES: List[Privilege] = [
         kind=KIND_API_TOKEN,
         local_path="~/.secrets/webterm_credential",
         reach="owner webterm gateway shared secret (constant-time compared by "
-              "the gateway — the pre-Access password floor)",
-        rotation="MOVED: copied from dev1 to controller (owner cancelled "
-                 "rotation). Gateway unit re-provisioned on controller.",
-        must_move=True,
+              "the gateway — the pre-Access password floor). RETIRED: "
+              "OWNER_GATEWAY_ACCESS_MODE=True (cli_webterm.py:130) means "
+              "the controller runs Access mode; _retire_owner_credential() "
+              "(cli_webterm.py:1138) actively deletes this file on install.",
+        rotation="RETIRED: Access-mode webterm replaces password auth. The "
+                 "file is actively deleted by _retire_owner_credential() "
+                 "on every install. Absent on both dev1 and controller.",
+        must_move=False,
         used_by=("cli_webterm.py:161 (WEBTERM_CRED_PATH)",
                  "cli_webterm_gateway.py:209"),
     ),
@@ -269,12 +273,16 @@ PRIVILEGES: List[Privilege] = [
         name="gh_auth",
         kind=KIND_OAUTH,
         local_path="~/.git-credentials",
-        reach="GitHub auth (issues + contents across the managed repos) — the "
-              "GH_TOKEN fallback airuleset extracts when the shell has none",
-        rotation="MOVED: gh auth copied from dev1 to controller (owner "
-                 "cancelled rotation). Same credentials on both boxes.",
-        must_move=True,
-        used_by=("airuleset.py:2331 (~/.git-credentials fallback)",),
+        reach="GitHub auth FALLBACK — _gh_env() (airuleset.py:2503) reads "
+              "this only when no GH_TOKEN/GITHUB_TOKEN env AND no "
+              "gh-app-tokens/primary exist. Sub-dev stream boxes (david, "
+              "montalu) use it as their primary auth; the controller uses "
+              "gh_cli_token (~/.config/gh/hosts.yml) instead.",
+        rotation="SUB-DEV FALLBACK: not needed on the controller (gh_cli_token "
+                 "covers it). Present on sub-dev stream boxes that never "
+                 "run `gh auth login`.",
+        must_move=False,
+        used_by=("airuleset.py:2503 (~/.git-credentials fallback)",),
     ),
     Privilege(
         name="root@subdev",
@@ -330,15 +338,16 @@ PRIVILEGES: List[Privilege] = [
     Privilege(
         name="cloudflared_config",
         kind=KIND_OAUTH,  # a config YAML, not a token — mode 0644 is normal
-        local_path="~/.cloudflared/webterm-owner.yml",
-        reach="airuleset's DEDICATED webterm tunnel config (never the default "
-              "config.yml — that belongs to spinbike on dev1, see "
-              "cli_webterm_tunnel.py:36)",
-        rotation="F4a DONE: re-rendered on controller by cli_webterm_tunnel "
-                 "+ cli_drop_gateway at install time.",
+        local_path="~/.cloudflared/controller-webterm.yml",
+        reach="controller's multi-ingress webterm tunnel config (the F4a "
+              "consolidation — one tunnel fronting all 4 webterm lanes). "
+              "On dev1 the equivalent is webterm-owner.yml "
+              "(cli_webterm_tunnel.py:38, single-ingress owner tunnel).",
+        rotation="F4a DONE: rendered by setup_webterm_controller_tunnel "
+                 "(cli_webterm.py:1712) at install time on the controller.",
         must_move=True,
-        used_by=("cli_webterm_tunnel.py:38 (WEBTERM_OWNER_TUNNEL_CONFIG)",
-                 "cli_drop_gateway.py:497 (drop-gateway ingress config)"),
+        used_by=("cli_webterm.py:1712 (controller-webterm.yml config path)",
+                 "cli_webterm.py:1727 (render_cloudflared_multi_ingress_config)"),
     ),
     Privilege(
         name="sudo_nopasswd",
@@ -366,11 +375,17 @@ PRIVILEGES: List[Privilege] = [
         name="gh_app_token",
         kind=KIND_OAUTH,
         local_path="~/.config/gh-app-tokens/primary",
-        reach="GitHub App token (alternative auth path for gh CLI)",
-        rotation="MOVED: copied from dev1 to controller if present "
-                 "(owner cancelled rotation).",
-        must_move=True,
-        used_by=("airuleset.py:2372 (gh-app-tokens/primary)",),
+        reach="GitHub App installation token — the live-refresh path for "
+              "sub-dev stream boxes (david2-4, marek, montalu/2/3/4 on "
+              "subdev). Delivered by the gatekeeper timer every 45 min. "
+              "The controller is NOT a sub-dev stream box; it authenticates "
+              "via gh_cli_token.",
+        rotation="SUB-DEV/GK-RESIDENT: the gatekeeper timer delivers tokens "
+                 "to sub-dev stream accounts. Not present on dev1, gk, or "
+                 "the controller — those use gh_cli_token.",
+        must_move=False,
+        used_by=("airuleset.py:2489 (gh-app-tokens/primary read)",
+                 "cli_quals.py:137 (_gh_app_token_dir)"),
     ),
     Privilege(
         name="soniox_source",
