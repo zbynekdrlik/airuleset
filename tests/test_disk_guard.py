@@ -2479,87 +2479,92 @@ class TestWholeDiskSurvey:
         assert not any("/var" in p or "/swapfile" in p for p in paths), \
             "without the whole-disk survey, system paths should not appear"
 
-    def test_whole_disk_survey_returns_action_rows(self):
-        """The survey function returns action-shaped rows with cls=whole-disk."""
-        # Inject a run_fn that returns canned du output
-        def fake_run(argv, **kw):
-            cmd = " ".join(argv) if isinstance(argv, list) else argv
-            if "du" in cmd and "--max-depth" in cmd and argv[-1] == "/":
-                return types.SimpleNamespace(
-                    returncode=0,
-                    stdout="1000000\t/var\n500000\t/tmp\n2000000\t/home\n",
-                    stderr="")
-            if "du" in cmd and "/var/log" in cmd:
-                return types.SimpleNamespace(
-                    returncode=0,
-                    stdout="800000\t/var/log\n100000\t/var/cache\n",
-                    stderr="")
-            if "find" in cmd:
-                return types.SimpleNamespace(
-                    returncode=0,
-                    stdout="500000000\t/swapfile2\n350000000\t/var/log/syslog.1\n",
-                    stderr="")
-            if "du" in cmd and "/home" in cmd:
-                return types.SimpleNamespace(
-                    returncode=0,
-                    stdout="400000\t/home/user1/.cache\n300000\t/home/user1/.local\n",
-                    stderr="")
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="error")
-        rows = dg.discover_whole_disk_survey(timeout_s=5, run_fn=fake_run)
-        assert len(rows) > 0, "survey must return rows"
-        for r in rows:
-            assert r["cls"] == "whole-disk"
-            assert r["kind"] == "whole-disk-info"
-        # The /var row from the root breakdown must appear
-        var_rows = [r for r in rows if r["path"] == "/var"]
-        assert len(var_rows) == 1
-        assert var_rows[0]["bytes"] == 1000000
+    def test_whole_disk_not_in_reclaimable_classes(self):
+        """Invariant lock: whole-disk rows are reporting-only; the drain
+        executor must NEVER act on them."""
+        assert "whole-disk" not in dg.RECLAIMABLE_CLASSES
 
-    def test_whole_disk_survey_big_files(self):
-        """Big-file find tier names files >= 300M."""
-        def fake_run(argv, **kw):
-            cmd = " ".join(argv) if isinstance(argv, list) else argv
-            if "du" in cmd:
-                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-            if "find" in cmd:
-                return types.SimpleNamespace(
-                    returncode=0,
-                    stdout="17000000000\t/swapfile2\n1100000000\t/var/log/syslog\n",
-                    stderr="")
-            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
-        rows = dg.discover_whole_disk_survey(timeout_s=5, run_fn=fake_run)
-        big = [r for r in rows if "/swapfile2" in r["path"]]
-        assert len(big) >= 1, "swapfile2 must appear in the survey"
-        assert big[0]["bytes"] == 17_000_000_000
+    def test_survey_reads_root_report(self):
+        """Tier (a): the survey reads the #841 root reporter's JSON and
+        returns rows for each candidate."""
+        fake_report = {
+            "generated_ts": 1000.0,
+            "candidates": [
+                {"cls": "var-log", "path": "/var/log", "bytes": 1_100_000_000},
+                {"cls": "apt-cache", "path": "/var/cache/apt", "bytes": 500_000_000},
+                {"cls": "tmp", "path": "/tmp", "bytes": 200_000_000},
+            ]
+        }
+        rows = dg.discover_whole_disk_survey(
+            report_read_fn=lambda _now: fake_report,
+            glob_fn=lambda _p: [], scandir_fn=lambda _p: iter([]))
+        var_log = [r for r in rows if r["path"] == "/var/log"]
+        assert len(var_log) == 1
+        assert var_log[0]["bytes"] == 1_100_000_000
+        assert var_log[0]["cls"] == "whole-disk"
+        assert var_log[0]["kind"] == "whole-disk-info"
+        assert var_log[0]["reason"] is None
+        # All 3 candidates should appear
+        assert len(rows) == 3
 
-    def test_survey_timeout_returns_empty(self):
-        """A timed-out subprocess returns empty rows, never crashes."""
-        def timeout_run(argv, **kw):
-            raise subprocess.TimeoutExpired(argv, kw.get("timeout", 10))
-        rows = dg.discover_whole_disk_survey(timeout_s=1, run_fn=timeout_run)
-        assert isinstance(rows, list)
-        # May contain partial results from other tiers, or be empty
+    def test_survey_swapfiles(self, tmp_path):
+        """Tier (b): swapfiles at / are stat'd directly."""
+        # Create a fake swapfile
+        sf = tmp_path / "swapfile"
+        sf.write_bytes(b"\0" * 1024)
+        # Only return the file for the /swapfile* pattern, not /swap.img
+        rows = dg._survey_swapfiles(
+            glob_fn=lambda p: [str(sf)] if "swapfile" in p else [])
+        assert len(rows) == 1
+        assert rows[0]["path"] == str(sf)
+        assert rows[0]["bytes"] == 1024
+        assert rows[0]["reason"] is None
 
-    def test_survey_permission_error_marks_needs_root(self):
-        """Items that fail with EACCES get reason='needs-root'."""
-        def perm_run(argv, **kw):
-            cmd = " ".join(argv) if isinstance(argv, list) else argv
-            if "du" in cmd and "--max-depth" in cmd and argv[-1] == "/":
-                return types.SimpleNamespace(
-                    returncode=1,
-                    stdout="1000\t/root\n",
-                    stderr="du: cannot read directory '/root': Permission denied\n")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        rows = dg.discover_whole_disk_survey(timeout_s=5, run_fn=perm_run)
-        # /root row should appear with the size from stdout (du writes what it can)
-        root_rows = [r for r in rows if r.get("path") == "/root"]
-        if root_rows:
-            assert root_rows[0]["bytes"] == 1000
+    def test_survey_swapfile_permission_denied(self):
+        """Tier (b): an unreadable swapfile gets reason='needs-root'."""
+        def stat_raises(_p):
+            raise PermissionError("EACCES")
+        import unittest.mock as mock
+        with mock.patch("os.stat", side_effect=stat_raises):
+            rows = dg._survey_swapfiles(
+                glob_fn=lambda p: ["/swapfile2"] if "swapfile" in p else [])
+        needs_root = [r for r in rows if r.get("reason", "").startswith("needs-root")]
+        assert len(needs_root) == 1
+        assert needs_root[0]["path"] == "/swapfile2"
+
+    def test_survey_root_big_files(self, tmp_path):
+        """Tier (c): big files at / found via scandir, sorted by size desc."""
+        def _make_entry(name, size):
+            e = types.SimpleNamespace(name=name, path="/" + name)
+            e.is_file = lambda follow_symlinks=False: size > 0
+            e.stat = lambda follow_symlinks=False: types.SimpleNamespace(st_size=size)
+            return e
+        entries = [_make_entry(n, s) for n, s in [
+            ("swapfile2", 17_000_000_000),
+            ("small.txt", 100),
+            ("bigdump.sql", 500_000_000),
+        ]]
+        rows = dg._survey_root_big_files(scandir_fn=lambda _p: iter(entries))
+        # Only files >= 300 MB should appear
+        assert len(rows) == 2
+        # Sorted by size descending
+        assert rows[0]["path"] == "/swapfile2"
+        assert rows[0]["bytes"] == 17_000_000_000
+        assert rows[1]["path"] == "/bigdump.sql"
+        assert rows[1]["bytes"] == 500_000_000
+
+    def test_survey_all_tiers_fail_returns_empty(self):
+        """When every tier fails, the survey returns an empty list."""
+        def broken_report(_now):
+            return None
+        rows = dg.discover_whole_disk_survey(
+            report_read_fn=broken_report,
+            glob_fn=lambda _p: [], scandir_fn=lambda _p: iter([]))
+        assert rows == []
 
     def test_collect_top_consumers_includes_whole_disk(self, tmp_path):
         """GREEN: _collect_top_consumers with the survey wired in names
         system-level paths. This is the counterpart of the RED test above."""
-        # Monkeypatch the survey to return a known system-path row
         import unittest.mock as mock
         fake_rows = [{"cls": "whole-disk", "path": "/var/log",
                       "bytes": 1_100_000_000, "kind": "whole-disk-info",

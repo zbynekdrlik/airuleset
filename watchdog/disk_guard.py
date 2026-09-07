@@ -2585,169 +2585,166 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
 # --------------------------------------------------------------------------- #
 # #925-D — whole-disk survey tier (root-scope top-consumers context)
 # --------------------------------------------------------------------------- #
-# Per-tier timeout budget defaults.  Each tier gets a fraction of the overall
-# timeout so a single slow ``du`` or ``find`` never blocks the whole survey.
-_SURVEY_TIER_TIMEOUT_S = 10      # per-tier default if caller gives no budget
-_SURVEY_BIG_FILE_MIN = 300_000_000   # 300 MB
-_SURVEY_BIG_FILE_LIMIT = 50      # head -50
-
-# System dirs that deserve a separate ``du -sb`` when readable.
-_SURVEY_SYSTEM_DIRS = ("/var/log", "/var/cache", "/root")
-
-
-def _parse_du_output(stdout):
-    """Parse tab-separated ``du`` output → [(bytes, path)].
-    Lines with non-integer sizes or missing tabs are silently skipped."""
-    out = []
-    for line in (stdout or "").splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) < 2:
-            continue
-        try:
-            out.append((int(parts[0]), parts[1]))
-        except (ValueError, TypeError):
-            continue
-    return out
+# The per-user planners (scratch/worktree/uploads/…) scope to $HOME. System-
+# level hoards (swapfiles, /var/log, other users' big dirs) are invisible.
+# This survey READS the existing root reporter's daily JSON (#841 —
+# ``/run/airuleset/disk-guard-root.json``, already ``du -sxb`` as root, no
+# permission holes, no timeout problem) + cheap stat calls for swapfiles +
+# top-level scandir for big files at ``/``.  It never runs expensive recursive
+# du/find in the watchdog's 60 s tick (Fable review HIGH-1, 2026-09-07).
+_SURVEY_BIG_FILE_MIN = 300_000_000   # 300 MB — report files above this
 
 
-def _survey_root_breakdown(timeout_s=None, run_fn=None):
-    """(a) ``du -xb --max-depth=1 /`` — top-level dirs on the root FS.
-    FAST: max-depth=1 only stats immediate children."""
-    timeout_s = timeout_s or _SURVEY_TIER_TIMEOUT_S
-    run_fn = run_fn or subprocess.run
+def _survey_root_report(report_read_fn=None):
+    """(a) Read the #841 root reporter's daily JSON for system-level consumers.
+    The report already carries ``du -sxb`` sizes for ``/var/log``,
+    ``/var/cache/apt``, ``/var/lib/docker``, ``/tmp``, and gh-runner ``_work``.
+    ``report_read_fn`` is injectable for testing (default reads the live
+    report via ``disk_guard_root.read_root_report``)."""
+    import time as _time
     rows = []
     try:
-        r = run_fn(["du", "-xb", "--max-depth=1", "/"],
-                   capture_output=True, text=True, timeout=timeout_s)
-        for nbytes, path in _parse_du_output(r.stdout):
-            if path == "/":
-                continue   # the root total duplicates the children
+        from watchdog import disk_guard_root
+        read_fn = report_read_fn or disk_guard_root.read_root_report
+        report = read_fn(_time.time())
+        if report is None:
+            _dbg("survey root-report: absent or stale")
+            return rows
+        candidates = report.get("candidates")
+        if not isinstance(candidates, list):
+            return rows
+        for c in candidates:
+            if not isinstance(c, dict):
+                continue
+            path = c.get("path", "")
+            nbytes = c.get("bytes", 0) or 0
+            if not path or nbytes <= 0:
+                continue
             rows.append({"cls": "whole-disk", "path": path, "bytes": nbytes,
                          "kind": "whole-disk-info", "reason": None})
-    except subprocess.TimeoutExpired:
-        _dbg("survey root-breakdown timed out after %ds" % timeout_s)
     except Exception as e:
-        _dbg("survey root-breakdown failed: %r" % e)
+        _dbg("survey root-report failed: %r" % e)
     return rows
 
 
-def _survey_system_dirs(timeout_s=None, run_fn=None):
-    """(b) System dirs (/var/log, /var/cache, /root) + swapfiles at /.
-    For dirs: ``du -sb`` with timeout.  For swapfiles: ``os.stat``."""
+def _survey_swapfiles(glob_fn=None):
+    """(b) Swapfiles at ``/`` — ``os.stat`` on ``/swapfile*``, ``/swap.img``.
+    Cheap: stat only, no recursion. ``glob_fn`` injectable for testing."""
     import glob as _glob
-    timeout_s = timeout_s or _SURVEY_TIER_TIMEOUT_S
-    run_fn = run_fn or subprocess.run
+    glob_fn = glob_fn or _glob.glob
     rows = []
-    # Swapfiles — stat directly (cheap, no subprocess)
     for pattern in ("/swapfile*", "/swap.img"):
-        for sf in _glob.glob(pattern):
+        try:
+            matches = glob_fn(pattern)
+        except Exception:
+            matches = []
+        for sf in matches:
             try:
                 st = os.stat(sf)
-                rows.append({"cls": "whole-disk", "path": sf, "bytes": st.st_size,
-                             "kind": "whole-disk-info", "reason": None})
+                if st.st_size > 0:
+                    rows.append({"cls": "whole-disk", "path": sf,
+                                 "bytes": st.st_size,
+                                 "kind": "whole-disk-info", "reason": None})
             except PermissionError:
                 rows.append({"cls": "whole-disk", "path": sf, "bytes": 0,
                              "kind": "whole-disk-info",
                              "reason": "needs-root: permission denied"})
             except OSError as e:
                 _dbg("survey swapfile stat %s: %r" % (sf, e))
-    # System dirs — du -sb
-    readable = [d for d in _SURVEY_SYSTEM_DIRS if os.path.isdir(d)]
-    if readable:
-        try:
-            r = run_fn(["du", "-sb"] + readable,
-                       capture_output=True, text=True, timeout=timeout_s)
-            for nbytes, path in _parse_du_output(r.stdout):
-                rows.append({"cls": "whole-disk", "path": path, "bytes": nbytes,
-                             "kind": "whole-disk-info", "reason": None})
-            # Check stderr for permission-denied dirs
-            for line in (r.stderr or "").splitlines():
-                if "Permission denied" in line or "cannot read" in line:
-                    # Try to extract the dir path from the error
-                    for d in _SURVEY_SYSTEM_DIRS:
-                        if d in line and not any(
-                                rr["path"] == d for rr in rows):
-                            rows.append({"cls": "whole-disk", "path": d,
-                                         "bytes": 0, "kind": "whole-disk-info",
-                                         "reason": "needs-root: permission denied"})
-        except subprocess.TimeoutExpired:
-            _dbg("survey system-dirs timed out after %ds" % timeout_s)
-        except Exception as e:
-            _dbg("survey system-dirs failed: %r" % e)
     return rows
 
 
-def _survey_big_files(timeout_s=None, run_fn=None):
-    """(c) Big-file find (>= 300M, same filesystem, bounded).
-    ``find / -xdev -size +300M -type f -printf '%s\\t%p\\n'``."""
-    timeout_s = timeout_s or _SURVEY_TIER_TIMEOUT_S
-    run_fn = run_fn or subprocess.run
+def _survey_root_big_files(scandir_fn=None):
+    """(c) Big files at ``/`` — ``os.scandir('/')`` + ``os.lstat`` for regular
+    files >= 300 MB on the root directory only (no recursion).  Catches
+    swapfiles, large DB dumps, and other files left at ``/``.  Sorted by size
+    descending so the top-N selector sees the biggest first."""
+    scandir_fn = scandir_fn or os.scandir
     rows = []
     try:
-        r = run_fn(
-            ["find", "/", "-xdev", "-size", "+%dM" % (_SURVEY_BIG_FILE_MIN // 1_000_000),
-             "-type", "f", "-printf", "%s\t%p\n"],
-            capture_output=True, text=True, timeout=timeout_s)
-        for nbytes, path in _parse_du_output(r.stdout)[:_SURVEY_BIG_FILE_LIMIT]:
-            rows.append({"cls": "whole-disk", "path": path, "bytes": nbytes,
-                         "kind": "whole-disk-info", "reason": None})
-    except subprocess.TimeoutExpired:
-        _dbg("survey big-files timed out after %ds" % timeout_s)
-    except Exception as e:
-        _dbg("survey big-files failed: %r" % e)
+        for entry in scandir_fn("/"):
+            try:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+                if st.st_size >= _SURVEY_BIG_FILE_MIN:
+                    rows.append({"cls": "whole-disk", "path": entry.path,
+                                 "bytes": st.st_size,
+                                 "kind": "whole-disk-info", "reason": None})
+            except PermissionError:
+                rows.append({"cls": "whole-disk", "path": entry.path,
+                             "bytes": 0, "kind": "whole-disk-info",
+                             "reason": "needs-root: permission denied"})
+            except OSError:
+                continue
+    except OSError as e:
+        _dbg("survey root-big-files scandir failed: %r" % e)
+    rows.sort(key=lambda r: r.get("bytes", 0), reverse=True)
     return rows
 
 
-def _survey_home_breadth(timeout_s=None, run_fn=None):
-    """(d) Per-home breadth beyond devel/ (e.g. .local/share/claude/versions,
-    .cache, uploads).  ``du -b --max-depth=1 /home/*/`` for all readable homes.
-    Reports dirs > 100 MB to keep the list actionable."""
+def _survey_home_breadth(scandir_fn=None):
+    """(d) Per-home breadth beyond ``devel/`` — ``os.scandir`` + ``os.lstat``
+    on each home's TOP-LEVEL entries (no recursion, no subprocess).  Reports
+    only entries whose own stat size > 0 (dirs at this level carry only the
+    entry metadata, not recursive content; the size is still useful as a
+    breadth signal — the planner that recursively sizes ``devel/`` already
+    covers that subtree)."""
     import glob as _glob
-    timeout_s = timeout_s or _SURVEY_TIER_TIMEOUT_S
-    run_fn = run_fn or subprocess.run
+    scandir_fn = scandir_fn or os.scandir
     rows = []
-    homes = sorted(_glob.glob("/home/*/"))
-    if not homes:
-        return rows
-    try:
-        # One du call for all homes at once, max-depth=1
-        argv = ["du", "-b", "--max-depth=1"] + homes
-        r = run_fn(argv, capture_output=True, text=True, timeout=timeout_s)
-        for nbytes, path in _parse_du_output(r.stdout):
-            # Skip home-root totals and devel/ (already covered by worktree planners)
-            if path.rstrip("/") in [h.rstrip("/") for h in homes]:
-                continue
-            if "/devel" in path:
-                continue
-            # Only report > 100 MB
-            if nbytes > 100_000_000:
-                rows.append({"cls": "whole-disk", "path": path, "bytes": nbytes,
-                             "kind": "whole-disk-info", "reason": None})
-    except subprocess.TimeoutExpired:
-        _dbg("survey home-breadth timed out after %ds" % timeout_s)
-    except Exception as e:
-        _dbg("survey home-breadth failed: %r" % e)
+    for home_dir in sorted(_glob.glob("/home/*/")):
+        try:
+            for entry in scandir_fn(home_dir):
+                name = entry.name
+                if name == "devel":
+                    continue   # already covered by worktree/home-worktree planners
+                if name.startswith(".") and name not in (
+                        ".local", ".cache", ".claude"):
+                    continue   # skip hidden dirs other than known big ones
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    # For known big-content dirs, use _safe_dir_size for an
+                    # actual recursive size (bounded by the existing helper).
+                    # For other dirs, report the entry for breadth only.
+                    if name in (".local", ".cache", ".claude", "uploads"):
+                        sz = _safe_dir_size(entry.path)
+                        if sz > 100_000_000:   # > 100 MB
+                            rows.append({"cls": "whole-disk", "path": entry.path,
+                                         "bytes": sz,
+                                         "kind": "whole-disk-info", "reason": None})
+                except PermissionError:
+                    rows.append({"cls": "whole-disk", "path": entry.path,
+                                 "bytes": 0, "kind": "whole-disk-info",
+                                 "reason": "needs-root: permission denied"})
+                except OSError:
+                    continue
+        except OSError:
+            continue
     return rows
 
 
-def discover_whole_disk_survey(timeout_s=30, run_fn=None):
+def discover_whole_disk_survey(report_read_fn=None, glob_fn=None,
+                               scandir_fn=None):
     """#925-D: whole-disk survey tier — extends the top-consumers report with
-    system-level context that the per-user planners cannot see: root-level
-    breakdown, system dirs, swapfiles, big files, and per-home breadth beyond
-    ``devel/``. Returns action-shaped rows for ``_top_consumers_by_path``.
+    system-level context that the per-user planners cannot see.
 
-    All subprocess calls are BOUNDED (``timeout_s`` split across 4 tiers).
-    On boxes where the guard runs unprivileged, reports what's readable and
-    marks the rest ``needs-root``.  ``run_fn`` is injectable for testing.
+    Four tiers, ALL cheap (no recursive ``du`` / ``find`` walks):
+      (a) Read the #841 root reporter's daily JSON for system dir sizes.
+      (b) ``os.stat`` on swapfiles at ``/``.
+      (c) ``os.scandir('/')`` for big files (>= 300 MB) at the root level.
+      (d) ``os.scandir('/home/*/')`` for per-home breadth beyond ``devel/``.
+
+    Returns action-shaped rows for ``_top_consumers_by_path``.
+    ``report_read_fn``, ``glob_fn``, ``scandir_fn`` are injectable for testing.
     Never fails — each tier is wrapped in try/except and returns what it can.
     """
-    run_fn = run_fn or subprocess.run
-    per_tier = max(3, timeout_s // 4)
     rows = []
-    rows.extend(_survey_root_breakdown(timeout_s=per_tier, run_fn=run_fn))
-    rows.extend(_survey_system_dirs(timeout_s=per_tier, run_fn=run_fn))
-    rows.extend(_survey_big_files(timeout_s=per_tier, run_fn=run_fn))
-    rows.extend(_survey_home_breadth(timeout_s=per_tier, run_fn=run_fn))
+    rows.extend(_survey_root_report(report_read_fn=report_read_fn))
+    rows.extend(_survey_swapfiles(glob_fn=glob_fn))
+    rows.extend(_survey_root_big_files(scandir_fn=scandir_fn))
+    rows.extend(_survey_home_breadth(scandir_fn=scandir_fn))
     return rows
 
 
