@@ -519,6 +519,102 @@ class TestPostCutover870(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
 
 
+class TestRegTruth870F1(unittest.TestCase):
+    """#870 F1: the post-cutover gate must report TRUTH on a controller-shaped
+    home. 4 of 5 prior findings were stale registry data:
+
+    - webterm_credential: retired by Access-mode webterm (must_move=False)
+    - gh_auth (~/.git-credentials): sub-dev fallback, controller uses gh_cli_token
+      (must_move=False)
+    - cloudflared_config: stale path webterm-owner.yml, controller uses
+      controller-webterm.yml (local_path updated)
+    - gh_app_token: sub-dev stream mechanism, not on controller (must_move=False)
+
+    The fixture seeds EVERY genuinely-must-move credential (the ones the
+    controller DOES need) and leaves the 4 stale-data entries absent. After the
+    registry corrections, the gate must exit 0."""
+
+    # Names of entries that should NOT be must_move on the controller
+    # (the stale registry data this ticket corrects).
+    RETIRED_ON_CONTROLLER = {
+        "webterm_credential",     # Access-mode retirement
+        "gh_auth",                # sub-dev fallback, gh_cli_token covers controller
+        "gh_app_token",           # sub-dev stream mechanism
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / ".secrets").mkdir()
+        (self.home / ".ssh").mkdir()
+
+    def _seed_controller_home(self):
+        """Seed every must_move credential the controller genuinely needs.
+        Leaves the RETIRED_ON_CONTROLLER entries absent — they should NOT be
+        must_move and should NOT cause a finding."""
+        for priv in p.PRIVILEGES:
+            if not priv.must_move or not priv.local_path:
+                continue
+            if priv.name in self.RETIRED_ON_CONTROLLER:
+                continue  # deliberately absent — the registry correction
+            expanded = self.home / priv.local_path.lstrip("~/")
+            expanded.parent.mkdir(parents=True, exist_ok=True)
+            if priv.kind == p.KIND_SSH_KEY:
+                _gen_ed25519(expanded)
+            elif priv.kind == p.KIND_STORE:
+                expanded.mkdir(parents=True, exist_ok=True)
+                os.chmod(expanded, 0o700)
+            else:
+                _mk(expanded, "test_value_placeholder", 0o600)
+
+    def test_controller_gate_clean_after_registry_fix(self):
+        """After registry corrections, a controller-shaped home with every
+        genuinely-must-move credential present exits 0 post_cutover."""
+        self._seed_controller_home()
+        rep = p.build_report(home=self.home, post_cutover=True)
+        absent_names = rep["findings"].get("absent_must_move_names", [])
+        self.assertEqual(
+            absent_names, [],
+            "gate reports absent must_move entries that should be "
+            "must_move=False or have a corrected local_path: %s" % absent_names)
+        self.assertEqual(rep["exit_code"], 0,
+                         "post-cutover gate should be clean on controller")
+
+    def test_webterm_credential_not_must_move(self):
+        """webterm_credential is retired by Access-mode webterm — must_move
+        must be False (#870 F1)."""
+        by = {e.name: e for e in p.PRIVILEGES}
+        self.assertFalse(by["webterm_credential"].must_move,
+                         "webterm_credential should be must_move=False "
+                         "(Access-mode retirement)")
+
+    def test_gh_auth_not_must_move(self):
+        """gh_auth (.git-credentials) is a sub-dev fallback — the controller
+        uses gh_cli_token instead, must_move must be False (#870 F1)."""
+        by = {e.name: e for e in p.PRIVILEGES}
+        self.assertFalse(by["gh_auth"].must_move,
+                         "gh_auth should be must_move=False "
+                         "(sub-dev fallback, controller has gh_cli_token)")
+
+    def test_gh_app_token_not_must_move(self):
+        """gh_app_token is a sub-dev stream mechanism — the controller is not
+        a sub-dev box, must_move must be False (#870 F1)."""
+        by = {e.name: e for e in p.PRIVILEGES}
+        self.assertFalse(by["gh_app_token"].must_move,
+                         "gh_app_token should be must_move=False "
+                         "(sub-dev stream mechanism)")
+
+    def test_cloudflared_config_path_is_controller(self):
+        """cloudflared_config must point to controller-webterm.yml, not the
+        stale webterm-owner.yml (#870 F1)."""
+        by = {e.name: e for e in p.PRIVILEGES}
+        self.assertEqual(
+            by["cloudflared_config"].local_path,
+            "~/.cloudflared/controller-webterm.yml",
+            "cloudflared_config local_path should be controller-webterm.yml")
+
+
 class TestControllerWebtermPrivileges870(unittest.TestCase):
     """#870 F4a D9: webterm per-human keys + controller tunnel creds must
     be registered in PRIVILEGES."""
