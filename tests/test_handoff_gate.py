@@ -391,5 +391,90 @@ class TestNudgeRound3Clause(unittest.TestCase):
         self.assertIn("#843", text)
 
 
+class TestSignOnly919(unittest.TestCase):
+    """#919: --sign-only mode creates a receipt for a pre-written body
+    WITHOUT posting it, so a stream can satisfy both airuleset's receipt
+    hook AND a repo-specific template gate."""
+
+    def _make_args(self, **kw):
+        """Build a namespace matching cmd_handoff's argparse shape."""
+        import argparse
+        defaults = dict(
+            repo="zbynekdrlik/odoo-erp", issue=42, branch=None,
+            self_review_file=None, root_cause=None, closes_finding=None,
+            prevencia_read=None, reviewed_by_tier=None, sign_only=None)
+        defaults.update(kw)
+        return argparse.Namespace(**defaults)
+
+    def test_sign_only_creates_receipt(self):
+        """A valid --sign-only file must produce a receipt whose sha256
+        matches the file content, WITHOUT posting anything."""
+        body = (
+            "READY-FOR-REVIEW: branch worktree-agent-test\n\n"
+            "Stack: airuleset\n"
+            "Harness: claude-code\n"
+            "Verified-at-UTC: 2026-09-07T01:00:00Z\n"
+            "HEAD: abc1234\n"
+            "Ready for gatekeeper cross-fork review.\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            body_path = os.path.join(td, "handoff-body.md")
+            with open(body_path, "w") as f:
+                f.write(body)
+
+            gate_dir = os.path.join(td, "gate")
+            os.makedirs(gate_dir)
+
+            args = self._make_args(sign_only=body_path)
+            # Patch the gate dir + log so we don't touch the real home.
+            import unittest.mock as m
+            with m.patch.object(airuleset, "HANDOFF_GATE_DIR",
+                                os.path.relpath(gate_dir,
+                                                os.path.expanduser("~"))):
+                with m.patch.object(airuleset, "HANDOFF_GATE_LOG",
+                                    os.path.relpath(
+                                        os.path.join(td, "gate.log"),
+                                        os.path.expanduser("~"))):
+                    rc = airuleset.cmd_handoff(args)
+
+            self.assertEqual(0, rc, "sign-only should succeed")
+
+            # A receipt must exist with the sha256 of the body.
+            expect_hash = hashlib.sha256(body.encode()).hexdigest()
+            receipts = [f for f in os.listdir(gate_dir) if f.endswith(".json")]
+            self.assertTrue(receipts, "No receipt written")
+            with open(os.path.join(gate_dir, receipts[0])) as f:
+                r = json.loads(f.read())
+            self.assertEqual(expect_hash, r["sha256"])
+            self.assertIn("issue", r)
+            self.assertEqual(42, r["issue"])
+
+    def test_sign_only_no_rfr_blocked(self):
+        """A --sign-only file without READY-FOR-REVIEW must be rejected."""
+        body = "Just some random text without the marker.\n"
+        with tempfile.TemporaryDirectory() as td:
+            body_path = os.path.join(td, "bad.md")
+            with open(body_path, "w") as f:
+                f.write(body)
+            args = self._make_args(sign_only=body_path)
+            rc = airuleset.cmd_handoff(args)
+            self.assertNotEqual(0, rc, "sign-only without RFR marker must fail")
+
+    def test_sign_only_missing_file_blocked(self):
+        """A --sign-only pointing to a nonexistent file must fail."""
+        args = self._make_args(sign_only="/nonexistent/path.md")
+        rc = airuleset.cmd_handoff(args)
+        self.assertNotEqual(0, rc)
+
+    def test_sign_only_argparse_present(self):
+        """The --sign-only flag must exist on the handoff subcommand."""
+        import inspect
+        src = inspect.getsource(airuleset.main)
+        # The argparse setup is in main() — check the whole airuleset module.
+        full = inspect.getsource(airuleset)
+        self.assertIn("--sign-only", full,
+                       "handoff subcommand must accept --sign-only")
+
+
 if __name__ == "__main__":
     unittest.main()
