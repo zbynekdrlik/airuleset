@@ -132,6 +132,7 @@ UPLOADS_MAX_AGE_DAYS = 14
 UPLOADS_KEEP_MARKERS = (".airuleset-keep", ".no-sweep")  # #861 opt-out
 DELETIONS_JOURNAL_PREFIX = "deletions-"                   # #861 durable journal
 TRANSCRIPT_PRESSURE_MIN_AGE_DAYS = 7        # owner-authorised pressure path (#834 rung e)
+TRANSCRIPT_PRESSURE_MIN_AGE_DAYS_SHARED_STREAM = 2  # #925: tighter on shared-stream
 TOOLCHAIN_DIRS = ("Android", ".gradle", ".android")
 TOOLCHAIN_PROC_RE = "gradle|java|emulator|qemu-system"
 
@@ -191,8 +192,10 @@ HOME_WORKTREE_GLOB = "/home/*"
 HOME_WORKTREE_MIN_AGE_S = 24 * 3600       # mtime > 24h (protects fresh lanes)
 
 # #920 — test runner /tmp leftovers (jest, pytest, generic tmp* dirs)
+# #925 — extended with npmcache-* and tmp* (observed litter shapes on subdev)
 TMP_TEST_MIN_AGE_DAYS = 1
-TMP_TEST_PREFIXES = ("jest_", "pytest-of-")
+TMP_TEST_MIN_AGE_HOURS_SHARED_STREAM = 3   # #925 owner ruling: 3h on shared-stream
+TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-")
 # #920 — runner _diag logs (diagnostic, safe to age out)
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #920 — npm _cacache + uv cache (regenerated on demand)
@@ -1882,15 +1885,41 @@ def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
 # --------------------------------------------------------------------------- #
 # #920 — test-runner /tmp leftovers, runner _diag logs, npm/uv cache
 # --------------------------------------------------------------------------- #
+def _shared_stream_age_days(default, shared_stream_days, min_age_days=None,
+                            box_class_fn=None):
+    """#925: on a shared-stream box, use ``shared_stream_days`` instead of
+    ``default``. When ``min_age_days`` is explicitly passed (e.g. from a
+    test), honour it. Fail-safe: box-class read error → ``default``."""
+    if min_age_days is not None:
+        return min_age_days
+    bcfn = box_class_fn or _default_box_class
+    try:
+        if bcfn() == "shared-stream":
+            return shared_stream_days
+    except Exception as e:
+        _dbg("box-class for age floor: %r" % e)
+    return default
+
+
+def _effective_tmp_test_age_days(min_age_days=None, box_class_fn=None):
+    """#925: 3h on shared-stream, 1d on workstation."""
+    return _shared_stream_age_days(
+        TMP_TEST_MIN_AGE_DAYS, TMP_TEST_MIN_AGE_HOURS_SHARED_STREAM / 24.0,
+        min_age_days, box_class_fn)
+
+
 def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
-                                 min_age_days=TMP_TEST_MIN_AGE_DAYS,
-                                 uid=None, dir_stats_fn=None):
+                                 min_age_days=None,
+                                 uid=None, dir_stats_fn=None,
+                                 box_class_fn=None):
     """#920: stale test-runner leftovers in /tmp — ``jest_*``, ``pytest-of-*``,
-    and generic ``tmp*`` dirs owned by THIS uid, older than ``min_age_days``.
+    ``npmcache-*``, and generic ``tmp*`` dirs owned by THIS uid, older than
+    the age floor (#925: 3h on shared-stream, 1d on workstation).
     UID-ownership check prevents a shared-box user from reclaiming a sibling's
     test dirs. Rows ``{cls:"tmp-test", path, bytes, reason}``."""
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
+    min_age_days = _effective_tmp_test_age_days(min_age_days, box_class_fn)
     cutoff = min_age_days * 86400
     out = []
     d = Path(tmp_dir)
@@ -1916,7 +1945,7 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
             row = {"cls": "tmp-test", "path": str(entry), "bytes": size,
                    "reason": None}
             if age < cutoff:
-                row["reason"] = "too recent (%.1fd < %dd)" % (age / 86400.0, min_age_days)
+                row["reason"] = "too recent (%.1fd < %.2fd)" % (age / 86400.0, min_age_days)
             out.append(row)
     except OSError as e:
         return [{"cls": "tmp-test", "path": None,
@@ -2016,15 +2045,27 @@ def _row_to_action(cls, row, kind):
     return {"cls": cls, "path": path, "bytes": size, "kind": kind, "reason": None}
 
 
-def _plan_scratch(home, now, scratch_rows=None):
+def _effective_scratch_age_days(box_class_fn=None):
+    """#925: 3h on shared-stream, 7d on workstation."""
+    from cli_scratch_sweep import (CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT,
+                                   CLAUDE_SCRATCH_MIN_AGE_HOURS_SHARED_STREAM)
+    return _shared_stream_age_days(
+        CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT,
+        CLAUDE_SCRATCH_MIN_AGE_HOURS_SHARED_STREAM / 24.0,
+        box_class_fn=box_class_fn)
+
+
+def _plan_scratch(home, now, scratch_rows=None, box_class_fn=None):
     from cli_scratch_sweep import (discover_claude_scratch_candidates,
                                    discover_stray_tmp_candidates)
     actions = []
+    scratch_age = _effective_scratch_age_days(box_class_fn)
     try:
         # #863 review 2: reuse the rows run_disk_guard already discovered for
         # largest_live_scratch (no 2nd du-walk); else discover here.
         rows = (scratch_rows if scratch_rows is not None
-                else (discover_claude_scratch_candidates(now=now, home=home) or []))
+                else (discover_claude_scratch_candidates(
+                    now=now, home=home, min_age_days=scratch_age) or []))
         for r in rows:
             actions.append(_row_to_action("scratch", r, "delete"))
             # #849 ask 2: stale scratchpad children inside a LIVE/UNDET session
@@ -2087,11 +2128,23 @@ def _plan_claude_metadata(home, now):
             for r in discover_stale_claude_metadata(home=home, now=now)]
 
 
-def _plan_transcripts(home, now):
+def _effective_transcript_age_days(box_class_fn=None):
+    """#925: 2d on shared-stream, 7d on workstation. The
+    ``_target_in_live_use`` open-fd exclusion inside
+    ``discover_old_transcript_candidates`` stays unchanged — a live transcript
+    is never gzipped regardless of the age floor."""
+    return _shared_stream_age_days(
+        TRANSCRIPT_PRESSURE_MIN_AGE_DAYS,
+        TRANSCRIPT_PRESSURE_MIN_AGE_DAYS_SHARED_STREAM,
+        box_class_fn=box_class_fn)
+
+
+def _plan_transcripts(home, now, box_class_fn=None):
     from cli_scratch_sweep import discover_old_transcript_candidates
+    age_days = _effective_transcript_age_days(box_class_fn)
     try:
         rows = discover_old_transcript_candidates(
-            home=home, now=now, min_age_days=TRANSCRIPT_PRESSURE_MIN_AGE_DAYS) or []
+            home=home, now=now, min_age_days=age_days) or []
     except Exception as e:
         return [{"cls": "transcript", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "transcript discovery error: %r" % e}]
@@ -2188,7 +2241,7 @@ def _plan_home_worktrees(home, now):
 
 
 def _plan_tmp_test(home, now):
-    """#920 — test-runner /tmp leftovers (jest, pytest, generic tmp*)."""
+    """#920/#925 — test-runner /tmp leftovers (jest, pytest, npmcache, tmp*)."""
     return [_norm_action("tmp-test", r, "delete")
             for r in discover_stale_tmp_test_dirs(now=now)]
 
@@ -2914,12 +2967,17 @@ def _release_lock(fd):
 # --------------------------------------------------------------------------- #
 # Job 40 entry
 # --------------------------------------------------------------------------- #
-def _default_scratch_discover(now, home):
+def _default_scratch_discover(now, home, box_class_fn=None):
     """The real #355/#863 scratch discovery, used by `run_disk_guard` to find
-    the largest LIVE session scratchpad (visibility only). Best-effort — a
-    discovery error surfaces as an empty list, never an exception."""
+    the largest LIVE session scratchpad (visibility only). #925: passes the
+    box-class-aware age floor so the pre-seeded rows carry the 3h shared-stream
+    floor (F1 fix — without this, the seeded rows use 7d and `_plan_scratch`'s
+    own `scratch_age` is never applied to them). Best-effort — a discovery error
+    surfaces as an empty list, never an exception."""
     from cli_scratch_sweep import discover_claude_scratch_candidates
-    return discover_claude_scratch_candidates(now=now, home=home) or []
+    scratch_age = _effective_scratch_age_days(box_class_fn)
+    return discover_claude_scratch_candidates(
+        now=now, home=home, min_age_days=scratch_age) or []
 
 
 def _largest_live_scratch(rows):

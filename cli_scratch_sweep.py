@@ -66,6 +66,7 @@ CLAUDE_SCRATCH_LOG_PATH = CLAUDE_DIR / "claude-scratch-sweep.log"
 CLAUDE_SCRATCH_STATE_PATH = CLAUDE_DIR / "claude-scratch-sweep-state.json"
 CLAUDE_SCRATCH_MIN_INTERVAL_S = 24 * 3600   # env AIRULESET_CLAUDE_SCRATCH_SWEEP_INTERVAL_S
 CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT = 7      # env AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS
+CLAUDE_SCRATCH_MIN_AGE_HOURS_SHARED_STREAM = 3  # #925 owner ruling: 3h on shared-stream
 
 
 def _claude_scratch_root(tmp_dir=None, uid=None) -> Path:
