@@ -3312,6 +3312,38 @@ def cmd_handoff(args):
             print("handoff BLOCK: sign-only file has no "
                   "READY-FOR-REVIEW marker")
             return 1
+        # Round >= 2 validation (#919 review RED-1): airuleset's OWN
+        # cross-repo fields must be present even in sign-only mode,
+        # because subagent-stop-check-review-tier.sh trusts the CLI.
+        self_login = _stream_self_login()
+        rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
+        if rnd >= 2:
+            _rc_re = _re.compile(
+                r'^Root-cause-of-previous-bounce:', _re.MULTILINE)
+            _prev_re = _re.compile(
+                r'^Prevencia-read:', _re.MULTILINE)
+            _tier_re = _re.compile(
+                r'^Reviewed-by-tier:\s*(\S+)', _re.MULTILINE)
+            if not _rc_re.search(body):
+                print("handoff BLOCK: sign-only round %d body missing "
+                      "Root-cause-of-previous-bounce:" % rnd)
+                return 1
+            if not _prev_re.search(body):
+                print("handoff BLOCK: sign-only round %d body missing "
+                      "Prevencia-read:" % rnd)
+                return 1
+            _tier_m = _tier_re.search(body)
+            if not _tier_m:
+                print("handoff BLOCK: sign-only round %d body missing "
+                      "Reviewed-by-tier:" % rnd)
+                return 1
+            _tier_val = _tier_m.group(1).split()[0]
+            if _tier_val not in REVIEWED_BY_TIER_VALUES:
+                print("handoff BLOCK: sign-only Reviewed-by-tier '%s' "
+                      "must be one of: %s"
+                      % (_tier_val, ", ".join(sorted(
+                          REVIEWED_BY_TIER_VALUES))))
+                return 1
         body_hash = hashlib.sha256(body.encode()).hexdigest()
         gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
         os.makedirs(gate_dir, exist_ok=True)
