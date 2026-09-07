@@ -587,6 +587,62 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 8 — an APPROVAL question must carry the proposed client message body
+# INLINE in the chat, never a file-path pointer or "na tikete" reference (#936).
+# Owner escalation (montalu 2026-09-07): "opakovane napises ze niekde v nejakom
+# subore ku ktoremu nemam pristup si mam pozriet a schvalit nieco!!!"
+# The prose rule (skills/odoo-client-messaging/handover-compose.md) failed twice;
+# this is the mechanical backstop. Fires only when ALL three conditions hold:
+#   (a) APPROVAL INTENT — approval/send keywords present
+#   (b) POINTER indicator — a filesystem path or redirect phrase
+#   (c) NO inline body — no fenced code block or blockquote >= 40 chars
+# Same fail-safe as Checks 6-7: away-user turns past Checks 1-7, narrow scope,
+# over-block is safe (model re-adds the body). LC_ALL=C.UTF-8 per #319.
+# Accepted residuals (#936 Fable review): (1) any >= 40-char blockquote
+# satisfies (c), even a quoted CLIENT message that is NOT the proposed reply
+# (under-block); (2) a technical question mentioning .md + a send verb
+# ("upraviť CLAUDE.md a potom poslať") false-positives (over-block, safe);
+# (3) unterminated fence counts everything after it; > inside a fence is
+# double-counted (under-block, rare).
+if [ -z "$VIOLATION" ]; then
+    # (a) Approval intent — approval/send verb families in the block.
+    APPROVE_INTENT_RX='schv[áa][ľl]|schvaľuje|po[šs]l[ai]|posiel|odosiel|odpoved.{0,20}(klient|z[áa]kazn[íi]k|do[[:space:]]+vl[áa]kn)|spr[áa]v.{0,20}(klient|z[áa]kazn[íi]k|schv[áa]l|po[šs]l)'
+    # (b) Pointer — a filesystem path or redirect phrase (the incident shapes).
+    POINTER_PATH_RX='~/|/tmp/|\.md([[:space:]]|$)|work-products/'
+    POINTER_PHRASE_RX='na[[:space:]]+tikete|v[[:space:]]+drafte|v[[:space:]]+s[úu]bore|v[[:space:]]+koment[áa]ri|pozri[[:space:]]+(s[úu]bor|draft|koment[áa]r)'
+    # (c) Inline body evidence: a fenced code block (``` ... ```) or blockquote
+    # (> ...) with at least 40 chars of content.
+    approve_intent=""
+    if LC_ALL=C.UTF-8 grep -qiE "$APPROVE_INTENT_RX" <<<"$BLOCK"; then
+        approve_intent=1
+    fi
+    pointer=""
+    if [ -n "$approve_intent" ]; then
+        if LC_ALL=C.UTF-8 grep -qiE "$POINTER_PATH_RX" <<<"$BLOCK"; then
+            pointer=1
+        elif LC_ALL=C.UTF-8 grep -qiE "$POINTER_PHRASE_RX" <<<"$BLOCK"; then
+            pointer=1
+        fi
+    fi
+    if [ -n "$approve_intent" ] && [ -n "$pointer" ]; then
+        # Check for inline body: fenced code or blockquote with >= 40 chars.
+        # Extract fenced body (between ``` lines) or blockquote lines (> ...).
+        INLINE_BODY=$(printf '%s\n' "$BLOCK" | awk '
+            /^[[:space:]]*```/ { fence = !fence; next }
+            fence { body = body $0 }
+            /^[[:space:]]*>/ {
+                line = $0; sub(/^[[:space:]]*>[[:space:]]*/, "", line)
+                body = body line
+            }
+            END { print body }')
+        # LC_ALL=C.UTF-8 so ${#} counts CHARS not bytes (#936 review 🔵5).
+        INLINE_LEN=$(LC_ALL=C.UTF-8; echo ${#INLINE_BODY})
+        if [ "${INLINE_LEN:-0}" -lt 40 ]; then
+            VIOLATION="approvebody"
+        fi
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
@@ -605,6 +661,8 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — a per #657 pridaj aj deep URL …/odoo/discuss?active_id=discuss.channel_<N> (samotný deep URL tiež stačí) — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-client-messaging/handover-compose.md (#632/#650/#697)." ;;
         task)
             REASON="Your ❓ block is about Odoo work but does NOT carry an Odoo task reference URL. Per #907 (owner directive montalu 2026-09-06): EVERY Odoo-context question MUST carry the project.task deep URL — napr. https://erp.montalu.cloud/odoo/project/4/tasks/503 — a meno tasku + stage. Odoo task je primárny klientsky tracking; GitHub issue je len developerský. Ak task neexistuje, napíš to explicitne ('Odoo task neexistuje — čisto technická úloha'). NIKDY nepoužívaj model-form URL (/odoo/project.task/503) — ten otvorí natívny formulár bez custom záložiek. See issue-reference-context.md." ;;
+        approvebody)
+            REASON="Your ❓ block asks to APPROVE/SEND a client message but the message body is NOT inline — it points at a file path or ticket comment instead. The owner reads the ping on their phone/webterm and has NO access to your filesystem or terminal scrollback. INLINE the FULL proposed text as a fenced code block (\`\`\`...body...\`\`\`) or blockquote (> ...) right in the ❓ block, at least 40 chars. NEVER 'text je v súbore ~/…' / 'pozri draft na tikete' / 'v komentári #N'. See skills/odoo-client-messaging/handover-compose.md (#936)." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
