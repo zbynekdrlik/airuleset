@@ -21,7 +21,6 @@ stopped consuming it.
 stdlib only; every function is fail-safe (an error renders as no segment, never
 a broken statusline).
 """
-import calendar
 import hashlib
 import json
 import os
@@ -29,7 +28,6 @@ import re
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timezone
 from pathlib import Path
 
 import burn
@@ -505,35 +503,21 @@ def _tail_usage_from_transcript(path, max_bytes=200_000):
     return model, usage
 
 
-def context_cost_segment(payload, show_cost=True):
-    """'ctx <size> ~$<cost>' — the CURRENT context size + its STEADY-STATE
-    per-turn dollar cost (2026-07-25 cost-fix package, #37; pricing fixed
-    same day; the ' · '/'/ťah' separator+suffix dropped, #223). Source:
-    the statusline stdin payload's
-    `context_window.current_usage` (the exact token breakdown of the last
-    billed API call) + `model.id`; falls back to the transcript tail (see
-    _tail_usage_from_transcript) when that's missing. `ctx` is
+def context_cost_segment(payload):
+    """'ctx <size>' — the CURRENT context size. Source: the statusline stdin
+    payload's `context_window.current_usage` (the exact token breakdown of
+    the last billed API call) + `model.id`; falls back to the transcript
+    tail (see _tail_usage_from_transcript) when that's missing. `ctx` is
     cache_read + cache_creation tokens (the dominant, resent-every-turn
     cost) — colour-escalates on that RAW count: green <150K
     (CTX_GREEN_MAX), yellow 150-400K, red >400K (CTX_YELLOW_MAX).
 
-    `show_cost=False` renders just 'ctx <size>', dropping the '~$<cost>'
-    suffix — the width-budget trim's last-resort shortening (#313 pt 4,
-    `fit_statusline`), never used by a normal render.
+    #928 (owner directive 2026-09-07): the '~$<cost>' per-turn dollar cost
+    suffix is removed — only the size renders.
 
-    The cost estimate is deliberately `ctx * the model's cache-READ rate`,
-    NOT `i*price0 + cw*price1 + cr*price2 + o*price3` (what this exact API
-    call literally billed) — pricing the literal mix skews wildly right
-    after a compaction or any cache-miss turn: cache_creation there is huge
-    (a full context re-write) and cache_read tiny, so the real-cost formula
-    priced a compaction turn at the cache-WRITE rate ($6.25/Mtok on Opus)
-    instead of the cache-READ rate ($0.50/Mtok) that every ORDINARY turn
-    actually pays to resend an already-cached context. Live-observed bug: gk
-    showed 'ctx 175K · ~$1.10/ťah' right after a compaction; steady-state for
-    175K on Opus is 175000 * 0.5 / 1e6 = ~$0.09. A one-off compaction /
-    cache-miss turn must never skew the displayed estimate. Cheap and
-    non-blocking by construction: no network, no `gh` — the payload is
-    already in hand, and the fallback is one bounded local file read."""
+    Cheap and non-blocking by construction: no network, no `gh` — the
+    payload is already in hand, and the fallback is one bounded local
+    file read."""
     if not isinstance(payload, dict):
         return ""
     model_id = ((payload.get("model") or {}).get("id")) or ""
@@ -554,15 +538,12 @@ def context_cost_segment(payload, show_cost=True):
     cw = int(cu.get("cache_creation_input_tokens") or 0)
     cr = int(cu.get("cache_read_input_tokens") or 0)
     ctx = cr + cw
-    usd = ctx * price[2] / 1e6
     if ctx < CTX_GREEN_MAX:
         color = 40
     elif ctx < CTX_YELLOW_MAX:
         color = 220
     else:
         color = 196
-    if show_cost:
-        return "\033[38;5;%dmctx %s ~$%.2f\033[0m" % (color, _fmt_tokens(ctx), usd)
     return "\033[38;5;%dmctx %s\033[0m" % (color, _fmt_tokens(ctx))
 
 
@@ -769,58 +750,6 @@ def _claude_json(home=None):
         return None
 
 
-def _clamp_day(year, month, day):
-    last = calendar.monthrange(year, month)[1]
-    return min(day, last)
-
-
-def _next_renewal(created_at, now_ts):
-    """Given an ISO-8601 `subscriptionCreatedAt` timestamp and the current
-    epoch time, return (day, month, days_until) for the NEXT occurrence of
-    that day-of-month at/after today -- the monthly subscription renewal
-    anchor. Clamps the day for short months (31 -> the month's last day).
-    Returns None on any unparseable input; never raises."""
-    try:
-        created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-        today = datetime.fromtimestamp(now_ts, tz=timezone.utc).date()
-        day = created.day
-        y, m = today.year, today.month
-        cand = date(y, m, _clamp_day(y, m, day))
-        if cand < today:
-            m += 1
-            if m > 12:
-                m = 1
-                y += 1
-            cand = date(y, m, _clamp_day(y, m, day))
-        return cand.day, cand.month, (cand - today).days
-    except Exception:
-        return None
-
-
-def subscription_segment(home=None, now=None):
-    """'sub <D.M.>(<Nd>)' -- the monthly renewal anchor of the Claude
-    account logged in on THIS box (~/.claude.json ->
-    oauthAccount.subscriptionCreatedAt, #223). Coloured by proximity, the
-    same green/yellow/red convention the usage-window segments already
-    use (green far, yellow near, red on the last day). Fails SILENTLY on
-    any missing/malformed input -- a statusline segment must never raise."""
-    try:
-        d = _claude_json(home)
-        if not isinstance(d, dict):
-            return ""
-        created = (d.get("oauthAccount") or {}).get("subscriptionCreatedAt")
-        if not created:
-            return ""
-        result = _next_renewal(created, time.time() if now is None else now)
-        if result is None:
-            return ""
-        day, month, days = result
-        color = 196 if days <= 0 else (220 if days <= 3 else 40)
-        return "\033[38;5;%dmsub %d.%d.(%dd)\033[0m" % (color, day, month, days)
-    except Exception:
-        return ""
-
-
 def account_email_segment(home=None):
     """The Claude account's login email (~/.claude.json ->
     oauthAccount.emailAddress, #223) -- WHICH account this box is logged in
@@ -889,16 +818,14 @@ def pane_width(run=None):
 
 def fit_statusline(segs, identity, cm_tag, ctx_full, ctx_short, width):
     """Join `segs` (never trimmed) with the trailing account-identity block
-    and the caveman tag, using the segment separator '  ' -- dropping the
-    LEAST important pieces first once the visible width would exceed
-    `width` (#313 pt 4):
+    (email only since #928) and the caveman tag, using the segment separator
+    '  ' -- dropping the LEAST important pieces first once the visible width
+    would exceed `width` (#313 pt 4):
 
-      1. the account-identity block (email + sub, #313 pt 6 groups them as
-         ONE unit -- "email+sub are first trim candidates when narrow").
+      1. the account-identity block (email, #928 removed the sub anchor).
       2. the caveman tag.
-      3. last resort: swap the `ctx` segment's full text (`ctx_full`, with
-         its '~$<cost>' suffix) for the shorter `ctx_short` (just 'ctx
-         <size>').
+      3. last resort: swap `ctx_full` for `ctx_short` (historically used for
+         the '~$<cost>' suffix trim, now a no-op since #928 removed cost).
 
     `width=None` means the pane width could not be measured -- return the
     full, untrimmed line; a statusline segment must never guess. `ctx_full`

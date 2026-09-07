@@ -22,7 +22,6 @@ import sys
 import time
 import unittest
 import unittest.mock
-from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
