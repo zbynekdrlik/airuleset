@@ -72,10 +72,10 @@ SYSCTL_VM_PATH = "/etc/sysctl.d/50-airuleset-vm.conf"
 MEMORY_HIGH_PCT = 12
 MEMORY_MAX_PCT = 18
 TASKS_MAX = 512
-# #922: CPUWeight lowered from 100 (default, no advantage) to 30 — gives
-# stream users 30/130 (~23%) of CPU when contending with root (weight 100
-# via the root-exempt drop-in). Under no contention, streams use any idle
-# CPU. The root-exempt drop-in restores CPUWeight=100 for uid 0.
+# #922: CPUWeight lowered from 100 (default, no advantage) to 30 — root
+# (weight 100 via the root-exempt drop-in) gets scheduling priority over
+# any stream user under contention. Under no contention, streams use any
+# idle CPU. The root-exempt drop-in restores CPUWeight=100 for uid 0.
 CPU_WEIGHT = 30
 # #922: CPUQuota hard-caps each stream at 300% (3 of 8 vCPU cores). Was
 # DELIBERATELY absent in #775 (the collapse was memory thrash, not CPU),
@@ -280,6 +280,8 @@ def build_apply_script() -> str:
         '|| echo "")\n'
         '    cpuw=$(systemctl show -p CPUWeight --value "$slice" 2>/dev/null '
         '|| echo "")\n'
+        '    cpuq=$(systemctl show -p CPUQuotaPerSecUSec --value "$slice" '
+        '2>/dev/null || echo "")\n'
         '    if [ "$mmax" = infinity ] || [ "$mhigh" = infinity ] '
         '|| [ -z "$mmax" ]; then\n'
         '        echo "  ⚠ RESOURCE-GUARDS VERIFY FAIL: $slice MemoryMax=$mmax '
@@ -302,6 +304,10 @@ def build_apply_script() -> str:
         '        echo "  ⚠ RESOURCE-GUARDS VERIFY FAIL: $slice CPUWeight=$cpuw '
         '(expected %d)" >&2; fail=1\n'
         '    fi\n'
+        '    if [ "$cpuq" != "%ds" ]; then\n'
+        '        echo "  ⚠ RESOURCE-GUARDS VERIFY FAIL: $slice '
+        'CPUQuotaPerSecUSec=$cpuq (expected %ds)" >&2; fail=1\n'
+        '    fi\n'
         'done\n'
         'if [ "$fail" -ne 0 ]; then\n'
         '    echo "  ⚠ RESOURCE-GUARDS FAILED read-back verify" >&2\n'
@@ -310,8 +316,9 @@ def build_apply_script() -> str:
         'echo "  resource-guards: applied + verified (MemTotal=${memtotal_b}B '
         'MemoryMax~${exp_max}B MemoryHigh~${exp_high}B CPUWeight=%d '
         'CPUQuota=%d%%)"'
-        % (TASKS_MAX, TASKS_MAX, CPU_WEIGHT, CPU_WEIGHT, CPU_WEIGHT,
-           CPU_QUOTA_PCT)
+        % (TASKS_MAX, TASKS_MAX, CPU_WEIGHT, CPU_WEIGHT,
+           CPU_QUOTA_PCT // 100, CPU_QUOTA_PCT // 100,
+           CPU_WEIGHT, CPU_QUOTA_PCT)
     )
     return "\n".join(parts) + "\n"
 

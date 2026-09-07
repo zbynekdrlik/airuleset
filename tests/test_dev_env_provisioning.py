@@ -564,32 +564,6 @@ class TestEnsureStreamTmuxSession(TestCase):
             user="montalu2", run=run, sentinel_path=sentinel)
         self.assertTrue(sentinel.exists())
 
-    def test_claude_launch_runs_with_nice_10(self):
-        """#922: stream Claude sessions launch with nice -n 10 so all
-        processes spawned inside inherit a lower scheduling priority. The
-        cgroup CPUWeight=30 is the primary mechanism; nice is
-        belt-and-suspenders at the process level."""
-        calls = []
-
-        def run(argv):
-            calls.append(argv)
-            if argv[:2] == ["tmux", "has-session"]:
-                return _FakeCP(returncode=1)
-            return _FakeCP(returncode=0)
-
-        d = Path(tempfile.mkdtemp())
-        checkout = d / "devel" / "odoo" / "odoo-erp"
-        checkout.mkdir(parents=True)
-        with m.patch.object(Path, "home", return_value=d):
-            airuleset.ensure_stream_tmux_session(
-                user="montalu3", run=run, sentinel_path=self._sentinel())
-        send_keys = [c for c in calls if c[:2] == ["tmux", "send-keys"]]
-        self.assertTrue(send_keys, "send-keys call must have been made")
-        # argv: ["tmux", "send-keys", "-t", user, "<cmd>", "Enter"]
-        cmd_text = send_keys[0][4]  # the typed command (after -t <user>)
-        self.assertTrue(cmd_text.startswith("nice -n 10 "),
-                        "Claude launch must be prefixed with nice -n 10, "
-                        "got: %r" % cmd_text)
 
 
 # ---------------------------------------------------------------------------

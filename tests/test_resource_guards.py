@@ -69,7 +69,8 @@ class TestDropInRendering(unittest.TestCase):
         # #922: root exempt must also restore CPU priority (the template now
         # sets CPUWeight=30 + CPUQuota=300%, both must be unlimited for root).
         self.assertIn("CPUWeight=100", d)
-        self.assertIn("CPUQuota=", d)  # present with empty/infinity value
+        # CPUQuota= with an empty value resets to unlimited (systemd semantics).
+        self.assertIn("\nCPUQuota=\n", d)
 
     def test_service_oom_dropin(self):
         d = g.render_service_oom_dropin()
@@ -147,11 +148,13 @@ class TestApplyScript(unittest.TestCase):
         self.assertIn("CPUWeight=30", self.s)
         self.assertIn("CPUQuota=300%", self.s)
 
-    def test_read_back_verify_checks_cpu_weight(self):
-        # #922: the read-back verify must check CPUWeight.
-        self.assertIn("CPUWeight", self.s)
-        # The verify reads CPUWeight from systemctl show.
+    def test_read_back_verify_checks_cpu_weight_and_quota(self):
+        # #922: the read-back verify must check CPUWeight AND CPUQuotaPerSecUSec.
         self.assertIn("-p CPUWeight", self.s)
+        self.assertIn("-p CPUQuotaPerSecUSec", self.s)
+        # The verify checks CPUWeight == 30 and CPUQuotaPerSecUSec == 3s.
+        self.assertIn('cpuw" != "30"', self.s)
+        self.assertIn('cpuq" != "3s"', self.s)
 
     def test_swap_is_verify_only_never_created(self):
         self.assertIn("SwapTotal", self.s)
