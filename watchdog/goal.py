@@ -3358,12 +3358,15 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 logs.append(gg)
                 # #923: collect into state["nudge_batch"] for goal_lane_sweep
                 # to compose; goal-guard's gate_ok skipped here, checked by
-                # batch_eligible in the sweep.
-                _gg_batch = state.setdefault("nudge_batch", {}).setdefault(sid, [])
+                # batch_eligible in the sweep. Single-slot write (Y2 fix) —
+                # no unbounded append per sweep.
+                _gg_batch = []
                 logs += _goal_guard_deliver(
                     sid, pid, captured, cwd, state, now, loc, run,
                     sleep_fn, dry_run, projects_dir,
                     batch_collect=_gg_batch)
+                if _gg_batch:
+                    state.setdefault("nudge_batch", {})[sid] = _gg_batch
             continue
         if armed is None:
             # #524 -- undeterminable footer (busy / chrome / dialog -> None):
@@ -5271,10 +5274,18 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _eligible = _nudge_gate.batch_eligible(state, sid, now)
         _batch_collect = None
         if _eligible and (handled is None or sid not in handled) and not dry_run:
-            # Pick up any goal-guard contribution from dark_watch.
-            _nb = state.get("nudge_batch", {}).get(sid, [])
-            _batch_collect = [entry for entry in _nb
-                              if entry[0] in _eligible] if _nb else []
+            # R2 (#923 review): common delivery guards checked ONCE.
+            from watchdog import compact as _compact_mod
+            from watchdog import ops_wait_recheck as _owr_mod
+            _b_compact = _compact_mod.pending_compact_hold(sid, now)
+            _b_kind, _ = watchdog._classify_boundary(captured)
+            _b_busy, _b_aged = _owr_mod._busy_waiting_with_age(
+                captured, state, sid, now, _b_kind)
+            if not _b_compact and not (_b_busy and not _b_aged):
+                # Pick up any goal-guard contribution from dark_watch.
+                _nb = state.get("nudge_batch", {}).get(sid, [])
+                _batch_collect = [entry for entry in _nb
+                                  if entry[0] in _eligible] if _nb else []
         llogs, _owns = goal_lane_occupancy_nudge(
             now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
             send_fn, dry_run, handled, projects_dir,
@@ -5344,12 +5355,14 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             _bt, _incl = _nudge_gate.compose_batch(
                 _items, max_chars=_nudge_gate.BATCH_MAX_CHARS)
             if _bt and not dry_run:
+                watchdog._janitor_mark_watch(state, pid, now)
                 send_out = {}
                 _bok = watchdog.send_verified(
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
                     logs=logs, out=send_out)
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
+                    watchdog._janitor_clear_watch(state, pid)
                     _nudge_gate.mark_batch_sent(state, sid, _incl, now)
                     if handled is not None:
                         handled.add(sid)

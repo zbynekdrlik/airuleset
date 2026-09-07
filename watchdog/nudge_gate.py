@@ -234,9 +234,12 @@ def mark_sent(state, sid, category, now):
 # `_JANITOR_OWN_PREFIXES` for stranded-nudge cleanup.
 BATCH_PREFIX = "nudge:"
 
-# The max-chars hard cap for a single nudge delivery into a live pane (#714).
-# Shared by all rider modules and by compose_batch's trim logic.
-BATCH_MAX_CHARS = 700
+# The max-chars hard cap for a BATCHED delivery (#923). Individual riders cap
+# their own text at 700; the batch adds a prefix + per-section headers, so the
+# batch cap must be > 700 to fit at least one full rider section. Set to 1400
+# (two full riders). send_verified's _type_literal chunk-typing handles texts
+# up to several KB (CC's input box accepts them) — the limit is readability.
+BATCH_MAX_CHARS = 1400
 
 
 def batch_eligible(state, sid, now):
@@ -306,7 +309,10 @@ def compose_batch(items, max_chars=None):
         while wd and len(result) > max_chars:
             wd.pop()
             result = _build(wd + au)
-    return result, [c for c, _ in wd + au]
+    included = [c for c, _ in wd + au]
+    if not included:
+        return "", []   # every section trimmed — nothing to deliver
+    return result, included
 
 
 def mark_batch_sent(state, sid, categories, now):
