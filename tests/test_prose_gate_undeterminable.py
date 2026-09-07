@@ -342,7 +342,7 @@ class TestTheReviewProbesBoundAcceptsRealAuditLines(_HookCase):
     every candidate from 120 to 1000 answers a 1 MB adversarial line in under
     0.35 s. So it is sized by what real reports look like, not by speed."""
 
-    HEAD = "## ✅ Work Complete\n\n**Audits & deploy:**\n✅ /plan-check: 3/3 fulfilled\n"
+    HEAD = "## ✅ Work Complete\n\n✅ /plan-check: 3/3 · "
     RCR = "✅ /requesting-code-review: clean — 0 %s 0 %s 0 %s\n" % (RED, YELLOW, BLUE)
     TAIL = "\n---\n\n**Goal:** x\n**What changed:** y\n"
 

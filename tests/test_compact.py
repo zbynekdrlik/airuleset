@@ -245,13 +245,10 @@ CB_IDLE_STRIP_ROWS_CAP = ("● Predošlá práca hotová.\n"
 # 30-min request expired.
 _WORK_COMPLETE_PLUS_TAIL = (
     "## ✅ Work Complete\n\n"
-    "**Audits & deploy:**\n"
-    "✅ CI: green\n\n"
-    "---\n\n"
-    "**Goal:** oprava chyby v X\n"
-    "**What changed:** X je teraz opravené\n\n"
-    "**[repo] PR #41: fix X**\n"
-    "https://github.com/o/r/pull/41 — merged abc123\n\n"
+    "✅ /plan-check: 3/3 · /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵\n"
+    "✅ Výstup: v1.2.3 na dashboarde\n"
+    "**Goal:** oprava chyby v X — **What changed:** X je teraz opravené\n"
+    "📔 Playbook: n/a\n"
     "⏳ WORKING: 3 more workers still dispatched in this round"
 )
 

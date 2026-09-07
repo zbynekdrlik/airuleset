@@ -40,7 +40,7 @@ After liveness passes and BEFORE functional E2E, confirm the deployed version is
 - "Frontend shows v1.0.5, backend serves v1.0.7 — close enough" → **WRONG.** That's frontend/backend drift; investigate.
 - "Dashboard has no version label" → **WRONG.** That's a foundation gap. File the foundation issue per `version-on-dashboard.md` before further work.
 
-The completion-report `✅ Deploy:` line MUST include the version read from the DOM, e.g. `✅ Deploy: dev frontend shows v1.0.97-dev.9 (matches backend /api/version)`.
+The completion-report `✅ Výstup:` line MUST include the version read from the DOM, e.g. `✅ Výstup: dev frontend shows v1.0.97-dev.9 (matches backend /api/version)` — deploy evidence merges into Výstup (#940).
 
 #### Layer 3: Functional — Playwright E2E against live system (MANDATORY)
 

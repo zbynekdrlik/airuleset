@@ -1086,19 +1086,14 @@ gap in either.
 5. **Report each COMPLETED INTEGRATION CYCLE as a REAL completion — the ARMED GOAL + any lanes
    still running continue the loop (2026-07-25 revision).** Once an integration cycle's
    verification + integration + the per-member run-cards are done and the mutex is released, end the
-   turn with the FULL `## ✅ Work Complete` template (`completion-report.md`) for the members
-   integrated in this cycle: audits — `✅ CI: green`,
-   `✅ /plan-check: <N>/<N> fulfilled` (RELAYS each worker's own `plan:` field — a per-issue
-   self-audit; you never independently re-run plan-check yourself, #215/#216), `✅ /review: clean —
-   0 🔴 0 🟡 0 🔵` and `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what
-   each worker already confirmed locally before its branch was merged (its own PR gate in serial
-   mode, its own local run in worktree mode — `agents/autopilot-worker.md`), never re-running the
-   review yourself — and neither should the worker have, as a literal `Skill({skill: "review"})`/
-   `code-review` invocation either, per #363), `✅ Deploy: <version>`, `✅ Výstup: <observed values>` (RELAYS each worker's Step-4 read-back of its member's real OUTPUT artifact — an explicit `n/a — <prečo>` when a member has no user-facing output; `completion-report.md` blocks a report missing this line)
-   — then Goal/What changed in plain language (covering every member integrated in this cycle), the
-   🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (this cycle's ONE PR, per the
-   repo-flow policy). **On `U > 0`/`W > 0` the report ALSO prints the parked BREAKDOWN** (Step-1
-   `--waiting`/`--ops-wait` members + tags, #527), never a bare `U N`.
+   turn with the COMPACT `## ✅ Work Complete` template (#940, ~7 lines, `completion-report.md`) for
+   the members integrated in this cycle: ONE audit-summary line (`✅ /plan-check: N/N ·
+   /review: 0 🔴 0 🟡 0 🔵 · /requesting-code-review: 0 🔴 0 🟡 0 🔵` — RELAYS each worker's own
+   `plan:` + review fields; you never re-run plan-check or review yourself, #215/#216/#363) +
+   `✅ Výstup:` (RELAYS each worker's Step-4 read-back; deploy version merges here) +
+   `**Goal:**`/`**What changed:**` + 🌐 URL(s) + `📔 Playbook:` + terminal marker. **On
+   `U > 0`/`W > 0` the report ALSO prints the parked BREAKDOWN** (Step-1 `--waiting`/`--ops-wait`
+   members + tags, #527), never a bare `U N`.
    Terminating in the marker `message-status-marker.md` prescribes: a genuine
    `✅ DONE: <plain outcome, e.g. "#41+#43+#317 merged -> v1.2.3, CI green">` when no lane is left
    running, or `⏳ WORKING` when this turn still has dispatched lanes in flight (background work IS
@@ -1115,17 +1110,12 @@ gap in either.
    nothing double-pings.
    **Reduced-authority streams (branch-merge / fork-no-merge) carry the SAME Step 5 mandate — never
    silence (#58, the david #2129 incident).** There is no PR-to-main, no merge, no deploy for these
-   streams — replace the PR-title/merge-SHA/`✅ Deploy:`/🌐 lines with `completion-report.md`'s
-   reduced-authority variant instead: `✅ Lokálne overenie: <tests+lint result>` +
-   `✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta` for BOTH profiles (#349:
-   branch-merge posts it too, right after its integration-branch merge — a merge alone does NOT
-   close the ticket) + `✅ PR: #M do <integration> zmergnutý <sha>` additionally for branch-merge
-   (ends there — ticket stays OPEN for the gatekeeper). The heading + audits + `---` separator +
-   Goal/What changed + terminal `✅ DONE:` are IDENTICAL and NON-OPTIONAL regardless of authority —
-   a bare `✅ DONE: #N hotové` prose report is still blocked by the same Stop-hook gate
-   (`stop-check-prose-violations.sh`).
-   This closes the exact gap #2129 hit: Step 5 previously read as merge-shaped only, so a fork-no-merge
-   stream might not have recognized it applies to its hand-off turns too.
+   streams — use the same compact template, replacing deploy/🌐/PR lines with `completion-report.md`'s
+   reduced-authority variant: `✅ Lokálne overenie:` + `✅ Hand-off: READY-FOR-REVIEW komentár na
+   #N (<topic>) + --handoff karta` for BOTH profiles (#349: branch-merge posts it too) +
+   `✅ PR: #M do <integration> zmergnutý <sha>` for branch-merge. The heading + audit-summary +
+   Goal/What changed + terminal `✅ DONE:` are NON-OPTIONAL regardless of authority — a bare
+   `✅ DONE: #N hotové` is still blocked by the Stop-hook gate (`stop-check-prose-violations.sh`).
    **The `/goal` loop's HOLD-for-compact mechanism is DISABLED (#911, owner flag).** The loop
    continues immediately to the next lane refill — no HOLD turn, no `compact-request --status`
    probe, no boundary-hold task. The mechanics below are kept for re-enable.

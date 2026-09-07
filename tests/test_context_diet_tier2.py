@@ -180,10 +180,11 @@ class TestCompletionReportConversion(TestCase):
         combined = self.module + "\n" + _read("skills/completion-report-deep/DEEP.md")
         self.assertIn("Hard rules", combined)
 
-    def test_compact_instruction_stays(self):
-        # #911: callback compact DISABLED — the module now names the disabled
-        # state; the full mechanics are in the DEEP companion.
-        self.assertIn("DISABLED (#911)", self.module)
+    def test_compact_template_reference(self):
+        # #940: the module names the compact template (~7 lines) and
+        # delegates the full skeleton to the DEEP companion.
+        self.assertIn("#940", self.module)
+        self.assertIn("compact template", self.module)
 
     def test_boundary_trigger_skips_gates_not_applies(self):
         # Y1 fix: --self deliberately SKIPS the #99/#48 gates, never "applies"
