@@ -212,6 +212,12 @@ set -euo pipefail
 #      recursive/`-f`/`-d` form, or any ONE bad token in a multi-file read
 #      still blocks exactly as before — this is deliberately what keeps
 #      every pre-existing fake-filename test fixture blocked unchanged.
+#   3. #953 extended the same read-only allowance to `head`/`tail`/`wc`/
+#      `ls`/`sed -n` (never `sed -i`), NOT via the size check above — via
+#      `_is_narrow_readonly_953()`, a separate COUNT-bounded gate: at most
+#      2 explicit, non-glob, non-variable-expansion paths, no recursive/
+#      `-c` byte-dump/redirect-to-file form. Narrower on file COUNT,
+#      broader on command set — the two allowances are independent checks.
 #
 # FIXED (fresh-context adversarial review of the #178 diff, same day): three
 # real holes in the first cut, all closed here.
