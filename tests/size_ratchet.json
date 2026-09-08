@@ -158,7 +158,7 @@
     "tests/test_deploy_watch_recipe.py": 224,
     "tests/test_design_before_code.py": 137,
     "tests/test_design_gate.py": 1644,
-    "tests/test_dev_env_provisioning.py": 2277,
+    "tests/test_dev_env_provisioning.py": 2290,
     "tests/test_discord_notify_check.py": 108,
     "tests/test_discord_reply.py": 2030,
     "tests/test_discuss_close_binding_695.py": 312,
