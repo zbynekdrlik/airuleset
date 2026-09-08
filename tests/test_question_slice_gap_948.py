@@ -85,6 +85,7 @@ class QuestionSliceGap(unittest.TestCase):
         }])
         fortytwo = json.dumps({
             "labels": [{"name": "needs-answer"}],
+            "state": "OPEN",
         })
         gh.write_text(
             "#!/usr/bin/env bash\n"
@@ -183,6 +184,139 @@ class QuestionSliceGap(unittest.TestCase):
                 cache.get("user_waiting", 0), 1,
                 "user_waiting must be exactly 1 -- the ticket is in the slice "
                 "AND in the question map, but must NOT be double-counted.")
+
+
+class SupplementUnit(unittest.TestCase):
+    """Unit tests for _question_map_u_supplement — pure Python, no subprocess.
+    Covers the review findings: MAJOR-1 (closed ticket), MINOR-3 (cap),
+    MINOR-4 (corrupt map, gh failure).
+
+    Each test sets os.environ["HOME"] to a temp dir so
+    `statusbar.question_map_ticket_refs(root)` reads the seeded map
+    (it resolves `~/.claude/` from HOME). setUp/addCleanup restores HOME
+    (#385 isolation discipline)."""
+
+    def setUp(self):
+        self._orig_home = os.environ.get("HOME")
+        self._tmpdir = TemporaryDirectory()
+        self._home = self._tmpdir.name
+        os.environ["HOME"] = self._home
+        self.addCleanup(self._restore_home)
+
+    def _restore_home(self):
+        if self._orig_home is not None:
+            os.environ["HOME"] = self._orig_home
+        else:
+            os.environ.pop("HOME", None)
+        self._tmpdir.cleanup()
+
+    def _seed_qmap(self, cwd, refs):
+        """Seed question map with entries referencing each number in refs."""
+        d = statusbar._claude_dir(self._home)
+        d.mkdir(parents=True, exist_ok=True)
+        entries = {}
+        for i, n in enumerate(refs):
+            entries["suppressed:s%d" % i] = {
+                "session": "s%d" % i, "cwd": str(cwd),
+                "channel": "", "ts": 1000, "asked": 1000,
+                "question": "q #%d" % n,
+                "block": "q #%d" % n,
+                "suppressed": True,
+            }
+        (d / "discord-questions.json").write_text(json.dumps(entries))
+
+    def test_returns_set_of_open_user_waiting_numbers(self):
+        """Basic: an OPEN needs-answer ticket outside rows is returned."""
+        cwd = "/fake/repo"
+        self._seed_qmap(cwd, [42])
+        rows = {}  # empty slice
+
+        def runner(argv, cd):
+            if "42" in argv:
+                return json.dumps({"labels": _labels("needs-answer"),
+                                   "state": "OPEN"})
+            return ""
+
+        result = airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertIsInstance(result, set)
+        self.assertEqual(result, {42})
+
+    def test_closed_ticket_excluded(self):
+        """MAJOR-1: a CLOSED ticket with needs-answer must NOT inflate U."""
+        cwd = "/fake/repo"
+        self._seed_qmap(cwd, [42])
+        rows = {}
+
+        def runner(argv, cd):
+            if "42" in argv:
+                return json.dumps({"labels": _labels("needs-answer"),
+                                   "state": "CLOSED"})
+            return ""
+
+        result = airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertEqual(result, set(),
+                         "a CLOSED needs-answer ticket must NOT be counted")
+
+    def test_ticket_in_rows_skipped(self):
+        """No-double-count: a ticket already in rows is not re-fetched."""
+        cwd = "/fake/repo"
+        self._seed_qmap(cwd, [42])
+        rows = {42: {"number": 42, "labels": _labels("needs-answer")}}
+        calls = []
+
+        def runner(argv, cd):
+            calls.append(argv)
+            return ""
+
+        result = airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertEqual(result, set())
+        self.assertEqual(len(calls), 0,
+                         "runner must NOT be called for a ticket in rows")
+
+    def test_gh_failure_returns_empty(self):
+        """MINOR-4: gh returning empty string (failure) is safe."""
+        cwd = "/fake/repo"
+        self._seed_qmap(cwd, [42])
+        rows = {}
+
+        def runner(argv, cd):
+            return ""  # gh failure
+
+        result = airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertEqual(result, set())
+
+    def test_corrupt_map_returns_empty(self):
+        """MINOR-4: a corrupt question map is safe."""
+        cwd = "/fake/repo"
+        d = statusbar._claude_dir(self._home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "discord-questions.json").write_text("NOT JSON")
+        rows = {}
+
+        def runner(argv, cd):
+            return ""
+
+        result = airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertEqual(result, set())
+
+    def test_cap_limits_gh_calls(self):
+        """MINOR-3: at most _QMAP_SUPPLEMENT_CAP gh calls."""
+        import cli_quals
+        cwd = "/fake/repo"
+        many = list(range(1, cli_quals._QMAP_SUPPLEMENT_CAP + 5))
+        self._seed_qmap(cwd, many)
+        rows = {}
+        calls = []
+
+        def runner(argv, cd):
+            calls.append(argv)
+            return json.dumps({"labels": _labels("needs-answer"),
+                               "state": "OPEN"})
+
+        airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertLessEqual(
+            len(calls), cli_quals._QMAP_SUPPLEMENT_CAP,
+            "must not exceed _QMAP_SUPPLEMENT_CAP gh calls")
 
 
 if __name__ == "__main__":

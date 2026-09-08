@@ -837,10 +837,15 @@ def _partition_user_waiting(rows):
     return {**workable, **ops_wait}, waiting
 
 
+# #948: hard cap on question-map supplement gh calls per refresh — the map is
+# TYPICALLY 0-3 entries, but a pathological accumulation must not burn the
+# shared #370 GraphQL budget. 10 is generous enough for any realistic box.
+_QMAP_SUPPLEMENT_CAP = 10
+
+
 def _question_map_u_supplement(rows, root, runner):
-    """#948: count question-map-referenced tickets that fell OUTSIDE the slice
-    search but carry a USER_WAITING label (needs-answer/needs-decision). Returns
-    the number of ADDITIONAL user_waiting tickets to add to the cache.
+    """#948: the SET of OPEN, user-waiting ticket numbers referenced in the
+    question map but ABSENT from the slice search ``rows``.
 
     On a shared-gh-identity/app-token box the slice is ``label:stream:<user>``
     only. A ticket authored via the shared token but lacking that label is
@@ -848,11 +853,15 @@ def _question_map_u_supplement(rows, root, runner):
     excludes the ping from the ticketless count (dedup). The ticket falls through
     BOTH paths -> footer ``U 0`` while a real question is pending.
 
-    This function reads ``statusbar.question_map_ticket_refs(root)`` (already
-    used by ``_acceptance_present_set`` on the ``--waiting`` path), fetches
-    labels for each ref NOT in ``rows``, and counts user-waiting ones. Bounded
-    by the map's own size (typically 0-3 entries). Runs only on the slow
-    refresh path, never the hot render.
+    Returns a SET of issue numbers (ints) so the caller can BOTH add
+    ``len(result)`` to the cache count AND list the members on ``--waiting``
+    — keeping the ONE-derivation invariant (#367/#391). An empty set on any
+    error (fail-safe: never inflate U off an unreadable map or failed gh).
+
+    Checks ``state == "OPEN"`` for every fetched ticket (#948 review MAJOR-1):
+    a CLOSED ticket with a stale ``needs-answer`` label must never inflate U.
+    Capped at ``_QMAP_SUPPLEMENT_CAP`` gh calls per refresh (#948 review
+    MINOR-3) to protect the #370 GraphQL budget.
 
     ``runner(argv, cd)`` is the caller's ``_out`` (a subprocess wrapper); ``rows``
     is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict."""
@@ -860,21 +869,33 @@ def _question_map_u_supplement(rows, root, runner):
     try:
         refs = _sb.question_map_ticket_refs(root)
     except Exception:
-        return 0
+        return set()
     if not refs:
-        return 0
-    extra = 0
+        return set()
+    result = set()
+    checked = 0
     for qn in refs:
         if qn in rows:
             continue
-        raw = runner(["gh", "issue", "view", str(qn), "--json", "labels"], root)
+        if checked >= _QMAP_SUPPLEMENT_CAP:
+            break
+        checked += 1
+        raw = runner(["gh", "issue", "view", str(qn),
+                      "--json", "labels,state"], root)
         try:
-            qlabels = json.loads(raw).get("labels")
-        except (ValueError, TypeError, AttributeError):
-            qlabels = None
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        # #948 review MAJOR-1: only OPEN tickets count.
+        state = obj.get("state", "")
+        if isinstance(state, str) and state.upper() != "OPEN":
+            continue
+        qlabels = obj.get("labels")
         if _row_is_user_waiting(qlabels):
-            extra += 1
-    return extra
+            result.add(qn)
+    return result
 
 
 # #539: the repo's OWN ask-flow markers — the shape a genuine owner-question

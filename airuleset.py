@@ -2821,14 +2821,11 @@ def cmd_tickets_status(args):
                 entry["gk"] = gk
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
-                # #948: question-map-aware U supplement — a question-map
-                # entry referencing #N on a shared-gh-identity/app-token
-                # box where #N lacks the stream label falls through BOTH
-                # the label-based user_waiting (not in slice search) AND
-                # the ticketless-ping count (excluded because it refs #N).
-                # See `_question_map_u_supplement` for the full docstring.
-                entry["user_waiting"] += _question_map_u_supplement(
-                    rows, root, _out)
+                # #948: question-map-aware U supplement — see the full
+                # docstring on `_question_map_u_supplement`. Returns a SET
+                # so `--waiting` can list the same members (#367 invariant).
+                _qmap_extra = _question_map_u_supplement(rows, root, _out)
+                entry["user_waiting"] += len(_qmap_extra)
                 # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
                 # for the red `· W N!` footer signal and by block-dispatch-over-
                 # wdrain.sh (which reads ops_wait directly, not this bool).
