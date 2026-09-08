@@ -117,12 +117,16 @@ class TestRemoteHostsDev1Entry(unittest.TestCase):
             cli_fleet.CONTROLLER_CUTOVER_DONE = saved_flag
             cli_fleet.REMOTE_HOSTS[:] = saved
 
-    def test_controller_never_in_remote_hosts(self):
-        """The controller box (100.101.214.103) is the SOURCE, never a target."""
+    def test_airuleset_account_never_in_remote_hosts(self):
+        """The airuleset account on the controller is the SOURCE, never a target.
+        Re-scoped by #960: a same-box SERVICE ACCOUNT (e.g. claudy@controller)
+        IS a legitimate loopback target; only the source account itself is banned."""
         import cli_fleet
         for h in cli_fleet.REMOTE_HOSTS:
-            self.assertNotEqual(h.get("host"), "100.101.214.103",
-                                "controller box must never be in REMOTE_HOSTS")
+            if h.get("host") == "100.101.214.103":
+                self.assertNotEqual(h.get("user"), "airuleset",
+                                    "the airuleset account itself must never be "
+                                    "a deploy target (it is the push source)")
 
 
 class TestLockoutGuardPubkeys(unittest.TestCase):

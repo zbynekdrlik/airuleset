@@ -43,6 +43,12 @@ class TestClaudyFleetEntry(unittest.TestCase):
         # R2: pending until the account exists and first install runs
         self.assertTrue(self._entry().get("pending"))
 
+    def test_pending_entry_excluded_from_deployable_hosts(self):
+        # Y6: behavioural lock — pending entry must be filtered by _deployable_hosts
+        from cli_remote import _deployable_hosts
+        names = [h["name"] for h in _deployable_hosts()]
+        self.assertNotIn("claudy@controller", names)
+
     def test_entry_repo_path(self):
         self.assertEqual(self._entry()["repo_path"], "~/devel/airuleset")
 
@@ -190,6 +196,19 @@ class TestClaudyBootstrap(unittest.TestCase):
         spec = bootstrap.SERVICE_ACCOUNTS["claudy"]
         self.assertEqual(spec["webterm_sessions"]["zbynek"], "zbynek")
         self.assertEqual(spec["webterm_sessions"]["marek"], "marek")
+
+    def test_service_accounts_preferred_matches_inventories(self):
+        """Y2 drift-lock: SERVICE_ACCOUNTS preferred values must match the
+        inventory entries' preferred fields."""
+        spec = bootstrap.SERVICE_ACCOUNTS["claudy"]
+        # zbynek inventory
+        zinv = profiles.zbynek_inventory()
+        ze = [e for e in zinv if e["id"] == "claudy"][0]
+        self.assertEqual(ze["preferred"], spec["webterm_sessions"]["zbynek"])
+        # marek inventory
+        minv = profiles.marek_inventory()
+        me = [e for e in minv if e["id"] == "claudy"][0]
+        self.assertEqual(me["preferred"], spec["webterm_sessions"]["marek"])
 
 
 class TestClaudyRegistry(unittest.TestCase):

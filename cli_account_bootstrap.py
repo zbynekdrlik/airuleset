@@ -10,6 +10,7 @@ ZERO outbound imports by design (the L-E leaf convention); constants are
 imported LAZILY inside render functions so the module loads with no side effects.
 """
 
+import sys
 import textwrap
 
 
@@ -33,13 +34,11 @@ SERVICE_ACCOUNTS = {
 
 def _forced_command_key_line(preferred, pubkey):
     """Build a ``restrict,pty,command="..."`` authorized_keys line that
-    attaches the named tmux session.  Mirrors ``_controller_lane_key_line``
-    in ``cli_webterm_only.py`` — same forced-command shape, different
-    ``preferred`` source (per SERVICE_ACCOUNTS, not per webterm-only user)."""
-    from cli_webterm import _remote_command
-    cmd = _remote_command(preferred)
-    escaped_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
-    return 'restrict,pty,command="%s" %s' % (escaped_cmd, pubkey)
+    attaches the named tmux session.  Delegates to the SINGLE source
+    ``_controller_lane_key_line`` in ``cli_webterm_only.py`` — Y1 Fable
+    review: two copies of authorized_keys escaping = drift hazard."""
+    from cli_webterm_only import _controller_lane_key_line
+    return _controller_lane_key_line(preferred, pubkey)
 
 
 def desired_keys_for_service_account(account):
@@ -152,15 +151,15 @@ def cmd_account_bootstrap(args):
     """CLI entry point: ``airuleset.py account-bootstrap --render <account>``."""
     if len(args) < 2 or args[0] != "--render":
         print("Usage: airuleset.py account-bootstrap --render <account>",
-              file=__import__("sys").stderr)
+              file=sys.stderr)
         print("Known accounts: %s" % ", ".join(sorted(SERVICE_ACCOUNTS)),
-              file=__import__("sys").stderr)
+              file=sys.stderr)
         return 1
     account = args[1]
     try:
         script = render_root_bootstrap(account)
     except ValueError as e:
-        print("ERROR: %s" % e, file=__import__("sys").stderr)
+        print("ERROR: %s" % e, file=sys.stderr)
         return 1
     print(script)
     return 0

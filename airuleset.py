@@ -5559,9 +5559,24 @@ def _watchdog_is_deploy_target():
     # #870 F3: a `dev_workstation` entry (dev1 mid-transition) hosts the
     # owner's live, routinely-dirty dev trees — the drift dimension staying
     # skipped there is the module's never-a-false-alarm invariant.
-    target_hosts = {e.get("host") for e in REMOTE_HOSTS
-                    if e.get("host") and not e.get("dev_workstation")}
-    return bool(my_ips & target_hosts)
+    # #960 R2 fix: on a shared-box (controller hosts both `airuleset` and
+    # `claudy`), match on IP AND user — the airuleset account is the push
+    # SOURCE and must not classify itself as a target just because a
+    # different account on the same IP is. The username alone is still
+    # insufficient for newlevel-sharing boxes (the docstring's existing
+    # concern), but IP AND user is exact.
+    try:
+        import pwd
+        current_user = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        current_user = None
+    for e in REMOTE_HOSTS:
+        host = e.get("host")
+        if not host or e.get("dev_workstation"):
+            continue
+        if host in my_ips and e.get("user") == current_user:
+            return True
+    return False
 
 
 def _watchdog_git_fetch(root):
