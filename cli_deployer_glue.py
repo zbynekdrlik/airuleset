@@ -269,6 +269,7 @@ if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
 # take down the others" contract.
 def _shim_log(msg):
     # #956: bounded diagnostic for silent shim failures (cap 64 KiB).
+    # B1: skip if last line carries the same msg (dedup repeated renders).
     _lp = os.path.expanduser("~/.claude/tickets-status/shim-errors.log")
     try:
         os.makedirs(os.path.dirname(_lp), exist_ok=True)
@@ -278,6 +279,13 @@ def _shim_log(msg):
             _sz = 0
         if _sz > 65536:
             return
+        if _sz > 0:
+            with open(_lp, "rb") as _fh:
+                _fh.seek(max(0, _sz - 512), 0)
+                _tail = _fh.read().decode("utf-8", errors="replace")
+            _last = _tail.rstrip("\n").rsplit("\n", 1)[-1]
+            if _last.endswith(" " + msg):
+                return
         with open(_lp, "a") as _fh:
             _fh.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
     except Exception:  # airuleset:script-ok diagnostic logger must never crash the shim render
