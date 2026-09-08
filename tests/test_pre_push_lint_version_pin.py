@@ -224,5 +224,108 @@ class TestNoWorkflowFileStillBlocks(TestCase):
         )
 
 
+class TestVersionMismatchPinnedRepoStillBlocks(TestCase):
+    """When the repo pins its lint rule set via `select =` in pyproject.toml
+    (e.g. #429: select = ["E4","E7","E9","F"]), the results are repo-controlled
+    and version-independent.  A version mismatch grants NO concession — the
+    hook must BLOCK (exit 2) on ANY lint failure, exactly as without mismatch.
+
+    RED-1 from the Fable review: the prior hook re-checked with --select E9,F
+    regardless of a select pin, letting E4/E7 violations through (E401 is E4
+    family, never caught by E9,F)."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-pinned-"))
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+        _git(self.tmpdir, "init", "-q", "-b", "main", str(self.tmpdir / "repo"))
+        self.repo = self.tmpdir / "repo"
+
+        # pyproject.toml WITH a ruff lint select pin — makes results
+        # version-controlled, so no mismatch concession should apply.
+        (self.repo / "pyproject.toml").write_text(
+            '[project]\nname = "x"\n\n'
+            '[tool.ruff.lint]\nselect = ["E4", "E7", "E9", "F"]\n'
+        )
+
+        # CI workflow with a FAKE pinned ruff version that forces a mismatch
+        ci_dir = self.repo / ".github" / "workflows"
+        ci_dir.mkdir(parents=True)
+        (ci_dir / "ci.yml").write_text(
+            "jobs:\n  gate:\n    steps:\n"
+            "      - run: pip install ruff==99.0.0\n"
+        )
+
+        (self.repo / "clean.py").write_text("X = 1\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "init")
+
+        # E401 (multiple imports on one line) — an E4 rule, version-
+        # independent when the repo pins select = ["E4",...].
+        (self.repo / "bad.py").write_text(
+            "import os, sys\nprint(os.getcwd())\nprint(sys.version)\n"
+        )
+        _git(self.repo, "add", "bad.py")
+        _git(self.repo, "commit", "-q", "-m", "add bad file")
+
+    def test_pinned_repo_blocks_on_mismatch(self):
+        """A repo with select= pin in pyproject.toml must BLOCK on ANY lint
+        failure regardless of version mismatch — no concession."""
+        r = _run_hook(self.repo)
+        combined = r.stdout + r.stderr
+        self.assertEqual(
+            r.returncode, 2,
+            f"Hook should BLOCK on a pinned repo (select= in pyproject.toml) "
+            f"even with version mismatch.\nOutput: {combined}",
+        )
+        self.assertIn("BLOCKED", combined)
+
+
+class TestVersionMismatchPinnedRuffTomlBlocks(TestCase):
+    """Same as above but with the select pin in ruff.toml instead of
+    pyproject.toml — the hook must check both config files."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-rufftoml-"))
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+        _git(self.tmpdir, "init", "-q", "-b", "main", str(self.tmpdir / "repo"))
+        self.repo = self.tmpdir / "repo"
+
+        # pyproject.toml WITHOUT ruff config — the pin is in ruff.toml
+        (self.repo / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        # ruff.toml with a select pin
+        (self.repo / "ruff.toml").write_text(
+            '[lint]\nselect = ["E4", "E7", "E9", "F"]\n'
+        )
+
+        ci_dir = self.repo / ".github" / "workflows"
+        ci_dir.mkdir(parents=True)
+        (ci_dir / "ci.yml").write_text(
+            "jobs:\n  gate:\n    steps:\n"
+            "      - run: pip install ruff==99.0.0\n"
+        )
+
+        (self.repo / "clean.py").write_text("X = 1\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "init")
+
+        (self.repo / "bad.py").write_text(
+            "import os, sys\nprint(os.getcwd())\nprint(sys.version)\n"
+        )
+        _git(self.repo, "add", "bad.py")
+        _git(self.repo, "commit", "-q", "-m", "add bad file")
+
+    def test_pinned_ruff_toml_blocks_on_mismatch(self):
+        r = _run_hook(self.repo)
+        combined = r.stdout + r.stderr
+        self.assertEqual(
+            r.returncode, 2,
+            f"Hook should BLOCK when ruff.toml has select= pin, even with "
+            f"version mismatch.\nOutput: {combined}",
+        )
+        self.assertIn("BLOCKED", combined)
+
+
 if __name__ == "__main__":
     main()
