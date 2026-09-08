@@ -113,7 +113,7 @@
     "tests/test_boundary_hold_822.py": 150,
     "tests/test_burn.py": 2294,
     "tests/test_busy_waiting_age_921.py": 183,
-    "tests/test_caveman.py": 691,
+    "tests/test_caveman.py": 821,
     "tests/test_channel_agnostic_acceptance.py": 164,
     "tests/test_channels_transport_defer_418.py": 104,
     "tests/test_ci_assert_collected.py": 91,
