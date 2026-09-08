@@ -933,9 +933,10 @@ def _print_deploy_leg_diagnostics(remote, identity, hostkey_opts,
             print(f"  WARN {remote['name']}: git pull failed — "
                   f"tree appears clean (failure may be non-dirty-tree)",
                   file=sys.stderr)
-    except Exception:
+    except Exception as exc:
         # Diagnostic ssh failed — don't mask the original failure.
-        pass
+        print(f"  WARN {remote['name']}: diagnostic ssh failed: {exc}",
+              file=sys.stderr)
 
 
 def _deploy_to_all_remotes(failed, auth_failed):
