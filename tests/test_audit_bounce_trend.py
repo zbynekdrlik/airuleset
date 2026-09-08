@@ -4,19 +4,21 @@ cli_quals._bounce_label_events timestamp extraction (#957).
 Covers:
 - _bounce_label_events: timestamp parsing, Z-suffix, fail-safe on garbage
 - _count_bounce_label_events: delegates to _bounce_label_events (one source)
-- compute_trends: falling/flat/rising/none, treadmill!, prevencia_missing
-- canonical_stream: rename-equivalence grouping (#537)
-- Zero hand-offs -> n/a rate
+- compute_trends: falling/flat/rising/none, treadmill!
+- canonical_stream: rename-equivalence grouping (#537) via STREAM_RENAME_ALIASES
+- Zero bounces -> n/a trend
+- None timestamps (unparseable) excluded from window math but counted
 """
 
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest import TestCase, main
+from unittest import TestCase, main, mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import airuleset  # noqa: E402
 import cli_quals  # noqa: E402
 
 # Import the script's helpers.
@@ -78,14 +80,25 @@ class TestBounceTimestampExtraction(TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].hour, 11)
 
-    def test_unparseable_timestamp_gets_epoch(self):
+    def test_unparseable_timestamp_gets_none(self):
+        """C2 fix: unparseable timestamp -> None (not epoch)."""
         events = json.dumps([
             {"event": "labeled", "label": {"name": "prio:bounce"},
              "created_at": "garbage-date"},
         ])
         result = cli_quals._bounce_label_events(events)
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].year, 1970)
+        self.assertIsNone(result[0])
+
+    def test_two_unparseable_no_false_treadmill(self):
+        """C2: two None timestamps must not cause a false treadmill!."""
+        items = [{
+            "number": 99,
+            "streams": ["david"],
+            "bounce_timestamps": [None, None],
+        }]
+        trends = abr.compute_trends(items, window_days=7)
+        self.assertEqual(trends["david"]["treadmill_issues"], [])
 
 
 class TestCountDelegatesToTimestamps(TestCase):
@@ -104,9 +117,17 @@ class TestCountDelegatesToTimestamps(TestCase):
     def test_count_zero_on_empty(self):
         self.assertEqual(cli_quals._count_bounce_label_events(""), 0)
 
+    def test_count_includes_unparseable(self):
+        """An unparseable timestamp is counted (len includes None)."""
+        events = json.dumps([
+            {"event": "labeled", "label": {"name": "prio:bounce"},
+             "created_at": "garbage"},
+        ])
+        self.assertEqual(cli_quals._count_bounce_label_events(events), 1)
+
 
 class TestComputeTrends(TestCase):
-    """compute_trends: rate trends and flags."""
+    """compute_trends: count-based trends and flags."""
 
     def _now(self):
         return datetime.now(timezone.utc)
@@ -119,13 +140,9 @@ class TestComputeTrends(TestCase):
         items = [{
             "streams": ["david"],
             "bounce_timestamps": [self._ts(1), self._ts(2), self._ts(3)],
-            "handoff_count": 3,
-            "prevencia_missing": False,
         }, {
             "streams": ["david"],
             "bounce_timestamps": [self._ts(10)],
-            "handoff_count": 1,
-            "prevencia_missing": False,
         }]
         trends = abr.compute_trends(items, window_days=7)
         self.assertIn("david", trends)
@@ -136,13 +153,9 @@ class TestComputeTrends(TestCase):
         items = [{
             "streams": ["david"],
             "bounce_timestamps": [self._ts(2)],
-            "handoff_count": 1,
-            "prevencia_missing": False,
         }, {
             "streams": ["david"],
             "bounce_timestamps": [self._ts(10), self._ts(11), self._ts(12)],
-            "handoff_count": 3,
-            "prevencia_missing": False,
         }]
         trends = abr.compute_trends(items, window_days=7)
         self.assertEqual(trends["david"]["trend"], "falling")
@@ -152,8 +165,6 @@ class TestComputeTrends(TestCase):
         items = [{
             "streams": ["david"],
             "bounce_timestamps": [self._ts(2), self._ts(10)],
-            "handoff_count": 2,
-            "prevencia_missing": False,
         }]
         trends = abr.compute_trends(items, window_days=7)
         self.assertEqual(trends["david"]["trend"], "flat")
@@ -163,8 +174,6 @@ class TestComputeTrends(TestCase):
         items = [{
             "streams": ["david"],
             "bounce_timestamps": [self._ts(30)],  # outside both windows
-            "handoff_count": 1,
-            "prevencia_missing": False,
         }]
         trends = abr.compute_trends(items, window_days=7)
         self.assertEqual(trends["david"]["trend"], "none")
@@ -179,14 +188,10 @@ class TestComputeTrends(TestCase):
             {
                 "streams": ["david"],
                 "bounce_timestamps": [self._ts(1)],
-                "handoff_count": 1,
-                "prevencia_missing": False,
             },
             {
                 "streams": ["montalu"],
                 "bounce_timestamps": [self._ts(10)],
-                "handoff_count": 1,
-                "prevencia_missing": False,
             },
         ]
         trends = abr.compute_trends(items, window_days=7)
@@ -201,8 +206,6 @@ class TestComputeTrends(TestCase):
             "number": 42,
             "streams": ["david"],
             "bounce_timestamps": [self._ts(1), self._ts(1.5)],  # 12h apart
-            "handoff_count": 2,
-            "prevencia_missing": False,
         }]
         trends = abr.compute_trends(items, window_days=7)
         self.assertIn(42, trends["david"]["treadmill_issues"])
@@ -213,48 +216,55 @@ class TestComputeTrends(TestCase):
             "number": 42,
             "streams": ["david"],
             "bounce_timestamps": [self._ts(1), self._ts(5)],  # 4 days apart
-            "handoff_count": 2,
-            "prevencia_missing": False,
         }]
         trends = abr.compute_trends(items, window_days=7)
         self.assertEqual(trends["david"]["treadmill_issues"], [])
 
-    def test_prevencia_missing_flag(self):
-        """Issue with >= 2 bounces and prevencia_missing -> flagged."""
-        items = [{
-            "number": 99,
-            "streams": ["david"],
-            "bounce_timestamps": [self._ts(1), self._ts(2)],
-            "handoff_count": 2,
-            "prevencia_missing": True,
-        }]
-        trends = abr.compute_trends(items, window_days=7)
-        self.assertIn(99, trends["david"]["prevencia_missing_issues"])
-
-    def test_zero_handoffs_rate_is_na(self):
-        """Zero hand-offs in window -> rate is n/a, not division by zero."""
+    def test_none_timestamps_excluded_from_windows(self):
+        """None timestamps (unparseable) don't count in window buckets."""
         items = [{
             "streams": ["david"],
-            "bounce_timestamps": [],
-            "handoff_count": 0,
-            "prevencia_missing": False,
+            "bounce_timestamps": [None, self._ts(2)],
         }]
         trends = abr.compute_trends(items, window_days=7)
-        self.assertEqual(trends["david"]["recent_rate"], "n/a")
-        self.assertEqual(trends["david"]["prior_rate"], "n/a")
+        self.assertEqual(trends["david"]["recent_bounces"], 1)
 
 
 class TestCanonicalStream(TestCase):
-    """canonical_stream uses _stream_rename_equivalents."""
+    """canonical_stream uses STREAM_RENAME_ALIASES."""
 
-    def test_identity(self):
-        # A stream with no alias maps to itself.
+    def test_identity_no_alias(self):
+        """A stream with no alias maps to itself."""
         self.assertEqual(abr.canonical_stream("unknown_stream"),
                          "unknown_stream")
 
-    def test_returns_string(self):
-        result = abr.canonical_stream("david")
-        self.assertIsInstance(result, str)
+    def test_old_name_maps_to_new(self):
+        """C1 fix: an old name maps to the rename target."""
+        with mock.patch.object(airuleset, "STREAM_RENAME_ALIASES",
+                               {"oldname": "newname"}):
+            self.assertEqual(abr.canonical_stream("oldname"), "newname")
+            self.assertEqual(abr.canonical_stream("newname"), "newname")
+
+    def test_grouping_merges_old_and_new(self):
+        """C1 fix: items with old and new stream names land in ONE row."""
+        with mock.patch.object(airuleset, "STREAM_RENAME_ALIASES",
+                               {"a": "a1"}):
+            now = datetime.now(timezone.utc)
+            items = [
+                {
+                    "streams": [abr.canonical_stream("a")],
+                    "bounce_timestamps": [now - timedelta(days=1)],
+                },
+                {
+                    "streams": [abr.canonical_stream("a1")],
+                    "bounce_timestamps": [now - timedelta(days=2)],
+                },
+            ]
+            trends = abr.compute_trends(items, window_days=7)
+            # Both should land in "a1" (the canonical new name).
+            self.assertIn("a1", trends)
+            self.assertNotIn("a", trends)
+            self.assertEqual(trends["a1"]["recent_bounces"], 2)
 
 
 class TestDoctrinePresence(TestCase):
@@ -272,12 +282,10 @@ class TestDoctrinePresence(TestCase):
         text = (root / "skills/autonomous-quality-discipline-deep/DEEP.md").read_text()
         self.assertIn("Integration friction is a bug", text)
         self.assertIn("treadmill", text)
-        self.assertIn("Prevencia", text)
 
     def test_trigger_row_fires_on_handoff(self):
         root = Path(__file__).resolve().parent.parent
         conf = (root / "hooks/situational-triggers.conf").read_text()
-        # The aqd-deep row must fire on airuleset.py handoff.
         for line in conf.splitlines():
             if line.startswith("autonomous-quality-discipline-deep") and "Bash" in line:
                 self.assertIn("airuleset\\.py handoff", line)

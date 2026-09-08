@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Audit bounce trends and Prevencia coverage per stream.
+"""Audit bounce trends per stream.
 
 Usage:
     python3 scripts/audit_bounce_rule_updates.py --rounds --repo owner/name
     python3 scripts/audit_bounce_rule_updates.py --rounds --repo owner/name --json
     python3 scripts/audit_bounce_rule_updates.py --rounds --repo owner/name --window 14
 
-Reports per-stream bounce rate trends and flags:
+Reports per-stream bounce count trends and flags:
 - treadmill!  — >= 2 bounce-adds on the SAME ticket within 24 h
-- prevencia!  — a hand-off at round >= 2 with no Prevencia-read path
 
 The 24 h rule (#957): every repeated bounce class (same finding type
 bounced >= 2x across a stream's tickets) MUST get a mechanical prevention
 (hook / gate / script / Prevencia rule) within 24 h of recurrence.  A
-stream with a rising bounce RATE violates this.
+stream with a rising bounce count violates this.
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ from pathlib import Path
 # Repo root for imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import airuleset  # noqa: E402
 import cli_quals  # noqa: E402
 
 
@@ -34,33 +34,19 @@ import cli_quals  # noqa: E402
 # Data helpers
 # ---------------------------------------------------------------------------
 
-def stream_labels(labels_list):
-    """Extract stream names from a list of label dicts/strings."""
-    out = []
-    for lb in (labels_list or []):
-        name = lb.get("name", lb) if isinstance(lb, dict) else str(lb)
-        if name.startswith("stream:"):
-            out.append(name[len("stream:"):])
-    return out
-
-
 def canonical_stream(raw_name):
-    """Canonicalize a stream name via rename-equivalence (#537).
+    """Canonicalize a stream name via rename aliases (#537).
 
-    Returns the FIRST element of the equivalence set — the canonical name.
-    """
-    equivs = cli_quals._stream_rename_equivalents(raw_name)
-    return equivs[0] if equivs else raw_name
-
-
-def _parse_iso(raw):
-    """Parse an ISO 8601 timestamp (GitHub ``Z`` suffix)."""
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except (ValueError, TypeError, AttributeError):
-        return None
+    Returns the rename TARGET when ``raw_name`` is a known old name, or
+    ``raw_name`` itself otherwise.  This groups old and new names under the
+    NEW canonical form — e.g. both ``montalu`` and ``montalu1`` map to
+    ``montalu1`` (if that alias exists in STREAM_RENAME_ALIASES)."""
+    aliases = airuleset.STREAM_RENAME_ALIASES
+    # Old name -> canonical new name.
+    if raw_name in aliases:
+        return aliases[raw_name]
+    # Already the new name (or no alias).
+    return raw_name
 
 
 # ---------------------------------------------------------------------------
@@ -68,19 +54,19 @@ def _parse_iso(raw):
 # ---------------------------------------------------------------------------
 
 def fetch_bounce_issues(repo, runner=None):
-    """Fetch open issues with prio:bounce or ready-for-review labels.
+    """Fetch open+recently-updated issues with prio:bounce or
+    ready-for-review labels.
 
     Returns a list of dicts with keys:
         number, title, labels (list of label-name strings),
         streams (list of canonical stream names).
     """
-    import airuleset
     run = runner or airuleset._gh_out
 
     issues = []
     seen = set()
     for label in ("prio:bounce", "ready-for-review"):
-        raw = run("issue", "list", "-R", repo, "--state", "open",
+        raw = run("issue", "list", "-R", repo, "--state", "all",
                   "--label", label, "-L", "200",
                   "--json", "number,title,labels", timeout=20)
         if not raw:
@@ -115,9 +101,9 @@ def fetch_bounce_issues(repo, runner=None):
 def fetch_bounce_events_for_issue(number, repo, runner=None):
     """Fetch prio:bounce label-add event timestamps for one issue.
 
-    Returns a list of datetime (UTC).
+    Returns a list of datetime (UTC).  None entries represent events
+    with unparseable timestamps (counted but excluded from window math).
     """
-    import airuleset
     run = runner or airuleset._gh_out
 
     events_path = "repos/%s/issues/%s/events" % (repo, number)
@@ -130,17 +116,14 @@ def fetch_bounce_events_for_issue(number, repo, runner=None):
 # ---------------------------------------------------------------------------
 
 def compute_trends(issues_with_events, window_days=7):
-    """Compute per-stream bounce rate trends.
+    """Compute per-stream bounce count trends.
 
     ``issues_with_events`` is a list of dicts, each carrying:
-        streams (list[str]), bounce_timestamps (list[datetime]),
-        handoff_count (int — total RFR hand-offs for the issue).
+        streams (list[str]), bounce_timestamps (list[datetime|None]).
 
     Returns a dict:
         {stream: {recent_bounces, prior_bounces,
-                  recent_handoffs, prior_handoffs,
-                  recent_rate, prior_rate,
-                  trend, treadmill_issues, prevencia_missing_issues}}
+                  trend, treadmill_issues}}
     """
     now = datetime.now(timezone.utc)
     recent_start = now - timedelta(days=window_days)
@@ -154,15 +137,13 @@ def compute_trends(issues_with_events, window_days=7):
                 per_stream[stream] = {
                     "recent_bounces": 0,
                     "prior_bounces": 0,
-                    "recent_handoffs": 0,
-                    "prior_handoffs": 0,
                     "treadmill_issues": [],
-                    "prevencia_missing_issues": [],
                 }
             entry = per_stream[stream]
 
-            # Count bounces per window.
-            ts_list = item.get("bounce_timestamps", [])
+            # Count bounces per window (skip None timestamps).
+            ts_list = [ts for ts in item.get("bounce_timestamps", [])
+                       if ts is not None]
             for ts in ts_list:
                 if ts >= recent_start:
                     entry["recent_bounces"] += 1
@@ -178,29 +159,10 @@ def compute_trends(issues_with_events, window_days=7):
                         entry["treadmill_issues"].append(num)
                     break
 
-            # Prevencia check.
-            if item.get("prevencia_missing") and len(ts_list) >= 2:
-                num = item.get("number", 0)
-                if num not in entry["prevencia_missing_issues"]:
-                    entry["prevencia_missing_issues"].append(num)
-
-            # Hand-off count allocation (best effort — attribute to recent
-            # if any bounce is recent, else prior).
-            handoffs = item.get("handoff_count", 0)
-            if any(ts >= recent_start for ts in ts_list):
-                entry["recent_handoffs"] += handoffs
-            elif any(ts >= prior_start for ts in ts_list):
-                entry["prior_handoffs"] += handoffs
-
-    # Compute rates and trends.
+    # Compute trends.
     for stream, data in per_stream.items():
         rb, pb = data["recent_bounces"], data["prior_bounces"]
-        rh, ph = data["recent_handoffs"], data["prior_handoffs"]
 
-        data["recent_rate"] = (rb / rh) if rh > 0 else ("n/a" if rb == 0 else rb)
-        data["prior_rate"] = (pb / ph) if ph > 0 else ("n/a" if pb == 0 else pb)
-
-        # Trend based on raw counts (rate when available, else counts).
         if rb == 0 and pb == 0:
             data["trend"] = "none"
         elif rb > pb:
@@ -226,9 +188,6 @@ def print_text(trends):
         if d["treadmill_issues"]:
             flags.append("treadmill!(%s)" % ",".join(
                 str(n) for n in d["treadmill_issues"]))
-        if d["prevencia_missing_issues"]:
-            flags.append("prevencia!(%s)" % ",".join(
-                str(n) for n in d["prevencia_missing_issues"]))
         print("%s\t%d\t%d\t%s\t%s" % (
             stream, d["recent_bounces"], d["prior_bounces"],
             d["trend"], " ".join(flags)))
@@ -246,7 +205,7 @@ def print_json(trends):
 
 def main(argv=None):
     p = argparse.ArgumentParser(
-        description="Audit bounce trends and Prevencia coverage per stream.")
+        description="Audit bounce trends per stream.")
     p.add_argument("--rounds", action="store_true",
                    help="Print per-stream bounce trend")
     p.add_argument("--repo", required=True,
@@ -273,12 +232,6 @@ def main(argv=None):
     for issue in issues:
         issue["bounce_timestamps"] = fetch_bounce_events_for_issue(
             issue["number"], args.repo)
-        issue["handoff_count"] = max(1, len(issue["bounce_timestamps"]))
-        # Prevencia check: round >= 2 hand-offs with no Prevencia reference
-        # is a rough signal.  Full check would read RFR comments, but that
-        # is expensive; the script flags issues with >= 2 bounces and leaves
-        # the detail to the operator.
-        issue["prevencia_missing"] = len(issue["bounce_timestamps"]) >= 2
 
     trends = compute_trends(issues, window_days=args.window)
 

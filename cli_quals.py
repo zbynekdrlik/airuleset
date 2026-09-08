@@ -2553,7 +2553,7 @@ def _bounce_label_events(events_raw):
     (which is now ``len()`` of this); the timestamp is needed by
     ``audit_bounce_rule_updates.py`` for rolling-window trend analysis
     (#957)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     if not events_raw:
         return []
     try:
@@ -2576,11 +2576,13 @@ def _bounce_label_events(events_raw):
                         raw_ts.replace("Z", "+00:00"))
                     timestamps.append(ts)
                 except (ValueError, TypeError, AttributeError):
-                    # Unparseable timestamp — still count the event but
-                    # without a timestamp it cannot participate in window
-                    # analysis.  Append epoch as a safe floor.
-                    timestamps.append(datetime(1970, 1, 1,
-                                               tzinfo=timezone.utc))
+                    # Unparseable timestamp — still count the event (len()
+                    # preserves the count) but it cannot participate in
+                    # window/treadmill analysis.  None signals "counted
+                    # but undated" (#957 C2 fix — epoch caused false
+                    # treadmill! when two unparseable timestamps were
+                    # identical).
+                    timestamps.append(None)
     return timestamps
 
 
