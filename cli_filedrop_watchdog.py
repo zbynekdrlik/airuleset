@@ -520,7 +520,12 @@ def setup_session_restart_dropin(dropin_path=None, optout_path=None,
         hand_path = SESSION_RESTART_DROPIN_HAND
     if daemon_reload_fn is None:
         def daemon_reload_fn():
-            _run_systemctl(["daemon-reload"])
+            rc, _o, err = _run_systemctl(["daemon-reload"])
+            if rc != 0:
+                print(f"  session-restart: daemon-reload FAILED (rc={rc}): "
+                      f"{err.strip()}", file=sys.stderr)
+                return False
+            return True
 
     dropin_path = Path(dropin_path)
     optout_path = Path(optout_path)
@@ -554,28 +559,36 @@ def setup_session_restart_dropin(dropin_path=None, optout_path=None,
             except (OSError, ValueError):
                 existing = None
             if existing != content:
-                dropin_path.write_text(content)
+                dropin_path.write_text(content, encoding="utf-8")
                 print("  session-restart: wrote managed drop-in "
                       f"({dropin_path.name})")
                 changed = True
 
         if changed:
-            daemon_reload_fn()
+            result = daemon_reload_fn()
+            if result is False:
+                return False
 
+        # Always report the configured state (L3: no-change path also prints).
+        source = configured_session_restart_source(dropin_path, optout_path)
+        print(f"  session-restart: configured={source}")
         return True
     except Exception as e:
         print(f"  session-restart drop-in error: {e}", file=sys.stderr)
         return False
 
 
-def effective_session_restart_state(dropin_path=None, optout_path=None):
-    """Report the effective session-restart state and its source.
+def configured_session_restart_source(dropin_path=None, optout_path=None):
+    """Report the CONFIGURED source of the session-restart flag.
 
-    Returns ``(action, source)`` where:
-    - ``action`` is ``"on"`` or ``"off"``
-    - ``source`` is ``"managed"`` (drop-in present), ``"opt-out"`` (marker
-      present), or ``"env-default"`` (no drop-in, no marker — falls through
-      to the env var default, which is OFF).
+    Returns the source string: ``"managed"`` (drop-in present),
+    ``"opt-out"`` (marker present), or ``"none"`` (no drop-in, no marker
+    -- falls through to the env var / EnvironmentFile, which the caller
+    reads via ``action_enabled()``).
+
+    NOTE: systemd ``EnvironmentFile=`` overrides ``Environment=`` from a
+    drop-in, so the configured source is NOT the effective action -- the
+    caller derives the effective action from the env var (``sr_enabled``).
 
     Injectable paths for testing. Never raises.
     """
@@ -588,10 +601,10 @@ def effective_session_restart_state(dropin_path=None, optout_path=None):
     optout_path = Path(optout_path)
 
     if optout_path.exists():
-        return ("off", "opt-out")
+        return "opt-out"
     if dropin_path.exists():
-        return ("on", "managed")
-    return ("off", "env-default")
+        return "managed"
+    return "none"
 
 
 def setup_watchdog_service():

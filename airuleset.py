@@ -318,7 +318,7 @@ from cli_filedrop_watchdog import (  # noqa: E402
     SESSION_RESTART_OPTOUT_MARKER as SESSION_RESTART_OPTOUT_MARKER,
     render_session_restart_dropin as render_session_restart_dropin,
     setup_session_restart_dropin as setup_session_restart_dropin,
-    effective_session_restart_state as effective_session_restart_state,
+    configured_session_restart_source as configured_session_restart_source,
 )
 
 # --- web terminal gateway (#555): dev1-only ttyd + tailscale-serve brána.
