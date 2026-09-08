@@ -623,10 +623,12 @@ def _ops_wait_reason(labels):
     tag). The gk-override exclusion mirrors `_row_is_user_waiting`'s own
     acceptance-scoping EXACTLY (#526 review 🔵): a contradictory
     `needs-acceptance`+`ready-for-review`/`needs-gatekeeper`/`prio:bounce`+
-    `ops-wait` row (a re-hand-off/bounce that also carries ops-wait, reaching the
-    ops_wait bucket via the plain `_row_is_ops_wait` branch, NOT the
-    acceptance-override one) is tagged `ops-wait`, never mislabelled
-    `acceptance`."""
+    `ops-wait` row is tagged `ops-wait`, never mislabelled `acceptance`.
+    (#943: a `needs-gatekeeper`/`ready-for-review` + `ops-wait` row now routes
+    to `workable` (I) via the MAINTAINER_ACTION_LABELS override in
+    `_partition_workable`, so this reason function is reached only for rows
+    in the `ops_wait` bucket — which no longer includes the contradictory
+    gk+ops-wait shape.)"""
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
     if "needs-acceptance" in names and not any(
@@ -703,6 +705,18 @@ def _partition_workable(rows, own_stream=None):
     labelled-but-not-yet-announced defect is surfaced by the `no-action!` display
     flag (`_no_question_flagged` + `_print_issue_rows`), not by a routing gate.
 
+    #943 (owner escalation 2026-09-08, odoo-erp #6294 APK): a NON-user-waiting
+    row carrying BOTH ops-wait AND a MAINTAINER_ACTION_LABELS label
+    (`needs-gatekeeper` / `ready-for-review`) routes to `workable` (action-only
+    I), NOT `ops_wait` (W). Only the full-authority box can action a hand-off,
+    so the hand-off label keeps the row visible in I — the #589/#636
+    over-count-safe direction. The `_gk_handoff_ops_wait_flagged` function (#636)
+    already DETECTED this contradictory shape and tagged it `gk_handoff!` in the
+    nudge text, but the partition itself routed it to W, making it invisible to
+    the gatekeeper's I count for 2 days. The override is unconditional (not
+    authority-gated) because this function is a pure label partition (#622),
+    and on a reduced-authority box these rows are structurally absent.
+
     `own_stream` (#654): the box's OWN reduced-authority stream (its canonical
     AUTHORITY_BY_USER key, `_current_user()`), or None for a full-authority box.
     An ANSWER/DECISION/ACTION row owned by a FOREIGN stream (`_stream_owner_of`
@@ -743,7 +757,25 @@ def _partition_workable(rows, own_stream=None):
             else:
                 user_waiting[number] = row
         elif _row_is_ops_wait(labels):
-            ops_wait[number] = row
+            # #943: a MAINTAINER_ACTION_LABELS label (needs-gatekeeper /
+            # ready-for-review) OVERRIDES ops-wait → workable (action-only I).
+            # Only the full-authority box can action a hand-off, so the hand-off
+            # label must keep the row visible in I, never hidden in W (the
+            # #589/#636 over-count-safe direction — the _gk_handoff_ops_wait_
+            # flagged function already DETECTS this shape, but the partition
+            # itself routed it to W for 2 days, odoo-erp #6294 APK). The
+            # override is unconditional (not authority-gated) because the
+            # function is a pure label partition (#622); on a reduced-authority
+            # box these rows are structurally absent from the obligation set
+            # anyway (_slice_mine_and_handed search-excludes foreign
+            # needs-gatekeeper rows). Additive partition-extension pattern
+            # (#601/#622).
+            names = {(lb or {}).get("name") for lb in (labels or [])
+                     if isinstance(lb, dict)}
+            if any(ml in names for ml in MAINTAINER_ACTION_LABELS):
+                workable[number] = row
+            else:
+                ops_wait[number] = row
         else:
             workable[number] = row
     return workable, user_waiting, ops_wait
