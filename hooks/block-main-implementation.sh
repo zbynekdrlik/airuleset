@@ -1232,15 +1232,26 @@ def cat_files(tk):
 def _is_narrow_readonly_953(tk):
     """#953: a read-only command on 1-2 explicit non-glob non-variable paths."""
     h = tk[0]
-    if h not in ("grep", "cat", "wc", "ls"):
+    if h not in ("grep", "head", "tail", "cat", "wc", "ls", "sed"):
         return False
-    # grep: no recursive flags
+    # sed: only -n mode (print selected lines), never -i (in-place edit)
+    if h == "sed":
+        if any(t == "-i" or t.startswith("-i") for t in tk[1:]):
+            return False
+        if not any(t == "-n" for t in tk[1:]):
+            return False
+    # grep: no recursive flags (incl. --directories)
     if h == "grep":
         for t in tk[1:]:
-            if t in ("-r", "-R", "--recursive", "--dereference-recursive", "-f", "-d"):
+            if t in ("-r", "-R", "--recursive", "--dereference-recursive",
+                     "-f", "-d") or t.startswith("--directories"):
                 return False
             if re.match(r"^-[A-Za-z]+$", t) and ("r" in t[1:] or "R" in t[1:]):
                 return False
+    # head/tail: -c (byte dump) can be arbitrarily large
+    if h in ("head", "tail"):
+        if any(t == "-c" or t.startswith("--bytes") for t in tk[1:]):
+            return False
     # Extract file arguments
     if h == "grep":
         nf = [t for t in tk[1:] if not t.startswith("-")]
@@ -1248,7 +1259,11 @@ def _is_narrow_readonly_953(tk):
         fls = nf if he else nf[1:]
     elif h == "cat":
         fls = cat_files(tk)
+    elif h == "sed":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        fls = nf[1:] if nf else []  # first non-flag = script, rest = files
     else:
+        # head/tail/wc/ls: every non-flag is a file
         fls = [t for t in tk[1:] if not t.startswith("-")]
     if len(fls) > 2:
         return False
