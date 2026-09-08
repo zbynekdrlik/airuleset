@@ -4,7 +4,8 @@ Each test verifies the declarative drop-in render + install lifecycle.
 Uses tmpdir fixtures -- no real systemd, no ssh.
 """
 
-from cli_filedrop_watchdog import (
+from cli_filedrop_watchdog import pathlib
+import (
     render_session_restart_dropin,
     setup_session_restart_dropin,
     configured_session_restart_source,
@@ -197,21 +198,25 @@ class TestSetupDropinFailure:
         )
         assert result is False
 
-    def test_exception_returns_false(self, tmp_path):
-        """An exception in setup returns False (never raises)."""
-        # Use an unwritable parent to trigger the exception path.
-        dropin = tmp_path / "no-such-parent" / "sub" / "dropin.conf"
+    def test_exception_returns_false(self, tmp_path, monkeypatch):
+        """An exception in setup returns False (never raises).
+
+        Deterministic failure injection: the write itself raises. The
+        earlier chmod(0o000) trick is NOT a failure on a root runner
+        (CI run 34226248645 — root ignores mode bits, the write succeeded,
+        setup returned True) — a permission trick is never a portable
+        exception fixture."""
+        dropin = tmp_path / "sub" / "dropin.conf"
         optout = tmp_path / "optout-marker"
         hand = tmp_path / "hand.conf"
-        # Make the parent unreadable/unwritable.
-        (tmp_path / "no-such-parent").mkdir()
-        (tmp_path / "no-such-parent").chmod(0o000)
+
+        def _boom(self, *a, **k):
+            raise OSError("injected write failure")
+        monkeypatch.setattr(pathlib.Path, "write_text", _boom)
         result = setup_session_restart_dropin(
             dropin_path=dropin, optout_path=optout,
             hand_path=hand, daemon_reload_fn=lambda: None,
         )
-        # Restore permissions for cleanup.
-        (tmp_path / "no-such-parent").chmod(0o755)
         assert result is False
 
 
