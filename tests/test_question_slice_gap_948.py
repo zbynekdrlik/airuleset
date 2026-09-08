@@ -225,8 +225,9 @@ class SupplementUnit(unittest.TestCase):
             }
         (d / "discord-questions.json").write_text(json.dumps(entries))
 
-    def test_returns_set_of_open_user_waiting_numbers(self):
-        """Basic: an OPEN needs-answer ticket outside rows is returned."""
+    def test_returns_dict_of_open_user_waiting_numbers(self):
+        """Basic: an OPEN needs-answer ticket outside rows is returned as a
+        dict {number: row_dict} with labels, title, createdAt."""
         cwd = "/fake/repo"
         self._seed_qmap(cwd, [42])
         rows = {}  # empty slice
@@ -234,12 +235,15 @@ class SupplementUnit(unittest.TestCase):
         def runner(argv, cd):
             if "42" in argv:
                 return json.dumps({"labels": _labels("needs-answer"),
-                                   "state": "OPEN"})
+                                   "state": "OPEN",
+                                   "title": "q42",
+                                   "createdAt": "2026-01-01T00:00:00Z"})
             return ""
 
         result = airuleset._question_map_u_supplement(rows, cwd, runner)
-        self.assertIsInstance(result, set)
-        self.assertEqual(result, {42})
+        self.assertIsInstance(result, dict)
+        self.assertIn(42, result)
+        self.assertEqual(result[42].get("title"), "q42")
 
     def test_closed_ticket_excluded(self):
         """MAJOR-1: a CLOSED ticket with needs-answer must NOT inflate U."""
@@ -254,7 +258,7 @@ class SupplementUnit(unittest.TestCase):
             return ""
 
         result = airuleset._question_map_u_supplement(rows, cwd, runner)
-        self.assertEqual(result, set(),
+        self.assertEqual(result, {},
                          "a CLOSED needs-answer ticket must NOT be counted")
 
     def test_ticket_in_rows_skipped(self):
@@ -269,7 +273,7 @@ class SupplementUnit(unittest.TestCase):
             return ""
 
         result = airuleset._question_map_u_supplement(rows, cwd, runner)
-        self.assertEqual(result, set())
+        self.assertEqual(result, {})
         self.assertEqual(len(calls), 0,
                          "runner must NOT be called for a ticket in rows")
 
@@ -283,7 +287,7 @@ class SupplementUnit(unittest.TestCase):
             return ""  # gh failure
 
         result = airuleset._question_map_u_supplement(rows, cwd, runner)
-        self.assertEqual(result, set())
+        self.assertEqual(result, {})
 
     def test_corrupt_map_returns_empty(self):
         """MINOR-4: a corrupt question map is safe."""
@@ -297,7 +301,7 @@ class SupplementUnit(unittest.TestCase):
             return ""
 
         result = airuleset._question_map_u_supplement(rows, cwd, runner)
-        self.assertEqual(result, set())
+        self.assertEqual(result, {})
 
     def test_cap_limits_gh_calls(self):
         """MINOR-3: at most _QMAP_SUPPLEMENT_CAP gh calls."""
@@ -391,8 +395,8 @@ class WaitingListingGap(unittest.TestCase):
 
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
-                 "slice-quals", "--waiting", "--cwd", repo],
-                capture_output=True, text=True,
+                 "slice-quals", "--waiting"],
+                capture_output=True, text=True, cwd=repo,
                 env={**os.environ, "HOME": home,
                      "PATH": "%s:%s" % (bindir, os.environ["PATH"]),
                      "GH_APP_TOKEN_DIR": tokendir})

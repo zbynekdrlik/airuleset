@@ -844,8 +844,8 @@ _QMAP_SUPPLEMENT_CAP = 10
 
 
 def _question_map_u_supplement(rows, root, runner):
-    """#948: the SET of OPEN, user-waiting ticket numbers referenced in the
-    question map but ABSENT from the slice search ``rows``.
+    """#948: a DICT ``{number: row_dict}`` of OPEN, user-waiting tickets
+    referenced in the question map but ABSENT from the slice search ``rows``.
 
     On a shared-gh-identity/app-token box the slice is ``label:stream:<user>``
     only. A ticket authored via the shared token but lacking that label is
@@ -853,10 +853,11 @@ def _question_map_u_supplement(rows, root, runner):
     excludes the ping from the ticketless count (dedup). The ticket falls through
     BOTH paths -> footer ``U 0`` while a real question is pending.
 
-    Returns a SET of issue numbers (ints) so the caller can BOTH add
-    ``len(result)`` to the cache count AND list the members on ``--waiting``
-    — keeping the ONE-derivation invariant (#367/#391). An empty set on any
-    error (fail-safe: never inflate U off an unreadable map or failed gh).
+    Returns a DICT ``{int: {"labels": [...], "title": str, "createdAt": str}}``
+    so the caller can BOTH add ``len(result)`` to the cache count AND merge the
+    rows into the ``--waiting`` listing — keeping the ONE-derivation invariant
+    (#367/#391, #948 review MAJOR-2). An empty dict on any error (fail-safe:
+    never inflate U off an unreadable map or failed gh).
 
     Checks ``state == "OPEN"`` for every fetched ticket (#948 review MAJOR-1):
     a CLOSED ticket with a stale ``needs-answer`` label must never inflate U.
@@ -869,10 +870,10 @@ def _question_map_u_supplement(rows, root, runner):
     try:
         refs = _sb.question_map_ticket_refs(root)
     except Exception:
-        return set()
+        return {}
     if not refs:
-        return set()
-    result = set()
+        return {}
+    result = {}
     checked = 0
     for qn in refs:
         if qn in rows:
@@ -881,7 +882,7 @@ def _question_map_u_supplement(rows, root, runner):
             break
         checked += 1
         raw = runner(["gh", "issue", "view", str(qn),
-                      "--json", "labels,state"], root)
+                      "--json", "labels,state,title,createdAt"], root)
         try:
             obj = json.loads(raw)
         except (ValueError, TypeError):
@@ -894,7 +895,11 @@ def _question_map_u_supplement(rows, root, runner):
             continue
         qlabels = obj.get("labels")
         if _row_is_user_waiting(qlabels):
-            result.add(qn)
+            result[qn] = {
+                "labels": qlabels,
+                "title": obj.get("title", ""),
+                "createdAt": obj.get("createdAt", ""),
+            }
     return result
 
 
