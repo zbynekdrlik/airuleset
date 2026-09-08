@@ -71,10 +71,8 @@ class TestRenderedScriptShape(unittest.TestCase):
             if stripped.startswith('#'):
                 continue
             if 'quotaon' in stripped and '2>/dev/null' in stripped:
-                # OK inside a $(...2>&1...) capture or with || true
+                # OK inside a $(...2>&1...) capture
                 if '2>&1' in stripped:
-                    continue
-                if '|| true' in stripped:
                     continue
                 self.fail(
                     "Bare 2>/dev/null on quotaon: %s" % stripped)
@@ -247,8 +245,8 @@ class TestQuotaBlockExecution(unittest.TestCase):
                              result.returncode))
 
     def test_usage_aware_above_target(self):
-        """When usage exceeds QUOTA_HARD_KIB, setquota must raise the
-        ceiling and warn about drain required."""
+        """When usage exceeds QUOTA_HARD_KIB, setquota must get a raised
+        ceiling (not the bare constant) and warn about drain."""
         from cli_resource_guards import _render_quota_apply_block
         block = _render_quota_apply_block()
 
@@ -263,6 +261,7 @@ class TestQuotaBlockExecution(unittest.TestCase):
             used_kib = 20971520  # 20G
             call_log = os.path.join(tmpdir, 'sq.log')
             expected_hard = (used_kib * 120 + 99) // 100
+            expected_soft = (used_kib * 110 + 99) // 100
 
             stubs = {
                 'findmnt': (
@@ -285,7 +284,7 @@ class TestQuotaBlockExecution(unittest.TestCase):
                 'repquota': (
                     'echo "biguser   -- %d  %d %d'
                     '              0     0     0"'
-                    % (used_kib, expected_hard, expected_hard)
+                    % (used_kib, expected_soft, expected_hard)
                 ),
                 'systemctl': 'exit 0',
                 'apt-get': 'exit 0',
@@ -295,10 +294,87 @@ class TestQuotaBlockExecution(unittest.TestCase):
             bin_dir = self._make_stubs(tmpdir, stubs)
             result = self._run_block(patched, bin_dir)
             combined = result.stdout + result.stderr
+            # Must warn about above-target usage
             self.assertIn("drain required", combined,
-                          "No drain-required warning for above-target user. "
+                          "No drain-required warning. "
                           "stdout=%s stderr=%s"
                           % (result.stdout, result.stderr))
+            # R1: assert actual setquota arguments
+            self.assertTrue(os.path.exists(call_log),
+                            "setquota was never called")
+            calls = open(call_log).read()
+            # Must contain the user-specific per-user call
+            self.assertIn("-u biguser", calls,
+                          "setquota not called for biguser")
+            # The hard limit must be the usage-aware value, not the constant
+            expected_sq = "-u biguser %d %d 0 0" % (
+                expected_soft, expected_hard)
+            self.assertIn(expected_sq, calls,
+                          "setquota did not use usage-aware limits. "
+                          "Expected: %s, Got: %s"
+                          % (expected_sq, calls))
+
+    def test_usage_aware_zero_usage_gets_target(self):
+        """When usage is zero (new account), setquota must apply the
+        fleet target constants."""
+        from cli_resource_guards import (_render_quota_apply_block,
+                                         QUOTA_HARD_KIB, QUOTA_SOFT_KIB)
+        block = _render_quota_apply_block()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, 'home', 'newuser')
+            os.makedirs(os.path.join(home, '.claude'))
+            with open(os.path.join(home, '.claude',
+                                   'airuleset-box-class'), 'w') as f:
+                f.write('shared-stream\n')
+
+            patched = self._patch_script_for_test(block, tmpdir)
+            call_log = os.path.join(tmpdir, 'sq.log')
+
+            stubs = {
+                'findmnt': (
+                    'case "$2" in\n'
+                    '  SOURCE) echo "/dev/sda1";;\n'
+                    '  FSTYPE) echo "ext4";;\n'
+                    'esac'
+                ),
+                'modprobe': 'exit 0',
+                'quotaon': (
+                    'case "$1" in\n'
+                    '  -pu) echo "/dev/sda1 [/]: user quotas are on";\n'
+                    '       exit 0;;\n'
+                    '  *) exit 0;;\n'
+                    'esac'
+                ),
+                'setquota': (
+                    'echo "SETQUOTA: $*" >> "%s"\nexit 0' % call_log
+                ),
+                'repquota': (
+                    'echo "newuser   --  0  %d %d'
+                    '              0     0     0"'
+                    % (QUOTA_SOFT_KIB, QUOTA_HARD_KIB)
+                ),
+                'systemctl': 'exit 0',
+                'apt-get': 'exit 0',
+                'mount': 'exit 0',
+                'quotacheck': 'exit 0',
+            }
+            bin_dir = self._make_stubs(tmpdir, stubs)
+            result = self._run_block(patched, bin_dir)
+            # Must NOT warn about drain (usage is zero)
+            combined = result.stdout + result.stderr
+            self.assertNotIn("drain required", combined,
+                             "False drain-required for zero-usage user")
+            # Must apply fleet targets
+            self.assertTrue(os.path.exists(call_log),
+                            "setquota was never called")
+            calls = open(call_log).read()
+            expected_sq = "-u newuser %d %d 0 0" % (
+                QUOTA_SOFT_KIB, QUOTA_HARD_KIB)
+            self.assertIn(expected_sq, calls,
+                          "setquota did not use fleet targets for zero-usage. "
+                          "Expected: %s, Got: %s"
+                          % (expected_sq, calls))
 
 
 if __name__ == "__main__":
