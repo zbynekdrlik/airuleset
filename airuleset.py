@@ -2821,6 +2821,11 @@ def cmd_tickets_status(args):
                 entry["gk"] = gk
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
+                # #948: question-map-aware U supplement — see the full
+                # docstring on `_question_map_u_supplement`. Returns a SET
+                # so `--waiting` can list the same members (#367 invariant).
+                _qmap_extra = _question_map_u_supplement(rows, root, _out)
+                entry["user_waiting"] += len(_qmap_extra)
                 # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
                 # for the red `· W N!` footer signal and by block-dispatch-over-
                 # wdrain.sh (which reads ops_wait directly, not this bool).
@@ -6550,6 +6555,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
     _acceptance_present_set as _acceptance_present_set,
+    _question_map_u_supplement as _question_map_u_supplement,
     _comment_carries_question as _comment_carries_question,
     _issue_question_comment_state as _issue_question_comment_state,
     _no_question_flagged as _no_question_flagged,
