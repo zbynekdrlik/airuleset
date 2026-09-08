@@ -267,12 +267,33 @@ if isinstance(cc, dict) and (now - (cc.get("ts") or 0)) < 6 * 3600:
 # {{REPO_DIR}} import, say), those still render instead of losing the WHOLE
 # line, matching this shim's pre-existing "never let one segment's failure
 # take down the others" contract.
+def _shim_log(msg):
+    # #956: bounded diagnostic for silent shim failures (cap 64 KiB).
+    _lp = os.path.expanduser("~/.claude/tickets-status/shim-errors.log")
+    try:
+        os.makedirs(os.path.dirname(_lp), exist_ok=True)
+        try:
+            _sz = os.path.getsize(_lp)
+        except OSError:
+            _sz = 0
+        if _sz > 65536:
+            return
+        with open(_lp, "a") as _fh:
+            _fh.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), msg))
+    except Exception:  # airuleset:script-ok diagnostic logger must never crash the shim render
+        pass
 line = "  ".join(segs)
 try:
     import sys
     sys.path.insert(0, "{{REPO_DIR}}")
-    import statusbar
-    cwd = ((d.get("workspace") or {}).get("current_dir")) or d.get("cwd") or ""
+    try:
+        import statusbar
+    except ImportError as _ie:
+        _shim_log("import-error %s" % _ie)
+        raise
+    cwd = ((d.get("workspace") or {}).get("current_dir")) or d.get("cwd") or os.environ.get("PWD") or ""
+    if not cwd:
+        _shim_log("cwd-empty keys=%s" % ",".join(sorted(d.keys())))
     # --- which model this session runs: 'opus'/'sonnet'/'fable'/'haiku',
     # highlighted when it differs from this box's MANAGED_MODEL default
     # (#133 -- passive replacement for the #37 model-cost signal).

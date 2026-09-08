@@ -689,3 +689,110 @@ class TestSetupCavemanRegistersMarketplaceBeforeInstall(TestCase):
             ok = airuleset.setup_caveman()   # must NOT raise
         self.assertFalse(ok, "a genuine install failure must still be "
                           "reported even when the mode-file read also fails")
+
+
+class TestShimColdStart956(TestCase):
+    """#956: after `claude --resume` the shim's cwd resolution chain falls
+    through to "" when the JSON has neither workspace.current_dir nor cwd,
+    so tickets_segment("") returns "" without spawning a refresh.
+
+    These tests run the RENDERED shim (real REPO_DIR so `import statusbar`
+    succeeds) under a fake HOME and assert:
+      - with only `cwd` key → spawn marker appears
+      - with neither key but PWD set → spawn marker appears (the fix)
+      - with nothing at all → shim-errors.log written (the diagnostic)
+    """
+
+    def _run_rendered_shim(self, payload, env_overrides=None):
+        """Run the RENDERED shim as a subprocess under a fake HOME."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            # Render the shim with the real REPO_DIR so import statusbar works
+            shim_content = airuleset.render_caveman_shim()
+            shim = os.path.join(home, "shim.sh")
+            with open(shim, "w") as fh:
+                fh.write(shim_content)
+            env = dict(os.environ)
+            env["HOME"] = home
+            env.pop("TMUX_PANE", None)
+            if env_overrides:
+                env.update(env_overrides)
+            r = subprocess.run(
+                ["bash", shim],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            # Collect spawn markers
+            ts_dir = os.path.join(home, ".claude", "tickets-status")
+            markers = []
+            if os.path.isdir(ts_dir):
+                markers = [f for f in os.listdir(ts_dir) if f.startswith(".spawn-")]
+            log_path = os.path.join(ts_dir, "shim-errors.log")
+            log_content = ""
+            if os.path.isfile(log_path):
+                with open(log_path) as fh:
+                    log_content = fh.read()
+            return r, markers, log_content
+
+    def test_cwd_key_produces_spawn_marker(self):
+        """When JSON has `cwd`, _spawn_refresh must fire."""
+        r, markers, _ = self._run_rendered_shim(
+            {"cwd": "/tmp/test-repo-956"},
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(len(markers) > 0,
+                        "spawn marker must appear when cwd is in JSON")
+
+    def test_pwd_fallback_produces_spawn_marker(self):
+        """When JSON has NEITHER workspace.current_dir NOR cwd, the shim
+        must fall back to $PWD for cwd resolution (#956)."""
+        r, markers, _ = self._run_rendered_shim(
+            {"rate_limits": {"five_hour": {"used_percentage": 10}}},
+            env_overrides={"PWD": "/tmp/test-repo-956-pwd"},
+        )
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(len(markers) > 0,
+                        "spawn marker must appear from PWD fallback")
+
+    def test_import_error_logs_diagnostic(self):
+        """When import statusbar fails (broken REPO_DIR), the shim must
+        log to shim-errors.log (#956 diagnostic)."""
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as home:
+            # Write the shim with a BOGUS repo path so import statusbar fails
+            shim_content = (airuleset.CAVEMAN_SHIM_CONTENT
+                            .replace("{{REPO_DIR}}", "/nonexistent/repo/path")
+                            .replace("{{MANAGED_MODEL}}", "claude-fable-5-1[1m]"))
+            shim = os.path.join(home, "shim.sh")
+            with open(shim, "w") as fh:
+                fh.write(shim_content)
+            env = dict(os.environ)
+            env["HOME"] = home
+            env.pop("TMUX_PANE", None)
+            # cwd=home so Python doesn't find statusbar.py in the real repo
+            r = subprocess.run(
+                ["bash", shim],
+                input='{"cwd": "/tmp/test"}',
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=home,
+            )
+            self.assertEqual(r.returncode, 0)
+            log_path = os.path.join(
+                home, ".claude", "tickets-status", "shim-errors.log")
+            self.assertTrue(os.path.isfile(log_path),
+                            "shim-errors.log must be created on import failure")
+            with open(log_path) as fh:
+                log = fh.read()
+            self.assertIn("import-error", log,
+                          "shim-errors.log must record the import failure")
