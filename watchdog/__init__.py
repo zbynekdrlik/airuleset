@@ -4713,6 +4713,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         sr_state = state.setdefault("session_restart", {})
         sr_logs = []
         sr_enabled = _sr.action_enabled()
+        # #947 follow-on: log the effective state + source for diagnostics.
+        from cli_filedrop_watchdog import effective_session_restart_state
+        _sr_action, _sr_source = effective_session_restart_state()
+        sr_logs.append("session-restart: action=%s source=%s (env=%s)"
+                       % (_sr_action, _sr_source,
+                          "on" if sr_enabled else "off"))
 
         # --- PHASE 2: walk persisted exit-sent entries (R2 fix) ----------- #
         # After /exit the pane hosts a shell, so it drops out of
