@@ -4,20 +4,19 @@ Issue #945: sub-dev streams must merge via `scripts/stream_merge_guard.py`,
 never a bare `gh pr merge`. The hook gates on `airuleset.resolve_authority(cwd)`
 — only reduced-authority boxes are blocked; full-authority boxes (gk/dev1) pass.
 
-Tests are hermetic: authority is controlled by patching
-`cli_quals.resolve_authority` (the same function `airuleset.resolve_authority`
-delegates to). The hook reads stdin (`.tool_input.command`) per the CC contract.
+Tests are hermetic: authority is controlled via a symlinked hook dir structure.
+The hook resolves REPO_ROOT_DIR as dirname(dirname(BASH_SOURCE[0])); by
+symlinking tmpdir/hooks/<hook> -> real hook, REPO_ROOT_DIR = tmpdir, where a
+shim airuleset.py returns the controlled authority (sys.path.insert(0, tmpdir)
+ahead of cwd). The hook reads stdin (.tool_input.command) per the CC contract.
 """
 
 import json
 import os
 import subprocess
-import sys
 import textwrap
 from pathlib import Path
 from unittest import TestCase, main
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-stream-direct-pr-merge.sh"
@@ -29,48 +28,18 @@ def _run_hook(command, authority="fork-no-merge"):
     Returns (returncode, stderr_text).
     """
     payload = json.dumps({"tool_input": {"command": command}})
-
-    # Patch resolve_authority at the module level so the inline python
-    # inside the hook picks it up when it imports airuleset.
-    # We achieve this by setting an env var the hook's inline python reads.
     env = dict(os.environ)
-    env["_TEST_AUTHORITY_OVERRIDE"] = authority if authority else ""
-
-    # We need to make the hook's python see our override. The cleanest way
-    # is to write a tiny wrapper that patches resolve_authority before the
-    # hook's inline python runs. But since the hook runs python3 inline,
-    # we can inject via PYTHONSTARTUP — but that's fragile.
-    #
-    # Instead: create a temporary airuleset.py shim that the hook will
-    # find via its REPO_ROOT_DIR. But that's complex.
-    #
-    # Simplest approach: the hook resolves authority via sys.path +
-    # `import airuleset`. We can control this by putting a shim on the path
-    # that overrides resolve_authority.
-    #
-    # Actually, the cleanest hermetic approach is to make a fake repo dir
-    # with a minimal airuleset.py that returns the controlled authority.
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Write a minimal airuleset.py shim
+        # Write a minimal airuleset.py shim that returns the controlled authority.
         shim = Path(tmpdir) / "airuleset.py"
         shim.write_text(textwrap.dedent(f"""\
             def resolve_authority(cwd=None):
                 return {repr(authority)}
         """))
 
-        # Run the hook, pointing REPO_ROOT_DIR at our shim dir by
-        # manipulating the hook's HOOK_DIR resolution. The hook does:
-        #   HOOK_DIR=$(dirname BASH_SOURCE[0])
-        #   REPO_ROOT_DIR=$(dirname HOOK_DIR)
-        # So if we run the hook from its real path, REPO_ROOT_DIR will be
-        # the real airuleset root. We need to override this.
-        #
-        # The hook passes REPO_ROOT_DIR as argv[3] to python. We can't
-        # easily change that without modifying the hook. But we CAN create
-        # a symlink structure: tmpdir/hooks/hook.sh -> real hook, so
-        # dirname(dirname(hook)) = tmpdir which has our shim.
+        # Symlink tmpdir/hooks/<hook> -> real hook so REPO_ROOT_DIR = tmpdir.
         hooks_dir = Path(tmpdir) / "hooks"
         hooks_dir.mkdir()
         hook_link = hooks_dir / "block-stream-direct-pr-merge.sh"
@@ -141,6 +110,28 @@ class TestAuthorityResolutionFailure(TestCase):
         rc, _ = _run_hook("gh pr merge 42", authority=None)
         self.assertEqual(rc, 0)
 
+    def test_import_failure_allowed(self):
+        """When the airuleset.py shim cannot be imported (no shim at all),
+        the hook's except clause returns None -> exit 0 (fail-open)."""
+        payload = json.dumps({"tool_input": {"command": "gh pr merge 42"}})
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # NO airuleset.py shim — import will fail.
+            hooks_dir = Path(tmpdir) / "hooks"
+            hooks_dir.mkdir()
+            hook_link = hooks_dir / "block-stream-direct-pr-merge.sh"
+            hook_link.symlink_to(HOOK)
+
+            result = subprocess.run(
+                ["bash", str(hook_link)],
+                input=payload,
+                capture_output=True,
+                text=True,
+                cwd=str(tmpdir),  # cwd with no airuleset.py either
+                timeout=10,
+            )
+        self.assertEqual(result.returncode, 0)
+
 
 class TestGuardedMergeAllowed(TestCase):
     """The sanctioned path via stream_merge_guard.py is allowed."""
@@ -163,7 +154,7 @@ class TestGuardedMergeAllowed(TestCase):
 
 
 class TestBypass(TestCase):
-    """The inline bypass marker allows the command."""
+    """The inline bypass marker allows the command (quote-aware, logged)."""
 
     def test_bypass_marker(self):
         rc, _ = _run_hook(
@@ -171,6 +162,15 @@ class TestBypass(TestCase):
             authority="fork-no-merge",
         )
         self.assertEqual(rc, 0)
+
+    def test_bypass_marker_inside_quotes_does_not_bypass(self):
+        """F1 fix: a bypass marker MENTIONED inside a quoted string must NOT
+        disarm the guard for a real `gh pr merge` elsewhere on the line."""
+        rc, stderr = _run_hook(
+            'echo "# airuleset:stream-merge-ok" && gh pr merge 42',
+            authority="fork-no-merge",
+        )
+        self.assertEqual(rc, 2, f"Quoted bypass marker should not disarm. stderr: {stderr}")
 
 
 class TestIrrelevantCommands(TestCase):
@@ -219,8 +219,28 @@ class TestQuotedMergeNotBlocked(TestCase):
         self.assertEqual(rc, 0)
 
 
+class TestHeredocNotBlocked(TestCase):
+    """F2 fix: heredoc bodies mentioning `gh pr merge` must not false-block."""
+
+    def test_cat_heredoc_allowed(self):
+        """A cat heredoc with gh pr merge in the body is data, not a command."""
+        rc, _ = _run_hook(
+            "cat > /tmp/body.md <<'EOF'\ngh pr merge 42\nEOF",
+            authority="fork-no-merge",
+        )
+        self.assertEqual(rc, 0)
+
+    def test_gh_issue_comment_heredoc_allowed(self):
+        """A gh issue comment with a heredoc body mentioning merge is data."""
+        rc, _ = _run_hook(
+            'gh issue comment 5 --body "$(cat <<\'EOF\'\nuse gh pr merge 42\nEOF\n)"',
+            authority="fork-no-merge",
+        )
+        self.assertEqual(rc, 0)
+
+
 class TestEnvPrefixStripped(TestCase):
-    """Environment assignments and sudo/env prefixes are stripped."""
+    """Environment assignments and wrapper prefixes are stripped."""
 
     def test_env_prefix(self):
         rc, _ = _run_hook(
@@ -232,6 +252,30 @@ class TestEnvPrefixStripped(TestCase):
     def test_sudo_prefix(self):
         rc, _ = _run_hook(
             "sudo gh pr merge 42",
+            authority="fork-no-merge",
+        )
+        self.assertEqual(rc, 2)
+
+    def test_command_prefix(self):
+        """F3 fix: `command gh pr merge` is detected."""
+        rc, _ = _run_hook(
+            "command gh pr merge 42",
+            authority="fork-no-merge",
+        )
+        self.assertEqual(rc, 2)
+
+    def test_nohup_prefix(self):
+        """F3 fix: `nohup gh pr merge` is detected."""
+        rc, _ = _run_hook(
+            "nohup gh pr merge 42",
+            authority="fork-no-merge",
+        )
+        self.assertEqual(rc, 2)
+
+    def test_time_prefix(self):
+        """F3 fix: `time gh pr merge` is detected."""
+        rc, _ = _run_hook(
+            "time gh pr merge 42",
             authority="fork-no-merge",
         )
         self.assertEqual(rc, 2)

@@ -17,17 +17,25 @@ set -euo pipefail
 #   - ONLY reduced-authority boxes are gated (`airuleset.resolve_authority(cwd)`
 #     != `full`; same single-source-of-truth as sibling hooks).
 #   - Full-authority boxes (gk/controller/dev1) are UNAFFECTED (exit 0).
-#   - Authority resolution failure → exit 0 (fail-open, degrade-to-allow,
+#   - Authority resolution failure -> exit 0 (fail-open, degrade-to-allow,
 #     same bias as block-gk-request-without-selfservice.sh / #390).
 #   - `gh pr merge --admin` is ALREADY blocked universally by
 #     block-history-rewrite.sh — this hook is additive (bare merge).
 #
 # Detection: tokenizes the command with Python's shlex (quote-aware, same
 # approach as block-history-rewrite.sh) and checks for `gh`, `pr`, `merge`
-# as actual argv tokens in any command segment.
+# as actual argv tokens in any command segment. Heredoc bodies are stripped
+# before segment splitting to prevent false blocks on documentation text.
+#
+# Accepted residuals (under-block, model-discipline not adversary boundary):
+#   - `bash -c "gh pr merge 42"` (interpreter payload)
+#   - `eval "gh pr merge 42"` (eval)
+#   - `gh api -X PUT repos/o/r/pulls/42/merge` (API merge)
+#   - subshell `(gh pr merge 42)` / brace group `{ gh pr merge 42; }`
 #
 # Exit code 2 = block the tool call.
-# Bypass: `# airuleset:stream-merge-ok <reason>` inline (logged).
+# Bypass: `# airuleset:stream-merge-ok <reason>` inline, logged to
+#   ~/devel/airuleset/audits/stream-merge-bypasses.log.
 
 INPUT=$(cat 2>/dev/null || echo "")
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
@@ -40,8 +48,30 @@ case "$CMD" in
     *) exit 0 ;;
 esac
 
-# Bypass: inline marker (logged).
-case "$CMD" in *"airuleset:stream-merge-ok"*) exit 0 ;; esac
+# Bypass: inline marker — quote-stripped before matching (F1 fix, porting the
+# block-history-rewrite.sh:62-81 pattern so a marker MENTIONED inside a quoted
+# string never disarms the guard for a real `gh pr merge` elsewhere).
+BYPASS_REASON=$(printf '%s' "$CMD" | python3 -c 'import re,sys
+cmd=sys.stdin.read()
+SQ=chr(39)
+DQ=chr(34)
+unquoted=re.sub(SQ+"[^"+SQ+"]*"+SQ, "", cmd)
+unquoted=re.sub(DQ+"[^"+DQ+"]*"+DQ, "", unquoted)
+m=None
+for mm in re.finditer(r"#[ \t]*airuleset:stream-merge-ok[ \t]+([^\n]+)", unquoted):
+    m=mm
+if m:
+    print(m.group(1).rstrip())
+' 2>/dev/null || echo "")
+
+if [ -n "$BYPASS_REASON" ]; then
+    AUDIT_LOG="$HOME/devel/airuleset/audits/stream-merge-bypasses.log"
+    mkdir -p "$(dirname "$AUDIT_LOG")" 2>/dev/null || true
+    {
+        echo "$(date -Iseconds)  cwd=$(pwd)  inline-bypass  # airuleset:stream-merge-ok $BYPASS_REASON"
+    } >> "$AUDIT_LOG" 2>/dev/null || true
+    exit 0
+fi
 
 # #682: route all stdout to stderr so the model reads the block reason.
 exec 1>&2
@@ -65,7 +95,7 @@ repo_dir = sys.argv[3] if len(sys.argv) > 3 else ""
 
 # --- authority gate -------------------------------------------------------
 # Engage ONLY for a reduced sub-dev stream account. Full-authority or
-# unresolvable → exit 0 (degrade-to-allow, same bias as #390/#516).
+# unresolvable -> exit 0 (degrade-to-allow, same bias as #390/#516).
 
 def _reduced_authority():
     try:
@@ -84,13 +114,51 @@ if not reduced:
     sys.exit(0)
 
 
-# --- command classification ------------------------------------------------
-# Split on shell statement separators, tokenize with shlex, check for
-# `gh pr merge` as actual argv tokens (not inside quoted strings).
+# --- heredoc body stripping (F2 fix) --------------------------------------
+# Strip heredoc bodies BEFORE segment splitting so that documentation text
+# like `gh pr merge 42` inside a heredoc does not false-block.
+# Non-executing consumers (cat/tee) have their bodies blanked; executing
+# consumers (bash/sh) are left scanned (documented residual).
 
-segments = re.split(r'&&|\|\||[;&|]|\n', cmd)
+_HEREDOC_RE = re.compile(
+    r"<<-?[ \t]*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?[ \t]*\n"
+    r"(.*?)\n[ \t]*\1(?:\n|$)",
+    re.DOTALL,
+)
+_EXEC_CONSUMERS = {"bash", "sh", "zsh", "dash", "ksh", "python3", "python", "perl", "ruby"}
+
+
+def _strip_heredocs(text):
+    """Blank non-executing heredoc bodies to prevent false blocks."""
+    def _replacer(m):
+        # Check the consumer: if it's an executing consumer, keep the body
+        # for scanning. Otherwise blank it.
+        start = m.start()
+        # Look backwards for the consumer command word
+        prefix = text[:start].rstrip()
+        consumer = prefix.split()[-1] if prefix.split() else ""
+        consumer = consumer.split("/")[-1]  # strip path
+        if consumer in _EXEC_CONSUMERS:
+            return m.group(0)  # keep for scanning
+        # Blank the body, keep the delimiters
+        delim = m.group(1)
+        return "<<" + delim + "\n" + delim + "\n"
+    return _HEREDOC_RE.sub(_replacer, text)
+
+
+cmd_clean = _strip_heredocs(cmd)
+
+
+# --- command classification ------------------------------------------------
+# Split on shell statement separators (quote-aware via _strip_comment +
+# shlex), check for `gh pr merge` as actual argv tokens.
+
+segments = re.split(r'&&|\|\||[;&|]|\n', cmd_clean)
 
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+# F3 fix: extended wrapper set (per #817 lesson from git_write_classify.py).
+_WRAPPERS = {"sudo", "env", "command", "nohup", "time", "nice", "exec"}
 
 
 def _strip_comment(text):
@@ -135,9 +203,9 @@ def _tokens(segment):
 
 
 def _strip_prefix(tk):
-    """Drop leading sudo/env and VAR=val assignments."""
+    """Drop leading wrappers and VAR=val assignments."""
     i = 0
-    while i < len(tk) and (tk[i] in ("sudo", "env") or ASSIGN_RE.match(tk[i])):
+    while i < len(tk) and (tk[i] in _WRAPPERS or ASSIGN_RE.match(tk[i])):
         i += 1
     return tk[i:]
 
