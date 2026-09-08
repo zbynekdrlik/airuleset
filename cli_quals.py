@@ -1169,8 +1169,10 @@ def _stream_self_login():
     (``_is_gh_app_token_box()`` true but the active auth is a PAT)
     made this function return ``STREAM_APP_BOT_LOGIN`` instead of the
     real PAT login — every own-comment comparison then failed (wrong
-    identity), producing ``_bounce_round()`` = 1 and invisible own
-    comments in ``_issue_comment_ages()``. Fixed by validating the
+    identity), producing invisible own comments in
+    ``_issue_comment_ages()`` (``_bounce_round`` no longer uses
+    self_login — it counts prio:bounce events since #942). Fixed by
+    validating the
     App-token detection: if ``_gh_login()`` succeeds (returns a real
     login), the box is NOT operating as an App-token box (a genuine
     App token makes ``gh api user`` 403 → ``_gh_login()`` = None)."""
@@ -2461,12 +2463,15 @@ def _bounce_round(number, self_login, cwd=None, runner=None, repo=None):
     run = runner or airuleset._gh_out
 
     # 1. Count prio:bounce label-add events from the issue timeline (#942).
-    bounce_adds = 0
-    if repo:
-        events_raw = run("api",
-                         "repos/%s/issues/%s/events" % (repo, number),
-                         "--paginate", cwd=cwd, timeout=30)
-        bounce_adds = _count_bounce_label_events(events_raw)
+    # When repo is given, build the explicit path; otherwise use gh's
+    # {owner}/{repo} template variables resolved from the cwd's git remote
+    # (F1 review finding: repo=None must not silently skip the events call).
+    events_path = ("repos/%s/issues/%s/events" % (repo, number)
+                   if repo
+                   else "repos/{owner}/{repo}/issues/%s/events" % number)
+    events_raw = run("api", events_path,
+                     "--paginate", cwd=cwd, timeout=30)
+    bounce_adds = _count_bounce_label_events(events_raw)
 
     rnd = bounce_adds + 1
 

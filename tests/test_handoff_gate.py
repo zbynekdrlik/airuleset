@@ -68,14 +68,17 @@ class TestBounceRoundEvents942(unittest.TestCase):
     formula over-counts.  The events-based formula counts only actual gatekeeper
     bounces (prio:bounce labeled events), eliminating the divergence."""
 
-    def _fake_runner(self, events, labels=None):
-        """Return a runner that serves events for ``gh api`` and labels for
+    def _fake_runner(self, events, labels=None, comments=None):
+        """Return a runner that serves events for ``gh api`` and labels
+        (+ optional comments, to prove they are ignored) for
         ``gh issue view``."""
-        obj_labels = {"labels": [{"name": lb} for lb in (labels or [])]}
+        obj_view = {"labels": [{"name": lb} for lb in (labels or [])]}
+        if comments is not None:
+            obj_view["comments"] = comments
         def runner(*args, **kwargs):
             if args and args[0] == "api":
                 return json.dumps(events)
-            return json.dumps(obj_labels)
+            return json.dumps(obj_view)
         return runner
 
     def test_gate_fail_rfr_not_inflated(self):
@@ -84,11 +87,18 @@ class TestBounceRoundEvents942(unittest.TestCase):
         This is the exact odoo-erp#6508 scenario: the stream posted two
         READY-FOR-REVIEW comments (one from a gate-FAIL iteration that left
         a superseded draft), but the gatekeeper only bounced once (one
-        prio:bounce label-add event)."""
+        prio:bounce label-add event).  The RFR comments are served in the
+        fixture to prove they are genuinely ignored (F2 review finding)."""
         events = [
             {"event": "labeled", "label": {"name": "prio:bounce"}},
         ]
-        r = self._fake_runner(events, labels=["prio:bounce"])
+        # Two RFR comments present — old formula would return round 3.
+        rfr_comments = [
+            {"author": {"login": "b"}, "body": "READY-FOR-REVIEW: x"},
+            {"author": {"login": "b"}, "body": "READY-FOR-REVIEW: y"},
+        ]
+        r = self._fake_runner(events, labels=["prio:bounce"],
+                              comments=rfr_comments)
         self.assertEqual(2, cli_quals._bounce_round(
             1, "b", runner=r, repo="owner/name"))
 
@@ -131,6 +141,17 @@ class TestBounceRoundEvents942(unittest.TestCase):
             return ""
         self.assertEqual(1, cli_quals._bounce_round(
             1, "b", runner=runner, repo="owner/name"))
+
+    def test_repo_none_still_fetches_events(self):
+        """When repo=None, the events API uses {owner}/{repo} template
+        (F1 review finding: must not silently skip the events call)."""
+        events = [
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ]
+        r = self._fake_runner(events, labels=["prio:bounce"])
+        rnd = cli_quals._bounce_round(1, "b", runner=r, repo=None)
+        self.assertEqual(2, rnd,
+                         "repo=None must still count events via template")
 
 
 class TestValidateTable(unittest.TestCase):

@@ -4,8 +4,10 @@ stray App-token directory.
 Root cause: _stream_self_login() checks _is_gh_app_token_box() (directory
 existence only), and when True returns STREAM_APP_BOT_LOGIN unconditionally
 — even when the active gh auth is a PAT (kvaskodev), not an App token.
-This makes _bounce_round() unable to match own prior RFR comments
-(authored by the PAT login), producing round=1 instead of the true round.
+This made _issue_comment_ages() unable to match own prior comments
+(authored by the PAT login). _bounce_round() no longer depends on
+self_login (it counts prio:bounce events since #942), but the identity
+fix remains important for _issue_comment_ages().
 
 The fix validates the App-token-box detection: if _gh_login() returns a
 real login (not None), the box is operating as a PAT box and the stray
