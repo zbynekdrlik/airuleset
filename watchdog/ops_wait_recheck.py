@@ -521,6 +521,17 @@ def _converge_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _deploy_target_numbers(members):
+    """#944: the subset of `_member_numbers` flagged `deploy_target` — a W
+    member whose Ops-wait-target event text names a deploy/release. Only the
+    structured dict shape carries the flag, so a legacy int list yields an
+    EMPTY list (no deploy-target clause — the safe/unchanged direction,
+    exactly like `_stale_numbers`)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("deploy_target")
+            and isinstance(m.get("number"), int)]
+
+
 def _no_target_numbers(members):
     """#881: the subset of `_member_numbers` flagged `no-target!` — a W member
     with no valid `Ops-wait-target:` marker. The session must set a target or
@@ -764,7 +775,8 @@ _W_TRIGGER = (
     "`ops-wait` s dôkazom; mis-shape → owner needs-owner-action U #601 / gk #636.")
 
 
-def _flag_items(w_members, release_landed, stagnation_count=0):
+def _flag_items(w_members, release_landed, stagnation_count=0,
+                deploy_window=None, deploy_miss=None):
     """Self-contained compact flag sentences for the fired W sub-categories
     (#714) -- each carries its identifying token + doctrine ticket # + a COUNT,
     NEVER a member enumeration (the session gets WHICH members, tagged, from
@@ -774,7 +786,11 @@ def _flag_items(w_members, release_landed, stagnation_count=0):
 
     #914: `stagnation_count` — the consecutive non-shrinking nudge count from
     `_recheck_decision`; a positive value fires the W-STAGNATION flag (the
-    LOUD signal the owner asked for)."""
+    LOUD signal the owner asked for).
+
+    #944: `deploy_window` — the deploy-target W member numbers whose PROD is
+    behind main AND a deploy window is currently open -> GATEKEEPER-ACTION.
+    `deploy_miss` — same but window has passed -> owner ping."""
     items = []
     # #914 — W-STAGNATION clause, FIRST (with W-OVERFLOW) so it survives the
     # greedy NUDGE_MAX_CHARS cap. A non-shrinking W for multiple nudge periods
@@ -850,6 +866,19 @@ def _flag_items(w_members, release_landed, stagnation_count=0):
         if len(landed) > RELEASE_LANDED_OWNER_ASK_N:
             it += ", nad %d zhrň ownerovi ❓" % RELEASE_LANDED_OWNER_ASK_N
         items.append(it + ".")
+    # #944 — deploy-state watch: main > PROD with an open/missed window.
+    dw = [n for n in (deploy_window or [])
+          if isinstance(n, int) and not isinstance(n, bool)]
+    if dw:
+        items.append(
+            "DEPLOY-WINDOW %d (#944 -- main > PROD, okno OTVORENÉ: "
+            "postni GATEKEEPER-ACTION + needs-gatekeeper)." % len(dw))
+    dm = [n for n in (deploy_miss or [])
+          if isinstance(n, int) and not isinstance(n, bool)]
+    if dm:
+        items.append(
+            "DEPLOY-MISS %d (#944 -- main > PROD, okno PREŠLO bez "
+            "deploya: ping ownerovi ❓)." % len(dm))
     return items
 
 
@@ -894,7 +923,7 @@ _UNPARK_AUDIT_TRIGGER = (
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
                 release_landed=None, discuss_audit=False, unpark_audit_n=0,
-                stagnation_count=0):
+                stagnation_count=0, deploy_window=None, deploy_miss=None):
     """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
     per-member enumeration + full-doctrine wall that parked orphaned in the
     incident). Carries the `stuck-check: ` prefix (janitor own-payload
@@ -935,7 +964,9 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     optional = []
     if w_count:
         optional.extend(_flag_items(w_list, release_landed,
-                                    stagnation_count=stagnation_count))
+                                    stagnation_count=stagnation_count,
+                                    deploy_window=deploy_window,
+                                    deploy_miss=deploy_miss))
     if discuss_audit:
         optional.append(_DISCUSS_TRIGGER)
     # #753 (b): the acceptance-unpark audit — only when there ARE acceptance-parked
@@ -1011,7 +1042,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                           dry_run, handled, ops_wait_fetch, state,
                           sleep_fn=None, cadence=None, i_count=None,
                           release_state_fetch=None, captured=None,
-                          batch_collect=None):
+                          batch_collect=None, deploy_state_fetch=None):
     """Audit ONE armed candidate pane's partition (I→W/U + W→I) and, on cadence,
     deliver ONE verified re-audit nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -1196,6 +1227,37 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
             except Exception:
                 rstate = None
     landed = rel_shaped if _release_train_drained(rstate) else None
+    # #944: deploy-state watch — read the deploy state ONLY when a
+    # deploy-target member exists AND the seam is wired, through a per-repo
+    # TTL cache (one fetch per repo per TTL). Classify into window-open vs
+    # window-missed numbers for the nudge text's DEPLOY-WINDOW / DEPLOY-MISS
+    # clauses. Unreadable / unwired → empty lists → no flag (fail-safe).
+    deploy_window_nums = []
+    deploy_miss_nums = []
+    dep_targets = _deploy_target_numbers(members)
+    if dep_targets and deploy_state_fetch is not None:
+        try:
+            ds = _cached_member_fetch(
+                cwd, deploy_state_fetch, state, now,
+                "deploy_state_cache", ttl=OPS_WAIT_FETCH_TTL_S,
+                fail_ttl=OPS_WAIT_FETCH_FAIL_TTL_S)
+        except Exception:
+            ds = None
+        if isinstance(ds, list) and ds:
+            # deploy_state_fetch returns a single-element list with the
+            # state dict: [{"main_version": ..., "prod_version": ...,
+            #   "window_open": bool, "window_passed": bool}]
+            dstate = ds[0] if isinstance(ds[0], dict) else {}
+            from watchdog import release_watch
+            decision = release_watch.deploy_watch_decision(
+                dstate.get("main_version"),
+                dstate.get("prod_version"),
+                dstate.get("window_open", False),
+                dstate.get("window_passed", False))
+            if decision == "window-open":
+                deploy_window_nums = dep_targets
+            elif decision == "window-missed":
+                deploy_miss_nums = dep_targets
     # #695: the DISCUSS-AUDIT clause scope is resolved HERE, in the nudge
     # branch only (a per-cwd git-remote read at most ~once a day per pane),
     # never on the per-sweep hot path.
@@ -1207,7 +1269,9 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                        discuss_audit=_dscope,
                        unpark_audit_n=(len(_acceptance_numbers(members))
                                        if _dscope else 0),
-                       stagnation_count=stag_count)
+                       stagnation_count=stag_count,
+                       deploy_window=deploy_window_nums,
+                       deploy_miss=deploy_miss_nums)
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_nr=new_rec, _w=wrecs, _s=sid, _n=now, _h=handled,
