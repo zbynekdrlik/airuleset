@@ -41,3 +41,10 @@ The close-time gate (`discuss_close_guard.py`) recognises:
 The cross-stream rules for COMPOSE (what a message must contain) and
 APPROVAL (every client message approved by the owner before posting) live
 in the companion `handover-compose.md` in this directory.
+
+## Client board tasks — project.task formatting
+
+The rules for HOW a stream writes to a client's Odoo project board
+(task name language, description format, Verifikácia notes, stage
+discipline, no assignee, no @mention) live in the companion
+`client-board-tasks.md` in this directory.

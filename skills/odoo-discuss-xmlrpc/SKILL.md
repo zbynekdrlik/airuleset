@@ -10,6 +10,9 @@ user-invocable: false
 
 - **Channel-agnostic compose doctrine** (owner approval, identity signature,
   family batching, closure protocol): load `odoo-client-messaging`.
+- **Client board task formatting** (task name language, description,
+  Verifikácia notes, stages, no assignee): `odoo-client-messaging` →
+  `client-board-tasks.md`.
 - **Channel + transport specifics for odoo-erp** (task chatter, `/json/2`,
   `odoo-task-sync.py`): see the odoo-erp project's own
   `.claude/rules/odoo-task-sync.md`.

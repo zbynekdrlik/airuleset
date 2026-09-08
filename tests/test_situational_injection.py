@@ -582,6 +582,88 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
         # (the skill renamed from odoo-discuss-xmlrpc, issue 891)
         self.assertIn("Odoo Client Messaging — Channel-Agnostic Guidance", ctx)
 
+    def test_odoo_project_task_write_injects_board_tasks(self):
+        """#949 — writing code that touches project.task loads the board formatting doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/task_sync.py",
+                 "content": "env['project.task'].create({'name': name, 'stage_id': stage})"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(ctx, "writing a project.task call must load the board-tasks doctrine")
+        # a string unique to client-board-tasks.md, never in SKILL.md
+        self.assertIn("Client Board Tasks", ctx)
+
+    def test_odoo_project_task_edit_injects_board_tasks(self):
+        """#949 — editing code that mentions project_task loads the board formatting doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/importer.py",
+                 "old_string": "# old",
+                 "new_string": "task = project_task.write({'stage_id': verifik_id})"},
+                tool_name="Edit",
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(ctx, "editing a project_task reference must load the board-tasks doctrine")
+        self.assertIn("Client Board Tasks", ctx)
+
+    def test_unrelated_write_does_not_inject_board_tasks(self):
+        """#949 — an unrelated Write must NOT load the board-tasks doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/utils.py",
+                 "content": "def helper(): return 42"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        if ctx is not None:
+            self.assertNotIn("Client Board Tasks", ctx)
+
+    def test_odoo_project_task_cofit_with_messaging(self):
+        """#949 R2 — a .py Write with project.task + message_post must inject BOTH."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/sync.py",
+                 "content": "env['project.task'].create(vals)\nchannel.message_post(body=html)"},
+                tool_name="Write",
+                session_id="sess-cofit-949",
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(ctx, "co-fire must inject something")
+        self.assertIn("Odoo Client Messaging", ctx)
+        self.assertIn("Client Board Tasks", ctx)
+
+    def test_asyncio_create_task_does_not_inject_board_tasks(self):
+        """#949 R3 — asyncio.create_task() must NOT load the board-tasks doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/worker.py",
+                 "content": "asyncio.create_task(run_background())"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        if ctx is not None:
+            self.assertNotIn("Client Board Tasks", ctx)
+
+    def test_rust_write_task_does_not_inject_board_tasks(self):
+        """#949 R3 — write_task() in .rs must NOT load the board-tasks doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/main.rs",
+                 "content": "write_task(&mut buf, &task_data)?;"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        if ctx is not None:
+            self.assertNotIn("Client Board Tasks", ctx)
+
     def test_claude_code_log_export_prompt_injects_the_skill(self):
         r = self._prompt("Please export this session as HTML so I can share it")
         ctx = self._injected_prompt(r)
