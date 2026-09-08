@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 7875,
+    "airuleset.py": 7872,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -26,8 +26,8 @@
     "cli_owner_vps.py": 168,
     "cli_privileges.py": 938,
     "cli_push_gate.py": 218,
-    "cli_quals.py": 2543,
-    "cli_quals_cmd.py": 1038,
+    "cli_quals.py": 2468,
+    "cli_quals_cmd.py": 1026,
     "cli_remote.py": 1575,
     "cli_resource_guards.py": 568,
     "cli_scratch_sweep.py": 1854,
@@ -546,7 +546,7 @@
     "watchdog/nice_check.py": 104,
     "watchdog/nudge_gate.py": 355,
     "watchdog/one_glance.py": 425,
-    "watchdog/ops_wait_recheck.py": 1287,
+    "watchdog/ops_wait_recheck.py": 1273,
     "watchdog/pane_classify.py": 553,
     "watchdog/pane_text.py": 211,
     "watchdog/priority_policy.py": 567,
@@ -569,8 +569,7 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78,
-    "tests/test_gk_ops_wait_override_943.py": 115
+    "working_time.py": 78
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
@@ -583,8 +582,8 @@
     "airuleset.py::cmd_watchdog": 261,
     "airuleset.py::main": 896,
     "cli_quals.py::_slice_mine_and_handed": 217,
-    "cli_quals_cmd.py::cmd_core_quals": 224,
-    "cli_quals_cmd.py::cmd_slice_quals": 222,
+    "cli_quals_cmd.py::cmd_core_quals": 222,
+    "cli_quals_cmd.py::cmd_slice_quals": 220,
     "cli_remote.py::_deploy_to_all_remotes": 299,
     "cli_remote.py::cmd_push": 255,
     "cli_resource_guards.py::build_apply_script": 255,

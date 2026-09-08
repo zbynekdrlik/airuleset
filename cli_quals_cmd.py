@@ -57,7 +57,7 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       gk_handoff_numbers=None, recheck_numbers=None,
                       unpark_numbers=None, tacit_wait_numbers=None,
                       tacit_close_numbers=None, converge_numbers=None,
-                      no_target_numbers=None, gk_action_numbers=None):
+                      no_target_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -180,10 +180,6 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                 reason = (reason + " converge!").strip()
             if n in no_target_numbers:
                 reason = (reason + " no-target!").strip()
-            # #943: GATEKEEPER-ACTION comment on this ops-wait ticket.
-            gk_action_numbers = gk_action_numbers or set()
-            if n in gk_action_numbers:
-                reason = (reason + " gk-action!").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                           action, reason,
                                           row.get("title") or ""))
@@ -192,8 +188,7 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
 def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
                            gk_handoff_numbers, unpark_numbers=None,
                            tacit_wait_numbers=None, tacit_close_numbers=None,
-                           converge_numbers=None, no_target_numbers=None,
-                           gk_action_numbers=None):
+                           converge_numbers=None, no_target_numbers=None):
     """#754 — a single `#`-prefixed AGGREGATE summary of the parked-W bucket,
     appended after the `--ops-wait` member rows: total count, the OLDEST member
     (by createdAt), the stale!/recheck!/gk-handoff!/unpark? flag counts, the
@@ -220,7 +215,7 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
               if over else "")
     return ("# W-summary: total=%d oldest=#%s (%s) stale=%d recheck=%d "
             "gk-handoff=%d unpark=%d tacit-wait=%d tacit-close=%d "
-            "aged=%d no-target=%d gk-action=%d%s" % (
+            "aged=%d no-target=%d%s" % (
                 total, oldest, created,
                 len(stale_numbers or set()),
                 len(recheck_numbers or set()),
@@ -229,8 +224,7 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
                 len(tacit_wait_numbers or set()),
                 len(tacit_close_numbers or set()),
                 len(converge_numbers or set()),
-                len(no_target_numbers or set()),
-                len(gk_action_numbers or set()), marker))
+                len(no_target_numbers or set()), marker))
 
 
 def _print_audit_rows(rows, own_stream=None):
@@ -537,8 +531,6 @@ def _ops_wait_flag_sets(ops_wait, root):
     # #881: convergence tags from the SAME shared ages fetch.
     converge = airuleset._converge_flagged(ops_wait, ages_fn=_ages)
     no_target = airuleset._no_target_flagged(ops_wait, ages_fn=_ages)
-    # #943: GATEKEEPER-ACTION comment tags from the SAME shared ages fetch.
-    gk_action = airuleset._gk_action_comment_flagged(ops_wait, ages_fn=_ages)
     # Precedence: specific-verdict tags suppress converge! and no-target!
     # (a tacit-close/unpark/gk-handoff member already has a verdict in
     # flight — demanding "set a target" on a ticket whose verdict is
@@ -549,7 +541,7 @@ def _ops_wait_flag_sets(ops_wait, root):
     # converge! suppresses stale! — the verdict is strictly stronger
     stale = stale - converge
     return (stale, recheck, gk_handoff, unpark, tacit_wait, tacit_close,
-            converge, no_target, gk_action)
+            converge, no_target)
 
 
 def _print_bounce_rounds(quals, root, user):
@@ -768,23 +760,21 @@ def cmd_slice_quals(args):
         # #818: also tag `tacit-wait`/`tacit-close?` a delivered+reminded
         # acceptance member inside/past its #799 N=3 window (subtracted from
         # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
-        _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _gka = (
+        _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt = (
             _ops_wait_flag_sets(ops_wait, root))
         _print_issue_rows(ops_wait, own_stream=user,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
                           gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
                           tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
-                          converge_numbers=_conv, no_target_numbers=_nt,
-                          gk_action_numbers=_gka)
+                          converge_numbers=_conv, no_target_numbers=_nt)
         # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
         _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
                                           unpark_numbers=_unpark,
                                           tacit_wait_numbers=_tw,
                                           tacit_close_numbers=_tc,
                                           converge_numbers=_conv,
-                                          no_target_numbers=_nt,
-                                          gk_action_numbers=_gka)
+                                          no_target_numbers=_nt)
         if _summary:
             print(_summary)
         return
@@ -990,23 +980,21 @@ def cmd_core_quals(args):
         # #818: also tag `tacit-wait`/`tacit-close?` a delivered+reminded
         # acceptance member inside/past its #799 N=3 window (subtracted from
         # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
-        _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _gka = (
+        _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt = (
             _ops_wait_flag_sets(ops_wait, root))
         _print_issue_rows(ops_wait, own_stream=None,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
                           gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
                           tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
-                          converge_numbers=_conv, no_target_numbers=_nt,
-                          gk_action_numbers=_gka)
+                          converge_numbers=_conv, no_target_numbers=_nt)
         # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
         _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
                                           unpark_numbers=_unpark,
                                           tacit_wait_numbers=_tw,
                                           tacit_close_numbers=_tc,
                                           converge_numbers=_conv,
-                                          no_target_numbers=_nt,
-                                          gk_action_numbers=_gka)
+                                          no_target_numbers=_nt)
         if _summary:
             print(_summary)
         return

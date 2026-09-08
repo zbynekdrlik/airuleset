@@ -845,14 +845,6 @@ def _partition_user_waiting(rows):
 # carries one of these (user-questions-slovak.md's hook-enforced template).
 _ASK_MARKER_RE = re.compile(r"❓|ot[áa]z|needs you|asked", re.IGNORECASE)
 
-# #943: a GATEKEEPER-ACTION marker in a comment is a re-entry signal for the
-# gatekeeper — the ticket carries pending gk work. Mirrors the proper-marker
-# regex from `watchdog/cross_stream.py::_GK_PROPER_MARKER_RE` (a standalone
-# definition so `cli_quals` never imports from `watchdog`; both match on the
-# same `GATEKEEPER-ACTION<ws>:` or `GATEKEEPER-ACTION<ws>(<...>):` shape).
-_GK_ACTION_COMMENT_RE = re.compile(
-    r'GATEKEEPER-ACTION[ \t]*[:(]', re.IGNORECASE)
-
 
 def _comment_carries_question(body):
     """True if `body` (an issue comment body, or None/non-str) is a real
@@ -1137,9 +1129,8 @@ def _comment_has_citation(body):
 
 def _norm_ages(res):
     """Normalize `_issue_comment_ages` output (or an injected fake) to the
-    `{own, any, own_cited, own_oldest, own_final_reminder, own_target,
-    has_gk_action}` dict (#753; #818 added `own_final_reminder`; #943 added
-    `has_gk_action`). A legacy 2-tuple `(own, any)` — the #699/#607
+    `{own, any, own_cited, own_oldest, own_final_reminder}` dict (#753; #818
+    added `own_final_reminder`). A legacy 2-tuple `(own, any)` — the #699/#607
     fakes — carries no body/citation info, so its `own` is treated as the CITED
     anchor (`own_cited = own`) and `own_final_reminder` is None (no tacit window
     — the fail-safe direction), which reproduces the PRE-#753 tuple semantics
@@ -1158,14 +1149,12 @@ def _norm_ages(res):
         # dependency (review 🔵 B).
         res.setdefault("own_final_reminder", None)
         res.setdefault("own_target", None)           # #881
-        res.setdefault("has_gk_action", False)       # #943
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
                 "own_cited": res[0], "own_oldest": None,
                 "own_final_reminder": None,
-                "own_target": None,
-                "has_gk_action": False}
+                "own_target": None}
     return None
 
 
@@ -1270,7 +1259,6 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     own_ts = any_ts = own_cited = own_oldest = own_final_reminder = None
     own_target = None                                # #881: newest valid target date
     own_target_ts = 0                                # comment ts of the winning target
-    has_gk_action = False                            # #943: GATEKEEPER-ACTION comment
     for c in comments:
         if not isinstance(c, dict):
             continue
@@ -1279,13 +1267,6 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
             continue
         if any_ts is None or ts > any_ts:
             any_ts = ts
-        # #943: check ANY comment (not just own) for GATEKEEPER-ACTION markers.
-        # A GATEKEEPER-ACTION comment on an ops-wait ticket is a re-entry signal
-        # for the gatekeeper — it means the ticket has pending gk work.
-        if not has_gk_action:
-            comment_body = c.get("body") or ""
-            if _GK_ACTION_COMMENT_RE.search(comment_body):
-                has_gk_action = True
         author = c.get("author")
         login = author.get("login") if isinstance(author, dict) else None
         if self_login and _is_own_login(login, self_login):
@@ -1314,8 +1295,7 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     return {"own": own_ts, "any": any_ts,
             "own_cited": own_cited, "own_oldest": own_oldest,
             "own_final_reminder": own_final_reminder,
-            "own_target": own_target,
-            "has_gk_action": has_gk_action}
+            "own_target": own_target}
 
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
@@ -1641,31 +1621,6 @@ def _gk_handoff_ops_wait_flagged(rows):
         if ("ops-wait" in names
                 and _GK_HANDOFF_BOUNCE_OVERRIDE not in names
                 and any(lb in names for lb in _GK_HANDOFF_LABELS)):
-            flagged.add(number)
-    return flagged
-
-
-def _gk_action_comment_flagged(rows, ages_fn=None):
-    """#943: the set of ops-wait (W) member numbers to tag `gk-action!` — an
-    ops-wait ticket whose comments carry a GATEKEEPER-ACTION marker. This is a
-    re-entry signal: the gatekeeper has pending work on this ticket, and the
-    ops-wait park must be re-evaluated.
-
-    Reads from the SHARED `_issue_comment_ages` fetch (reuses the `ages_fn`
-    seam the stale!/recheck!/tacit/converge tags share), so it costs zero
-    additional gh calls. Only the `has_gk_action` field of the ages dict is
-    consumed. A failed/missing ages dict → UNTAGGED (fail-safe, "nikdy falošný",
-    #539/#570 bias)."""
-    flagged = set()
-    if not rows or not ages_fn:
-        return flagged
-    for number, row in rows.items():
-        if not isinstance(row, dict):
-            continue
-        ages = ages_fn(number)
-        if not isinstance(ages, dict):
-            continue
-        if ages.get("has_gk_action"):
             flagged.add(number)
     return flagged
 

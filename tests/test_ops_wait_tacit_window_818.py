@@ -272,8 +272,8 @@ class FlagSetsSubtractsTacitFromStale(unittest.TestCase):
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: None):
             sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
-        self.assertEqual(9, len(sets))
-        stale, _recheck, _gkh, _unpark, tacit_wait, tacit_close, _conv, _nt, _gka = sets
+        self.assertEqual(8, len(sets))
+        stale, _recheck, _gkh, _unpark, tacit_wait, tacit_close, _conv, _nt = sets
         self.assertIn(42, tacit_close)          # delivered+reminded, silent
         self.assertNotIn(42, stale)             # NOT double-flagged stale!
         self.assertIn(43, stale)                # no marker → stale! stands
@@ -298,7 +298,7 @@ class FlagSetsSubtractsTacitFromStale(unittest.TestCase):
                                   lambda cwd=None: "full"), \
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: None):
-            _stale, recheck, _gkh, _unpark, _tw, tacit_close, _conv, _nt, _gka = \
+            _stale, recheck, _gkh, _unpark, _tw, tacit_close, _conv, _nt = \
                 cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
         self.assertIn(48, tacit_close)          # tacit (acceptance + reminded)
         self.assertNotIn(48, recheck)           # release title but tacit → no recheck!
