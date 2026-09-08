@@ -1,8 +1,6 @@
 {
-  "cli_onboard.py": 994,
-  "cli_remote.py": 1625,
   "files": {
-    "airuleset.py": 7893,
+    "airuleset.py": 7902,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 115,
@@ -28,7 +26,7 @@
     "cli_owner_vps.py": 168,
     "cli_privileges.py": 938,
     "cli_push_gate.py": 218,
-    "cli_quals.py": 2570,
+    "cli_quals.py": 2610,
     "cli_quals_cmd.py": 1040,
     "cli_remote.py": 1626,
     "cli_resource_guards.py": 568,
@@ -374,6 +372,7 @@
     "tests/test_question_ping_off_710.py": 328,
     "tests/test_question_policy.py": 223,
     "tests/test_question_prune.py": 503,
+    "tests/test_question_slice_gap_948.py": 189,
     "tests/test_question_thread_install_718.py": 277,
     "tests/test_queue_arrival_recheck.py": 553,
     "tests/test_ratchet_counts.py": 157,
@@ -590,7 +589,7 @@
     "airuleset.py::cmd_handoff": 266,
     "airuleset.py::cmd_install": 704,
     "airuleset.py::cmd_notify": 352,
-    "airuleset.py::cmd_tickets_status": 235,
+    "airuleset.py::cmd_tickets_status": 243,
     "airuleset.py::cmd_watchdog": 269,
     "airuleset.py::main": 896,
     "cli_quals.py::_slice_mine_and_handed": 217,
@@ -634,6 +633,5 @@
     ".claude/rules/internals-tests.md": 51098,
     ".claude/rules/internals-watchdog.md": 51200,
     ".claude/rules/internals-webterm.md": 52000
-  },
-  "tests/test_onboard_registry_guard_946.py": 335
+  }
 }

@@ -837,6 +837,46 @@ def _partition_user_waiting(rows):
     return {**workable, **ops_wait}, waiting
 
 
+def _question_map_u_supplement(rows, root, runner):
+    """#948: count question-map-referenced tickets that fell OUTSIDE the slice
+    search but carry a USER_WAITING label (needs-answer/needs-decision). Returns
+    the number of ADDITIONAL user_waiting tickets to add to the cache.
+
+    On a shared-gh-identity/app-token box the slice is ``label:stream:<user>``
+    only. A ticket authored via the shared token but lacking that label is
+    invisible to the search. Meanwhile the question-map entry referencing ``#N``
+    excludes the ping from the ticketless count (dedup). The ticket falls through
+    BOTH paths -> footer ``U 0`` while a real question is pending.
+
+    This function reads ``statusbar.question_map_ticket_refs(root)`` (already
+    used by ``_acceptance_present_set`` on the ``--waiting`` path), fetches
+    labels for each ref NOT in ``rows``, and counts user-waiting ones. Bounded
+    by the map's own size (typically 0-3 entries). Runs only on the slow
+    refresh path, never the hot render.
+
+    ``runner(argv, cd)`` is the caller's ``_out`` (a subprocess wrapper); ``rows``
+    is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict."""
+    import statusbar as _sb
+    try:
+        refs = _sb.question_map_ticket_refs(root)
+    except Exception:
+        return 0
+    if not refs:
+        return 0
+    extra = 0
+    for qn in refs:
+        if qn in rows:
+            continue
+        raw = runner(["gh", "issue", "view", str(qn), "--json", "labels"], root)
+        try:
+            qlabels = json.loads(raw).get("labels")
+        except (ValueError, TypeError, AttributeError):
+            qlabels = None
+        if _row_is_user_waiting(qlabels):
+            extra += 1
+    return extra
+
+
 # #539: the repo's OWN ask-flow markers — the shape a genuine owner-question
 # comment takes (`❓ NEEDS YOU`/`❓ ASKED`, the `**Otázka …:**` block head, or a
 # plain "otázka" mention). Deliberately NOT a bare `?`: a routine gatekeeper /

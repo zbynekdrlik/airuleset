@@ -2821,6 +2821,14 @@ def cmd_tickets_status(args):
                 entry["gk"] = gk
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
+                # #948: question-map-aware U supplement — a question-map
+                # entry referencing #N on a shared-gh-identity/app-token
+                # box where #N lacks the stream label falls through BOTH
+                # the label-based user_waiting (not in slice search) AND
+                # the ticketless-ping count (excluded because it refs #N).
+                # See `_question_map_u_supplement` for the full docstring.
+                entry["user_waiting"] += _question_map_u_supplement(
+                    rows, root, _out)
                 # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
                 # for the red `· W N!` footer signal and by block-dispatch-over-
                 # wdrain.sh (which reads ops_wait directly, not this bool).
@@ -6550,6 +6558,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
     _acceptance_present_set as _acceptance_present_set,
+    _question_map_u_supplement as _question_map_u_supplement,
     _comment_carries_question as _comment_carries_question,
     _issue_question_comment_state as _issue_question_comment_state,
     _no_question_flagged as _no_question_flagged,
