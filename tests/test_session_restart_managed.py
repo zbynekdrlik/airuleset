@@ -4,8 +4,8 @@ Each test verifies the declarative drop-in render + install lifecycle.
 Uses tmpdir fixtures -- no real systemd, no ssh.
 """
 
-from cli_filedrop_watchdog import pathlib
-import (
+import pathlib
+from cli_filedrop_watchdog import (
     render_session_restart_dropin,
     setup_session_restart_dropin,
     configured_session_restart_source,
