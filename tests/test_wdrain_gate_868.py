@@ -434,5 +434,101 @@ class TestQualsTimeout902(unittest.TestCase):
                          "the old hardcoded timeout=30 must be gone")
 
 
+class TestDeployTargetExempt953(unittest.TestCase):
+    """#953: W members tagged deploy-target! (blocked on a release/deploy)
+    do not count toward the wdrain threshold. A W=9 all-deploy-target set
+    should pass. Hard ceiling: total W > 2*THRESHOLD blocks regardless."""
+
+    def test_w9_all_deploy_target_passes(self):
+        """W=9 with 9 deploy-target-exempt → effective W=0 → pass."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.path.join(td, "repo")
+            os.makedirs(cwd, exist_ok=True)
+            _make_cache(td, cwd, 9, extra={"ops_wait_deploy_wait": 9})
+            rc, stderr = _run_hook(
+                {"tool_name": "Agent",
+                 "tool_input": {"subagent_type": "autopilot-worker",
+                                "prompt": "Work issue"},
+                 "cwd": cwd},
+                env_extra={"HOME": td},
+            )
+            self.assertEqual(0, rc, f"all-deploy-target W=9 should pass: {stderr}")
+
+    def test_w9_partial_deploy_target_passes(self):
+        """W=9, 3 deploy-target → effective W=6 ≤ 8 → pass."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.path.join(td, "repo")
+            os.makedirs(cwd, exist_ok=True)
+            _make_cache(td, cwd, 9, extra={"ops_wait_deploy_wait": 3})
+            rc, stderr = _run_hook(
+                {"tool_name": "Agent",
+                 "tool_input": {"subagent_type": "autopilot-worker",
+                                "prompt": "Work issue"},
+                 "cwd": cwd},
+                env_extra={"HOME": td},
+            )
+            self.assertEqual(0, rc, f"W=9 with 3 exempt should pass: {stderr}")
+
+    def test_w12_all_deploy_target_passes(self):
+        """W=12, 12 exempt → effective W=0, total 12 ≤ 16 → pass."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.path.join(td, "repo")
+            os.makedirs(cwd, exist_ok=True)
+            _make_cache(td, cwd, 12, extra={"ops_wait_deploy_wait": 12})
+            rc, stderr = _run_hook(
+                {"tool_name": "Agent",
+                 "tool_input": {"subagent_type": "autopilot-worker",
+                                "prompt": "Work issue"},
+                 "cwd": cwd},
+                env_extra={"HOME": td},
+            )
+            self.assertEqual(0, rc, f"W=12 all-exempt should pass: {stderr}")
+
+    def test_hard_ceiling_blocks_at_double_threshold(self):
+        """W=17 > 2*8=16 blocks even with all 17 exempt (hard ceiling)."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.path.join(td, "repo")
+            os.makedirs(cwd, exist_ok=True)
+            _make_cache(td, cwd, 17, extra={"ops_wait_deploy_wait": 17})
+            rc, stderr = _run_hook(
+                {"tool_name": "Agent",
+                 "tool_input": {"subagent_type": "autopilot-worker",
+                                "prompt": "Work issue"},
+                 "cwd": cwd},
+                env_extra={"HOME": td},
+            )
+            self.assertEqual(2, rc, "hard ceiling at 2x threshold should block")
+
+    def test_no_exempt_field_behaves_as_zero(self):
+        """Legacy cache without ops_wait_deploy_wait → exempt=0, old behavior."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.path.join(td, "repo")
+            os.makedirs(cwd, exist_ok=True)
+            _make_cache(td, cwd, 9)  # no ops_wait_deploy_wait field
+            rc, stderr = _run_hook(
+                {"tool_name": "Agent",
+                 "tool_input": {"subagent_type": "autopilot-worker",
+                                "prompt": "Work issue"},
+                 "cwd": cwd},
+                env_extra={"HOME": td},
+            )
+            self.assertEqual(2, rc, "W=9 with no exempt field should block (old behavior)")
+
+    def test_w10_with_1_exempt_still_blocks(self):
+        """W=10, 1 exempt → effective W=9 > 8 → still blocks."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.path.join(td, "repo")
+            os.makedirs(cwd, exist_ok=True)
+            _make_cache(td, cwd, 10, extra={"ops_wait_deploy_wait": 1})
+            rc, stderr = _run_hook(
+                {"tool_name": "Agent",
+                 "tool_input": {"subagent_type": "autopilot-worker",
+                                "prompt": "Work issue"},
+                 "cwd": cwd},
+                env_extra={"HOME": td},
+            )
+            self.assertEqual(2, rc, "effective W=9 should still block")
+
+
 if __name__ == "__main__":
     unittest.main()

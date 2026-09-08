@@ -412,5 +412,105 @@ class WorktreeGuardModuleDirect(WorktreeGuardBase):
         self.assertFalse(self.call(""))
 
 
+class WorktreePinResume953(TestCase):
+    """#953: on a SendMessage resume, CWD drifts to a DIFFERENT worktree.
+    RULE B derives the agent's own worktree from CWD, so it blocks writes
+    to the agent's REAL worktree as an "escape". A worktree identity pin
+    (/tmp/airuleset-worktree-pin-<agent_id>) records the correct worktree
+    on the first call and overrides a drifted CWD on resume."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wtpin953-")
+        self.main = os.path.join(self.tmp, "fakerepo")
+        self.wt_a = os.path.join(self.main, ".claude", "worktrees", "agent-aaa111")
+        self.wt_b = os.path.join(self.main, ".claude", "worktrees", "agent-bbb222")
+        os.makedirs(os.path.join(self.wt_a, "hooks"), exist_ok=True)
+        os.makedirs(os.path.join(self.wt_b, "hooks"), exist_ok=True)
+        os.makedirs(os.path.join(self.main, "hooks"), exist_ok=True)
+        self.pin_file = "/tmp/airuleset-worktree-pin-aaa111"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        # test teardown: pin file may or may not exist  # airuleset:script-ok test cleanup
+        if os.path.exists(self.pin_file):
+            os.unlink(self.pin_file)
+
+    def run_hook(self, payload, env_extra=None):
+        env = {"PATH": "/usr/bin:/bin"}
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+
+    def test_write_own_wt_from_drifted_cwd_blocked_without_pin(self):
+        """Agent aaa111 owns worktree-A. After resume, CWD = worktree-B.
+        Writing to worktree-A is BLOCKED because RULE B derives from CWD
+        (worktree-B), and the target (worktree-A) is NOT under worktree-B."""
+        target = os.path.join(self.wt_a, "hooks", "test.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 2,
+                         "without pin, write to own wt from drifted cwd should block")
+
+    def test_write_own_wt_from_drifted_cwd_allowed_with_pin(self):
+        """Same scenario, but a pin file exists from the original dispatch.
+        The pin overrides the drifted CWD, so the write is allowed."""
+        Path(self.pin_file).write_text(self.wt_a + "\n")
+        target = os.path.join(self.wt_a, "hooks", "test.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0,
+                         "with pin, write to own wt from drifted cwd should pass: "
+                         + r.stderr)
+
+    def test_pin_does_not_allow_main_checkout_escape(self):
+        """A pin pointing at worktree-A must NOT allow writes to the MAIN
+        checkout — the pin just corrects CWD, not the guard itself."""
+        Path(self.pin_file).write_text(self.wt_a + "\n")
+        target = os.path.join(self.main, "hooks", "test.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 2,
+                         "pin must NOT allow main checkout escape: " + r.stderr)
+
+    def test_pin_auto_created_on_first_call(self):
+        """On the first call where CWD IS the correct worktree, the pin
+        file should be auto-created."""
+        self.assertFalse(os.path.exists(self.pin_file))
+        target = os.path.join(self.wt_a, "hooks", "ok.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_a,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(self.pin_file),
+                        "pin file should be auto-created on first call")
+        content = Path(self.pin_file).read_text().strip()
+        self.assertEqual(content, self.wt_a)
+
+
 if __name__ == "__main__":
     main()

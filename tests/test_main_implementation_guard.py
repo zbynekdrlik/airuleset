@@ -2814,5 +2814,98 @@ class SharedExecLogParallelSafety768(unittest.TestCase):
             "ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR dir.")
 
 
+class NarrowReadonly953(unittest.TestCase):
+    """#953: a provably read-only command targeting ≤2 explicit non-glob paths
+    with no write flags is allowed even while goal-armed, regardless of file
+    size or existence. The guard's PURPOSE (Fable main must never IMPLEMENT)
+    stays intact — writes, test suites, builds, recursive sweeps all blocked."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(
+                               kw.pop("model", "claude-opus-4-8")),
+                           **kw)
+
+    def test_grep_n_single_nonexistent_file_allowed(self):
+        out = self._armed("grep -n 'pattern' /fake/nonexistent/hookfile.sh")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_tail_100_single_file_allowed(self):
+        out = self._armed("tail -100 /fake/nonexistent/waiter.log")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_head_80_single_file_allowed(self):
+        out = self._armed("head -80 /fake/nonexistent/file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_sed_n_wide_range_single_file_allowed(self):
+        out = self._armed("sed -n '1,200p' /fake/nonexistent/file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_cat_single_oversize_file_allowed(self):
+        with TemporaryDirectory() as d:
+            f = Path(d) / "big.txt"
+            with open(f, "wb") as fh:
+                fh.seek(200000)
+                fh.write(b"x")
+            out = self._armed("cat %s" % f)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_wc_single_file_allowed(self):
+        out = self._armed("wc -l /fake/nonexistent/file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_ls_single_dir_allowed(self):
+        out = self._armed("ls /fake/nonexistent/dir")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_grep_two_files_allowed(self):
+        out = self._armed("grep -n 'pattern' /fake/a.py /fake/b.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- NEGATIVE: must stay blocked ----
+
+    def test_sed_i_write_stays_blocked(self):
+        out = self._armed("sed -i 's/x/y/' file.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_grep_recursive_stays_blocked(self):
+        out = self._armed("grep -rn pattern .")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cat_four_files_stays_blocked(self):
+        out = self._armed("cat f1.py f2.py f3.py f4.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_grep_three_files_stays_blocked(self):
+        out = self._armed("grep -n pattern f1.py f2.py f3.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_pytest_stays_blocked(self):
+        out = self._armed("pytest tests/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cargo_test_stays_blocked(self):
+        out = self._armed("cargo test")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cat_glob_stays_blocked(self):
+        out = self._armed("cat *.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_rg_stays_blocked_even_single_path(self):
+        out = self._armed("rg -n 'pattern' src/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_ag_stays_blocked_even_single_path(self):
+        out = self._armed("ag 'pattern' src/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_sed_without_n_stays_blocked(self):
+        out = self._armed("sed '1,10p' file.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
