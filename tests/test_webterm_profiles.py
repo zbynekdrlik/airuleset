@@ -414,5 +414,100 @@ class TestAppendOnlyKeyWriter870(unittest.TestCase):
         self.assertIn("grep", cmd.lower())
 
 
+class TestZbynekHostDriftLock(unittest.TestCase):
+    """Drift-lock: every ZBYNEK_*_HOST constant and ZBYNEK_SPINBIKE_HOST_KEYS
+    must match the cli_fleet.REMOTE_HOSTS entries — the ONE source of truth.
+    #958: #870 D4 introduced wrong spinbike values (ssh 255); this class
+    locks ALL zbynek host constants, not just spinbike."""
+
+    def test_dev1_host_matches_fleet(self):
+        import cli_fleet
+        fleet_entries = [h for h in cli_fleet.REMOTE_HOSTS
+                         if h["name"] == "dev1"]
+        if not fleet_entries:
+            return  # dev1 conditionally present in fleet (#870 cutover)
+        self.assertEqual(p.ZBYNEK_DEV1_HOST, fleet_entries[0]["host"])
+
+    def test_dev2_host_matches_fleet(self):
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "dev2")
+        self.assertEqual(p.ZBYNEK_DEV2_HOST, fleet_e["host"])
+
+    def test_gk_host_matches_fleet(self):
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "gatekeeper")
+        self.assertEqual(p.ZBYNEK_GK_HOST, fleet_e["host"])
+
+    def test_spinbike_host_matches_fleet(self):
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "spinbike-vps")
+        self.assertEqual(
+            p.ZBYNEK_SPINBIKE_HOST, fleet_e["host"],
+            "ZBYNEK_SPINBIKE_HOST %r drifted from cli_fleet %r"
+            % (p.ZBYNEK_SPINBIKE_HOST, fleet_e["host"]))
+
+    def test_spinbike_host_keys_match_fleet(self):
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "spinbike-vps")
+        self.assertEqual(
+            list(p.ZBYNEK_SPINBIKE_HOST_KEYS), list(fleet_e["host_keys"]),
+            "ZBYNEK_SPINBIKE_HOST_KEYS drifted from cli_fleet")
+
+    def test_spinbike_inventory_entry_uses_correct_values(self):
+        """The zbynek_inventory() spinbike-vps entry must carry the fleet
+        values, not stale literals."""
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "spinbike-vps")
+        inv_e = next(e for e in p.zbynek_inventory()
+                     if e["id"] == "spinbike-vps")
+        self.assertEqual(inv_e["host"], fleet_e["host"])
+        self.assertEqual(list(inv_e["host_keys"]), list(fleet_e["host_keys"]))
+
+
+class TestNoBareDnsHostOutsideFleet(unittest.TestCase):
+    """Every 'host' in any profile inventory that looks like a DNS name
+    (contains a dot but is NOT an IP address) MUST appear in the fleet
+    source (cli_fleet.REMOTE_HOSTS) as a host value. A DNS name that
+    does not exist in the fleet is a latent ssh 255. #958 regression."""
+
+    @staticmethod
+    def _is_ip(host):
+        """True if host looks like an IPv4/IPv6 address, not a DNS name."""
+        import re
+        # IPv4: all dotted-decimal
+        if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
+            return True
+        # IPv6
+        if ':' in host:
+            return True
+        # Loopback
+        if host in ('localhost',):
+            return True
+        return False
+
+    def test_no_dns_host_outside_fleet_source(self):
+        import cli_fleet
+        fleet_hosts = {h["host"] for h in cli_fleet.REMOTE_HOSTS}
+        profile_hosts = set()
+        for inv_fn in [p.zbynek_inventory, p.david_inventory,
+                       p.marek_inventory, p.dominika_inventory]:
+            for e in inv_fn():
+                if not e.get("local") and "host" in e:
+                    profile_hosts.add(e["host"])
+
+        for host in profile_hosts:
+            if not self._is_ip(host) and host not in fleet_hosts:
+                self.fail(
+                    "Profile host %r is a DNS name not found in "
+                    "cli_fleet.REMOTE_HOSTS — likely a non-existent record "
+                    "(#958 class). Fleet hosts: %s"
+                    % (host, sorted(fleet_hosts)))
+
+
 if __name__ == "__main__":
     unittest.main()
