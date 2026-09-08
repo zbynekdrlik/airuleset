@@ -12,7 +12,7 @@
     "cli_claude_scripts.py": 996,
     "cli_config.py": 673,
     "cli_context_baseline.py": 727,
-    "cli_deployer_glue.py": 375,
+    "cli_deployer_glue.py": 404,
     "cli_disk_guard_root.py": 769,
     "cli_drop_gateway.py": 869,
     "cli_filedrop_watchdog.py": 669,
