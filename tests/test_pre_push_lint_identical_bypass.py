@@ -1,16 +1,13 @@
-"""Behaviour test for hooks/pre-push-lint.sh byte-identical file bypass (#951 item 3).
+"""Characterization test for hooks/pre-push-lint.sh byte-identical file scope (#951 item 3).
 
 Files that are byte-identical to the merge-base target (i.e. not actually
 changed by the branch) must not be linted or blocked. The three-dot range
-should already exclude them for the common case; the per-file identity check
-is a defense-in-depth layer for edge cases.
+(BASE_REF...HEAD) already excludes them -- no per-file bypass code is needed.
 
-This test covers:
+These tests PROVE that the three-dot range handles both:
 1. Common case: a file present on both sides of a merge, byte-identical to
-   the base -- must not appear in the lint scope (three-dot handles this).
-2. Edge case: a file that git's diff engine somehow includes despite being
-   identical (forced via `--no-renames` or merge artifacts) -- the per-file
-   bypass must filter it out.
+   the base -- excluded from lint scope by the three-dot range.
+2. Positive control: the branch's own dirty file IS linted and blocked.
 """
 import json
 import os
