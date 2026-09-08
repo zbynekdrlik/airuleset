@@ -211,6 +211,86 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
     return removed
 
 
+# Keys carried forward from a previous good cache when a transient gh failure
+# prevents a fresh read — the "serve stale" doctrine (#952).
+_CARRY_FORWARD_KEYS = (
+    "open", "gk", "user_waiting", "ops_wait", "skipped", "wdrain_over",
+    "created_today", "closed_today", "name",
+)
+
+_ERROR_LOG_MAX_BYTES = 64 * 1024   # truncate refresh-errors.log beyond this
+_ERROR_LOG_KEEP_LINES = 200        # keep the last N lines on truncation
+
+
+def carry_forward_stale(entry, prev, reason):
+    """#952: on a transient gh failure, carry forward good numbers from `prev`
+    (the previous cache entry) into `entry` (the new one being written).
+
+    If `prev` has an int `open`, the returned entry preserves the displayable
+    counts so the footer keeps rendering. `stale_since` is set to the EARLIEST
+    known failure time (kept across consecutive failures). `last_error` records
+    the most recent reason (capped at 120 chars). `ts` is already set on
+    `entry` by the caller — it must stay refreshed so the render does not
+    re-spawn every SPAWN_GUARD_S.
+
+    If `prev` is None or has no int `open` (cold cache), the entry is returned
+    unchanged — the current "nothing to render" behavior is preserved."""
+    if not isinstance(prev, dict):
+        return entry
+    prev_open = prev.get("open")
+    if not isinstance(prev_open, int):
+        return entry
+    for key in _CARRY_FORWARD_KEYS:
+        val = prev.get(key)
+        # Only carry forward when the fresh entry has no useful value —
+        # a successful partial read (e.g. skipped count) must not be
+        # overwritten by a stale one (#952 review Y3).
+        if val not in (None, "") and entry.get(key) in (None, ""):
+            entry[key] = val
+    # Preserve scope from the previous cache so the render path knows the
+    # partition shape (mine vs core).
+    if "scope" in prev and "scope" not in entry:
+        entry["scope"] = prev["scope"]
+    # Keep the earliest known stale_since (the first failure in a streak).
+    existing_stale = prev.get("stale_since")
+    if isinstance(existing_stale, (int, float)):
+        entry["stale_since"] = existing_stale
+    else:
+        entry["stale_since"] = entry["ts"]
+    entry["last_error"] = str(reason)[:120]
+    return entry
+
+
+def log_refresh_error(cwd_key_str, reason, home=None):
+    """#952: append one line to ~/.claude/tickets-status/refresh-errors.log.
+
+    Never raises — the statusline hot path must not break over diagnostics.
+    Truncates the file to the last ~200 lines when it exceeds 64 KiB."""
+    # airuleset:script-ok statusline never-raise contract: a diagnostic log
+    # failure must never break the footer render or the refresh path.
+    try:
+        import datetime
+        d = cache_dir(home)
+        d.mkdir(parents=True, exist_ok=True)
+        log = d / "refresh-errors.log"
+        iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        line = "%s %s %s\n" % (iso, cwd_key_str, str(reason)[:200])
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(line)
+        # Truncate if too large
+        try:
+            if log.stat().st_size > _ERROR_LOG_MAX_BYTES:
+                lines = log.read_text(encoding="utf-8").splitlines()
+                log.write_text(
+                    "\n".join(lines[-_ERROR_LOG_KEEP_LINES:]) + "\n",
+                    encoding="utf-8")
+        except OSError:
+            sys.stderr.write("tickets-status: error log truncation failed\n")
+    except Exception:
+        sys.stderr.write("tickets-status: error log write failed\n")
+
+
 def _stream_split_sfx(cache):
     """The '· gk N' suffix — sub-dev (scope=mine) boxes only: own tickets
     already handed off to the gatekeeper. #391 (2026-08-11) REVERSES the
