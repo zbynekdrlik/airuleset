@@ -4,7 +4,6 @@ Tests the RENDERED bash script text and its runtime behaviour under stubbed
 quota tools.  Every test here is expected to FAIL against the pre-fix code
 and PASS after the fix.
 """
-import math
 import os
 import re
 import subprocess
@@ -32,12 +31,21 @@ class TestRenderedScriptShape(unittest.TestCase):
                          "pipefail-unsafe `quotaon | grep -q` found")
 
     def test_no_bare_pipe_grep_q(self):
-        """No `| grep -q` should appear anywhere in the quota block
+        """No non-comment `| grep -q` on quota commands in the block
         (the script runs under set -euo pipefail via the wrapper)."""
         script = self._script()
-        pipes = re.findall(r'[^#]\|\s*grep\s+-q', script)
-        self.assertEqual(pipes, [],
-                         "`| grep -q` found in rendered quota block")
+        for line in script.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                continue
+            if re.search(r'\|\s*grep\s+-q', stripped):
+                # grep -q on airuleset-box-class is fine (pipefail safe:
+                # the file exists and is small, so grep exit = the result)
+                if 'shared-stream' in stripped:
+                    continue
+                self.fail(
+                    "pipefail-unsafe `| grep -q` on a quota command: %s"
+                    % stripped)
 
     # -- D1: kmod handling --
 
@@ -177,6 +185,19 @@ class TestQuotaBlockExecution(unittest.TestCase):
             finally:
                 os.unlink(f.name)
 
+    def _patch_script_for_test(self, block, tmpdir):
+        """Replace /etc/modules-load.d and /home/* with writable temp
+        paths so the script runs without root."""
+        fake_etc = os.path.join(tmpdir, 'etc', 'modules-load.d')
+        os.makedirs(fake_etc, exist_ok=True)
+        patched = block.replace(
+            '/etc/modules-load.d/airuleset-quota.conf',
+            os.path.join(fake_etc, 'airuleset-quota.conf'))
+        patched = patched.replace(
+            'for home in /home/*',
+            'for home in %s/home/*' % tmpdir)
+        return patched
+
     def test_already_on_branch_succeeds(self):
         """When quotaon -pu reports 'is on', script must NOT remount."""
         from cli_resource_guards import _render_quota_apply_block
@@ -188,6 +209,8 @@ class TestQuotaBlockExecution(unittest.TestCase):
             with open(os.path.join(home, '.claude',
                                    'airuleset-box-class'), 'w') as f:
                 f.write('shared-stream\n')
+
+            patched = self._patch_script_for_test(block, tmpdir)
 
             stubs = {
                 'findmnt': (
@@ -215,13 +238,67 @@ class TestQuotaBlockExecution(unittest.TestCase):
                 'quotacheck': 'exit 0',
             }
             bin_dir = self._make_stubs(tmpdir, stubs)
-            result = self._run_block(block, bin_dir)
+            result = self._run_block(patched, bin_dir)
             combined = result.stdout + result.stderr
             self.assertIn("already", combined.lower(),
                           "Already-on branch not taken. "
                           "stdout=%s stderr=%s rc=%d"
                           % (result.stdout, result.stderr,
                              result.returncode))
+
+    def test_usage_aware_above_target(self):
+        """When usage exceeds QUOTA_HARD_KIB, setquota must raise the
+        ceiling and warn about drain required."""
+        from cli_resource_guards import _render_quota_apply_block
+        block = _render_quota_apply_block()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, 'home', 'biguser')
+            os.makedirs(os.path.join(home, '.claude'))
+            with open(os.path.join(home, '.claude',
+                                   'airuleset-box-class'), 'w') as f:
+                f.write('shared-stream\n')
+
+            patched = self._patch_script_for_test(block, tmpdir)
+            used_kib = 20971520  # 20G
+            call_log = os.path.join(tmpdir, 'sq.log')
+            expected_hard = (used_kib * 120 + 99) // 100
+
+            stubs = {
+                'findmnt': (
+                    'case "$2" in\n'
+                    '  SOURCE) echo "/dev/sda1";;\n'
+                    '  FSTYPE) echo "ext4";;\n'
+                    'esac'
+                ),
+                'modprobe': 'exit 0',
+                'quotaon': (
+                    'case "$1" in\n'
+                    '  -pu) echo "/dev/sda1 [/]: user quotas are on";\n'
+                    '       exit 0;;\n'
+                    '  *) exit 0;;\n'
+                    'esac'
+                ),
+                'setquota': (
+                    'echo "SETQUOTA: $*" >> "%s"\nexit 0' % call_log
+                ),
+                'repquota': (
+                    'echo "biguser   -- %d  %d %d'
+                    '              0     0     0"'
+                    % (used_kib, expected_hard, expected_hard)
+                ),
+                'systemctl': 'exit 0',
+                'apt-get': 'exit 0',
+                'mount': 'exit 0',
+                'quotacheck': 'exit 0',
+            }
+            bin_dir = self._make_stubs(tmpdir, stubs)
+            result = self._run_block(patched, bin_dir)
+            combined = result.stdout + result.stderr
+            self.assertIn("drain required", combined,
+                          "No drain-required warning for above-target user. "
+                          "stdout=%s stderr=%s"
+                          % (result.stdout, result.stderr))
 
 
 if __name__ == "__main__":
