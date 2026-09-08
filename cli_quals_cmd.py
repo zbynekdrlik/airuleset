@@ -798,10 +798,20 @@ def cmd_slice_quals(args):
         # delivered question `no-question!` (the #527 invariant, mechanized).
         # #622: an undelivered bare acceptance is re-tagged `queued` (draft ready,
         # awaiting #606 delivery) and is no-question!-exempt.
-        _print_issue_rows(waiting, own_stream=user,
+        # #948 MAJOR-2: merge question-map-supplement rows into `waiting` so
+        # the listing includes every ticket the cache count includes — ONE
+        # derivation (#367). The supplement returns a dict {number: row_dict}
+        # from the SAME `_question_map_u_supplement` the cache path uses.
+        _qmap_extra = airuleset._question_map_u_supplement(
+            rows, root, _slice_quals_runner(root))
+        _waiting_merged = dict(waiting)
+        _waiting_merged.update(_qmap_extra)
+        _print_issue_rows(_waiting_merged, own_stream=user,
                           reason_fn=airuleset._user_waiting_reason,
-                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root),
-                          queued_numbers=_queued_acceptance_numbers(waiting, root))
+                          flag_numbers=airuleset._no_question_flagged(
+                              _waiting_merged, cwd=root),
+                          queued_numbers=_queued_acceptance_numbers(
+                              _waiting_merged, root))
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
@@ -813,6 +823,20 @@ def cmd_slice_quals(args):
         _print_audit_rows(unhandled, own_stream=user)
         return
     _print_issue_rows(unhandled, own_stream=user)
+
+
+def _slice_quals_runner(root):
+    """A subprocess runner compatible with `_question_map_u_supplement`'s
+    ``runner(argv, cd)`` contract.  Reuses `_gh_out` (which handles
+    `_gh_env()` token resolution) so the supplement on the `--waiting` path
+    authenticates identically to the cache path (#181 I-6)."""
+    import airuleset as _a
+
+    def _runner(argv, cd):
+        # argv is ["gh", ...rest]; _gh_out takes *rest (without leading "gh").
+        return _a._gh_out(*argv[1:], cwd=cd, timeout=20)
+
+    return _runner
 
 
 def cmd_core_quals(args):

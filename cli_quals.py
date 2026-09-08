@@ -837,6 +837,72 @@ def _partition_user_waiting(rows):
     return {**workable, **ops_wait}, waiting
 
 
+# #948: hard cap on question-map supplement gh calls per refresh — the map is
+# TYPICALLY 0-3 entries, but a pathological accumulation must not burn the
+# shared #370 GraphQL budget. 10 is generous enough for any realistic box.
+_QMAP_SUPPLEMENT_CAP = 10
+
+
+def _question_map_u_supplement(rows, root, runner):
+    """#948: a DICT ``{number: row_dict}`` of OPEN, user-waiting tickets
+    referenced in the question map but ABSENT from the slice search ``rows``.
+
+    On a shared-gh-identity/app-token box the slice is ``label:stream:<user>``
+    only. A ticket authored via the shared token but lacking that label is
+    invisible to the search. Meanwhile the question-map entry referencing ``#N``
+    excludes the ping from the ticketless count (dedup). The ticket falls through
+    BOTH paths -> footer ``U 0`` while a real question is pending.
+
+    Returns a DICT ``{int: {"labels": [...], "title": str, "createdAt": str}}``
+    so the caller can BOTH add ``len(result)`` to the cache count AND merge the
+    rows into the ``--waiting`` listing — keeping the ONE-derivation invariant
+    (#367/#391, #948 review MAJOR-2). An empty dict on any error (fail-safe:
+    never inflate U off an unreadable map or failed gh).
+
+    Checks ``state == "OPEN"`` for every fetched ticket (#948 review MAJOR-1):
+    a CLOSED ticket with a stale ``needs-answer`` label must never inflate U.
+    Capped at ``_QMAP_SUPPLEMENT_CAP`` gh calls per refresh (#948 review
+    MINOR-3) to protect the #370 GraphQL budget.
+
+    ``runner(argv, cd)`` is the caller's ``_out`` (a subprocess wrapper); ``rows``
+    is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict."""
+    import statusbar as _sb
+    try:
+        refs = _sb.question_map_ticket_refs(root)
+    except Exception:
+        return {}
+    if not refs:
+        return {}
+    result = {}
+    checked = 0
+    for qn in refs:
+        if qn in rows:
+            continue
+        if checked >= _QMAP_SUPPLEMENT_CAP:
+            break
+        checked += 1
+        raw = runner(["gh", "issue", "view", str(qn),
+                      "--json", "labels,state,title,createdAt"], root)
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        # #948 review MAJOR-1: only OPEN tickets count.
+        state = obj.get("state", "")
+        if isinstance(state, str) and state.upper() != "OPEN":
+            continue
+        qlabels = obj.get("labels")
+        if _row_is_user_waiting(qlabels):
+            result[qn] = {
+                "labels": qlabels,
+                "title": obj.get("title", ""),
+                "createdAt": obj.get("createdAt", ""),
+            }
+    return result
+
+
 # #539: the repo's OWN ask-flow markers — the shape a genuine owner-question
 # comment takes (`❓ NEEDS YOU`/`❓ ASKED`, the `**Otázka …:**` block head, or a
 # plain "otázka" mention). Deliberately NOT a bare `?`: a routine gatekeeper /
