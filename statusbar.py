@@ -211,13 +211,11 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
     return removed
 
 
-STALE_WARN_S = 30 * 60     # #952: render stale numbers in muted colour after 30 min
-
 # Keys carried forward from a previous good cache when a transient gh failure
 # prevents a fresh read — the "serve stale" doctrine (#952).
 _CARRY_FORWARD_KEYS = (
     "open", "gk", "user_waiting", "ops_wait", "skipped", "wdrain_over",
-    "created_today", "closed_today",
+    "created_today", "closed_today", "name",
 )
 
 _ERROR_LOG_MAX_BYTES = 64 * 1024   # truncate refresh-errors.log beyond this
@@ -244,7 +242,10 @@ def carry_forward_stale(entry, prev, reason):
         return entry
     for key in _CARRY_FORWARD_KEYS:
         val = prev.get(key)
-        if val is not None:
+        # Only carry forward when the fresh entry has no useful value —
+        # a successful partial read (e.g. skipped count) must not be
+        # overwritten by a stale one (#952 review Y3).
+        if val not in (None, "") and entry.get(key) in (None, ""):
             entry[key] = val
     # Preserve scope from the previous cache so the render path knows the
     # partition shape (mine vs core).

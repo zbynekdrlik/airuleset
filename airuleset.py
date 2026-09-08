@@ -2922,9 +2922,11 @@ def cmd_tickets_status(args):
     cache = statusbar.cache_dir() / (_cwd_key + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
     # #952: serve stale on transient failure; clear stale on success.
-    if entry.get("open") is None:
+    # Gate on `root` so a non-repo cwd (root="", zero gh calls) does not
+    # spam the error log every TTL (#952 review Y2).
+    if entry.get("open") is None and root:
         prev = statusbar._load(cache)
-        reason = "gh failure (root=%s)" % (root or "none")
+        reason = "gh failure (root=%s)" % root
         entry = statusbar.carry_forward_stale(entry, prev, reason)
         statusbar.log_refresh_error(_cwd_key, reason)
     else:

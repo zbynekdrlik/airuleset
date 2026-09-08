@@ -2949,6 +2949,26 @@ class StaleCarryForward952(unittest.TestCase):
         self.assertGreaterEqual(len(lines), 1)
         self.assertIn(statusbar.cwd_key(self.repo), lines[-1])
 
+    def test_consecutive_failures_preserve_earliest_stale_since(self):
+        """Two consecutive failures must keep the EARLIEST stale_since."""
+        _seed_cache(self.home, self.repo, open_n=3, name="demo")
+        # Manually set stale_since to a known past time (simulating a prior failure)
+        p = statusbar.cache_dir(self.home) / (statusbar.cwd_key(self.repo) + ".json")
+        c = json.loads(p.read_text())
+        first_failure_ts = int(time.time()) - 3600  # 1 hour ago
+        c["stale_since"] = first_failure_ts
+        c["last_error"] = "first failure"
+        p.write_text(json.dumps(c))
+        # Second failure
+        self._write_fake_gh("exit 1\n")
+        self._refresh()
+        cache = self._cache()
+        self.assertEqual(cache["open"], 3)
+        self.assertEqual(cache["stale_since"], first_failure_ts,
+                         "stale_since must keep the earliest failure time")
+        self.assertNotEqual(cache["last_error"], "first failure",
+                            "last_error must update to the newest reason")
+
     def test_cold_cache_failure_stays_none(self):
         """With no prior cache, a failed refresh still writes open=None."""
         self._write_fake_gh("exit 1\n")
