@@ -65,13 +65,19 @@ def main_ahead_of_prod(main_version, prod_version):
     Both are version strings (e.g. '2.264.0'). Returns None on any
     parse failure (fail-safe: no action).
 
-    Comparison is tuple-wise: (2, 264, 0) > (2, 262, 0) is True.
-    Equal versions return False (no deploy needed)."""
+    Comparison pads to equal length with trailing zeros so that
+    (2, 264) and (2, 264, 0) are EQUAL, not different — a trailing-zero
+    mismatch between the two read sources must never produce a false
+    "ahead" (F3 review finding). Equal versions return False."""
     main_t = parse_version_tuple(main_version)
     prod_t = parse_version_tuple(prod_version)
     if main_t is None or prod_t is None:
         return None
-    return main_t > prod_t
+    # Pad to equal length so (2, 264) == (2, 264, 0)
+    max_len = max(len(main_t), len(prod_t))
+    main_p = main_t + (0,) * (max_len - len(main_t))
+    prod_p = prod_t + (0,) * (max_len - len(prod_t))
+    return main_p > prod_p
 
 
 def deploy_watch_decision(main_version, prod_version,

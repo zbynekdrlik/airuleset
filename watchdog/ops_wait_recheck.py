@@ -532,6 +532,46 @@ def _deploy_target_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _deploy_watch_classify(dep_targets, cwd, deploy_state_fetch, state, now):
+    """#944 (extracted from goal_ops_wait_recheck, F8): given deploy-target
+    member numbers and a deploy_state_fetch seam, read the deploy state and
+    classify into (deploy_window_nums, deploy_miss_nums).
+
+    The seam returns a DICT `{"main_version": str, "prod_version": str,
+    "window_open": bool, "window_passed": bool}` (the natural shape); it is
+    wrapped into a `[dict]` list for `_cached_member_fetch`'s list-only
+    contract internally. None / fetch error / non-dict → ([], []).
+
+    The cache key is `"deploy_state_cache"`, shared across all panes on the
+    same repo per TTL — one fetch per repo per TTL, never per sweep.
+    """
+    try:
+        # Wrap the natural dict return into a [dict] for _cached_member_fetch
+        def _list_wrap(c):
+            r = deploy_state_fetch(c)
+            return [r] if isinstance(r, dict) else r
+        ds = _cached_member_fetch(
+            cwd, _list_wrap, state, now,
+            "deploy_state_cache", ttl=OPS_WAIT_FETCH_TTL_S,
+            fail_ttl=OPS_WAIT_FETCH_FAIL_TTL_S)
+    except Exception:
+        return [], []
+    if not isinstance(ds, list) or not ds:
+        return [], []
+    dstate = ds[0] if isinstance(ds[0], dict) else {}
+    from watchdog import release_watch
+    decision = release_watch.deploy_watch_decision(
+        dstate.get("main_version"),
+        dstate.get("prod_version"),
+        dstate.get("window_open", False),
+        dstate.get("window_passed", False))
+    if decision == "window-open":
+        return dep_targets, []
+    elif decision == "window-missed":
+        return [], dep_targets
+    return [], []
+
+
 def _no_target_numbers(members):
     """#881: the subset of `_member_numbers` flagged `no-target!` — a W member
     with no valid `Ops-wait-target:` marker. The session must set a target or
@@ -792,6 +832,21 @@ def _flag_items(w_members, release_landed, stagnation_count=0,
     behind main AND a deploy window is currently open -> GATEKEEPER-ACTION.
     `deploy_miss` — same but window has passed -> owner ping."""
     items = []
+    # #944 — DEPLOY-WINDOW / DEPLOY-MISS: main > PROD with an open/missed
+    # deploy window. FIRST so the owner-ping / GATEKEEPER-ACTION signal
+    # survives the greedy NUDGE_MAX_CHARS cap (the ticket's primary purpose).
+    dw = [n for n in (deploy_window or [])
+          if isinstance(n, int) and not isinstance(n, bool)]
+    if dw:
+        items.append(
+            "DEPLOY-WINDOW %d (#944 -- main > PROD, okno OTVORENÉ: "
+            "postni GATEKEEPER-ACTION + needs-gatekeeper)." % len(dw))
+    dm = [n for n in (deploy_miss or [])
+          if isinstance(n, int) and not isinstance(n, bool)]
+    if dm:
+        items.append(
+            "DEPLOY-MISS %d (#944 -- main > PROD, okno PREŠLO bez "
+            "deploya: ping ownerovi ❓)." % len(dm))
     # #914 — W-STAGNATION clause, FIRST (with W-OVERFLOW) so it survives the
     # greedy NUDGE_MAX_CHARS cap. A non-shrinking W for multiple nudge periods
     # is the specific rot the owner reported.
@@ -866,19 +921,6 @@ def _flag_items(w_members, release_landed, stagnation_count=0,
         if len(landed) > RELEASE_LANDED_OWNER_ASK_N:
             it += ", nad %d zhrň ownerovi ❓" % RELEASE_LANDED_OWNER_ASK_N
         items.append(it + ".")
-    # #944 — deploy-state watch: main > PROD with an open/missed window.
-    dw = [n for n in (deploy_window or [])
-          if isinstance(n, int) and not isinstance(n, bool)]
-    if dw:
-        items.append(
-            "DEPLOY-WINDOW %d (#944 -- main > PROD, okno OTVORENÉ: "
-            "postni GATEKEEPER-ACTION + needs-gatekeeper)." % len(dw))
-    dm = [n for n in (deploy_miss or [])
-          if isinstance(n, int) and not isinstance(n, bool)]
-    if dm:
-        items.append(
-            "DEPLOY-MISS %d (#944 -- main > PROD, okno PREŠLO bez "
-            "deploya: ping ownerovi ❓)." % len(dm))
     return items
 
 
@@ -1236,28 +1278,8 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     deploy_miss_nums = []
     dep_targets = _deploy_target_numbers(members)
     if dep_targets and deploy_state_fetch is not None:
-        try:
-            ds = _cached_member_fetch(
-                cwd, deploy_state_fetch, state, now,
-                "deploy_state_cache", ttl=OPS_WAIT_FETCH_TTL_S,
-                fail_ttl=OPS_WAIT_FETCH_FAIL_TTL_S)
-        except Exception:
-            ds = None
-        if isinstance(ds, list) and ds:
-            # deploy_state_fetch returns a single-element list with the
-            # state dict: [{"main_version": ..., "prod_version": ...,
-            #   "window_open": bool, "window_passed": bool}]
-            dstate = ds[0] if isinstance(ds[0], dict) else {}
-            from watchdog import release_watch
-            decision = release_watch.deploy_watch_decision(
-                dstate.get("main_version"),
-                dstate.get("prod_version"),
-                dstate.get("window_open", False),
-                dstate.get("window_passed", False))
-            if decision == "window-open":
-                deploy_window_nums = dep_targets
-            elif decision == "window-missed":
-                deploy_miss_nums = dep_targets
+        deploy_window_nums, deploy_miss_nums = _deploy_watch_classify(
+            dep_targets, cwd, deploy_state_fetch, state, now)
     # #695: the DISCUSS-AUDIT clause scope is resolved HERE, in the nudge
     # branch only (a per-cwd git-remote read at most ~once a day per pane),
     # never on the per-sweep hot path.

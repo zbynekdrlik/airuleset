@@ -265,18 +265,118 @@ class TestCliQualsDeployTarget(unittest.TestCase):
         self.assertEqual(flagged, set())
 
 
-class TestWatchdogFetchDeployTarget(unittest.TestCase):
-    """The deploy_target flag is parsed from the --ops-wait reason column."""
+class TestDeployWatchClassify(unittest.TestCase):
+    """_deploy_watch_classify — the extracted orchestrator helper."""
 
-    def test_deploy_target_tag_parsed(self):
-        """A 'deploy-target!' tag in the reason column is parsed to
-        deploy_target=True in the member dict."""
-        # Simulate _watchdog_ops_wait_fetch parsing a line with deploy-target!
-        # We test the parsing logic directly by checking that the tag would be
-        # recognized in the existing pattern.
-        reason = "ops-wait deploy-target!"
-        self.assertIn("deploy-target!", reason)
-        self.assertTrue("deploy-target!" in reason)
+    def _make_fetch(self, main="2.264.0", prod="2.262.0",
+                    window_open=False, window_passed=False):
+        def fetch(cwd):
+            return {"main_version": main, "prod_version": prod,
+                    "window_open": window_open,
+                    "window_passed": window_passed}
+        return fetch
+
+    def test_window_open_classifies(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        dw, dm = _deploy_watch_classify(
+            [100, 200], "/repo",
+            self._make_fetch(window_open=True), state, 1000)
+        self.assertEqual(sorted(dw), [100, 200])
+        self.assertEqual(dm, [])
+
+    def test_window_missed_classifies(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        dw, dm = _deploy_watch_classify(
+            [100], "/repo",
+            self._make_fetch(window_passed=True), state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [100])
+
+    def test_equal_versions_no_flags(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        dw, dm = _deploy_watch_classify(
+            [100], "/repo",
+            self._make_fetch(main="2.264.0", prod="2.264.0",
+                             window_open=True), state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [])
+
+    def test_fetch_error_failsafe(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        def fetch(cwd):
+            raise RuntimeError("network error")
+        dw, dm = _deploy_watch_classify([100], "/repo", fetch, state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [])
+
+    def test_fetch_none_failsafe(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        def fetch(cwd):
+            return None
+        dw, dm = _deploy_watch_classify([100], "/repo", fetch, state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [])
+
+
+class TestCommentOpsWaitTargetFull(unittest.TestCase):
+    """_comment_ops_wait_target_full — event + date extraction."""
+
+    def test_deploy_event(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(
+            "Ops-wait-target: deploy na PROD by 2026-09-08")
+        self.assertEqual(event, "deploy na PROD")
+        self.assertEqual(date, "2026-09-08")
+
+    def test_no_marker(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(
+            "no marker here")
+        self.assertIsNone(event)
+        self.assertIsNone(date)
+
+    def test_none_input(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(None)
+        self.assertIsNone(event)
+        self.assertIsNone(date)
+
+    def test_invalid_date(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(
+            "Ops-wait-target: deploy by 2026-99-99")
+        self.assertIsNone(event)
+        self.assertIsNone(date)
+
+
+class TestNormAgesTargetEvent(unittest.TestCase):
+    """_norm_ages setdefaults own_target_event for legacy fakes."""
+
+    def test_legacy_tuple_gets_none_event(self):
+        import cli_quals
+        result = cli_quals._norm_ages((1000, 2000))
+        self.assertIsNone(result.get("own_target_event"))
+
+    def test_dict_without_event_gets_none(self):
+        import cli_quals
+        result = cli_quals._norm_ages({"own": 1000, "any": 2000})
+        self.assertIsNone(result.get("own_target_event"))
+
+
+class TestVersionPadding(unittest.TestCase):
+    """F3 fix: trailing-zero-padded comparison."""
+
+    def test_trailing_zero_equality(self):
+        """(2, 264) and (2, 264, 0) must be EQUAL, not different."""
+        self.assertFalse(release_watch.main_ahead_of_prod("2.264", "2.264.0"))
+
+    def test_different_length_ahead(self):
+        self.assertTrue(release_watch.main_ahead_of_prod("2.265", "2.264.0"))
 
 
 if __name__ == "__main__":
