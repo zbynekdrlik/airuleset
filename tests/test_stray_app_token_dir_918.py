@@ -4,8 +4,10 @@ stray App-token directory.
 Root cause: _stream_self_login() checks _is_gh_app_token_box() (directory
 existence only), and when True returns STREAM_APP_BOT_LOGIN unconditionally
 — even when the active gh auth is a PAT (kvaskodev), not an App token.
-This makes _bounce_round() unable to match own prior RFR comments
-(authored by the PAT login), producing round=1 instead of the true round.
+This made _issue_comment_ages() unable to match own prior comments
+(authored by the PAT login). _bounce_round() no longer depends on
+self_login (it counts prio:bounce events since #942), but the identity
+fix remains important for _issue_comment_ages().
 
 The fix validates the App-token-box detection: if _gh_login() returns a
 real login (not None), the box is operating as a PAT box and the stray
@@ -66,37 +68,37 @@ class TestStrayAppTokenDir(unittest.TestCase):
 
 
 class TestBounceRoundStrayDir(unittest.TestCase):
-    """_bounce_round with the wrong self_login produces round=1 instead of
-    the correct round — the gate-visible symptom of #918."""
+    """#942: _bounce_round no longer depends on self_login at all — it counts
+    prio:bounce label events, not own RFR comments.  The stray-directory
+    identity mismatch (#918) is structurally irrelevant to the bounce round
+    now, but the round must still work correctly regardless of self_login."""
 
-    def _fake_runner(self, comments, labels=None):
-        obj = {"comments": comments,
-               "labels": [{"name": lb} for lb in (labels or [])]}
+    def _fake_runner(self, events, labels=None):
+        obj_labels = {"labels": [{"name": lb} for lb in (labels or [])]}
         def runner(*args, **kwargs):
-            return json.dumps(obj)
+            if args and args[0] == "api":
+                return json.dumps(events)
+            return json.dumps(obj_labels)
         return runner
 
-    def test_pat_comments_invisible_with_app_bot_login(self):
-        """When self_login is STREAM_APP_BOT_LOGIN but comments were
-        authored by the PAT login, _bounce_round returns 1 (wrong).
-        This is the RED test — it documents the bug, not the fix."""
-        r = self._fake_runner([
-            {"author": {"login": PAT_LOGIN},
-             "body": "READY-FOR-REVIEW: branch a head abc"},
-            {"author": {"login": PAT_LOGIN},
-             "body": "READY-FOR-REVIEW: branch b head def"},
-            {"author": {"login": PAT_LOGIN},
-             "body": "READY-FOR-REVIEW: branch c head ghi"},
-        ], labels=["prio:bounce"])
-        # With the WRONG self_login (App bot), none match -> round 2
-        # (floored from 1 by prio:bounce).
-        rnd_wrong = cli_quals._bounce_round(1, APP_BOT, runner=r)
-        self.assertEqual(2, rnd_wrong,
-                         "Bug confirmation: App bot login misses PAT comments")
-        # With the CORRECT self_login (PAT), all 3 match -> round 4.
-        rnd_correct = cli_quals._bounce_round(1, PAT_LOGIN, runner=r)
-        self.assertEqual(4, rnd_correct,
-                         "Correct PAT login must find all 3 RFR comments")
+    def test_round_independent_of_self_login(self):
+        """Bounce round counts prio:bounce events, not own RFR comments,
+        so self_login identity mismatch cannot affect the round (#942)."""
+        events = [
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+            {"event": "unlabeled", "label": {"name": "prio:bounce"}},
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ]
+        r = self._fake_runner(events, labels=["prio:bounce"])
+        # Both logins produce the same round — events-based, not RFR.
+        rnd_app = cli_quals._bounce_round(1, APP_BOT, runner=r,
+                                           repo="o/n")
+        rnd_pat = cli_quals._bounce_round(1, PAT_LOGIN, runner=r,
+                                           repo="o/n")
+        self.assertEqual(rnd_app, rnd_pat,
+                         "Round must be identical regardless of self_login")
+        self.assertEqual(3, rnd_app,
+                         "Two prio:bounce label-adds -> round 3")
 
 
 if __name__ == "__main__":

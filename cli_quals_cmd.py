@@ -549,7 +549,8 @@ def _print_bounce_rounds(quals, root, user):
     in this slice — one line per member: number<TAB>round<TAB>tag<TAB>title.
     The tag is `round3!` at round >= 3, empty otherwise (fail-safe untagged on
     any gh error — #539/#570 bias). Scoped to LABELED tickets to bound gh calls
-    (each _bounce_round does one `gh issue view`)."""
+    (each _bounce_round does a `gh api` events call + a `gh issue view`
+    for labels — #942)."""
     import airuleset
     slug = airuleset._repo_slug(cwd=root)
     # Fetch only prio:bounce / ready-for-review labeled tickets (the bounce lane
