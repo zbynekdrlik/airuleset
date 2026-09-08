@@ -324,9 +324,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 - **Every client Discuss report → Odoo project.task IMMEDIATELY (#924,
   owner 7.9.).** Before reply/GitHub ticket: create the task in the
   client's project (origin: thread + deep URL + msg id, summary, dev
-  ref). Stages track reality (Zásobník→Realizácia→Verifikácia;
-  Hotovo=owner); lag=violation. Discuss is NEVER the source of truth;
-  the project task is.
+  ref). Stages + Hotovo authority per `client-board-tasks.md`;
+  lag=violation. Discuss is NEVER the source of truth; the task is.
 
 Every thread this file governs follows the project's own channel placement
 rule — for odoo-erp see `.claude/rules/odoo-task-sync.md` (task chatter for

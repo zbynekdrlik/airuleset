@@ -78,12 +78,10 @@ class TestTaskFirstDoctrinePresent(unittest.TestCase):
     def test_stages_token(self):
         win = _window(self.body, "project.task IMMEDIATELY")
         self.assertTrue(win, "anchor not found")
-        # The stage progression must be named
+        # #949 Y1: stages moved to client-board-tasks.md; the #924 bullet
+        # now carries a pointer instead of the inline stage list.
         normed = _norm(win)
-        self.assertTrue(
-            "Realizácia" in normed or "Realizacia" in normed,
-            f"stage token missing in window: {normed[:200]}",
-        )
+        self.assertIn("client-board-tasks.md", normed)
 
     def test_source_of_truth_negation(self):
         win = _window(self.body, "project.task IMMEDIATELY")
@@ -92,12 +90,13 @@ class TestTaskFirstDoctrinePresent(unittest.TestCase):
         self.assertIn("NEVER", normed)
         self.assertIn("source of truth", normed)
 
-    def test_hotovo_owner(self):
+    def test_hotovo_authority(self):
         win = _window(self.body, "project.task IMMEDIATELY")
         self.assertTrue(win, "anchor not found")
+        # #949 Y1: Hotovo authority pointed to client-board-tasks.md
         normed = _norm(win)
         self.assertIn("Hotovo", normed)
-        self.assertIn("owner", normed)
+        self.assertIn("authority", normed)
 
 
 class TestSizeCap(unittest.TestCase):

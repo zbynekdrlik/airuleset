@@ -623,6 +623,47 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
         if ctx is not None:
             self.assertNotIn("Client Board Tasks", ctx)
 
+    def test_odoo_project_task_cofit_with_messaging(self):
+        """#949 R2 — a .py Write with project.task + message_post must inject BOTH."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/sync.py",
+                 "content": "env['project.task'].create(vals)\nchannel.message_post(body=html)"},
+                tool_name="Write",
+                session_id="sess-cofit-949",
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(ctx, "co-fire must inject something")
+        self.assertIn("Odoo Client Messaging", ctx)
+        self.assertIn("Client Board Tasks", ctx)
+
+    def test_asyncio_create_task_does_not_inject_board_tasks(self):
+        """#949 R3 — asyncio.create_task() must NOT load the board-tasks doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/worker.py",
+                 "content": "asyncio.create_task(run_background())"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        if ctx is not None:
+            self.assertNotIn("Client Board Tasks", ctx)
+
+    def test_rust_write_task_does_not_inject_board_tasks(self):
+        """#949 R3 — write_task() in .rs must NOT load the board-tasks doctrine."""
+        ctx = injected(
+            run(
+                {"file_path": "/repo/main.rs",
+                 "content": "write_task(&mut buf, &task_data)?;"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        if ctx is not None:
+            self.assertNotIn("Client Board Tasks", ctx)
+
     def test_claude_code_log_export_prompt_injects_the_skill(self):
         r = self._prompt("Please export this session as HTML so I can share it")
         ctx = self._injected_prompt(r)
@@ -786,6 +827,76 @@ class TestWiring(TestCase):
         text = HOOK.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("#!"), "hook needs a shebang")
         self.assertIn("set -euo pipefail", text)
+
+
+class TestClientBoardTasksDoctrine949(TestCase):
+    """#949 Y2 — content locks for every acceptance item in client-board-tasks.md."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.body = (ROOT / "skills" / "odoo-client-messaging"
+                    / "client-board-tasks.md").read_text(encoding="utf-8")
+
+    # Rule 1: task name language
+    def test_task_name_client_language(self):
+        self.assertIn("v jazyku KLIENTA", self.body)
+        self.assertIn("nikdy anglicky", self.body)
+
+    # Rule 2: description format
+    def test_description_banned_list(self):
+        self.assertIn("BANNED in the description", self.body)
+        self.assertIn("channel ids", self.body)
+        self.assertIn("version numbers", self.body)
+
+    # Rule 3: verification chatter note
+    def test_verification_note_mandatory(self):
+        self.assertIn("MANDATORY on stage transition", self.body)
+
+    def test_verification_note_closing_line(self):
+        self.assertIn("stačí 👍", self.body)
+
+    def test_verification_note_paired_with_reactions(self):
+        self.assertIn("read-reactions.md", self.body)
+
+    # Rule 4: client question stage
+    def test_client_question_stage(self):
+        self.assertIn("Potrebuje ujasniť", self.body)
+
+    # Rule 5: no assignee
+    def test_no_assignee(self):
+        self.assertIn("user_ids", self.body)
+        self.assertIn("empty", self.body.lower())
+        self.assertIn("No assignee", self.body)
+
+    # Rule 6: Hotovo only after client confirmation
+    def test_hotovo_client_confirmation(self):
+        self.assertIn("ONLY after client confirmation", self.body)
+
+    # Rule 7: stage table
+    def test_stage_table_rows(self):
+        for stage in ("ToDo", "Potrebuje ujasniť", "Realizácia",
+                      "Verifikácia", "Hotovo"):
+            self.assertIn(stage, self.body)
+
+    # Rule 8: posting mechanics
+    def test_never_manual_browser_post(self):
+        self.assertIn("never a manual browser post", self.body)
+
+    def test_never_edit_or_delete(self):
+        self.assertIn("Never edit or delete", self.body)
+
+    # Acceptance-cited order aligned with SKILL.md:35
+    def test_acceptance_cited_order(self):
+        self.assertIn("Acceptance-cited: msg", self.body)
+        # msg comes before task — SKILL.md:35 order
+        idx_msg = self.body.index("Acceptance-cited: msg")
+        idx_task = self.body.index("task <task_id>", idx_msg)
+        self.assertGreater(idx_task, idx_msg)
+
+    # B2: plain prose content vs body_is_html transport
+    def test_plain_prose_vs_html_transport(self):
+        self.assertIn("PLAIN PROSE", self.body)
+        self.assertIn("body_is_html=True", self.body)
 
 
 if __name__ == "__main__":
