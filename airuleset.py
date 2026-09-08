@@ -2918,8 +2918,18 @@ def cmd_tickets_status(args):
                 entry["skipped"] = int(s)
             except (TypeError, ValueError):
                 entry["skipped"] = None
-    cache = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
+    _cwd_key = statusbar.cwd_key(cwd)
+    cache = statusbar.cache_dir() / (_cwd_key + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
+    # #952: serve stale on transient failure; clear stale on success.
+    if entry.get("open") is None:
+        prev = statusbar._load(cache)
+        reason = "gh failure (root=%s)" % (root or "none")
+        entry = statusbar.carry_forward_stale(entry, prev, reason)
+        statusbar.log_refresh_error(_cwd_key, reason)
+    else:
+        entry.pop("stale_since", None)
+        entry.pop("last_error", None)
     tmp = str(cache) + ".tmp"
     Path(tmp).write_text(json.dumps(entry))
     os.replace(tmp, cache)
