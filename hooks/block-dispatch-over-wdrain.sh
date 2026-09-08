@@ -83,7 +83,23 @@ fi
 
 # Threshold check: W > 8
 THRESHOLD=8
-if [ "$OPS_WAIT" -le "$THRESHOLD" ]; then
+
+# #953: deploy-target exempt — W members blocked on a release/deploy train
+# do not count toward the threshold. The effective W is reduced by the exempt
+# count. Hard ceiling at 2*THRESHOLD prevents unbounded W growth.
+DEPLOY_WAIT=$(jq -r '.ops_wait_deploy_wait // empty' "$CACHE_FILE" 2>/dev/null || echo "")
+case "$DEPLOY_WAIT" in ''|*[!0-9]*) DEPLOY_WAIT=0 ;; esac
+
+HARD_CEILING=$(( THRESHOLD * 2 ))
+if [ "$OPS_WAIT" -gt "$HARD_CEILING" ]; then
+    : # fall through to receipt/bypass/block — hard ceiling breached
+elif [ "$DEPLOY_WAIT" -gt 0 ] 2>/dev/null; then
+    EFFECTIVE_W=$(( OPS_WAIT - DEPLOY_WAIT ))
+    if [ "$EFFECTIVE_W" -lt 0 ]; then EFFECTIVE_W=0; fi
+    if [ "$EFFECTIVE_W" -le "$THRESHOLD" ]; then
+        exit 0   # under threshold after exemption — allow
+    fi
+elif [ "$OPS_WAIT" -le "$THRESHOLD" ]; then
     exit 0   # under threshold — allow
 fi
 

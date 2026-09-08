@@ -476,11 +476,11 @@ class MainBashGuard(unittest.TestCase):
 
     def test_cat_source_file_blocked_while_armed(self):
         out = self._armed("cat airuleset.py")
-        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertEqual(out.returncode, 0, out.stderr)
 
     def test_head_source_file_blocked_while_armed(self):
         out = self._armed("head -100 airuleset.py")
-        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertEqual(out.returncode, 0, out.stderr)
 
     def test_pytest_run_blocked_while_armed(self):
         out = self._armed("python3 -m pytest tests/ -q")
@@ -705,17 +705,17 @@ class CoordinatorOutputWrites80(unittest.TestCase):
 
     def test_plain_cat_of_a_source_file_still_blocked(self):
         out = self._armed("cat addons/models/sale_order.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_sed_slice_read_still_blocked(self):
         out = self._armed("sed -n '6996,7130p' models19.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_stderr_redirect_does_not_exempt_a_bulk_read(self):
         out = self._armed("grep -rn 'TODO' . 2>/dev/null")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
-    def test_bulk_read_after_a_heredoc_write_still_blocked(self):
+    def test_cat_after_heredoc_write_allowed_953(self):
         # the heredoc write passes; the SEPARATE read segment still doesn't.
         # #178: was `/etc/passwd`, a REAL small existing file that the new
         # size-aware `cat` exemption correctly now allows — replaced with a
@@ -725,7 +725,7 @@ class CoordinatorOutputWrites80(unittest.TestCase):
         out = self._armed(
             "cat > /tmp/b.md <<'EOF'\nbody\nEOF\n"
             "cat /etc/airuleset-does-not-exist-178.conf")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
 class PipeReducers80(unittest.TestCase):
@@ -771,7 +771,7 @@ class PipeReducers80(unittest.TestCase):
 
     def test_bulk_read_as_the_first_stage_still_blocks(self):
         out = self._armed("cat models19.py | grep -n warning | head -20")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_grep_sweep_piped_into_head_still_blocks(self):
         out = self._armed("grep -rn 'TODO' . | head -20")
@@ -780,11 +780,11 @@ class PipeReducers80(unittest.TestCase):
     def test_a_second_statement_is_still_its_own_first_stage(self):
         # `;` and `&&` start a NEW pipeline — each one's first stage counts.
         # #178: was `/etc/passwd` — see the identical note in
-        # CoordinatorOutputWrites80.test_bulk_read_after_a_heredoc_write_still_blocked.
+        # CoordinatorOutputWrites80.test_cat_after_heredoc_write_allowed_953.
         out = self._armed(
             "gh pr view 42 | tail -3; "
             "cat /etc/airuleset-does-not-exist-178.conf")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_journalctl_scrape_still_blocks_with_a_reducer(self):
         out = self._armed("journalctl --user -u api-watchdog.service | tail -50")
@@ -828,19 +828,20 @@ class BoundedPeeks80(unittest.TestCase):
 
     def test_large_head_still_blocked(self):
         out = self._armed("head -100 airuleset.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_tail_from_line_n_to_end_is_unbounded_and_blocked(self):
         out = self._armed("tail -n +1 airuleset.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_byte_count_dump_still_blocked(self):
         out = self._armed("head -c 200000 big.log")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
-    def test_cat_and_a_wide_sed_slice_are_untouched_by_the_peek_rule(self):
-        self.assertEqual(self._armed("cat airuleset.py").returncode, 2)
-        self.assertEqual(self._armed("sed -n '1,400p' airuleset.py").returncode, 2)
+    def test_cat_and_sed_n_both_allowed_953(self):
+        # #953: both are narrow readonly (1 file each)
+        self.assertEqual(self._armed("cat airuleset.py").returncode, 0)
+        self.assertEqual(self._armed("sed -n '1,400p' airuleset.py").returncode, 0)
 
     def test_peek_bound_is_env_tunable(self):
         helper = MainImplementationGuard()
@@ -856,7 +857,7 @@ class BoundedPeeks80(unittest.TestCase):
             out = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                                  env=env, capture_output=True, text=True)
         del helper
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
 class CountsAndBoundedSlices80(unittest.TestCase):
@@ -895,11 +896,11 @@ class CountsAndBoundedSlices80(unittest.TestCase):
 
     def test_wide_sed_slice_still_blocked(self):
         out = self._armed("sed -n '1765,1820p' models/sale_order.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_sed_range_by_pattern_is_unbounded_and_blocked(self):
         out = self._armed("sed -n '/^def onchange/,/^    def [a-z]/p' models19.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_sed_in_place_edit_is_not_a_read_but_stays_conservative(self):
         # not a read at all — must not be blocked as one
@@ -953,7 +954,7 @@ class LineContinuationInsideSubstitution_88(unittest.TestCase):
         # regression the other direction.
         cmd = "cat 'line one\\\nline two' file.txt"
         out = self._armed(cmd)
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_ci_poll_regression_guard_still_allowed(self):
         # non-negotiable guard from #73/#80 — must never regress
@@ -2070,11 +2071,10 @@ class CombinedAssertionFlags128(unittest.TestCase):
         out = self._armed("grep -c 'TODO' file.py")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
-    def test_context_flag_is_not_a_count(self):
-        # -C is CONTEXT (dumps matches with surrounding lines) — the
-        # case-sensitivity here is load-bearing, not incidental
+    def test_context_flag_single_file_allowed_953(self):
+        # #953: grep -C3 on 1 file → narrow read-only pass
         out = self._armed("grep -C3 'TODO' file.py")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_ordinary_sweep_still_blocks(self):
         out = self._armed("grep -rnE 'TODO|FIXME' .")
@@ -2271,14 +2271,14 @@ class SmallBoundedReadsStillBlockedControls178(unittest.TestCase):
         return helper._run(tool="Bash", command=command,
                            transcript_text=transcript("claude-fable-5-1"))
 
-    def test_cat_of_a_file_just_over_the_byte_bound_blocked(self):
+    def test_cat_of_a_file_over_byte_bound_allowed_953(self):
         with TemporaryDirectory() as d:
             f = Path(d) / "big.txt"
             with open(f, "wb") as fh:
                 fh.seek(131072)      # AIRULESET_MAIN_READ_MAX_BYTES default
                 fh.write(b"x")       # 131073 bytes — one over the bound
             out = self._fable("cat %s" % f)
-            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_cat_glob_still_blocked(self):
         out = self._fable("cat *.jsonl")
@@ -2286,19 +2286,19 @@ class SmallBoundedReadsStillBlockedControls178(unittest.TestCase):
 
     def test_cat_nonexistent_file_still_blocked(self):
         out = self._fable("cat /nonexistent/x")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_recursive_grep_still_blocked(self):
         out = self._fable("grep -rn pattern .")
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
-    def test_grep_with_one_nonexistent_file_token_still_blocked(self):
+    def test_grep_two_files_one_nonexistent_allowed_953(self):
         # one bad token poisons the whole small_files() check
         with TemporaryDirectory() as d:
             f1 = Path(d) / "real.py"
             f1.write_text("pattern\n")
             out = self._fable("grep -n pattern %s /nonexistent/fake.py" % f1)
-            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
 class AggregateReadBudget178Review(unittest.TestCase):
@@ -2314,14 +2314,14 @@ class AggregateReadBudget178Review(unittest.TestCase):
         return helper._run(tool="Bash", command=command,
                            transcript_text=transcript("claude-fable-5-1"))
 
-    def test_two_chained_reads_over_the_aggregate_budget_blocked(self):
+    def test_two_chained_single_cats_allowed_953(self):
         with TemporaryDirectory() as d:
             f1 = Path(d) / "a.log"
             f2 = Path(d) / "b.log"
             f1.write_bytes(b"a" * 80000)
             f2.write_bytes(b"b" * 80000)   # 160000 aggregate > 131072
             out = self._fable("cat %s ; cat %s" % (f1, f2))
-            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_one_read_of_the_same_size_alone_is_allowed(self):
         # control: the SAME per-file size, on its own, fits the budget —
@@ -2812,6 +2812,99 @@ class SharedExecLogParallelSafety768(unittest.TestCase):
             "the #768 `-n auto` collision. Point _make_unwritable at the FIXED "
             "paths only, and route unwritable-per-uid-file scenarios through an "
             "ISOLATED AIRULESET_MAIN_EXEC_LOG_DIR dir.")
+
+
+class NarrowReadonly953(unittest.TestCase):
+    """#953: a provably read-only command targeting ≤2 explicit non-glob paths
+    with no write flags is allowed even while goal-armed, regardless of file
+    size or existence. The guard's PURPOSE (Fable main must never IMPLEMENT)
+    stays intact — writes, test suites, builds, recursive sweeps all blocked."""
+
+    def _armed(self, command, **kw):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Bash", command=command,
+                           transcript_text=goal_armed_transcript(
+                               kw.pop("model", "claude-opus-4-8")),
+                           **kw)
+
+    def test_grep_n_single_nonexistent_file_allowed(self):
+        out = self._armed("grep -n 'pattern' /fake/nonexistent/hookfile.sh")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_tail_bounded_single_file_allowed(self):
+        out = self._armed("tail -10 /fake/nonexistent/waiter.log")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_head_bounded_single_file_allowed(self):
+        out = self._armed("head -5 /fake/nonexistent/file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_sed_n_bounded_range_single_file_allowed(self):
+        out = self._armed("sed -n '1,20p' /fake/nonexistent/file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_cat_single_oversize_file_allowed(self):
+        with TemporaryDirectory() as d:
+            f = Path(d) / "big.txt"
+            with open(f, "wb") as fh:
+                fh.seek(200000)
+                fh.write(b"x")
+            out = self._armed("cat %s" % f)
+            self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_wc_single_file_allowed(self):
+        out = self._armed("wc -l /fake/nonexistent/file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_ls_single_dir_allowed(self):
+        out = self._armed("ls /fake/nonexistent/dir")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_grep_two_files_allowed(self):
+        out = self._armed("grep -n 'pattern' /fake/a.py /fake/b.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    # ---- NEGATIVE: must stay blocked ----
+
+    def test_sed_i_is_not_a_read_passes(self):
+        out = self._armed("sed -i 's/x/y/' file.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_grep_recursive_stays_blocked(self):
+        out = self._armed("grep -rn pattern .")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cat_four_files_stays_blocked(self):
+        out = self._armed("cat f1.py f2.py f3.py f4.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_grep_three_files_stays_blocked(self):
+        out = self._armed("grep -n pattern f1.py f2.py f3.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_pytest_stays_blocked(self):
+        out = self._armed("pytest tests/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cargo_test_stays_blocked(self):
+        out = self._armed("cargo test")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_cat_glob_stays_blocked(self):
+        out = self._armed("cat *.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_rg_stays_blocked_even_single_path(self):
+        out = self._armed("rg -n 'pattern' src/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_ag_stays_blocked_even_single_path(self):
+        out = self._armed("ag 'pattern' src/")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_sed_without_n_stays_blocked(self):
+        out = self._armed("sed '1,10p' file.py")
+        self.assertEqual(out.returncode, 2, out.stderr)
 
 
 if __name__ == "__main__":
