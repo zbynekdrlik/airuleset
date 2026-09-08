@@ -385,6 +385,25 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     existing_env = result.get("env")
     result["env"] = dict(existing_env) if isinstance(existing_env, dict) else {}
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION
+    # #950: shared Playwright browsers — set PLAYWRIGHT_BROWSERS_PATH on
+    # shared-stream boxes so Playwright (and its MCP plugin) uses the
+    # root-owned /opt/ms-playwright instead of per-user ~/.cache/ms-playwright.
+    # On non-shared-stream boxes the key is ABSENT (not set to empty — that
+    # would override a working default). The box-class marker is read ONCE.
+    try:
+        from watchdog.reaper import default_box_class
+        if default_box_class() == "shared-stream":
+            from cli_resource_guards import PLAYWRIGHT_SHARED_PATH
+            if os.path.isdir(PLAYWRIGHT_SHARED_PATH):
+                result["env"]["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_SHARED_PATH
+            else:
+                # #950 Y2: if the shared dir is absent, REMOVE the key so a stale
+                # settings.json doesn't point at nothing (Playwright would fail to
+                # fall back to the per-user cache).
+                result["env"].pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    except Exception as e:  # noqa: BLE001 — best-effort, never break install
+        import sys
+        print("  ⚠ playwright env: box-class read failed: %r" % e, file=sys.stderr)
     result["cleanupPeriodDays"] = airuleset.MANAGED_CLEANUP_PERIOD_DAYS
     return result
 

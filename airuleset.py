@@ -1366,6 +1366,15 @@ def cmd_install(args):
         print(f"  owner-VPS ssh auto-attach setup error (non-fatal): {e}",
               file=sys.stderr)
     try:
+        # #950: shared-stream env vars (PLAYWRIGHT_BROWSERS_PATH) in ~/.bashrc
+        from cli_bashrc_appliers import apply_stream_env
+        env_changed = apply_stream_env()
+        if env_changed:
+            print(f"  Updated:   {BASHRC} (shared-stream env, #950)")
+    except Exception as e:
+        print(f"  shared-stream env setup error (non-fatal): {e}",
+              file=sys.stderr)
+    try:
         # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
         # (gk/mN/dN/...) so the owner sees WHERE they are. #593: renders ONLY on
         # SINGLE-SESSION-per-account boxes (gk + subdev streams), NEVER an owner/

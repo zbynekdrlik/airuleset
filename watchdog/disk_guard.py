@@ -107,6 +107,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "tmp-test", "runner-diag", "npm-uv-cache",
     # #935-B — work-products snapshot backstop:
     "work-products-snapshot",
+    # #950 — generalized home-directory snapshot backstop:
+    "home-snapshot",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -212,6 +214,17 @@ WORK_PRODUCTS_SUBDIR = os.path.join(".claude", "work-products")
 WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD = 10000   # >10k files = snapshot
 WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD = 1_000_000_000  # >1G = snapshot
 WORK_PRODUCTS_SNAPSHOT_MIN_AGE_DAYS = 7
+
+# #950 — generalized home-directory snapshot backstop (shared-stream only)
+HOME_SNAPSHOT_FILE_THRESHOLD = WORK_PRODUCTS_SNAPSHOT_FILE_THRESHOLD   # >10k files
+HOME_SNAPSHOT_SIZE_THRESHOLD = WORK_PRODUCTS_SNAPSHOT_SIZE_THRESHOLD   # >1G
+HOME_SNAPSHOT_MIN_AGE_DAYS = 7
+# Top-level $HOME entries EXCLUDED from the sweep — everything else that is
+# snapshot-shaped AND old enough is a candidate. Dot-entries are excluded as a
+# category (rule 1); these named entries are the non-dot allowlist.
+HOME_SNAPSHOT_SAFE_NAMES = frozenset({
+    "devel", "uploads", "snap", "bin",
+})
 
 
 def _dbg(msg):
@@ -2191,6 +2204,109 @@ def discover_snapshot_work_products(home=None, now=None,
 
 
 # --------------------------------------------------------------------------- #
+# #950 — generalized home-directory SNAPSHOT backstop (shared-stream only)
+# --------------------------------------------------------------------------- #
+def discover_snapshot_home_dirs(home=None, now=None, box_class_fn=None,
+                                min_age_days=HOME_SNAPSHOT_MIN_AGE_DAYS,
+                                file_threshold=HOME_SNAPSHOT_FILE_THRESHOLD,
+                                size_threshold=HOME_SNAPSHOT_SIZE_THRESHOLD):
+    """#950: top-level $HOME entries that look like full-tree snapshots on a
+    shared-stream box.  Structural exclusions (cheapest-first):
+
+    1. Dot-entries (``.*``) — covers .ssh .config .local .cache .claude etc.
+    2. Named safe dirs — ``devel`` (checkouts), ``uploads``, ``snap``, ``bin``.
+    3. Not a real directory (files, symlinks — never followed).
+    4. Different ``st_dev`` than ``$HOME`` (never cross a filesystem mount).
+    5. Live cwd/fd inside (``_target_in_live_use``).
+    6. ``.airuleset-keep``/``.no-sweep`` at the candidate root.
+    7. Git-shaped (``.git`` file or dir at root) — routed to the worktree rung.
+    8. Snapshot-shaped (>10k files OR >1G) AND newest mtime > min_age_days → delete.
+
+    Gated to ``shared-stream`` box class (a workstation home is owner data).
+    Returns ``[{cls:"home-snapshot", path, bytes, kind, reason}]``."""
+    now = time.time() if now is None else now
+    home = home or os.path.expanduser("~")
+    bcfn = box_class_fn or _default_box_class
+    try:
+        if bcfn() != "shared-stream":
+            return []
+    except Exception:
+        return []       # box-class unknown → never sweep
+    out = []
+    try:
+        home_dev = os.lstat(home).st_dev
+    except OSError:
+        return []
+    try:
+        for entry in sorted(Path(home).iterdir()):
+            name = entry.name
+            # Rule 1: skip dot-entries
+            if name.startswith("."):
+                continue
+            # Rule 2: named safe dirs
+            if name in HOME_SNAPSHOT_SAFE_NAMES:
+                continue
+            # Rule 3: not a real directory / symlink
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            path_s = str(entry)
+            # Rule 4: different filesystem
+            try:
+                if os.lstat(path_s).st_dev != home_dev:
+                    continue
+            except OSError:
+                continue
+            # Rule 5: live use
+            if _target_in_live_use_pw(path_s):
+                out.append({"cls": "home-snapshot", "path": path_s,
+                            "bytes": 0, "kind": "skip",
+                            "reason": "in live use — kept"})
+                continue
+            # Rule 6: keep marker
+            if _uploads_dir_has_keep_marker(path_s):
+                out.append({"cls": "home-snapshot", "path": path_s,
+                            "bytes": 0, "kind": "skip",
+                            "reason": "keep marker — never touched"})
+                continue
+            # Rule 7: git-shaped → skip (handled by worktree rung)
+            git_path = os.path.join(path_s, ".git")
+            if os.path.exists(git_path):
+                out.append({"cls": "home-snapshot", "path": path_s,
+                            "bytes": 0, "kind": "skip",
+                            "reason": "git-shaped — deferred to worktree rung"})
+                continue
+            # Rule 8: snapshot check
+            fcount, fsize, newest = _count_files_bounded(path_s, file_threshold)
+            is_snapshot = (fcount > file_threshold or fsize > size_threshold)
+            if not is_snapshot:
+                continue        # small dir — not a snapshot, not touched
+            if newest is None:
+                try:
+                    newest = os.lstat(path_s).st_mtime
+                except OSError:
+                    out.append({"cls": "home-snapshot", "path": path_s,
+                                "bytes": fsize, "kind": "skip",
+                                "reason": "could not determine age — kept"})
+                    continue
+            age_d = (now - newest) / 86400.0
+            if age_d < min_age_days:
+                out.append({"cls": "home-snapshot", "path": path_s,
+                            "bytes": fsize, "kind": "skip",
+                            "reason": "snapshot too recent (%.1fd < %dd) — kept"
+                            % (age_d, min_age_days)})
+                continue
+            out.append({"cls": "home-snapshot", "path": path_s,
+                        "bytes": fsize, "kind": "delete", "reason": None,
+                        "why": "home snapshot: %d files, %s, %.1fd old"
+                        % (fcount, _human(fsize), age_d)})
+    except OSError as e:
+        out.append({"cls": "home-snapshot", "path": "-", "bytes": 0,
+                    "kind": "skip",
+                    "reason": "home walk error: %s" % e})
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # rung PLANNERS (adapters over the existing per-class discovery functions)
 # --------------------------------------------------------------------------- #
 def _row_to_action(cls, row, kind):
@@ -2435,6 +2551,16 @@ def _plan_work_products_snapshot(home, now):
                  "reason": "work-products-snapshot discovery error: %r" % e}]
 
 
+def _plan_home_snapshot(home, now):
+    """#950 — generalized home-directory snapshot backstop."""
+    try:
+        return discover_snapshot_home_dirs(home=home, now=now)
+    except Exception as e:
+        return [{"cls": "home-snapshot", "path": "-", "bytes": 0,
+                 "kind": "skip",
+                 "reason": "home-snapshot discovery error: %r" % e}]
+
+
 def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
@@ -2457,6 +2583,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("uploads", lambda: _plan_uploads(home, now)),
         ("work-products-snapshot", lambda: _plan_work_products_snapshot(home, now)),
+        ("home-snapshot", lambda: _plan_home_snapshot(home, now)),
         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
@@ -3226,6 +3353,39 @@ def _cadence_allows_drain(worst_pct, due, dry_run):
     return due
 
 
+def _read_quota_pct():
+    """#950: read this user's quota usage as a percentage of the hard limit.
+    Returns an int 0-100 (or higher if over-quota), or None if quota is not
+    enabled or the command fails. Uses ``quota -w -u -p`` (machine-parseable,
+    no name-wrap). Best-effort, never raises.
+
+    NOTE (review R1): ``quota`` exits 1 when the soft limit is exceeded
+    (``quota.c showquotas()`` returns ``over > 0 ? 1 : 0``), so rc=1 is a
+    VALID response with parseable stdout — only rc>1 or an exception is a
+    failure. The ``*`` suffix on the blocks field marks over-soft; it is
+    stripped before parsing."""
+    try:
+        r = subprocess.run(
+            ["quota", "-w", "-u", "-p"],
+            capture_output=True, text=True, timeout=10)
+        # rc=0 (under soft) and rc=1 (over soft) both produce valid stdout.
+        # rc>1 = genuine error (quota not enabled, no quota file, etc.).
+        if r.returncode > 1:
+            return None
+        # Parse the data line: "Filesystem  blocks  quota  limit  grace  ..."
+        lines = (r.stdout or "").strip().splitlines()
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 4 and parts[0].startswith("/"):
+                used_kb = int(parts[1].rstrip("*"))
+                hard_kb = int(parts[3])
+                if hard_kb > 0:
+                    return int(math.ceil(100.0 * used_kb / hard_kb))
+        return None
+    except Exception:
+        return None
+
+
 def _drain_due(home, now, min_interval_s=None):
     min_interval_s = MIN_DRAIN_INTERVAL_S if min_interval_s is None else min_interval_s
     p = _guard_dir(home) / LAST_DRAIN_NAME
@@ -3486,6 +3646,16 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # cold-start non-drain poll) so downstream readers never see a missing key.
     if "top_consumers" not in status:
         status["top_consumers"] = []
+    # #950: per-user quota reading (shared-stream only). Best-effort: quota
+    # not enabled → field omitted, downstream readers (footer, drain) treat
+    # missing as "no quota".
+    if _is_shared:
+        try:
+            qpct = _read_quota_pct()
+            if qpct is not None:
+                status["quota_pct"] = qpct
+        except Exception as e:
+            _dbg("quota read: %r" % e)
     try:
         write_status_cache(status, home=home)
     except Exception as e:

@@ -758,3 +758,76 @@ def apply_owner_vps_ssh_attach(bashrc_path: Path = None, user: str = None,
         os.replace(str(tmp), str(bpath))
         return True
     return False
+
+
+# --- #950: shared-stream managed env vars ------------------------------------
+# Separate marker block from ultracode (whose invariant is "thin functions, no
+# literals" — cli_bashrc_appliers.py:80-81). This block carries env vars that
+# apply ONLY to shared-stream boxes (subdev). The guard inside checks for the
+# /opt/ms-playwright directory so the export is a no-op when the shared install
+# hasn't been provisioned.
+STREAM_ENV_MARK_START = "# >>> airuleset: shared-stream env >>>"
+STREAM_ENV_MARK_END = "# <<< airuleset: shared-stream env <<<"
+
+STREAM_ENV_BASHRC_BLOCK = (
+    f"{STREAM_ENV_MARK_START}\n"
+    '# #950: shared Playwright browsers — one root-owned read-only copy.\n'
+    '# PLAYWRIGHT_BROWSERS_PATH tells Playwright (and its MCP plugin) to\n'
+    '# use /opt/ms-playwright instead of per-user ~/.cache/ms-playwright.\n'
+    'if [ -d /opt/ms-playwright ]; then\n'
+    '    export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright\n'
+    'fi\n'
+    f"{STREAM_ENV_MARK_END}"
+)
+
+
+def apply_stream_env(bashrc_path=None, user=None):
+    """#950: idempotently add/remove the shared-stream env marker block in
+    ~/.bashrc. Applied on shared-stream boxes only (subdev). Uses the same
+    marker-block mechanism as ultracode + ssh-attach. Returns True if the
+    file was modified."""
+    import airuleset
+    u = user or airuleset._current_user()
+    bpath = bashrc_path or Path(airuleset.BASHRC)
+
+    # Only shared-stream accounts get this block
+    want = u in airuleset.AUTHORITY_BY_USER
+
+    if not bpath.exists():
+        if want:
+            bpath.write_text(STREAM_ENV_BASHRC_BLOCK + "\n")
+            return True
+        return False
+
+    existing = bpath.read_text()
+    spans = _stream_marker_block_spans(existing,
+                                        start=STREAM_ENV_MARK_START,
+                                        end=STREAM_ENV_MARK_END)
+    if want:
+        if spans:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                out.append(STREAM_ENV_BASHRC_BLOCK)
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+        else:
+            sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+            new = f"{existing}{sep}\n{STREAM_ENV_BASHRC_BLOCK}\n"
+    else:
+        if not spans:
+            return False
+        out, cursor = [], 0
+        for s, e in spans:
+            out.append(existing[cursor:s])
+            cursor = e
+        out.append(existing[cursor:])
+        new = "".join(out)
+
+    if new != existing:
+        tmp = bpath.with_suffix(bpath.suffix + ".airuleset-tmp")
+        tmp.write_text(new)
+        os.replace(str(tmp), str(bpath))
+        return True
+    return False
