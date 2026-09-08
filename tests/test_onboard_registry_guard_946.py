@@ -7,13 +7,11 @@ the dirty file names from git status --porcelain.
 """
 
 import json
-import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -70,11 +68,10 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
                      "branch_model": "2-branch",
                      "default_branch": "main",
                      "work_branch": "dev"}
-            # Patch default_box_class to return "workstation" (non-controller).
-            with mock.patch("cli_onboard.default_box_class",
-                            return_value="workstation"):
-                result = ob.step_registry(
-                    str(proj), entry, reg_path)
+            # Inject box_class_fn returning "workstation" (non-controller).
+            result = ob.step_registry(
+                str(proj), entry, reg_path,
+                box_class_fn=lambda: "workstation")
             # The registry must NOT have been written.
             self.assertEqual(json.loads(Path(reg_path).read_text()), [])
             # The step must indicate refusal.
@@ -105,10 +102,10 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
                      "branch_model": "2-branch",
                      "default_branch": "main",
                      "work_branch": "dev"}
-            with mock.patch("cli_onboard.default_box_class",
-                            return_value="controller"):
-                result = ob.step_registry(
-                    str(proj), entry, reg_path)
+            # Inject box_class_fn returning "controller".
+            result = ob.step_registry(
+                str(proj), entry, reg_path,
+                box_class_fn=lambda: "controller")
             # The registry must have been written.
             entries = json.loads(Path(reg_path).read_text())
             self.assertEqual(len(entries), 1)
@@ -136,10 +133,9 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
                      "branch_model": "2-branch",
                      "default_branch": "main",
                      "work_branch": "dev"}
-            with mock.patch("cli_onboard.default_box_class",
-                            return_value="workstation"):
-                result = ob.step_registry(
-                    str(proj), entry, reg_path)
+            result = ob.step_registry(
+                str(proj), entry, reg_path,
+                box_class_fn=lambda: "workstation")
             # The detail must contain the JSON-serialized entry.
             self.assertIn('"my-proj"', result["detail"])
 
@@ -150,21 +146,34 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
 class TestDeployLegDiagnostics(unittest.TestCase):
     """A failed deploy leg must print a WARN line with dirty file names."""
 
-    def test_failed_pull_prints_dirty_files_warn(self):
-        """When a target's git pull fails (rc!=0), the deploy loop must issue
-        a follow-up diagnostic that shows which files are dirty."""
+    def test_deploy_loop_calls_diagnostics_on_failure(self):
+        """_deploy_to_all_remotes must call _print_deploy_leg_diagnostics
+        when a remote command fails (non-auth failure)."""
         import cli_remote
         import inspect
 
         src = inspect.getsource(cli_remote._deploy_to_all_remotes)
-        # The source must contain a diagnostic that mentions git status
-        # and a WARN line pattern.
+        self.assertIn("_print_deploy_leg_diagnostics", src,
+                      "_deploy_to_all_remotes must call "
+                      "_print_deploy_leg_diagnostics on pull failure")
+
+    def test_diagnostics_function_issues_git_status(self):
+        """_print_deploy_leg_diagnostics must issue git status --porcelain
+        and print a WARN line with dirty file info."""
+        import cli_remote
+        import inspect
+
+        src = inspect.getsource(cli_remote._print_deploy_leg_diagnostics)
         self.assertIn("git status", src,
-                      "_deploy_to_all_remotes must issue a git status "
-                      "diagnostic on pull failure")
-        self.assertRegex(src, r"WARN.*dirty|dirty.*WARN",
-                         "_deploy_to_all_remotes must print a WARN line "
-                         "with dirty file information on pull failure")
+                      "_print_deploy_leg_diagnostics must run "
+                      "git status --porcelain")
+        # WARN and dirty may span f-string continuations (separate lines
+        # in the source), so use re.DOTALL.
+        import re
+        self.assertTrue(
+            re.search(r"WARN.*dirty|dirty.*WARN", src, re.DOTALL),
+            "_print_deploy_leg_diagnostics must print a WARN "
+            "line with dirty file information")
 
 
 if __name__ == "__main__":
