@@ -295,11 +295,11 @@ class TestFleet(unittest.TestCase):
 
 class TestRunOnceJob43(unittest.TestCase):
 
-    def test_docstring_counts_45_jobs(self):
+    def test_docstring_counts_46_jobs(self):
         from watchdog import run_once
         doc = run_once.__doc__
-        self.assertIn("45 numbered", doc)
-        self.assertIn("39 LIVE", doc)
+        self.assertIn("46 numbered", doc)  # #947 added Job 46 (session-restart)
+        self.assertIn("40 LIVE", doc)
 
     def test_docstring_mentions_job_43(self):
         from watchdog import run_once
