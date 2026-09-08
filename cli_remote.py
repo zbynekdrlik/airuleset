@@ -1107,8 +1107,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # failure), issue a follow-up diagnostic to show dirty files —
                 # a `git pull --ff-only` failure on a dirty tree is otherwise
                 # anonymous (rc=1, no file names in the push log).
-                if not _is_ssh_auth_failure(ssh_result.returncode,
-                                            ssh_result.stderr):
+                if (ssh_result.returncode != 255
+                        and not _is_ssh_auth_failure(ssh_result.returncode,
+                                                     ssh_result.stderr)):
                     _print_deploy_leg_diagnostics(
                         remote, identity, hostkey_opts, control_opts)
                 # #341: a genuine ssh AUTH failure (never a remote-command

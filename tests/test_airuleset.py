@@ -12679,7 +12679,14 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
         code = self._run_push(calls, script)
         self.assertEqual(code, 1)
         gk_calls = [c for c, k in calls if any("5.6.7.8" in str(t) for t in c)]
-        self.assertEqual(len(gk_calls), 1)
+        # #946: an ordinary remote-command failure gets ONE deploy attempt
+        # (never retried) plus ONE follow-up diagnostic ssh that reads
+        # `git status --porcelain` so a dirty-tree pull failure is named in
+        # the push log. Lock both: exactly one deploy attempt, and the extra
+        # call is the diagnostic (not a retry).
+        self.assertEqual(len(gk_calls), 2)
+        self.assertIn("git status --porcelain", " ".join(str(t) for t in gk_calls[1]))
+        self.assertNotIn("git status --porcelain", " ".join(str(t) for t in gk_calls[0]))
 
     def test_retry_never_re_runs_ruff_tests_or_git_push(self):
         calls = []
