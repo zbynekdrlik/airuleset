@@ -377,5 +377,126 @@ class TestQuotaBlockExecution(unittest.TestCase):
                           % (expected_sq, calls))
 
 
+    # -- Y6: repquota failure must never be treated as zero usage --
+
+    def test_repquota_failure_skips_user(self):
+        """When repquota exits non-zero, the script must warn LOUDLY and
+        skip setquota for that user rather than assuming 0 usage."""
+        from cli_resource_guards import _render_quota_apply_block
+        block = _render_quota_apply_block()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = os.path.join(tmpdir, 'home', 'testuser')
+            os.makedirs(os.path.join(home, '.claude'))
+            with open(os.path.join(home, '.claude',
+                                   'airuleset-box-class'), 'w') as f:
+                f.write('shared-stream\n')
+
+            patched = self._patch_script_for_test(block, tmpdir)
+            call_log = os.path.join(tmpdir, 'sq.log')
+
+            stubs = {
+                'findmnt': (
+                    'case "$2" in\n'
+                    '  SOURCE) echo "/dev/sda1";;\n'
+                    '  FSTYPE) echo "ext4";;\n'
+                    'esac'
+                ),
+                'modprobe': 'exit 0',
+                'quotaon': (
+                    'case "$1" in\n'
+                    '  -pu) echo "/dev/sda1 [/]: user quotas are on";\n'
+                    '       exit 0;;\n'
+                    '  *) exit 0;;\n'
+                    'esac'
+                ),
+                'setquota': (
+                    'echo "SETQUOTA: $*" >> "%s"\nexit 0' % call_log
+                ),
+                'repquota': 'echo "repquota: cannot find /" >&2\nexit 1',
+                'systemctl': 'exit 0',
+                'apt-get': 'exit 0',
+                'mount': 'exit 0',
+                'quotacheck': 'exit 0',
+            }
+            bin_dir = self._make_stubs(tmpdir, stubs)
+            result = self._run_block(patched, bin_dir)
+            combined = result.stdout + result.stderr
+            self.assertIn(
+                "repquota gave no usage for testuser", combined,
+                "No loud repquota-failure warning. stdout=%s stderr=%s"
+                % (result.stdout, result.stderr))
+            self.assertIn("skipping setquota for testuser", combined)
+            # Per-user setquota must NEVER be called for this user
+            if os.path.exists(call_log):
+                calls = open(call_log).read()
+                self.assertNotIn(
+                    "-u testuser", calls,
+                    "setquota was called for testuser despite repquota"
+                    " failure. Got: %s" % calls)
+
+
+class TestKmodBlockExecution(unittest.TestCase):
+    """#950 Y3: modprobe-fail must trigger the apt-get fallback, then retry
+    modprobe -- executed under stubbed tools, not just static-checked."""
+
+    def test_modprobe_failure_triggers_install_then_retries(self):
+        from cli_resource_guards import _render_quota_kmod_block
+        block = _render_quota_kmod_block()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = os.path.join(tmpdir, 'bin')
+            os.makedirs(bin_dir)
+            counter = os.path.join(tmpdir, 'modprobe.count')
+            apt_log = os.path.join(tmpdir, 'apt.log')
+            load_d = os.path.join(tmpdir, 'etc', 'modules-load.d')
+            os.makedirs(load_d)
+
+            def stub(name, content):
+                path = os.path.join(bin_dir, name)
+                with open(path, 'w') as f:
+                    f.write('#!/usr/bin/env bash\n' + content + '\n')
+                os.chmod(path, 0o755)
+
+            stub('uname', 'echo "5.15.0-generic"')
+            # Fails on call 1 (recorded via a counter file), succeeds on call 2
+            stub('modprobe', (
+                'n=$(cat "%s" 2>/dev/null || echo 0); n=$((n+1))\n'
+                'echo "$n" > "%s"\n'
+                '[ "$n" -ge 2 ]' % (counter, counter)
+            ))
+            stub('apt-get', 'echo "APT: $*" >> "%s"\nexit 0' % apt_log)
+
+            patched = block.replace(
+                '/etc/modules-load.d/airuleset-quota.conf',
+                os.path.join(load_d, 'airuleset-quota.conf'))
+            script = '#!/usr/bin/env bash\nset -euo pipefail\n' + patched + '\n'
+            env = dict(os.environ)
+            env['PATH'] = bin_dir + ':' + env.get('PATH', '')
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh',
+                                             delete=False) as f:
+                f.write(script)
+                f.flush()
+                try:
+                    result = subprocess.run(
+                        ['bash', f.name], capture_output=True, text=True,
+                        timeout=10, env=env)
+                finally:
+                    os.unlink(f.name)
+
+            self.assertEqual(
+                result.returncode, 0,
+                "kmod block failed: stdout=%s stderr=%s"
+                % (result.stdout, result.stderr))
+            self.assertTrue(os.path.exists(counter), "modprobe never ran")
+            self.assertEqual(
+                open(counter).read().strip(), "2",
+                "modprobe must run exactly twice (initial fail, retry)")
+            self.assertTrue(os.path.exists(apt_log), "apt-get never called")
+            apt_calls = open(apt_log).read()
+            self.assertIn("linux-modules-extra-5.15.0-generic", apt_calls)
+            self.assertIn("linux-image-extra-virtual", apt_calls)
+
+
 if __name__ == "__main__":
     unittest.main()
