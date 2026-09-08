@@ -474,6 +474,16 @@ def _gk_handoff_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _gk_action_numbers(members):
+    """#943: the subset of `_member_numbers` flagged `gk_action!` — a parked W
+    ticket whose comments carry a GATEKEEPER-ACTION marker. Only the structured
+    shape carries the flag, so a legacy int list yields an EMPTY list (no
+    gk-action sub-clause — the safe/unchanged direction)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("gk_action")
+            and isinstance(m.get("number"), int)]
+
+
 def _release_recheck_numbers(members):
     """The subset of `_member_numbers` flagged `recheck!` (#699) — a RELEASE-
     parked W ticket OVERDUE for its hourly deployed-state re-check (no fresh <=1h
@@ -842,6 +852,10 @@ def _flag_items(w_members, release_landed, stagnation_count=0):
     if gk:
         items.append("gk-handoff %d (#636 -- zlož ops-wait → "
                      "needs-gatekeeper)." % gk)
+    gka = len(_gk_action_numbers(w_members))
+    if gka:
+        items.append("gk-action %d (#943 -- GATEKEEPER-ACTION komentár na "
+                     "ops-wait tikete → over, zlož ops-wait)." % gka)
     landed = [n for n in (release_landed or [])
               if isinstance(n, int) and not isinstance(n, bool)]
     if landed:
