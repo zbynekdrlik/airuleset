@@ -613,6 +613,8 @@ def build_apply_script() -> str:
         '    mkdir -p "$pw_shared"\n'
         '    chmod 0755 "$pw_shared"\n'
         '    if PLAYWRIGHT_BROWSERS_PATH="$pw_shared" npx -y playwright install chromium >/dev/null 2>&1; then\n'
+        '        # Y1: ensure read+exec for all users (root umask may restrict)\n'
+        '        chmod -R a+rX "$pw_shared" 2>/dev/null || true\n'
         '        echo "  playwright: shared browsers installed at $pw_shared"\n'
         '        # Sweep per-user caches (only entries that exist in the shared path)\n'
         '        for home in /home/*; do\n'

@@ -3357,16 +3357,23 @@ def _read_quota_pct():
     """#950: read this user's quota usage as a percentage of the hard limit.
     Returns an int 0-100 (or higher if over-quota), or None if quota is not
     enabled or the command fails. Uses ``quota -w -u -p`` (machine-parseable,
-    no name-wrap). Best-effort, never raises."""
+    no name-wrap). Best-effort, never raises.
+
+    NOTE (review R1): ``quota`` exits 1 when the soft limit is exceeded
+    (``quota.c showquotas()`` returns ``over > 0 ? 1 : 0``), so rc=1 is a
+    VALID response with parseable stdout — only rc>1 or an exception is a
+    failure. The ``*`` suffix on the blocks field marks over-soft; it is
+    stripped before parsing."""
     try:
         r = subprocess.run(
             ["quota", "-w", "-u", "-p"],
             capture_output=True, text=True, timeout=10)
-        if r.returncode != 0:
+        # rc=0 (under soft) and rc=1 (over soft) both produce valid stdout.
+        # rc>1 = genuine error (quota not enabled, no quota file, etc.).
+        if r.returncode > 1:
             return None
-        # Parse the second data line (first is header, skip "Disk quotas for…")
-        # Format: "Filesystem  blocks  quota  limit  grace  files  quota  limit  grace"
-        lines = r.stdout.strip().splitlines()
+        # Parse the data line: "Filesystem  blocks  quota  limit  grace  ..."
+        lines = (r.stdout or "").strip().splitlines()
         for line in lines:
             parts = line.split()
             if len(parts) >= 4 and parts[0].startswith("/"):

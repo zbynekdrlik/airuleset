@@ -394,7 +394,13 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
         from watchdog.reaper import default_box_class
         if default_box_class() == "shared-stream":
             from cli_resource_guards import PLAYWRIGHT_SHARED_PATH
-            result["env"]["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_SHARED_PATH
+            if os.path.isdir(PLAYWRIGHT_SHARED_PATH):
+                result["env"]["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_SHARED_PATH
+            else:
+                # #950 Y2: if the shared dir is absent, REMOVE the key so a stale
+                # settings.json doesn't point at nothing (Playwright would fail to
+                # fall back to the per-user cache).
+                result["env"].pop("PLAYWRIGHT_BROWSERS_PATH", None)
     except Exception as e:  # noqa: BLE001 — best-effort, never break install
         import sys
         print("  ⚠ playwright env: box-class read failed: %r" % e, file=sys.stderr)

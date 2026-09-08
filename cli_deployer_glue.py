@@ -294,6 +294,10 @@ try:
     dsk = statusbar.disk_segment()
     if dsk:
         segs.append(dsk)
+    # #950: per-account quota % on shared-stream boxes (after disk, same cache).
+    qta = statusbar.quota_segment()
+    if qta:
+        segs.append(qta)
     rel = statusbar.release_idle_segment(cwd=cwd)
     if rel:
         segs.append(rel)
