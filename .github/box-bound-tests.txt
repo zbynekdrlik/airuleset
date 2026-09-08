@@ -23,7 +23,6 @@ tests/test_webterm_stream_footer_672.py
 tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_fails_loudly_when_capture_pane_is_blank_too
 tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls_back_to_real_capture_pane
 tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls_back_when_claude_history_exits_zero_but_empty
-tests/test_send_verified_adoption.py::ReplyPointerAdoption::test_verifies_against_the_session_transcript_then_pops
 #
 # --- git/tmux session-state dependent ---
 tests/test_airuleset.py::TestSessionStartFetchHook::test_unmeasurable_status_refuses_rather_than_guesses_clean

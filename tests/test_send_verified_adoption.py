@@ -577,6 +577,16 @@ class ReplyPointerAdoption(unittest.TestCase):
                            lambda: str(Path(tmp.name) / "q.json"))
         p.start()
         self.addCleanup(p.stop)
+        # #955: deliver_discord_replies calls _read_env() when env= is not
+        # passed (mirroring the real run_once path).  Under a clean HOME the
+        # real .env is absent -> bot_token() = "" -> early return before the
+        # pointer delivery, so rec.calls stays empty and 0 != 1.  Mock it
+        # with a minimal env the same way ReplyTypedAnswerAdoption does.
+        env = {"DISCORD_BOT_TOKEN": "tok",
+               "DISCORD_MENTION_ZBYNEK": "773451844110385193"}
+        pe = m.patch.object(notify, "_read_env", lambda: dict(env))
+        pe.start()
+        self.addCleanup(pe.stop)
         proj = Path(tmp.name) / "projects"
         tpath = _write_transcript(proj, self.CWD, sid=self.SID)
         now = time.time()
