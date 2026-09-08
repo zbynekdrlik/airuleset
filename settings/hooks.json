@@ -38,6 +38,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-stream-direct-pr-merge.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-foreign-airuleset-write.sh",
             "timeout": 5
           },
