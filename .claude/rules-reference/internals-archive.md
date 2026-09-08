@@ -1850,3 +1850,53 @@ The #672 REWORK bullet in internals-webterm.md marks these two as the OLD design
 
 - **#862 — new `runner-superseded` disk_guard rung (superseded gh-runner `bin.<ver>`/`externals.<ver>`): additive-rung pattern + a cross-user `/proc` gotcha.** Pure PLANNER (`discover_superseded_runner_versions`) + `_plan_*` wrapper + ladder line after `runner-update` + membership in `RECLAIMABLE_CLASSES` AND `SUDO_CLASSES` (gh-runner home is a FOREIGN user → delete via `sudo -n rm`). KEEP = the `bin`/`externals` symlink targets + the version a live `Runner.Listener` of that root runs + any STAGED version >= current (a self-update the runner is about to switch to); delete only real (non-symlink), version-suffixed (`^\d+(\.\d+){1,3}$`) `bin.<ver>`/`externals.<ver>` dirs STRICTLY below current. Fail-safe KEEP-all on ANY uncertainty — proc sentinel (a pgrep'd runner pid whose exe is UNRESOLVABLE or a non-runner/`(deleted)` basename yields the sentinel, never a silent drop that empties the exe list → the rung would delete a live version) / `Runner.Worker` live / self-update in flight (`<root>/_work/_update` exists or a live `update.sh` scoped to the root) / symlink missing/dangling/not-a-symlink / current-or-Listener version unparseable — PLUS an action-time re-verify (`_perform_action` re-resolves the root symlinks right before `sudo rm` and REFUSES a dir that became current/staged between plan and act), mirroring `claude-version` `:782`. **Gotcha:** the guard can't `readlink /proc/<pid>/exe` of a `gh-runner` proc (owner-only) and the systemd cmdline is the `bin` symlink (no version) → the Listener's version resolves ONLY via `sudo -n readlink /proc/<pid>/exe` — HONOR its returncode (rc!=0 = unresolvable → sentinel, never empty). Scope a proc to its root by exe prefix — the realpath'd `<root>/` AND the raw `<root>/` (TRAILING slash, else `actions-runner` collides with `-2`; realpath because /proc exe paths are resolved and the root may itself be symlinked); anchor the Listener version to the FIRST path segment BELOW the root, never an unanchored search. Seam = injected `proc_exes_fn` + `update_argv_fn` over a fixture tree, never live `/proc`.
 
+
+## Archived from `.claude/rules/internals-webterm.md` at #958 51200-byte cap, 2026-09-09
+
+## #661 rework + #684 parity — badge reversal + lane-dashboard regeneration (2026-08-25)
+
+- **#661 REVERSED its own #582 decision** (owner acceptance ruling): the `.ord`
+  ordinal badge (the visible Ctrl+Alt+1..9 map added by #582) was owner-vetoed — "adds
+  no needed info, eats space" — so it is REMOVED (the `<span class="ord">` in
+  `_tab_button` + the `.tab .ord` / `.tab.active .ord` CSS). The Ctrl+Alt+1..9
+  SHORTCUT itself stays fully functional (`onHotkey`, `e.key >= '1'`) — it never
+  depended on the badge; only the visible digit went. The green `▸ .ico` separator
+  STAYS (owner values its tab-separating role). Reusable shape: a KEEP-the-mechanism /
+  DROP-the-decoration reversal — the RED test asserts the rendered dashboard contains
+  NO `class="ord"` at any tab count, and a sibling test locks that `.ico` survives, so
+  "requirement change, not test-weakening" is provable.
+- **#684 finding: the lane-dashboard REGENERATION is ALREADY on the deploy path — do
+  NOT add a redundant re-render step.** Full chain (verify empirically, never assume):
+  `push` (cli_remote._deploy_to_all_remotes) deploys to `david1@subdev` AND
+  `marek@subdev` (both in `cli_fleet.REMOTE_HOSTS`) → `git pull && python3 airuleset.py
+  install` under each account → `cmd_install` → `maybe_setup_webterm()` → dispatch by
+  profile/account → `cli_webterm_lane.setup_service()` → `write_artifacts()`
+  REGENERATES `dash_index` from the LIVE `render_dashboard_html()` (human=None,
+  physically-scoped inventory) → daemon-reload → restart ttyd+gateway. The gateway
+  ALSO serves `dash_index` by reading the file per request
+  (`cli_webterm_gateway.py:558`), so a fresh `write_artifacts` alone serves current
+  HTML even before the restart. So the shared render is the parity mechanism: any owner
+  render change reaches david/marek on the next push, automatically.
+- **How to PROVE lane parity without touching live subdev units (worktree-safe).** (1)
+  LIVE READ (one ssh, read-only, key `~/.secrets/gatekeeper_access_ed25519`, NEVER retry
+  — subdev fail2ban): `grep -c 'class="ord"'` the live `~/.claude/webterm-<lane>-dash/
+  index.html` — before #661 both lanes carried `.ord` (david 5, marek 1), proving the
+  path already propagates owner-render changes. (2) LOCAL DRY-RUN: run the REAL
+  `_write_<lane>_artifacts()` with the lane path constants patched into a tmp dir (the
+  `test_webterm_david.py::_isolate` pattern) and read back the generated index.html
+  (post-#661: 0× `class="ord"`, 5× `.ico`, `.tab` padding `6px 12px 6px 16px`,
+  `"u_status": false`). (3) The live-service restart + unix-socket curl smoke is the
+  SUPERVISOR's post-merge job, not a worktree action.
+- **Parity is VISUAL/UX ONLY — the security boundary is `u_status` (#677).** A lane
+  render (`human=None` / `"marek"`) has `"u_status": false` in its embedded cfg; only
+  `human == WEBTERM_LOGIN_USER` ("zbynek") gets `true`. So a lane gateway NEVER polls
+  `/u-status` and NEVER spawns the cross-tenant `--u-collect` ssh collector under a
+  sub-dev account. Lock it in the parity test; a parity change must never flip it.
+- **The regression lock (`tests/test_webterm_lane_parity_684.py`) is the deliverable,
+  not new code**: (a) `write_artifacts` writes `dash_index` from the LIVE render (patch
+  `render_dashboard_html` to a sentinel → written file == sentinel, so a future
+  cached/hardcoded blob fails); (b) `setup_service` re-renders BEFORE it restarts the
+  units (order locked via the `run`/`_run_systemctl`/`write_artifacts_fn` seams + a
+  SimpleNamespace spec — setup_service only reads a handful of spec attrs on the ready
+  path); (c) owner + lane render both drop `.ord` (parity, non-vacuous); (d) the
+  `u_status` boundary above.
