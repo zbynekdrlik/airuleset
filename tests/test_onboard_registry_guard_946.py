@@ -61,8 +61,13 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
             proj = Path(td) / "proj"
             proj.mkdir()
             _init_repo(proj)
-            reg_path = str(Path(td) / "projects-registry.json")
+            # #946 fix-forward: the guard protects a git-TRACKED registry —
+            # place it inside the initialised repo and track it.
+            reg_path = str(proj / "projects-registry.json")
             Path(reg_path).write_text("[]\n")
+            subprocess.run(["git", "-C", str(proj), "add",
+                            "projects-registry.json"], check=True,
+                           capture_output=True)
             entry = {"name": "test-proj", "host": "dev2",
                      "path": "~/devel/test-proj",
                      "branch_model": "2-branch",
@@ -201,6 +206,28 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
             self.assertEqual(result["status"], "applied-uncommitted")
             self.assertIn("lock held", result["detail"])
 
+    def test_non_controller_untracked_registry_is_written(self):
+        """#946 fix-forward: an UNTRACKED registry (tmp copy) is not drift —
+        a non-controller box writes it normally. Keeps onboard idempotency
+        tests hermetic on any box class (Pass A clean-HOME incident)."""
+        with TemporaryDirectory() as td:
+            proj = Path(td) / "proj"
+            proj.mkdir()
+            _init_repo(proj)
+            reg_path = str(Path(td) / "projects-registry.json")
+            Path(reg_path).write_text("[]\n")
+            entry = {"name": "tmp-proj", "host": "dev2",
+                     "path": "~/devel/tmp-proj",
+                     "branch_model": "2-branch",
+                     "default_branch": "main",
+                     "work_branch": "dev"}
+            result = ob.step_registry(
+                str(proj), entry, reg_path,
+                box_class_fn=lambda: "workstation")
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(json.loads(Path(reg_path).read_text())[0]["name"],
+                             "tmp-proj")
+
     def test_non_controller_prints_json_entry(self):
         """The refusal message must contain the JSON entry so the user
         can copy-paste it on the controller."""
@@ -208,8 +235,13 @@ class TestStepRegistryControllerGuard(unittest.TestCase):
             proj = Path(td) / "proj"
             proj.mkdir()
             _init_repo(proj)
-            reg_path = str(Path(td) / "projects-registry.json")
+            # #946 fix-forward: the guard protects a git-TRACKED registry —
+            # place it inside the initialised repo and track it.
+            reg_path = str(proj / "projects-registry.json")
             Path(reg_path).write_text("[]\n")
+            subprocess.run(["git", "-C", str(proj), "add",
+                            "projects-registry.json"], check=True,
+                           capture_output=True)
             entry = {"name": "my-proj", "host": "dev2",
                      "path": "~/devel/my-proj",
                      "branch_model": "2-branch",

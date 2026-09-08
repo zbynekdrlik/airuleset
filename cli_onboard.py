@@ -642,6 +642,25 @@ def step_notification_ticket(path, name, host=None, run=None, dry_run=False):
                  "filed onboarding notification ticket")
 
 
+def _registry_is_tracked(registry_path):
+    """#946 fix-forward: the drift incident is a GIT-TRACKED registry mutated
+    on a deploy target. Only a tracked file can drift against the SoT push, so
+    the controller-only write guard applies to tracked registries alone — an
+    untracked registry (a tmp copy, an ad-hoc file) is never drift and stays
+    writable everywhere (keeps onboard idempotency tests hermetic on any box).
+    Any git error (not a repo, git missing) → False = not tracked."""
+    import subprocess
+    try:
+        rp = os.path.abspath(os.path.expanduser(str(registry_path)))
+        r = subprocess.run(
+            ["git", "-C", os.path.dirname(rp), "ls-files", "--error-unmatch",
+             os.path.basename(rp)],
+            capture_output=True, text=True, timeout=10)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _is_controller_box(box_class_fn=None):
     """True when this box's class marker reads 'controller'. Deferred import
     of ``default_box_class`` (the same discriminator ``_push_origin_guard`` in
@@ -706,7 +725,8 @@ def step_registry(path, entry, registry_path, host=None, run=None,
     # #946 (C1 fix): guard ONLY the write — a non-controller box can still
     # read the registry ("satisfied" / "would-apply" / "skipped" above), but
     # must NOT mutate the git-tracked file.
-    if not _is_controller_box(box_class_fn):
+    tracked = _registry_is_tracked(registry_path)
+    if tracked and not _is_controller_box(box_class_fn):
         entry_json = json.dumps(entry, indent=2, ensure_ascii=False)
         return _step(
             "registry", "refused",
@@ -716,7 +736,9 @@ def step_registry(path, entry, registry_path, host=None, run=None,
             "via gk-request. Entry to apply:\n" + entry_json)
     save_registry(registry_path, upsert_entry(entries, entry))
     # #946: auto-commit so the registry is never left dirty on the controller.
-    commit_warn = _auto_commit_registry(registry_path)
+    # An untracked registry (tmp copy) has nothing to commit — only a tracked
+    # one must never be left dirty on the controller.
+    commit_warn = _auto_commit_registry(registry_path) if tracked else None
     verb = "updated" if existing else "added"
     if commit_warn:
         return _step("registry", "applied-uncommitted",
