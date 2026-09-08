@@ -61,6 +61,79 @@ class TestBounceRound(unittest.TestCase):
         self.assertEqual(2, cli_quals._bounce_round(1, "b", runner=r))
 
 
+class TestBounceRoundEvents942(unittest.TestCase):
+    """#942: _bounce_round uses prio:bounce label-add events, not RFR comments.
+
+    When a handoff gate-FAIL iteration leaves a superseded READY-FOR-REVIEW
+    comment behind (no prio:bounce label-add event), the RFR-comment-based
+    formula over-counts.  The events-based formula counts only actual gatekeeper
+    bounces (prio:bounce labeled events), eliminating the divergence."""
+
+    def _fake_runner(self, events, labels=None):
+        """Return a runner that serves events for ``gh api`` and labels for
+        ``gh issue view``."""
+        obj_labels = {"labels": [{"name": lb} for lb in (labels or [])]}
+        def runner(*args, **kwargs):
+            if args and args[0] == "api":
+                return json.dumps(events)
+            return json.dumps(obj_labels)
+        return runner
+
+    def test_gate_fail_rfr_not_inflated(self):
+        """Two RFR comments but only one prio:bounce event -> round 2, not 3.
+
+        This is the exact odoo-erp#6508 scenario: the stream posted two
+        READY-FOR-REVIEW comments (one from a gate-FAIL iteration that left
+        a superseded draft), but the gatekeeper only bounced once (one
+        prio:bounce label-add event)."""
+        events = [
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ]
+        r = self._fake_runner(events, labels=["prio:bounce"])
+        self.assertEqual(2, cli_quals._bounce_round(
+            1, "b", runner=r, repo="owner/name"))
+
+    def test_zero_bounce_events_is_round_1(self):
+        """No prio:bounce label events -> round 1."""
+        r = self._fake_runner([], labels=[])
+        self.assertEqual(1, cli_quals._bounce_round(
+            1, "b", runner=r, repo="owner/name"))
+
+    def test_two_bounce_events_is_round_3(self):
+        """Two prio:bounce label-add events -> round 3."""
+        events = [
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+            {"event": "unlabeled", "label": {"name": "prio:bounce"}},
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ]
+        r = self._fake_runner(events, labels=["prio:bounce"])
+        self.assertEqual(3, cli_quals._bounce_round(
+            1, "b", runner=r, repo="owner/name"))
+
+    def test_unrelated_labels_not_counted(self):
+        """A labeled event for a different label is not counted."""
+        events = [
+            {"event": "labeled", "label": {"name": "bug"}},
+            {"event": "labeled", "label": {"name": "ready-for-review"}},
+        ]
+        r = self._fake_runner(events, labels=[])
+        self.assertEqual(1, cli_quals._bounce_round(
+            1, "b", runner=r, repo="owner/name"))
+
+    def test_floor_to_2_when_bounce_label_present(self):
+        """When prio:bounce label is present but no events found, floor to 2."""
+        r = self._fake_runner([], labels=["prio:bounce"])
+        self.assertEqual(2, cli_quals._bounce_round(
+            1, "b", runner=r, repo="owner/name"))
+
+    def test_events_api_error_returns_1(self):
+        """If the events API returns empty, fall back to round 1."""
+        def runner(*args, **kwargs):
+            return ""
+        self.assertEqual(1, cli_quals._bounce_round(
+            1, "b", runner=runner, repo="owner/name"))
+
+
 class TestValidateTable(unittest.TestCase):
     """_validate_self_review_table: lens coverage + n/a reason."""
 
