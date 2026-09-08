@@ -642,7 +642,53 @@ def step_notification_ticket(path, name, host=None, run=None, dry_run=False):
                  "filed onboarding notification ticket")
 
 
-def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False):
+def _is_controller_box(box_class_fn=None):
+    """True when this box's class marker reads 'controller'. Deferred import
+    of ``default_box_class`` (the same discriminator ``_push_origin_guard`` in
+    cli_remote.py already uses) — stdlib-only at module level."""
+    if box_class_fn is None:
+        from watchdog.reaper import default_box_class as _dbc
+        box_class_fn = _dbc
+    try:
+        return box_class_fn() == "controller"
+    except Exception:
+        return False
+
+
+def _auto_commit_registry(registry_path):
+    """After a registry write on the controller, commit the file so the tree
+    is never left dirty (#946). Operates on the AIRULESET repo dir (where the
+    registry lives), not the project dir. A no-op when there is nothing to
+    commit (idempotent re-run). Returns a warning string on failure, None on
+    success — the caller folds it into the step detail."""
+    import subprocess
+    repo_dir = str(Path(registry_path).resolve().parent)
+    add_r = subprocess.run(
+        ["git", "-C", repo_dir, "add", REGISTRY_FILENAME],
+        capture_output=True, text=True)
+    if add_r.returncode != 0:
+        return ("git add failed (rc=%d): %s"
+                % (add_r.returncode, add_r.stderr.strip()))
+    # --allow-empty is NOT used — only commit when the file actually changed.
+    r = subprocess.run(
+        ["git", "-C", repo_dir, "diff", "--cached", "--quiet",
+         "--", REGISTRY_FILENAME],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        # There are staged changes — commit them.
+        commit_r = subprocess.run(
+            ["git", "-C", repo_dir, "commit", "-q", "-m",
+             "chore: [registry] update %s via onboard-project"
+             % REGISTRY_FILENAME, "--", REGISTRY_FILENAME],
+            capture_output=True, text=True)
+        if commit_r.returncode != 0:
+            return ("git commit failed (rc=%d): %s"
+                    % (commit_r.returncode, commit_r.stderr.strip()))
+    return None
+
+
+def step_registry(path, entry, registry_path, host=None, run=None,
+                  dry_run=False, box_class_fn=None):
     # #569 review MAJOR-4: never overwrite a present-but-unparseable registry —
     # load_registry() degrades a corrupt file to [], and a blind save would then
     # DESTROY every real entry it still held. Refuse, don't overwrite.
@@ -657,10 +703,27 @@ def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False
     if dry_run:
         return _step("registry", "would-apply",
                      "would upsert registry entry for " + entry["name"])
+    # #946 (C1 fix): guard ONLY the write — a non-controller box can still
+    # read the registry ("satisfied" / "would-apply" / "skipped" above), but
+    # must NOT mutate the git-tracked file.
+    if not _is_controller_box(box_class_fn):
+        entry_json = json.dumps(entry, indent=2, ensure_ascii=False)
+        return _step(
+            "registry", "refused",
+            "this box is NOT the controller (box-class marker != "
+            "'controller') — registry writes are allowed only on the "
+            "controller. Run onboard-project on the controller, or relay "
+            "via gk-request. Entry to apply:\n" + entry_json)
     save_registry(registry_path, upsert_entry(entries, entry))
+    # #946: auto-commit so the registry is never left dirty on the controller.
+    commit_warn = _auto_commit_registry(registry_path)
+    verb = "updated" if existing else "added"
+    if commit_warn:
+        return _step("registry", "applied-uncommitted",
+                     "%s registry entry for %s — WARNING: %s"
+                     % (verb, entry["name"], commit_warn))
     return _step("registry", "applied",
-                 ("updated" if existing else "added") + " registry entry for "
-                 + entry["name"])
+                 "%s registry entry for %s" % (verb, entry["name"]))
 
 
 # --------------------------------------------------------------------------- #

@@ -1441,9 +1441,16 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         simap_calls = [c for c in calls if any("simap@" in str(a) for a in c)]
-        self.assertEqual(len(simap_calls), 2,
+        # #946: a non-auth failure now triggers a diagnostic ssh call
+        # (git status --porcelain) BETWEEN the deploy leg and the soniox
+        # delivery — so the failure path is: deploy(1) + diagnostic(2) +
+        # soniox(3) = 3 calls total. The happy path is still exactly 2
+        # (deploy + soniox, no diagnostic).
+        self.assertEqual(len(simap_calls), 3,
                           "a plain remote-command failure (auth succeeded) "
-                          "must NOT suppress the soniox delivery attempt")
+                          "must NOT suppress the soniox delivery attempt — "
+                          "3 calls expected: deploy + #946 diagnostic + "
+                          "soniox")
 
     def test_a_remote_side_permission_denied_message_is_not_ssh_auth_failure(self):
         # #341 adversarial-review F1 (MAJOR, TRIGGERED): a REMOTE command's
@@ -1498,10 +1505,16 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
         miva1_calls = [c for c in calls if any("miva1@" in str(a) for a in c)]
-        self.assertEqual(len(miva1_calls), 2,
+        # #946: a non-auth failure now triggers a diagnostic ssh call
+        # (git status --porcelain) BETWEEN the deploy leg and the soniox
+        # delivery — so the failure path is: deploy(1) + diagnostic(2) +
+        # soniox(3) = 3 calls total.
+        self.assertEqual(len(miva1_calls), 3,
                           "a remote-side 'Permission denied' MESSAGE with "
                           "ssh auth genuinely intact must NOT suppress the "
-                          "soniox delivery attempt: %r" % miva1_calls)
+                          "soniox delivery attempt — 3 calls expected: "
+                          "deploy + #946 diagnostic + soniox: %r"
+                          % miva1_calls)
 
     def test_failure_summary_counts_distinct_hosts_not_failed_entries(self):
         # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed

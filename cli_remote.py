@@ -897,6 +897,48 @@ def _print_deploy_summary(deployable_list, paused_entries, distinct_failed):
           f"{len(distinct_failed)} failed")
 
 
+def _print_deploy_leg_diagnostics(remote, identity, hostkey_opts,
+                                  control_opts):
+    """#946: after a deploy-leg failure, issue a follow-up ssh to the target
+    to show ``git status --porcelain`` (first 5 lines). This makes a dirty-tree
+    ``git pull --ff-only`` failure diagnosable from the push log alone, instead
+    of an anonymous ``rc=1``. Best-effort: if the diagnostic ssh itself fails,
+    print what we already have and move on."""
+    import subprocess
+    diag_cmd = (f"cd {remote['repo_path']} && "
+                f"git status --porcelain 2>/dev/null | head -5")
+    if identity:
+        ssh_cmd = [
+            "ssh", "-i", os.path.expanduser(identity),
+            *hostkey_opts, "-o", "BatchMode=yes",
+        ] + control_opts + [
+            f"{remote['user']}@{remote['host']}", diag_cmd,
+        ]
+    else:
+        ssh_cmd = [
+            "sshpass", "-p", "newlevel",
+            "ssh", *hostkey_opts,
+            "-o", "NumberOfPasswordPrompts=1",
+        ] + control_opts + [
+            f"{remote['user']}@{remote['host']}", diag_cmd,
+        ]
+    try:
+        diag = subprocess.run(ssh_cmd, capture_output=True, text=True,
+                              timeout=30)
+        dirty = diag.stdout.strip()
+        if dirty:
+            print(f"  WARN {remote['name']}: git pull failed — "
+                  f"dirty: {dirty}", file=sys.stderr)
+        else:
+            print(f"  WARN {remote['name']}: git pull failed — "
+                  f"tree appears clean (failure may be non-dirty-tree)",
+                  file=sys.stderr)
+    except Exception as exc:
+        # Diagnostic ssh failed — don't mask the original failure.
+        print(f"  WARN {remote['name']}: diagnostic ssh failed: {exc}",
+              file=sys.stderr)
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1061,6 +1103,14 @@ def _deploy_to_all_remotes(failed, auth_failed):
             if ssh_result.returncode != 0:
                 print(f"  FAILED: {ssh_result.stderr.strip()}")
                 failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
+                # #946: when the remote command failed (not an ssh-level auth
+                # failure), issue a follow-up diagnostic to show dirty files —
+                # a `git pull --ff-only` failure on a dirty tree is otherwise
+                # anonymous (rc=1, no file names in the push log).
+                if not _is_ssh_auth_failure(ssh_result.returncode,
+                                            ssh_result.stderr):
+                    _print_deploy_leg_diagnostics(
+                        remote, identity, hostkey_opts, control_opts)
                 # #341: a genuine ssh AUTH failure (never a remote-command
                 # failure with auth intact, e.g. a bad `git pull`) marks this
                 # host so the soniox phase below skips it instead of opening a
