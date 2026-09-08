@@ -90,25 +90,30 @@ class TestCommentAgesAppToken(unittest.TestCase):
 
 
 class TestBounceRoundAppToken(unittest.TestCase):
-    """_bounce_round must count App-token stream's own RFR comments."""
+    """_bounce_round derives from prio:bounce events, not RFR comments (#942).
 
-    def _fake_runner(self, comments, labels=None):
-        obj = {"comments": comments,
-               "labels": [{"name": lb} for lb in (labels or [])]}
+    The App-token login normalization (#904) is no longer relevant to
+    _bounce_round (it counts label events, not own comments), but the
+    round must still work correctly on an App-token box."""
+
+    def _fake_runner(self, events, labels=None):
+        obj_labels = {"labels": [{"name": lb} for lb in (labels or [])]}
         def runner(*args, **kwargs):
-            return json.dumps(obj)
+            if args and args[0] == "api":
+                return json.dumps(events)
+            return json.dumps(obj_labels)
         return runner
 
-    def test_bare_slug_rfr_counted(self):
-        """An RFR comment by the bare App slug must be counted when
-        self_login is app/-prefixed."""
+    def test_bounce_round_works_regardless_of_login(self):
+        """Bounce round counts prio:bounce events, not RFR comments,
+        so App-token login shape is irrelevant (#942)."""
         r = self._fake_runner([
-            {"author": {"login": APP_BARE},
-             "body": "READY-FOR-REVIEW: branch x head abc"},
-        ])
-        rnd = cli_quals._bounce_round(1, APP_PREFIXED, runner=r)
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ], labels=["prio:bounce"])
+        rnd = cli_quals._bounce_round(1, APP_PREFIXED, runner=r,
+                                       repo="o/n")
         self.assertEqual(2, rnd,
-                         "Bare-slug RFR must be counted -> round 2")
+                         "One bounce event -> round 2")
 
 
 if __name__ == "__main__":

@@ -17,48 +17,47 @@ import cli_quals
 
 
 class TestBounceRound(unittest.TestCase):
-    """_bounce_round: count own prior READY-FOR-REVIEW comments + 1."""
+    """_bounce_round: count prio:bounce label-add events + 1 (#942)."""
 
-    def _fake_runner(self, comments, labels=None):
-        obj = {"comments": comments,
-               "labels": [{"name": lb} for lb in (labels or [])]}
+    def _fake_runner(self, events, labels=None):
+        """Return a runner that serves events for ``gh api`` and labels for
+        ``gh issue view``."""
+        obj_labels = {"labels": [{"name": lb} for lb in (labels or [])]}
         def runner(*args, **kwargs):
-            return json.dumps(obj)
+            if args and args[0] == "api":
+                return json.dumps(events)
+            return json.dumps(obj_labels)
         return runner
 
-    def test_zero_prior_is_round_1(self):
-        r = self._fake_runner([{"author": {"login": "b"}, "body": "hi"}])
-        self.assertEqual(1, cli_quals._bounce_round(1, "b", runner=r))
+    def test_zero_bounce_events_is_round_1(self):
+        r = self._fake_runner([])
+        self.assertEqual(1, cli_quals._bounce_round(
+            1, "b", runner=r, repo="o/n"))
 
-    def test_two_prior_is_round_3(self):
+    def test_one_bounce_event_is_round_2(self):
         r = self._fake_runner([
-            {"author": {"login": "b"}, "body": "READY-FOR-REVIEW: x"},
-            {"author": {"login": "o"}, "body": "gk review"},
-            {"author": {"login": "b"}, "body": "READY-FOR-REVIEW: y"},
-        ])
-        self.assertEqual(3, cli_quals._bounce_round(1, "b", runner=r))
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ], labels=["prio:bounce"])
+        self.assertEqual(2, cli_quals._bounce_round(
+            1, "b", runner=r, repo="o/n"))
 
-    def test_foreign_not_counted(self):
+    def test_two_bounce_events_is_round_3(self):
         r = self._fake_runner([
-            {"author": {"login": "o"}, "body": "READY-FOR-REVIEW: z"},
-        ])
-        self.assertEqual(1, cli_quals._bounce_round(1, "b", runner=r))
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+            {"event": "unlabeled", "label": {"name": "prio:bounce"}},
+            {"event": "labeled", "label": {"name": "prio:bounce"}},
+        ], labels=["prio:bounce"])
+        self.assertEqual(3, cli_quals._bounce_round(
+            1, "b", runner=r, repo="o/n"))
 
     def test_bounce_floors_to_2(self):
-        r = self._fake_runner(
-            [{"author": {"login": "b"}, "body": "nothing"}],
-            labels=["prio:bounce"])
-        self.assertEqual(2, cli_quals._bounce_round(1, "b", runner=r))
+        r = self._fake_runner([], labels=["prio:bounce"])
+        self.assertEqual(2, cli_quals._bounce_round(
+            1, "b", runner=r, repo="o/n"))
 
     def test_gh_error_returns_1(self):
         self.assertEqual(1, cli_quals._bounce_round(
-            1, "b", runner=lambda *a, **k: ""))
-
-    def test_header_rfr_counted(self):
-        r = self._fake_runner([
-            {"author": {"login": "b"}, "body": "## READY-FOR-REVIEW: a"},
-        ])
-        self.assertEqual(2, cli_quals._bounce_round(1, "b", runner=r))
+            1, "b", runner=lambda *a, **k: "", repo="o/n"))
 
 
 class TestBounceRoundEvents942(unittest.TestCase):

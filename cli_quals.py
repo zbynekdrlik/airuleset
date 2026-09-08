@@ -2393,75 +2393,89 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
 # Bounce round derivation (#843) — one function feeds CLI + slice-quals
 # ---------------------------------------------------------------------------
 
-# Matches a line-start READY-FOR-REVIEW (a duplicated copy of the same
-# pattern airuleset._READINESS_LINE_RE defines — kept local to avoid a
-# circular import from this leaf module).
-_BOUNCE_RFR_RE = re.compile(
-    r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
+def _count_bounce_label_events(events_raw):
+    """Count prio:bounce label-add events in a JSON array from the
+    GitHub issue events REST API.  Returns 0 on any parse error (#942)."""
+    if not events_raw:
+        return 0
+    try:
+        events = json.loads(events_raw)
+    except (ValueError, TypeError):
+        return 0  # unparseable -> fail-safe 0 bounces
+    if not isinstance(events, list):
+        return 0
+    count = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("event") == "labeled":
+            lbl = ev.get("label")
+            if isinstance(lbl, dict) and lbl.get("name") == "prio:bounce":
+                count += 1
+    return count
+
+
+def _has_bounce_label(labels_raw):
+    """Check whether the prio:bounce label is currently present on an issue,
+    from the JSON output of ``gh issue view --json labels``.
+    Returns False on any parse error (#942)."""
+    if not labels_raw:
+        return False
+    try:
+        obj = json.loads(labels_raw)
+    except (ValueError, TypeError):
+        return False  # unparseable -> fail-safe
+    if not isinstance(obj, dict):
+        return False
+    labels = obj.get("labels")
+    if not isinstance(labels, list):
+        return False
+    for lb in labels:
+        if isinstance(lb, dict):
+            if lb.get("name") == "prio:bounce":
+                return True
+        elif isinstance(lb, str) and lb == "prio:bounce":
+            return True
+    return False
 
 
 def _bounce_round(number, self_login, cwd=None, runner=None, repo=None):
     """Derive the bounce round for issue `number`.
 
-    round = count(own prior comments whose body carries a line-start
-            READY-FOR-REVIEW marker) + 1.  Floored to 2 while the ticket
-            carries the `prio:bounce` label.
+    round = 1 + count(prio:bounce label-add events in the issue timeline).
+    Floored to 2 while the ticket carries the `prio:bounce` label.
 
-    Fail-safe: gh error -> 1 (never a false Fable requirement; an over-count
-    on a re-sync round escalates the review tier = SAFE direction).
+    Uses the issue events API (not RFR comment count) so gate-FAIL
+    iterations that leave superseded READY-FOR-REVIEW comments do not
+    inflate the round (#942).
 
-    `runner` injectable for tests (returns a fake ``_gh_out`` result).
-    `repo` passes ``-R owner/name`` to gh for cross-repo resolution."""
+    Fail-safe: gh/API error -> 1 (never a false Fable requirement; an
+    over-count on a re-sync round escalates the review tier = SAFE
+    direction).
+
+    `runner` injectable for tests (returns fake ``_gh_out`` results).
+    `repo` passes ``owner/name`` to build the events API path and
+    ``-R owner/name`` for the label query."""
     import airuleset
 
     run = runner or airuleset._gh_out
 
-    # Fetch comments + labels in one call.
+    # 1. Count prio:bounce label-add events from the issue timeline (#942).
+    bounce_adds = 0
+    if repo:
+        events_raw = run("api",
+                         "repos/%s/issues/%s/events" % (repo, number),
+                         "--paginate", cwd=cwd, timeout=30)
+        bounce_adds = _count_bounce_label_events(events_raw)
+
+    rnd = bounce_adds + 1
+
+    # 2. Fetch current labels for the floor-to-2 safety check.
     r_args = ["-R", repo] if repo else []
-    raw = run("issue", "view", str(number), *r_args, "--json",
-              "comments,labels", cwd=cwd, timeout=15)
-    if not raw:
-        return 1  # gh failed -> fail-safe round 1
-
-    try:
-        obj = json.loads(raw)
-    except (ValueError, TypeError):
-        return 1
-
-    if not isinstance(obj, dict):
-        return 1
-
-    comments = obj.get("comments")
-    if not isinstance(comments, list):
-        return 1
-
-    # Count own prior READY-FOR-REVIEW comments.
-    own_rfr = 0
-    for c in comments:
-        if not isinstance(c, dict):
-            continue
-        author = c.get("author")
-        login = author.get("login") if isinstance(author, dict) else None
-        if self_login and _is_own_login(login, self_login):
-            body = c.get("body") or ""
-            if _BOUNCE_RFR_RE.search(body):
-                own_rfr += 1
-
-    rnd = own_rfr + 1
-
-    # Floor to 2 while prio:bounce is present.
-    labels = obj.get("labels")
-    if isinstance(labels, list):
-        label_names = set()
-        for lb in labels:
-            if isinstance(lb, dict):
-                n = lb.get("name")
-                if n:
-                    label_names.add(n)
-            elif isinstance(lb, str):
-                label_names.add(lb)
-        if "prio:bounce" in label_names and rnd < 2:
-            rnd = 2
+    labels_raw = run("issue", "view", str(number), *r_args, "--json",
+                     "labels", cwd=cwd, timeout=15)
+    if _has_bounce_label(labels_raw) and rnd < 2:
+        rnd = 2
 
     return rnd
 
