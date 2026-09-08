@@ -4709,42 +4709,51 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     def _job_session_restart():
         from watchdog import session_restart as _sr
         from watchdog.ops_wait_recheck import _pane_busy_waiting as _sr_busy
+        import watchdog.resurrect as _resurrect
         sr_state = state.setdefault("session_restart", {})
         sr_logs = []
         sr_enabled = _sr.action_enabled()
+
+        # --- PHASE 2: walk persisted exit-sent entries (R2 fix) ----------- #
+        # After /exit the pane hosts a shell, so it drops out of
+        # list_claude_panes / panes_by_sid. Phase 2 must iterate state
+        # directly and locate the pane by recorded cwd.
+        for sr_sid, pentry in list(sr_state.items()):
+            if not isinstance(pentry, dict) or pentry.get("phase") != "exit-sent":
+                continue
+            rec_cwd = pentry.get("cwd")
+            rec_pane = pentry.get("pane_id")
+            # Is the old claude PID gone?
+            rpane = _resurrect.find_pane(rec_cwd, run)
+            if rpane:
+                pentry["pid_gone"] = True
+                pentry["pane_bare_idle"] = _resurrect.pane_is_bare_idle(
+                    rpane, run)
+            else:
+                pentry["pid_gone"] = False
+            rh, rr = _goal_autoarm_recent_human_activity(
+                sr_sid, None, now, pane_target=rpane, run=run)
+            line, action = _sr.decide(
+                pentry, None, None,
+                pane_idle=False, bg_live=False, busy_waiting=False,
+                compacting=False, human_recent=rh,
+                human_reason=rr, enabled=sr_enabled,
+                dry_run=dry_run, now=now, pane_id=rec_pane or sr_sid)
+            sr_logs.append(line)
+            if action == "relaunch" and rpane:
+                _resurrect.relaunch(rpane, _sr._LAUNCH_CONTINUE, run)
+
+        # --- PHASE 1: evaluate live claude panes for degradation ---------- #
         for sid, (pid, captured) in panes_by_sid.items():
             pentry = sr_state.setdefault(sid, {})
-            # Read the claude PID for this pane.
-            cpid = _pane_claude_pid(pid)
-            phase = pentry.get("phase")
-            # Phase 2: check if PID disappeared after /exit.
-            if phase == "exit-sent":
-                if cpid is None:
-                    pentry["pid_gone"] = True
-                    # Check if pane is at bare-idle shell for relaunch.
-                    import watchdog.resurrect as _resurrect
-                    pentry["pane_bare_idle"] = _resurrect.pane_is_bare_idle(
-                        pid, run)
-                else:
-                    pentry["pid_gone"] = False
-                _sr_cwd = cwd_by_sid.get(sid)
-                _sr_tinfo = find_active_transcript(
-                    projects_dir, _sr_cwd) if _sr_cwd else None
-                _sr_tpath = _sr_tinfo[0] if _sr_tinfo else None
-                rh, rr = _goal_autoarm_recent_human_activity(
-                    sid, _sr_tpath, now, pane_target=pid, run=run)
-                # For phase 2, call decide with dummy health values.
-                line, action = _sr.decide(
-                    pentry, None, None,
-                    pane_idle=False, bg_live=False, busy_waiting=False,
-                    compacting=False, human_recent=rh,
-                    human_reason=rr, enabled=sr_enabled,
-                    dry_run=dry_run, now=now, pane_id=pid)
-                sr_logs.append(line)
-                if action == "relaunch":
-                    _sr.execute_relaunch(pid, run)
+            if pentry.get("phase") == "exit-sent":
+                continue  # handled above
+            # Resolve the numeric pane_pid from tmux (R1 fix).
+            ppid = (run(["tmux", "display-message", "-p", "-t", pid,
+                         "#{pane_pid}"]) or "").strip()
+            if not ppid or not ppid.isdigit():
                 continue
-            # Phase 1: measure health and decide.
+            cpid = _pane_claude_pid(ppid)
             if cpid is None:
                 continue
             rss_swap = _sr.read_health(cpid, _proc_read)
@@ -4769,6 +4778,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 dry_run=dry_run, now=now, pane_id=pid)
             sr_logs.append(line)
             if action == "exit":
+                # Record pane_id and cwd for phase-2 lookup (Y1 fix).
+                pentry["pane_id"] = pid
+                pentry["cwd"] = cwd
                 _sr.execute_exit(pid, run)
         return sr_logs
     _add("session_restart", lambda: session_restart_enabled,

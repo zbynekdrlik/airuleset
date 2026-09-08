@@ -5841,6 +5841,7 @@ def cmd_watchdog(args):
                     # on the registry declaration existing. Left None in
                     # run_once unit tests.
                     deploy_state_fetch=_watchdog_deploy_state_fetch(),
+                    session_restart_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
