@@ -408,7 +408,7 @@
     "tests/test_scope_gate.py": 1929,
     "tests/test_scoped_waiter_kill_701.py": 339,
     "tests/test_send_verified.py": 327,
-    "tests/test_send_verified_adoption.py": 1006,
+    "tests/test_send_verified_adoption.py": 1016,
     "tests/test_served_compact_boundary.py": 232,
     "tests/test_session_status.py": 319,
     "tests/test_shadow_box_fresh_refresh.py": 98,
