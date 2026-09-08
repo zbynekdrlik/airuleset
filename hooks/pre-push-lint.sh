@@ -76,6 +76,25 @@ fi
 # Python project (pyproject.toml or setup.py or *.py in root)
 if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
     if command -v ruff &>/dev/null; then
+        # #951 item 2: detect CI-pinned ruff version and compare to local.
+        # When they differ, a lint failure may be version-specific (a rule
+        # behaviour change within the pinned select set). Demote BLOCK to
+        # WARN on mismatch — fail-open with a diagnostic, not a false block.
+        _RUFF_VERSION_MISMATCH=false
+        _LOCAL_RUFF_VER=$(ruff --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+        _CI_RUFF_PIN=""
+        for _WF in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -f "$_WF" ] || continue
+            _CI_RUFF_PIN=$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' "$_WF" 2>/dev/null \
+                | head -1 | sed 's/ruff==//' || true)
+            [ -n "$_CI_RUFF_PIN" ] && break
+        done
+        if [ -n "$_CI_RUFF_PIN" ] && [ -n "$_LOCAL_RUFF_VER" ] \
+           && [ "$_CI_RUFF_PIN" != "$_LOCAL_RUFF_VER" ]; then
+            _RUFF_VERSION_MISMATCH=true
+            echo "WARNING: local ruff ${_LOCAL_RUFF_VER} differs from CI pin ${_CI_RUFF_PIN} — lint failures will be warnings, not blocks."
+        fi
+
         # Lint ONLY the Python files this push introduces — NEVER `ruff check .`
         # over the whole repo. A blanket whole-repo check false-positives on
         # pre-existing tech debt the pusher didn't touch (and that CI may not even
@@ -157,9 +176,15 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
             # hook's own invocation cwd (nested-repo layout).
             ABS_CHANGED=$(printf '%s\n' "$CHANGED" | sed "s|^|${GIT_ROOT}/|")
             if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check 2>&1; then
-                echo ""
-                echo "BLOCKED: ruff found issues in files you're pushing. Fix them before pushing."
-                FAILED=1
+                if [ "$_RUFF_VERSION_MISMATCH" = true ]; then
+                    # #951 item 2: version mismatch — demote to warning.
+                    echo ""
+                    echo "WARNING: ruff found issues, but local ruff ${_LOCAL_RUFF_VER} differs from CI pin ${_CI_RUFF_PIN}. CI may not see these errors — continuing (not blocking)."
+                else
+                    echo ""
+                    echo "BLOCKED: ruff found issues in files you're pushing. Fix them before pushing."
+                    FAILED=1
+                fi
             fi
         else
             echo "Pre-push lint: no changed Python files in this push (ruff skipped)."
