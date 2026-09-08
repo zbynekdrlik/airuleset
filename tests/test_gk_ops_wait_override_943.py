@@ -11,11 +11,12 @@ slice never carries a `needs-gatekeeper` row from the partition's perspective
 `_slice_mine_and_handed` `gk` bucket), so the override is structurally inert
 there — but we lock the expectation explicitly.
 """
-import sys, os, unittest
+import sys
+import os
+import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import airuleset
 from cli_quals import (
-    _partition_workable, _row_is_user_waiting, MAINTAINER_ACTION_LABELS,
+    _partition_workable, _row_is_user_waiting,
 )
 
 
