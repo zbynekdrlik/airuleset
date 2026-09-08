@@ -414,11 +414,31 @@ class TestAppendOnlyKeyWriter870(unittest.TestCase):
         self.assertIn("grep", cmd.lower())
 
 
-class TestSpinbikeDriftLock(unittest.TestCase):
-    """Drift-lock: ZBYNEK_SPINBIKE_HOST and ZBYNEK_SPINBIKE_HOST_KEYS must
-    match the cli_fleet.REMOTE_HOSTS 'spinbike-vps' entry — the ONE source
-    of truth for this public-IP target. #958 regression: #870 D4 introduced
-    wrong values that broke the tab (ssh 255)."""
+class TestZbynekHostDriftLock(unittest.TestCase):
+    """Drift-lock: every ZBYNEK_*_HOST constant and ZBYNEK_SPINBIKE_HOST_KEYS
+    must match the cli_fleet.REMOTE_HOSTS entries — the ONE source of truth.
+    #958: #870 D4 introduced wrong spinbike values (ssh 255); this class
+    locks ALL zbynek host constants, not just spinbike."""
+
+    def test_dev1_host_matches_fleet(self):
+        import cli_fleet
+        fleet_entries = [h for h in cli_fleet.REMOTE_HOSTS
+                         if h["name"] == "dev1"]
+        if not fleet_entries:
+            return  # dev1 conditionally present in fleet (#870 cutover)
+        self.assertEqual(p.ZBYNEK_DEV1_HOST, fleet_entries[0]["host"])
+
+    def test_dev2_host_matches_fleet(self):
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "dev2")
+        self.assertEqual(p.ZBYNEK_DEV2_HOST, fleet_e["host"])
+
+    def test_gk_host_matches_fleet(self):
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "gatekeeper")
+        self.assertEqual(p.ZBYNEK_GK_HOST, fleet_e["host"])
 
     def test_spinbike_host_matches_fleet(self):
         import cli_fleet
