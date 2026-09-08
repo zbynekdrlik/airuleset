@@ -319,5 +319,151 @@ class SupplementUnit(unittest.TestCase):
             "must not exceed _QMAP_SUPPLEMENT_CAP gh calls")
 
 
+class WaitingListingGap(unittest.TestCase):
+    """MAJOR-2 (#948 review): cmd_slice_quals --waiting must list supplemented
+    tickets, not just the label-partitioned ones.  Before the fix, the count
+    (cache) includes the supplement but the listing does not -- divergence."""
+
+    def _seed_question_map(self, home, cwd, refs_ticket=42):
+        d = statusbar._claude_dir(home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "discord-questions.json").write_text(json.dumps({
+            "suppressed:test-session": {
+                "session": "test-session",
+                "cwd": str(cwd),
+                "channel": "",
+                "ts": 1000,
+                "asked": 1000,
+                "question": "Otazka k #%d nieco" % refs_ticket,
+                "block": "**Otazka -- projekt odoo-erp:**\nOtazka k #%d nieco\n"
+                         "NEEDS YOU: rozhodnutie" % refs_ticket,
+                "suppressed": True,
+            }
+        }))
+
+    def test_waiting_lists_supplemented_ticket(self):
+        """RED: slice-quals --waiting must list ticket #42 when it is a
+        supplemented U member (in question map, needs-answer, NOT in slice).
+        Before the MAJOR-2 fix, --waiting prints only the partition's waiting
+        dict and #42 never appears."""
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir, TemporaryDirectory() as tokendir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+
+            tokendir_path = Path(tokendir)
+            tokendir_path.mkdir(parents=True, exist_ok=True)
+
+            user = airuleset._current_user()
+            stream_label = "stream:%s" % user
+
+            # Slice search returns only #10 (workable, no user-waiting label).
+            # #42 is NOT in the slice, but the question map references it and
+            # gh issue view 42 returns needs-answer + OPEN.
+            ten = json.dumps([{
+                "number": 10, "title": "workable",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "labels": [{"name": stream_label}],
+            }])
+            fortytwo = json.dumps({
+                "labels": [{"name": "needs-answer"}],
+                "state": "OPEN",
+                "title": "question ticket outside slice",
+                "createdAt": "2026-02-01T00:00:00Z",
+            })
+            gh = Path(bindir) / "gh"
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+                '  *rate_limit*) echo \'{"resources":{"graphql":{"remaining":5000}}}\';;\n'
+                '  *"label:stream:"*autopilot-skip*) echo "[]";;\n'
+                "  *\"label:stream:\"*) echo '%s';;\n" % ten +
+                '  *"label list"*"stream:"*) echo \'[{"name":"stream:%s"}]\';;\n' % user +
+                '  *"issue list"*"involves:@me"*) echo \'[{"number":99}]\';;\n'
+                "  *\"issue\"*\"view\"*\"42\"*) echo '%s';;\n" % fortytwo +
+                '  *) echo "[]";;\n'
+                'esac\n')
+            gh.chmod(0o755)
+
+            self._seed_question_map(home, repo, refs_ticket=42)
+
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "slice-quals", "--waiting", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": "%s:%s" % (bindir, os.environ["PATH"]),
+                     "GH_APP_TOKEN_DIR": tokendir})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # The --waiting output must list ticket #42.
+            lines = [ln for ln in r.stdout.strip().splitlines() if ln.strip()]
+            numbers = [ln.split("\t")[0] for ln in lines
+                       if not ln.startswith("#")]
+            self.assertIn("42", numbers,
+                          "slice-quals --waiting must list supplemented ticket "
+                          "#42 (needs-answer, in question map, outside slice). "
+                          "Got output:\n%s" % r.stdout)
+
+
+class SupplementReturnShape(unittest.TestCase):
+    """#948 MAJOR-2: _question_map_u_supplement must return a DICT (number ->
+    row) so the --waiting listing can render the rows, not just count them."""
+
+    def setUp(self):
+        self._orig_home = os.environ.get("HOME")
+        self._tmpdir = TemporaryDirectory()
+        self._home = self._tmpdir.name
+        os.environ["HOME"] = self._home
+        self.addCleanup(self._restore_home)
+
+    def _restore_home(self):
+        if self._orig_home is not None:
+            os.environ["HOME"] = self._orig_home
+        else:
+            os.environ.pop("HOME", None)
+        self._tmpdir.cleanup()
+
+    def _seed_qmap(self, cwd, refs):
+        d = statusbar._claude_dir(self._home)
+        d.mkdir(parents=True, exist_ok=True)
+        entries = {}
+        for i, n in enumerate(refs):
+            entries["suppressed:s%d" % i] = {
+                "session": "s%d" % i, "cwd": str(cwd),
+                "channel": "", "ts": 1000, "asked": 1000,
+                "question": "q #%d" % n,
+                "block": "q #%d" % n,
+                "suppressed": True,
+            }
+        (d / "discord-questions.json").write_text(json.dumps(entries))
+
+    def test_returns_dict_with_row_data(self):
+        """The supplement must return a dict {number: row_dict} with labels,
+        title, createdAt so the --waiting listing can render each row."""
+        cwd = "/fake/repo"
+        self._seed_qmap(cwd, [42])
+        rows = {}
+
+        def runner(argv, cd):
+            if "42" in argv:
+                return json.dumps({
+                    "labels": _labels("needs-answer"),
+                    "state": "OPEN",
+                    "title": "test question",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                })
+            return ""
+
+        result = airuleset._question_map_u_supplement(rows, cwd, runner)
+        self.assertIsInstance(result, dict)
+        self.assertIn(42, result)
+        row = result[42]
+        self.assertEqual(row.get("title"), "test question")
+        self.assertEqual(row.get("createdAt"), "2026-01-01T00:00:00Z")
+        self.assertIsInstance(row.get("labels"), list)
+
+
 if __name__ == "__main__":
     unittest.main()
