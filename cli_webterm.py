@@ -656,7 +656,7 @@ WEBTERM_DASHBOARD_TABS = {
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
     # admin@forestshop-dev.
     "zbynek": [
-        "ar",
+        "ar", "claudy",
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -669,10 +669,12 @@ WEBTERM_DASHBOARD_TABS = {
     # REMOVED (his cancelled stream session); montalu1-subdev ADDED per owner
     # request. Remaining: his montalu streams (montalu1/2/4), miva1, dev1/dev2,
     # gatekeeper, forestshop.
+    # #960: claudy tab added before dev1 (his claudy work is reached today via
+    # dev1; the controller claudy tab replaces that path after migration).
     "marek": [
         "montalu1-subdev", "montalu2-subdev",
         "miva1-subdev", "montalu4-subdev",
-        "dev1", "dev2", "gatekeeper", "forestshop",
+        "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,

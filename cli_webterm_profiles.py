@@ -399,6 +399,20 @@ def marek_inventory():
             "u_tenant": True,
         },
         {
+            # #960: claudy project — SSH to the `claudy` account on the
+            # controller. `preferred: "marek"` targets marek's OWN tmux session
+            # on the claudy account (R1 Fable review: per-human sessions).
+            # NO u_tenant — owner-realm account (#703 boundary).
+            "id": "claudy",
+            "label": "claudy (controller)",
+            "kind": "stream",
+            "local": False,
+            "host": ZBYNEK_CLAUDY_HOST,
+            "user": "claudy",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": MAREK_GATEWAY_USER,
+        },
+        {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
             "kind": "stream",
@@ -556,6 +570,10 @@ ZBYNEK_SPINBIKE_HOST = "spinbike-vps.newlevel.media"
 ZBYNEK_SPINBIKE_HOST_KEYS = [
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICqtadLnTI+wfXp9J2FUkuTp0IIcZ5IvCG5eNVlR2jA5",
 ]
+# #960: claudy project on the controller — same tailscale IP as the controller
+# itself (SSH loopback to a different unix account). Duplicated from cli_fleet's
+# REMOTE_HOSTS claudy@controller entry; drift-locked by test.
+ZBYNEK_CLAUDY_HOST = "100.101.214.103"
 
 
 def zbynek_inventory():
@@ -581,6 +599,21 @@ def zbynek_inventory():
             "host": None,
             "user": None,
             "identity": None,
+            "preferred": "zbynek",
+        },
+        {
+            # #960: claudy project — SSH to the `claudy` account on the same
+            # controller box. NOT local (different unix user, needs SSH).
+            # `preferred: "zbynek"` targets the owner's OWN tmux session on
+            # the claudy account (R1 Fable review: per-human sessions, not a
+            # shared "claudy" session — mirrors today's dev1 setup).
+            "id": "claudy",
+            "label": "claudy (controller)",
+            "kind": "owner",
+            "local": False,
+            "host": ZBYNEK_CLAUDY_HOST,
+            "user": "claudy",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "zbynek",
         },
         {

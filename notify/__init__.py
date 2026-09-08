@@ -87,6 +87,9 @@ STREAM_NOTIFY_OWNER = {
     # route to the owner exactly like dev1 maintainer work (never left to the
     # tmux-session-name fallback, the #882 reroute rule).
     "airuleset": "zbynek",
+    # claudy (#960): the claudy project's service account on the controller —
+    # pings route to the owner, same as the airuleset account.
+    "claudy": "zbynek",
     # david1/montalu1/simap1 (#537): the NUMBERED names for the base-stream
     # rename — all three now LIVE (montalu1 2026-08-19, simap1 2026-08-18,
     # david1 2026-08-21). Each mirrors its base's routing decision EXACTLY —

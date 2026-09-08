@@ -30,7 +30,7 @@ import cli_webterm_profiles as profiles  # noqa: E402
 # 2026-08-24: "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"; david3 (d3) added after
 # d2 per owner request 2026-08-26, #719; ar (controller local) added first, #938).
 ZBYNEK_ORDER = [
-    "ar",
+    "ar", "claudy",
     "dev1", "dev2", "gatekeeper",
     "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
     "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -45,8 +45,8 @@ ZBYNEK_EXCLUDED = [
 ]
 # The owner's expected tab ALIASES, in his order (spinbike -> "sb").
 ZBYNEK_ALIAS_ORDER = [
-    "ar", "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6", "d1",
-    "d2", "d3", "d4", "miva", "sb",
+    "ar", "claudy", "dev1", "dev2", "gk", "m1", "m2", "m3", "m4", "m5", "m6",
+    "d1", "d2", "d3", "d4", "miva", "sb",
 ]
 
 
@@ -135,7 +135,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         self.assertEqual(got, [
             "montalu1-subdev", "montalu2-subdev",
             "miva1-subdev", "montalu4-subdev",
-            "dev1", "dev2", "gatekeeper", "forestshop",
+            "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
@@ -143,7 +143,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
         # montalu1->m1, montalu2->m2, miva1->miva, montalu4->m4, dev1, dev2,
         # gatekeeper->gk, forestshop->fs — from the SINGLE #592 cli_aliases source.
-        self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "dev1", "dev2", "gk", "fs"])
+        self.assertEqual(aliases, ["m1", "m2", "miva", "m4", "claudy", "dev1", "dev2", "gk", "fs"])
         # No marek-subdev (dead stream) on the dashboard.
         self.assertNotIn('title="marek@subdev"', html)
 

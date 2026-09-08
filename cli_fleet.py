@@ -410,6 +410,25 @@ def _append_dev1_if_cutover():
 
 _append_dev1_if_cutover()
 
+# claudy@controller (#960): the claudy project (zbynekdrlik/claudy — read-only
+# dashboard over Claude account fleet) migrated from dev1 to the controller as
+# a standalone managed target (owner directive on #954, 2026-09-08). The
+# `claudy` unix account is a service account on the controller box, separate
+# from `airuleset` (own repo, own systemd units, own secrets, own tmux
+# sessions). Push deploys via SSH loopback (tailscale IP, same box) with the
+# push key. The `"pending": True` flag keeps _deployable_hosts from contacting
+# the account until the owner runs the root bootstrap + initial clone + first
+# manual install (R2 Fable review finding: a live entry before the account
+# exists = DEPLOY FAILED on the next push).
+REMOTE_HOSTS.append({
+    "name": "claudy@controller",
+    "host": "100.101.214.103",
+    "user": "claudy",
+    "repo_path": "~/devel/airuleset",
+    "identity": "~/.secrets/airuleset_push_ed25519",
+    "pending": True,
+})
+
 
 def is_paused(remote):
     """True if a REMOTE_HOSTS entry carries a `"paused": "<why + date>"`
@@ -561,7 +580,7 @@ AUTHORITY_BY_USER = {
 # `gatekeeper`, deliberately NOT in AUTHORITY_BY_USER (a stream-registry row
 # would misclassify the controller as a sub-dev stream downstream).
 FULL_AUTHORITY_USERS = frozenset(
-    {"newlevel", "gatekeeper", "admin", "stepan", "airuleset"})
+    {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a

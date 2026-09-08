@@ -4437,6 +4437,11 @@ from cli_disk_guard_root import (  # noqa: E402, F401
     cmd_disk_guard_root as cmd_disk_guard_root,
 )
 
+# --- #960: service account bootstrap renderer (controller-local accounts)
+from cli_account_bootstrap import (  # noqa: E402, F401
+    cmd_account_bootstrap as cmd_account_bootstrap,
+)
+
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
@@ -7918,6 +7923,7 @@ SUBCOMMANDS = {
     "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
+    "account-bootstrap": cmd_account_bootstrap,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

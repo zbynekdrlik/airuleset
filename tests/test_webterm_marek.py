@@ -98,14 +98,15 @@ class TestMarekInventory(unittest.TestCase):
     # adding montalu2-subdev; an owner request 2026-09-03 grew it to EIGHT by
     # adding miva1-subdev (loopback, like montalu2) and gatekeeper (tailscale,
     # like dev1/dev2) so marek can SEE the miva subdev stream and the gk box.
-    def test_eight_member_set_in_owner_order(self):
+    def test_nine_member_set_in_owner_order(self):
         # #882 scope correction: marek-subdev LOCAL tab REMOVED (cancelled stream),
         # montalu1-subdev ADDED (owner: "potrebujem aby marek mal prístup aj k m1").
+        # #960: claudy tab added before dev1.
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
                          ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                          "montalu4-subdev", "dev1", "dev2", "gatekeeper",
-                          "forestshop"])
+                          "montalu4-subdev", "claudy", "dev1", "dev2",
+                          "gatekeeper", "forestshop"])
 
     def test_montalu2_entry_is_ssh_with_dedicated_key(self):
         # #787: mirrors montalu4-subdev except for the account name.
@@ -347,14 +348,16 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         self.assertNotIn("sshpass", argv)
         self.assertIn("P=zbynek; ", " ".join(argv))  # the gk group, not marek
 
-    def test_marek_allowed_ids_are_exactly_his_eight(self):
+    def test_marek_allowed_ids_are_exactly_his_nine(self):
         # #787 + owner-req 2026-09-03: montalu2-subdev, miva1-subdev and
         # gatekeeper joined the set.
         fleet = _fleet_inventory()
         marek_ids = p.allowed_ids(p.MAREK, fleet)
         # #882 scope correction: marek-subdev REMOVED, montalu1-subdev ADDED.
+        # #960: claudy tab added.
         self.assertEqual(marek_ids, {"montalu1-subdev", "montalu2-subdev",
-                                     "miva1-subdev", "montalu4-subdev", "dev1",
+                                     "miva1-subdev", "montalu4-subdev",
+                                     "claudy", "dev1",
                                      "dev2", "gatekeeper", "forestshop"})
         for foreign in ("gk", "montalu-subdev", "david1",
                         "codex-bridge", "stepan-forestshop-dev",
@@ -508,13 +511,14 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             inv = json.loads((claude / "webterm-marek-inventory.json")
                              .read_text(encoding="utf-8"))
             # #661 rework + #787 + owner-req 2026-09-03: the written connect
-            # allowlist is the eight-member set (montalu2-subdev, miva1-subdev
+            # allowlist is the nine-member set (montalu2-subdev, miva1-subdev
             # and gatekeeper added).
             # #882 scope correction: montalu1-subdev replaces marek-subdev.
+            # #960: claudy tab added before dev1.
             self.assertEqual([e["id"] for e in inv],
                              ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                              "montalu4-subdev", "dev1", "dev2", "gatekeeper",
-                              "forestshop"])
+                              "montalu4-subdev", "claudy", "dev1", "dev2",
+                              "gatekeeper", "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")
             self.assertIn("export WEBTERM_INVENTORY=", launcher)
