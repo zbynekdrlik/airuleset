@@ -79,11 +79,12 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
         # #951 item 2: detect CI-pinned ruff version and compare to local.
         # When they differ AND the repo does NOT pin its own `select =`
         # rule set, the failure MAY be version-specific.  Re-run with
-        # --select E4,E7,E9,F (the classic default = what CI evaluates).
-        # If THAT also fails -> BLOCK.  Only findings outside the classic
-        # default -> allowed (exit 0).  A repo WITH a `select =` pin
-        # (pyproject.toml or ruff.toml) controls its results across
-        # versions, so no concession applies — BLOCK unconditionally.
+        # --select E4,E7,E9,F (ruff's default rules).  If THAT also
+        # fails -> BLOCK.  Only findings outside E4,E7,E9,F (from
+        # extend-select/per-file config) -> allowed (CI is the authority
+        # for those).  A repo WITH a `select =` pin (pyproject.toml,
+        # ruff.toml, or .ruff.toml) controls its results across versions,
+        # so no concession applies — BLOCK unconditionally.
         _RUFF_VERSION_MISMATCH=false
         _LOCAL_RUFF_VER=$(ruff --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
         _CI_RUFF_PIN=""
@@ -194,7 +195,7 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
                     # or ruff.toml means the results are repo-controlled and
                     # version-independent — no concession.
                     _REPO_SELECT_PINNED=false
-                    for _CFG in "${GIT_ROOT}/pyproject.toml" "${GIT_ROOT}/ruff.toml"; do
+                    for _CFG in "${GIT_ROOT}/pyproject.toml" "${GIT_ROOT}/ruff.toml" "${GIT_ROOT}/.ruff.toml"; do
                         [ -f "$_CFG" ] || continue
                         if grep -qE '^\s*select\s*=' "$_CFG" 2>/dev/null; then
                             _REPO_SELECT_PINNED=true
@@ -207,8 +208,11 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
                         echo "BLOCKED: ruff found issues in files you're pushing (repo pins select=, version mismatch ignored). Fix them before pushing."
                         FAILED=1
                     else
-                        # Unpinned repo — re-run with the classic default
-                        # (E4,E7,E9,F = what CI evaluates). BLOCK on any hit.
+                        # Unpinned repo — re-run with the ruff default rules
+                        # (E4,E7,E9,F). Failures outside these families (from
+                        # extend-select/per-file config) may be version-
+                        # sensitive; CI is the authority for those. BLOCK on
+                        # any E4/E7/E9/F hit.
                         echo ""
                         echo "local ruff ${_LOCAL_RUFF_VER} differs from CI pin ${_CI_RUFF_PIN} — re-checking with CI-evaluated rules (E4,E7,E9,F)..."
                         if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check --select E4,E7,E9,F 2>&1; then

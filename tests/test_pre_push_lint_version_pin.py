@@ -290,7 +290,7 @@ class TestVersionMismatchPinnedRepoStillBlocks(TestCase):
 
 class TestVersionMismatchPinnedRuffTomlBlocks(TestCase):
     """Same as above but with the select pin in ruff.toml instead of
-    pyproject.toml — the hook must check both config files."""
+    pyproject.toml — the hook must check all three config files."""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-rufftoml-"))
@@ -329,6 +329,52 @@ class TestVersionMismatchPinnedRuffTomlBlocks(TestCase):
         self.assertEqual(
             r.returncode, 2,
             f"Hook should BLOCK when ruff.toml has select= pin, even with "
+            f"version mismatch.\nOutput: {combined}",
+        )
+        self.assertIn("BLOCKED", combined)
+
+
+class TestVersionMismatchPinnedDotRuffTomlBlocks(TestCase):
+    """Same as PinnedRuffTomlBlocks but with .ruff.toml (dotted) — ruff's
+    highest-priority config file.  The hook must check all three:
+    pyproject.toml, ruff.toml, .ruff.toml."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-dotruff-"))
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+        _git(self.tmpdir, "init", "-q", "-b", "main", str(self.tmpdir / "repo"))
+        self.repo = self.tmpdir / "repo"
+
+        (self.repo / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        # .ruff.toml (dotted) with a select pin
+        (self.repo / ".ruff.toml").write_text(
+            '[lint]\nselect = ["E4", "E7", "E9", "F"]\n'
+        )
+
+        ci_dir = self.repo / ".github" / "workflows"
+        ci_dir.mkdir(parents=True)
+        (ci_dir / "ci.yml").write_text(
+            "jobs:\n  gate:\n    steps:\n"
+            "      - run: pip install ruff==99.0.0\n"
+        )
+
+        (self.repo / "clean.py").write_text("X = 1\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "init")
+
+        (self.repo / "bad.py").write_text(
+            "import os, sys\nprint(os.getcwd())\nprint(sys.version)\n"
+        )
+        _git(self.repo, "add", "bad.py")
+        _git(self.repo, "commit", "-q", "-m", "add bad file")
+
+    def test_pinned_dot_ruff_toml_blocks_on_mismatch(self):
+        r = _run_hook(self.repo)
+        combined = r.stdout + r.stderr
+        self.assertEqual(
+            r.returncode, 2,
+            f"Hook should BLOCK when .ruff.toml has select= pin, even with "
             f"version mismatch.\nOutput: {combined}",
         )
         self.assertIn("BLOCKED", combined)
