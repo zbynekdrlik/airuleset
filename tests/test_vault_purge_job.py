@@ -305,12 +305,18 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # producer) was appended on a NEW trailing line after
                # priority_policy_enabled=False; the anchor grew a last
                # line, vault_purge=None is untouched.
+               # #947 re-pin: session_restart_enabled=False (job 46's
+               # session-restart-on-degradation gate) was appended on a
+               # NEW trailing line after deploy_state_fetch=None, so the
+               # closing `):` moved off that line onto the new one; the
+               # anchor grew a last line, vault_purge=None is untouched.
                "             u_fetch=None, reconcile_fetch=None, "
                "disk_guard_enabled=False,\n"
                "             nice_check_enabled=False,\n"
                "             mdreview_cadence_enabled=False,\n"
                "             priority_policy_enabled=False,\n"
-               "             deploy_state_fetch=None):")
+               "             deploy_state_fetch=None,\n"
+               "             session_restart_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

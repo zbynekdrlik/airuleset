@@ -40,7 +40,7 @@ def _registry_labels():
     return re.findall(r'_add\(\s*"([^"]+)"', src)
 
 
-# The 23 standalone entries in CANONICAL_SWEEP order (the step-15 contract, i.e.
+# The 24 standalone entries in CANONICAL_SWEEP order (the step-15 contract, i.e.
 # everything the sweep runs AFTER the pane loop's `list_claude_panes` entry).
 # Jobs 3/5/7 + their #368 extension come first, then jobs 8->30 in
 # literal call order. (The #461 owner-decision digest entry was RETIRED by
@@ -84,6 +84,7 @@ EXPECTED_STANDALONE = [
     "mdreview_cadence",                 # (43) — #858 mdreview recurring cadence
     "priority_policy",                  # (44) — #885 priority policy enforcer
     "orphan_poll_reaper",               # (45) — #885 orphan bg-poll-loop reaper
+    "session_restart",                  # (46) — #947 session-restart-on-degradation
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
