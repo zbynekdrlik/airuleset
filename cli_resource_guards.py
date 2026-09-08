@@ -105,6 +105,19 @@ OOM_SCORE_ADJUST = -900
 MEMORY_MIN = "128M"
 VM_SWAPPINESS = 10
 
+# #950: per-user disk quota on shared-stream boxes.  ext4 usrquota via legacy
+# journaled quota (NOT `tune2fs -O quota` which is REFUSED on a mounted root
+# by e2fsprogs 1.47 — evidenced by the Fable design consult).  Soft = warning
+# threshold; hard = ENOSPC wall; grace = time before soft becomes hard.
+QUOTA_SOFT_KIB = 8 * 1024 * 1024   # 8G in KiB
+QUOTA_HARD_KIB = 10 * 1024 * 1024  # 10G in KiB
+QUOTA_GRACE_S = 86400               # 24 hours
+# The systemd oneshot unit that re-enables quota at boot (persistence without
+# editing the root fstab line — a mangled fstab = unbootable remote VPS).
+QUOTA_UNIT_PATH = "/etc/systemd/system/airuleset-quota.service"
+# Shared Playwright browser install path (#950-B)
+PLAYWRIGHT_SHARED_PATH = "/opt/ms-playwright"
+
 
 def render_guard_dropin() -> str:
     """The TEMPLATE `user-.slice` guardrail (applies to every stream user)."""
@@ -208,6 +221,33 @@ def render_journald_cap():
     )
 
 
+def render_quota_unit():
+    """#950: a oneshot systemd unit that re-enables ext4 usrquota at boot.
+
+    Persistence without editing the root fstab line (a mangled fstab =
+    unbootable remote VPS, per Fable design consult).  The unit remounts /
+    with journaled quota options and turns quota on — a failed unit leaves a
+    bootable box with quota off, and the verify job reports it LOUD."""
+    return (
+        "# Managed by airuleset (#950) — re-enable ext4 usrquota at boot.\n"
+        "# A failed unit = bootable box with quota off (verify job reports).\n"
+        "[Unit]\n"
+        "Description=airuleset ext4 usrquota enablement\n"
+        "After=local-fs.target\n"
+        "Before=ssh.service\n"
+        "ConditionPathExists=/aquota.user\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        "ExecStart=/bin/mount -o remount,usrjquota=aquota.user,jqfmt=vfsv1 /\n"
+        "ExecStartPost=/sbin/quotaon -u /\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
 def guard_files():
     """The (path, content) pairs the apply script installs, in write order.
     ssh + tailscaled share the identical OOM-protect body by design."""
@@ -220,6 +260,8 @@ def guard_files():
         # #925-C: rsyslog quiet + journald cap
         (RSYSLOG_QUIET_PATH, render_rsyslog_quiet()),
         (JOURNALD_CAP_PATH, render_journald_cap()),
+        # #950: quota boot unit
+        (QUOTA_UNIT_PATH, render_quota_unit()),
     ]
 
 
@@ -482,6 +524,127 @@ def build_apply_script() -> str:
         % (TASKS_MAX, TASKS_MAX, CPU_WEIGHT, CPU_WEIGHT,
            CPU_QUOTA_PCT // 100, CPU_QUOTA_PCT // 100,
            CPU_WEIGHT, CPU_QUOTA_PCT)
+    )
+    parts.append("")
+    # --- #950: per-user disk quota (ext4 usrquota) ---
+    # Legacy journaled quota: remount + quotacheck + quotaon (NOT tune2fs -O
+    # quota, which is REFUSED on a mounted root by e2fsprogs 1.47).
+    # Idempotent: each step is a no-op when already applied. Uncertain → skip.
+    parts.append(
+        '# --- #950: per-user ext4 disk quota ---\n'
+        'quota_fail=0\n'
+        'dev=$(findmnt -no SOURCE /); fstype=$(findmnt -no FSTYPE /)\n'
+        'if [ "$fstype" != "ext4" ]; then\n'
+        '    echo "  ⚠ quota: / is $fstype, not ext4 — skipped"\n'
+        'elif ! command -v quotaon >/dev/null 2>&1; then\n'
+        '    DEBIAN_FRONTEND=noninteractive apt-get install -y quota >/dev/null 2>&1 \\\n'
+        '        || { echo "  ⚠ quota: quota package install failed — skipped" >&2; quota_fail=1; }\n'
+        'fi\n'
+        'if [ "$quota_fail" -eq 0 ] && [ "$fstype" = "ext4" ] && command -v quotaon >/dev/null 2>&1; then\n'
+        '    modprobe quota_v2 2>/dev/null || true\n'
+        '    # Check if quota is already on\n'
+        '    if quotaon -pu / 2>/dev/null | grep -q "is on"; then\n'
+        '        echo "  quota: already enabled on /"\n'
+        '    else\n'
+        '        # Try remount with journaled quota options\n'
+        '        if mount -o remount,usrjquota=aquota.user,jqfmt=vfsv1 / 2>/dev/null; then\n'
+        '            if [ ! -f /aquota.user ]; then\n'
+        '                nice -n19 ionice -c3 timeout 1800 quotacheck -cum / 2>/dev/null \\\n'
+        '                    || { echo "  ⚠ quota: quotacheck failed — skipped" >&2; quota_fail=1; }\n'
+        '            fi\n'
+        '            if [ "$quota_fail" -eq 0 ]; then\n'
+        '                quotaon -u / 2>/dev/null \\\n'
+        '                    || { echo "  ⚠ quota: quotaon failed — skipped" >&2; quota_fail=1; }\n'
+        '            fi\n'
+        '        else\n'
+        '            echo "  ⚠ quota: remount with usrjquota refused — reboot-only path, skipped" >&2\n'
+        '            quota_fail=1\n'
+        '        fi\n'
+        '    fi\n'
+        '    if [ "$quota_fail" -eq 0 ]; then\n'
+        '        # Set grace period\n'
+        '        setquota -t -u %d %d / 2>/dev/null || true\n'
+        '        # Set per-user quotas for shared-stream accounts\n'
+        '        for home in /home/*; do\n'
+        '            [ -d "$home" ] || continue\n'
+        '            u=$(basename "$home")\n'
+        '            bcf="$home/.claude/airuleset-box-class"\n'
+        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '            setquota -u "$u" %d %d 0 0 / 2>/dev/null \\\n'
+        '                || echo "  ⚠ quota: setquota failed for $u" >&2\n'
+        '        done\n'
+        '        # Enable the boot unit\n'
+        '        systemctl enable airuleset-quota.service >/dev/null 2>&1 || true\n'
+        '        # Read-back verify\n'
+        '        qfail=0\n'
+        '        for home in /home/*; do\n'
+        '            [ -d "$home" ] || continue\n'
+        '            u=$(basename "$home")\n'
+        '            bcf="$home/.claude/airuleset-box-class"\n'
+        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '            hard=$(repquota -u / 2>/dev/null | awk -v u="$u" \'$1==u{print $5}\')\n'
+        '            if [ "$hard" != "%d" ]; then\n'
+        '                echo "  ⚠ QUOTA VERIFY FAIL: $u hard=$hard (expected %d)" >&2\n'
+        '                qfail=1\n'
+        '            fi\n'
+        '        done\n'
+        '        if [ "$qfail" -ne 0 ]; then\n'
+        '            echo "  ⚠ QUOTA FAILED read-back verify" >&2\n'
+        '        else\n'
+        '            echo "  quota: applied + verified (soft=%dG hard=%dG grace=%ds)"\n'
+        '        fi\n'
+        '    fi\n'
+        'fi'
+        % (QUOTA_GRACE_S, QUOTA_GRACE_S,
+           QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
+           QUOTA_HARD_KIB, QUOTA_HARD_KIB,
+           QUOTA_SOFT_KIB // (1024 * 1024), QUOTA_HARD_KIB // (1024 * 1024),
+           QUOTA_GRACE_S)
+    )
+    parts.append("")
+    # --- #950-B: shared Playwright browser install ---
+    # Root installs chromium to /opt/ms-playwright so all stream accounts
+    # share ONE copy. Per-user ~/.cache/ms-playwright is swept ONLY when
+    # the shared install succeeds.
+    parts.append(
+        '# --- #950-B: shared Playwright browsers ---\n'
+        'pw_shared=%s\n'
+        'if command -v npx >/dev/null 2>&1; then\n'
+        '    mkdir -p "$pw_shared"\n'
+        '    chmod 0755 "$pw_shared"\n'
+        '    if PLAYWRIGHT_BROWSERS_PATH="$pw_shared" npx -y playwright install chromium >/dev/null 2>&1; then\n'
+        '        echo "  playwright: shared browsers installed at $pw_shared"\n'
+        '        # Sweep per-user caches (only entries that exist in the shared path)\n'
+        '        for home in /home/*; do\n'
+        '            [ -d "$home" ] || continue\n'
+        '            u=$(basename "$home")\n'
+        '            bcf="$home/.claude/airuleset-box-class"\n'
+        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '            user_pw="$home/.cache/ms-playwright"\n'
+        '            [ -d "$user_pw" ] || continue\n'
+        '            # Only remove dirs whose name also exists in the shared path\n'
+        '            for d in "$user_pw"/*/; do\n'
+        '                [ -d "$d" ] || continue\n'
+        '                bn=$(basename "$d")\n'
+        '                if [ -d "$pw_shared/$bn" ] && [ -f "$pw_shared/$bn/INSTALLATION_COMPLETE" ]; then\n'
+        '                    # Check not in live use (open fd)\n'
+        '                    if ! fuser -s "$d" 2>/dev/null; then\n'
+        '                        rm -rf --one-file-system -- "$d" 2>/dev/null \\\n'
+        '                            && echo "  playwright: swept $d (shared at $pw_shared/$bn)" \\\n'
+        '                            || echo "  ⚠ playwright: failed to sweep $d"\n'
+        '                    else\n'
+        '                        echo "  playwright: SKIP $d — in live use"\n'
+        '                    fi\n'
+        '                fi\n'
+        '            done\n'
+        '        done\n'
+        '    else\n'
+        '        echo "  ⚠ playwright: shared install failed — per-user caches kept" >&2\n'
+        '    fi\n'
+        'else\n'
+        '    echo "  ⚠ playwright: npx not found — shared install skipped" >&2\n'
+        'fi'
+        % shlex.quote(PLAYWRIGHT_SHARED_PATH)
     )
     return "\n".join(parts) + "\n"
 

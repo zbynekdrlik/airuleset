@@ -433,6 +433,29 @@ def disk_segment(home=None, now=None):
     return "\033[38;5;196mdisk %d%%\033[0m" % int(worst)
 
 
+def quota_segment(home=None, now=None):
+    """#950: the ``quota NN%`` footer segment — per-account disk quota usage
+    on shared-stream boxes.  Shown at >= 90 % of the hard quota, hidden below.
+    Also hidden when the disk-guard cache is stale (> DISK_SEGMENT_STALE_S) or
+    has no ``quota_pct`` (quota not enabled / non-shared-stream box).  Reads ONLY
+    the machine-local cache the watchdog Job 40 writes; never touches the
+    network.  Renders as no segment on any error (never blocks)."""
+    import time as _time
+    now = _time.time() if now is None else now
+    cache = _load(_claude_dir(home) / "disk-guard" / "status.json")
+    if not isinstance(cache, dict):
+        return ""
+    qpct = cache.get("quota_pct")
+    ts = cache.get("ts")
+    if not isinstance(qpct, (int, float)) or isinstance(qpct, bool):
+        return ""
+    if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
+        return ""
+    if qpct < 90:
+        return ""
+    return "\033[38;5;196mquota %d%%\033[0m" % int(qpct)
+
+
 def release_idle_segment(cwd=None, home=None, now=None):
     """The `rel <Nh>` footer segment (#846): shown ONLY when the last PROD deploy
     is >= RELEASE_IDLE_BREACH_H hours old (RED), hidden otherwise. Also hidden
