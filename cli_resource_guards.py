@@ -271,76 +271,17 @@ def guard_files():
 _HEREDOC_MARK = "AIRULESET_GUARD_EOF"
 
 
-def build_apply_script() -> str:
-    """A `bash -eo pipefail` script (run as `bash -c <script>` over ssh
-    root@subdev, so its stdin stays free for the heredocs below) that
-    idempotently installs every guard drop-in atomically, reloads systemd,
-    live-applies the caps to running slices (skipping any already over the new
-    max — never insta-kill a live session), verifies swap presence (never
-    creates it), and READS BACK the applied limits (mismatch/infinity → exit 4,
-    turning the push step LOUD). Pure string builder — no side effects."""
-    parts = []
-    parts.append("set -euo pipefail")
-    parts.append("")
-    # Atomic idempotent installer: content on stdin (a quoted heredoc), written
-    # to a dotted mktemp in the destination dir and mv'd into place only once
-    # fully written — the SAME never-a-truncating-write discipline as #659.
-    parts.append(
-        '_install() {\n'
-        '    dest="$1"; dir=$(dirname "$dest")\n'
-        '    mkdir -p "$dir"\n'
-        '    tmp=$(mktemp "$dir/.airuleset-guard-XXXXXX")\n'
-        "    trap 'rm -f \"$tmp\"' EXIT\n"
-        '    cat > "$tmp"\n'
-        '    chmod 0644 "$tmp"\n'
-        '    mv -f "$tmp" "$dest"\n'
-        '    trap - EXIT\n'
-        '    echo "  resource-guards: wrote $dest"\n'
-        '}'
-    )
-    parts.append("")
-    for path, content in guard_files():
-        parts.append(
-            "_install %s <<'%s'\n%s%s"
-            % (shlex.quote(path), _HEREDOC_MARK, content.rstrip("\n") + "\n",
-               _HEREDOC_MARK)
-        )
-    parts.append("")
-    # daemon-reload MUST precede any set-property (systemd must re-read the
-    # template drop-in first). sysctl is best-effort LOUD.
-    parts.append("systemctl daemon-reload")
-    parts.append(
-        'sysctl --system >/dev/null 2>&1 '
-        '|| echo "  ⚠ resource-guards: sysctl --system failed (non-fatal)"'
-    )
-    parts.append("")
-    # #925-C: restart rsyslog so it picks up the new quiet rule from rsyslog.d/.
-    # rsyslog re-reads .d/ files only at restart. Best-effort LOUD.
-    parts.append(
-        'systemctl restart rsyslog.service >/dev/null 2>&1 '
-        '|| echo "  ⚠ resource-guards: rsyslog restart failed (non-fatal)"'
-    )
-    # #925-C: journald cap — re-read ONLY at (re)start (the #841 gotcha:
-    # daemon-reload does NOT make journald re-read its own conf.d, and
-    # `journalctl --rotate` alone vacuums to the OLD limit). So restart
-    # journald FIRST, then rotate so it vacuums to the new SystemMaxUse.
-    parts.append(
-        'systemctl try-restart systemd-journald.service >/dev/null 2>&1 '
-        '|| echo "  ⚠ resource-guards: systemd-journald restart failed (non-fatal)"'
-    )
-    parts.append(
-        'journalctl --rotate >/dev/null 2>&1 '
-        '|| echo "  ⚠ resource-guards: journalctl --rotate failed (non-fatal)"'
-    )
-    parts.append("")
-    # #925-C: swap policy — idempotent swap management on shared-stream boxes.
-    # Exactly ONE /swapfile of SWAP_SIZE_GB. Guard: only acts when a
-    # shared-stream box-class marker exists under ANY home.
-    # The sequence is: cleanup stale .new → free-space check → create new →
-    # mkswap → swapon new → swapoff old → rm old → rename → fstab.
-    # NEVER leaves two active swapfiles. F2 review fixes: stale .new cleanup,
-    # free-space precheck, no dd fallback (ENOSPC risk), cleanup-on-failure.
-    parts.append(
+def _render_swap_policy_block() -> str:
+    """#925-C: swap policy bash snippet — idempotent swap management.
+
+    Exactly ONE /swapfile of SWAP_SIZE_GB on shared-stream boxes. Guard: only
+    acts when a shared-stream box-class marker exists under ANY home. The
+    sequence is: cleanup stale .new -> free-space check -> create new ->
+    mkswap -> swapon new -> swapoff old -> rm old -> rename -> fstab. NEVER
+    leaves two active swapfiles. F2 review fixes: stale .new cleanup,
+    free-space precheck, no dd fallback (ENOSPC risk), cleanup-on-failure.
+    Pure renderer returning the bash snippet — no side effects."""
+    return (
         '# Swap policy: exactly ONE /swapfile of %dG (#925-C, owner ruling).\n'
         '# Guard: only acts when a shared-stream box-class marker exists.\n'
         'swap_is_shared_stream=false\n'
@@ -426,6 +367,204 @@ def build_apply_script() -> str:
            SWAP_SIZE_GB, SWAP_SIZE_GB,
            SWAP_SIZE_GB)
     )
+
+
+def _render_quota_apply_block() -> str:
+    """#950: per-user disk quota bash snippet — ext4 usrquota via legacy
+    journaled quota (NOT tune2fs -O quota, which is REFUSED on a mounted root
+    by e2fsprogs 1.47). Idempotent: each step is a no-op when already applied.
+    Uncertain -> skip. Pure renderer returning the bash snippet."""
+    return (
+        '# --- #950: per-user ext4 disk quota ---\n'
+        'quota_fail=0\n'
+        'dev=$(findmnt -no SOURCE /); fstype=$(findmnt -no FSTYPE /)\n'
+        'if [ "$fstype" != "ext4" ]; then\n'
+        '    echo "  ⚠ quota: / is $fstype, not ext4 — skipped"\n'
+        'elif ! command -v quotaon >/dev/null 2>&1; then\n'
+        '    DEBIAN_FRONTEND=noninteractive apt-get install -y quota >/dev/null 2>&1 \\\n'
+        '        || { echo "  ⚠ quota: quota package install failed — skipped" >&2; quota_fail=1; }\n'
+        'fi\n'
+        'if [ "$quota_fail" -eq 0 ] && [ "$fstype" = "ext4" ] && command -v quotaon >/dev/null 2>&1; then\n'
+        '    modprobe quota_v2 2>/dev/null || true\n'
+        '    # Check if quota is already on\n'
+        '    if quotaon -pu / 2>/dev/null | grep -q "is on"; then\n'
+        '        echo "  quota: already enabled on /"\n'
+        '    else\n'
+        '        # Try remount with journaled quota options\n'
+        '        if mount -o remount,usrjquota=aquota.user,jqfmt=vfsv1 / 2>/dev/null; then\n'
+        '            if [ ! -f /aquota.user ]; then\n'
+        '                nice -n19 ionice -c3 timeout 1800 quotacheck -cum / 2>/dev/null \\\n'
+        '                    || { echo "  ⚠ quota: quotacheck failed — skipped" >&2; quota_fail=1; }\n'
+        '            fi\n'
+        '            if [ "$quota_fail" -eq 0 ]; then\n'
+        '                quotaon -u / 2>/dev/null \\\n'
+        '                    || { echo "  ⚠ quota: quotaon failed — skipped" >&2; quota_fail=1; }\n'
+        '            fi\n'
+        '        else\n'
+        '            echo "  ⚠ quota: remount with usrjquota refused — reboot-only path, skipped" >&2\n'
+        '            quota_fail=1\n'
+        '        fi\n'
+        '    fi\n'
+        '    if [ "$quota_fail" -eq 0 ]; then\n'
+        '        # Set grace period\n'
+        '        setquota -t -u %d %d / 2>/dev/null || true\n'
+        '        # Set per-user quotas for shared-stream accounts\n'
+        '        for home in /home/*; do\n'
+        '            [ -d "$home" ] || continue\n'
+        '            u=$(basename "$home")\n'
+        '            bcf="$home/.claude/airuleset-box-class"\n'
+        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '            setquota -u "$u" %d %d 0 0 / 2>/dev/null \\\n'
+        '                || echo "  ⚠ quota: setquota failed for $u" >&2\n'
+        '        done\n'
+        '        # Enable the boot unit\n'
+        '        systemctl enable airuleset-quota.service >/dev/null 2>&1 || true\n'
+        '        # Read-back verify\n'
+        '        qfail=0\n'
+        '        for home in /home/*; do\n'
+        '            [ -d "$home" ] || continue\n'
+        '            u=$(basename "$home")\n'
+        '            bcf="$home/.claude/airuleset-box-class"\n'
+        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '            hard=$(repquota -u / 2>/dev/null | awk -v u="$u" \'$1==u{print $5}\')\n'
+        '            if [ "$hard" != "%d" ]; then\n'
+        '                echo "  ⚠ QUOTA VERIFY FAIL: $u hard=$hard (expected %d)" >&2\n'
+        '                qfail=1\n'
+        '            fi\n'
+        '        done\n'
+        '        if [ "$qfail" -ne 0 ]; then\n'
+        '            echo "  ⚠ QUOTA FAILED read-back verify" >&2\n'
+        '        else\n'
+        '            echo "  quota: applied + verified (soft=%dG hard=%dG grace=%ds)"\n'
+        '        fi\n'
+        '    fi\n'
+        'fi'
+        % (QUOTA_GRACE_S, QUOTA_GRACE_S,
+           QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
+           QUOTA_HARD_KIB, QUOTA_HARD_KIB,
+           QUOTA_SOFT_KIB // (1024 * 1024), QUOTA_HARD_KIB // (1024 * 1024),
+           QUOTA_GRACE_S)
+    )
+
+
+def _render_playwright_shared_block() -> str:
+    """#950-B: shared Playwright browser install bash snippet.
+
+    Root installs chromium to /opt/ms-playwright so all stream accounts share
+    ONE copy. Per-user ~/.cache/ms-playwright is swept ONLY when the shared
+    install succeeds. Pure renderer returning the bash snippet."""
+    return (
+        '# --- #950-B: shared Playwright browsers ---\n'
+        'pw_shared=%s\n'
+        'if command -v npx >/dev/null 2>&1; then\n'
+        '    mkdir -p "$pw_shared"\n'
+        '    chmod 0755 "$pw_shared"\n'
+        '    if PLAYWRIGHT_BROWSERS_PATH="$pw_shared" npx -y playwright install chromium >/dev/null 2>&1; then\n'
+        '        # Y1: ensure read+exec for all users (root umask may restrict)\n'
+        '        chmod -R a+rX "$pw_shared" 2>/dev/null || true\n'
+        '        echo "  playwright: shared browsers installed at $pw_shared"\n'
+        '        # Sweep per-user caches (only entries that exist in the shared path)\n'
+        '        for home in /home/*; do\n'
+        '            [ -d "$home" ] || continue\n'
+        '            u=$(basename "$home")\n'
+        '            bcf="$home/.claude/airuleset-box-class"\n'
+        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '            user_pw="$home/.cache/ms-playwright"\n'
+        '            [ -d "$user_pw" ] || continue\n'
+        '            # Only remove dirs whose name also exists in the shared path\n'
+        '            for d in "$user_pw"/*/; do\n'
+        '                [ -d "$d" ] || continue\n'
+        '                bn=$(basename "$d")\n'
+        '                if [ -d "$pw_shared/$bn" ] && [ -f "$pw_shared/$bn/INSTALLATION_COMPLETE" ]; then\n'
+        '                    # Check not in live use (open fd)\n'
+        '                    if ! fuser -s "$d" 2>/dev/null; then\n'
+        '                        rm -rf --one-file-system -- "$d" 2>/dev/null \\\n'
+        '                            && echo "  playwright: swept $d (shared at $pw_shared/$bn)" \\\n'
+        '                            || echo "  ⚠ playwright: failed to sweep $d"\n'
+        '                    else\n'
+        '                        echo "  playwright: SKIP $d — in live use"\n'
+        '                    fi\n'
+        '                fi\n'
+        '            done\n'
+        '        done\n'
+        '    else\n'
+        '        echo "  ⚠ playwright: shared install failed — per-user caches kept" >&2\n'
+        '    fi\n'
+        'else\n'
+        '    echo "  ⚠ playwright: npx not found — shared install skipped" >&2\n'
+        'fi'
+        % shlex.quote(PLAYWRIGHT_SHARED_PATH)
+    )
+
+
+def build_apply_script() -> str:
+    """A `bash -eo pipefail` script (run as `bash -c <script>` over ssh
+    root@subdev, so its stdin stays free for the heredocs below) that
+    idempotently installs every guard drop-in atomically, reloads systemd,
+    live-applies the caps to running slices (skipping any already over the new
+    max — never insta-kill a live session), verifies swap presence (never
+    creates it), and READS BACK the applied limits (mismatch/infinity → exit 4,
+    turning the push step LOUD). Pure string builder — no side effects.
+
+    The heavy bash snippets are rendered by dedicated helpers
+    (_render_swap_policy_block, _render_quota_apply_block,
+    _render_playwright_shared_block) — this function only assembles them."""
+    parts = []
+    parts.append("set -euo pipefail")
+    parts.append("")
+    # Atomic idempotent installer: content on stdin (a quoted heredoc), written
+    # to a dotted mktemp in the destination dir and mv'd into place only once
+    # fully written — the SAME never-a-truncating-write discipline as #659.
+    parts.append(
+        '_install() {\n'
+        '    dest="$1"; dir=$(dirname "$dest")\n'
+        '    mkdir -p "$dir"\n'
+        '    tmp=$(mktemp "$dir/.airuleset-guard-XXXXXX")\n'
+        "    trap 'rm -f \"$tmp\"' EXIT\n"
+        '    cat > "$tmp"\n'
+        '    chmod 0644 "$tmp"\n'
+        '    mv -f "$tmp" "$dest"\n'
+        '    trap - EXIT\n'
+        '    echo "  resource-guards: wrote $dest"\n'
+        '}'
+    )
+    parts.append("")
+    for path, content in guard_files():
+        parts.append(
+            "_install %s <<'%s'\n%s%s"
+            % (shlex.quote(path), _HEREDOC_MARK, content.rstrip("\n") + "\n",
+               _HEREDOC_MARK)
+        )
+    parts.append("")
+    # daemon-reload MUST precede any set-property (systemd must re-read the
+    # template drop-in first). sysctl is best-effort LOUD.
+    parts.append("systemctl daemon-reload")
+    parts.append(
+        'sysctl --system >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: sysctl --system failed (non-fatal)"'
+    )
+    parts.append("")
+    # #925-C: restart rsyslog so it picks up the new quiet rule from rsyslog.d/.
+    # rsyslog re-reads .d/ files only at restart. Best-effort LOUD.
+    parts.append(
+        'systemctl restart rsyslog.service >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: rsyslog restart failed (non-fatal)"'
+    )
+    # #925-C: journald cap — re-read ONLY at (re)start (the #841 gotcha:
+    # daemon-reload does NOT make journald re-read its own conf.d, and
+    # `journalctl --rotate` alone vacuums to the OLD limit). So restart
+    # journald FIRST, then rotate so it vacuums to the new SystemMaxUse.
+    parts.append(
+        'systemctl try-restart systemd-journald.service >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: systemd-journald restart failed (non-fatal)"'
+    )
+    parts.append(
+        'journalctl --rotate >/dev/null 2>&1 '
+        '|| echo "  ⚠ resource-guards: journalctl --rotate failed (non-fatal)"'
+    )
+    parts.append("")
+    # #925-C: swap policy (rendered by _render_swap_policy_block).
+    parts.append(_render_swap_policy_block())
     parts.append("")
     # Expected bytes from MemTotal (the read-back baseline). systemd resolves a
     # `%` against PHYSICAL RAM, which is >= MemTotal by the reserved amount, so
@@ -526,128 +665,12 @@ def build_apply_script() -> str:
            CPU_WEIGHT, CPU_QUOTA_PCT)
     )
     parts.append("")
-    # --- #950: per-user disk quota (ext4 usrquota) ---
-    # Legacy journaled quota: remount + quotacheck + quotaon (NOT tune2fs -O
-    # quota, which is REFUSED on a mounted root by e2fsprogs 1.47).
-    # Idempotent: each step is a no-op when already applied. Uncertain → skip.
-    parts.append(
-        '# --- #950: per-user ext4 disk quota ---\n'
-        'quota_fail=0\n'
-        'dev=$(findmnt -no SOURCE /); fstype=$(findmnt -no FSTYPE /)\n'
-        'if [ "$fstype" != "ext4" ]; then\n'
-        '    echo "  ⚠ quota: / is $fstype, not ext4 — skipped"\n'
-        'elif ! command -v quotaon >/dev/null 2>&1; then\n'
-        '    DEBIAN_FRONTEND=noninteractive apt-get install -y quota >/dev/null 2>&1 \\\n'
-        '        || { echo "  ⚠ quota: quota package install failed — skipped" >&2; quota_fail=1; }\n'
-        'fi\n'
-        'if [ "$quota_fail" -eq 0 ] && [ "$fstype" = "ext4" ] && command -v quotaon >/dev/null 2>&1; then\n'
-        '    modprobe quota_v2 2>/dev/null || true\n'
-        '    # Check if quota is already on\n'
-        '    if quotaon -pu / 2>/dev/null | grep -q "is on"; then\n'
-        '        echo "  quota: already enabled on /"\n'
-        '    else\n'
-        '        # Try remount with journaled quota options\n'
-        '        if mount -o remount,usrjquota=aquota.user,jqfmt=vfsv1 / 2>/dev/null; then\n'
-        '            if [ ! -f /aquota.user ]; then\n'
-        '                nice -n19 ionice -c3 timeout 1800 quotacheck -cum / 2>/dev/null \\\n'
-        '                    || { echo "  ⚠ quota: quotacheck failed — skipped" >&2; quota_fail=1; }\n'
-        '            fi\n'
-        '            if [ "$quota_fail" -eq 0 ]; then\n'
-        '                quotaon -u / 2>/dev/null \\\n'
-        '                    || { echo "  ⚠ quota: quotaon failed — skipped" >&2; quota_fail=1; }\n'
-        '            fi\n'
-        '        else\n'
-        '            echo "  ⚠ quota: remount with usrjquota refused — reboot-only path, skipped" >&2\n'
-        '            quota_fail=1\n'
-        '        fi\n'
-        '    fi\n'
-        '    if [ "$quota_fail" -eq 0 ]; then\n'
-        '        # Set grace period\n'
-        '        setquota -t -u %d %d / 2>/dev/null || true\n'
-        '        # Set per-user quotas for shared-stream accounts\n'
-        '        for home in /home/*; do\n'
-        '            [ -d "$home" ] || continue\n'
-        '            u=$(basename "$home")\n'
-        '            bcf="$home/.claude/airuleset-box-class"\n'
-        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
-        '            setquota -u "$u" %d %d 0 0 / 2>/dev/null \\\n'
-        '                || echo "  ⚠ quota: setquota failed for $u" >&2\n'
-        '        done\n'
-        '        # Enable the boot unit\n'
-        '        systemctl enable airuleset-quota.service >/dev/null 2>&1 || true\n'
-        '        # Read-back verify\n'
-        '        qfail=0\n'
-        '        for home in /home/*; do\n'
-        '            [ -d "$home" ] || continue\n'
-        '            u=$(basename "$home")\n'
-        '            bcf="$home/.claude/airuleset-box-class"\n'
-        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
-        '            hard=$(repquota -u / 2>/dev/null | awk -v u="$u" \'$1==u{print $5}\')\n'
-        '            if [ "$hard" != "%d" ]; then\n'
-        '                echo "  ⚠ QUOTA VERIFY FAIL: $u hard=$hard (expected %d)" >&2\n'
-        '                qfail=1\n'
-        '            fi\n'
-        '        done\n'
-        '        if [ "$qfail" -ne 0 ]; then\n'
-        '            echo "  ⚠ QUOTA FAILED read-back verify" >&2\n'
-        '        else\n'
-        '            echo "  quota: applied + verified (soft=%dG hard=%dG grace=%ds)"\n'
-        '        fi\n'
-        '    fi\n'
-        'fi'
-        % (QUOTA_GRACE_S, QUOTA_GRACE_S,
-           QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
-           QUOTA_HARD_KIB, QUOTA_HARD_KIB,
-           QUOTA_SOFT_KIB // (1024 * 1024), QUOTA_HARD_KIB // (1024 * 1024),
-           QUOTA_GRACE_S)
-    )
+    # #950: per-user disk quota (rendered by _render_quota_apply_block).
+    parts.append(_render_quota_apply_block())
     parts.append("")
-    # --- #950-B: shared Playwright browser install ---
-    # Root installs chromium to /opt/ms-playwright so all stream accounts
-    # share ONE copy. Per-user ~/.cache/ms-playwright is swept ONLY when
-    # the shared install succeeds.
-    parts.append(
-        '# --- #950-B: shared Playwright browsers ---\n'
-        'pw_shared=%s\n'
-        'if command -v npx >/dev/null 2>&1; then\n'
-        '    mkdir -p "$pw_shared"\n'
-        '    chmod 0755 "$pw_shared"\n'
-        '    if PLAYWRIGHT_BROWSERS_PATH="$pw_shared" npx -y playwright install chromium >/dev/null 2>&1; then\n'
-        '        # Y1: ensure read+exec for all users (root umask may restrict)\n'
-        '        chmod -R a+rX "$pw_shared" 2>/dev/null || true\n'
-        '        echo "  playwright: shared browsers installed at $pw_shared"\n'
-        '        # Sweep per-user caches (only entries that exist in the shared path)\n'
-        '        for home in /home/*; do\n'
-        '            [ -d "$home" ] || continue\n'
-        '            u=$(basename "$home")\n'
-        '            bcf="$home/.claude/airuleset-box-class"\n'
-        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
-        '            user_pw="$home/.cache/ms-playwright"\n'
-        '            [ -d "$user_pw" ] || continue\n'
-        '            # Only remove dirs whose name also exists in the shared path\n'
-        '            for d in "$user_pw"/*/; do\n'
-        '                [ -d "$d" ] || continue\n'
-        '                bn=$(basename "$d")\n'
-        '                if [ -d "$pw_shared/$bn" ] && [ -f "$pw_shared/$bn/INSTALLATION_COMPLETE" ]; then\n'
-        '                    # Check not in live use (open fd)\n'
-        '                    if ! fuser -s "$d" 2>/dev/null; then\n'
-        '                        rm -rf --one-file-system -- "$d" 2>/dev/null \\\n'
-        '                            && echo "  playwright: swept $d (shared at $pw_shared/$bn)" \\\n'
-        '                            || echo "  ⚠ playwright: failed to sweep $d"\n'
-        '                    else\n'
-        '                        echo "  playwright: SKIP $d — in live use"\n'
-        '                    fi\n'
-        '                fi\n'
-        '            done\n'
-        '        done\n'
-        '    else\n'
-        '        echo "  ⚠ playwright: shared install failed — per-user caches kept" >&2\n'
-        '    fi\n'
-        'else\n'
-        '    echo "  ⚠ playwright: npx not found — shared install skipped" >&2\n'
-        'fi'
-        % shlex.quote(PLAYWRIGHT_SHARED_PATH)
-    )
+    # #950-B: shared Playwright browser install (rendered by
+    # _render_playwright_shared_block).
+    parts.append(_render_playwright_shared_block())
     return "\n".join(parts) + "\n"
 
 
