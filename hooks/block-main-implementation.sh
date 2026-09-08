@@ -1229,10 +1229,42 @@ def cat_files(tk):
     return tk[i:]
 
 
+def _is_narrow_readonly_953(tk):
+    """#953: a read-only command on 1-2 explicit non-glob non-variable paths."""
+    h = tk[0]
+    if h not in ("grep", "cat", "wc", "ls"):
+        return False
+    # grep: no recursive flags
+    if h == "grep":
+        for t in tk[1:]:
+            if t in ("-r", "-R", "--recursive", "--dereference-recursive", "-f", "-d"):
+                return False
+            if re.match(r"^-[A-Za-z]+$", t) and ("r" in t[1:] or "R" in t[1:]):
+                return False
+    # Extract file arguments
+    if h == "grep":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        he = any(t == "-e" or t.startswith("--regexp") for t in tk[1:])
+        fls = nf if he else nf[1:]
+    elif h == "cat":
+        fls = cat_files(tk)
+    else:
+        fls = [t for t in tk[1:] if not t.startswith("-")]
+    if len(fls) > 2:
+        return False
+    if any(any(c in p for c in "*?[$") for p in fls):
+        return False
+    if any(t.startswith(">") or t.startswith("1>") for t in tk):
+        return False
+    return True
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
     if redirects_stdout_to_file(tk):
+        return False
+    if _is_narrow_readonly_953(tk):
         return False
     head = tk[0]
     if head in ("grep", "rg", "ag"):

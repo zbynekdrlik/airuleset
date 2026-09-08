@@ -82,13 +82,35 @@ AGENT_TYPE=$(jqr '.agent_type // empty')
 # ======================= RULE B — worktree escape ==========================
 # Fires ONLY for a subagent (agent_id) whose session cwd is an isolated worktree.
 if [ -n "$AGENT_ID" ] && [ "${AIRULESET_ALLOW_WORKTREE_ESCAPE:-0}" != "1" ]; then
-  case "$CWD" in
+  # #953: worktree identity pin — on a SendMessage resume, CWD can drift to
+  # a DIFFERENT worktree (the main session's cwd). A pin file recorded on the
+  # first call preserves the original worktree identity. The pin overrides CWD
+  # for worktree derivation; everything else (the is_under checks, the
+  # deny_write logic) is unchanged.
+  _WT_PIN_FILE="/tmp/airuleset-worktree-pin-${AGENT_ID}"
+  _PINNED_WT=""
+  if [ -f "$_WT_PIN_FILE" ]; then
+      _PINNED_WT=$(head -1 "$_WT_PIN_FILE" 2>/dev/null || true)
+      _PINNED_WT="${_PINNED_WT%"${_PINNED_WT##*[![:space:]]}"}"
+  fi
+  # Use the pin (if valid worktree path) over the possibly-drifted CWD.
+  _EFFECTIVE_CWD="$CWD"
+  if [ -n "$_PINNED_WT" ]; then
+      case "$_PINNED_WT" in
+          */.claude/worktrees/*) _EFFECTIVE_CWD="$_PINNED_WT" ;;
+      esac
+  fi
+  case "$_EFFECTIVE_CWD" in
     */.claude/worktrees/*)
-      MAINSTR="${CWD%%/.claude/worktrees/*}"
-      _rest="${CWD#*/.claude/worktrees/}"
+      MAINSTR="${_EFFECTIVE_CWD%%/.claude/worktrees/*}"
+      _rest="${_EFFECTIVE_CWD#*/.claude/worktrees/}"
       WTNAME="${_rest%%/*}"
       if [ -n "$MAINSTR" ] && [ -n "$WTNAME" ]; then
         WTSTR="$MAINSTR/.claude/worktrees/$WTNAME"
+        # #953: record the pin on the FIRST call (when cwd is correct).
+        if [ -z "$_PINNED_WT" ]; then
+            echo "$WTSTR" > "$_WT_PIN_FILE" 2>/dev/null || true
+        fi
         # normalized forms for path CONTAINMENT (realpath -m needs no existence)
         MAIN=$(realpath -m -- "$MAINSTR" 2>/dev/null) || MAIN="$MAINSTR"
         WT=$(realpath -m -- "$WTSTR" 2>/dev/null) || WT="$WTSTR"

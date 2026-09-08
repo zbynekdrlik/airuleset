@@ -43,6 +43,11 @@ class WorktreeGuardBase(TestCase):
         self.sibling = os.path.join(self.main, ".claude", "worktrees",
                                     "agent-sibling")
         os.makedirs(self.sibling, exist_ok=True)
+        # #953: clean up any worktree pin from a prior test
+        pin = "/tmp/airuleset-worktree-pin-abc123"
+        if os.path.exists(pin):
+            os.unlink(pin)
+        self.addCleanup(lambda: os.unlink(pin) if os.path.exists(pin) else None)
 
     def run_hook(self, payload, env_extra=None):
         env = {"PATH": "/usr/bin:/bin"}

@@ -2845,6 +2845,19 @@ def cmd_tickets_status(args):
                 # for the red `· W N!` footer signal and by block-dispatch-over-
                 # wdrain.sh (which reads ops_wait directly, not this bool).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
+                # #953: deploy-target exempt count — members blocked on a
+                # release/deploy train. Lightweight title-based heuristic (no
+                # extra gh calls); the full comment-based deploy-target! tag
+                # runs in _ops_wait_flag_sets which is too expensive here.
+                _dw = 0
+                try:  # airuleset:script-ok guarded cache write, fail-safe to 0
+                    from watchdog.release_watch import is_deploy_target as _idt
+                    for _n, _r in ops_wait.items():
+                        if _idt((_r or {}).get("title") or ""):
+                            _dw += 1
+                except Exception:
+                    pass
+                entry["ops_wait_deploy_wait"] = _dw
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -2904,6 +2917,16 @@ def cmd_tickets_status(args):
                 entry["ops_wait"] = len(ops_wait)
                 # #868: W-drain breach flag (same as the slice path above).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
+                # #953: deploy-target exempt count (same as the slice path above).
+                _dw = 0
+                try:  # airuleset:script-ok guarded cache write, fail-safe to 0
+                    from watchdog.release_watch import is_deploy_target as _idt
+                    for _n, _r in ops_wait.items():
+                        if _idt((_r or {}).get("title") or ""):
+                            _dw += 1
+                except Exception:
+                    pass
+                entry["ops_wait_deploy_wait"] = _dw
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
