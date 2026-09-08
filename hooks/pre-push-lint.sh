@@ -76,19 +76,80 @@ fi
 # Python project (pyproject.toml or setup.py or *.py in root)
 if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
     if command -v ruff &>/dev/null; then
-        # Lint ONLY the Python files this push introduces (commits ahead of the
-        # tracked upstream) — NEVER `ruff check .` over the whole repo. A blanket
-        # whole-repo check false-positives on pre-existing tech debt the pusher
-        # didn't touch (and that CI may not even gate), wrongly blocking every
-        # push. The hook's job is "don't push NEW lint errors", not "the entire
-        # repo must be clean". Fall back to the last commit when no upstream.
-        UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
-        if [ -n "$UPSTREAM" ]; then
-            RANGE="${UPSTREAM}..HEAD"
-        else
-            RANGE="HEAD~1..HEAD"
+        # Lint ONLY the Python files this push introduces — NEVER `ruff check .`
+        # over the whole repo. A blanket whole-repo check false-positives on
+        # pre-existing tech debt the pusher didn't touch (and that CI may not even
+        # gate), wrongly blocking every push. The hook's job is "don't push NEW
+        # lint errors", not "the entire repo must be clean".
+        #
+        # #951: the range must be THREE-DOT against the PR TARGET (the branch
+        # this work merges into), not TWO-DOT against @{u}. Two-dot diffs the
+        # two TIPS — after `git merge origin/develop` it includes files that
+        # came FROM upstream (already linted upstream) and falsely blocks. The
+        # three-dot range `BASE_REF...HEAD` diffs from the merge-base and gives
+        # exactly "files changed on MY side". Same PR-target base resolution
+        # as pre-push-test-check.sh / block-test-skips.sh (#847/#909).
+        DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+            | sed 's@^refs/remotes/origin/@@' || echo "main")
+        CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+        BASE_REF="origin/${DEFAULT_BRANCH}"
+        _CASE_RESOLVED=false
+        case "$CUR_BRANCH" in
+            HEAD|"$DEFAULT_BRANCH"|staging) ;;
+            develop)
+                if git rev-parse -q --verify origin/staging >/dev/null; then
+                    BASE_REF="origin/staging"
+                    _CASE_RESOLVED=true
+                fi ;;
+            *)
+                for CAND in develop dev; do
+                    if [ "$CAND" != "$CUR_BRANCH" ]; then
+                        # #847: prefer upstream/<CAND> on fork-no-merge streams
+                        # (origin = personal fork, stale) when BOTH exist.
+                        if git rev-parse -q --verify "upstream/${CAND}" >/dev/null && \
+                           git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                            BASE_REF="upstream/${CAND}"
+                            _CASE_RESOLVED=true
+                            break
+                        elif git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                            BASE_REF="origin/${CAND}"
+                            _CASE_RESOLVED=true
+                            break
+                        fi
+                    fi
+                done ;;
+        esac
+        # #909/#951: fallbacks when the case block found nothing (new-branch-
+        # push). NOTE: the origin/<branch> override that block-test-skips.sh
+        # applies for per-added-line semantics is deliberately OMITTED here.
+        # After `git merge origin/develop`, origin/<branch> points at the OLD
+        # push tip, and the three-dot range from it includes merged upstream
+        # files — the exact bug #951 fixes. The PR-target base from the case
+        # block is the correct scope for lint (files the branch changes
+        # relative to the merge target).
+        if [ "$_CASE_RESOLVED" = false ]; then
+            _TRACKING=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+            if [ -n "$_TRACKING" ] && git rev-parse -q --verify "$_TRACKING" >/dev/null 2>&1; then
+                BASE_REF="$_TRACKING"
+            else
+                for _LOCAL_CAND in develop dev; do
+                    if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
+                       git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
+                        BASE_REF="$_LOCAL_CAND"
+                        break
+                    fi
+                done
+            fi
         fi
-        CHANGED=$(git diff --name-only --diff-filter=d "$RANGE" 2>/dev/null | grep -E '\.py$' || true)
+
+        # Fall back to HEAD~1 if BASE_REF doesn't resolve (local-only repo
+        # with no remotes — the old pre-#951 ultimate fallback).
+        CHANGED=$(git diff --name-only --diff-filter=d "${BASE_REF}...HEAD" 2>/dev/null \
+            | grep -E '\.py$' || true)
+        if [ -z "$CHANGED" ] && ! git rev-parse -q --verify "$BASE_REF" >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only --diff-filter=d "HEAD~1..HEAD" 2>/dev/null \
+                | grep -E '\.py$' || true)
+        fi
         if [ -n "$CHANGED" ]; then
             echo "Pre-push lint: ruff on $(echo "$CHANGED" | wc -l) changed Python file(s)..."
             # #218 -- $CHANGED paths are ROOT-relative; resolve to absolute
