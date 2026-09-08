@@ -2856,5 +2856,107 @@ class ObligationCountSafeguard(unittest.TestCase):
                          (None, None))                 # open is null
 
 
+class StaleCarryForward952(unittest.TestCase):
+    """#952: a transient gh failure must carry forward previous good numbers
+    instead of blanking the footer with open=None."""
+
+    def setUp(self):
+        self._home_td = TemporaryDirectory()
+        self._repo_td = TemporaryDirectory()
+        self._bin_td = TemporaryDirectory()
+        self.addCleanup(self._home_td.cleanup)
+        self.addCleanup(self._repo_td.cleanup)
+        self.addCleanup(self._bin_td.cleanup)
+        self.home = self._home_td.name
+        self.repo = self._repo_td.name
+        self.bindir = self._bin_td.name
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+
+    def _write_fake_gh(self, script_body):
+        fake = Path(self.bindir) / "gh"
+        fake.write_text("#!/usr/bin/env bash\n" + script_body)
+        fake.chmod(0o755)
+
+    def _env(self):
+        return {**os.environ, "HOME": self.home,
+                "PATH": "%s:%s" % (self.bindir, os.environ["PATH"])}
+
+    def _refresh(self):
+        return subprocess.run(
+            [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+             "tickets-status", "--refresh", "--cwd", self.repo],
+            capture_output=True, text=True, env=self._env())
+
+    def _cache(self):
+        p = statusbar.cache_dir(self.home) / (statusbar.cwd_key(self.repo) + ".json")
+        return json.loads(p.read_text()) if p.exists() else None
+
+    def test_failed_refresh_carries_forward_good_numbers(self):
+        """A good cache {open:2} + a failing gh refresh -> open stays 2,
+        stale_since set, tickets_segment still renders 'I 2'."""
+        _seed_cache(self.home, self.repo, open_n=2, user_waiting=0,
+                    name="demo")
+        # Manually add ops_wait to the seeded cache
+        p = statusbar.cache_dir(self.home) / (statusbar.cwd_key(self.repo) + ".json")
+        c = json.loads(p.read_text())
+        c["ops_wait"] = 1
+        p.write_text(json.dumps(c))
+        # Now make gh always fail (exit 1)
+        self._write_fake_gh("exit 1\n")
+        self._refresh()
+        cache = self._cache()
+        self.assertIsNotNone(cache)
+        self.assertEqual(cache["open"], 2, "open must be carried forward")
+        self.assertEqual(cache.get("user_waiting"), 0)
+        self.assertEqual(cache.get("ops_wait"), 1)
+        self.assertIn("stale_since", cache)
+        self.assertIn("last_error", cache)
+        # The render must still show I 2
+        seg = statusbar.tickets_segment(self.repo, home=self.home, spawn=False)
+        self.assertIn("I 2", seg)
+
+    def test_successful_refresh_clears_stale_fields(self):
+        """After a stale carry-forward, a successful refresh must clear
+        stale_since and last_error."""
+        _seed_cache(self.home, self.repo, open_n=2, user_waiting=0,
+                    name="demo")
+        p = statusbar.cache_dir(self.home) / (statusbar.cwd_key(self.repo) + ".json")
+        c = json.loads(p.read_text())
+        c["stale_since"] = int(time.time()) - 600
+        c["last_error"] = "timeout"
+        p.write_text(json.dumps(c))
+        SEVEN = ('[{"number":1},{"number":2},{"number":3},{"number":4},'
+                 '{"number":5},{"number":6},{"number":7}]')
+        self._write_fake_gh(
+            'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; '
+            "else echo '%s'; fi\n" % SEVEN)
+        self._refresh()
+        cache = self._cache()
+        self.assertEqual(cache["open"], 7)
+        self.assertNotIn("stale_since", cache,
+                         "stale_since must be cleared on success")
+        self.assertNotIn("last_error", cache,
+                         "last_error must be cleared on success")
+
+    def test_error_log_appended_on_failure(self):
+        """A failed refresh must append one line to refresh-errors.log."""
+        _seed_cache(self.home, self.repo, open_n=5, name="demo")
+        self._write_fake_gh("exit 1\n")
+        self._refresh()
+        log_path = statusbar.cache_dir(self.home) / "refresh-errors.log"
+        self.assertTrue(log_path.exists(), "error log must be created")
+        lines = log_path.read_text().splitlines()
+        self.assertGreaterEqual(len(lines), 1)
+        self.assertIn(statusbar.cwd_key(self.repo), lines[-1])
+
+    def test_cold_cache_failure_stays_none(self):
+        """With no prior cache, a failed refresh still writes open=None."""
+        self._write_fake_gh("exit 1\n")
+        self._refresh()
+        cache = self._cache()
+        self.assertIsNone(cache.get("open"),
+                          "cold cache must stay None on failure")
+
+
 if __name__ == "__main__":
     unittest.main()
