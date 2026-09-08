@@ -54,6 +54,21 @@ The ONLY reasons to interrupt long-running autonomous work:
 
 CI failures are NOT interruptions. They are part of the work.
 
+#### Integration friction is a bug (#957, 2026-09-08)
+
+Integration friction — repeated bounces, gate iterations, non-code re-cycles — is a first-class bug, not normal overhead. When it recurs, STOP the treadmill and fix the systemic CAUSE.
+
+**Thresholds (any one triggers):**
+- A ticket bounced >= 2x (round >= 3, `round3!` in `slice-quals --bounces`).
+- A single RFR gate-FAILs >= 3x (odoo-erp gate-side — the stream must track).
+- A non-code cycle repeats (CHANGELOG drift, RFR text rework with no code delta).
+
+**Response:** the supervisor STOPS the loop on that ticket and files a root-cause fix — a gate check, a script, a Prevencia rule, a template change. Never another iteration of the same failing pattern.
+
+**Audit:** `scripts/audit_bounce_rule_updates.py --rounds --repo owner/name` reports per-stream bounce rate trends (7d vs prior 7d). A rising or flat trend with recent bounces > 0 is a process failure — the 24h mechanical-prevention rule is being violated (every repeated bounce class must get a hook/gate/script within 24h of recurrence).
+
+**Origin:** david3 stream, 10 hand-offs in 14h, ~8 wasted deploy/e2e cycles, 2026-09-08. The CHANGELOG develop-drift treadmill alone burned ~80 min of CI on zero-value re-runs.
+
 #### Banned phrases (intent, not just exact wording)
 
 Do NOT shift a decision back to the user when the goals already determine the answer. Representative: "Your call", "You decide" / "Your decision" / "Up to you", "Realistic options: 1) admin-merge 2) close PR", "Cheaper / quicker / easier" paired with a shortcut, "Functionally ready" / "I won't claim it's clean but…", "Want me to investigate … or merge despite …?".

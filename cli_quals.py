@@ -2544,26 +2544,54 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
 # Bounce round derivation (#843) — one function feeds CLI + slice-quals
 # ---------------------------------------------------------------------------
 
-def _count_bounce_label_events(events_raw):
-    """Count prio:bounce label-add events in a JSON array from the
-    GitHub issue events REST API.  Returns 0 on any parse error (#942)."""
+def _bounce_label_events(events_raw):
+    """Extract prio:bounce label-add event timestamps from a JSON array
+    returned by the GitHub issue events REST API.
+
+    Returns a list of ``datetime`` objects (UTC).  Empty list on any parse
+    error — fail-safe (#942).  Sibling of ``_count_bounce_label_events``
+    (which is now ``len()`` of this); the timestamp is needed by
+    ``audit_bounce_rule_updates.py`` for rolling-window trend analysis
+    (#957)."""
+    from datetime import datetime
     if not events_raw:
-        return 0
+        return []
     try:
         events = json.loads(events_raw)
     except (ValueError, TypeError):
-        return 0  # unparseable -> fail-safe 0 bounces
+        return []
     if not isinstance(events, list):
-        return 0
-    count = 0
+        return []
+    timestamps = []
     for ev in events:
         if not isinstance(ev, dict):
             continue
         if ev.get("event") == "labeled":
             lbl = ev.get("label")
             if isinstance(lbl, dict) and lbl.get("name") == "prio:bounce":
-                count += 1
-    return count
+                raw_ts = ev.get("created_at", "")
+                try:
+                    # GitHub returns ISO 8601 with Z suffix.
+                    ts = datetime.fromisoformat(
+                        raw_ts.replace("Z", "+00:00"))
+                    timestamps.append(ts)
+                except (ValueError, TypeError, AttributeError):
+                    # Unparseable timestamp — still count the event (len()
+                    # preserves the count) but it cannot participate in
+                    # window/treadmill analysis.  None signals "counted
+                    # but undated" (#957 C2 fix — epoch caused false
+                    # treadmill! when two unparseable timestamps were
+                    # identical).
+                    timestamps.append(None)
+    return timestamps
+
+
+def _count_bounce_label_events(events_raw):
+    """Count prio:bounce label-add events in a JSON array from the
+    GitHub issue events REST API.  Returns 0 on any parse error (#942).
+
+    Delegates to ``_bounce_label_events`` — one source of truth (#957)."""
+    return len(_bounce_label_events(events_raw))
 
 
 def _has_bounce_label(labels_raw):
