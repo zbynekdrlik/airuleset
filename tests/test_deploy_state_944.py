@@ -117,9 +117,10 @@ class TestDeployWindow(unittest.TestCase):
         self.assertFalse(w_open)
         self.assertTrue(w_passed)
 
-    def test_none_spec(self):
+    def test_none_spec_means_always_open(self):
+        """null / None deploy_window = no restriction, always open (#944 Y3)."""
         self.assertEqual(deploy_state.evaluate_deploy_window(None),
-                         (False, False))
+                         (True, False))
 
     def test_empty_times(self):
         self.assertEqual(
@@ -236,7 +237,27 @@ class TestFetchDeployState(unittest.TestCase):
 
 
 class TestMultiInstanceClassify(unittest.TestCase):
-    """_deploy_watch_classify with per-instance list (F2)."""
+    """_deploy_watch_classify with per-instance list (F2).
+
+    Each test isolates the dedup state by patching _dedup_path to a tmpdir,
+    so should_fire writes to a throwaway dir instead of ~/.claude/.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.home = self._td.name
+        self.addCleanup(self._td.cleanup)
+        # Patch dedup + repo_slug so classify's dedup calls are isolated
+        self._p1 = mock.patch.object(
+            deploy_state, "_dedup_path",
+            return_value=os.path.join(self.home, ".claude", "deploy-watch"))
+        self._p2 = mock.patch.object(
+            deploy_state, "_repo_slug_from_cwd",
+            return_value="test/classify-repo")
+        self._p1.start()
+        self._p2.start()
+        self.addCleanup(self._p1.stop)
+        self.addCleanup(self._p2.stop)
 
     def test_any_window_open_fires(self):
         """If ANY instance is window-open, fire DEPLOY-WINDOW."""
@@ -262,7 +283,7 @@ class TestMultiInstanceClassify(unittest.TestCase):
     def test_all_missed_fires_miss(self):
         """If ALL behind instances are window-missed, fire DEPLOY-MISS."""
         from watchdog.ops_wait_recheck import _deploy_watch_classify
-        dep_targets = [42]
+        dep_targets = [100]
         state = {}
 
         def _fetch(_cwd):
@@ -278,12 +299,12 @@ class TestMultiInstanceClassify(unittest.TestCase):
         dw, dm = _deploy_watch_classify(dep_targets, "/tmp", _fetch,
                                         state, now)
         self.assertEqual(dw, [])
-        self.assertEqual(dm, [42])
+        self.assertEqual(dm, [100])
 
     def test_none_fetch_no_action(self):
         """None fetch -> no action."""
         from watchdog.ops_wait_recheck import _deploy_watch_classify
-        dep_targets = [42]
+        dep_targets = [200]
         state = {}
 
         import time
@@ -296,7 +317,7 @@ class TestMultiInstanceClassify(unittest.TestCase):
     def test_single_dict_backward_compat(self):
         """A single dict return (part-1 shape) still works."""
         from watchdog.ops_wait_recheck import _deploy_watch_classify
-        dep_targets = [42]
+        dep_targets = [300]
         state = {}
 
         def _fetch(_cwd):
@@ -307,8 +328,45 @@ class TestMultiInstanceClassify(unittest.TestCase):
         now = time.time()
         dw, dm = _deploy_watch_classify(dep_targets, "/tmp", _fetch,
                                         state, now)
-        self.assertEqual(dw, [42])
+        self.assertEqual(dw, [300])
         self.assertEqual(dm, [])
+
+
+class TestDedupWiredInClassify(unittest.TestCase):
+    """F5: should_fire is called inside _deploy_watch_classify (R2 fix)."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.home = self._td.name
+        self.addCleanup(self._td.cleanup)
+
+    def test_dedup_prevents_second_fire(self):
+        """Same (ticket, version) classified twice -> second returns empty."""
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        dep_targets = [500]
+        import time
+        now = time.time()
+
+        def _fetch(_cwd):
+            return [{"main_version": "2.266.0", "prod_version": "2.265.0",
+                     "window_open": True, "window_passed": False}]
+
+        with mock.patch.object(deploy_state, "_dedup_path",
+                               return_value=os.path.join(
+                                   self.home, ".claude", "deploy-watch")):
+            with mock.patch.object(deploy_state, "_repo_slug_from_cwd",
+                                   return_value="test/dedup-repo"):
+                # First call: should fire
+                state1 = {}
+                dw1, _ = _deploy_watch_classify(
+                    dep_targets, "/tmp", _fetch, state1, now)
+                self.assertEqual(dw1, [500])
+                # Second call with fresh state (simulates next sweep):
+                state2 = {}
+                dw2, _ = _deploy_watch_classify(
+                    dep_targets, "/tmp", _fetch, state2, now + 100)
+                self.assertEqual(dw2, [],
+                                 "dedup should prevent second fire")
 
 
 class TestGoalLaneSweepWiring(unittest.TestCase):
@@ -327,6 +385,12 @@ class TestGoalLaneSweepWiring(unittest.TestCase):
         from watchdog import run_once
         sig = inspect.signature(run_once)
         self.assertIn("deploy_state_fetch", sig.parameters)
+
+    def test_factory_returns_callable(self):
+        """_watchdog_deploy_state_fetch returns a callable."""
+        import airuleset
+        fn = airuleset._watchdog_deploy_state_fetch()
+        self.assertTrue(callable(fn))
 
 
 class TestRegistryOdooErp(unittest.TestCase):

@@ -2369,9 +2369,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the armed session to integrate returned worktree lanes from durable
           state (the branch + its LANE-RETURN comment) after the #844 forced
           compact may have lost a lane-completion notification — NEVER an owner
-          ping, deduped one attempt per observed compaction. All six riders (lane
-          / ops-wait / release-gap / queue-arrival / u-freshness / lane-reconcile)
-          now consult that
+          ping, deduped one attempt per observed compaction. And, when
+          `deploy_state_fetch` is wired, the #944 DEPLOY-STATE WATCH
+          (feeds `ops_wait_recheck._deploy_watch_classify`) — for a
+          deploy-target W member whose PROD version is behind main,
+          classifies into DEPLOY-WINDOW (open window) or DEPLOY-MISS
+          (missed window), per-instance and per-version deduped. All
+          seven riders (lane / ops-wait / release-gap / queue-arrival /
+          u-freshness / lane-reconcile / deploy-state) now consult that
           SHARED `nudge_gate` (`state["nudge_cadence"]`, #797): a per-category
           floor (only u-freshness's 1×/hour strop is non-zero) plus a
           cross-category family-spacing floor that DEFERS a second category's

@@ -180,10 +180,12 @@ def read_prod_version(version_source, timeout=15):
 
 
 def _fetch_version_from_url(url, timeout=15):
-    """HTTP GET ``url``, parse the response for a version string.
+    """HTTP GET ``url``, parse the JSON response for a version string.
 
-    Tries JSON first (looks for ``version`` / ``installed_version`` keys),
-    then falls back to regex on the raw body.
+    The response MUST be valid JSON with a known version key.
+    Non-JSON / non-2xx / HTML / JS bodies -> None (fail-safe: never
+    parse a login redirect or asset manifest as a version — Y1 review).
+    Body read capped at 64 KB.
     Returns None on any error.
     """
     try:
@@ -191,28 +193,31 @@ def _fetch_version_from_url(url, timeout=15):
         req = urllib.request.Request(url, method="GET")
         req.add_header("User-Agent", "airuleset-deploy-watch/1.0")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
+            if resp.status != 200:
+                log.debug("deploy_state: HTTP %d for %s", resp.status, url)
+                return None
+            body = resp.read(65536).decode("utf-8", errors="replace")
     except Exception:
         log.debug("deploy_state: HTTP fetch failed for %s", url,
                   exc_info=True)
         return None
 
-    # Try JSON
+    # JSON-only: no regex fallback on raw body (Y1 — a login redirect
+    # or JS bundle can carry a "version" string that would false-fire)
     try:
         data = json.loads(body)
-        if isinstance(data, dict):
-            for key in ("version", "installed_version", "server_version"):
-                v = data.get(key)
-                if isinstance(v, str) and v.strip():
-                    return _strip_odoo_prefix(v.strip())
     except (json.JSONDecodeError, TypeError):
-        log.debug("deploy_state: JSON parse failed for %s, trying regex",
-                  url)
+        log.debug("deploy_state: response not JSON for %s", url)
+        return None
 
-    # Fallback: regex on body
-    m = _MANIFEST_VERSION_RX.search(body)
-    if m:
-        return _strip_odoo_prefix(m.group(1))
+    if isinstance(data, dict):
+        # Only look for ``version`` and ``installed_version`` — NOT
+        # ``server_version`` which returns the Odoo platform version
+        # (e.g. "19.0"), not the module version
+        for key in ("version", "installed_version"):
+            v = data.get(key)
+            if isinstance(v, str) and v.strip():
+                return _strip_odoo_prefix(v.strip())
 
     return None
 
@@ -236,6 +241,9 @@ def evaluate_deploy_window(window_spec, now_dt=None):
     and a new one hasn't opened yet.
     Errors -> ``(False, False)`` (fail-safe: no action).
     """
+    if window_spec is None:
+        # null / undeclared window = no restriction, always open (#944 Y3)
+        return True, False
     if not isinstance(window_spec, dict):
         return False, False
     try:
@@ -422,7 +430,7 @@ def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None):
     return results if results else None
 
 
-def make_deploy_state_fetch(registry_path=None, home=None, now_dt=None):
+def make_deploy_state_fetch(registry_path=None, home=None):
     """Return a ``deploy_state_fetch(cwd)`` callable for the watchdog seam.
 
     This is the ADAPTER between the per-project multi-instance producer
@@ -434,8 +442,11 @@ def make_deploy_state_fetch(registry_path=None, home=None, now_dt=None):
       - Returns a list of per-instance dicts (each with
         ``main_version, prod_version, window_open, window_passed``)
       - Returns None on undeclared / all-fail (the seam's fail-safe)
+
+    ``now_dt`` is evaluated at CALL time (never frozen at factory
+    creation — B6 review finding).
     """
     def _fetch(cwd):
         return fetch_deploy_state(
-            cwd, registry_path=registry_path, home=home, now_dt=now_dt)
+            cwd, registry_path=registry_path, home=home)
     return _fetch

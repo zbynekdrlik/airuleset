@@ -268,6 +268,23 @@ class TestCliQualsDeployTarget(unittest.TestCase):
 class TestDeployWatchClassify(unittest.TestCase):
     """_deploy_watch_classify — the extracted orchestrator helper."""
 
+    def setUp(self):
+        # Isolate per-version dedup state (#944 part 2 wired should_fire)
+        import tempfile
+        from unittest import mock
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        from watchdog import deploy_state as _ds
+        self._p1 = mock.patch.object(
+            _ds, "_dedup_path",
+            return_value=self._td.name + "/.claude/deploy-watch")
+        self._p2 = mock.patch.object(
+            _ds, "_repo_slug_from_cwd", return_value="test/part1-classify")
+        self._p1.start()
+        self._p2.start()
+        self.addCleanup(self._p1.stop)
+        self.addCleanup(self._p2.stop)
+
     def _make_fetch(self, main="2.264.0", prod="2.262.0",
                     window_open=False, window_passed=False):
         def fetch(cwd):

@@ -569,12 +569,16 @@ def _deploy_watch_classify(dep_targets, cwd, deploy_state_fetch, state, now):
     if not isinstance(ds, list) or not ds:
         return [], []
     from watchdog import release_watch
+    from watchdog import deploy_state as _ds
     # Classify each instance; aggregate: window-open wins over window-missed
     has_window_open = False
     has_window_missed = False
+    main_version = None
     for dstate in ds:
         if not isinstance(dstate, dict):
             continue
+        if main_version is None:
+            main_version = dstate.get("main_version")
         decision = release_watch.deploy_watch_decision(
             dstate.get("main_version"),
             dstate.get("prod_version"),
@@ -584,11 +588,18 @@ def _deploy_watch_classify(dep_targets, cwd, deploy_state_fetch, state, now):
             has_window_open = True
         elif decision == "window-missed":
             has_window_missed = True
+    if not (has_window_open or has_window_missed):
+        return [], []
+    # F5: per-version dedup — filter to tickets that haven't already fired
+    # for this main_version. Derive the repo slug from cwd.
+    repo_slug = _ds._repo_slug_from_cwd(cwd) or "unknown"
+    deduped = [n for n in dep_targets
+               if _ds.should_fire(repo_slug, n, main_version or "")]
+    if not deduped:
+        return [], []
     if has_window_open:
-        return dep_targets, []
-    if has_window_missed:
-        return [], dep_targets
-    return [], []
+        return deduped, []
+    return [], deduped
 
 
 def _no_target_numbers(members):
