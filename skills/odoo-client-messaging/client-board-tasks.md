@@ -1,17 +1,18 @@
 # Client Board Tasks — project.task Formatting Doctrine
 
 **Canonical rule for HOW a stream writes to a client's Odoo project board
-(project.task).** All streams, all boards (montalu, slovnormal, miva).
-Origin: operator directive (montalu4, 2026-09-08); #949; lint odoo-erp#6605.
+(project.task).** All streams, every client board (today: montalu,
+slovnormal, miva). Origin: operator directive (montalu4, 2026-09-08);
+#949; lint odoo-erp#6605.
 
 ---
 
 ## 1. Task name — CLIENT language
 
-The task name (`project.task.name`) is written v jazyku KLIENTA (dnes
-slovensky pre každý board — montalu, slovnormal, miva) — nikdy anglicky,
-nikdy interný/developer žargón. A task name the client's employee cannot
-understand without asking defeats the board's purpose.
+The task name (`project.task.name`) is written in the CLIENT's language
+(today: Slovak for every board — montalu, slovnormal, miva) — never
+English, never internal/developer jargon. A task name the client's
+employee cannot understand without asking defeats the board's purpose.
 
 ## 2. Description — 2–4 sentences for the employee
 
@@ -64,7 +65,8 @@ nothing the stage does not already show.
 
 ## 6. Hotovo — ONLY after client confirmation
 
-A task moves to **Hotovo** ONLY after the client confirms acceptance:
+A task moves to **Hotovo** ONLY by the OWNER (#924), and only after
+the client confirms acceptance:
 a thumbs-up reaction (👍), a reply, or an explicit "OK" — never on
 the stream's own judgment. The confirmation is recorded on the GitHub
 issue as `Acceptance-cited: msg <message_id> task <task_id>` (the

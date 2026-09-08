@@ -90,12 +90,12 @@ class TestTaskFirstDoctrinePresent(unittest.TestCase):
         self.assertIn("NEVER", normed)
         self.assertIn("source of truth", normed)
 
-    def test_hotovo_authority(self):
+    def test_hotovo_owner(self):
         win = _window(self.body, "project.task IMMEDIATELY")
         self.assertTrue(win, "anchor not found")
-        # #949 Y1: Hotovo authority pointed to client-board-tasks.md
         normed = _norm(win)
         self.assertIn("Hotovo", normed)
+        # #924 owner ruling preserved — the pointer carries it
         self.assertIn("authority", normed)
 
 
