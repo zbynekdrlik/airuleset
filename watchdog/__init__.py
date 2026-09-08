@@ -4713,6 +4713,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         sr_state = state.setdefault("session_restart", {})
         sr_logs = []
         sr_enabled = _sr.action_enabled()
+        # #947 follow-on: log the effective state + configured source.
+        # action derives from the env (sr_enabled) — the truth the process
+        # has; source is the file-level configuration (managed drop-in /
+        # opt-out marker / none). EnvironmentFile can override the drop-in,
+        # so source != action is a real, diagnosable state.
+        from cli_filedrop_watchdog import configured_session_restart_source
+        _sr_source = configured_session_restart_source()
+        sr_logs.append("session-restart: action=%s configured=%s"
+                       % ("on" if sr_enabled else "off", _sr_source))
 
         # --- PHASE 2: walk persisted exit-sent entries (R2 fix) ----------- #
         # After /exit the pane hosts a shell, so it drops out of

@@ -23,8 +23,10 @@ Abandon.  PID still alive after ``EXIT_CONFIRM_SWEEPS`` -> log
 ``exit-not-taken``, abandon, anchor the 6 h cooldown.
 
 Safety (#486 structured state, no pane-render heuristic):
-- ``action_enabled()`` opt-in flag (default OFF — the supervisor enables it
-  fleet-wide after live verification, exactly as resurrect's mode 5).
+- ``action_enabled()`` env flag (default ON via managed drop-in provisioned
+  by ``cmd_install``, #947 follow-on; per-box opt-out marker
+  ``~/.claude/airuleset-session-restart-off``; ``~/.claude/watchdog.env``
+  overrides).
 - Conjunctive gate cascade: idle prompt + no bg agents + no busy-waiting +
   no compacting + no recent human + 6 h cooldown + opt-in + not dry-run.
 - Every verdict is a ``session-restart:`` decision-log line with measurements
@@ -62,11 +64,12 @@ _LAUNCH_CONTINUE = "claude --continue"
 
 
 def action_enabled():
-    """The opt-in flag (mirrors resurrect.action_enabled): the live /exit +
-    relaunch keystroke fires ONLY when ``AIRULESET_SESSION_RESTART_ACTION``
-    is truthy.  Default OFF — the supervisor enables it fleet-wide after
-    verifying the restart decisions in the journal + a real kill->comeback on
-    a live box."""
+    """The env flag: the live /exit + relaunch keystroke fires ONLY when
+    ``AIRULESET_SESSION_RESTART_ACTION`` is truthy.  Default ON via a managed
+    systemd drop-in provisioned by ``cmd_install`` (#947 follow-on); per-box
+    opt-out marker ``~/.claude/airuleset-session-restart-off`` removes the
+    drop-in.  ``~/.claude/watchdog.env`` (systemd ``EnvironmentFile=``)
+    overrides the drop-in value."""
     return os.environ.get("AIRULESET_SESSION_RESTART_ACTION",
                           "").strip().lower() in ("1", "true", "yes", "on")
 

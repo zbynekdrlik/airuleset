@@ -313,6 +313,12 @@ from cli_filedrop_watchdog import (  # noqa: E402
     watchdog_disable_marker as watchdog_disable_marker,
     setup_watchdog_service as setup_watchdog_service,
     maybe_setup_watchdog as maybe_setup_watchdog,
+    SESSION_RESTART_DROPIN_DEST as SESSION_RESTART_DROPIN_DEST,
+    SESSION_RESTART_DROPIN_HAND as SESSION_RESTART_DROPIN_HAND,
+    SESSION_RESTART_OPTOUT_MARKER as SESSION_RESTART_OPTOUT_MARKER,
+    render_session_restart_dropin as render_session_restart_dropin,
+    setup_session_restart_dropin as setup_session_restart_dropin,
+    configured_session_restart_source as configured_session_restart_source,
 )
 
 # --- web terminal gateway (#555): dev1-only ttyd + tailscale-serve brána.
