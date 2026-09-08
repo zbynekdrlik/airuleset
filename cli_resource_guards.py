@@ -409,20 +409,37 @@ def _render_quota_limits_block() -> str:
     computes hard=max(QUOTA_HARD_KIB, ceil(used*1.2)),
     soft=max(QUOTA_SOFT_KIB, ceil(used*1.1)).  When above target, prints a
     LOUD warning about the temporary ceiling.  Read-back verify compares
-    against the per-user APPLIED value, not the constant."""
+    against the per-user APPLIED value, not the constant.
+
+    Y6: a failed repquota call or a missing per-user row is NEVER treated
+    as zero usage -- both cases print a LOUD warning and skip setquota for
+    that user, so a transient repquota failure can never silently apply a
+    blind (possibly too-low) limit."""
     return (
         '# --- #950: per-user usage-aware quota limits ---\n'
         'setquota -t -u %d %d / 2>&1 || true\n'
         '# Y5: hoist repquota above the loop (one call for all users)\n'
-        'rq_out=$(repquota -u / 2>&1 || true)\n'
+        '# Y6: capture rc without letting the assignment itself trip -e\n'
+        'rq_out=$(repquota -u / 2>&1) && rq_rc=0 || rq_rc=$?\n'
         'for home in /home/*; do\n'
         '    [ -d "$home" ] || continue\n'
         '    u=$(basename "$home")\n'
         '    bcf="$home/.claude/airuleset-box-class"\n'
         '    grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
+        '    # Y6: repquota failure -> no usage for ANY user, never guess 0\n'
+        '    if [ "$rq_rc" -ne 0 ]; then\n'
+        '        echo "  ⚠ quota: repquota gave no usage for $u'
+        ' — skipping setquota for $u" >&2\n'
+        '        continue\n'
+        '    fi\n'
         '    # Read current usage in KiB from the hoisted repquota output\n'
         '    used_kib=$(echo "$rq_out" | awk -v u="$u" \'$1==u{print $3}\')\n'
-        '    used_kib=${used_kib:-0}\n'
+        '    # Y6: no row for this user -> never treat missing usage as 0\n'
+        '    if [ -z "$used_kib" ]; then\n'
+        '        echo "  ⚠ quota: repquota gave no usage for $u'
+        ' — skipping setquota for $u" >&2\n'
+        '        continue\n'
+        '    fi\n'
         '    # Target limits (KiB)\n'
         '    target_soft=%d\n'
         '    target_hard=%d\n'
