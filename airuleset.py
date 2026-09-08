@@ -5008,6 +5008,9 @@ def _watchdog_ops_wait_fetch(cwd):
                         # CONVERGE and NO-TARGET clauses.
                         "converge": "converge!" in reason,
                         "no_target": "no-target!" in reason,
+                        # #944: deploy-target tag consumed by the job-20
+                        # nudge's DEPLOY-WINDOW / DEPLOY-MISS clauses.
+                        "deploy_target": "deploy-target!" in reason,
                         "title": title})
     return members
 
@@ -6549,6 +6552,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
     _converge_flagged as _converge_flagged,
     _no_target_flagged as _no_target_flagged,
+    _deploy_target_flagged as _deploy_target_flagged,
     OPS_WAIT_CONVERGE_AGE_D as OPS_WAIT_CONVERGE_AGE_D,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,

@@ -1085,6 +1085,28 @@ def _comment_ops_wait_target(body):
     return date_str
 
 
+def _comment_ops_wait_target_full(body):
+    """#944: extract BOTH the event text AND the date from the
+    `Ops-wait-target: <event> by <YYYY-MM-DD>` marker. Returns
+    `(event, date)` or `(None, None)` if no valid marker is present.
+    The event text is the part between the colon and ` by <date>` —
+    it tells us WHAT the ticket is waiting on (deploy/release/client reply).
+    None/empty/non-str → (None, None)."""
+    if not isinstance(body, str) or not body.strip():
+        return None, None
+    m = _OPS_WAIT_TARGET_RX.search(body)
+    if not m:
+        return None, None
+    date_str = m.group("date")
+    from datetime import datetime
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None, None
+    event = m.group("event").strip() if m.group("event") else None
+    return event, date_str
+
+
 def _parse_iso_ts(s):
     """Epoch seconds for an ISO-8601 `createdAt` (gh renders `...Z`), or None on
     any unparsable/absent value (fail-safe — an unmeasurable timestamp is simply
@@ -1151,12 +1173,14 @@ def _norm_ages(res):
         # dependency (review 🔵 B).
         res.setdefault("own_final_reminder", None)
         res.setdefault("own_target", None)           # #881
+        res.setdefault("own_target_event", None)     # #944
         return res
     if isinstance(res, (tuple, list)) and len(res) >= 2:
         return {"own": res[0], "any": res[1],
                 "own_cited": res[0], "own_oldest": None,
                 "own_final_reminder": None,
-                "own_target": None}
+                "own_target": None,
+                "own_target_event": None}
     return None
 
 
@@ -1262,6 +1286,7 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
         return None
     own_ts = any_ts = own_cited = own_oldest = own_final_reminder = None
     own_target = None                                # #881: newest valid target date
+    own_target_event = None                          # #944: event text of the winning target
     own_target_ts = 0                                # comment ts of the winning target
     for c in comments:
         if not isinstance(c, dict):
@@ -1291,15 +1316,17 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
             # `Ops-wait-target: <event> by <date>` marker. Newest
             # comment-ts wins (revising a target = posting a newer
             # comment), NOT the date inside the marker.
-            tgt = _comment_ops_wait_target(body)
-            if tgt is not None:
+            tgt_event, tgt_date = _comment_ops_wait_target_full(body)
+            if tgt_date is not None:
                 if own_target is None or ts > own_target_ts:
-                    own_target = tgt
+                    own_target = tgt_date
+                    own_target_event = tgt_event
                     own_target_ts = ts
     return {"own": own_ts, "any": any_ts,
             "own_cited": own_cited, "own_oldest": own_oldest,
             "own_final_reminder": own_final_reminder,
-            "own_target": own_target}
+            "own_target": own_target,
+            "own_target_event": own_target_event}
 
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
@@ -1697,6 +1724,30 @@ def _no_target_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
             continue                                 # gh error -> fail-safe
         own_target = res.get("own_target")
         if own_target is None:
+            flagged.add(number)
+    return flagged
+
+
+def _deploy_target_flagged(rows, cwd=None, now=None, self_login=None,
+                           ages_fn=None):
+    """#944: the set of ops-wait (W) member numbers to tag `deploy-target!` —
+    a parked ticket whose newest valid `Ops-wait-target:` event text names a
+    deploy/release. PURE regex on the event text (from `_issue_comment_ages`'s
+    `own_target_event`), NO external reads.
+
+    Fail-safe: gh error / no target / no event text / non-deploy event →
+    UNTAGGED (never a false deploy-target claim)."""
+    from watchdog.release_watch import is_deploy_target
+    flagged = set()
+    for number, row in (rows or {}).items():
+        if not isinstance(row, dict):
+            continue
+        res = ages_fn(number) if ages_fn else None
+        res = _norm_ages(res)
+        if res is None:
+            continue
+        event = res.get("own_target_event")
+        if is_deploy_target(event):
             flagged.add(number)
     return flagged
 

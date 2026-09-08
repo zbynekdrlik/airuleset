@@ -1,0 +1,383 @@
+"""Tests for deploy-state watch (#944) — pure decision logic in
+watchdog/release_watch.py and the ops_wait_recheck integration.
+
+All tests use tmpdir/json fixtures — no live gh, no ssh.
+"""
+import unittest
+
+from watchdog import release_watch
+
+
+class TestIsDeployTarget(unittest.TestCase):
+    """is_deploy_target(event_text) — regex check on the Ops-wait-target
+    event text."""
+
+    def test_deploy_keyword(self):
+        self.assertTrue(release_watch.is_deploy_target("PROD deploy"))
+
+    def test_nasadenie_keyword(self):
+        self.assertTrue(release_watch.is_deploy_target("nasadenie na PROD"))
+
+    def test_release_keyword(self):
+        self.assertTrue(release_watch.is_deploy_target("release 2.264"))
+
+    def test_vydanie_keyword(self):
+        self.assertTrue(release_watch.is_deploy_target("vydanie verzie"))
+
+    def test_non_deploy_target(self):
+        self.assertFalse(release_watch.is_deploy_target("client reply"))
+
+    def test_none_input(self):
+        self.assertFalse(release_watch.is_deploy_target(None))
+
+    def test_empty_input(self):
+        self.assertFalse(release_watch.is_deploy_target(""))
+
+    def test_non_str_input(self):
+        self.assertFalse(release_watch.is_deploy_target(42))
+
+
+class TestParseVersionTuple(unittest.TestCase):
+    """parse_version_tuple(version_str) — dotted version to tuple."""
+
+    def test_three_part(self):
+        self.assertEqual(release_watch.parse_version_tuple("2.264.0"),
+                         (2, 264, 0))
+
+    def test_two_part(self):
+        self.assertEqual(release_watch.parse_version_tuple("2.264"),
+                         (2, 264))
+
+    def test_v_prefix(self):
+        self.assertEqual(release_watch.parse_version_tuple("v2.264.0"),
+                         (2, 264, 0))
+
+    def test_dev_suffix_stripped(self):
+        self.assertEqual(release_watch.parse_version_tuple("2.265.0-dev.1"),
+                         (2, 265, 0))
+
+    def test_none_input(self):
+        self.assertIsNone(release_watch.parse_version_tuple(None))
+
+    def test_empty_input(self):
+        self.assertIsNone(release_watch.parse_version_tuple(""))
+
+    def test_garbage_input(self):
+        self.assertIsNone(release_watch.parse_version_tuple("not-a-version"))
+
+    def test_single_number(self):
+        self.assertEqual(release_watch.parse_version_tuple("42"), (42,))
+
+
+class TestMainAheadOfProd(unittest.TestCase):
+    """main_ahead_of_prod(main, prod) — version comparison."""
+
+    def test_main_ahead(self):
+        self.assertTrue(release_watch.main_ahead_of_prod("2.264.0", "2.262.0"))
+
+    def test_equal_versions(self):
+        self.assertFalse(release_watch.main_ahead_of_prod("2.264.0", "2.264.0"))
+
+    def test_prod_ahead(self):
+        self.assertFalse(release_watch.main_ahead_of_prod("2.262.0", "2.264.0"))
+
+    def test_unreadable_main(self):
+        self.assertIsNone(release_watch.main_ahead_of_prod(None, "2.264.0"))
+
+    def test_unreadable_prod(self):
+        self.assertIsNone(release_watch.main_ahead_of_prod("2.264.0", None))
+
+    def test_garbage_versions(self):
+        self.assertIsNone(release_watch.main_ahead_of_prod("abc", "def"))
+
+
+class TestDeployWatchDecision(unittest.TestCase):
+    """deploy_watch_decision — the pure deploy-state decision."""
+
+    def test_window_open_main_ahead(self):
+        self.assertEqual(
+            release_watch.deploy_watch_decision(
+                "2.264.0", "2.262.0", window_open=True, window_passed=False),
+            "window-open")
+
+    def test_window_passed_main_ahead(self):
+        self.assertEqual(
+            release_watch.deploy_watch_decision(
+                "2.264.0", "2.262.0", window_open=False, window_passed=True),
+            "window-missed")
+
+    def test_equal_versions_window_open(self):
+        """Equal versions = no deploy needed, regardless of window."""
+        self.assertIsNone(
+            release_watch.deploy_watch_decision(
+                "2.264.0", "2.264.0", window_open=True, window_passed=False))
+
+    def test_unreadable_versions(self):
+        """Unreadable versions -> fail-safe None."""
+        self.assertIsNone(
+            release_watch.deploy_watch_decision(
+                None, None, window_open=True, window_passed=True))
+
+    def test_window_neither_open_nor_passed(self):
+        """Window not yet reached -> None even if main is ahead."""
+        self.assertIsNone(
+            release_watch.deploy_watch_decision(
+                "2.264.0", "2.262.0", window_open=False, window_passed=False))
+
+    def test_window_open_takes_precedence(self):
+        """If both open and passed are True, open wins."""
+        self.assertEqual(
+            release_watch.deploy_watch_decision(
+                "2.264.0", "2.262.0", window_open=True, window_passed=True),
+            "window-open")
+
+
+class TestDeployTargetNumbers(unittest.TestCase):
+    """_deploy_target_numbers(members) in ops_wait_recheck — extracts
+    members flagged deploy_target."""
+
+    def test_extracts_flagged_members(self):
+        from watchdog.ops_wait_recheck import _deploy_target_numbers
+        members = [
+            {"number": 100, "deploy_target": True, "title": "deploy v2.264"},
+            {"number": 200, "deploy_target": False, "title": "client reply"},
+            {"number": 300, "deploy_target": True, "title": "nasadenie"},
+        ]
+        self.assertEqual(sorted(_deploy_target_numbers(members)), [100, 300])
+
+    def test_empty_members(self):
+        from watchdog.ops_wait_recheck import _deploy_target_numbers
+        self.assertEqual(_deploy_target_numbers([]), [])
+
+    def test_none_members(self):
+        from watchdog.ops_wait_recheck import _deploy_target_numbers
+        self.assertEqual(_deploy_target_numbers(None), [])
+
+    def test_legacy_int_members(self):
+        """Legacy bare-int members have no deploy_target flag -> empty."""
+        from watchdog.ops_wait_recheck import _deploy_target_numbers
+        self.assertEqual(_deploy_target_numbers([100, 200]), [])
+
+
+class TestFlagItemsDeployWatch(unittest.TestCase):
+    """The DEPLOY-WINDOW and DEPLOY-MISS clauses in _flag_items."""
+
+    def test_deploy_window_clause(self):
+        from watchdog.ops_wait_recheck import _flag_items
+        items = _flag_items(
+            [{"number": 100, "title": "deploy"}],
+            release_landed=None,
+            deploy_window=[100],
+            deploy_miss=[])
+        joined = " ".join(items)
+        self.assertIn("DEPLOY-WINDOW", joined)
+        self.assertIn("GATEKEEPER-ACTION", joined)
+        self.assertIn("1", joined)
+
+    def test_deploy_miss_clause(self):
+        from watchdog.ops_wait_recheck import _flag_items
+        items = _flag_items(
+            [{"number": 100, "title": "deploy"}],
+            release_landed=None,
+            deploy_window=[],
+            deploy_miss=[100])
+        joined = " ".join(items)
+        self.assertIn("DEPLOY-MISS", joined)
+
+    def test_no_deploy_flags(self):
+        """When no deploy flags, no deploy clauses appear."""
+        from watchdog.ops_wait_recheck import _flag_items
+        items = _flag_items(
+            [{"number": 100, "title": "deploy"}],
+            release_landed=None,
+            deploy_window=[],
+            deploy_miss=[])
+        joined = " ".join(items)
+        self.assertNotIn("DEPLOY-WINDOW", joined)
+        self.assertNotIn("DEPLOY-MISS", joined)
+
+
+class TestNudgeTextDeployWatch(unittest.TestCase):
+    """The _nudge_text function carries deploy-watch clauses."""
+
+    def test_deploy_window_in_nudge(self):
+        from watchdog.ops_wait_recheck import _nudge_text
+        text = _nudge_text(
+            0,
+            [{"number": 100, "deploy_target": True, "title": "deploy"}],
+            deploy_window=[100], deploy_miss=[])
+        self.assertIn("DEPLOY-WINDOW", text)
+
+    def test_deploy_miss_in_nudge(self):
+        from watchdog.ops_wait_recheck import _nudge_text
+        text = _nudge_text(
+            0,
+            [{"number": 100, "deploy_target": True, "title": "deploy"}],
+            deploy_window=[], deploy_miss=[100])
+        self.assertIn("DEPLOY-MISS", text)
+
+
+class TestCliQualsDeployTarget(unittest.TestCase):
+    """cli_quals._deploy_target_flagged — pure regex over Ops-wait-target
+    event text, no gh."""
+
+    def test_deploy_event_flagged(self):
+        import cli_quals
+        rows = {
+            100: {"title": "ticket A", "labels": []},
+            200: {"title": "ticket B", "labels": []},
+        }
+        # Mock ages_fn that returns own_target_event for member 100
+        def ages_fn(n):
+            if n == 100:
+                return {"own": 1000, "any": 1000, "own_cited": None,
+                        "own_oldest": 1000, "own_final_reminder": None,
+                        "own_target": "2026-09-08",
+                        "own_target_event": "deploy na PROD"}
+            return {"own": 1000, "any": 1000, "own_cited": None,
+                    "own_oldest": 1000, "own_final_reminder": None,
+                    "own_target": "2026-09-10",
+                    "own_target_event": "client reply"}
+
+        flagged = cli_quals._deploy_target_flagged(rows, ages_fn=ages_fn)
+        self.assertIn(100, flagged)
+        self.assertNotIn(200, flagged)
+
+    def test_no_deploy_event(self):
+        import cli_quals
+        rows = {100: {"title": "ticket A", "labels": []}}
+        def ages_fn(n):
+            return {"own": 1000, "any": 1000, "own_cited": None,
+                    "own_oldest": 1000, "own_final_reminder": None,
+                    "own_target": "2026-09-10",
+                    "own_target_event": "client confirmation"}
+        flagged = cli_quals._deploy_target_flagged(rows, ages_fn=ages_fn)
+        self.assertEqual(flagged, set())
+
+    def test_no_target_at_all(self):
+        import cli_quals
+        rows = {100: {"title": "ticket A", "labels": []}}
+        def ages_fn(n):
+            return {"own": 1000, "any": 1000, "own_cited": None,
+                    "own_oldest": 1000, "own_final_reminder": None,
+                    "own_target": None, "own_target_event": None}
+        flagged = cli_quals._deploy_target_flagged(rows, ages_fn=ages_fn)
+        self.assertEqual(flagged, set())
+
+
+class TestDeployWatchClassify(unittest.TestCase):
+    """_deploy_watch_classify — the extracted orchestrator helper."""
+
+    def _make_fetch(self, main="2.264.0", prod="2.262.0",
+                    window_open=False, window_passed=False):
+        def fetch(cwd):
+            return {"main_version": main, "prod_version": prod,
+                    "window_open": window_open,
+                    "window_passed": window_passed}
+        return fetch
+
+    def test_window_open_classifies(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        dw, dm = _deploy_watch_classify(
+            [100, 200], "/repo",
+            self._make_fetch(window_open=True), state, 1000)
+        self.assertEqual(sorted(dw), [100, 200])
+        self.assertEqual(dm, [])
+
+    def test_window_missed_classifies(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        dw, dm = _deploy_watch_classify(
+            [100], "/repo",
+            self._make_fetch(window_passed=True), state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [100])
+
+    def test_equal_versions_no_flags(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        dw, dm = _deploy_watch_classify(
+            [100], "/repo",
+            self._make_fetch(main="2.264.0", prod="2.264.0",
+                             window_open=True), state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [])
+
+    def test_fetch_error_failsafe(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        def fetch(cwd):
+            raise RuntimeError("network error")
+        dw, dm = _deploy_watch_classify([100], "/repo", fetch, state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [])
+
+    def test_fetch_none_failsafe(self):
+        from watchdog.ops_wait_recheck import _deploy_watch_classify
+        state = {}
+        def fetch(cwd):
+            return None
+        dw, dm = _deploy_watch_classify([100], "/repo", fetch, state, 1000)
+        self.assertEqual(dw, [])
+        self.assertEqual(dm, [])
+
+
+class TestCommentOpsWaitTargetFull(unittest.TestCase):
+    """_comment_ops_wait_target_full — event + date extraction."""
+
+    def test_deploy_event(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(
+            "Ops-wait-target: deploy na PROD by 2026-09-08")
+        self.assertEqual(event, "deploy na PROD")
+        self.assertEqual(date, "2026-09-08")
+
+    def test_no_marker(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(
+            "no marker here")
+        self.assertIsNone(event)
+        self.assertIsNone(date)
+
+    def test_none_input(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(None)
+        self.assertIsNone(event)
+        self.assertIsNone(date)
+
+    def test_invalid_date(self):
+        import cli_quals
+        event, date = cli_quals._comment_ops_wait_target_full(
+            "Ops-wait-target: deploy by 2026-99-99")
+        self.assertIsNone(event)
+        self.assertIsNone(date)
+
+
+class TestNormAgesTargetEvent(unittest.TestCase):
+    """_norm_ages setdefaults own_target_event for legacy fakes."""
+
+    def test_legacy_tuple_gets_none_event(self):
+        import cli_quals
+        result = cli_quals._norm_ages((1000, 2000))
+        self.assertIsNone(result.get("own_target_event"))
+
+    def test_dict_without_event_gets_none(self):
+        import cli_quals
+        result = cli_quals._norm_ages({"own": 1000, "any": 2000})
+        self.assertIsNone(result.get("own_target_event"))
+
+
+class TestVersionPadding(unittest.TestCase):
+    """F3 fix: trailing-zero-padded comparison."""
+
+    def test_trailing_zero_equality(self):
+        """(2, 264) and (2, 264, 0) must be EQUAL, not different."""
+        self.assertFalse(release_watch.main_ahead_of_prod("2.264", "2.264.0"))
+
+    def test_different_length_ahead(self):
+        self.assertTrue(release_watch.main_ahead_of_prod("2.265", "2.264.0"))
+
+
+if __name__ == "__main__":
+    unittest.main()

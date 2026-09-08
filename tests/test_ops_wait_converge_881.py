@@ -269,7 +269,7 @@ class TestConvergeSuppressesStale(unittest.TestCase):
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: None):
             sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
-        stale, _recheck, _gkh, _unpark, _tw, _tc, converge, _nt = sets
+        stale, _recheck, _gkh, _unpark, _tw, _tc, converge, _nt, _dt = sets
         self.assertIn(100, converge, "member should be in converge set")
         self.assertNotIn(100, stale, "converge! must suppress stale!")
 
@@ -297,7 +297,7 @@ class TestConvergeSuppressesStale(unittest.TestCase):
                 mock.patch.object(airuleset, "_watchdog_release_state_fetch",
                                   lambda cwd: None):
             sets = cli_quals_cmd._ops_wait_flag_sets(ow, "/r")
-        _stale, _recheck, gkh, _unpark, _tw, _tc, converge, _nt = sets
+        _stale, _recheck, gkh, _unpark, _tw, _tc, converge, _nt, _dt = sets
         self.assertIn(200, gkh, "member should be in gk-handoff set")
         self.assertNotIn(200, converge, "gk-handoff! must suppress converge!")
 
