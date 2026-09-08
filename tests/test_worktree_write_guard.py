@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -43,9 +44,16 @@ class WorktreeGuardBase(TestCase):
         self.sibling = os.path.join(self.main, ".claude", "worktrees",
                                     "agent-sibling")
         os.makedirs(self.sibling, exist_ok=True)
+        # #953-followup (Y3): the pin now lives under ~/.claude/worktree-pins/
+        # (never /tmp — see the hook's own comment), so HOME is pinned to this
+        # test's isolated tmp dir and the pin file resolves under it.
+        pin = os.path.join(self.tmp, ".claude", "worktree-pins", "abc123")
+        if os.path.exists(pin):
+            os.unlink(pin)
+        self.addCleanup(lambda: os.unlink(pin) if os.path.exists(pin) else None)
 
     def run_hook(self, payload, env_extra=None):
-        env = {"PATH": "/usr/bin:/bin"}
+        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp}
         if env_extra:
             env.update(env_extra)
         return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
@@ -410,6 +418,180 @@ class WorktreeGuardModuleDirect(WorktreeGuardBase):
 
     def test_empty_command_allows(self):
         self.assertFalse(self.call(""))
+
+
+class WorktreePinResume953(TestCase):
+    """#953: on a SendMessage resume, CWD drifts to a DIFFERENT worktree.
+    RULE B derives the agent's own worktree from CWD, so it blocks writes
+    to the agent's REAL worktree as an "escape". A worktree identity pin
+    (~/.claude/worktree-pins/<agent_id>, moved off /tmp by the #953 follow-on
+    — /tmp is swept by fleet hygiene, which could delete a long lane's pin
+    mid-flight) records the correct worktree on the first call and overrides
+    a drifted CWD on resume."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wtpin953-")
+        self.main = os.path.join(self.tmp, "fakerepo")
+        self.wt_a = os.path.join(self.main, ".claude", "worktrees", "agent-aaa111")
+        self.wt_b = os.path.join(self.main, ".claude", "worktrees", "agent-bbb222")
+        os.makedirs(os.path.join(self.wt_a, "hooks"), exist_ok=True)
+        os.makedirs(os.path.join(self.wt_b, "hooks"), exist_ok=True)
+        os.makedirs(os.path.join(self.main, "hooks"), exist_ok=True)
+        self.pin_dir = os.path.join(self.tmp, ".claude", "worktree-pins")
+        os.makedirs(self.pin_dir, exist_ok=True)
+        self.pin_file = os.path.join(self.pin_dir, "aaa111")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        # test teardown: pin file may or may not exist  # airuleset:script-ok test cleanup
+        if os.path.exists(self.pin_file):
+            os.unlink(self.pin_file)
+
+    def run_hook(self, payload, env_extra=None):
+        env = {"PATH": "/usr/bin:/bin", "HOME": self.tmp}
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                              capture_output=True, text=True, env=env)
+
+    def test_write_own_wt_from_drifted_cwd_blocked_without_pin(self):
+        """Agent aaa111 owns worktree-A. After resume, CWD = worktree-B.
+        Writing to worktree-A is BLOCKED because RULE B derives from CWD
+        (worktree-B), and the target (worktree-A) is NOT under worktree-B."""
+        target = os.path.join(self.wt_a, "hooks", "test.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 2,
+                         "without pin, write to own wt from drifted cwd should block")
+
+    def test_write_own_wt_from_drifted_cwd_allowed_with_pin(self):
+        """Same scenario, but a pin file exists from the original dispatch.
+        The pin overrides the drifted CWD, so the write is allowed."""
+        Path(self.pin_file).write_text(self.wt_a + "\n")
+        target = os.path.join(self.wt_a, "hooks", "test.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0,
+                         "with pin, write to own wt from drifted cwd should pass: "
+                         + r.stderr)
+
+    def test_pin_does_not_allow_main_checkout_escape(self):
+        """A pin pointing at worktree-A must NOT allow writes to the MAIN
+        checkout — the pin just corrects CWD, not the guard itself."""
+        Path(self.pin_file).write_text(self.wt_a + "\n")
+        target = os.path.join(self.main, "hooks", "test.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 2,
+                         "pin must NOT allow main checkout escape: " + r.stderr)
+
+    def test_pin_auto_created_on_first_call(self):
+        """On the first call where CWD IS the correct worktree, the pin
+        file should be auto-created."""
+        self.assertFalse(os.path.exists(self.pin_file))
+        target = os.path.join(self.wt_a, "hooks", "ok.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_a,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(self.pin_file),
+                        "pin file should be auto-created on first call")
+        content = Path(self.pin_file).read_text().strip()
+        self.assertEqual(content, self.wt_a)
+
+    # ---- #953 follow-on (Y3): pin moved off /tmp -----------------------------
+
+    def test_pin_lives_under_claude_dir_never_tmp(self):
+        """The pin file must be created under $HOME/.claude/worktree-pins/,
+        never a bare /tmp/airuleset-worktree-pin-* path — /tmp is swept by
+        the fleet hygiene job and airuleset's own scratch sweep, which could
+        delete a long-lived lane's pin mid-flight and silently regress to the
+        pre-#953 cwd-drift bug."""
+        target = os.path.join(self.wt_a, "hooks", "ok.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_a,
+            "agent_id": "aaa111",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(self.pin_file), r.stderr)
+        # the honoured pin resolves under $HOME/.claude/worktree-pins/, never /tmp
+        self.assertIn(os.path.join(self.tmp, ".claude", "worktree-pins"),
+                     self.pin_file)
+        self.assertFalse(self.pin_file.startswith("/tmp/airuleset-worktree-pin"))
+        # a legacy /tmp pin path is NOT created as a side effect
+        self.assertFalse(
+            os.path.exists("/tmp/airuleset-worktree-pin-aaa111"),
+            "no legacy /tmp pin should be written")
+
+    def test_stale_pin_missing_worktree_pruned(self):
+        """A pin whose recorded worktree no longer exists (the worktree was
+        purged and the agent got a new agent_id on re-dispatch, #953 Y4) is
+        pruned by the hook itself on its next run — never left to accumulate."""
+        purged_wt = os.path.join(self.main, ".claude", "worktrees",
+                                 "agent-purged999")
+        # NOTE: purged_wt is intentionally never created on disk.
+        Path(self.pin_file).write_text(purged_wt + "\n")
+        self.assertTrue(os.path.exists(self.pin_file))
+        # any worktree call runs the opportunistic cleanup pass
+        target = os.path.join(self.wt_b, "hooks", "ok.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "bbb222",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(self.pin_file),
+                         "stale pin (missing worktree) should be pruned")
+
+    def test_stale_pin_older_than_7_days_pruned(self):
+        """A pin older than 7 days is pruned on the hook's next run, even if
+        its recorded worktree still exists (age is the independent trigger)."""
+        Path(self.pin_file).write_text(self.wt_a + "\n")
+        old_mtime = time.time() - (8 * 86400)
+        os.utime(self.pin_file, (old_mtime, old_mtime))
+        target = os.path.join(self.wt_b, "hooks", "ok.sh")
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": target},
+            "cwd": self.wt_b,
+            "agent_id": "bbb222",
+            "transcript_path": AR_TR,
+        }
+        r = self.run_hook(payload)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(self.pin_file),
+                         "pin older than 7 days should be pruned")
 
 
 if __name__ == "__main__":

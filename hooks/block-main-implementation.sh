@@ -212,6 +212,12 @@ set -euo pipefail
 #      recursive/`-f`/`-d` form, or any ONE bad token in a multi-file read
 #      still blocks exactly as before — this is deliberately what keeps
 #      every pre-existing fake-filename test fixture blocked unchanged.
+#   3. #953 extended the same read-only allowance to `head`/`tail`/`wc`/
+#      `ls`/`sed -n` (never `sed -i`), NOT via the size check above — via
+#      `_is_narrow_readonly_953()`, a separate COUNT-bounded gate: at most
+#      2 explicit, non-glob, non-variable-expansion paths, no recursive/
+#      `-c` byte-dump/redirect-to-file form. Narrower on file COUNT,
+#      broader on command set — the two allowances are independent checks.
 #
 # FIXED (fresh-context adversarial review of the #178 diff, same day): three
 # real holes in the first cut, all closed here.
@@ -1229,10 +1235,57 @@ def cat_files(tk):
     return tk[i:]
 
 
+def _is_narrow_readonly_953(tk):
+    """#953: a read-only command on 1-2 explicit non-glob non-variable paths."""
+    h = tk[0]
+    if h not in ("grep", "head", "tail", "cat", "wc", "ls", "sed"):
+        return False
+    # sed: only -n mode (print selected lines), never -i (in-place edit)
+    if h == "sed":
+        if any(t == "-i" or t.startswith("-i") for t in tk[1:]):
+            return False
+        if not any(t == "-n" for t in tk[1:]):
+            return False
+    # grep: no recursive flags (incl. --directories)
+    if h == "grep":
+        for t in tk[1:]:
+            if t in ("-r", "-R", "--recursive", "--dereference-recursive",
+                     "-f", "-d") or t.startswith("--directories"):
+                return False
+            if re.match(r"^-[A-Za-z]+$", t) and ("r" in t[1:] or "R" in t[1:]):
+                return False
+    # head/tail: -c (byte dump) can be arbitrarily large
+    if h in ("head", "tail"):
+        if any(t == "-c" or t.startswith("--bytes") for t in tk[1:]):
+            return False
+    # Extract file arguments
+    if h == "grep":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        he = any(t == "-e" or t.startswith("--regexp") for t in tk[1:])
+        fls = nf if he else nf[1:]
+    elif h == "cat":
+        fls = cat_files(tk)
+    elif h == "sed":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        fls = nf[1:] if nf else []  # first non-flag = script, rest = files
+    else:
+        # head/tail/wc/ls: every non-flag is a file
+        fls = [t for t in tk[1:] if not t.startswith("-")]
+    if len(fls) > 2:
+        return False
+    if any(any(c in p for c in "*?[$") for p in fls):
+        return False
+    if any(t.startswith(">") or t.startswith("1>") for t in tk):
+        return False
+    return True
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
     if redirects_stdout_to_file(tk):
+        return False
+    if _is_narrow_readonly_953(tk):
         return False
     head = tk[0]
     if head in ("grep", "rg", "ag"):

@@ -82,13 +82,72 @@ AGENT_TYPE=$(jqr '.agent_type // empty')
 # ======================= RULE B — worktree escape ==========================
 # Fires ONLY for a subagent (agent_id) whose session cwd is an isolated worktree.
 if [ -n "$AGENT_ID" ] && [ "${AIRULESET_ALLOW_WORKTREE_ESCAPE:-0}" != "1" ]; then
-  case "$CWD" in
+  # #953/#953-followup (Y3): worktree identity pin — on a SendMessage resume,
+  # CWD can drift to a DIFFERENT worktree (the main session's cwd). A pin file
+  # recorded on the first call preserves the original worktree identity. The
+  # pin overrides CWD for worktree derivation; everything else (the is_under
+  # checks, the deny_write logic) is unchanged.
+  #
+  # Pin location: ~/.claude/worktree-pins/<agent_id> — deliberately OUTSIDE
+  # /tmp. /tmp is swept by the fleet hygiene job and airuleset's own scratch
+  # sweep on a cadence; a long-lived lane's pin could be deleted mid-flight,
+  # silently falling back to the pre-#953 cwd-drift behaviour this pin exists
+  # to fix. ~/.claude/ is NOT swept by that path: disk_guard's claude-metadata
+  # sweep only walks the fixed CLAUDE_METADATA_SUBDIRS allowlist
+  # ("tasks", "debug", "shell-snapshots") and never lists "worktree-pins", and
+  # the home-breadth survey is read-only reporting, never deletion. This
+  # dir's own hygiene is self-contained below (stale-pin cleanup), not
+  # delegated to a fleet sweep.
+  _WT_PIN_DIR="${HOME:-/root}/.claude/worktree-pins"
+  mkdir -p -m 700 "$_WT_PIN_DIR" 2>/dev/null || true
+  # Stale-pin cleanup (#953 Y3/Y4), run opportunistically on every worktree
+  # call rather than as a separate job: a pin older than 7 days, or one whose
+  # recorded worktree path no longer exists (the worktree was purged and the
+  # agent got a new agent_id on re-dispatch), is pruned right here. Cheap (a
+  # handful of small files per box) and self-healing — no watchdog job needed.
+  if [ -d "$_WT_PIN_DIR" ]; then
+      _wt_pin_now=$(date +%s 2>/dev/null || echo 0)
+      for _wt_pin_f in "$_WT_PIN_DIR"/*; do
+          [ -e "$_wt_pin_f" ] || continue
+          [ -f "$_wt_pin_f" ] || continue
+          _wt_pin_mt=$(stat -c %Y "$_wt_pin_f" 2>/dev/null \
+                       || stat -f %m "$_wt_pin_f" 2>/dev/null || echo "$_wt_pin_now")
+          _wt_pin_age=$(( _wt_pin_now - _wt_pin_mt ))
+          if [ "$_wt_pin_age" -gt 604800 ]; then
+              rm -f "$_wt_pin_f" 2>/dev/null || true
+              continue
+          fi
+          _wt_pin_target=$(head -1 "$_wt_pin_f" 2>/dev/null || true)
+          _wt_pin_target="${_wt_pin_target%"${_wt_pin_target##*[![:space:]]}"}"
+          if [ -n "$_wt_pin_target" ] && [ ! -d "$_wt_pin_target" ]; then
+              rm -f "$_wt_pin_f" 2>/dev/null || true
+          fi
+      done
+  fi
+  _WT_PIN_FILE="$_WT_PIN_DIR/${AGENT_ID}"
+  _PINNED_WT=""
+  if [ -f "$_WT_PIN_FILE" ]; then
+      _PINNED_WT=$(head -1 "$_WT_PIN_FILE" 2>/dev/null || true)
+      _PINNED_WT="${_PINNED_WT%"${_PINNED_WT##*[![:space:]]}"}"
+  fi
+  # Use the pin (if valid worktree path) over the possibly-drifted CWD.
+  _EFFECTIVE_CWD="$CWD"
+  if [ -n "$_PINNED_WT" ]; then
+      case "$_PINNED_WT" in
+          */.claude/worktrees/*) _EFFECTIVE_CWD="$_PINNED_WT" ;;
+      esac
+  fi
+  case "$_EFFECTIVE_CWD" in
     */.claude/worktrees/*)
-      MAINSTR="${CWD%%/.claude/worktrees/*}"
-      _rest="${CWD#*/.claude/worktrees/}"
+      MAINSTR="${_EFFECTIVE_CWD%%/.claude/worktrees/*}"
+      _rest="${_EFFECTIVE_CWD#*/.claude/worktrees/}"
       WTNAME="${_rest%%/*}"
       if [ -n "$MAINSTR" ] && [ -n "$WTNAME" ]; then
         WTSTR="$MAINSTR/.claude/worktrees/$WTNAME"
+        # #953: record the pin on the FIRST call (when cwd is correct).
+        if [ -z "$_PINNED_WT" ]; then
+            echo "$WTSTR" > "$_WT_PIN_FILE" 2>/dev/null || true
+        fi
         # normalized forms for path CONTAINMENT (realpath -m needs no existence)
         MAIN=$(realpath -m -- "$MAINSTR" 2>/dev/null) || MAIN="$MAINSTR"
         WT=$(realpath -m -- "$WTSTR" 2>/dev/null) || WT="$WTSTR"
