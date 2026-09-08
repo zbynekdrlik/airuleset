@@ -537,19 +537,29 @@ def _deploy_watch_classify(dep_targets, cwd, deploy_state_fetch, state, now):
     member numbers and a deploy_state_fetch seam, read the deploy state and
     classify into (deploy_window_nums, deploy_miss_nums).
 
-    The seam returns a DICT `{"main_version": str, "prod_version": str,
-    "window_open": bool, "window_passed": bool}` (the natural shape); it is
-    wrapped into a `[dict]` list for `_cached_member_fetch`'s list-only
-    contract internally. None / fetch error / non-dict → ([], []).
+    The seam returns EITHER a single DICT (part-1 shape) or a LIST of
+    per-instance dicts (#944 part 2, F2 per-instance shape).  Each dict
+    carries ``{main_version, prod_version, window_open, window_passed}``.
+    A single dict is wrapped into ``[dict]`` for uniform iteration.
 
-    The cache key is `"deploy_state_cache"`, shared across all panes on the
-    same repo per TTL — one fetch per repo per TTL, never per sweep.
+    Per-instance classification: if ANY instance is ``window-open``, the
+    tickets fire DEPLOY-WINDOW; if ANY is ``window-missed`` (and none
+    ``window-open``), they fire DEPLOY-MISS.  This is correct because a
+    deploy-parked ticket may match ANY behind instance.
+
+    None / fetch error / non-dict/list -> ([], []).
+    The cache key is ``"deploy_state_cache"``, shared across all panes on the
+    same repo per TTL -- one fetch per repo per TTL, never per sweep.
     """
     try:
-        # Wrap the natural dict return into a [dict] for _cached_member_fetch
+        # Wrap a single-dict return into [dict] for _cached_member_fetch
         def _list_wrap(c):
             r = deploy_state_fetch(c)
-            return [r] if isinstance(r, dict) else r
+            if isinstance(r, dict):
+                return [r]
+            if isinstance(r, list):
+                return r
+            return r
         ds = _cached_member_fetch(
             cwd, _list_wrap, state, now,
             "deploy_state_cache", ttl=OPS_WAIT_FETCH_TTL_S,
@@ -558,16 +568,25 @@ def _deploy_watch_classify(dep_targets, cwd, deploy_state_fetch, state, now):
         return [], []
     if not isinstance(ds, list) or not ds:
         return [], []
-    dstate = ds[0] if isinstance(ds[0], dict) else {}
     from watchdog import release_watch
-    decision = release_watch.deploy_watch_decision(
-        dstate.get("main_version"),
-        dstate.get("prod_version"),
-        dstate.get("window_open", False),
-        dstate.get("window_passed", False))
-    if decision == "window-open":
+    # Classify each instance; aggregate: window-open wins over window-missed
+    has_window_open = False
+    has_window_missed = False
+    for dstate in ds:
+        if not isinstance(dstate, dict):
+            continue
+        decision = release_watch.deploy_watch_decision(
+            dstate.get("main_version"),
+            dstate.get("prod_version"),
+            dstate.get("window_open", False),
+            dstate.get("window_passed", False))
+        if decision == "window-open":
+            has_window_open = True
+        elif decision == "window-missed":
+            has_window_missed = True
+    if has_window_open:
         return dep_targets, []
-    elif decision == "window-missed":
+    if has_window_missed:
         return [], dep_targets
     return [], []
 

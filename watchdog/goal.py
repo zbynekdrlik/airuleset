@@ -5194,7 +5194,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
                     release_state_fetch=None, queue_fetch=None,
-                    u_fetch=None, reconcile_fetch=None):
+                    u_fetch=None, reconcile_fetch=None,
+                    deploy_state_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -5394,7 +5395,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 i_count=glance.backlog, captured=captured,
                 release_state_fetch=release_state_fetch,
                 batch_collect=(_batch_collect if _batch_collect is not None
-                               and "partition-audit" in _eligible else None))
+                               and "partition-audit" in _eligible else None),
+                deploy_state_fetch=deploy_state_fetch)
         # #616 -- release-gap re-check for this armed pane.
         if release_state_fetch is not None:
             logs += _release_gap.goal_release_gap_recheck(

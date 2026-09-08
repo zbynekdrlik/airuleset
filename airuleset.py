@@ -5575,6 +5575,15 @@ def _watchdog_issue_counts_fetch(repo_label, window_s):
         return None
 
 
+def _watchdog_deploy_state_fetch():
+    """#944 part 2 — return a deploy_state_fetch(cwd) callable backed by the
+    projects-registry.json in this repo. The callable returns a list of
+    per-instance dicts or None on undeclared/error (fail-safe)."""
+    from watchdog import deploy_state as _ds
+    registry_path = os.path.join(REPO_DIR, "projects-registry.json")
+    return _ds.make_deploy_state_fetch(registry_path=registry_path)
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
@@ -5824,6 +5833,14 @@ def cmd_watchdog(args):
                     # REAPER. Enabled on every real poll; left False in
                     # run_once unit tests.
                     priority_policy_enabled=True,
+                    # #944 part 2 — deploy-state PRODUCER for the job-20
+                    # DEPLOY-WINDOW / DEPLOY-MISS nudge clauses. Reads
+                    # projects-registry.json for the repo's deploy_state
+                    # declaration (per-instance PROD version + deploy
+                    # window). Wired on EVERY box; the rider self-gates
+                    # on the registry declaration existing. Left None in
+                    # run_once unit tests.
+                    deploy_state_fetch=_watchdog_deploy_state_fetch(),
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

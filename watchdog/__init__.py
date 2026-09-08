@@ -2083,7 +2083,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
              nice_check_enabled=False,
              mdreview_cadence_enabled=False,
-             priority_policy_enabled=False):
+             priority_policy_enabled=False,
+             deploy_state_fetch=None):
     """Scan every `claude` pane once. 45 numbered jobs per poll — 39 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -4344,7 +4345,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             release_state_fetch=release_state_fetch,     # #616
             queue_fetch=queue_fetch,                     # #733
             u_fetch=u_fetch,                             # #797
-            reconcile_fetch=reconcile_fetch)             # #844
+            reconcile_fetch=reconcile_fetch,             # #844
+            deploy_state_fetch=deploy_state_fetch)       # #944
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 
