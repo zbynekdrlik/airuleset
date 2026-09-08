@@ -1,8 +1,8 @@
-"""Edge-case test: renamed file with identical content (#951 item 3 probe).
+"""Edge-case test: a renamed dirty file IS a branch change and blocks (#951 item 3).
 
-If a file is renamed on the branch (same content, different name), the three-dot
-range will show it as "added" (new name). We need to verify whether this causes
-a false block when the file content has lint errors inherited from the original.
+A file renamed on the branch (same content, different name) appears as "added"
+(new name) in the three-dot range.  The rename is the branch's own action, so
+the file under its new name is the branch's responsibility and must be linted.
 """
 import json
 import os

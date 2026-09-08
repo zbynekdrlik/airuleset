@@ -57,10 +57,8 @@ class TestByteIdenticalFileNotLinted(TestCase):
     on the feature branch (came via merge, never touched by the branch) must
     NOT cause the hook to block.
 
-    This is the miva1 incident scenario: upstream_dirty.py is a ruff-violating
-    file that develop owns. The feature branch merges develop (bringing it in)
-    but never touches it. The three-dot range should already exclude it, and
-    the per-file identity check is the safety net.
+    The three-dot range (BASE_REF...HEAD) alone excludes byte-identical files
+    from the diff — no per-file identity check code exists in the hook.
     """
 
     def setUp(self):
@@ -127,7 +125,7 @@ class TestByteIdenticalFileNotLinted(TestCase):
 
 class TestBranchOwnDirtyFileStillBlocked(TestCase):
     """A file that the branch itself changes with lint errors must still be
-    blocked, even with the identity bypass in place."""
+    blocked — the three-dot range includes it as a branch change."""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-ident2-"))

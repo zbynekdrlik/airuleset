@@ -1,14 +1,13 @@
 """Behaviour test for hooks/pre-push-lint.sh ruff version pin awareness (#951 item 2).
 
 When the local ruff version differs from the CI-pinned version
-(`.github/workflows/ci.yml` carries `ruff==<pinned>`), the hook uses a surgical
-approach: it re-runs failing files with --select E9,F (the version-stable
-pyflakes/syntax core). If the stable core also fails -> BLOCK (real errors,
-version-independent). If only non-core rules failed -> WARN (exit 0).
+(`.github/workflows/ci.yml` carries `ruff==<pinned>`), the hook uses a
+two-branch concession:
 
-This avoids wholesale fail-open (#951 review RED: pyproject.toml #429 pins
-select to E4,E7,E9,F precisely so version drift does NOT change results — an
-F401 is F401 in every ruff version).
+- PINNED repo (pyproject.toml/ruff.toml has `select =`): NO concession,
+  BLOCK unconditionally — results are repo-controlled, version-independent.
+- UNPINNED repo: re-run with --select E4,E7,E9,F (the classic default =
+  what CI evaluates). BLOCK on any hit, otherwise allowed (exit 0).
 """
 import json
 import os
@@ -54,10 +53,10 @@ def _run_hook(cwd):
 
 
 class TestVersionMismatchStableCoreStillBlocks(TestCase):
-    """When the CI-pinned ruff version does NOT match the local ruff, a lint
-    failure in the stable core (E9,F — e.g. F401 unused import) must still
-    BLOCK. The surgical approach re-runs with --select E9,F; if that also
-    fails, the error is version-independent and gets blocked."""
+    """When the CI-pinned ruff version does NOT match the local ruff on an
+    UNPINNED repo, a lint failure in the classic default (E4,E7,E9,F — e.g.
+    F401 unused import) must still BLOCK.  The re-check with --select
+    E4,E7,E9,F catches it."""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-vpin-"))
@@ -101,11 +100,13 @@ class TestVersionMismatchStableCoreStillBlocks(TestCase):
         self.assertIn("99.0.0", combined, "CI pin version should be in output")
 
 
-class TestVersionMismatchNonCoreWarnOnly(TestCase):
-    """When only NON-CORE rules fail (outside E9,F), and there is a version
-    mismatch, the hook should WARN (exit 0) — the failures may be version-
-    sensitive. We simulate this with an E401 violation (multiple imports on
-    one line) that E9,F does not catch."""
+class TestVersionMismatchNonCoreAllowed(TestCase):
+    """When only rules OUTSIDE the classic default (E4,E7,E9,F) fail on an
+    UNPINNED repo (no `select =`) with a version mismatch, the hook should
+    allow (exit 0) — the re-check with --select E4,E7,E9,F is clean.
+
+    We use an I001 (isort unsorted-imports) violation enabled via
+    extend-select = ["I"] — outside E4,E7,E9,F, so the re-check misses it."""
 
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="airuleset-pplint-noncore-"))
@@ -114,7 +115,12 @@ class TestVersionMismatchNonCoreWarnOnly(TestCase):
         _git(self.tmpdir, "init", "-q", "-b", "main", str(self.tmpdir / "repo"))
         self.repo = self.tmpdir / "repo"
 
-        (self.repo / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        # extend-select adds I (isort) WITHOUT a `select =` pin — the hook
+        # sees no pin, so the unpinned re-check path applies.
+        (self.repo / "pyproject.toml").write_text(
+            '[project]\nname = "x"\n\n'
+            '[tool.ruff.lint]\nextend-select = ["I"]\n'
+        )
 
         ci_dir = self.repo / ".github" / "workflows"
         ci_dir.mkdir(parents=True)
@@ -127,26 +133,27 @@ class TestVersionMismatchNonCoreWarnOnly(TestCase):
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-q", "-m", "init")
 
-        # E401 (multiple imports on one line) — an E4 rule, NOT in E9,F.
-        # `ruff check` catches it; `ruff check --select E9,F` does not.
-        # Both imports are used, so no F401 (unused import) fires.
+        # I001 (unsorted imports: os should come before sys). Both are used,
+        # so no F401. The I family is outside E4,E7,E9,F — the re-check
+        # with --select E4,E7,E9,F won't catch it.
         (self.repo / "style_issue.py").write_text(
-            "import os, sys\nprint(os.getcwd())\nprint(sys.version)\n"
+            "import sys\nimport os\nprint(os.getcwd())\nprint(sys.version)\n"
         )
         _git(self.repo, "add", "style_issue.py")
         _git(self.repo, "commit", "-q", "-m", "add style issue")
 
-    def test_version_mismatch_non_core_warns_not_blocks(self):
+    def test_version_mismatch_non_core_allowed(self):
         r = _run_hook(self.repo)
         combined = r.stdout + r.stderr
-        # Non-core rule failure with version mismatch -> WARN, not BLOCK
+        # Non-core rule failure with version mismatch -> allowed, not BLOCK
         self.assertEqual(
             r.returncode, 0,
-            f"Hook should WARN (not BLOCK) on non-core rule failures with "
-            f"version mismatch.\nOutput: {combined}",
+            f"Hook should allow (not BLOCK) on non-core rule failures with "
+            f"version mismatch on an unpinned repo.\nOutput: {combined}",
         )
         # Should mention the version mismatch
         self.assertIn("99.0.0", combined, "CI pin version should be in output")
+        self.assertIn("allowed", combined, "Message should say allowed")
 
 
 class TestVersionMatchStillBlocks(TestCase):

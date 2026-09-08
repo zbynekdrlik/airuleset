@@ -77,22 +77,31 @@ fi
 if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
     if command -v ruff &>/dev/null; then
         # #951 item 2: detect CI-pinned ruff version and compare to local.
-        # When they differ, a lint failure MAY be version-specific. The
-        # surgical approach: re-run with --select E9,F (version-stable
-        # pyflakes/syntax core). If THAT also fails -> BLOCK (real errors,
-        # version-independent). Only non-core failures -> WARN (exit 0).
-        # This preserves the gate for real errors while avoiding false-
-        # blocks from version-sensitive rule behaviour changes.
+        # When they differ AND the repo does NOT pin its own `select =`
+        # rule set, the failure MAY be version-specific.  Re-run with
+        # --select E4,E7,E9,F (the classic default = what CI evaluates).
+        # If THAT also fails -> BLOCK.  Only findings outside the classic
+        # default -> allowed (exit 0).  A repo WITH a `select =` pin
+        # (pyproject.toml or ruff.toml) controls its results across
+        # versions, so no concession applies — BLOCK unconditionally.
         _RUFF_VERSION_MISMATCH=false
         _LOCAL_RUFF_VER=$(ruff --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
         _CI_RUFF_PIN=""
-        # #951 review: anchor on $GIT_ROOT for nested-repo consistency (#218).
-        for _WF in "${GIT_ROOT}"/.github/workflows/*.yml "${GIT_ROOT}"/.github/workflows/*.yaml; do
-            [ -f "$_WF" ] || continue
-            _CI_RUFF_PIN=$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' "$_WF" 2>/dev/null \
+        # BLUE-1: prefer ci.yml (the canonical workflow name) for the pin,
+        # then fall back to a glob over all workflow files.
+        if [ -f "${GIT_ROOT}/.github/workflows/ci.yml" ]; then
+            _CI_RUFF_PIN=$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' \
+                "${GIT_ROOT}/.github/workflows/ci.yml" 2>/dev/null \
                 | head -1 | sed 's/ruff==//' || true)
-            [ -n "$_CI_RUFF_PIN" ] && break
-        done
+        fi
+        if [ -z "$_CI_RUFF_PIN" ]; then
+            for _WF in "${GIT_ROOT}"/.github/workflows/*.yml "${GIT_ROOT}"/.github/workflows/*.yaml; do
+                [ -f "$_WF" ] || continue
+                _CI_RUFF_PIN=$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' "$_WF" 2>/dev/null \
+                    | head -1 | sed 's/ruff==//' || true)
+                [ -n "$_CI_RUFF_PIN" ] && break
+            done
+        fi
         if [ -n "$_CI_RUFF_PIN" ] && [ -n "$_LOCAL_RUFF_VER" ] \
            && [ "$_CI_RUFF_PIN" != "$_LOCAL_RUFF_VER" ]; then
             _RUFF_VERSION_MISMATCH=true
@@ -180,18 +189,35 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
             ABS_CHANGED=$(printf '%s\n' "$CHANGED" | sed "s|^|${GIT_ROOT}/|")
             if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check 2>&1; then
                 if [ "$_RUFF_VERSION_MISMATCH" = true ]; then
-                    # #951 item 2 (surgical): version mismatch — re-run with
-                    # --select E9,F (the version-stable pyflakes/syntax core).
-                    # If the stable core also fails -> BLOCK (real errors).
-                    # If only non-core rules failed -> WARN (exit 0).
-                    echo ""
-                    echo "WARNING: local ruff ${_LOCAL_RUFF_VER} differs from CI pin ${_CI_RUFF_PIN} — re-checking with stable-core rules (E9,F)..."
-                    if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check --select E9,F 2>&1; then
+                    # RED-1 fix: check whether the repo pins its own rule set.
+                    # A `select =` line (NOT extend-select) in pyproject.toml
+                    # or ruff.toml means the results are repo-controlled and
+                    # version-independent — no concession.
+                    _REPO_SELECT_PINNED=false
+                    for _CFG in "${GIT_ROOT}/pyproject.toml" "${GIT_ROOT}/ruff.toml"; do
+                        [ -f "$_CFG" ] || continue
+                        if grep -qE '^\s*select\s*=' "$_CFG" 2>/dev/null; then
+                            _REPO_SELECT_PINNED=true
+                            break
+                        fi
+                    done
+                    if [ "$_REPO_SELECT_PINNED" = true ]; then
+                        # Pinned repo — results are version-controlled, BLOCK.
                         echo ""
-                        echo "BLOCKED: ruff stable-core rules (E9,F) found errors despite version mismatch (local ${_LOCAL_RUFF_VER} vs CI ${_CI_RUFF_PIN}). Fix them before pushing."
+                        echo "BLOCKED: ruff found issues in files you're pushing (repo pins select=, version mismatch ignored). Fix them before pushing."
                         FAILED=1
                     else
-                        echo "Stable-core rules clean — non-core findings are version-sensitive, continuing (not blocking)."
+                        # Unpinned repo — re-run with the classic default
+                        # (E4,E7,E9,F = what CI evaluates). BLOCK on any hit.
+                        echo ""
+                        echo "local ruff ${_LOCAL_RUFF_VER} differs from CI pin ${_CI_RUFF_PIN} — re-checking with CI-evaluated rules (E4,E7,E9,F)..."
+                        if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check --select E4,E7,E9,F 2>&1; then
+                            echo ""
+                            echo "BLOCKED: ruff CI-evaluated rules (E4,E7,E9,F) found errors despite version mismatch (local ${_LOCAL_RUFF_VER} vs CI ${_CI_RUFF_PIN}). Fix them before pushing."
+                            FAILED=1
+                        else
+                            echo "allowed (transcript-only): local ruff ${_LOCAL_RUFF_VER} ≠ CI pin ${_CI_RUFF_PIN}; CI-evaluated rules (E4,E7,E9,F) re-checked clean."
+                        fi
                     fi
                 else
                     echo ""
