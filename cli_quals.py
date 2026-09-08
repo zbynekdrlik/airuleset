@@ -623,10 +623,12 @@ def _ops_wait_reason(labels):
     tag). The gk-override exclusion mirrors `_row_is_user_waiting`'s own
     acceptance-scoping EXACTLY (#526 review 🔵): a contradictory
     `needs-acceptance`+`ready-for-review`/`needs-gatekeeper`/`prio:bounce`+
-    `ops-wait` row (a re-hand-off/bounce that also carries ops-wait, reaching the
-    ops_wait bucket via the plain `_row_is_ops_wait` branch, NOT the
-    acceptance-override one) is tagged `ops-wait`, never mislabelled
-    `acceptance`."""
+    `ops-wait` row is tagged `ops-wait`, never mislabelled `acceptance`.
+    (#943: a `needs-gatekeeper`/`ready-for-review` + `ops-wait` row now routes
+    to `workable` (I) via the MAINTAINER_ACTION_LABELS override in
+    `_partition_workable`, so this reason function is reached only for rows
+    in the `ops_wait` bucket — which no longer includes the contradictory
+    gk+ops-wait shape.)"""
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
     if "needs-acceptance" in names and not any(

@@ -26,7 +26,7 @@
     "cli_owner_vps.py": 168,
     "cli_privileges.py": 938,
     "cli_push_gate.py": 218,
-    "cli_quals.py": 2468,
+    "cli_quals.py": 2500,
     "cli_quals_cmd.py": 1026,
     "cli_remote.py": 1575,
     "cli_resource_guards.py": 568,
@@ -569,7 +569,8 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "tests/test_gk_ops_wait_override_943.py": 113
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
