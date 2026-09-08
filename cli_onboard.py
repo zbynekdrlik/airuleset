@@ -642,7 +642,55 @@ def step_notification_ticket(path, name, host=None, run=None, dry_run=False):
                  "filed onboarding notification ticket")
 
 
-def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False):
+def _is_controller_box(box_class_fn=None):
+    """True when this box's class marker reads 'controller'. Deferred import
+    of ``default_box_class`` (the same discriminator ``_push_origin_guard`` in
+    cli_remote.py already uses) — stdlib-only at module level."""
+    if box_class_fn is None:
+        from watchdog.reaper import default_box_class as _dbc
+        box_class_fn = _dbc
+    try:
+        return box_class_fn() == "controller"
+    except Exception:
+        return False
+
+
+def _auto_commit_registry(registry_path):
+    """After a registry write on the controller, commit the file so the tree
+    is never left dirty (#946). Operates on the AIRULESET repo dir (where the
+    registry lives), not the project dir. A no-op when there is nothing to
+    commit (idempotent re-run)."""
+    import subprocess
+    repo_dir = str(Path(registry_path).resolve().parent)
+    subprocess.run(
+        ["git", "-C", repo_dir, "add", REGISTRY_FILENAME],
+        capture_output=True, text=True)
+    # --allow-empty is NOT used — only commit when the file actually changed.
+    r = subprocess.run(
+        ["git", "-C", repo_dir, "diff", "--cached", "--quiet",
+         "--", REGISTRY_FILENAME],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        # There are staged changes — commit them.
+        subprocess.run(
+            ["git", "-C", repo_dir, "commit", "-q", "-m",
+             "chore: [registry] update %s via onboard-project"
+             % REGISTRY_FILENAME, "--", REGISTRY_FILENAME],
+            capture_output=True, text=True)
+
+
+def step_registry(path, entry, registry_path, host=None, run=None,
+                  dry_run=False, box_class_fn=None):
+    # #946: on a NON-CONTROLLER box, refuse to mutate the git-tracked registry
+    # — print the JSON entry so the user can apply it on the controller.
+    if not _is_controller_box(box_class_fn):
+        entry_json = json.dumps(entry, indent=2, ensure_ascii=False)
+        return _step(
+            "registry", "refused",
+            "this box is NOT the controller — registry writes are allowed "
+            "only on the controller (hostname airuleset). "
+            "Run onboard-project on the controller, or relay via "
+            "gk-request. Entry to apply:\n" + entry_json)
     # #569 review MAJOR-4: never overwrite a present-but-unparseable registry —
     # load_registry() degrades a corrupt file to [], and a blind save would then
     # DESTROY every real entry it still held. Refuse, don't overwrite.
@@ -658,6 +706,8 @@ def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False
         return _step("registry", "would-apply",
                      "would upsert registry entry for " + entry["name"])
     save_registry(registry_path, upsert_entry(entries, entry))
+    # #946: auto-commit so the registry is never left dirty on the controller.
+    _auto_commit_registry(registry_path)
     return _step("registry", "applied",
                  ("updated" if existing else "added") + " registry entry for "
                  + entry["name"])
