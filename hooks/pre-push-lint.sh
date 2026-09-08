@@ -76,19 +76,102 @@ fi
 # Python project (pyproject.toml or setup.py or *.py in root)
 if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
     if command -v ruff &>/dev/null; then
-        # Lint ONLY the Python files this push introduces (commits ahead of the
-        # tracked upstream) — NEVER `ruff check .` over the whole repo. A blanket
-        # whole-repo check false-positives on pre-existing tech debt the pusher
-        # didn't touch (and that CI may not even gate), wrongly blocking every
-        # push. The hook's job is "don't push NEW lint errors", not "the entire
-        # repo must be clean". Fall back to the last commit when no upstream.
-        UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
-        if [ -n "$UPSTREAM" ]; then
-            RANGE="${UPSTREAM}..HEAD"
-        else
-            RANGE="HEAD~1..HEAD"
+        # #951 item 2: detect CI-pinned ruff version and compare to local.
+        # When they differ, a lint failure MAY be version-specific. The
+        # surgical approach: re-run with --select E9,F (version-stable
+        # pyflakes/syntax core). If THAT also fails -> BLOCK (real errors,
+        # version-independent). Only non-core failures -> WARN (exit 0).
+        # This preserves the gate for real errors while avoiding false-
+        # blocks from version-sensitive rule behaviour changes.
+        _RUFF_VERSION_MISMATCH=false
+        _LOCAL_RUFF_VER=$(ruff --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+        _CI_RUFF_PIN=""
+        # #951 review: anchor on $GIT_ROOT for nested-repo consistency (#218).
+        for _WF in "${GIT_ROOT}"/.github/workflows/*.yml "${GIT_ROOT}"/.github/workflows/*.yaml; do
+            [ -f "$_WF" ] || continue
+            _CI_RUFF_PIN=$(grep -oE 'ruff==[0-9]+\.[0-9]+\.[0-9]+' "$_WF" 2>/dev/null \
+                | head -1 | sed 's/ruff==//' || true)
+            [ -n "$_CI_RUFF_PIN" ] && break
+        done
+        if [ -n "$_CI_RUFF_PIN" ] && [ -n "$_LOCAL_RUFF_VER" ] \
+           && [ "$_CI_RUFF_PIN" != "$_LOCAL_RUFF_VER" ]; then
+            _RUFF_VERSION_MISMATCH=true
         fi
-        CHANGED=$(git diff --name-only --diff-filter=d "$RANGE" 2>/dev/null | grep -E '\.py$' || true)
+
+        # Lint ONLY the Python files this push introduces — NEVER `ruff check .`
+        # over the whole repo. A blanket whole-repo check false-positives on
+        # pre-existing tech debt the pusher didn't touch (and that CI may not even
+        # gate), wrongly blocking every push. The hook's job is "don't push NEW
+        # lint errors", not "the entire repo must be clean".
+        #
+        # #951: the range must be THREE-DOT against the PR TARGET (the branch
+        # this work merges into), not TWO-DOT against @{u}. Two-dot diffs the
+        # two TIPS — after `git merge origin/develop` it includes files that
+        # came FROM upstream (already linted upstream) and falsely blocks. The
+        # three-dot range `BASE_REF...HEAD` diffs from the merge-base and gives
+        # exactly "files changed on MY side". Same PR-target base resolution
+        # as pre-push-test-check.sh / block-test-skips.sh (#847/#909).
+        DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+            | sed 's@^refs/remotes/origin/@@' || echo "main")
+        CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+        BASE_REF="origin/${DEFAULT_BRANCH}"
+        _CASE_RESOLVED=false
+        case "$CUR_BRANCH" in
+            HEAD|"$DEFAULT_BRANCH"|staging) ;;
+            develop)
+                if git rev-parse -q --verify origin/staging >/dev/null; then
+                    BASE_REF="origin/staging"
+                    _CASE_RESOLVED=true
+                fi ;;
+            *)
+                for CAND in develop dev; do
+                    if [ "$CAND" != "$CUR_BRANCH" ]; then
+                        # #847: prefer upstream/<CAND> on fork-no-merge streams
+                        # (origin = personal fork, stale) when BOTH exist.
+                        if git rev-parse -q --verify "upstream/${CAND}" >/dev/null && \
+                           git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                            BASE_REF="upstream/${CAND}"
+                            _CASE_RESOLVED=true
+                            break
+                        elif git rev-parse -q --verify "origin/${CAND}" >/dev/null; then
+                            BASE_REF="origin/${CAND}"
+                            _CASE_RESOLVED=true
+                            break
+                        fi
+                    fi
+                done ;;
+        esac
+        # #909/#951: fallbacks when the case block found nothing (new-branch-
+        # push). NOTE: the origin/<branch> override that block-test-skips.sh
+        # applies for per-added-line semantics is deliberately OMITTED here.
+        # After `git merge origin/develop`, origin/<branch> points at the OLD
+        # push tip, and the three-dot range from it includes merged upstream
+        # files — the exact bug #951 fixes. The PR-target base from the case
+        # block is the correct scope for lint (files the branch changes
+        # relative to the merge target).
+        if [ "$_CASE_RESOLVED" = false ]; then
+            _TRACKING=$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || echo "")
+            if [ -n "$_TRACKING" ] && git rev-parse -q --verify "$_TRACKING" >/dev/null 2>&1; then
+                BASE_REF="$_TRACKING"
+            else
+                for _LOCAL_CAND in develop dev; do
+                    if [ "$_LOCAL_CAND" != "$CUR_BRANCH" ] && \
+                       git rev-parse -q --verify "$_LOCAL_CAND" >/dev/null 2>&1; then
+                        BASE_REF="$_LOCAL_CAND"
+                        break
+                    fi
+                done
+            fi
+        fi
+
+        # Fall back to HEAD~1 if BASE_REF doesn't resolve (local-only repo
+        # with no remotes — the old pre-#951 ultimate fallback).
+        CHANGED=$(git diff --name-only --diff-filter=d "${BASE_REF}...HEAD" 2>/dev/null \
+            | grep -E '\.py$' || true)
+        if [ -z "$CHANGED" ] && ! git rev-parse -q --verify "$BASE_REF" >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only --diff-filter=d "HEAD~1..HEAD" 2>/dev/null \
+                | grep -E '\.py$' || true)
+        fi
         if [ -n "$CHANGED" ]; then
             echo "Pre-push lint: ruff on $(echo "$CHANGED" | wc -l) changed Python file(s)..."
             # #218 -- $CHANGED paths are ROOT-relative; resolve to absolute
@@ -96,9 +179,25 @@ if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
             # hook's own invocation cwd (nested-repo layout).
             ABS_CHANGED=$(printf '%s\n' "$CHANGED" | sed "s|^|${GIT_ROOT}/|")
             if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check 2>&1; then
-                echo ""
-                echo "BLOCKED: ruff found issues in files you're pushing. Fix them before pushing."
-                FAILED=1
+                if [ "$_RUFF_VERSION_MISMATCH" = true ]; then
+                    # #951 item 2 (surgical): version mismatch — re-run with
+                    # --select E9,F (the version-stable pyflakes/syntax core).
+                    # If the stable core also fails -> BLOCK (real errors).
+                    # If only non-core rules failed -> WARN (exit 0).
+                    echo ""
+                    echo "WARNING: local ruff ${_LOCAL_RUFF_VER} differs from CI pin ${_CI_RUFF_PIN} — re-checking with stable-core rules (E9,F)..."
+                    if ! printf '%s\n' "$ABS_CHANGED" | xargs -r ruff check --select E9,F 2>&1; then
+                        echo ""
+                        echo "BLOCKED: ruff stable-core rules (E9,F) found errors despite version mismatch (local ${_LOCAL_RUFF_VER} vs CI ${_CI_RUFF_PIN}). Fix them before pushing."
+                        FAILED=1
+                    else
+                        echo "Stable-core rules clean — non-core findings are version-sensitive, continuing (not blocking)."
+                    fi
+                else
+                    echo ""
+                    echo "BLOCKED: ruff found issues in files you're pushing. Fix them before pushing."
+                    FAILED=1
+                fi
             fi
         else
             echo "Pre-push lint: no changed Python files in this push (ruff skipped)."
