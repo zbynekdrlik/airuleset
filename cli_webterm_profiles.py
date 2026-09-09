@@ -411,6 +411,9 @@ def marek_inventory():
             "user": "claudy",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": MAREK_GATEWAY_USER,
+            # #961: claudy tab opens in devel/claudy, not the default
+            # STREAM_DEV_CWD_CHAIN.
+            "start_dir_chain": ["devel/claudy"],
         },
         {
             "id": "dev1",
@@ -620,6 +623,9 @@ def zbynek_inventory():
             "user": "claudy",
             "identity": WEBTERM_ZBYNEK_IDENTITY,
             "preferred": "zbynek",
+            # #961: claudy tab opens in devel/claudy, not the default
+            # STREAM_DEV_CWD_CHAIN.
+            "start_dir_chain": ["devel/claudy"],
         },
         {
             "id": "dev1",

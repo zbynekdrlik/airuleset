@@ -149,13 +149,28 @@ def render_root_bootstrap(account):
 
 def cmd_account_bootstrap(args):
     """CLI entry point: ``airuleset.py account-bootstrap --render <account>``."""
-    if len(args) < 2 or args[0] != "--render":
+    # Support both argparse Namespace (from main() argparse) and raw list
+    # (from legacy callers).
+    if hasattr(args, "render"):
+        account = args.render
+    elif isinstance(args, (list, tuple)):
+        if len(args) < 2 or args[0] != "--render":
+            print("Usage: airuleset.py account-bootstrap --render <account>",
+                  file=sys.stderr)
+            print("Known accounts: %s" % ", ".join(sorted(SERVICE_ACCOUNTS)),
+                  file=sys.stderr)
+            return 1
+        account = args[1]
+    else:
+        print("Usage: airuleset.py account-bootstrap --render <account>",
+              file=sys.stderr)
+        return 1
+    if not account:
         print("Usage: airuleset.py account-bootstrap --render <account>",
               file=sys.stderr)
         print("Known accounts: %s" % ", ".join(sorted(SERVICE_ACCOUNTS)),
               file=sys.stderr)
         return 1
-    account = args[1]
     try:
         script = render_root_bootstrap(account)
     except ValueError as e:

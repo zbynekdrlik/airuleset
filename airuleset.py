@@ -7818,6 +7818,12 @@ def main():
     p_ma.add_argument("--json", dest="json_output", action="store_true",
                       help="JSON output")
 
+    p_ab = sub.add_parser(
+        "account-bootstrap",
+        help="Render idempotent root bootstrap script for a service account")
+    p_ab.add_argument("--render", metavar="ACCOUNT",
+                      help="Account name to render bootstrap for")
+
     args = parser.parse_args()
 
     if args.command is None:
