@@ -122,7 +122,7 @@
     "tests/test_ci_poll_repeat_block.py": 917,
     "tests/test_ci_workflow_683.py": 183,
     "tests/test_claude_code_log_skill.py": 96,
-    "tests/test_claudy_migration_960.py": 248,
+    "tests/test_claudy_migration_960.py": 250,
     "tests/test_cli_aliases.py": 79,
     "tests/test_cli_caveman_plugins_split.py": 149,
     "tests/test_cli_config_split.py": 202,
