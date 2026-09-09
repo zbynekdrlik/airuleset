@@ -462,10 +462,11 @@ worker's PR, `autonomous-batch-issue-development.md`) and lane-parallelism (runn
 bundled units at once) are COMPLEMENTARY levers, not substitutes: bundling cuts CI cost per
 worker, parallel dispatch cuts wall-clock by running up to 5 bundled units concurrently.
 
-**Serialize-on-overlap — up to the lane cap (#456/#848).** Keep up to 5 parallel lanes live:
-dispatch a lane for each workable bundle-safe unit UP TO that lane cap, and no more (the lane cap,
-not a resource number, is the primary bound — #848 restores #456's continuous refill FOR autopilot,
-retiring #723's batch mode). A worker should still prefer running a
+**Serialize-on-overlap — up to the lane cap (#456/#848/#970).** Keep up to 5 parallel lanes live
+(or fewer when the project declares a shared resource cap via `.claude/lane-resources.json` —
+see Lane cap below): dispatch a lane for each workable bundle-safe unit UP TO that effective cap,
+and no more. #848 restores #456's continuous refill FOR autopilot,
+retiring #723's batch mode. A worker should still prefer running a
 SCOPED test subset first before the full suite where the project supports it, same discipline as
 any single worker. When assembling
 lanes (repeat the per-lane procedure below for each lane you dispatch, up to 5),
@@ -476,10 +477,14 @@ independently editing the same file in two separate worktrees is a guaranteed me
 integration — worse than simply waiting until the overlapping lane has integrated. An overlapping
 issue is not lost — it fills a LATER free lane, exactly like any issue that fails the bundling gate today.
 
-**Lane cap — up to 5 live lanes; back off on a real resource signal + stagger (#848;
-the #332 numbers below are measured CONTEXT).** The lane cap (up to 5 live lanes, refilled
-continuously) is the primary concurrency bound — #848's restoration of #456's continuous refill.
-Across all live lanes a SECOND, account-wide bound
+**Lane cap — up to 5 live lanes (resource-aware since #970); back off on a real resource signal +
+stagger (#848; the #332 numbers below are measured CONTEXT).** The lane cap (up to 5 live lanes,
+refilled continuously) is the primary concurrency bound — #848's restoration of #456's continuous
+refill. **#970 resource-aware cap:** when the project carries `.claude/lane-resources.json` with
+`{"max_lanes": N}` (N = 1..5), the effective ceiling is N instead of 5. A project with ONE shared
+test box declares `{"max_lanes": 1}` — the supervisor dispatches at most 1 lane at a time, and
+the watchdog nudge respects the same cap. Absent file = the flat 5 (today's default, backward
+compatible). Across all live lanes a SECOND, account-wide bound
 still applies: the up-to-5 worker lanes PLUS the read-only `ticket-validator`
 dispatches Step 1b fires for EVERY member PLUS anything a
 DIFFERENT concurrent lane or session under this account runs are all the SAME kind of Claude-API
@@ -556,7 +561,7 @@ at all this turn. The bundling gate (`autonomous-batch-issue-development.md`) pl
 heuristic together are the whole answer to "which issues share one lane" — this ticket found no
 gap in either.
 
-**Continuous refill — up to 5 live lanes, refill a returned lane's slot immediately (#848, restores #456's continuous refill FOR autopilot, retiring #723's batch mode).** DISPATCH is CONTINUOUS, not batched: keep up to 5 bundle-safe `isolation: "worktree"` lanes live (the **lane cap** — the per-lane procedure below applies the bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane). Whenever a lane returns, integrate it SERIALLY (Step 4) AND — while unworked bundle-safe backlog remains — refill a returned lane's slot immediately in the same turn, up to the lane cap. There is NO wait for the slowest lane and NO drained boundary: a returned slot is replaced right away. And **compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not** (`compact-request --self`, Step 5): the STEP-0 live experiment (CC 2.1.258, dev1 2026-09-02, on issue #848) proved a `/compact` over live worktree lanes + a bg-bash waiter + an armed `/goal` does NOT break the task registry — lanes commit, completion notifications survive, task IDs still resolve, `◎ /goal` survives — so the compact no longer waits for the fleet to drain (the batch model's premise, CC issue 29193, is gone for the idle-boundary delivery case). Two research facts make this SAFE: a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes; and the STEP-0 experiment above proved the task registry survives a compact over live lanes (a residual lost notification is backed by the #844 LANE-RETURN comment + the post-compaction lane-reconcile rider — Step 5). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the refill decision.
+**Continuous refill — up to 5 live lanes, refill a returned lane's slot immediately (#848, restores #456's continuous refill FOR autopilot, retiring #723's batch mode).** DISPATCH is CONTINUOUS, not batched: keep up to the effective lane cap — 5, or fewer when the project's `.claude/lane-resources.json` declares `{"max_lanes": N}` (#970) — bundle-safe `isolation: "worktree"` lanes live (the per-lane procedure below applies the bundling gate + collision heuristic, skipping only a unit that file-overlaps a LIVE lane). Whenever a lane returns, integrate it SERIALLY (Step 4) AND — while unworked bundle-safe backlog remains — refill a returned lane's slot immediately in the same turn, up to the lane cap. There is NO wait for the slowest lane and NO drained boundary: a returned slot is replaced right away. And **compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not** (`compact-request --self`, Step 5): the STEP-0 live experiment (CC 2.1.258, dev1 2026-09-02, on issue #848) proved a `/compact` over live worktree lanes + a bg-bash waiter + an armed `/goal` does NOT break the task registry — lanes commit, completion notifications survive, task IDs still resolve, `◎ /goal` survives — so the compact no longer waits for the fleet to drain (the batch model's premise, CC issue 29193, is gone for the idle-boundary delivery case). Two research facts make this SAFE: a normal SUCCESSFUL compaction PRESERVES the armed `/goal` (goal.md — a goal is cleared ONLY by auth-fail / credit-exhaustion / an overflow auto-compact could not clear / an unavailable model, never by a routine compact), so the loop resumes; and the STEP-0 experiment above proved the task registry survives a compact over live lanes (a residual lost notification is backed by the #844 LANE-RETURN comment + the post-compaction lane-reconcile rider — Step 5). INTEGRATION stays serialized under Step 3.2's integration mutex (one merge→gates→push at a time per repo across all sessions); the mutex gates only integration, never the refill decision.
 
 1. **Per lane SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
