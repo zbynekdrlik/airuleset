@@ -426,7 +426,7 @@ REMOTE_HOSTS.append({
     "user": "claudy",
     "repo_path": "~/devel/airuleset",
     "identity": "~/.secrets/airuleset_push_ed25519",
-    "pending": True,
+    "pending": False,
 })
 
 

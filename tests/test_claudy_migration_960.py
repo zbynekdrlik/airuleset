@@ -39,15 +39,17 @@ class TestClaudyFleetEntry(unittest.TestCase):
         self.assertEqual(self._entry()["identity"],
                          "~/.secrets/airuleset_push_ed25519")
 
-    def test_entry_is_pending(self):
-        # R2: pending until the account exists and first install runs
-        self.assertTrue(self._entry().get("pending"))
+    def test_entry_is_active(self):
+        # R2 (flipped 2026-09-09 21:33 UTC+2): the claudy account exists on the
+        # controller (root bootstrap ran) and its first install landed, so the
+        # target is ACTIVE — push deploys to it like any other host.
+        self.assertFalse(self._entry().get("pending", False))
 
-    def test_pending_entry_excluded_from_deployable_hosts(self):
-        # Y6: behavioural lock — pending entry must be filtered by _deployable_hosts
+    def test_active_entry_included_in_deployable_hosts(self):
+        # Y6 (flipped): an ACTIVE entry is deployed by push.
         from cli_remote import _deployable_hosts
         names = [h["name"] for h in _deployable_hosts()]
-        self.assertNotIn("claudy@controller", names)
+        self.assertIn("claudy@controller", names)
 
     def test_entry_repo_path(self):
         self.assertEqual(self._entry()["repo_path"], "~/devel/airuleset")
