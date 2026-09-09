@@ -339,7 +339,7 @@ def cmd_burn(args):
     per-host + total $ for the last N hours (default 24), the trend (latest
     hour vs mean of the previous 3), and a sustainability verdict against the
     watchdog's weekly usage-cache budget. The fleet.jsonl feed is written by
-    watchdog job 16 (`fleet_burn_job`), coordinator-only (dev1)."""
+    watchdog job 16 (`fleet_burn_job`), coordinator-only (controller)."""
     import burn
     if getattr(args, "mark", None):
         ts = None
