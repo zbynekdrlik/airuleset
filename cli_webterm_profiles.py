@@ -586,7 +586,7 @@ def zbynek_inventory():
             "preferred": "zbynek",
             # #961: the controller ar tab opens in devel/airuleset, not the
             # default STREAM_DEV_CWD_CHAIN (devel/odoo/odoo-erp, devel/odoo).
-            "start_dir_chain": ("devel/airuleset",),
+            "start_dir_chain": ["devel/airuleset"],
         },
         {
             "id": "dev1",

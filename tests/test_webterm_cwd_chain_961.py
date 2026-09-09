@@ -59,7 +59,7 @@ class TestForcedCommandCarriesCwd(unittest.TestCase):
     def test_custom_chain_used(self):
         """A custom start_dir_chain should be used instead of default."""
         import cli_webterm as w
-        cmd = w._remote_command("zbynek", start_dir_chain=("devel/airuleset",))
+        cmd = w._remote_command("zbynek", start_dir_chain=["devel/airuleset"])
         self.assertIn("devel/airuleset", cmd)
 
     def test_ar_entry_has_start_dir_chain(self):
@@ -69,7 +69,7 @@ class TestForcedCommandCarriesCwd(unittest.TestCase):
         ar = next(e for e in inv if e["id"] == "ar")
         self.assertIn("start_dir_chain", ar,
                       "ar entry must carry start_dir_chain for devel/airuleset")
-        self.assertEqual(ar["start_dir_chain"], ("devel/airuleset",))
+        self.assertEqual(ar["start_dir_chain"], ["devel/airuleset"])
 
 
 class TestBuildConnectArgvPassesChain(unittest.TestCase):
@@ -151,7 +151,7 @@ class TestChainFallbackBehavior(unittest.TestCase):
         """The ar tab's chain resolves to devel/airuleset when it exists."""
         with tempfile.TemporaryDirectory() as home:
             (Path(home) / "devel" / "airuleset").mkdir(parents=True)
-            c = self._eval_chain(home, ("devel/airuleset",))
+            c = self._eval_chain(home, ["devel/airuleset"])
             self.assertEqual(c, os.path.join(home, "devel/airuleset"))
 
     def test_primary_chain_entry_takes_precedence(self):

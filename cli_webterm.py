@@ -432,7 +432,7 @@ def _remote_command(preferred, start_dir_chain=None):
     `preferred` is shell-quoted; the rest is a fixed body — no user input reaches
     the shell beyond the allowlisted, inventory-derived `preferred` value.
 
-    #961: `start_dir_chain` is a tuple of HOME-relative dir paths to try in
+    #961: `start_dir_chain` is a list (JSON-safe) of HOME-relative dir paths to try in
     order (first existing wins, else $HOME). Default is
     `cli_bashrc_appliers.STREAM_DEV_CWD_CHAIN` — ONE source of truth, shared
     with the ssh auto-attach block (#264/#563). The chain is baked into a shell
