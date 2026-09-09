@@ -1337,11 +1337,13 @@ class TestStreamRoutingGate(TestCase):
         self.assertIn("Stream-routing", r.stderr)
 
     def test_stream_account_foreign_label_with_justification_passes(self):
+        # #962: a foreign-label filing with Stream-routing: now also needs
+        # -l needs-gatekeeper to auto-route to the gatekeeper.
         gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
         body = ("Stream-routing: david -- patri im, defekt je v ich module\n"
                 "found this while working my own module")
         r = run(body_cmd("foreign justified", body, scope_gate="cross-cutting",
-                          labels=["stream:david"]),
+                          labels=["stream:david", "needs-gatekeeper"]),
                 gh_bin=gh_bin, user="david2")
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -1923,6 +1925,87 @@ class TestNetDrainHarness842(TestCase):
                 gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestCoreTicketFiling962(TestCase):
+    """#962 — a reduced-authority stream filing a core (shared-infra) ticket
+    with Stream-routing: + Scope-gate: + Dedup-checked: must be ALLOWED when
+    `-l needs-gatekeeper` is present (auto-routes to gk); BLOCKED with a
+    concrete message when `-l needs-gatekeeper` is missing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-core962-test-")
+        self.labels = ["stream:core", "stream:david", "stream:montalu",
+                        "stream:montalu1", "stream:david2"]
+        self.gh_bin = _fake_gh_stream(self.tmp, labels=self.labels)
+
+    def test_foreign_label_with_routing_and_needs_gatekeeper_passes(self):
+        # A montalu1 filer filing with -l stream:core -l needs-gatekeeper
+        # + Stream-routing: in the body must PASS.
+        r = run(body_cmd("gate script defect",
+                          "Stream-routing: shared-infra gate skript, patri core\n"
+                          "Hook blocks even with correct lines.",
+                          scope_gate="user-request",
+                          labels=["stream:core", "needs-gatekeeper"]),
+                gh_bin=self.gh_bin, user="montalu1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_foreign_label_with_routing_without_needs_gatekeeper_blocks(self):
+        # Same filing but WITHOUT -l needs-gatekeeper → BLOCK with a message
+        # telling the filer to add -l needs-gatekeeper.
+        r = run(body_cmd("gate script defect",
+                          "Stream-routing: shared-infra gate skript, patri core\n"
+                          "Hook blocks even with correct lines.",
+                          scope_gate="user-request",
+                          labels=["stream:core"]),
+                gh_bin=self.gh_bin, user="montalu1")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("needs-gatekeeper", r.stderr)
+
+
+class TestPresenceExempt962(TestCase):
+    """#962 — the presence-required heuristic must exempt a user-request filing
+    whose body quotes an owner message with 'verbatim' + a timestamp from the
+    last 24 hours."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-presence962-test-")
+        self.home = tempfile.mkdtemp(prefix="airuleset-presence962-home-")
+
+    def _away_sid(self):
+        sid = "t-p962-" + uuid.uuid4().hex[:10]
+        mark = Path("/tmp/claude-user-active-%s" % sid)
+        mark.write_text("")
+        old = time.time() - 1000
+        os.utime(mark, (old, old))
+        self.addCleanup(lambda: mark.unlink(missing_ok=True))
+        return sid
+
+    def test_unattended_user_request_with_owner_verbatim_passes(self):
+        from datetime import datetime as _dt
+        today = _dt.now().strftime("%-d.%-m.%Y")
+        body = ('Owner (montalu1, %s 06:20, verbatim): '
+                '"to treba prehodnotit"\nHook blocks the filing.' % today)
+        r = run(body_cmd("core ticket", body, scope_gate="user-request"),
+                gh_bin=_default_gh_stub(),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unattended_user_request_without_verbatim_still_blocks(self):
+        body = "Owner said something but no verbatim marker or date."
+        r = run(body_cmd("core ticket", body, scope_gate="user-request"),
+                gh_bin=_default_gh_stub(),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("presence", r.stderr.lower())
+
+    def test_unattended_user_request_with_old_verbatim_still_blocks(self):
+        body = ('Owner (montalu1, 1.1.2020 06:20, verbatim): '
+                '"stara sprava"\nHook blocks the filing.')
+        r = run(body_cmd("core ticket", body, scope_gate="user-request"),
+                gh_bin=_default_gh_stub(),
+                session_id=self._away_sid(), home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
 
 
 if __name__ == "__main__":
