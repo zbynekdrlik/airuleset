@@ -20,6 +20,7 @@ control over every branch, including the fail-safe edges a real repo cannot be
 coaxed into on demand; a ``TestRealGit`` class then proves the real git commands
 against a temporary repo so the fake can never drift from real ``git`` semantics.
 """
+import contextlib
 import json
 import os
 import subprocess
@@ -456,18 +457,42 @@ class TestIsDeployTarget(unittest.TestCase):
     """`_watchdog_is_deploy_target` (#535 review MAJOR-A) — positively confirms a
     deploy TARGET by tailscale-IP∈REMOTE_HOSTS membership, fail-safe to False (skip
     the dirty dimension, never a false alarm) on any error."""
-    def _run_ips(self, stdout, rc=0):
+    def _run_ips(self, stdout, rc=0, pw_name=None):
         import airuleset
         import unittest.mock as m
         fake = m.Mock(returncode=rc, stdout=stdout)
-        with m.patch("subprocess.run", return_value=fake):
+        patches = [m.patch("subprocess.run", return_value=fake)]
+        if pw_name is not None:
+            pw = m.Mock(pw_name=pw_name)
+            patches.append(m.patch("pwd.getpwuid", return_value=pw))
+        ctx = contextlib.ExitStack()
+        for p in patches:
+            ctx.enter_context(p)
+        with ctx:
             return airuleset._watchdog_is_deploy_target()
 
     def test_target_when_ip_in_remote_hosts(self):
         import airuleset
-        host = next(e["host"] for e in airuleset.REMOTE_HOSTS if e.get("host"))
-        self.assertTrue(self._run_ips(host + "\n"),
-                        "a box whose tailscale IP is a REMOTE_HOSTS host is a target")
+        entry = next(e for e in airuleset.REMOTE_HOSTS
+                     if e.get("host") and not e.get("dev_workstation")
+                     and not e.get("pending") and not e.get("paused"))
+        self.assertTrue(
+            self._run_ips(entry["host"] + "\n",
+                          pw_name=entry.get("user", "newlevel")),
+            "a box whose tailscale IP is a REMOTE_HOSTS host is a target")
+
+    def test_controller_airuleset_not_a_target(self):
+        """#960 R2: airuleset account on the controller must NOT classify as a
+        deploy target even though a DIFFERENT account (claudy) on the same IP
+        IS a target."""
+        import airuleset
+        claudy = next((e for e in airuleset.REMOTE_HOSTS
+                       if e.get("user") == "claudy"), None)
+        if claudy is None:
+            self.skipTest("no claudy entry in REMOTE_HOSTS")
+        self.assertFalse(
+            self._run_ips(claudy["host"] + "\n", pw_name="airuleset"),
+            "airuleset account on controller is the push SOURCE, not a target")
 
     def test_source_when_ip_not_in_remote_hosts(self):
         # dev1 (the source) — an IP not in any REMOTE_HOSTS entry

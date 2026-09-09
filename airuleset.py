@@ -390,8 +390,8 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
 # Skills deploy per USER at install time; every user-invocable skill shows in that
 # box's slash-command list, so an irrelevant skill is pure noise there. Two scopes:
 #   MAINTAINER_ONLY — relevant only on the airuleset-maintainer's own boxes
-#     (newlevel@dev1/dev2): airuleset self-maintenance (mdreview, rules-audit),
-#     his personal workflows (meeting-analysis), his projects' tooling
+#     (newlevel@dev1/dev2, airuleset@controller): airuleset self-maintenance
+#     (mdreview, rules-audit), personal workflows (meeting-analysis), tooling
 #     (windows-remote-gui = win-* MCP rigs, fast-iterate + mutation-sweep = his
 #     Rust/mutation-era repos). Sub-dev / gatekeeper boxes never invoke these.
 #   FULL_AUTHORITY_ONLY — deploys are OUTSIDE a reduced-authority stream's job
@@ -403,7 +403,7 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
 SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
                           "mutation-sweep", "windows-remote-gui", "fast-iterate"}
 SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh", "process-subdev", "autopilot-master"}
-MAINTAINER_USERS = {"newlevel"}
+MAINTAINER_USERS = {"newlevel", "airuleset"}
 # Per-user re-grants: a scoped-away skill that IS relevant on one specific box
 # (montalu meeting recordings get analyzed IN that stream's session — the
 # 2026-07-14 incident where the scoping prune took /meeting-analysis off montalu).
@@ -1715,8 +1715,42 @@ def cmd_install(args):
     print("Install complete. Restart Claude Code for changes to take effect.")
 
 
+def check_skill_parity(skills_dir=None, user=None):
+    """Compare installed skills against skill_names_for_user() for the current
+    account.  Returns {"missing": [...], "extra": [...]} where 'missing' are
+    skills the user SHOULD have but doesn't, and 'extra' are skills that exist
+    in ~/.claude/skills but are NOT in the user's expected set (unmanaged /
+    project-owned — informational).  #967: install-state parity check."""
+    sd = skills_dir or SKILLS_DIR
+    expected = set(skill_names_for_user(user))
+    installed = set()
+    if sd.exists():
+        installed = {p.name for p in sd.iterdir()}
+    return {
+        "missing": sorted(expected - installed),
+        "extra": sorted(installed - expected),
+    }
+
+
 def cmd_status(args):
     """Show current managed config (imports, skills, hooks)."""
+    # --skill-parity: compare installed vs expected and exit
+    if getattr(args, "skill_parity", False):
+        result = check_skill_parity()
+        if result["missing"]:
+            print("MISSING (expected but not installed):")
+            for s in result["missing"]:
+                print(f"  {s}")
+        if result["extra"]:
+            print("EXTRA (installed but not in expected set — unmanaged):")
+            for s in result["extra"]:
+                print(f"  {s}")
+        if not result["missing"] and not result["extra"]:
+            print("OK — installed skills match expected set for this account.")
+        if result["missing"]:
+            sys.exit(1)
+        return
+
     print("airuleset status")
     print("=" * 50)
 
@@ -4473,6 +4507,11 @@ from cli_disk_guard_root import (  # noqa: E402, F401
     cmd_disk_guard_root as cmd_disk_guard_root,
 )
 
+# --- #960: service account bootstrap renderer (controller-local accounts)
+from cli_account_bootstrap import (  # noqa: E402, F401
+    cmd_account_bootstrap as cmd_account_bootstrap,
+)
+
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
@@ -5590,9 +5629,24 @@ def _watchdog_is_deploy_target():
     # #870 F3: a `dev_workstation` entry (dev1 mid-transition) hosts the
     # owner's live, routinely-dirty dev trees — the drift dimension staying
     # skipped there is the module's never-a-false-alarm invariant.
-    target_hosts = {e.get("host") for e in REMOTE_HOSTS
-                    if e.get("host") and not e.get("dev_workstation")}
-    return bool(my_ips & target_hosts)
+    # #960 R2 fix: on a shared-box (controller hosts both `airuleset` and
+    # `claudy`), match on IP AND user — the airuleset account is the push
+    # SOURCE and must not classify itself as a target just because a
+    # different account on the same IP is. The username alone is still
+    # insufficient for newlevel-sharing boxes (the docstring's existing
+    # concern), but IP AND user is exact.
+    try:
+        import pwd
+        current_user = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        current_user = None
+    for e in REMOTE_HOSTS:
+        host = e.get("host")
+        if not host or e.get("dev_workstation"):
+            continue
+        if host in my_ips and e.get("user") == current_user:
+            return True
+    return False
 
 
 def _watchdog_git_fetch(root):
@@ -7128,7 +7182,9 @@ def main():
     sub.add_parser("install", help="Deploy config to ~/.claude/")
     sub.add_parser("diff", help="Show what install would change")
     sub.add_parser("validate", help="Check all files exist and resolve")
-    sub.add_parser("status", help="Show current managed config")
+    p_status = sub.add_parser("status", help="Show current managed config")
+    p_status.add_argument("--skill-parity", action="store_true",
+                          help="Compare installed skills against expected set for this account")
     sub.add_parser("push", help="Push to GitHub + install locally + deploy to all remotes")
 
     # --- Tier-0 target/ retention: manual/testable purge entry point (#315)
@@ -7994,6 +8050,12 @@ def main():
     p_ma.add_argument("--json", dest="json_output", action="store_true",
                       help="JSON output")
 
+    p_ab = sub.add_parser(
+        "account-bootstrap",
+        help="Render idempotent root bootstrap script for a service account")
+    p_ab.add_argument("--render", metavar="ACCOUNT",
+                      help="Account name to render bootstrap for")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -8139,6 +8201,7 @@ SUBCOMMANDS = {
     "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
+    "account-bootstrap": cmd_account_bootstrap,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

@@ -186,9 +186,59 @@ def _java_is_build_daemon(tk):
     return False
 
 
+# #965 — indirect launch patterns (npm/npx/yarn/eas wrappers)
+ANDROID_NPX_COMMANDS = {
+    # npx expo run:android, npx expo prebuild
+    ("expo", "run:android"), ("expo", "prebuild"),
+    # npx react-native run-android
+    ("react-native", "run-android"),
+}
+ANDROID_NPM_SCRIPTS = {"android"}  # npm run android
+EAS_BUILD_LOCAL = "eas"  # eas build --local
+
+
+def _is_indirect_android_build(tk):
+    """True if tk is an npm/npx/yarn command launching an Android build."""
+    if not tk:
+        return False
+    base = os.path.basename(tk[0])
+    rest = tk[1:]
+    if base == "npx":
+        # npx <tool> <subcommand> — check against ANDROID_NPX_COMMANDS
+        for tool, subcmd in ANDROID_NPX_COMMANDS:
+            try:
+                idx = rest.index(tool)
+                if idx + 1 < len(rest) and rest[idx + 1] == subcmd:
+                    return True
+            except ValueError:
+                continue
+            # Also check if tool is immediately after npx (no flags)
+            if len(rest) >= 2 and rest[0] == tool and rest[1] == subcmd:
+                return True
+        return False
+    if base in ("npm", "yarn"):
+        # npm run android / yarn run android
+        if "run" in rest:
+            idx = rest.index("run")
+            if idx + 1 < len(rest) and rest[idx + 1] in ANDROID_NPM_SCRIPTS:
+                return True
+        # yarn android (first positional = script name, B1 fix: not bare token)
+        if base == "yarn" and rest and rest[0] in ANDROID_NPM_SCRIPTS:
+            return True
+        return False
+    if base == EAS_BUILD_LOCAL:
+        # eas build --local
+        if "build" in rest and "--local" in rest:
+            return True
+        return False
+    return False
+
+
 def cmd_is_heavy_build(tk):
     """tk is one command's tokens (prefix already stripped). Return True if it
-    launches a blocked heavy build/VM toolchain."""
+    launches a blocked heavy build/VM toolchain.
+    #965: extended with indirect launches (npx expo, react-native, npm run android,
+    eas build --local)."""
     if not tk:
         return False
     base = os.path.basename(tk[0])
@@ -198,6 +248,8 @@ def cmd_is_heavy_build(tk):
         return True
     if base == "java":
         return _java_is_build_daemon(tk)
+    if _is_indirect_android_build(tk):
+        return True
     return False
 
 

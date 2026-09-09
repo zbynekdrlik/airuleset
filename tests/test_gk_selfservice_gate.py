@@ -244,5 +244,31 @@ class HookRegistered(TestCase):
             "hook not registered in settings/hooks.json PreToolUse/Bash: %r" % commands)
 
 
+class PreExistingBodyFile963(TestCase):
+    """#963 item 5b — a gk-request --body-file pointing to a pre-existing disk
+    file (NOT written via heredoc in the same command) must resolve the body
+    from disk. The test writes the file BEFORE the command, not inside it."""
+
+    def test_preexisting_disk_body_file_with_line_passes(self):
+        d = tempfile.mkdtemp(prefix="airuleset-selfservice-disk-")
+        bf = Path(d) / "body.md"
+        bf.write_text("Zaseknutá fronta.\nSelf-service-checked: overil som na "
+                       "čerstvej PROD kópii; potrebujem živý reštart.\n")
+        # No heredoc — the file already exists on disk; the command references it
+        r = run("python3 ~/devel/airuleset/airuleset.py gk-request "
+                '--title "restart queue" --body-file body.md',
+                cwd=d, user="david2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_preexisting_disk_body_file_no_line_blocks(self):
+        d = tempfile.mkdtemp(prefix="airuleset-selfservice-disk-")
+        bf = Path(d) / "body.md"
+        bf.write_text("Prečítaj mi počet riadkov v tabuľke X na PRODe.\n")
+        r = run("python3 ~/devel/airuleset/airuleset.py gk-request "
+                '--title "read table" --body-file body.md',
+                cwd=d, user="david2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     main()

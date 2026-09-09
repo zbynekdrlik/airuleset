@@ -320,8 +320,12 @@ class TestFleetBurnSkipsPendingHosts(TestCase):
         # must keep holding for the remaining transitions without relock.
         still_pending = {h["user"] for h in airuleset.REMOTE_HOSTS
                          if h.get("pending")}
+        # #960: a brand-NEW account provisioned as `pending` until its root
+        # bootstrap runs (claudy@controller) is a legitimate pending entry
+        # that is NOT a rename target -- enumerate such accounts explicitly.
+        new_pending_accounts = {"claudy"}
         self.assertTrue(
-            still_pending.issubset({new for _o, new in RENAMES}),
+            still_pending.issubset({new for _o, new in RENAMES} | new_pending_accounts),
             "unexpected pending entries: %s" % still_pending)
         for pending in still_pending:
             self.assertNotIn(pending, rowed, pending)
