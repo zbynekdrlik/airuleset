@@ -85,7 +85,7 @@ A ticket is expected to pass stream→gk→PROD on the FIRST hand-off. This is n
 | stream | recent | prior | trend | first-pass | treadmill |
 ```
 
-`first-pass` = share of tickets with exactly 1 bounce event (round 1 = the initial hand-off label = first-pass success). A first-pass rate below 80% is a process alarm.
+`first-pass` = share of tickets with ZERO `prio:bounce` events (never bounced = round 1 = first-pass success). A first-pass rate below 80% is a process alarm. Caveat: the corpus is tickets currently labeled `prio:bounce` or `ready-for-review`, not all hand-offs in the window — closed tickets whose labels were removed drop out.
 
 **Origin:** montalu stream, 7 code-complete PRs, median 3 finisher rounds per ticket, 3/7 merged in 8h (2026-09-08/09). Causes: hand-off gate checks added weekly with NO stream-side pre-flight, shared-infra changes unannounced, hooks blocking even the escalation path.
 

@@ -182,17 +182,17 @@ def compute_trends(issues_with_events, window_days=7):
 def first_pass_rate(trends, issues_with_events):
     """Compute per-stream first-pass rate.
 
-    first-pass rate = share of tickets with exactly 1 bounce event
-    (round 1 = the initial hand-off label = first-pass success).
+    first-pass rate = share of tickets with ZERO prio:bounce events
+    (never bounced = round 1 = first-pass success).
 
     Returns {stream: float} where 1.0 = 100% first-pass.
     """
     if not trends:
         return {}
 
-    # Count per-stream: tickets total and tickets with exactly 1 bounce.
+    # Count per-stream: tickets total and tickets with 0 bounce events.
     per_stream_total = {}
-    per_stream_single = {}
+    per_stream_zero = {}
 
     for item in issues_with_events:
         n_bounces = len(item.get("bounce_timestamps", []))
@@ -200,9 +200,9 @@ def first_pass_rate(trends, issues_with_events):
             if stream not in trends:
                 continue
             per_stream_total[stream] = per_stream_total.get(stream, 0) + 1
-            if n_bounces == 1:
-                per_stream_single[stream] = (
-                    per_stream_single.get(stream, 0) + 1)
+            if n_bounces == 0:
+                per_stream_zero[stream] = (
+                    per_stream_zero.get(stream, 0) + 1)
 
     result = {}
     for stream in trends:
@@ -210,7 +210,7 @@ def first_pass_rate(trends, issues_with_events):
         if total == 0:
             result[stream] = 0.0
         else:
-            result[stream] = per_stream_single.get(stream, 0) / total
+            result[stream] = per_stream_zero.get(stream, 0) / total
     return result
 
 
@@ -276,11 +276,13 @@ def main(argv=None):
                    help="GitHub repo (owner/name)")
     p.add_argument("--window", type=int, default=7,
                    help="Window size in days (default: 7)")
-    p.add_argument("--json", dest="json_out", action="store_true",
-                   help="Output as JSON")
-    p.add_argument("--weekly-report", dest="weekly_report",
-                   action="store_true",
-                   help="Print a compact markdown table with first-pass rate")
+    output_fmt = p.add_mutually_exclusive_group()
+    output_fmt.add_argument("--json", dest="json_out", action="store_true",
+                            help="Output as JSON")
+    output_fmt.add_argument("--weekly-report", dest="weekly_report",
+                            action="store_true",
+                            help="Print a compact markdown table with "
+                                 "first-pass rate")
     args = p.parse_args(argv)
 
     if not args.rounds:

@@ -276,23 +276,23 @@ class TestWeeklyReport(TestCase):
     def _ts(self, days_ago):
         return self._now() - timedelta(days=days_ago)
 
-    def test_first_pass_rate_all_single_bounce(self):
-        """All tickets with exactly 1 bounce event -> 100% first-pass."""
+    def test_first_pass_rate_all_zero_bounces(self):
+        """All tickets with 0 bounce events -> 100% first-pass."""
         items = [
             {"number": 1, "streams": ["david"],
-             "bounce_timestamps": [self._ts(2)]},
+             "bounce_timestamps": []},
             {"number": 2, "streams": ["david"],
-             "bounce_timestamps": [self._ts(3)]},
+             "bounce_timestamps": []},
         ]
         trends = abr.compute_trends(items, window_days=7)
         rate = abr.first_pass_rate(trends, items)
         self.assertEqual(rate["david"], 1.0)
 
     def test_first_pass_rate_mixed(self):
-        """Mix of 1-bounce and multi-bounce tickets."""
+        """Mix of 0-bounce (first-pass) and bounced tickets."""
         items = [
             {"number": 1, "streams": ["david"],
-             "bounce_timestamps": [self._ts(2)]},
+             "bounce_timestamps": []},
             {"number": 2, "streams": ["david"],
              "bounce_timestamps": [self._ts(1), self._ts(2)]},
         ]
@@ -333,29 +333,49 @@ class TestWeeklyReport(TestCase):
         self.assertIn("montalu", output)
 
     def test_weekly_report_first_pass_100_pct(self):
-        """The first-pass column shows percentage."""
+        """The first-pass column shows 100% for 0-bounce tickets."""
         items = [
             {"number": 1, "streams": ["s1"],
-             "bounce_timestamps": [self._ts(1)]},
+             "bounce_timestamps": []},
             {"number": 2, "streams": ["s1"],
-             "bounce_timestamps": [self._ts(2)]},
+             "bounce_timestamps": []},
         ]
         trends = abr.compute_trends(items, window_days=7)
         output = abr.format_weekly_report(trends, items)
-        # Both tickets have exactly 1 bounce -> 100%
+        # Both tickets have 0 bounces -> 100% first-pass
         self.assertIn("100%", output)
 
-    def test_first_pass_rate_zero_when_all_multi_bounce(self):
-        """All tickets with >1 bounce -> 0% first-pass."""
+    def test_first_pass_rate_zero_when_all_bounced(self):
+        """All tickets bounced at least once -> 0% first-pass."""
         items = [
             {"number": 1, "streams": ["david"],
-             "bounce_timestamps": [self._ts(1), self._ts(2)]},
+             "bounce_timestamps": [self._ts(1)]},
             {"number": 2, "streams": ["david"],
-             "bounce_timestamps": [self._ts(1), self._ts(3), self._ts(4)]},
+             "bounce_timestamps": [self._ts(1), self._ts(3)]},
         ]
         trends = abr.compute_trends(items, window_days=7)
         rate = abr.first_pass_rate(trends, items)
         self.assertAlmostEqual(rate["david"], 0.0)
+
+    def test_weekly_report_treadmill_cell(self):
+        """Treadmill cell shows ticket number for 24h bounces."""
+        items = [
+            {"number": 42, "streams": ["david"],
+             "bounce_timestamps": [self._ts(1), self._ts(1.3)]},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        output = abr.format_weekly_report(trends, items)
+        self.assertIn("42", output)
+
+    def test_weekly_report_and_json_mutually_exclusive(self):
+        """--weekly-report and --json cannot be used together."""
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with redirect_stderr(buf):
+                abr.main(["--rounds", "--repo", "o/r",
+                           "--json", "--weekly-report"])
 
 
 class TestDoctrinePresence(TestCase):
