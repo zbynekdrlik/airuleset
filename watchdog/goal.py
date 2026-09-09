@@ -4115,26 +4115,37 @@ _LANE_RESOURCE_FILE = os.path.join(".claude", "lane-resources.json")
 
 
 def lane_resource_cap(cwd):
-    """Read the project's `.claude/lane-resources.json` and return the effective
-    lane ceiling (an int, 1..GOAL_LANE_SATURATION_WORKERS). Returns
-    GOAL_LANE_SATURATION_WORKERS (5) when the file is absent, unreadable, or
-    malformed — backward-compatible default.  The absent-file case is the NORMAL
-    path (most projects have no resource file), so OSError is a routine
-    control-flow signal, not a suppressed failure — logged at the caller's
-    decision site, not here."""
-    # airuleset:script-ok file-absent is the normal path, not a suppressed error
+    """Read the project's `.claude/lane-resources.json` and return
+    ``(effective_cap, reason)`` — effective_cap is an int
+    1..GOAL_LANE_SATURATION_WORKERS; reason is None on success or a short
+    string explaining why the default was returned.  File-absent is the NORMAL
+    path (most projects have no resource file) and returns ``(5, None)``."""
+    default = GOAL_LANE_SATURATION_WORKERS
     p = os.path.join(cwd, _LANE_RESOURCE_FILE) if cwd else None
     if not p:
-        return GOAL_LANE_SATURATION_WORKERS
+        return default, None
+    # airuleset:script-ok FileNotFoundError is the normal absent-file path
     try:
         with open(p) as f:
-            data = json.loads(f.read())
-        cap = data.get("max_lanes")
-        if isinstance(cap, int) and 1 <= cap <= GOAL_LANE_SATURATION_WORKERS:
-            return cap
-    except (OSError, ValueError, TypeError, KeyError):
-        pass
-    return GOAL_LANE_SATURATION_WORKERS
+            raw = f.read()
+    except FileNotFoundError:
+        return default, None
+    except OSError as exc:
+        return default, "unreadable: %s" % exc
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        return default, "malformed JSON: %s" % exc
+    if not isinstance(data, dict):
+        return default, "not a JSON object"
+    cap = data.get("max_lanes")
+    if isinstance(cap, bool):
+        return default, "max_lanes is bool, not int"
+    if not isinstance(cap, int):
+        return default, "max_lanes is %s, not int" % type(cap).__name__
+    if cap < 1 or cap > default:
+        return default, "max_lanes=%d out of range 1..%d" % (cap, default)
+    return cap, None
 
 
 # #848 -- the text TEACHES the CONTINUOUS REFILL doctrine
@@ -4849,7 +4860,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # anti-flap (a just-merged worker counted through its integration window) is
     # gone (it WAS the #587 ghost); now = 1-hour cooldown + 3-min recent-human +
     # ~30s FINISH_SETTLE_S debounce.
-    effective_cap = lane_resource_cap(cwd)
+    effective_cap, cap_reason = lane_resource_cap(cwd)
+    if cap_reason:
+        logs.append("lane-resources %s INVALID %s -> default %d"
+                    % (loc, cap_reason, effective_cap))
     floor = min(effective_cap, backlog_n)
     if live_workers >= floor:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
