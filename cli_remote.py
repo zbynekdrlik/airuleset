@@ -1381,6 +1381,9 @@ def cmd_push(args):
     import subprocess
     import airuleset  # #433 L-E: cmd_install resident + REMOTE_HOSTS in cli_fleet, via facade
 
+    # #972: refuse when REPO_DIR is a worktree path — symlinks would dangle.
+    airuleset._check_worktree_repo_dir("push")
+
     # #870 F3: the push-origin guard runs at main()'s dispatch site (it is a
     # CLI-invocation policy), NOT here — unit tests under both runners drive
     # cmd_push directly to exercise deploy wiring (Fable review RED-2).
