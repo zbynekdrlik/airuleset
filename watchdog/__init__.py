@@ -1951,12 +1951,13 @@ from watchdog.conformance import (  # noqa: E402
     CONFORMANCE_BASELINE_NAME as CONFORMANCE_BASELINE_NAME,
 )
 
-# #543 — job 35, central dead-box heartbeat-missing detector (dev1-only). The
-# per-box conformance check (job 34) cannot report a DEAD box; this reads the
-# already-collected fleet.jsonl liveness and pings when a box goes silent past a
-# threshold. Extracted to `watchdog/conformance_heartbeat.py`; re-exported here
-# so `run_once`'s job-35 dispatch resolves unchanged. Same circular-import-safe
-# idiom as conformance.py (its own `import watchdog`, call-time attribute access).
+# #543 — job 35, central dead-box heartbeat-missing detector (controller-only,
+# #971 — was dev1-only). The per-box conformance check (job 34) cannot
+# report a DEAD box; this reads the already-collected fleet.jsonl liveness
+# and pings when a box goes silent past a threshold. Extracted to
+# `watchdog/conformance_heartbeat.py`; re-exported here so `run_once`'s
+# job-35 dispatch resolves unchanged. Same circular-import-safe idiom as
+# conformance.py (its own `import watchdog`, call-time attribute access).
 from watchdog.conformance_heartbeat import (  # noqa: E402
     run_conformance_heartbeat_check as run_conformance_heartbeat_check,
     classify_collection as classify_collection,
@@ -2637,7 +2638,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           surfaces an unchanged divergence without daily re-spam yet is never
           permanently silent (#134), an UNDETERMINED sweep never drops a prior
           episode (#486-G5), resolution clears the dedup. No ssh, no central
-          fan-out (works even when dev1 sleeps); the dead-box gap is a filed
+          fan-out (works even when the controller sleeps, #971 — was "dev1
+          sleeps"); the dead-box gap is a filed
           central-heartbeat follow-up. See `run_conformance_check` in
           `watchdog/conformance.py`.
 

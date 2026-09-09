@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import watchdog as wd
@@ -61,6 +62,79 @@ class TestCoordinatorGatingByRole(unittest.TestCase):
         source = inspect.getsource(airuleset.cmd_watchdog)
         self.assertIn("controller", source,
                        "cmd_watchdog must reference 'controller' box-class (#971)")
+
+
+# ---------------------------------------------------------------------------
+# M2 (#971 follow-on) — BEHAVIOURAL gate test: the source-text checks above
+# prove the "dev1" literal is gone, but not that cmd_watchdog's WIRING
+# actually differs between box-classes. Drive cmd_watchdog for real, with
+# default_box_class() patched to each value, and assert what it wires into
+# run_once() — the fleet_fetch callable, the two enable flags, and
+# shared_fleet_path — is gated correctly on BOTH branches.
+# ---------------------------------------------------------------------------
+
+class TestCmdWatchdogCoordinatorWiring(unittest.TestCase):
+    """Patch `default_box_class` to 'controller' vs 'workstation' and drive
+    `airuleset.cmd_watchdog`, capturing the kwargs it passes to `run_once`."""
+
+    class _Args:
+        dry_run = False
+        verbose = False
+
+    def _drive(self, box_class, shared_dir_exists):
+        import airuleset
+        from watchdog import reaper
+
+        captured = {}
+
+        def fake_run_once(*a, **kw):
+            captured.update(kw)
+            return []
+
+        tmp = tempfile_mkdtemp_cleanup(self)
+        shared_dir = Path(tmp) / "shared"
+        if shared_dir_exists:
+            shared_dir.mkdir()
+
+        with mock.patch.object(reaper, "default_box_class",
+                               return_value=box_class), \
+             mock.patch.object(wd, "run_once", side_effect=fake_run_once), \
+             mock.patch.object(airuleset, "SHARED_FLEET_DIR", shared_dir):
+            airuleset.cmd_watchdog(self._Args())
+        return captured
+
+    def test_controller_wires_fleet_fetch_and_shared_path(self):
+        captured = self._drive("controller", shared_dir_exists=True)
+        self.assertIsNotNone(captured.get("fleet_fetch"),
+                             "controller box-class must wire fleet_fetch (#971)")
+        self.assertTrue(captured.get("burn_alert_enabled"),
+                        "controller box-class must enable burn_alert (#971)")
+        self.assertTrue(captured.get("conformance_hb_enabled"),
+                        "controller box-class must enable conformance_hb (#971)")
+        self.assertIsNotNone(
+            captured.get("shared_fleet_path"),
+            "controller with an existing shared dir must wire shared_fleet_path (#971)")
+
+    def test_workstation_does_not_wire_fleet_fetch_or_shared_path(self):
+        captured = self._drive("workstation", shared_dir_exists=True)
+        self.assertIsNone(captured.get("fleet_fetch"),
+                          "non-controller box-class must NOT wire fleet_fetch (#971)")
+        self.assertFalse(captured.get("burn_alert_enabled"),
+                         "non-controller box-class must NOT enable burn_alert (#971)")
+        self.assertFalse(captured.get("conformance_hb_enabled"),
+                         "non-controller box-class must NOT enable conformance_hb (#971)")
+        self.assertIsNone(
+            captured.get("shared_fleet_path"),
+            "non-controller box-class must never wire shared_fleet_path, even if "
+            "the shared dir happens to exist (#971)")
+
+    def test_controller_without_shared_dir_skips_shared_path(self):
+        captured = self._drive("controller", shared_dir_exists=False)
+        self.assertIsNotNone(captured.get("fleet_fetch"),
+                             "controller box-class must still wire fleet_fetch")
+        self.assertIsNone(
+            captured.get("shared_fleet_path"),
+            "shared_fleet_path must stay None when the shared dir does not exist yet (#971)")
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +269,42 @@ class TestRunOnceSharedFleetParam(unittest.TestCase):
         self.assertIn("shared_fleet_path", sig.parameters,
                        "run_once must accept shared_fleet_path (#971)")
 
+
+
+# ---------------------------------------------------------------------------
+# M3 (#971 follow-on) — sudo-probe dedup: `airuleset._probe_sudo()` must
+# delegate to `watchdog.disk_guard._sudo_available()` (the disk-pressure
+# guard's own `sudo -n true` probe) instead of a second, independent
+# implementation of the identical check.
+# ---------------------------------------------------------------------------
+
+class TestProbeSudoDedup(unittest.TestCase):
+    """airuleset._probe_sudo must reuse the shared disk_guard probe."""
+
+    def test_probe_sudo_delegates_to_disk_guard(self):
+        import airuleset
+        from watchdog import disk_guard
+
+        with mock.patch.object(disk_guard, "_sudo_available",
+                               return_value=True) as fake:
+            self.assertTrue(airuleset._probe_sudo())
+            fake.assert_called_once()
+
+        with mock.patch.object(disk_guard, "_sudo_available",
+                               return_value=False) as fake:
+            self.assertFalse(airuleset._probe_sudo())
+            fake.assert_called_once()
+
+    def test_probe_sudo_source_has_no_second_subprocess_run(self):
+        """airuleset._probe_sudo's OWN body must not shell out to
+        `sudo -n true` itself — that would be the duplicate implementation
+        this dedup removes."""
+        import inspect
+        import airuleset
+        source = inspect.getsource(airuleset._probe_sudo)
+        self.assertNotIn('"sudo", "-n", "true"', source,
+                         "_probe_sudo re-implements the sudo -n true probe "
+                         "instead of delegating to disk_guard._sudo_available (#971 M3)")
 
 if __name__ == "__main__":
     unittest.main()

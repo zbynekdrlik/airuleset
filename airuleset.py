@@ -993,16 +993,14 @@ SHARED_FLEET_DIR = Path("/var/lib/airuleset")
 
 
 def _probe_sudo():
-    """Check if passwordless sudo is available. Returns True/False."""
-    import subprocess as _sp
-    try:
-        r = _sp.run(["sudo", "-n", "true"],
-                     capture_output=True, timeout=5)
-        return r.returncode == 0
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
+    """Check if passwordless sudo is available. Returns True/False.
+
+    #971 M3: delegates to `watchdog.disk_guard._sudo_available()` — the
+    disk-pressure guard's own `sudo -n true` probe — rather than a second,
+    independent implementation of the identical check (same command, same
+    fail-safe-False-on-error semantics)."""
+    from watchdog.disk_guard import _sudo_available
+    return _sudo_available()
 
 
 def _provision_shared_fleet_dir():
