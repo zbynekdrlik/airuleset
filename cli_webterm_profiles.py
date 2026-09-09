@@ -399,6 +399,23 @@ def marek_inventory():
             "u_tenant": True,
         },
         {
+            # #960: claudy project — SSH to the `claudy` account on the
+            # controller. `preferred: "marek"` targets marek's OWN tmux session
+            # on the claudy account (R1 Fable review: per-human sessions).
+            # NO u_tenant — owner-realm account (#703 boundary).
+            "id": "claudy",
+            "label": "claudy (controller)",
+            "kind": "stream",
+            "local": False,
+            "host": ZBYNEK_CLAUDY_HOST,
+            "user": "claudy",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": MAREK_GATEWAY_USER,
+            # #961: claudy tab opens in devel/claudy, not the default
+            # STREAM_DEV_CWD_CHAIN.
+            "start_dir_chain": ["devel/claudy"],
+        },
+        {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
             "kind": "stream",
@@ -558,6 +575,10 @@ ZBYNEK_SPINBIKE_HOST_KEYS = [
     "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOGOPIXqySpMtYUHf3LOdpOWUwhUqxQb6tPwohllTPO0jtjF7YgTw7BKT+NQlFL2QapbGET925FaO/ZIPamFFm8=",
     "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDJdt/emE+jSbKDUgS2WBAPicPNJaVGFSPZ2svAtkfzDWxTS3duvDNR/i9S1D9Rv1VWbAzBrBFyXDZG/UmblLatzozd+DJjl7lf2/5opuW4qrtyqwNqr6rpyClo2U5xH3ftR6atZu+T4uJnAWBjasH9WLD7TvV/IU0m/627tEkwOJollYKdEz1bEVcYW697CHFROAmEehgThm8Ikio0vBPhUHG7POigquZS/ZDgJNqcaBPpeWgni0NRRcn/pmoKwEywUJx4DgKw6Okulan27Scx3K2E7luRa6xZsEbtQWTNiNOoBQM2+MyFwLxZwi3P+CiINcrYeactngnmSrwtH6tcNlGUmqHp8zF7rEZESpAlvwoErK7XjAO8ML76JuwwDmAcOXDwfUKJzWO6tNYjMeaEQOdEVNodpyesRFM2qvBAzn8FQWeoGRoBEPDAVNTpRzv6jmMgkXeB0Lu3TwqlZ3bhSn1vXdxbTXMinTNXp0lcsmLGz9g78VXCvybUj52LFYE=",
 ]
+# #960: claudy project on the controller — same tailscale IP as the controller
+# itself (SSH loopback to a different unix account). Duplicated from cli_fleet's
+# REMOTE_HOSTS claudy@controller entry; drift-locked by test.
+ZBYNEK_CLAUDY_HOST = "100.101.214.103"
 
 
 def zbynek_inventory():
@@ -587,6 +608,24 @@ def zbynek_inventory():
             # #961: the controller ar tab opens in devel/airuleset, not the
             # default STREAM_DEV_CWD_CHAIN (devel/odoo/odoo-erp, devel/odoo).
             "start_dir_chain": ["devel/airuleset"],
+        },
+        {
+            # #960: claudy project — SSH to the `claudy` account on the same
+            # controller box. NOT local (different unix user, needs SSH).
+            # `preferred: "zbynek"` targets the owner's OWN tmux session on
+            # the claudy account (R1 Fable review: per-human sessions, not a
+            # shared "claudy" session — mirrors today's dev1 setup).
+            "id": "claudy",
+            "label": "claudy (controller)",
+            "kind": "owner",
+            "local": False,
+            "host": ZBYNEK_CLAUDY_HOST,
+            "user": "claudy",
+            "identity": WEBTERM_ZBYNEK_IDENTITY,
+            "preferred": "zbynek",
+            # #961: claudy tab opens in devel/claudy, not the default
+            # STREAM_DEV_CWD_CHAIN.
+            "start_dir_chain": ["devel/claudy"],
         },
         {
             "id": "dev1",

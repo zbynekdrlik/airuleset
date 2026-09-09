@@ -190,14 +190,18 @@ def _webterm_only_user_to_human(user):
     return None
 
 
-def _controller_lane_key_line(user, pubkey):
+def _controller_lane_key_line(user, pubkey, start_dir_chain=None):
     """Build an options-prefixed authorized_keys line for a controller lane
     key. The forced command attaches the user's own tmux session via
-    ``_remote_command(preferred=user)``. Shape: ``restrict,pty,command="..."``
-    — ``pty`` is load-bearing (#661 go-live lesson: bare ``restrict`` kills
-    the PTY)."""
+    ``_remote_command(preferred=user, start_dir_chain=...)``.
+    Shape: ``restrict,pty,command="..."`` — ``pty`` is load-bearing (#661
+    go-live lesson: bare ``restrict`` kills the PTY).
+
+    #960+#961: ``start_dir_chain`` threads to ``_remote_command`` so the
+    forced command opens in the correct project dir (e.g. ``devel/claudy``
+    for the claudy tab), not the default ``STREAM_DEV_CWD_CHAIN``."""
     from cli_webterm import _remote_command
-    cmd = _remote_command(user)
+    cmd = _remote_command(user, start_dir_chain=start_dir_chain)
     # Escape for authorized_keys command="..." format
     escaped_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
     return 'restrict,pty,command="%s" %s' % (escaped_cmd, pubkey)

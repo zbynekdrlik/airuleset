@@ -4473,6 +4473,11 @@ from cli_disk_guard_root import (  # noqa: E402, F401
     cmd_disk_guard_root as cmd_disk_guard_root,
 )
 
+# --- #960: service account bootstrap renderer (controller-local accounts)
+from cli_account_bootstrap import (  # noqa: E402, F401
+    cmd_account_bootstrap as cmd_account_bootstrap,
+)
+
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
 # to the constants-only leaf cli_fleet.py — re-exported here so every resident
 # reader (_current_remote_host_entry, cmd_watchdog), every shipped leaf that
@@ -5590,9 +5595,24 @@ def _watchdog_is_deploy_target():
     # #870 F3: a `dev_workstation` entry (dev1 mid-transition) hosts the
     # owner's live, routinely-dirty dev trees — the drift dimension staying
     # skipped there is the module's never-a-false-alarm invariant.
-    target_hosts = {e.get("host") for e in REMOTE_HOSTS
-                    if e.get("host") and not e.get("dev_workstation")}
-    return bool(my_ips & target_hosts)
+    # #960 R2 fix: on a shared-box (controller hosts both `airuleset` and
+    # `claudy`), match on IP AND user — the airuleset account is the push
+    # SOURCE and must not classify itself as a target just because a
+    # different account on the same IP is. The username alone is still
+    # insufficient for newlevel-sharing boxes (the docstring's existing
+    # concern), but IP AND user is exact.
+    try:
+        import pwd
+        current_user = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        current_user = None
+    for e in REMOTE_HOSTS:
+        host = e.get("host")
+        if not host or e.get("dev_workstation"):
+            continue
+        if host in my_ips and e.get("user") == current_user:
+            return True
+    return False
 
 
 def _watchdog_git_fetch(root):
@@ -7994,6 +8014,12 @@ def main():
     p_ma.add_argument("--json", dest="json_output", action="store_true",
                       help="JSON output")
 
+    p_ab = sub.add_parser(
+        "account-bootstrap",
+        help="Render idempotent root bootstrap script for a service account")
+    p_ab.add_argument("--render", metavar="ACCOUNT",
+                      help="Account name to render bootstrap for")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -8139,6 +8165,7 @@ SUBCOMMANDS = {
     "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
+    "account-bootstrap": cmd_account_bootstrap,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

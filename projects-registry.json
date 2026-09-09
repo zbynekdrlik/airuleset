@@ -32,6 +32,17 @@
     "onboarded": "2026-06-08"
   },
   {
+    "name": "claudy",
+    "host": "controller",
+    "path": "~/devel/claudy",
+    "github_repo": "zbynekdrlik/claudy",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
     "name": "codex-bridge",
     "host": "dev2",
     "path": "~/devel/codex-bridge",
