@@ -2621,8 +2621,13 @@ def _plan_npm_uv_cache(home, now):
             for r in discover_npm_uv_cache(home=home)]
 
 
-def _plan_android_build(home, now):
-    """#965 — android build intermediates (shared-stream prevention)."""
+def _plan_android_build(home, now, box_class_fn=None):
+    """#965 — android build intermediates (shared-stream prevention ONLY).
+    R2 fix: gated on shared-stream box class — dev2 (the build lane) never
+    has its gradle/android dirs deleted."""
+    from watchdog.reaper import is_shared_stream_box
+    if not is_shared_stream_box(box_class_fn):
+        return []
     try:
         return [_norm_action("android-build", r, "delete")
                 for r in discover_android_build_intermediates(home=home)]
@@ -2871,6 +2876,7 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         return nbytes
     if kind == "scratch-worktree-remove":
         # #965: scratch worktree under /tmp — parse repo from .git file, remove
+        # R4 fix: no --force, no rm fallback (git refusal = SKIP, #834 invariant)
         wt = path
         git_file = os.path.join(wt, ".git")
         repo = None
@@ -2878,19 +2884,14 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
             content = Path(git_file).read_text().strip()
             if content.startswith("gitdir:"):
                 gd = content.split(":", 1)[1].strip()
-                # .git/worktrees/<name> → repo is 3 levels up
                 repo = os.path.dirname(os.path.dirname(os.path.dirname(gd)))
         except OSError:
-            pass  # airuleset:script-ok .git file unreadable, fall back to rm
-        if repo and os.path.isdir(os.path.join(repo, ".git")):
-            try:
-                subprocess.run(
-                    ["git", "-C", repo, "worktree", "remove", "--force", wt],
-                    check=True, capture_output=True, text=True, timeout=60)
-                return nbytes
-            except Exception:
-                pass  # airuleset:script-ok fall through to rm
-        _rm_path(wt, sudo=False, run_fn=run_fn)
+            raise OSError("scratch-worktree .git file unreadable: %s" % wt)
+        if not repo or not os.path.isdir(os.path.join(repo, ".git")):
+            raise OSError("scratch-worktree repo not found for: %s" % wt)
+        subprocess.run(
+            ["git", "-C", repo, "worktree", "remove", wt],
+            check=True, capture_output=True, text=True, timeout=60)
         return nbytes
     if kind == "journal-vacuum":
         subprocess.run(["journalctl", "--user", "--vacuum-size=100M"],
@@ -2990,6 +2991,14 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             logs.append(line)
             _append_log(log_path, [line])
             break
+        # #965 R3 fix: skip a rung that has freed < 1 MiB three times in a row
+        if _should_skip_low_yield_rung(home, _label, now):
+            line = _log_line(now, "SKIP-LOW-YIELD", "-", 0,
+                             "rung %s skipped — %d consecutive low yields"
+                             % (_label, LOW_YIELD_SKIP_COUNT))
+            logs.append(line)
+            _append_log(log_path, [line])
+            continue
         try:
             actions = planner()
         except Exception as e:
@@ -3047,6 +3056,9 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         _append_log(log_path, rung_lines)
         if rung_acted > 0:                  # a rung that only skipped gets no summary
             pending = (_label, worst, rung_freed)
+            # #965 R3 fix: record the rung's yield for low-yield tracking
+            if not dry_run:
+                _record_rung_yield(home, _label, freed=rung_freed, now=now)
     if pending is not None:
         _emit_summary(pending, recheck_fn())
     return logs

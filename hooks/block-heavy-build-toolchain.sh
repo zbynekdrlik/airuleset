@@ -217,15 +217,14 @@ def _is_indirect_android_build(tk):
                 return True
         return False
     if base in ("npm", "yarn"):
-        # npm run android / yarn android
+        # npm run android / yarn run android
         if "run" in rest:
             idx = rest.index("run")
             if idx + 1 < len(rest) and rest[idx + 1] in ANDROID_NPM_SCRIPTS:
                 return True
-        # npm android (npm script shorthand)
-        for s in ANDROID_NPM_SCRIPTS:
-            if s in rest:
-                return True
+        # yarn android (first positional = script name, B1 fix: not bare token)
+        if base == "yarn" and rest and rest[0] in ANDROID_NPM_SCRIPTS:
+            return True
         return False
     if base == EAS_BUILD_LOCAL:
         # eas build --local

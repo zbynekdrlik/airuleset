@@ -173,7 +173,8 @@ class TestScratchWorktrees(unittest.TestCase):
 
     def _mk_scratch_wt(self, name="wt1234", age_s=8000, make_git=True):
         """Create a simulated scratch worktree dir."""
-        scratch = Path(self.tmp) / ("claude-%d" % self.uid) / "sessid" / "scratchpad"
+        # Real layout: claude-<uid>/<cwd-key>/<session-uuid>/scratchpad
+        scratch = Path(self.tmp) / ("claude-%d" % self.uid) / "cwdkey" / "sessuuid" / "scratchpad"
         wt = scratch / name
         wt.mkdir(parents=True)
         if make_git:

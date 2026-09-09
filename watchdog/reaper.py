@@ -535,4 +535,10 @@ def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
             logs.append(
                 "heavy-build-reaper: SIGKILL pid=%s FAILED: %r (kind=%s cmd=%s)"
                 % (pid, e, kind, args))
+    # #965 Y1 fix: surface JDK/toolchain findings (log-only, no delete)
+    try:
+        findings = discover_jdk_toolchain_findings()
+        logs.extend(findings)
+    except Exception:
+        pass  # airuleset:script-ok best-effort findings, never block the reaper
     return logs

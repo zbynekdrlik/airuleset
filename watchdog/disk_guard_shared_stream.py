@@ -95,9 +95,18 @@ def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
     out = []
-    pattern = os.path.join(tmp_dir, "claude-%d" % uid, "*", "scratchpad", "wt*")
+    # R1 fix: real layout is claude-<uid>/<cwd-key>/<session-uuid>/scratchpad/wt*
+    # (TWO wildcard levels, not one)
+    pattern = os.path.join(tmp_dir, "claude-%d" % uid, "*", "*", "scratchpad", "wt*")
+    my_uid = os.getuid()
     for wt_path in sorted(_glob.glob(pattern)):
         if not os.path.isdir(wt_path):
+            continue
+        # Y4 fix: verify ownership (shared /tmp — a foreign-created dir is not ours)
+        try:
+            if os.stat(wt_path).st_uid != my_uid:
+                continue
+        except OSError:
             continue
         row = {"cls": "scratch-worktree", "path": wt_path}
         # Must have a .git file (worktree marker)
@@ -120,22 +129,36 @@ def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
                            age / 3600, SCRATCH_WORKTREE_MIN_AGE_S / 3600))
             out.append(row)
             continue
-        # Branch check
+        # Branch check (Y3 fix: real default reads git HEAD)
         wt_name = os.path.basename(wt_path)
         if branch_fn is not None:
             branch = branch_fn(wt_path)
         else:
-            branch = wt_name
+            try:
+                r = subprocess.run(
+                    ["git", "-C", wt_path, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=10)
+                branch = r.stdout.strip() if r.returncode == 0 else wt_name
+            except Exception:
+                branch = wt_name
         if branch in SCRATCH_WORKTREE_PROTECTED_BRANCHES:
             row.update(bytes=0, kind="skip",
                        reason="protected branch %s" % branch)
             out.append(row)
             continue
-        # Locked check
+        # Locked check (Y3 fix: real default reads .git worktree lock file)
         if locked_fn is not None:
             is_locked = locked_fn(wt_path, wt_name)
         else:
+            # Parse the gitdir from .git file to find the lock
             is_locked = False
+            try:
+                content = open(git_marker).read().strip()
+                if content.startswith("gitdir:"):
+                    gd = content.split(":", 1)[1].strip()
+                    is_locked = os.path.exists(os.path.join(gd, "locked"))
+            except OSError:
+                is_locked = True  # can't read → assume locked (fail-safe)
         if is_locked:
             row.update(bytes=0, kind="skip", reason="locked")
             out.append(row)
@@ -161,11 +184,17 @@ def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
             row.update(bytes=0, kind="skip", reason="dirty worktree — kept")
             out.append(row)
             continue
-        # Ahead check
+        # Ahead check (Y3 fix: real default uses git rev-list)
         if ahead_fn is not None:
             n_ahead = ahead_fn(wt_path)
         else:
-            n_ahead = 0
+            try:
+                r = subprocess.run(
+                    ["git", "-C", wt_path, "rev-list", "--count", "@{u}..HEAD"],
+                    capture_output=True, text=True, timeout=10)
+                n_ahead = int(r.stdout.strip()) if r.returncode == 0 else 0
+            except Exception:
+                n_ahead = 0
         if n_ahead and n_ahead > 0:
             row.update(bytes=0, kind="skip",
                        reason="%d commits ahead — kept" % n_ahead)
