@@ -159,22 +159,48 @@ class TestEnsureErpTestSshConfig(unittest.TestCase):
         self.assertFalse(changed)
         self.assertFalse(config_path.exists())
 
-    def test_unmarked_manual_block_is_not_duplicated(self):
-        """A manually written block (no markers) gets the managed block appended,
-        but we do NOT try to parse/replace unmarked content -- only marked blocks
-        are managed."""
+    def test_unmarked_manual_stanza_replaced(self):
+        """An unmarked manual stanza with User mdeploy is REPLACED by the
+        managed block with User ddeploy -- ssh first-match means an unmarked
+        stanza placed BEFORE the managed block would win, so the fix must
+        take over the unmarked stanza, not just append after it."""
         manual = textwrap.dedent("""\
             Host erp-test-david4 erp-test-david4.newlevel.media
                 HostName erp-test-david4.newlevel.media
-                User ddeploy
+                User mdeploy
                 StrictHostKeyChecking no
         """)
         text, changed = self._run_ensure(manual, "david4")
-        # The managed block is ADDED (since no markers found), but the manual
-        # content is untouched -- ssh reads the FIRST matching Host, so the
-        # hand-corrected entry wins. Future pushes replace the managed block only.
         self.assertTrue(changed)
+        # The managed block REPLACED the unmarked stanza.
         self.assertIn("# >>> airuleset: erp-test-ssh >>>", text)
+        self.assertIn("User ddeploy", text)
+        self.assertNotIn("User mdeploy", text)
+        # Exactly ONE Host erp-test-david4 stanza.
+        self.assertEqual(text.count("Host erp-test-david4"), 1)
+
+    def test_unmarked_manual_stanza_with_surrounding_content(self):
+        """An unmarked stanza is replaced while preserving foreign stanzas."""
+        config = textwrap.dedent("""\
+            Host other-host
+                User someone
+
+            Host erp-test-david4 erp-test-david4.newlevel.media
+                HostName erp-test-david4.newlevel.media
+                User mdeploy
+                StrictHostKeyChecking no
+
+            Host another-host
+                User another
+        """)
+        text, changed = self._run_ensure(config, "david4")
+        self.assertTrue(changed)
+        self.assertIn("User ddeploy", text)
+        self.assertNotIn("User mdeploy", text)
+        self.assertEqual(text.count("Host erp-test-david4"), 1)
+        # Foreign stanzas preserved.
+        self.assertIn("Host other-host", text)
+        self.assertIn("Host another-host", text)
 
 
 if __name__ == "__main__":

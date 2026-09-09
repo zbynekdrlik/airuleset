@@ -6499,11 +6499,83 @@ def render_erp_test_ssh_config_block(user):
     )
 
 
+def _replace_unmarked_erp_test_stanza(text, user, block):
+    """Replace an UNMARKED ``Host erp-test-<user>`` stanza with ``block``.
+
+    ssh_config stanzas start with a ``Host`` or ``Match`` keyword at the
+    beginning of a line and extend to the next such keyword (or EOF).
+    An unmarked stanza is one NOT inside the managed marker comments.
+
+    Returns the text with the FIRST matching unmarked stanza replaced and
+    any further duplicates removed.  If no unmarked stanza is found,
+    returns ``text`` unchanged.
+    """
+    import re as _re
+    host_alias = "erp-test-%s" % user
+    host_fqdn = "erp-test-%s.newlevel.media" % user
+
+    # Determine the byte ranges covered by managed marker blocks — any Host
+    # line inside such a range is NOT an unmarked stanza.
+    marker_ranges = []
+    s_pos = 0
+    while True:
+        si = text.find(_ERP_TEST_SSH_MARK_START, s_pos)
+        if si < 0:
+            break
+        ei = text.find(_ERP_TEST_SSH_MARK_END, si)
+        if ei < 0:
+            break
+        marker_ranges.append((si, ei + len(_ERP_TEST_SSH_MARK_END)))
+        s_pos = ei + len(_ERP_TEST_SSH_MARK_END)
+
+    def _in_marker(pos):
+        for ms, me in marker_ranges:
+            if ms <= pos < me:
+                return True
+        return False
+
+    # Split into stanzas: each starts at a line matching ^Host or ^Match.
+    stanza_re = _re.compile(r"^(?=(?:Host|Match)\s)", _re.MULTILINE)
+    parts = stanza_re.split(text)
+    if len(parts) <= 1:
+        return text
+
+    # Reconstruct with character offsets to check marker membership.
+    rebuilt = []
+    replaced = False
+    offset = 0
+    for i, part in enumerate(parts):
+        if i == 0:
+            rebuilt.append(part)
+            offset += len(part)
+            continue
+        first_line = part.split("\n", 1)[0]
+        tokens = first_line.split()
+        is_match = (
+            len(tokens) >= 2
+            and tokens[0].lower() == "host"
+            and (host_alias in tokens[1:] or host_fqdn in tokens[1:])
+        )
+        if is_match and not _in_marker(offset):
+            if not replaced:
+                rebuilt.append(block + "\n")
+                replaced = True
+            # else: drop duplicate unmarked stanzas silently.
+        else:
+            rebuilt.append(part)
+        offset += len(part)
+    if not replaced:
+        return text
+    return "".join(rebuilt)
+
+
 def ensure_erp_test_ssh_config(user=None, ssh_config_path=None):
     """Idempotently write/replace the erp-test ssh config block for `user`.
 
     If the block already exists with the correct content, nothing changes
-    (returns False). A stale block (wrong User) is REPLACED in place.
+    (returns False). A stale block (wrong User) is REPLACED in place —
+    both MARKED blocks (airuleset managed markers) AND UNMARKED manual
+    stanzas (the live shape on streams provisioned before #964).
     A fresh block is appended. Non-stream users are a no-op (returns False).
     Creates ~/.ssh/ if absent.
 
@@ -6524,23 +6596,44 @@ def ensure_erp_test_ssh_config(user=None, ssh_config_path=None):
 
     existing = ssh_config_path.read_text() if ssh_config_path.exists() else ""
 
-    # Find and replace existing managed block(s) (marker-delimited).
     start_marker = _ERP_TEST_SSH_MARK_START
     end_marker = _ERP_TEST_SSH_MARK_END
 
-    if start_marker in existing and end_marker in existing:
-        # Replace all marker-delimited blocks (should be exactly one).
+    # Phase 1: replace UNMARKED manual stanzas FIRST (the live shape on
+    # streams provisioned before #964 — ssh first-match means an unmarked
+    # stanza placed BEFORE the managed block would win and the fix would be
+    # a no-op). This phase skips stanzas inside marker comments.
+    new = _replace_unmarked_erp_test_stanza(existing, user, block)
+
+    # Phase 2: replace marked blocks (airuleset-managed markers).
+    if start_marker in new and end_marker in new:
         import re as _re
+        # Replace the FIRST marked block with the managed block.
         new = _re.sub(
             _re.escape(start_marker) + r".*?" + _re.escape(end_marker),
             block,
-            existing,
+            new,
+            count=1,
             flags=_re.DOTALL,
         )
-    else:
-        # No existing managed block -- append.
-        sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
-        new = f"{existing}{sep}\n{block}\n"
+        # Drop any duplicate marked blocks (collapse to one).
+        idx = new.find(end_marker)
+        if idx >= 0:
+            tail = new[idx + len(end_marker):]
+            if start_marker in tail:
+                import re as _re2
+                tail = _re2.sub(
+                    _re2.escape(start_marker) + r".*?" + _re2.escape(end_marker),
+                    "",
+                    tail,
+                    flags=_re2.DOTALL,
+                )
+                new = new[:idx + len(end_marker)] + tail
+
+    # Phase 3: if nothing was replaced/found, append the managed block.
+    if start_marker not in new:
+        sep = "" if (new == "" or new.endswith("\n")) else "\n"
+        new = f"{new}{sep}\n{block}\n"
 
     if new == existing:
         return False
