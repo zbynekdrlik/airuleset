@@ -78,25 +78,20 @@ class TestInstallWorktreeGuard(TestCase):
             self.assertEqual(ctx.exception.code, 1)
 
     def test_cmd_install_override_allows(self):
-        """AIRULESET_INSTALL_FROM_WORKTREE=1 bypasses the worktree guard."""
+        """AIRULESET_INSTALL_FROM_WORKTREE=1 bypasses the worktree guard.
+
+        Tests only the guard helper, never the full cmd_install — calling
+        cmd_install with a fake REPO_DIR mutates the host (RED-1 review finding).
+        """
         mod = self._load_airuleset()
         fake_wt = Path("/fake/repo/.claude/worktrees/agent-xyz")
-        # We only test the guard itself doesn't fire — cmd_install will fail
-        # later because the fake path doesn't exist, but it should NOT exit
-        # at the worktree guard.
         with patch.object(mod, "REPO_DIR", fake_wt), \
              patch.dict(os.environ,
                         {"AIRULESET_INSTALL_FROM_WORKTREE": "1"},
                         clear=False):
-            try:
-                mod.cmd_install(None)
-            except SystemExit as e:
-                # It should NOT be exit code 1 with the worktree message
-                # (it may fail later for other reasons like missing files)
-                self.assertNotEqual(e.code, 1,
-                                    "Should not exit with worktree guard code")
-            except FileNotFoundError:
-                pass  # airuleset:script-ok guard bypassed, file missing is expected
+            # Must NOT raise SystemExit — the guard is bypassed
+            result = mod._check_worktree_repo_dir("install")
+            self.assertIsNone(result)
 
     def test_worktree_escape_does_not_imply_install(self):
         """AIRULESET_ALLOW_WORKTREE_ESCAPE=1 does NOT bypass the install guard."""
@@ -224,14 +219,14 @@ class TestHookRuleB3(TestCase):
                          f"expected BLOCK\nstderr={r.stderr}")
 
     def test_other_airuleset_commands_allowed(self):
-        """Non-install/push airuleset.py commands remain allowed from worktree."""
+        """Non-install/push airuleset.py commands remain allowed from worktree.
+
+        airuleset.py status is a read-only command — B3 must NOT block it.
+        """
         cwd = "/home/user/devel/airuleset/.claude/worktrees/agent-abc"
         r = self._run_hook("python3 airuleset.py status", cwd)
-        # Should NOT be blocked by B3 (may be blocked by B for other reasons
-        # but B3 specifically should not fire for 'status')
-        if r.returncode == 2:
-            self.assertNotIn("install/push", r.stderr,
-                             "B3 should not block 'status'")
+        self.assertEqual(r.returncode, 0,
+                         f"B3 should not block 'status'\nstderr={r.stderr}")
 
     def test_no_agent_id_not_blocked(self):
         """Without agent_id (main session), install from worktree is NOT blocked

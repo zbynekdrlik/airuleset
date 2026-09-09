@@ -239,8 +239,7 @@ breaking agent types for the session (#972).
   your worktree : $WTSTR
 
 FIX: a lane worker must NEVER run install/push. The supervisor runs
-install from the main checkout after integration. If this is a test,
-set AIRULESET_INSTALL_FROM_WORKTREE=1.
+install from the main checkout after integration.
 B3EOF
             { echo "[block-foreign-airuleset-write:ruleB3] $AGENT_ID -> install/push from worktree: $CMD" \
               >> /tmp/airuleset-worktree-escape-block.log; } 2>/dev/null || true

@@ -999,11 +999,8 @@ def _is_worktree_repo_dir(repo_dir):
     types on the controller (2026-09-09).
     """
     parts = Path(repo_dir).resolve().parts
-    try:
-        idx = parts.index(".claude")
-        return idx + 1 < len(parts) and parts[idx + 1] == "worktrees"
-    except ValueError:
-        return False
+    return any(a == ".claude" and b == "worktrees"
+               for a, b in zip(parts, parts[1:]))
 
 
 def _main_checkout_from_worktree(repo_dir):
