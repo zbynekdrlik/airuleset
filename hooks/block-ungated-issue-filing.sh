@@ -287,7 +287,7 @@ import re
 import shlex
 import subprocess
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 cmd = sys.argv[1]
 sid = sys.argv[2]
@@ -990,19 +990,18 @@ _EU_DATE_RE = re.compile(r'\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b')
 
 def _has_recent_owner_quote(body):
     """True when the body contains 'verbatim' AND a D.M.YYYY date that is
-    today or yesterday (the 24h window the dispatch mandates). Returns False
-    on ANY parse failure -- fail toward blocking, matching this hook's own
-    stated bias throughout."""
+    today or yesterday (a calendar-day window covering the last ~48h).
+    Returns False on ANY parse failure -- fail toward blocking, matching
+    this hook's own stated bias throughout."""
     if not body or not _VERBATIM_RE.search(body):
         return False
     try:
-        now = datetime.now()
-        today = now.date()
-        yesterday = today - __import__("datetime").timedelta(days=1)
+        today = date.today()
+        yesterday = today - timedelta(days=1)
         for m in _EU_DATE_RE.finditer(body):
-            day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            day_n, month_n, year_n = int(m.group(1)), int(m.group(2)), int(m.group(3))
             try:
-                d = __import__("datetime").date(year, month, day)
+                d = date(year_n, month_n, day_n)
             except ValueError:
                 continue
             if d == today or d == yesterday:
@@ -1115,47 +1114,17 @@ def _filer_authority_and_own_stream(cwd, repo_dir):
     return result
 
 
-def _explicit_stream_labels(tk, is_api):
-    """Every `stream:<x>` value named via -l/--label in THIS segment's own
-    tokens, lowercase, deduped, in order of appearance -- comma-list
-    aware (`-l bug,stream:david2`), any repetition (`-l a -l b`), and
-    every genuine `gh`-accepted spelling of the short flag: separate-token
-    (`-l stream:x`), ATTACHED (`-lstream:x`), and attached-with-equals
-    (`-l=stream:x`) -- #390 adversarial-review MAJOR-2, verified live
-    against the real `gh` binary (a truly unknown flag is rejected by gh
-    itself with "unknown shorthand flag", distinct from these three
-    accepted forms). A compliant filer using the attached spelling must
-    never be FALSE-BLOCKED for a label the hook simply failed to see --
-    this hook's own stated bias is to degrade toward allowing, never
-    toward a false block. Only `gh issue create` is scanned -- `gh api
-    ... POST` labeling is deliberately out of scope (see this file's
-    header)."""
-    if is_api:
-        return []
-    found = []
-    for idx, t in enumerate(tk):
-        val = None
-        if t in ("-l", "--label") and idx + 1 < len(tk):
-            val = tk[idx + 1]
-        elif t.startswith("--label="):
-            val = t[len("--label="):]
-        elif t.startswith("-l") and len(t) > 2 and not t.startswith("--"):
-            val = t[2:]
-            if val.startswith("="):
-                val = val[1:]
-        if val is None:
-            continue
-        for piece in val.split(","):
-            piece = piece.strip().lower()
-            if STREAM_LABEL_RE.match(piece) and piece not in found:
-                found.append(piece)
-    return found
-
-
 def _all_labels(tk, is_api):
     """Every label value named via -l/--label in THIS segment's own tokens,
-    lowercase, deduped -- same extraction as `_explicit_stream_labels` but
-    returns ALL labels, not just stream:* ones (#962)."""
+    lowercase, deduped, in order of appearance -- comma-list aware
+    (`-l bug,stream:david2`), any repetition (`-l a -l b`), and every
+    genuine `gh`-accepted spelling of the short flag: separate-token
+    (`-l stream:x`), ATTACHED (`-lstream:x`), and attached-with-equals
+    (`-l=stream:x`) -- #390 adversarial-review MAJOR-2, verified live
+    against the real `gh` binary. Only `gh issue create` is scanned --
+    `gh api ... POST` labeling is deliberately out of scope (see this
+    file's header). #962: factored from `_explicit_stream_labels` to
+    serve both the stream-routing gate and the needs-gatekeeper check."""
     if is_api:
         return []
     found = []
@@ -1176,6 +1145,12 @@ def _all_labels(tk, is_api):
             if piece and piece not in found:
                 found.append(piece)
     return found
+
+
+def _explicit_stream_labels(tk, is_api):
+    """The subset of `_all_labels` matching `stream:<x>` -- the #390
+    stream-routing gate's own label comparator."""
+    return [lb for lb in _all_labels(tk, is_api) if STREAM_LABEL_RE.match(lb)]
 
 
 def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
