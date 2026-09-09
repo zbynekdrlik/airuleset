@@ -83,7 +83,7 @@ class TestSharedFleetFeed(unittest.TestCase):
         with open(local_snap, "w") as f:
             f.write(json.dumps(_snap_row("2026-07-25T19:00:00+00:00", "ctrl", 1.0, 5, 1000)) + "\n")
 
-        logs = wd.fleet_burn_job(
+        wd.fleet_burn_job(
             _fleet_now(), {}, [], lambda *a, **k: None,
             fetch=lambda hs, hb: {},
             local_snapshot_path=local_snap,
@@ -103,7 +103,7 @@ class TestSharedFleetFeed(unittest.TestCase):
         tmp = tempfile_mkdtemp_cleanup(self)
         fleet_path = Path(tmp) / "fleet.jsonl"
 
-        logs = wd.fleet_burn_job(
+        wd.fleet_burn_job(
             _fleet_now(), {}, [], lambda *a, **k: None,
             fetch=lambda hs, hb: {},
             fleet_path=fleet_path,
@@ -118,7 +118,7 @@ class TestSharedFleetFeed(unittest.TestCase):
         shared_path = Path(tmp) / "shared" / "fleet.jsonl"
         shared_path.parent.mkdir(parents=True)
 
-        logs = wd.fleet_burn_job(
+        wd.fleet_burn_job(
             _fleet_now(), {}, [], lambda *a, **k: None,
             fetch=lambda hs, hb: {},
             fleet_path=fleet_path,
@@ -136,7 +136,7 @@ class TestSharedFleetFeed(unittest.TestCase):
         # Point shared_path to a non-existent dir without auto-create
         shared_path = Path(tmp) / "no-such-dir" / "deep" / "fleet.jsonl"
 
-        logs = wd.fleet_burn_job(
+        wd.fleet_burn_job(
             _fleet_now(), {}, [], lambda *a, **k: None,
             fetch=lambda hs, hb: {},
             fleet_path=fleet_path,

@@ -989,6 +989,52 @@ def _write_box_class_marker():
         print(f"  Box class marker error (non-fatal): {e}", file=sys.stderr)
 
 
+SHARED_FLEET_DIR = Path("/var/lib/airuleset")
+
+
+def _probe_sudo():
+    """Check if passwordless sudo is available. Returns True/False."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(["sudo", "-n", "true"],
+                     capture_output=True, timeout=5)
+        return r.returncode == 0
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def _provision_shared_fleet_dir():
+    """#971: create /var/lib/airuleset on the controller for cross-account
+    fleet data (claudy reads fleet.jsonl from here). Only runs when box-class
+    is `controller` AND passwordless sudo is available. Loud skip otherwise —
+    never fatal."""
+    from watchdog.reaper import default_box_class
+    bc = default_box_class()
+    if bc != "controller":
+        return  # not the controller — nothing to provision
+    if SHARED_FLEET_DIR.is_dir():
+        print("  Shared fleet dir: %s (exists)" % SHARED_FLEET_DIR)
+        return
+    if not _probe_sudo():
+        print("  Shared fleet dir: SKIPPED — sudo unavailable on controller "
+              "(create %s manually: install -d -o airuleset -g airuleset "
+              "-m 0755 %s)" % (SHARED_FLEET_DIR, SHARED_FLEET_DIR))
+        return
+    import subprocess as _sp
+    try:
+        _sp.run(
+            ["sudo", "-n", "install", "-d",
+             "-o", "airuleset", "-g", "airuleset",
+             "-m", "0755", str(SHARED_FLEET_DIR)],
+            check=True, capture_output=True, timeout=10)
+        print("  Shared fleet dir: %s (created)" % SHARED_FLEET_DIR)
+    except Exception as e:
+        print("  Shared fleet dir: FAILED — %s (non-fatal)" % e,
+              file=sys.stderr)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -1003,6 +1049,13 @@ def cmd_install(args):
     # --- Box class marker (#778): shared-stream (subdev) vs workstation. Read
     # by the heavy-build reaper (Job 38) + block-heavy-build-toolchain.sh hook.
     _write_box_class_marker()
+
+    # --- #971: shared fleet data dir for cross-account consumers (claudy).
+    # Created only on the controller (box-class `controller`) when passwordless
+    # sudo is available. The fleet-burn coordinator (Job 16) writes a
+    # world-readable fleet.jsonl here so claudy can read it without home-dir
+    # ACLs. Loud skip when sudo is unavailable or box-class is not controller.
+    _provision_shared_fleet_dir()
 
     # --- 1. Generate ~/.claude/CLAUDE.md ---
     modules, global_rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))
@@ -5727,9 +5780,10 @@ def cmd_watchdog(args):
     long-lived session that never reports a ticket — `/compact`'s any
     session whose context exceeds 400K tokens once it has sat genuinely
     idle for 20+ minutes with no worker in flight (#39/#43 job 15), and — ONLY
-    on the coordinator box (dev1) — merges every managed box's own hourly
-    burn-snapshot row into one combined fleet.jsonl row, pinging when the
-    observed weekly-%/day pace exceeds budget (#55 job 16), pings a SECOND,
+    on the coordinator box (box-class `controller`, #971 — was dev1) — merges
+    every managed box's own hourly burn-snapshot row into one combined
+    fleet.jsonl row, pinging when the observed weekly-%/day pace exceeds
+    budget (#55 job 16), pings a SECOND,
     independent way right after that merge when the completed hour itself
     crosses an absolute/relative/weekly-step threshold (#81 job 19), and — since
     Claude Code snapshots its hook set once at process start and never
@@ -5774,21 +5828,29 @@ def cmd_watchdog(args):
     from watchdog import compact as _compact_mod
     from watchdog import goal as _goal_mod
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
-    # its own local hourly row via job 13, so only dev1 fans out over ssh to
-    # merge them. `os.uname().nodename` is the same "which host am I" check
-    # `burn.local_report()`/`hourly_snapshot()` already use as their own
-    # host tag — the machine hostnames ARE the tailscale/MagicDNS names now
-    # (machine-identities.md), so this is a plain string compare, no ssh probe.
-    fleet_fetch = _watchdog_fleet_fetch if os.uname().nodename == "dev1" else None
+    # its own local hourly row via job 13, so only the controller fans out
+    # over ssh to merge them. #971: gated on box-class `controller` (was
+    # hostname `dev1` before the controller cutover) — reads the durable
+    # marker `~/.claude/airuleset-box-class` via `default_box_class()`.
+    from watchdog.reaper import default_box_class
+    _is_coordinator = default_box_class() == "controller"
+    fleet_fetch = _watchdog_fleet_fetch if _is_coordinator else None
     # Job 19 (#81) is coordinator-only for the identical reason job 16 is:
-    # every OTHER managed box never writes fleet.jsonl at all (only dev1
-    # collects the merged fleet view), so evaluating it anywhere else would
-    # just see an empty file. Same host check, reused verbatim.
-    burn_alert_enabled = os.uname().nodename == "dev1"
-    # Job 35 (#543) is coordinator-only for the SAME reason job 16/19 are: only
-    # dev1 collects the merged fleet.jsonl this dead-box detector reads. Same
-    # host check, reused verbatim — every OTHER box would just see an empty file.
-    conformance_hb_enabled = os.uname().nodename == "dev1"
+    # every OTHER managed box never writes fleet.jsonl at all (only the
+    # controller collects the merged fleet view), so evaluating it anywhere
+    # else would just see an empty file. Same box-class gate.
+    burn_alert_enabled = _is_coordinator
+    # Job 35 (#543) is coordinator-only for the SAME reason job 16/19 are:
+    # only the controller collects the merged fleet.jsonl this dead-box
+    # detector reads. Same box-class gate.
+    conformance_hb_enabled = _is_coordinator
+    # #971: shared fleet.jsonl path for cross-account consumers (claudy).
+    # The coordinator writes the same row to /var/lib/airuleset/fleet.jsonl
+    # when the directory exists (created by cmd_install on the controller).
+    _shared_fleet_dir = Path("/var/lib/airuleset")
+    shared_fleet_path = (_shared_fleet_dir / "fleet.jsonl"
+                         if _is_coordinator and _shared_fleet_dir.is_dir()
+                         else None)
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
@@ -5823,6 +5885,7 @@ def cmd_watchdog(args):
                     compact_requests_path=_compact_mod.compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
+                    shared_fleet_path=shared_fleet_path,
                     burn_alert_enabled=burn_alert_enabled,
                     # Jobs 9/20 (#403, collapsing #76) run on EVERY managed
                     # box — a silently dead /goal, or a still-pending arm
@@ -5914,9 +5977,10 @@ def cmd_watchdog(args):
                     # on a confirmed deploy target — the dev1 SOURCE box is
                     # legitimately dirty and must not false-alarm.
                     conformance_is_target=_watchdog_is_deploy_target,
-                    # #543 job 35 — dev1-only central dead-box detector, gated on
-                    # the SAME coordinator host check job 16/19 use (only dev1
-                    # has the fleet.jsonl it reads). Internally cadence-gated.
+                    # #543 job 35 — controller-only central dead-box detector,
+                    # gated on the SAME coordinator box-class check job 16/19
+                    # use (#971, only the controller has the fleet.jsonl it
+                    # reads). Internally cadence-gated.
                     conformance_hb_enabled=conformance_hb_enabled,
                     # Job 36 (#551) — orphaned gk hand-off marker backstop.
                     # Runs on the SUPERVISOR box only (internally gated), for

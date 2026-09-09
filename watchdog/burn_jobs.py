@@ -150,9 +150,10 @@ def vault_purge_job(now, state, purge_fn=None, backstop_fn=None, dry_run=False):
 # user's ask: "zacat aj v hodinovych intervaloch vyhodnocovat stav spotreby
 # tokenov cez monitorovanu sadu claude targetov" — job 13 above only ever
 # measures THIS box. This job runs ONLY on the coordinator (cmd_watchdog
-# wires `fleet_fetch` ONLY when `os.uname().nodename == "dev1"` — every OTHER
-# managed box already writes ITS OWN hourly row via job 13, so this job just
-# TAILS each box's already-written `snapshots.jsonl` over ssh
+# wires `fleet_fetch` ONLY when box-class is `controller` (#971, was
+# hostname `dev1` before the controller cutover) — every OTHER managed box
+# already writes ITS OWN hourly row via job 13, so this job just TAILS each
+# box's already-written `snapshots.jsonl` over ssh
 # (`airuleset._watchdog_fleet_fetch`, injected as `fleet_fetch` — never
 # re-scans transcripts remotely) and merges them into ONE combined
 # `~/.claude/burn-history/fleet.jsonl` row per hour (`burn.merge_fleet_row`).
@@ -174,7 +175,8 @@ FLEET_BURN_DELAY_MINUTES = 5
 
 
 def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=None,
-                   fleet_path=None, usage_cache=None, owner=None, dry_run=False):
+                   fleet_path=None, usage_cache=None, owner=None, dry_run=False,
+                   shared_fleet_path=None):
     """Job 16 — see the section comment. Guarded by `state['fleet_burn_hour']`,
     the SAME at-most-once-per-UTC-hour convention job 13 uses, PLUS a wait
     until `FLEET_BURN_DELAY_MINUTES` past the hour boundary (#60 point 4) —
@@ -192,12 +194,19 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     #63: job 13 (`burn_snapshot_job`) stamps its row with the hour that JUST
     completed (`bucket(now) - 1`), never the current still-open one — so this
     job must collect against that SAME completed-hour bucket
-    (`want_hour_bucket = hour_bucket - 1`), for EVERY host including dev1's
-    own local `snapshots.jsonl` tail row (previously trusted unconditionally,
-    with no freshness check at all — the asymmetry behind "dev1 always has a
-    number, every remote column is permanently --"). `hour_bucket` itself
-    stays the CURRENT hour purely as the once-per-hour state guard (unchanged
-    from #60/#55) — it is never used to select data."""
+    (`want_hour_bucket = hour_bucket - 1`), for EVERY host including the
+    coordinator's own local `snapshots.jsonl` tail row (previously trusted
+    unconditionally, with no freshness check at all — the asymmetry behind
+    "the coordinator always has a number, every remote column is permanently
+    --"). `hour_bucket` itself stays the CURRENT hour purely as the
+    once-per-hour state guard (unchanged from #60/#55) — it is never used to
+    select data.
+
+    `shared_fleet_path` (#971): when given, the coordinator ALSO writes the
+    same JSON row to this world-readable path (e.g.
+    `/var/lib/airuleset/fleet.jsonl`) so other accounts on the same box
+    (claudy) can read the fleet feed without home-dir ACLs. Best-effort: a
+    write failure here never breaks the primary path or the job."""
     import burn as burn_mod
     hour_bucket = int(now // 3600)
     if state.get("fleet_burn_hour") == hour_bucket:
@@ -210,7 +219,7 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     local_rows = burn_mod.load_snapshots(local_snapshot_path)
     if local_rows:
         last = local_rows[-1]
-        name = last.get("host") or "dev1"
+        name = last.get("host") or os.uname().nodename
         if burn_mod.hour_bucket_of_ts(last.get("ts")) == want_hour_bucket:
             host_rows[name] = last
         else:
@@ -236,8 +245,19 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
                % (ts, row["total_usd"], len(host_rows))]
     path = Path(fleet_path or burn_mod.fleet_path())
     path.parent.mkdir(parents=True, exist_ok=True)
+    row_line = json.dumps(row) + "\n"
     with open(path, "a") as f:
-        f.write(json.dumps(row) + "\n")
+        f.write(row_line)
+    # #971: shared feed — write the same row to a world-readable path so
+    # other accounts on the controller (claudy) can read the fleet data
+    # without home-dir ACLs. Best-effort: never breaks the primary write.
+    if shared_fleet_path is not None:
+        try:
+            with open(shared_fleet_path, "a") as f:
+                f.write(row_line)
+        except OSError as e:
+            import sys
+            print("fleet-burn shared-feed write failed: %s" % e, file=sys.stderr)
     state["fleet_burn_hour"] = hour_bucket
     logs = ["fleet-burn ts=%s total=$%.2f hosts=%d -> %s"
            % (ts, row["total_usd"], len(host_rows), path)]
@@ -258,7 +278,7 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
 # it against a reference and pings on its own -- "the only thing that does
 # that today is remembering to check, and exactly during an incident, when
 # spend spikes most, there's no time to remember" (the ticket's own words).
-# Runs right after job 16 in run_once, on the SAME dev1-only coordinator
+# Runs right after job 16 in run_once, on the SAME controller-only coordinator
 # gate (cmd_watchdog computes it, this module stays host-agnostic, mirroring
 # job 16's own convention) -- every other managed box never writes
 # fleet.jsonl at all, so the job would simply see an empty file there.
