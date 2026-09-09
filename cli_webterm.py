@@ -441,13 +441,6 @@ def _remote_command(preferred, start_dir_chain=None):
     chain = start_dir_chain if start_dir_chain is not None else STREAM_DEV_CWD_CHAIN
     # Build the shell snippet that computes C = first existing dir of the chain,
     # fallback $HOME. Each dir is relative to $HOME.
-    chain_shell = 'C="$HOME"; '
-    for rel in chain:
-        chain_shell += (
-            'if [ -d "$HOME/' + rel + '" ]; then C="$HOME/' + rel + '"; '
-        )
-    # Close all the if blocks (only the first match sets C and we break)
-    # Actually, use a for-loop approach to avoid nested ifs:
     chain_rels = " ".join(shlex.quote(r) for r in chain)
     chain_shell = (
         'C="$HOME"; '

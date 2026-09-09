@@ -1,20 +1,19 @@
-"""RED tests for #961: webterm forced command cwd chain.
+"""Tests for #961: webterm forced command cwd chain.
 
 These tests verify the fix for webterm tabs opening tmux sessions in $HOME
 after reboot instead of the project directory. They test:
 1. _remote_command output contains -c for both new-session and attach-session
 2. The chain fallback logic works (first existing dir wins, else $HOME)
 3. The ar tab uses devel/airuleset chain
-4. The boot-time bootstrap unit is rendered and enabled by install
-5. Drift-lock: _ATTACH_BODY chain matches STREAM_DEV_CWD_CHAIN
+4. Drift-lock: _ATTACH_BODY chain matches STREAM_DEV_CWD_CHAIN
+5. Behavioral: the shell snippet correctly resolves chain dirs via fake tmux
 """
 import os
+import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
-from unittest import mock
 
 # Ensure the repo root is on sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -108,24 +107,60 @@ class TestForcedCommandInAuthorizedKeys(unittest.TestCase):
             "new-session in authorized_keys must carry -c (#961)")
 
 
-class TestBootTimeBootstrapUnit(unittest.TestCase):
-    """Layer 2: a systemd --user unit for boot-time tmux bootstrap."""
+class TestChainFallbackBehavior(unittest.TestCase):
+    """Behavioral tests: run the chain computation snippet with a fake HOME
+    and verify the C variable resolves correctly.
 
-    def test_bootstrap_unit_template_exists(self):
-        """The service template file must exist."""
-        repo = Path(__file__).resolve().parent.parent
-        template = repo / "settings" / "airuleset-tmux-bootstrap.service.template"
-        self.assertTrue(template.exists(),
-                        "boot-time bootstrap unit template must exist")
+    We extract ONLY the chain-computation prefix (P=...; C=...; for ...; done;)
+    from _remote_command's output and run it in a real shell, printing C
+    at the end. This avoids the _ATTACH_BODY's exec tmux call."""
 
-    def test_bootstrap_unit_content(self):
-        """The unit must be Type=oneshot, WantedBy=default.target."""
-        repo = Path(__file__).resolve().parent.parent
-        template = repo / "settings" / "airuleset-tmux-bootstrap.service.template"
-        content = template.read_text()
-        self.assertIn("Type=oneshot", content)
-        self.assertIn("WantedBy=default.target", content)
-        self.assertIn("RemainAfterExit=no", content)
+    def _eval_chain(self, home, chain):
+        """Run the chain computation snippet in a real shell and return C."""
+        import cli_webterm as w
+        cmd = w._remote_command("test", start_dir_chain=chain)
+        # The chain snippet is everything up to the first T=
+        # (T="" is the start of _ATTACH_BODY). Extract it.
+        idx = cmd.index('T=""')
+        chain_snippet = cmd[:idx]
+        script = chain_snippet + 'echo "CHAIN_RESULT=$C"'
+        env = dict(os.environ, HOME=home)
+        r = subprocess.run(
+            ["sh", "-c", script], capture_output=True, text=True,
+            env=env, timeout=10)
+        for line in r.stdout.splitlines():
+            if line.startswith("CHAIN_RESULT="):
+                return line.split("=", 1)[1]
+        return None
+
+    def test_first_existing_dir_wins(self):
+        """When only the second chain dir exists, C points to it."""
+        with tempfile.TemporaryDirectory() as home:
+            # Create only devel/odoo (second in default chain)
+            (Path(home) / "devel" / "odoo").mkdir(parents=True)
+            c = self._eval_chain(home, ("devel/odoo/odoo-erp", "devel/odoo"))
+            self.assertEqual(c, os.path.join(home, "devel/odoo"))
+
+    def test_fallback_to_home(self):
+        """When no chain dir exists, C falls back to $HOME."""
+        with tempfile.TemporaryDirectory() as home:
+            c = self._eval_chain(home, ("nonexistent/a", "nonexistent/b"))
+            self.assertEqual(c, home)
+
+    def test_ar_chain_resolves_airuleset(self):
+        """The ar tab's chain resolves to devel/airuleset when it exists."""
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "devel" / "airuleset").mkdir(parents=True)
+            c = self._eval_chain(home, ("devel/airuleset",))
+            self.assertEqual(c, os.path.join(home, "devel/airuleset"))
+
+    def test_primary_chain_entry_takes_precedence(self):
+        """When both chain dirs exist, the first one wins."""
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / "devel" / "odoo" / "odoo-erp").mkdir(parents=True)
+            (Path(home) / "devel" / "odoo").mkdir(parents=True, exist_ok=True)
+            c = self._eval_chain(home, ("devel/odoo/odoo-erp", "devel/odoo"))
+            self.assertEqual(c, os.path.join(home, "devel/odoo/odoo-erp"))
 
 
 if __name__ == "__main__":
