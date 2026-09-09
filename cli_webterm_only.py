@@ -242,21 +242,43 @@ def desired_keys_for_user(user):
 
 
 def append_controller_lane_pubkey_command(user, key_line, ssh_dir=None):
-    """#870 F4a D6: render a shell command that APPENDS an options-bearing key
-    to a NON-webterm-only target's authorized_keys. Idempotent on the key blob
-    — greps for the blob BEFORE appending (a second push is a no-op). NEVER a
-    desired-set rewrite (that is for webterm-only targets only — a desired-set
-    rewrite on a non-webterm-only target is one-bug-from-lockout, F1 ruling).
+    """#870 F4a D6 (+ #961 follow-on): render a shell command that
+    APPENDS-OR-REFRESHES an options-bearing key on a NON-webterm-only
+    target's authorized_keys, keyed on the key BLOB. NEVER a desired-set
+    rewrite (that is for webterm-only targets only — a desired-set rewrite
+    on a non-webterm-only target is one-bug-from-lockout, F1 ruling).
 
-    The key_line MAY carry options (e.g. ``restrict,pty,command="..."``); the
-    whole line is appended verbatim. Returns the shell script string.
+    Three cases, all keyed on the blob (never the whole line):
+      1. blob ABSENT              -> appended (unchanged from #870 F4a D6).
+      2. blob present, line MATCHES byte-for-byte -> no-op.
+      3. blob present, line DIFFERS (stale options/comment) -> the ONE
+         matching line is REPLACED in place: a whole-file
+         ``authorized_keys.airuleset-prev-<ts>`` backup is written FIRST,
+         then a ``authorized_keys.airuleset-new-<ts>`` is built by copying
+         every OTHER line verbatim (foreign lines, other managed blobs,
+         comments, ordering — all untouched) and swapping in the desired
+         line for the stale one, then ``mv``'d into place atomically.
+
+    Root cause of case 3 (#961 follow-on, live 2026-09-09): the original
+    D6 writer was idempotent ONLY on the blob — a key already present with
+    STALE options (e.g. the pre-#961 forced command, missing the -c
+    cwd-chain fix) printed "already in $AK — no-op" forever and never
+    picked up a later options change. montalu1-8 / miva1 / gk zbynek+marek
+    keys were all stuck this way.
+
+    The key_line MAY carry options (e.g. ``restrict,pty,command="..."``);
+    the whole line is written verbatim. Returns the shell script string.
 
     The script runs on the REMOTE (over ssh), so ``~`` is expanded by the
     remote shell via ``$HOME`` (double-quoted, never single-quoted — single
     quotes suppress tilde expansion). ``set -euo pipefail`` per
     script-failure-policy.md. Key line and comment are shell-escaped via
-    ``printf '%s'`` to avoid injection from ``command="..."`` options
-    containing quotes."""
+    ``printf '%s'`` / a shell variable to avoid injection from
+    ``command="..."`` options containing quotes. Never ``| grep -q`` (a
+    not-found grep -q as the LAST stage of a pipe would abort the whole
+    script under ``set -euo pipefail`` unless carefully guarded) — every
+    grep here is either the direct condition of an ``if`` or the guaranteed
+    match captured right after that ``if`` already proved it exists."""
     import shlex as _shlex
     if ssh_dir is None:
         ssh_dir = "$HOME/.ssh"
@@ -267,16 +289,42 @@ def append_controller_lane_pubkey_command(user, key_line, ssh_dir=None):
     escaped_comment = _shlex.quote(ak.comment or "(no comment)")
     return (
         "set -euo pipefail\n"
-        "# airuleset:managed append-only key (#870 F4a D6)\n"
+        "# airuleset:managed append-or-refresh key (#961 follow-on / #870 F4a D6)\n"
         'mkdir -p "%(ssh_dir)s" && chmod 700 "%(ssh_dir)s"\n'
         'AK="%(ssh_dir)s/authorized_keys"\n'
         "BLOB=%(blob)s\n"
-        'if ! grep -qF "$BLOB" "$AK" 2>/dev/null; then\n'
-        "  printf '%%s\\n' %(key_line)s >> \"$AK\"\n"
+        "DESIRED=%(key_line)s\n"
+        'EXISTING=""\n'
+        'if [ -f "$AK" ] && grep -qF "$BLOB" "$AK"; then\n'
+        '  EXISTING=$(grep -F "$BLOB" "$AK" | head -n1)\n'
+        "fi\n"
+        'if [ -z "$EXISTING" ]; then\n'
+        "  printf '%%s\\n' \"$DESIRED\" >> \"$AK\"\n"
         '  chmod 600 "$AK"\n'
         "  echo \"  appended key (%(comment)s) to $AK\"\n"
-        "else\n"
+        'elif [ "$EXISTING" = "$DESIRED" ]; then\n'
         "  echo \"  key (%(comment)s) already in $AK — no-op\"\n"
+        "else\n"
+        "  TS=$(date +%%s)\n"
+        '  cp "$AK" "${AK}.airuleset-prev-${TS}"\n'
+        '  chmod 600 "${AK}.airuleset-prev-${TS}"\n'
+        "  python3 -c '\n"
+        "import sys\n"
+        "blob, desired, src, dst = sys.argv[1:5]\n"
+        "done = False\n"
+        'with open(src, "r") as fh:\n'
+        "    lines = fh.readlines()\n"
+        'with open(dst, "w") as fh:\n'
+        "    for line in lines:\n"
+        "        if not done and blob in line:\n"
+        '            fh.write(desired.rstrip("\\n") + "\\n")\n'
+        "            done = True\n"
+        "        else:\n"
+        '            fh.write(line if line.endswith("\\n") else line + "\\n")\n'
+        "' \"$BLOB\" \"$DESIRED\" \"$AK\" \"${AK}.airuleset-new-${TS}\"\n"
+        '  mv "${AK}.airuleset-new-${TS}" "$AK"\n'
+        '  chmod 600 "$AK"\n'
+        "  echo \"  refreshed key (%(comment)s) in $AK\"\n"
         "fi\n"
     ) % {
         "ssh_dir": ssh_dir,
