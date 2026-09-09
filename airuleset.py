@@ -1409,6 +1409,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  stream dev-env gap report error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3g-ter. erp-test ssh config provisioning (#964): the stream's
+    # ~/.ssh/config `Host erp-test-<stream>` alias with the correct deploy
+    # user (ddeploy for david-family, mdeploy for montalu/miva). Runs on
+    # stream accounts only; a no-op on dev1/dev2/gk. Non-fatal.
+    try:
+        erp_ssh_changed = ensure_erp_test_ssh_config()
+        if erp_ssh_changed:
+            print("  Updated:   ~/.ssh/config (erp-test ssh alias, #964)")
+    except Exception as e:
+        print(f"  erp-test ssh config error (non-fatal): {e}", file=sys.stderr)
+
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
         maybe_setup_filedrop()
@@ -6449,6 +6460,98 @@ def report_stream_dev_env(user=None):
         except OSError as e:
             print("  ⚠ could not rename %s (%s) — remove/rename by hand"
                   % (todo, e), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# erp-test ssh config provisioning (#964)
+# ---------------------------------------------------------------------------
+# The stream's ~/.ssh/config carries a `Host erp-test-<stream>` alias so
+# interactive `ssh erp-test-david4` (psql/odoo-shell fixtures) resolves to
+# the right deploy user. Previously created manually with a hardcoded
+# `User mdeploy`, which is WRONG for david-model boxes (they have only
+# `ddeploy`). This provisioner derives the deploy user from the stream
+# family via `cli_aliases.erp_test_deploy_user` and writes an idempotent
+# marker-block in ~/.ssh/config.
+
+_ERP_TEST_SSH_MARK_START = "# >>> airuleset: erp-test-ssh >>>"
+_ERP_TEST_SSH_MARK_END = "# <<< airuleset: erp-test-ssh <<<"
+
+
+def render_erp_test_ssh_config_block(user):
+    """Render the managed ssh config block for ``Host erp-test-<user>``, or
+    None if `user` is not a stream with an erp-test box.
+
+    The block is wrapped in marker comments for idempotent replacement by
+    `ensure_erp_test_ssh_config`.
+    """
+    from cli_aliases import erp_test_deploy_user
+    deploy_user = erp_test_deploy_user(user)
+    if deploy_user is None:
+        return None
+    hostname = "erp-test-%s.newlevel.media" % user
+    return (
+        f"{_ERP_TEST_SSH_MARK_START}\n"
+        f"Host erp-test-{user} {hostname}\n"
+        f"    HostName {hostname}\n"
+        f"    User {deploy_user}\n"
+        f"    StrictHostKeyChecking no\n"
+        f"{_ERP_TEST_SSH_MARK_END}"
+    )
+
+
+def ensure_erp_test_ssh_config(user=None, ssh_config_path=None):
+    """Idempotently write/replace the erp-test ssh config block for `user`.
+
+    If the block already exists with the correct content, nothing changes
+    (returns False). A stale block (wrong User) is REPLACED in place.
+    A fresh block is appended. Non-stream users are a no-op (returns False).
+    Creates ~/.ssh/ if absent.
+
+    `ssh_config_path` is injectable for testing; defaults to ~/.ssh/config.
+    """
+    user = user or _current_user()
+    block = render_erp_test_ssh_config_block(user)
+    if block is None:
+        return False
+
+    if ssh_config_path is None:
+        ssh_config_path = Path.home() / ".ssh" / "config"
+
+    ssh_config_path = Path(ssh_config_path)
+    ssh_dir = ssh_config_path.parent
+    if not ssh_dir.exists():
+        ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    existing = ssh_config_path.read_text() if ssh_config_path.exists() else ""
+
+    # Find and replace existing managed block(s) (marker-delimited).
+    start_marker = _ERP_TEST_SSH_MARK_START
+    end_marker = _ERP_TEST_SSH_MARK_END
+
+    if start_marker in existing and end_marker in existing:
+        # Replace all marker-delimited blocks (should be exactly one).
+        import re as _re
+        new = _re.sub(
+            _re.escape(start_marker) + r".*?" + _re.escape(end_marker),
+            block,
+            existing,
+            flags=_re.DOTALL,
+        )
+    else:
+        # No existing managed block -- append.
+        sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+        new = f"{existing}{sep}\n{block}\n"
+
+    if new == existing:
+        return False
+
+    # Atomic write via tmp + os.replace.
+    tmp = ssh_config_path.with_suffix(ssh_config_path.suffix + ".airuleset-tmp")
+    tmp.write_text(new)
+    os.replace(str(tmp), str(ssh_config_path))
+    # Ensure the config file has restrictive permissions (ssh warns otherwise).
+    os.chmod(str(ssh_config_path), 0o600)
+    return True
 
 
 # Which Discord OWNER key a stream's linux user routes its pings under lives
