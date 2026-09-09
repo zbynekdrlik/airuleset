@@ -267,6 +267,117 @@ class TestCanonicalStream(TestCase):
             self.assertEqual(trends["a1"]["recent_bounces"], 2)
 
 
+class TestWeeklyReport(TestCase):
+    """Tests for --weekly-report mode (#963)."""
+
+    def _now(self):
+        return datetime.now(timezone.utc)
+
+    def _ts(self, days_ago):
+        return self._now() - timedelta(days=days_ago)
+
+    def test_first_pass_rate_all_zero_bounces(self):
+        """All tickets with 0 bounce events -> 100% first-pass."""
+        items = [
+            {"number": 1, "streams": ["david"],
+             "bounce_timestamps": []},
+            {"number": 2, "streams": ["david"],
+             "bounce_timestamps": []},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        rate = abr.first_pass_rate(trends, items)
+        self.assertEqual(rate["david"], 1.0)
+
+    def test_first_pass_rate_mixed(self):
+        """Mix of 0-bounce (first-pass) and bounced tickets."""
+        items = [
+            {"number": 1, "streams": ["david"],
+             "bounce_timestamps": []},
+            {"number": 2, "streams": ["david"],
+             "bounce_timestamps": [self._ts(1), self._ts(2)]},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        rate = abr.first_pass_rate(trends, items)
+        self.assertAlmostEqual(rate["david"], 0.5)
+
+    def test_first_pass_rate_no_items(self):
+        """No items -> empty dict."""
+        rate = abr.first_pass_rate({}, [])
+        self.assertEqual(rate, {})
+
+    def test_format_weekly_report_markdown(self):
+        """Weekly report output is a markdown table."""
+        items = [
+            {"number": 1, "streams": ["david"],
+             "bounce_timestamps": [self._ts(2)]},
+            {"number": 2, "streams": ["david"],
+             "bounce_timestamps": [self._ts(1), self._ts(3)]},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        output = abr.format_weekly_report(trends, items)
+        self.assertIn("| stream", output)
+        self.assertIn("| david", output)
+        self.assertIn("first-pass", output)
+
+    def test_format_weekly_report_multiple_streams(self):
+        """Report covers all streams."""
+        items = [
+            {"number": 1, "streams": ["david"],
+             "bounce_timestamps": [self._ts(2)]},
+            {"number": 2, "streams": ["montalu"],
+             "bounce_timestamps": [self._ts(1)]},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        output = abr.format_weekly_report(trends, items)
+        self.assertIn("david", output)
+        self.assertIn("montalu", output)
+
+    def test_weekly_report_first_pass_100_pct(self):
+        """The first-pass column shows 100% for 0-bounce tickets."""
+        items = [
+            {"number": 1, "streams": ["s1"],
+             "bounce_timestamps": []},
+            {"number": 2, "streams": ["s1"],
+             "bounce_timestamps": []},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        output = abr.format_weekly_report(trends, items)
+        # Both tickets have 0 bounces -> 100% first-pass
+        self.assertIn("100%", output)
+
+    def test_first_pass_rate_zero_when_all_bounced(self):
+        """All tickets bounced at least once -> 0% first-pass."""
+        items = [
+            {"number": 1, "streams": ["david"],
+             "bounce_timestamps": [self._ts(1)]},
+            {"number": 2, "streams": ["david"],
+             "bounce_timestamps": [self._ts(1), self._ts(3)]},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        rate = abr.first_pass_rate(trends, items)
+        self.assertAlmostEqual(rate["david"], 0.0)
+
+    def test_weekly_report_treadmill_cell(self):
+        """Treadmill cell shows ticket number for 24h bounces."""
+        items = [
+            {"number": 42, "streams": ["david"],
+             "bounce_timestamps": [self._ts(1), self._ts(1.3)]},
+        ]
+        trends = abr.compute_trends(items, window_days=7)
+        output = abr.format_weekly_report(trends, items)
+        self.assertIn("42", output)
+
+    def test_weekly_report_and_json_mutually_exclusive(self):
+        """--weekly-report and --json cannot be used together."""
+        import io
+        from contextlib import redirect_stderr
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with redirect_stderr(buf):
+                abr.main(["--rounds", "--repo", "o/r",
+                           "--json", "--weekly-report"])
+
+
 class TestDoctrinePresence(TestCase):
     """The always-on module carries the friction doctrine sentence."""
 
@@ -277,11 +388,24 @@ class TestDoctrinePresence(TestCase):
         self.assertIn("#957", text)
         self.assertIn("audit_bounce_rule_updates.py", text)
 
+    def test_module_has_first_pass_sentence(self):
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "modules/core/autonomous-quality-discipline.md").read_text()
+        self.assertIn("FIRST hand-off", text)
+        self.assertIn("#963", text)
+
     def test_deep_companion_has_detail(self):
         root = Path(__file__).resolve().parent.parent
         text = (root / "skills/autonomous-quality-discipline-deep/DEEP.md").read_text()
         self.assertIn("Integration friction is a bug", text)
         self.assertIn("treadmill", text)
+
+    def test_deep_has_first_pass_section(self):
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "skills/autonomous-quality-discipline-deep/DEEP.md").read_text()
+        self.assertIn("First-pass doctrine", text)
+        self.assertIn("#963", text)
+        self.assertIn("pre-flight", text)
 
     def test_trigger_row_fires_on_handoff(self):
         root = Path(__file__).resolve().parent.parent

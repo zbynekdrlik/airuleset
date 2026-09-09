@@ -69,6 +69,28 @@ Integration friction — repeated bounces, gate iterations, non-code re-cycles �
 
 **Origin:** david3 stream, 10 hand-offs in 14h, ~8 wasted deploy/e2e cycles, 2026-09-08. The CHANGELOG develop-drift treadmill alone burned ~80 min of CI on zero-value re-runs.
 
+#### First-pass doctrine (#963, 2026-09-09)
+
+A ticket is expected to pass stream→gk→PROD on the FIRST hand-off. This is not aspirational — it is the baseline expectation, and deviations are attributed.
+
+**Attribution:** a 2nd gate FAIL / gk BOUNCE on the same ticket is an INCIDENT attributed to the RULE or INFRA owner, not only to the stream. The gate/rule owner must fix the falsifiability gap (pre-flight) before adding any further check. A check that cannot be pre-flighted by the stream BEFORE posting/labeling is not merged.
+
+**Cost accounting:** a rule/hook change that measurably raises rounds-per-ticket or hours-to-merge is reverted or fixed within the day. Token/time burn from integration friction is a first-class regression — measured by `audit_bounce_rule_updates.py --rounds --weekly-report`.
+
+**Pre-flight requirement for hand-off-gating hooks:** every airuleset hook under `hooks/` that gates a hand-off or filing must be dry-runnable via the stdin-JSON harness pattern: feed `{"tool_input":{"command":"<the-command>"}}` on stdin, run the hook in a subshell, check exit code. This is the existing CC hook contract (hooks read `.tool_input.command` from stdin JSON) — streams use it to pre-flight their posts locally before the live hand-off. Document this pattern in `.claude/rules/internals-hooks.md`.
+
+**Metric — weekly report:** `scripts/audit_bounce_rule_updates.py --rounds --repo owner/name --weekly-report` prints a compact markdown table:
+
+```
+| stream | recent | prior | trend | first-pass | treadmill |
+```
+
+`first-pass` = share of tickets with ZERO `prio:bounce` events (never bounced = round 1 = first-pass success). A first-pass rate below 80% is a process alarm. Caveat: the corpus is tickets currently labeled `prio:bounce` or `ready-for-review`, not all hand-offs in the window — closed tickets whose labels were removed drop out.
+
+**Origin:** montalu stream, 7 code-complete PRs, median 3 finisher rounds per ticket, 3/7 merged in 8h (2026-09-08/09). Causes: hand-off gate checks added weekly with NO stream-side pre-flight, shared-infra changes unannounced, hooks blocking even the escalation path.
+
+**Cross-ref:** odoo-erp issue 6630 (gate dry-run + CHANGELOG mechanics, odoo-erp-side); odoo-erp issue 6377 (gate batches); airuleset issue 962 (hook defect fixes, parallel lane).
+
 #### Banned phrases (intent, not just exact wording)
 
 Do NOT shift a decision back to the user when the goals already determine the answer. Representative: "Your call", "You decide" / "Your decision" / "Up to you", "Realistic options: 1) admin-merge 2) close PR", "Cheaper / quicker / easier" paired with a shortcut, "Functionally ready" / "I won't claim it's clean but…", "Want me to investigate … or merge despite …?".
