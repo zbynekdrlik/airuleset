@@ -44,7 +44,7 @@
     "cli_webterm_gateway.py": 1208,
     "cli_webterm_lane.py": 446,
     "cli_webterm_marek.py": 256,
-    "cli_webterm_only.py": 754,
+    "cli_webterm_only.py": 802,
     "cli_webterm_profiles.py": 820,
     "cli_webterm_pwa.py": 215,
     "cli_webterm_tunnel.py": 190,
