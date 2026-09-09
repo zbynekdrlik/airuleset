@@ -87,9 +87,11 @@ SCRATCH_WORKTREE_PROTECTED_BRANCHES = frozenset({
 
 def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
                                git_run_fn=None, dir_stats_fn=None,
-                               locked_fn=None, ahead_fn=None, branch_fn=None):
-    """#965: discover git worktrees living under scratchpad dirs
-    ``/tmp/claude-<uid>/*/scratchpad/wt*``. Guards: unlocked, clean, 0 ahead,
+                               locked_fn=None, ahead_fn=None, branch_fn=None,
+                               contained_fn=None):
+    """#965/#968: discover git worktrees living under scratchpad dirs
+    ``/tmp/claude-<uid>/*/scratchpad/wt*``. Guards: unlocked, clean,
+    (0 ahead OR HEAD on origin via ``contained_fn``),
     idle > 2h, not main/dev. Returns rows ``{cls:"scratch-worktree", ...}``."""
     import glob as _glob
     now = time.time() if now is None else now
@@ -196,10 +198,19 @@ def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
             except Exception:
                 n_ahead = 0
         if n_ahead and n_ahead > 0:
-            row.update(bytes=0, kind="skip",
-                       reason="%d commits ahead — kept" % n_ahead)
-            out.append(row)
-            continue
+            # #968: accept containment as alternative to zero-ahead
+            is_contained = False
+            if contained_fn is not None:
+                is_contained = contained_fn(wt_path)
+            elif n_ahead > 0:
+                # Default: check via git branch -r --contains HEAD
+                from watchdog.disk_guard_worktrees import head_contained_in_origin_scratch
+                is_contained = head_contained_in_origin_scratch(wt_path)
+            if not is_contained:
+                row.update(bytes=0, kind="skip",
+                           reason="%d commits ahead — kept" % n_ahead)
+                out.append(row)
+                continue
         # Reclaimable
         size = _safe_dir_size(wt_path, dir_stats_fn)
         row.update(bytes=size, kind="scratch-worktree-remove", reason=None)

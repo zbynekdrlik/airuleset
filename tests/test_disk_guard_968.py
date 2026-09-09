@@ -14,8 +14,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 

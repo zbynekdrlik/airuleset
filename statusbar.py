@@ -502,11 +502,12 @@ def disk_segment(home=None, now=None):
         return ""
     if not isinstance(ts, (int, float)) or (now - ts) > DISK_SEGMENT_STALE_S:
         return ""
-    # #925: shown at >= 95 % OR when drain_exhausted (the guard could not
-    # reach target — the owner must act). The 90-94 % band the machinery
-    # resolves autonomously is hidden. Falls back to the pct threshold when
-    # the cache predates the exhausted field.
-    exhausted = cache.get("drain_exhausted") is True
+    # #925/#968: shown at >= 95 % OR when drain_exhausted_streak >= 2 (the
+    # guard freed nothing twice in a row at critical pressure — the owner must
+    # act). Backwards-compat: legacy drain_exhausted=True still triggers.
+    # The 90-94 % band the machinery resolves autonomously is hidden.
+    streak = cache.get("drain_exhausted_streak", 0)
+    exhausted = (isinstance(streak, int) and streak >= 2) or cache.get("drain_exhausted") is True
     shown = (worst >= DISK_SEGMENT_RED_PCT) or exhausted
     if not shown:
         return ""

@@ -111,6 +111,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "home-snapshot",
     # #965 — android build intermediates + scratch worktrees:
     "android-build", "scratch-worktree",
+    # #968 — stale agent worktrees (drain rung, every box class):
+    "stale-agent-worktree",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -2050,9 +2052,10 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
 def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
                               min_age_days=RUNNER_DIAG_MIN_AGE_DAYS,
                               pgrep_fn=None, dir_stats_fn=None):
-    """#920: runner ``_work/_diag`` diagnostic logs older than ``min_age_days``.
-    These are diagnostic output logs the runner writes per-job — safe to age
-    out. SKIPPED ENTIRELY when ANY ``Runner.Worker`` process is live (a job
+    """#920/#968: runner diagnostic logs older than ``min_age_days``.
+    Walks BOTH ``_work/_diag`` (per-job output) AND the runner's own top-level
+    ``_diag/`` (``Runner_*.log``, ``Worker_*.log`` — #968).
+    SKIPPED ENTIRELY when ANY ``Runner.Worker`` process is live (a job
     may be writing to ``_diag`` right now). Returns individual LOG FILES as
     candidates (not the whole ``_diag`` dir) so the guard can reclaim selectively.
     Rows ``{cls:"runner-diag", path, bytes, reason}``."""
@@ -2071,31 +2074,38 @@ def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
                  "reason": "Runner.Worker live — _diag may be written, kept"}]
     cutoff = min_age_days * 86400
     out = []
+
+    def _walk_diag_dir(diag):
+        """Walk a single _diag directory and append candidates to `out`."""
+        if not diag.is_dir() or diag.is_symlink():
+            return
+        try:
+            for logfile in sorted(diag.iterdir()):
+                if logfile.is_symlink() or not logfile.is_file():
+                    continue
+                try:
+                    st = os.lstat(str(logfile))
+                except OSError as e:
+                    out.append({"cls": "runner-diag", "path": str(logfile),
+                                "bytes": 0, "reason": "could not stat: %s" % e})
+                    continue
+                age = now - st.st_mtime
+                row = {"cls": "runner-diag", "path": str(logfile),
+                       "bytes": st.st_size, "reason": None}
+                if age < cutoff:
+                    row["reason"] = ("too recent (%.1fd < %dd)"
+                                     % (age / 86400.0, min_age_days))
+                out.append(row)
+        except OSError as e:
+            out.append({"cls": "runner-diag", "path": str(diag),
+                        "bytes": 0, "reason": "could not walk: %s" % e})
+
     try:
         for rd in sorted(root.glob("actions-runner*")):
-            diag = rd / "_work" / "_diag"
-            if not diag.is_dir() or diag.is_symlink():
-                continue
-            try:
-                for logfile in sorted(diag.iterdir()):
-                    if logfile.is_symlink() or not logfile.is_file():
-                        continue
-                    try:
-                        st = os.lstat(str(logfile))
-                    except OSError as e:
-                        out.append({"cls": "runner-diag", "path": str(logfile),
-                                    "bytes": 0, "reason": "could not stat: %s" % e})
-                        continue
-                    age = now - st.st_mtime
-                    row = {"cls": "runner-diag", "path": str(logfile),
-                           "bytes": st.st_size, "reason": None}
-                    if age < cutoff:
-                        row["reason"] = ("too recent (%.1fd < %dd)"
-                                         % (age / 86400.0, min_age_days))
-                    out.append(row)
-            except OSError as e:
-                out.append({"cls": "runner-diag", "path": str(diag),
-                            "bytes": 0, "reason": "could not walk: %s" % e})
+            # #920: per-job diagnostic output under _work/_diag
+            _walk_diag_dir(rd / "_work" / "_diag")
+            # #968: runner's own top-level _diag (Runner_*.log, Worker_*.log)
+            _walk_diag_dir(rd / "_diag")
     except OSError as e:
         return [{"cls": "runner-diag", "path": None,
                  "reason": "could not walk %s: %s" % (runner_root, e)}]
@@ -2647,6 +2657,17 @@ def _plan_scratch_worktrees(home, now):
             for r in rows]
 
 
+def _plan_stale_agent_worktrees(home, now):
+    """#968 — stale agent worktrees (every box class, before journal)."""
+    from watchdog.disk_guard_worktrees import discover_stale_agent_worktrees
+    try:
+        return discover_stale_agent_worktrees(home=home, now=now)
+    except Exception as e:
+        return [{"cls": "stale-agent-worktree", "path": "-", "bytes": 0,
+                 "kind": "skip",
+                 "reason": "stale-agent-worktree discovery error: %r" % e}]
+
+
 def _plan_work_products_snapshot(home, now):
     """#935-B — work-products snapshot backstop."""
     try:
@@ -2693,6 +2714,9 @@ def _default_planners(home, now, scratch_rows=None):
         ("claude-metadata", lambda: _plan_claude_metadata(home, now)),
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
+        # #968: stale agent worktrees + scratch worktrees BEFORE journal
+        ("stale-agent-worktree", lambda: _plan_stale_agent_worktrees(home, now)),
+        ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
         ("docker-image", lambda: _plan_docker(home, now)),
         ("runner-checkout", lambda: _plan_runner_checkouts(home, now)),
