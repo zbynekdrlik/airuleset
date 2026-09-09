@@ -1337,11 +1337,13 @@ class TestStreamRoutingGate(TestCase):
         self.assertIn("Stream-routing", r.stderr)
 
     def test_stream_account_foreign_label_with_justification_passes(self):
+        # #962: a foreign-label filing with Stream-routing: now also needs
+        # -l needs-gatekeeper to auto-route to the gatekeeper.
         gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
         body = ("Stream-routing: david -- patri im, defekt je v ich module\n"
                 "found this while working my own module")
         r = run(body_cmd("foreign justified", body, scope_gate="cross-cutting",
-                          labels=["stream:david"]),
+                          labels=["stream:david", "needs-gatekeeper"]),
                 gh_bin=gh_bin, user="david2")
         self.assertEqual(r.returncode, 0, r.stderr)
 

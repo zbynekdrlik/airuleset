@@ -980,6 +980,38 @@ def _target_repo_for_segment(tk, api_call, cwd_repo):
 STREAM_LABEL_RE = re.compile(r'^stream:([A-Za-z0-9_-]+)$', re.I)
 STREAM_ROUTING_RE = re.compile(r'(?m)^\s*Stream-routing:\s*(\S.*)$')
 
+# #962 -- owner-quote detection for the presence-required exemption. A body
+# quoting an owner message with `verbatim` and a date from today or yesterday
+# (D.M.YYYY format) is evidence the owner WAS present and the user-request
+# is legitimate even in an unattended session.
+_VERBATIM_RE = re.compile(r'\bverbatim\b', re.I)
+_EU_DATE_RE = re.compile(r'\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b')
+
+
+def _has_recent_owner_quote(body):
+    """True when the body contains 'verbatim' AND a D.M.YYYY date that is
+    today or yesterday (the 24h window the dispatch mandates). Returns False
+    on ANY parse failure -- fail toward blocking, matching this hook's own
+    stated bias throughout."""
+    if not body or not _VERBATIM_RE.search(body):
+        return False
+    try:
+        now = datetime.now()
+        today = now.date()
+        yesterday = today - __import__("datetime").timedelta(days=1)
+        for m in _EU_DATE_RE.finditer(body):
+            day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                d = __import__("datetime").date(year, month, day)
+            except ValueError:
+                continue
+            if d == today or d == yesterday:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 # Cached per (cwd, repo) / (cwd, repo_dir) WITHIN THIS ONE hook invocation,
 # same shape as `_issue_list_cache` above -- a batch filing several issues
 # in one command must not repeat the identical `gh label list` call or the
@@ -1120,6 +1152,32 @@ def _explicit_stream_labels(tk, is_api):
     return found
 
 
+def _all_labels(tk, is_api):
+    """Every label value named via -l/--label in THIS segment's own tokens,
+    lowercase, deduped -- same extraction as `_explicit_stream_labels` but
+    returns ALL labels, not just stream:* ones (#962)."""
+    if is_api:
+        return []
+    found = []
+    for idx, t in enumerate(tk):
+        val = None
+        if t in ("-l", "--label") and idx + 1 < len(tk):
+            val = tk[idx + 1]
+        elif t.startswith("--label="):
+            val = t[len("--label="):]
+        elif t.startswith("-l") and len(t) > 2 and not t.startswith("--"):
+            val = t[2:]
+            if val.startswith("="):
+                val = val[1:]
+        if val is None:
+            continue
+        for piece in val.split(","):
+            piece = piece.strip().lower()
+            if piece and piece not in found:
+                found.append(piece)
+    return found
+
+
 def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
     """#390 -- a block-reason string, or None (nothing to block -- covers
     every degrade-to-unmeasurable case too, per this hook's own
@@ -1141,7 +1199,12 @@ def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
     rides alongside it. This is deliberate: the filer's own label already
     proves the filing is (at least in part) that filer's own work: routing
     it under an ADDITIONAL, foreign label as well is a normal
-    cross-stream-relevance tag, not a mis-file."""
+    cross-stream-relevance tag, not a mis-file.
+
+    #962: when a foreign-label filing carries a `Stream-routing:` body
+    line, it ALSO requires `-l needs-gatekeeper` -- auto-routing the
+    ticket to the gatekeeper for triage. Without the label the block
+    message names the exact flag to add."""
     if is_api:
         return None
     profile, own_label = _filer_authority_and_own_stream(cwd, repo_dir)
@@ -1156,7 +1219,14 @@ def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
     if own_label in applied:
         return None
     if body and STREAM_ROUTING_RE.search(body):
-        return None
+        # #962: a justified foreign-label filing must also carry
+        # -l needs-gatekeeper to auto-route to the gatekeeper.
+        all_lbl = _all_labels(tk, is_api)
+        if "needs-gatekeeper" in all_lbl:
+            return None
+        return ("stream-routing-add-needs-gatekeeper (add "
+                "`-l needs-gatekeeper` to auto-route the core ticket "
+                "to the gatekeeper for triage)")
     return "stream-routing-unjustified"
 
 
@@ -1360,10 +1430,15 @@ for seg in split_top_level(skeleton):
         if unattended:
             unattended_reason = None
             if crit_l in EXEMPT_FROM_CAP:
-                unattended_reason = (
-                    "presence-required (an unattended loop cannot claim the "
-                    "owner asked -- %s is accepted only when the owner is "
-                    "PRESENT)" % crit_l)
+                # #962: exempt when the body quotes an owner message with
+                # 'verbatim' + a date from the last 24h — evidence the
+                # owner WAS present and explicitly asked.
+                if not _has_recent_owner_quote(body):
+                    unattended_reason = (
+                        "presence-required (an unattended loop cannot claim the "
+                        "owner asked -- %s is accepted only when the owner is "
+                        "PRESENT, or the body quotes an owner message with "
+                        "'verbatim' and today's/yesterday's date)" % crit_l)
             else:
                 _dw = _dismissal_word(body)
                 if _dw:
@@ -1525,14 +1600,17 @@ chain-width cap (#329: a 3rd+ finding off one review belongs in that
 branch, not a new ticket), (g) this repo has already reached today's
 soft filing cap of 8 non-exempt issues (#329), (h) this repo is
 stream-aware and this filing (from a known sub-dev stream account) carries
-no explicit `stream:<x>` label at all (#390), or (i) it carries a
+no explicit `stream:<x>` label at all (#390), (i) it carries a
 `stream:<x>` label naming a DIFFERENT stream than your own, with no
-`Stream-routing: <reason>` line justifying the hand-off (#390).
+`Stream-routing: <reason>` line justifying the hand-off (#390), or
+(i2) it HAS a `Stream-routing:` line but is missing `-l needs-gatekeeper`
+to auto-route the core ticket to the gatekeeper (#962).
 
 #842 (UNATTENDED sessions only — an attended/owner-present filing is never
 subject to these): (j) `presence-required` — a `user-request`/`planned-work`
-criterion is accepted only when the OWNER is PRESENT; an unattended loop cannot
-claim the owner asked. (k) `dismissal-word` — the body dismisses a test failure
+criterion is accepted only when the OWNER is PRESENT (or the body quotes an
+owner message with `verbatim` and today's/yesterday's date — #962); an
+unattended loop cannot claim the owner asked. (k) `dismissal-word` — the body dismisses a test failure
 (flaky / pre-existing / intermittent / out of scope); FIX the test/root cause,
 do not file its excuse as a ticket. (l) `net-drain` — this repo has created at
 least as many issues as it closed today; the loop must DRAIN it (fix in-lane, or
@@ -1562,9 +1640,10 @@ Fix NOW — one of:
      chain-width caps), OR
   5. Add an explicit `-l stream:<your-own-stream>` label matching YOUR OWN
      stream (#390) -- or, when this ticket genuinely belongs to a
-     DIFFERENT stream, keep that stream's label and add a
-     `Stream-routing: <reason>` line to the body naming why it belongs to
-     them, not you.
+     DIFFERENT stream (or is a core/shared-infra ticket), keep that
+     stream's label, add a `Stream-routing: <reason>` line to the body,
+     AND add `-l needs-gatekeeper` to auto-route it to the gatekeeper
+     for triage (#962).
 
 This is a LOGGED, falsifiable claim (~/.claude/scope-gate.log) — it does not
 verify the criterion is true, only that you affirmatively claimed one instead
