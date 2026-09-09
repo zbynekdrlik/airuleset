@@ -23,6 +23,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cli_handoff_template import (
+    compose_body,
     derive_branch_field,
     has_extended_template,
     render_extended_body,
@@ -189,6 +190,15 @@ class TestRenderExtendedBody(unittest.TestCase):
         self.assertIn("Closes-finding: F1 -- fixed", body)
         self.assertIn("Closes-finding: F2 -- fixed", body)
 
+    def test_self_review_model_emitted_when_tier_given(self):
+        """R1 fable-advisor finding: Self-review-model: is gate-required."""
+        body = self._render(reviewed_by_tier="claude-fable-5-1")
+        self.assertIn("Self-review-model: claude-fable-5-1", body)
+        # Must appear BEFORE the Self-review: marker.
+        model_idx = body.index("Self-review-model:")
+        review_idx = body.index("**Self-review:**")
+        self.assertLess(model_idx, review_idx)
+
 
 class TestRenderGenericBody(unittest.TestCase):
     """The generic body preserves the pre-#969 shape, minus Bounce-round: 1."""
@@ -272,6 +282,7 @@ class TestValidateExtendedFlags(unittest.TestCase):
             stack="#100",
             harness="pytest",
             shared_benefit="shared -- mechanism",
+            reviewed_by_tier="claude-fable-5-1",
         ))
 
     def test_missing_stack(self):
@@ -279,6 +290,7 @@ class TestValidateExtendedFlags(unittest.TestCase):
             stack="",
             harness="pytest",
             shared_benefit="shared",
+            reviewed_by_tier="claude-fable-5-1",
         )
         self.assertIn("--stack", result)
 
@@ -287,10 +299,48 @@ class TestValidateExtendedFlags(unittest.TestCase):
             stack=None,
             harness=None,
             shared_benefit=None,
+            reviewed_by_tier=None,
         )
         self.assertIn("--stack", result)
         self.assertIn("--harness", result)
         self.assertIn("--shared-benefit", result)
+        self.assertIn("--reviewed-by-tier", result)
+
+    def test_missing_reviewed_by_tier(self):
+        result = validate_extended_flags(
+            stack="#100",
+            harness="pytest",
+            shared_benefit="shared",
+            reviewed_by_tier="",
+        )
+        self.assertIn("--reviewed-by-tier", result)
+
+
+class TestComposeBody(unittest.TestCase):
+    """compose_body uses extended shape when extended flags are given."""
+
+    def test_extended_flags_override_failed_probe(self):
+        """Y1: when --stack/--harness/--shared-benefit are given, use
+        extended shape even if the probe returns False."""
+        import unittest.mock as m
+        with m.patch("cli_handoff_template.has_extended_template",
+                      return_value=False):
+            body, err = compose_body(
+                repo="zbynekdrlik/odoo-erp",
+                branch="dev",
+                head_sha="abc123def",
+                verified_at_utc="2026-09-09T12:00:00Z",
+                self_review_table=REVIEW_TABLE,
+                bounce_round=1,
+                stack="#100",
+                harness="pytest",
+                shared_benefit="shared",
+                reviewed_by_tier="claude-fable-5-1",
+            )
+        self.assertIsNone(err)
+        fields = _parse_fields(body)
+        self.assertIn("branch", fields)
+        self.assertIn("stack", fields)
 
 
 class TestHasExtendedTemplate(unittest.TestCase):

@@ -135,7 +135,9 @@ def render_extended_body(
     parts.append("READY-FOR-REVIEW: branch %s" % branch_field)
     parts.append("")
 
-    # Self-review block.
+    # Self-review block — Self-review-model: goes BEFORE the table (#969 R1).
+    if reviewed_by_tier:
+        parts.append("Self-review-model: %s" % reviewed_by_tier)
     parts.append("**Self-review:**")
     parts.append("")
     parts.append(self_review_table.strip())
@@ -155,8 +157,8 @@ def render_extended_body(
         parts.append("Evidence-HEAD: %s" % evidence_head)
     if tenant_scope:
         parts.append("Tenant-scope: %s" % tenant_scope)
-    if shared_benefit:
-        parts.append("Shared-benefit: %s" % shared_benefit)
+    # shared_benefit is unconditionally required (validated upstream).
+    parts.append("Shared-benefit: %s" % shared_benefit)
     if source_verified:
         parts.append("Source-verified: %s" % source_verified)
 
@@ -232,6 +234,7 @@ def validate_extended_flags(
     stack: Optional[str],
     harness: Optional[str],
     shared_benefit: Optional[str],
+    reviewed_by_tier: Optional[str] = None,
 ) -> Optional[str]:
     """Return an error message if any unconditionally-required extended
     template field is missing, or None if all present."""
@@ -242,6 +245,8 @@ def validate_extended_flags(
         missing.append("--harness")
     if not (shared_benefit or "").strip():
         missing.append("--shared-benefit")
+    if not (reviewed_by_tier or "").strip():
+        missing.append("--reviewed-by-tier (Self-review-model)")
     if missing:
         return ("handoff BLOCK: repo has extended template — missing "
                 "required flags: %s" % ", ".join(missing))
@@ -273,10 +278,17 @@ def compose_body(
     Returns ``(body, error)``. On error, ``body`` is empty and ``error``
     is the message to print; on success, ``error`` is None.
     """
+    # Y1 review finding (#969): when any extended flag is explicitly supplied,
+    # treat the intent as "extended" even if the probe fails — silently
+    # falling back to generic would post a body the gate rejects.
+    has_extended_flags = any((stack, harness, shared_benefit))
     use_extended = has_extended_template(repo)
+    if not use_extended and has_extended_flags:
+        use_extended = True  # caller intent overrides a failed probe
     if use_extended:
         err = validate_extended_flags(
-            stack=stack, harness=harness, shared_benefit=shared_benefit)
+            stack=stack, harness=harness, shared_benefit=shared_benefit,
+            reviewed_by_tier=reviewed_by_tier)
         if err:
             return ("", err)
         branch_field = derive_branch_field(branch, repo)
