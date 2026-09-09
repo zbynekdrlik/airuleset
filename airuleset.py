@@ -1736,6 +1736,8 @@ def cmd_status(args):
                 print(f"  {s}")
         if not result["missing"] and not result["extra"]:
             print("OK — installed skills match expected set for this account.")
+        if result["missing"]:
+            sys.exit(1)
         return
 
     print("airuleset status")
