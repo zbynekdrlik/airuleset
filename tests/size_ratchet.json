@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 7952,
+    "airuleset.py": 7973,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_account_bootstrap.py": 165,
@@ -37,7 +37,7 @@
     "cli_tmux_provisioning.py": 2005,
     "cli_vault.py": 1080,
     "cli_wdrain.py": 274,
-    "cli_webterm.py": 1831,
+    "cli_webterm.py": 1833,
     "cli_webterm_access.py": 367,
     "cli_webterm_dash_template.py": 997,
     "cli_webterm_david.py": 196,
@@ -46,7 +46,7 @@
     "cli_webterm_lane.py": 446,
     "cli_webterm_marek.py": 256,
     "cli_webterm_only.py": 802,
-    "cli_webterm_profiles.py": 848,
+    "cli_webterm_profiles.py": 853,
     "cli_webterm_pwa.py": 215,
     "cli_webterm_tunnel.py": 190,
     "cli_webterm_zbynek.py": 154,
