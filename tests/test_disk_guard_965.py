@@ -46,7 +46,7 @@ class TestAndroidBuildIntermediates(unittest.TestCase):
         self._mk("devel/proj/.claude/worktrees/agent-x/frontline/node_modules/"
                  "react-native/android/build/intermediates/something.so", 4096)
         rows = discover_android_build_intermediates(
-            home=self.home, dir_stats_fn=lambda p: 9000000)
+            home=self.home, dir_stats_fn=lambda p: (9000000, 0))
         self.assertTrue(len(rows) > 0,
                         "should discover android/build dir in node_modules")
         self.assertEqual(rows[0]["cls"], "android-build")
@@ -57,7 +57,7 @@ class TestAndroidBuildIntermediates(unittest.TestCase):
         from watchdog.disk_guard import discover_android_build_intermediates
         self._mk(".gradle/caches/transforms-3/foo.jar", 2048)
         rows = discover_android_build_intermediates(
-            home=self.home, dir_stats_fn=lambda p: 500000)
+            home=self.home, dir_stats_fn=lambda p: (500000, 0))
         gradle_rows = [r for r in rows if ".gradle/caches" in r["path"]]
         self.assertTrue(len(gradle_rows) > 0,
                         "should discover .gradle/caches")
@@ -67,7 +67,7 @@ class TestAndroidBuildIntermediates(unittest.TestCase):
         from watchdog.disk_guard import discover_android_build_intermediates
         self._mk(".gradle/daemon/8.0/daemon-pid.log", 1024)
         rows = discover_android_build_intermediates(
-            home=self.home, dir_stats_fn=lambda p: 100000)
+            home=self.home, dir_stats_fn=lambda p: (100_000, 0))
         daemon_rows = [r for r in rows if ".gradle/daemon" in r["path"]]
         self.assertTrue(len(daemon_rows) > 0,
                         "should discover .gradle/daemon")
@@ -78,7 +78,7 @@ class TestAndroidBuildIntermediates(unittest.TestCase):
         self._mk("devel/proj/node_modules/react-native/android/.cxx/cmake/debug/x86_64/libfoo.so",
                  4096)
         rows = discover_android_build_intermediates(
-            home=self.home, dir_stats_fn=lambda p: 5000000)
+            home=self.home, dir_stats_fn=lambda p: (5000000, 0))
         cxx_rows = [r for r in rows if ".cxx" in r["path"]]
         self.assertTrue(len(cxx_rows) > 0,
                         "should discover android/.cxx dir")
@@ -90,7 +90,7 @@ class TestAndroidBuildIntermediates(unittest.TestCase):
         build_dir = str(Path(build_path).parent.parent)  # android/build
         os.utime(build_dir, (time.time(), time.time()))
         rows = discover_android_build_intermediates(
-            home=self.home, dir_stats_fn=lambda p: 1000)
+            home=self.home, dir_stats_fn=lambda p: (1000, 0))
         self.assertTrue(len(rows) > 0,
                         "fresh dirs should still be discovered (no age gate)")
 
@@ -189,7 +189,7 @@ class TestScratchWorktrees(unittest.TestCase):
         rows = discover_scratch_worktrees(
             tmp_dir=self.tmp, uid=self.uid, now=time.time(),
             git_run_fn=lambda cmd, **kw: "",
-            dir_stats_fn=lambda p: 200_000_000,
+            dir_stats_fn=lambda p: (200_000_000, 0),
             locked_fn=lambda wt_path, name: False,
             ahead_fn=lambda wt_path: 0,
         )
@@ -416,7 +416,7 @@ class TestDrainSkipAfterLowYield(unittest.TestCase):
         """After 3 consecutive low-yield (<1 MiB) runs, a rung is skipped."""
         from watchdog.disk_guard import (
             _should_skip_low_yield_rung, _record_rung_yield,
-            LOW_YIELD_THRESHOLD, LOW_YIELD_SKIP_COUNT)
+            LOW_YIELD_SKIP_COUNT)
         now = time.time()
         rung = "npm-uv-cache"
         for i in range(LOW_YIELD_SKIP_COUNT):
@@ -431,8 +431,7 @@ class TestDrainSkipAfterLowYield(unittest.TestCase):
     def test_rung_not_skipped_after_high_yield(self):
         """A high-yield run resets the counter."""
         from watchdog.disk_guard import (
-            _should_skip_low_yield_rung, _record_rung_yield,
-            LOW_YIELD_THRESHOLD, LOW_YIELD_SKIP_COUNT)
+            _should_skip_low_yield_rung, _record_rung_yield)
         now = time.time()
         rung = "npm-uv-cache"
         _record_rung_yield(self.home, rung, freed=500_000, now=now)
@@ -446,15 +445,16 @@ class TestDrainSkipAfterLowYield(unittest.TestCase):
         """The skip expires after 6 hours."""
         from watchdog.disk_guard import (
             _should_skip_low_yield_rung, _record_rung_yield,
-            LOW_YIELD_THRESHOLD, LOW_YIELD_SKIP_COUNT, LOW_YIELD_SKIP_S)
+            LOW_YIELD_SKIP_COUNT, LOW_YIELD_SKIP_S)
         now = time.time()
         rung = "npm-uv-cache"
         for i in range(LOW_YIELD_SKIP_COUNT):
             _record_rung_yield(self.home, rung, freed=500_000, now=now + i)
         self.assertTrue(
             _should_skip_low_yield_rung(self.home, rung, now + LOW_YIELD_SKIP_COUNT))
+        # last_ts is at now+2 (3rd record), so we need now+2+SKIP_S+1 to be past the window
         self.assertFalse(
-            _should_skip_low_yield_rung(self.home, rung, now + LOW_YIELD_SKIP_S + 1),
+            _should_skip_low_yield_rung(self.home, rung, now + LOW_YIELD_SKIP_COUNT + LOW_YIELD_SKIP_S + 1),
             "skip should expire after 6h")
 
 

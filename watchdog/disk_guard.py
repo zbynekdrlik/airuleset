@@ -109,6 +109,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "work-products-snapshot",
     # #950 — generalized home-directory snapshot backstop:
     "home-snapshot",
+    # #965 — android build intermediates + scratch worktrees:
+    "android-build", "scratch-worktree",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -208,6 +210,13 @@ TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-")
 RUNNER_DIAG_MIN_AGE_DAYS = 2
 # #920 — npm _cacache + uv cache (regenerated on demand)
 NPM_CACACHE_SUBDIR = os.path.join(".npm", "_cacache")
+# #965 — npx cache (a SEPARATE cache from _cacache, discovered alongside it)
+NPM_NPX_SUBDIR = os.path.join(".npm", "_npx")
+# #965 — low-yield rung tracking constants
+LOW_YIELD_THRESHOLD = 1_000_000      # < 1 MiB = low yield
+LOW_YIELD_SKIP_COUNT = 3             # 3 consecutive low yields → skip
+LOW_YIELD_SKIP_S = 6 * 3600          # skip for 6 hours
+LOW_YIELD_STATE_NAME = "low-yield.json"
 
 # #935-B — work-products snapshot backstop
 WORK_PRODUCTS_SUBDIR = os.path.join(".claude", "work-products")
@@ -2107,6 +2116,13 @@ def discover_npm_uv_cache(home=None, dir_stats_fn=None):
         if size > 0:
             out.append({"cls": "npm-uv-cache", "path": str(cacache),
                         "bytes": size, "kind": "delete", "reason": None})
+    # #965 — npx cache (separate from _cacache, regenerated on demand)
+    npx = Path(home) / NPM_NPX_SUBDIR
+    if npx.is_dir() and not npx.is_symlink():
+        size = _safe_dir_size(str(npx), dir_stats_fn)
+        if size > 0:
+            out.append({"cls": "npm-uv-cache", "path": str(npx),
+                        "bytes": size, "kind": "delete", "reason": None})
     # uv cache prune — only when uv is installed
     import shutil
     if shutil.which("uv"):
@@ -2116,6 +2132,70 @@ def discover_npm_uv_cache(home=None, dir_stats_fn=None):
 
 
 # --------------------------------------------------------------------------- #
+# #965 — android build intermediates + scratch worktrees extracted to
+# watchdog/disk_guard_shared_stream.py to stay under the size ratchet ceiling.
+from watchdog.disk_guard_shared_stream import (  # noqa: E402
+    discover_android_build_intermediates,
+    discover_scratch_worktrees,
+)
+
+
+# --------------------------------------------------------------------------- #
+# #965 — low-yield rung tracking (skip a rung after 3 consecutive <1 MiB runs)
+# --------------------------------------------------------------------------- #
+def _low_yield_state_path(home):
+    return os.path.join(_guard_dir(home), LOW_YIELD_STATE_NAME)
+
+
+def _read_low_yield_state(home):
+    try:
+        with open(_low_yield_state_path(home), "r") as fh:
+            return json.loads(fh.read())
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_low_yield_state(home, state):
+    try:
+        p = _low_yield_state_path(home)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(json.dumps(state))
+    except OSError:
+        pass  # airuleset:script-ok best-effort state persistence
+
+
+def _record_rung_yield(home, rung, freed, now=None):
+    """Record a rung's yield for low-yield tracking."""
+    now = time.time() if now is None else now
+    state = _read_low_yield_state(home)
+    entry = state.get(rung, {"count": 0, "last_ts": 0})
+    if freed < LOW_YIELD_THRESHOLD:
+        entry["count"] = entry.get("count", 0) + 1
+        entry["last_ts"] = now
+    else:
+        entry["count"] = 0
+        entry["last_ts"] = now
+    state[rung] = entry
+    _write_low_yield_state(home, state)
+
+
+def _should_skip_low_yield_rung(home, rung, now=None):
+    """True if a rung should be skipped due to consecutive low yields."""
+    now = time.time() if now is None else now
+    state = _read_low_yield_state(home)
+    entry = state.get(rung)
+    if entry is None:
+        return False
+    if entry.get("count", 0) < LOW_YIELD_SKIP_COUNT:
+        return False
+    # Skip expires after LOW_YIELD_SKIP_S
+    last = entry.get("last_ts", 0)
+    if now - last > LOW_YIELD_SKIP_S:
+        return False
+    return True
+
+
 # #935-B — work-products SNAPSHOT backstop
 # --------------------------------------------------------------------------- #
 def _count_files_bounded(path, limit):
@@ -2536,9 +2616,30 @@ def _plan_runner_diag(home, now):
 
 
 def _plan_npm_uv_cache(home, now):
-    """#920 — npm _cacache + uv cache prune."""
+    """#920 — npm _cacache + _npx (#965) + uv cache prune."""
     return [_norm_action("npm-uv-cache", r, "delete")
             for r in discover_npm_uv_cache(home=home)]
+
+
+def _plan_android_build(home, now):
+    """#965 — android build intermediates (shared-stream prevention)."""
+    try:
+        return [_norm_action("android-build", r, "delete")
+                for r in discover_android_build_intermediates(home=home)]
+    except Exception as e:
+        return [{"cls": "android-build", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "android-build discovery error: %r" % e}]
+
+
+def _plan_scratch_worktrees(home, now):
+    """#965 — scratch worktrees under /tmp scratchpads."""
+    try:
+        rows = discover_scratch_worktrees(now=now)
+    except Exception as e:
+        return [{"cls": "scratch-worktree", "path": "-", "bytes": 0, "kind": "skip",
+                 "reason": "scratch-worktree discovery error: %r" % e}]
+    return [_norm_action("scratch-worktree", r, r.get("kind", "delete"))
+            for r in rows]
 
 
 def _plan_work_products_snapshot(home, now):
@@ -2601,12 +2702,15 @@ def _prevention_planners(home, now, scratch_rows=None):
     """#920 — cheapest/safest rungs for the PREVENTION pass (70-79%, or any
     level on shared-stream boxes #939). Age-out operations on disposable content
     + worktree cleanup (#939: proactive worktree reclaim on shared-stream boxes,
-    not only under >=80% pressure)."""
+    not only under >=80% pressure).
+    #965: added android-build (no age gate on shared-stream) and scratch-worktree."""
     return [
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
         ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
+        ("android-build", lambda: _plan_android_build(home, now)),
+        ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
         ("worktree", lambda: _plan_worktrees(home, now)),
     ]
 
@@ -2764,6 +2868,29 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
     if kind == "home-worktree-remove":
         # #906: cross-user worktree removal via `sudo -u <owner>`.
         _remove_home_worktree_dir(a, run_fn=run_fn)
+        return nbytes
+    if kind == "scratch-worktree-remove":
+        # #965: scratch worktree under /tmp — parse repo from .git file, remove
+        wt = path
+        git_file = os.path.join(wt, ".git")
+        repo = None
+        try:
+            content = Path(git_file).read_text().strip()
+            if content.startswith("gitdir:"):
+                gd = content.split(":", 1)[1].strip()
+                # .git/worktrees/<name> → repo is 3 levels up
+                repo = os.path.dirname(os.path.dirname(os.path.dirname(gd)))
+        except OSError:
+            pass  # airuleset:script-ok .git file unreadable, fall back to rm
+        if repo and os.path.isdir(os.path.join(repo, ".git")):
+            try:
+                subprocess.run(
+                    ["git", "-C", repo, "worktree", "remove", "--force", wt],
+                    check=True, capture_output=True, text=True, timeout=60)
+                return nbytes
+            except Exception:
+                pass  # airuleset:script-ok fall through to rm
+        _rm_path(wt, sudo=False, run_fn=run_fn)
         return nbytes
     if kind == "journal-vacuum":
         subprocess.run(["journalctl", "--user", "--vacuum-size=100M"],
