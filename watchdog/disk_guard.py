@@ -210,6 +210,8 @@ TMP_TEST_MIN_AGE_HOURS_SHARED_STREAM = 3   # #925 owner ruling: 3h on shared-str
 TMP_TEST_PREFIXES = ("jest_", "pytest-of-", "npmcache-")
 # #920 — runner _diag logs (diagnostic, safe to age out)
 RUNNER_DIAG_MIN_AGE_DAYS = 2
+# #968 — runner top-level _diag (Runner_*.log, Worker_*.log) — 1 day per ticket
+RUNNER_DIAG_TOPLEVEL_MIN_AGE_DAYS = 1
 # #920 — npm _cacache + uv cache (regenerated on demand)
 NPM_CACACHE_SUBDIR = os.path.join(".npm", "_cacache")
 # #965 — npx cache (a SEPARATE cache from _cacache, discovered alongside it)
@@ -2073,10 +2075,13 @@ def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
         return [{"cls": "runner-diag", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — _diag may be written, kept"}]
     cutoff = min_age_days * 86400
+    cutoff_toplevel = RUNNER_DIAG_TOPLEVEL_MIN_AGE_DAYS * 86400  # #968: 1d for top-level
     out = []
 
-    def _walk_diag_dir(diag):
+    def _walk_diag_dir(diag, age_cutoff=None, age_days_label=None):
         """Walk a single _diag directory and append candidates to `out`."""
+        _co = age_cutoff if age_cutoff is not None else cutoff
+        _dl = age_days_label if age_days_label is not None else min_age_days
         if not diag.is_dir() or diag.is_symlink():
             return
         try:
@@ -2092,9 +2097,9 @@ def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
                 age = now - st.st_mtime
                 row = {"cls": "runner-diag", "path": str(logfile),
                        "bytes": st.st_size, "reason": None}
-                if age < cutoff:
+                if age < _co:
                     row["reason"] = ("too recent (%.1fd < %dd)"
-                                     % (age / 86400.0, min_age_days))
+                                     % (age / 86400.0, _dl))
                 out.append(row)
         except OSError as e:
             out.append({"cls": "runner-diag", "path": str(diag),
@@ -2105,7 +2110,9 @@ def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
             # #920: per-job diagnostic output under _work/_diag
             _walk_diag_dir(rd / "_work" / "_diag")
             # #968: runner's own top-level _diag (Runner_*.log, Worker_*.log)
-            _walk_diag_dir(rd / "_diag")
+            # Uses 1-day age per ticket (shorter than _work/_diag's 2d)
+            _walk_diag_dir(rd / "_diag", age_cutoff=cutoff_toplevel,
+                          age_days_label=RUNNER_DIAG_TOPLEVEL_MIN_AGE_DAYS)
     except OSError as e:
         return [{"cls": "runner-diag", "path": None,
                  "reason": "could not walk %s: %s" % (runner_root, e)}]
@@ -3787,24 +3794,36 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             status["top_consumers"] = prior["top_consumers"]
             if "top_consumers_ts" in prior:
                 status["top_consumers_ts"] = prior["top_consumers_ts"]
-        # #925: carry forward drain_exhausted on non-drain polls, but CLEAR it
-        # when pressure drops below CRITICAL_PCT (the badge band — F1 review:
-        # DRAIN_PCT=80 would show the badge in the 80-89 % band #854 hid).
+        # #925/#968: carry forward drain_exhausted + drain_exhausted_streak on
+        # non-drain polls. CLEAR when pressure drops below effective critical.
+        from watchdog.disk_guard_worktrees import effective_critical_pct
+        _eff_crit = effective_critical_pct(statvfs_fn)
         if isinstance(prior, dict) and prior.get("drain_exhausted") is True:
-            if status["worst_pct"] < CRITICAL_PCT:
+            if status["worst_pct"] < _eff_crit:
                 status["drain_exhausted"] = False
             else:
                 status["drain_exhausted"] = True
+        # #968: carry forward drain_exhausted_streak
+        if isinstance(prior, dict) and isinstance(prior.get("drain_exhausted_streak"), int):
+            if status["worst_pct"] < _eff_crit:
+                status["drain_exhausted_streak"] = 0
+            else:
+                status["drain_exhausted_streak"] = prior["drain_exhausted_streak"]
     # #925 F5: carry forward drain_exhausted BEFORE the pre-drain status write
-    # (the write would otherwise erase it on a drain poll that hits the lock
-    # early-return, or on a dry-run that skips the post-drain merge).
     if "drain_exhausted" not in status:
         _prior_ex = _read_status_cache(home) if will_drain else (prior if isinstance(prior, dict) else {})
+        from watchdog.disk_guard_worktrees import effective_critical_pct as _ecp
+        _eff_crit2 = _ecp(statvfs_fn)
         if isinstance(_prior_ex, dict) and _prior_ex.get("drain_exhausted") is True:
-            if status["worst_pct"] < CRITICAL_PCT:
+            if status["worst_pct"] < _eff_crit2:
                 status["drain_exhausted"] = False
             else:
                 status["drain_exhausted"] = True
+        if isinstance(_prior_ex, dict) and isinstance(_prior_ex.get("drain_exhausted_streak"), int):
+            if status["worst_pct"] < _eff_crit2:
+                status["drain_exhausted_streak"] = 0
+            else:
+                status["drain_exhausted_streak"] = _prior_ex["drain_exhausted_streak"]
     # #895: top_consumers must ALWAYS be present in status.json (even on a
     # cold-start non-drain poll) so downstream readers never see a missing key.
     if "top_consumers" not in status:
@@ -3912,24 +3931,32 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             except Exception as e:
                 logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
-        # #925: drain_exhausted — True when the drain ran at >=CRITICAL_PCT
-        # pressure AND could NOT move the needle (no measurable pct drop).
-        # This is the "guard needs human help" signal the statusbar reads to
-        # show the badge BELOW 95 %. A drain that freed even 1 % clears it.
-        # Threshold = CRITICAL_PCT (90), NOT TARGET_PCT (75) — a drain at 88 %
-        # that cannot reach 75 % is still in the "machinery handles it" band
-        # and must NOT show the badge (F1 review finding).
-        # Set on `post` AND written to a SEPARATE cache update so it survives
-        # even when `planners_fn is not None` (test path) skips the top_consumers
-        # write below.
+        # #925/#968: drain_exhausted + drain_exhausted_streak — the streak is
+        # the consecutive count of drains at >= effective critical that freed
+        # < 1 MiB. Badge shows at streak >= 2.
         if not dry_run:
+            from watchdog.disk_guard_worktrees import effective_critical_pct as _ecp3
+            _eff_crit3 = _ecp3(statvfs_fn)
             pre_pct = status.get("worst_pct", 0)
-            post["drain_exhausted"] = (post["worst_pct"] >= CRITICAL_PCT
-                                       and post["worst_pct"] >= pre_pct)
+            is_exhausted = (post["worst_pct"] >= _eff_crit3
+                            and post["worst_pct"] >= pre_pct)
+            post["drain_exhausted"] = is_exhausted
+            # #968: streak counter
+            _prior_streak = _read_status_cache(home)
+            _prev_streak = 0
+            if isinstance(_prior_streak, dict):
+                _prev_streak = _prior_streak.get("drain_exhausted_streak", 0)
+                if not isinstance(_prev_streak, int):
+                    _prev_streak = 0
+            if is_exhausted:
+                post["drain_exhausted_streak"] = _prev_streak + 1
+            else:
+                post["drain_exhausted_streak"] = 0
             try:
                 _cur = _read_status_cache(home)
                 if isinstance(_cur, dict):
                     _cur["drain_exhausted"] = post["drain_exhausted"]
+                    _cur["drain_exhausted_streak"] = post["drain_exhausted_streak"]
                     _cur["worst_pct"] = post["worst_pct"]
                     _cur["level"] = post["level"]
                     _cur["ts"] = post["ts"]
@@ -3973,6 +4000,27 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             if post["worst_pct"] >= SEVERE_PCT:
                 logs += file_severe_ticket(post, home, now, top_now,
                                           dry_run=dry_run, run_fn=severe_run_fn)
+        # #968: swap warning — report when /swapfile > 2x MemTotal
+        if not dry_run:
+            try:
+                from watchdog.disk_guard_worktrees import check_swap_warning
+                sw = check_swap_warning()
+                if sw:
+                    line = _log_line(now, "WARN", "/swapfile", sw["swapfile_bytes"],
+                                     "swapfile %.1fx MemTotal (%s)" % (
+                                         sw["ratio"], _human(sw["memtotal_bytes"])))
+                    logs.append(line)
+                    _append_log(_log_path(home), [line])
+                    try:
+                        _sw_cur = _read_status_cache(home)
+                        if isinstance(_sw_cur, dict):
+                            _sw_cur.setdefault("warnings", {})
+                            _sw_cur["warnings"]["swap_oversized"] = sw
+                            write_status_cache(_sw_cur, home=home)
+                    except Exception as e:
+                        _dbg("swap warning cache write: %r" % e)
+            except Exception as e:
+                _dbg("swap warning check: %r" % e)
     finally:
         _release_lock(lock)
     return logs
