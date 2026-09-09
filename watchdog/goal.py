@@ -4105,16 +4105,69 @@ def _account_limit_notify_owner(send_fn, pid, run, sid, cwd, dry_run,
             "(no-reset cap, job-6-unhandled)" % loc)
 
 
+# #970 -- resource-aware lane cap. A project's `.claude/lane-resources.json`
+# declares the effective lane ceiling for that project (default: 5, today's flat
+# cap). A stream with 1 shared test box dispatching 4 box-needing lanes wastes
+# tokens on 3 blocked workers; this lets the project cap at the actual resource
+# count. The file is read by the supervisor (SKILL.md Step 3) AND by the watchdog
+# (this module's floor computation), so both agree on the cap.
+_LANE_RESOURCE_FILE = os.path.join(".claude", "lane-resources.json")
+
+
+def lane_resource_cap(cwd):
+    """Read the project's `.claude/lane-resources.json` and return the effective
+    lane ceiling (an int, 1..GOAL_LANE_SATURATION_WORKERS). Returns
+    GOAL_LANE_SATURATION_WORKERS (5) when the file is absent, unreadable, or
+    malformed — backward-compatible default.  The absent-file case is the NORMAL
+    path (most projects have no resource file), so OSError is a routine
+    control-flow signal, not a suppressed failure — logged at the caller's
+    decision site, not here."""
+    # airuleset:script-ok file-absent is the normal path, not a suppressed error
+    p = os.path.join(cwd, _LANE_RESOURCE_FILE) if cwd else None
+    if not p:
+        return GOAL_LANE_SATURATION_WORKERS
+    try:
+        with open(p) as f:
+            data = json.loads(f.read())
+        cap = data.get("max_lanes")
+        if isinstance(cap, int) and 1 <= cap <= GOAL_LANE_SATURATION_WORKERS:
+            return cap
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return GOAL_LANE_SATURATION_WORKERS
+
+
 # #848 -- the text TEACHES the CONTINUOUS REFILL doctrine
 # (skills/autopilot SKILL.md + goal_registry.py::saturation-core; #848 retired
 # #723/#724's batch mode after the STEP-0 experiment). It fires whenever the box
-# has ROOM to refill (live_workers < min(5, backlog)) -- an empty box OR a
-# partially-full one -- and commands: keep up to 5 parallel worktree lanes live,
-# doplň (refill) a returned lane's slot IMMEDIATELY, oldest-first, serial
-# integration under the mutex, a compact-request --self after every integration
-# cycle (live lanes or not), and (the canonical within-cycle bound -- NOT the
-# retired #442 fixed "cap 8") back off ONLY on a real resource signal
-# (rate-limit / memory pressure / CC max-subagents ceiling).
+# has ROOM to refill (live_workers < min(effective_cap, backlog)) -- an empty box
+# OR a partially-full one -- and commands: keep up to effective_cap parallel
+# worktree lanes live, doplň (refill) a returned lane's slot IMMEDIATELY,
+# oldest-first, serial integration under the mutex, a compact-request --self
+# after every integration cycle (live lanes or not), and (the canonical
+# within-cycle bound -- NOT the retired #442 fixed "cap 8") back off ONLY on a
+# real resource signal (rate-limit / memory pressure / CC max-subagents ceiling).
+# #970: the nudge text is now a function so it can print the EFFECTIVE cap
+# (from lane_resource_cap) instead of a hardcoded 5.
+def _lane_nudge_text(backlog_n, waiters, effective_cap):
+    """Build the lane-check nudge text with the effective cap (#970)."""
+    return (
+        "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
+        "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
+        "NErátaj; dispatchni len naozaj workable), no BEŽÍ menej než %d živých lán "
+        "(waiterov beží: %d) — sú VOĽNÉ sloty. Podľa CONTINUOUS REFILL doktríny "
+        "skills/autopilot SKILL.md (#848/#970): drž až %d PARALELNÝCH "
+        "isolation:\"worktree\" autopilot-worker lán (run_in_background) živých — "
+        "doplň vrátený slot HNEĎ, oldest-first; ustúp (back off) len na REÁLNY "
+        "resource signál — server-side rate-limit error, memory pressure boxu, "
+        "alebo CC max-subagents strop; vrátené vetvy integruj výhradne SÉRIOVO pod "
+        "integračným mutexom; po každom integračnom cykle sprav compact-request "
+        "--self (aj keď lány bežia)."
+    ) % (backlog_n, effective_cap, waiters, effective_cap)
+
+
+# Keep the old constant for backward compat (used in GOAL_LANE_NUDGE_TEXT
+# references in test assertions etc.) and as the DEFAULT ceiling.
 GOAL_LANE_NUDGE_TEXT = (
     "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
     "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
@@ -4135,6 +4188,8 @@ GOAL_LANE_NUDGE_TEXT = (
 # SKIPS (lanes full); `live_workers < floor` (EMPTY or partially-full) falls
 # through to the refill nudge. backlog_n is >= 1 at the floor computation, so
 # floor >= 1 and workers==0 is always < floor (the refill branch is reachable).
+# #970: the EFFECTIVE ceiling is min(GOAL_LANE_SATURATION_WORKERS,
+# lane_resource_cap(cwd)) — the per-project file can only LOWER the ceiling.
 GOAL_LANE_SATURATION_WORKERS = 5      # lane ceiling: >= min(5, backlog) live lanes -> "saturated" skip (#848: below it, refill continuously)
 
 # #729 -- the whole low-mem OOM subsystem (GOAL_LANE_MIN_MEM_AVAIL_MB +
@@ -4776,12 +4831,15 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #848 CONTINUOUS REFILL (retiring #726/#723/#724's batch mode) -- on the PURE
     # COUNTS the guard reads (live worker count + open backlog), no
     # transcript-content heuristic. The nudge-worthy state is: ROOM to refill,
-    # i.e. `live_workers < min(5, backlog)` -- whether the box is EMPTY
-    # (live_workers == 0) OR partially-full (0 < live_workers < floor); both fall
-    # through to the refill nudge below. Only a SATURATED box (>= floor lanes)
-    # skips. #481: floor = min(GOAL_LANE_SATURATION_WORKERS, backlog); backlog_n
+    # i.e. `live_workers < min(effective_cap, backlog)` -- whether the box is
+    # EMPTY (live_workers == 0) OR partially-full (0 < live_workers < floor);
+    # both fall through to the refill nudge below. Only a SATURATED box (>= floor
+    # lanes) skips. #481/#970: floor = min(effective_cap, backlog); backlog_n
     # is >= 1 (the `<= 0` guard above returned), so floor >= 1 and workers==0 is
     # always < floor (an empty box always reaches the refill nudge).
+    # #970: effective_cap = lane_resource_cap(cwd) -- the per-project file can
+    # only LOWER the ceiling from the flat 5. Most projects have no file and
+    # get the flat GOAL_LANE_SATURATION_WORKERS (5) default.
     # live_workers (dispatched SUBAGENT transcripts) EXCLUDES `waiters`
     # (CC's bg-shell/monitor badge). #587 changed the finished direction: a
     # CI-waiting subagent is still counted (tool_use tail = mid-work), but a
@@ -4791,11 +4849,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # anti-flap (a just-merged worker counted through its integration window) is
     # gone (it WAS the #587 ghost); now = 1-hour cooldown + 3-min recent-human +
     # ~30s FINISH_SETTLE_S debounce.
-    floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
+    effective_cap = lane_resource_cap(cwd)
+    floor = min(effective_cap, backlog_n)
     if live_workers >= floor:
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "saturated (>= %d lanes), skip"
-                    % (loc, live_workers, waiters, backlog_n, floor))
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
+                    "effective_cap=%d -> saturated (>= %d lanes), skip"
+                    % (loc, live_workers, waiters, backlog_n,
+                       effective_cap, floor))
         return logs, False
     # #937 OCCUPANCY HONESTY: live workers alone don't cover all tickets, but
     # live + recently-finished (in integration) workers do — no room to dispatch.
@@ -4938,9 +4998,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> draft changed "
                     "between captures -- human composing right now" % loc)
         return logs, True
-    # #848: the refill nudge reaches here for ANY live_workers < floor (0..4) --
+    # #848/#970: the refill nudge reaches here for ANY live_workers < floor --
     # only a SATURATED box (>= floor lanes) returned at the saturated skip above.
-    text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
+    # #970: use the resource-aware nudge text (effective_cap replaces hardcoded 5).
+    text = _lane_nudge_text(backlog_n, waiters, effective_cap)
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_rec=rec, _lw=live_workers, _bn=backlog_n, _n_=n, _now=now):
