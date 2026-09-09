@@ -696,13 +696,13 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # REOPEN-3: no more `new-session -d -t ... -s ...-web-<pid>` clone
         # creation anywhere on this path.
         log = self._run("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertRegex(log, r"\battach-session -t zbynek-4 -f ignore-size\b")
+        self.assertRegex(log, r"\battach-session -t zbynek-4 -c \S+ -f ignore-size\b")
         self.assertNotIn("attach -d", log)
         self.assertNotRegex(log, r"new-session -d -t \S+ -s \S+-web-")
 
     def test_standalone_stream_joins_exact_directly(self):
         log = self._run("david", "::david\n::montalu")
-        self.assertRegex(log, r"\battach-session -t david -f ignore-size\b")
+        self.assertRegex(log, r"\battach-session -t david -c \S+ -f ignore-size\b")
         self.assertNotRegex(log, r"new-session -d -t \S+ -s \S+-web-")
 
     def test_single_session_joins_via_direct_attach(self):
@@ -710,7 +710,7 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # -- the independent grouped-clone view #584/#613-REOPEN-2 used to
         # build is exactly what #613 REOPEN-3 removed (it broke Ctrl+B w).
         log = self._run("zbynek", "::0")
-        self.assertRegex(log, r"\battach-session -t 0 -f ignore-size\b")
+        self.assertRegex(log, r"\battach-session -t 0 -c \S+ -f ignore-size\b")
         self.assertNotRegex(log, r"new-session -d -t \S+ -s \S+-web-")
 
     def test_no_clone_lifecycle_machinery_anywhere(self):
@@ -824,7 +824,7 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # (see tests/test_webterm_ctrlbw_darkening.py). Never the fresh-base
         # fallback (see test_fresh_base_session_is_never_ignore_size).
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"\battach-session -t zbynek-4 -f ignore-size\b")
+        self.assertRegex(log, r"\battach-session -t zbynek-4 -c \S+ -f ignore-size\b")
         self.assertIn("ignore-size", log)
 
     def test_mouse_is_restored_on_the_shared_base_session_only(self):

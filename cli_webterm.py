@@ -417,18 +417,45 @@ _ATTACH_BODY = (
     # exec'd this branch either). The explicit `exit` after keeps
     # execution from ever falling through to the fresh-create fallback
     # once a real join was resolved.
-    'tmux attach-session -t "$T" -f ignore-size; '
+    # #961: `-c "$C"` sets the default-path for new windows/panes on attach
+    # so that new splits/windows open in the project dir, not $HOME.
+    'tmux attach-session -t "$T" -c "$C" -f ignore-size; '
     'exit; '
     'fi; '
-    'exec tmux new-session -A -s "$P"'
+    # #961: `-c "$C"` creates the session in the project dir, not $HOME.
+    'exec tmux new-session -A -s "$P" -c "$C"'
 )
 
 
-def _remote_command(preferred):
+def _remote_command(preferred, start_dir_chain=None):
     """The single shell-command string run on the target (or locally for dev1).
     `preferred` is shell-quoted; the rest is a fixed body — no user input reaches
-    the shell beyond the allowlisted, inventory-derived `preferred` value."""
-    return "P=" + shlex.quote(preferred) + "; " + _ATTACH_BODY
+    the shell beyond the allowlisted, inventory-derived `preferred` value.
+
+    #961: `start_dir_chain` is a tuple of HOME-relative dir paths to try in
+    order (first existing wins, else $HOME). Default is
+    `cli_bashrc_appliers.STREAM_DEV_CWD_CHAIN` — ONE source of truth, shared
+    with the ssh auto-attach block (#264/#563). The chain is baked into a shell
+    variable `C` before the attach body runs."""
+    from cli_bashrc_appliers import STREAM_DEV_CWD_CHAIN
+    chain = start_dir_chain if start_dir_chain is not None else STREAM_DEV_CWD_CHAIN
+    # Build the shell snippet that computes C = first existing dir of the chain,
+    # fallback $HOME. Each dir is relative to $HOME.
+    chain_shell = 'C="$HOME"; '
+    for rel in chain:
+        chain_shell += (
+            'if [ -d "$HOME/' + rel + '" ]; then C="$HOME/' + rel + '"; '
+        )
+    # Close all the if blocks (only the first match sets C and we break)
+    # Actually, use a for-loop approach to avoid nested ifs:
+    chain_rels = " ".join(shlex.quote(r) for r in chain)
+    chain_shell = (
+        'C="$HOME"; '
+        'for __r in ' + chain_rels + '; do '
+        'if [ -d "$HOME/$__r" ]; then C="$HOME/$__r"; break; fi; '
+        'done; '
+    )
+    return "P=" + shlex.quote(preferred) + "; " + chain_shell + _ATTACH_BODY
 
 
 def _ssh_interactive_prefix(entry):
@@ -497,8 +524,12 @@ _SYSTEMD_RUN_SCOPE = ["systemd-run", "--user", "--scope", "--quiet", "--collect"
 
 def build_connect_argv(entry):
     """The argv the ttyd child execs for `entry`: a local scope-detached
-    `sh -c` (#736) or an interactive `ssh -t <target> <remote-command>`."""
-    cmd = _remote_command(entry["preferred"])
+    `sh -c` (#736) or an interactive `ssh -t <target> <remote-command>`.
+
+    #961: passes the entry's `start_dir_chain` (if any) to `_remote_command`
+    so the forced command creates/attaches sessions in the project dir."""
+    cmd = _remote_command(entry["preferred"],
+                          start_dir_chain=entry.get("start_dir_chain"))
     if entry.get("local"):
         return _SYSTEMD_RUN_SCOPE + ["sh", "-c", cmd]
     prefix = _ssh_interactive_prefix(entry)

@@ -1415,6 +1415,12 @@ def cmd_install(args):
     except Exception as e:
         print(f"  filedrop setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 4b. #961: boot-time tmux bootstrap unit (shared-stream/gk/controller) ---
+    try:
+        setup_tmux_bootstrap_service()
+    except Exception as e:
+        print(f"  tmux bootstrap setup error (non-fatal): {e}", file=sys.stderr)
+
     # --- 5. api-watchdog timer: every machine (auto-resume API-error stalls) ---
     try:
         maybe_setup_watchdog()
@@ -6371,6 +6377,77 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
     return "created session '%s' in %s, claude launched" % (user, cwd)
 
 
+# --- #961: boot-time tmux bootstrap systemd --user unit ---
+
+TMUX_BOOTSTRAP_SERVICE_TEMPLATE = REPO_DIR / "settings" / "airuleset-tmux-bootstrap.service.template"
+TMUX_BOOTSTRAP_SERVICE_NAME = "airuleset-tmux-bootstrap.service"
+
+
+def _render_tmux_bootstrap_unit():
+    """Render the boot-time tmux bootstrap unit template with {{REPO_DIR}}."""
+    return TMUX_BOOTSTRAP_SERVICE_TEMPLATE.read_text().replace(
+        "{{REPO_DIR}}", str(REPO_DIR))
+
+
+def setup_tmux_bootstrap_service():
+    """Install + enable the boot-time tmux bootstrap systemd --user unit.
+
+    #961: ensures the stream's ONE tmux session exists in the correct project
+    cwd BEFORE any webterm tab attaches after a reboot. Runs on shared-stream,
+    gk, and controller boxes (the same scope as ensure_stream_tmux_session).
+
+    Follows the filedrop.service install pattern: write unit, daemon-reload,
+    enable --now. The oneshot runs once at boot and exits."""
+    import subprocess
+    from cli_filedrop_watchdog import _run_systemctl, _whoami
+    print("  Installing tmux bootstrap systemd --user service (#961)")
+
+    if not TMUX_BOOTSTRAP_SERVICE_TEMPLATE.exists():
+        print("  ERROR: tmux bootstrap service template missing: "
+              "%s" % TMUX_BOOTSTRAP_SERVICE_TEMPLATE, file=sys.stderr)
+        return False
+
+    # Write the unit
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_path = unit_dir / TMUX_BOOTSTRAP_SERVICE_NAME
+    unit_path.write_text(_render_tmux_bootstrap_unit())
+    print("  Wrote unit: %s" % unit_path)
+
+    # Linger (best-effort — should already be on for managed accounts)
+    try:
+        subprocess.run(["loginctl", "enable-linger", _whoami()],
+                       capture_output=True, text=True, timeout=15)
+    except Exception as e:
+        print("  loginctl enable-linger skipped (%s)" % e, file=sys.stderr)
+
+    # daemon-reload + enable (NOT --now: the oneshot already ran at THIS boot
+    # via ensure_stream_tmux_session in install; enable makes it run at NEXT
+    # boot)
+    rc, _o, err = _run_systemctl(["daemon-reload"])
+    if rc != 0:
+        print("  systemctl daemon-reload FAILED (rc=%s): %s" % (rc, err.strip()),
+              file=sys.stderr)
+        return False
+    rc, _o, err = _run_systemctl(["enable", TMUX_BOOTSTRAP_SERVICE_NAME])
+    if rc != 0:
+        print("  systemctl enable FAILED (rc=%s): %s" % (rc, err.strip()),
+              file=sys.stderr)
+        return False
+    print("  tmux bootstrap unit enabled (runs at boot)")
+    return True
+
+
+def cmd_stream_tmux_bootstrap(_args):
+    """Subcommand: run the stream tmux bootstrap (used by the systemd unit).
+
+    Calls ensure_stream_tmux_session() — the same #263 bootstrap that install
+    runs. Idempotent (never touches an existing session)."""
+    result = ensure_stream_tmux_session()
+    if result:
+        print(result)
+
+
 def _stream_provisioning_gaps() -> list:
     """The genuinely-human-only steps remaining for the CURRENT subdev
     stream account (#263): the claude CLI's OWN first-run OAuth login, and
@@ -7798,6 +7875,11 @@ def main():
     p_ma.add_argument("--json", dest="json_output", action="store_true",
                       help="JSON output")
 
+    # --- #961: boot-time tmux bootstrap ---
+    sub.add_parser(
+        "stream-tmux-bootstrap",
+        help="Run the stream tmux session bootstrap (#961 boot-time unit)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -7943,6 +8025,7 @@ SUBCOMMANDS = {
     "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
+    "stream-tmux-bootstrap": cmd_stream_tmux_bootstrap,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
