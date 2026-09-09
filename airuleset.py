@@ -3385,6 +3385,14 @@ def cmd_handoff(args):
     prevencia_read = getattr(args, "prevencia_read", None)
     reviewed_by_tier = getattr(args, "reviewed_by_tier", None)
     sign_only = getattr(args, "sign_only", None)
+    # Extended template fields (#969).
+    stack = getattr(args, "stack", None)
+    harness = getattr(args, "harness", None)
+    shared_benefit = getattr(args, "shared_benefit", None)
+    tenant_scope = getattr(args, "tenant_scope", None)
+    source_verified = getattr(args, "source_verified", None)
+    tested_tree = getattr(args, "tested_tree", None)
+    evidence_head = getattr(args, "evidence_head", None)
 
     # --- sign-only mode (#919) -------------------------------------------
     # Create a receipt for an existing body file without posting it.
@@ -3561,24 +3569,21 @@ def cmd_handoff(args):
               "tip %s — push first" % (head_sha[:12], branch, remote_sha[:12]))
         return 1
 
-    # Compose the comment body.
-    body_parts = ["READY-FOR-REVIEW: branch %s" % branch]
-    body_parts.append("")
-    body_parts.append("**Self-review:**")
-    body_parts.append("")
-    body_parts.append(table_text.strip())
-    body_parts.append("")
-    body_parts.append("Verified-at-UTC: %s" % now_utc)
-    body_parts.append("HEAD: %s" % head_sha)
-    if rnd >= 2:
-        body_parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
-        body_parts.append("Prevencia-read: %s" % prevencia_read)
-        body_parts.append("Reviewed-by-tier: %s" % reviewed_by_tier)
-    for cf in closes_finding:
-        body_parts.append("Closes-finding: %s" % cf)
-    body_parts.append("Bounce-round: %d" % rnd)
-
-    body = "\n".join(body_parts) + "\n"
+    # Compose the comment body — template-aware (#969).
+    import cli_handoff_template as _ht
+    body, err = _ht.compose_body(
+        repo=repo, branch=branch, head_sha=head_sha,
+        verified_at_utc=now_utc, self_review_table=table_text,
+        bounce_round=rnd, stack=stack, harness=harness,
+        shared_benefit=shared_benefit, tenant_scope=tenant_scope,
+        source_verified=source_verified, tested_tree=tested_tree,
+        evidence_head=evidence_head, root_cause=root_cause,
+        prevencia_read=prevencia_read, reviewed_by_tier=reviewed_by_tier,
+        closes_finding=closes_finding,
+    )
+    if err:
+        print(err)
+        return 1
 
     # Write receipt BEFORE posting (the hook checks the receipt).
     gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
@@ -7607,6 +7612,25 @@ def main():
                            "writes its own template-compliant body, calls "
                            "--sign-only to get the receipt, then posts with "
                            "gh issue comment --body-file.")
+    # Extended template fields (#969).
+    p_ho.add_argument("--stack",
+                      help="Stack: ticket list (required for extended-template "
+                           "repos, e.g. '#100, #101')")
+    p_ho.add_argument("--harness",
+                      help="Harness: which harness files/variants were run "
+                           "(required for extended-template repos)")
+    p_ho.add_argument("--shared-benefit", dest="shared_benefit",
+                      help="Shared-benefit: disposition (required for "
+                           "extended-template repos)")
+    p_ho.add_argument("--tenant-scope", dest="tenant_scope",
+                      help="Tenant-scope: which tenants (optional)")
+    p_ho.add_argument("--source-verified", dest="source_verified",
+                      help="Source-verified: external-data horizon (optional)")
+    p_ho.add_argument("--tested-tree", dest="tested_tree",
+                      help="Tested-tree: sha of the tested tree (optional)")
+    p_ho.add_argument("--evidence-head", dest="evidence_head",
+                      help="Evidence-HEAD: commit evidence was captured at "
+                           "(optional)")
 
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
