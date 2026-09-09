@@ -390,8 +390,8 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
 # Skills deploy per USER at install time; every user-invocable skill shows in that
 # box's slash-command list, so an irrelevant skill is pure noise there. Two scopes:
 #   MAINTAINER_ONLY — relevant only on the airuleset-maintainer's own boxes
-#     (newlevel@dev1/dev2): airuleset self-maintenance (mdreview, rules-audit),
-#     his personal workflows (meeting-analysis), his projects' tooling
+#     (newlevel@dev1/dev2, airuleset@controller): airuleset self-maintenance
+#     (mdreview, rules-audit), personal workflows (meeting-analysis), tooling
 #     (windows-remote-gui = win-* MCP rigs, fast-iterate + mutation-sweep = his
 #     Rust/mutation-era repos). Sub-dev / gatekeeper boxes never invoke these.
 #   FULL_AUTHORITY_ONLY — deploys are OUTSIDE a reduced-authority stream's job
@@ -403,7 +403,7 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
 SKILLS_MAINTAINER_ONLY = {"mdreview", "rules-audit", "meeting-analysis",
                           "mutation-sweep", "windows-remote-gui", "fast-iterate"}
 SKILLS_FULL_AUTHORITY_ONLY = {"deploy-ssh", "process-subdev", "autopilot-master"}
-MAINTAINER_USERS = {"newlevel"}
+MAINTAINER_USERS = {"newlevel", "airuleset"}
 # Per-user re-grants: a scoped-away skill that IS relevant on one specific box
 # (montalu meeting recordings get analyzed IN that stream's session — the
 # 2026-07-14 incident where the scoping prune took /meeting-analysis off montalu).
@@ -1715,8 +1715,42 @@ def cmd_install(args):
     print("Install complete. Restart Claude Code for changes to take effect.")
 
 
+def check_skill_parity(skills_dir=None, user=None):
+    """Compare installed skills against skill_names_for_user() for the current
+    account.  Returns {"missing": [...], "extra": [...]} where 'missing' are
+    skills the user SHOULD have but doesn't, and 'extra' are skills that exist
+    in ~/.claude/skills but are NOT in the user's expected set (unmanaged /
+    project-owned — informational).  #967: install-state parity check."""
+    sd = skills_dir or SKILLS_DIR
+    expected = set(skill_names_for_user(user))
+    installed = set()
+    if sd.exists():
+        installed = {p.name for p in sd.iterdir()}
+    return {
+        "missing": sorted(expected - installed),
+        "extra": sorted(installed - expected),
+    }
+
+
 def cmd_status(args):
     """Show current managed config (imports, skills, hooks)."""
+    # --skill-parity: compare installed vs expected and exit
+    if getattr(args, "skill_parity", False):
+        result = check_skill_parity()
+        if result["missing"]:
+            print("MISSING (expected but not installed):")
+            for s in result["missing"]:
+                print(f"  {s}")
+        if result["extra"]:
+            print("EXTRA (installed but not in expected set — unmanaged):")
+            for s in result["extra"]:
+                print(f"  {s}")
+        if not result["missing"] and not result["extra"]:
+            print("OK — installed skills match expected set for this account.")
+        if result["missing"]:
+            sys.exit(1)
+        return
+
     print("airuleset status")
     print("=" * 50)
 
@@ -7148,7 +7182,9 @@ def main():
     sub.add_parser("install", help="Deploy config to ~/.claude/")
     sub.add_parser("diff", help="Show what install would change")
     sub.add_parser("validate", help="Check all files exist and resolve")
-    sub.add_parser("status", help="Show current managed config")
+    p_status = sub.add_parser("status", help="Show current managed config")
+    p_status.add_argument("--skill-parity", action="store_true",
+                          help="Compare installed skills against expected set for this account")
     sub.add_parser("push", help="Push to GitHub + install locally + deploy to all remotes")
 
     # --- Tier-0 target/ retention: manual/testable purge entry point (#315)
