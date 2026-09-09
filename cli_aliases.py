@@ -15,6 +15,15 @@ module import, so it stays cheap on cli_webterm's import-light connect path.
 """
 import re
 
+# The set of unix users whose target alias keys on the BOX NAME, not the
+# user name — i.e. owner/maintainer accounts that share a unix user across
+# multiple boxes (newlevel@dev1/dev2, airuleset@controller).  This MUST
+# equal airuleset.MAINTAINER_USERS; a cross-reference test
+# (test_maintainer_parity_967.py) enforces parity at CI time.  Kept as a
+# local constant (not a lazy import) to preserve cli_aliases.py's
+# stdlib-only / import-light contract for the webterm connect path.
+_OWNER_ALIAS_USERS = frozenset({"newlevel", "airuleset"})
+
 
 def short_target_alias(user, box_name):
     """A Windows-Terminal-style SHORT target alias from a box's unix `user` and
@@ -73,9 +82,11 @@ def short_target_alias(user, box_name):
     mo = re.match(r"^simap(\d+)$", user)
     if mo:
         return "si" + mo.group(1)
-    if user == "newlevel":
-        # an owner box (dev2 / spinbike-vps) shares the `newlevel` unix user --
-        # key on the box NAME, not the user.
+    if user in _OWNER_ALIAS_USERS:
+        # an owner/maintainer box shares its unix user across multiple boxes
+        # (newlevel@dev1/dev2, airuleset@controller) — key on the box NAME,
+        # not the user.  Keyed on _OWNER_ALIAS_USERS (== MAINTAINER_USERS)
+        # instead of a literal (#967).
         return (box_name.split("-")[0] or box_name)[:8]
     if user:
         return user[:8]

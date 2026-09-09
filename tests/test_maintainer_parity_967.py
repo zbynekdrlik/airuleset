@@ -6,7 +6,6 @@ RED tests — written BEFORE the fix; they MUST fail against the current code.""
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 import unittest
