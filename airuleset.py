@@ -5847,9 +5847,8 @@ def cmd_watchdog(args):
     # #971: shared fleet.jsonl path for cross-account consumers (claudy).
     # The coordinator writes the same row to /var/lib/airuleset/fleet.jsonl
     # when the directory exists (created by cmd_install on the controller).
-    _shared_fleet_dir = Path("/var/lib/airuleset")
-    shared_fleet_path = (_shared_fleet_dir / "fleet.jsonl"
-                         if _is_coordinator and _shared_fleet_dir.is_dir()
+    shared_fleet_path = (SHARED_FLEET_DIR / "fleet.jsonl"
+                         if _is_coordinator and SHARED_FLEET_DIR.is_dir()
                          else None)
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,

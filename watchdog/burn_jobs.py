@@ -251,10 +251,16 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     # #971: shared feed — write the same row to a world-readable path so
     # other accounts on the controller (claudy) can read the fleet data
     # without home-dir ACLs. Best-effort: never breaks the primary write.
+    # Mode 0644 enforced on create so world-readability is guaranteed
+    # regardless of the umask (Fable review M1).
     if shared_fleet_path is not None:
         try:
-            with open(shared_fleet_path, "a") as f:
-                f.write(row_line)
+            fd = os.open(str(shared_fleet_path),
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            try:
+                os.write(fd, row_line.encode())
+            finally:
+                os.close(fd)
         except OSError as e:
             import sys
             print("fleet-burn shared-feed write failed: %s" % e, file=sys.stderr)

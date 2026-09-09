@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 8299,
+    "airuleset.py": 8298,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_account_bootstrap.py": 189,
@@ -554,7 +554,7 @@
     "tests/test_worktree_write_guard.py": 598,
     "tests/test_wrapped_draft.py": 627,
     "watchdog/__init__.py": 4819,
-    "watchdog/burn_jobs.py": 358,
+    "watchdog/burn_jobs.py": 364,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
     "watchdog/compact.py": 1884,
