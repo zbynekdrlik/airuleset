@@ -398,13 +398,14 @@ def is_shared_stream_box(box_class_fn=None):
 
 def _heavy_build_kind(args):
     """A short label of the heavy build / VM daemon that `args` (a process
-    cmdline string) IS — `gradle-daemon` / `kotlin-daemon` / `aapt2` /
-    `qemu/emulator` — or None for anything else. argv[0]-ANCHORED: a process
-    merely mentioning a signature in its arguments (argv[0] = watch/pgrep/grep/
-    git) never matches. NODE is DELIBERATELY never matched — node runs Claude
-    Code, MCP servers and the webterm, so a kill-on-sight node reaper would be
-    catastrophic collateral; the hook can discourage a node bundler, the reaper
-    never SIGKILLs one."""
+    cmdline string) IS — `gradle-daemon` / `kotlin-daemon` / `gradle` /
+    `gradlew` / `cmake` / `ninja` / `kotlinc` / `aapt2` / `qemu/emulator` —
+    or None for anything else. argv[0]-ANCHORED: a process merely mentioning a
+    signature in its arguments (argv[0] = watch/pgrep/grep/git) never matches.
+    NODE is DELIBERATELY never matched — node runs Claude Code, MCP servers and
+    the webterm, so a kill-on-sight node reaper would be catastrophic collateral;
+    the hook can discourage a node bundler, the reaper never SIGKILLs one.
+    #965: extended to match gradle/gradlew/cmake/ninja/kotlinc by comm/exe."""
     toks = (args or "").split()
     if not toks:
         return None
@@ -420,7 +421,33 @@ def _heavy_build_kind(args):
         return "aapt2"
     if base.startswith("qemu-system"):
         return "qemu/emulator"
+    # #965 — direct build tool processes (not via java main-class)
+    if base == "gradle":
+        return "gradle"
+    if base == "gradlew":
+        return "gradlew"
+    if base == "cmake":
+        return "cmake"
+    if base == "ninja":
+        return "ninja"
+    if base in ("kotlinc", "kotlinc-jvm"):
+        return "kotlinc"
     return None
+
+
+def discover_jdk_toolchain_findings(home=None):
+    """#965: find JDK installations under ~/tools/jdk*, ~/.sdkman, ~/Android
+    on a shared-stream box. Returns log-line strings (findings only, no delete).
+    This is a REPORT, not a reclaimable action — the owner decides removal."""
+    import glob as _glob
+    home = home or os.path.expanduser("~")
+    findings = []
+    for pattern in ("tools/jdk*", ".sdkman", "Android"):
+        for p in sorted(_glob.glob(os.path.join(home, pattern))):
+            if os.path.isdir(p):
+                findings.append("JDK/toolchain finding: %s on shared-stream box "
+                                "(#965 — owner decides removal)" % p)
+    return findings
 
 
 def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
@@ -508,4 +535,10 @@ def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
             logs.append(
                 "heavy-build-reaper: SIGKILL pid=%s FAILED: %r (kind=%s cmd=%s)"
                 % (pid, e, kind, args))
+    # #965 Y1 fix: surface JDK/toolchain findings (log-only, no delete)
+    try:
+        findings = discover_jdk_toolchain_findings()
+        logs.extend(findings)
+    except Exception:
+        pass  # airuleset:script-ok best-effort findings, never block the reaper
     return logs
