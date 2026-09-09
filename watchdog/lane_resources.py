@@ -28,9 +28,16 @@ GOAL_LANE_SATURATION_WORKERS = 5
 
 _LANE_RESOURCE_FILE = os.path.join(".claude", "lane-resources.json")
 
-#: Marker file the supervisor writes into each worktree at dispatch.
+#: Marker file the supervisor writes into the worktree's PRIVATE gitdir
+#: at dispatch — NOT the working tree root (Y-2: a file at the root dirties
+#: the tree and blocks disk-guard reclamation).  Path:
+#:   <main>/.git/worktrees/<agent-id>/lane-needs
+#: The supervisor resolves it via ``git -C "$WT" rev-parse --git-dir``.
 #: Plain text, one resource name per line (e.g. ``box\n``).
-_LANE_NEEDS_FILE = ".lane-needs"
+#: A multi-resource lane (e.g. ``box\ngpu\n``) counts once per resource;
+#: the double-count of ``live_workers - resource_occupied`` is an accepted
+#: approximation for the single-resource fleet today (L-4).
+_LANE_NEEDS_FILE = "lane-needs"
 
 # ---------------------------------------------------------------------------
 # lane_resource_caps -- the per-project resource declaration
@@ -89,6 +96,8 @@ def lane_resource_caps(cwd):
             return default_caps, ("resources is %s, not dict"
                                   % type(resources).__name__)
         for rname, rval in resources.items():
+            if rname == "total":
+                return default_caps, "resources.total is reserved"
             if isinstance(rval, bool):
                 return default_caps, "resources.%s is bool, not int" % rname
             if not isinstance(rval, int):
@@ -127,17 +136,26 @@ def count_resource_usage(cwd, evidence):
     """
     if not cwd or not evidence:
         return {}
+    # Y-2 fix: read from the worktree's PRIVATE gitdir, not the working tree.
+    # The gitdir for a worktree is <main-repo>/.git/worktrees/<agent-id>/.
+    git_dir = os.path.join(cwd, ".git", "worktrees")
+    # Fallback: also check the old working-tree path for transition compat.
     worktrees_dir = os.path.join(cwd, ".claude", "worktrees")
     counts = {}
     for lane in evidence:
         if lane.state != "live":
             continue
-        needs_path = os.path.join(worktrees_dir, lane.agent_id, _LANE_NEEDS_FILE)
+        # Primary: gitdir path (invisible to git status, dies with worktree)
+        needs_path = os.path.join(git_dir, lane.agent_id, _LANE_NEEDS_FILE)
+        if not os.path.isfile(needs_path):
+            # Fallback: old working-tree-root path (transition compat)
+            needs_path = os.path.join(
+                worktrees_dir, lane.agent_id, _LANE_NEEDS_FILE)
         try:
             with open(needs_path) as f:
                 needs = [line.strip() for line in f if line.strip()]
         except (OSError, IOError):
-            # No .lane-needs or unreadable -> box-free lane, no resource counted
+            # No lane-needs or unreadable -> box-free lane, no resource counted
             continue
         for rname in needs:
             counts[rname] = counts.get(rname, 0) + 1
@@ -169,7 +187,8 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
             parts.append("%s %d/%d occupied" % (rk, rused, rcap))
         box_free_cap = total - sum(caps[rk] for rk in resource_keys)
         box_free_used = max(0, live_workers - resource_occupied)
-        parts.append("box-free %d/%d free" % (box_free_used, max(0, box_free_cap)))
+        box_free_avail = max(0, box_free_cap - box_free_used)
+        parts.append("box-free %d/%d free" % (box_free_avail, max(0, box_free_cap)))
         resource_snippet = " (%s)" % " · ".join(parts)
 
     return (

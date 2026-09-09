@@ -370,11 +370,12 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   regardless of pressure) and reclaims any worktree whose HEAD is reachable from origin and has
   no live process. Any uncommitted scratch/temp files in a returned worktree are discarded after
   24h idle — committed work is preserved via the wip-backup ref on origin.
-- **`.lane-needs` resource marker (#970 fix-forward).** The supervisor writes a `.lane-needs` file
-  into your worktree at dispatch when the ticket needs a declared resource (e.g. `box` for an
-  erp-test box). You do NOT write or modify this file. If you are blocked on a resource the
-  supervisor over-dispatched (the box lock you waited on is held by another lane), report
-  `blocked: box` in your evidence block — this is a scheduler DEFECT the nudge must name.
+- **`lane-needs` resource marker (#970 fix-forward).** The supervisor writes a `lane-needs` file
+  into your worktree's PRIVATE gitdir at dispatch when the ticket needs a declared resource
+  (e.g. `box` for an erp-test box). You do NOT write or modify this file. If you are blocked
+  on a resource the supervisor over-dispatched (the box lock you waited on is held by another
+  lane), report `blocked: box` in your evidence block — the supervisor treats this as its own
+  scheduling defect and does not redispatch a box ticket until usage is under cap.
 - **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
   prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
   checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and

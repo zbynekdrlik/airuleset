@@ -494,19 +494,22 @@ caps — a project with ONE shared test box declares `"box": 1`. Absent file = t
 to `max_lanes`. The watchdog nudge counts live lanes per resource by reading `.lane-needs` files
 in live worktrees (see Step 3.2 below) and prints per-resource occupancy.
 
-**Step 3.2 — `.lane-needs` dispatch marker.** At dispatch, when a ticket needs a declared resource
-(e.g. its shadow/E2E test needs the erp-test box), the supervisor writes a `.lane-needs` marker
-file into the lane's worktree directory:
+**Dispatch marker — `.lane-needs`.** At dispatch, when a ticket needs a declared resource
+(e.g. its shadow/E2E test needs the erp-test box), the supervisor writes a `lane-needs` marker
+file into the lane worktree's PRIVATE gitdir (not the working tree — a working-tree file would
+dirty the tree and block disk-guard reclamation):
 
 ```bash
-echo "box" > "$WORKTREE_PATH/.lane-needs"
+echo "box" > "$(git -C "$WORKTREE_PATH" rev-parse --git-dir)/lane-needs"
 ```
 
-The file is plain text, one resource name per line. A box-free ticket gets no `.lane-needs` file.
-The watchdog's `count_resource_usage(cwd, evidence)` reads these files from live worktrees to
-count per-resource usage. A lane that returns `blocked: box` (waited on the box lock and could
-not proceed) is a scheduler DEFECT — the nudge names it: the supervisor dispatched a box-needing
-lane when the box cap was already full. Across all live lanes a SECOND, account-wide bound
+The `Agent` tool return gives the agent id; the gitdir is `.git/worktrees/agent-<id>/`. The file
+is plain text, one resource name per line. A box-free ticket gets no marker (fails OPEN toward
+"box-free" in the nudge — the nudge still pushes refill). The watchdog's
+`count_resource_usage(cwd, evidence)` reads these files from live worktrees to count per-resource
+usage. A worker that is blocked on a resource the supervisor over-dispatched should report
+`blocked: box` in its evidence block — the supervisor treats this as its own scheduling defect
+and does not redispatch a box ticket until usage is under cap. Across all live lanes a SECOND, account-wide bound
 still applies: the up-to-5 worker lanes PLUS the read-only `ticket-validator`
 dispatches Step 1b fires for EVERY member PLUS anything a
 DIFFERENT concurrent lane or session under this account runs are all the SAME kind of Claude-API
