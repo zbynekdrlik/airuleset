@@ -2956,7 +2956,7 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
     tests/test_batch_orchestration.py::TestWatchdogLaneNudgeIsContinuous.)"""
 
     def test_nudge_text_commands_continuous_refill_doctrine(self):
-        rendered = goal.GOAL_LANE_NUDGE_TEXT % (7, 2)
+        rendered = goal.GOAL_LANE_NUDGE_TEXT_FN(7, 2)
         low = rendered.lower()
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)

@@ -203,7 +203,7 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
     # ---- content locks (stable, no driving) ----
 
     def test_nudge_text_teaches_refill(self):
-        rendered = goal.GOAL_LANE_NUDGE_TEXT % (37, 2)
+        rendered = goal.GOAL_LANE_NUDGE_TEXT_FN(37, 2)
         low = rendered.lower()
         self.assertIn("refill", low)        # "CONTINUOUS REFILL"
         self.assertIn("doplň", low)         # "doplň vrátený slot HNEĎ"
@@ -217,7 +217,7 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
         self.assertNotIn("várk", low)
 
     def test_nudge_text_dropped_the_batch_phrasing(self):
-        low = goal.GOAL_LANE_NUDGE_TEXT.lower()
+        low = goal.GOAL_LANE_NUDGE_TEXT_FN(1, 0).lower()
         self.assertNotIn("začni novú várku", low)
         self.assertNotIn("žiadny refill kým", low)
 

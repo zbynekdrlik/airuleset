@@ -266,7 +266,7 @@ class TestNudgeTextQualifiesOpenCount(unittest.TestCase):
     were dispatchable -- while keeping the whole #442/#481 fleet doctrine."""
 
     def test_empty_lane_text_qualifies_open_not_workable(self):
-        rendered = goal.GOAL_LANE_NUDGE_TEXT % (7, 2)
+        rendered = goal.GOAL_LANE_NUDGE_TEXT_FN(7, 2)
         low = rendered.lower()
         self.assertIn("nie všetky", low)
         self.assertIn("rozpracovate", low)

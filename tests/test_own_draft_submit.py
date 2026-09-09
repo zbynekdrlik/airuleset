@@ -53,7 +53,7 @@ def _no_double_escape(sent):
 
 # A realistic OWN lane-check nudge (starts with the unambiguous machine prefix
 # `lane-check: `) — the exact class the live cam-box draft was.
-OWN_LANE = goal.GOAL_LANE_NUDGE_TEXT % (5, 0)
+OWN_LANE = goal.GOAL_LANE_NUDGE_TEXT_FN(5, 0)
 OWN_BOUNCE = wd.BOUNCE_NUDGE % ("#12, #13", "camera-box")
 OWN_GKREQ = wd.GKREQ_NUDGE % ("#40", "odoo-erp")
 
