@@ -113,3 +113,31 @@ def stream_number(user):
     if not m:
         return None
     return m.group(1) or "1"
+
+
+# The erp-test deploy user per stream FAMILY (#964): david-model boxes have
+# `ddeploy`, montalu/miva-model boxes have `mdeploy`.  simap is PAUSED (#851)
+# and has no erp-test box, so it returns None.  Non-stream users return None.
+# Keyed on the SAME _STREAM_FAMILY_RE stems so the mapping never drifts from
+# the stream classifier.
+_ERP_TEST_DEPLOY_USER_BY_FAMILY = {
+    "david": "ddeploy",
+    "montalu": "mdeploy",
+    "miva": "mdeploy",
+    # simap deliberately absent — paused, no erp-test box
+}
+
+
+def erp_test_deploy_user(user):
+    """The deploy user for the stream's erp-test shadow box, or None.
+
+    ``david*`` -> ``"ddeploy"``, ``montalu*``/``miva*`` -> ``"mdeploy"``,
+    everything else (non-stream, simap) -> ``None``.  THE single source for
+    the erp-test ssh config provisioning (#964) — never a second mapping.
+    """
+    u = (user or "").strip()
+    m = _STREAM_FAMILY_RE.match(u)
+    if not m:
+        return None
+    family = re.match(r"^([a-z]+)", u).group(1)
+    return _ERP_TEST_DEPLOY_USER_BY_FAMILY.get(family)

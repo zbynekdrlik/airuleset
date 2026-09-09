@@ -1,9 +1,9 @@
 {
   "files": {
-    "airuleset.py": 7952,
+    "airuleset.py": 8148,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
-    "cli_aliases.py": 115,
+    "cli_aliases.py": 143,
     "cli_autopilot_lock.py": 793,
     "cli_bashrc_appliers.py": 833,
     "cli_binary_installers.py": 467,
@@ -597,7 +597,7 @@
     "airuleset.py::_watchdog_release_state_fetch": 215,
     "airuleset.py::cmd_gk_request": 209,
     "airuleset.py::cmd_handoff": 266,
-    "airuleset.py::cmd_install": 713,
+    "airuleset.py::cmd_install": 724,
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 258,
     "airuleset.py::cmd_watchdog": 270,

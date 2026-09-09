@@ -1409,6 +1409,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  stream dev-env gap report error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3g-ter. erp-test ssh config provisioning (#964): the stream's
+    # ~/.ssh/config `Host erp-test-<stream>` alias with the correct deploy
+    # user (ddeploy for david-family, mdeploy for montalu/miva). Runs on
+    # stream accounts only; a no-op on dev1/dev2/gk. Non-fatal.
+    try:
+        erp_ssh_changed = ensure_erp_test_ssh_config()
+        if erp_ssh_changed:
+            print("  Updated:   ~/.ssh/config (erp-test ssh alias, #964)")
+    except Exception as e:
+        print(f"  erp-test ssh config error (non-fatal): {e}", file=sys.stderr)
+
     # --- 4. File-Drop service: installed on EVERY machine (serves local files) ---
     try:
         maybe_setup_filedrop()
@@ -6449,6 +6460,191 @@ def report_stream_dev_env(user=None):
         except OSError as e:
             print("  ⚠ could not rename %s (%s) — remove/rename by hand"
                   % (todo, e), file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# erp-test ssh config provisioning (#964)
+# ---------------------------------------------------------------------------
+# The stream's ~/.ssh/config carries a `Host erp-test-<stream>` alias so
+# interactive `ssh erp-test-david4` (psql/odoo-shell fixtures) resolves to
+# the right deploy user. Previously created manually with a hardcoded
+# `User mdeploy`, which is WRONG for david-model boxes (they have only
+# `ddeploy`). This provisioner derives the deploy user from the stream
+# family via `cli_aliases.erp_test_deploy_user` and writes an idempotent
+# marker-block in ~/.ssh/config.
+
+_ERP_TEST_SSH_MARK_START = "# >>> airuleset: erp-test-ssh >>>"
+_ERP_TEST_SSH_MARK_END = "# <<< airuleset: erp-test-ssh <<<"
+
+
+def render_erp_test_ssh_config_block(user):
+    """Render the managed ssh config block for ``Host erp-test-<user>``, or
+    None if `user` is not a stream with an erp-test box.
+
+    The block is wrapped in marker comments for idempotent replacement by
+    `ensure_erp_test_ssh_config`.
+    """
+    from cli_aliases import erp_test_deploy_user
+    deploy_user = erp_test_deploy_user(user)
+    if deploy_user is None:
+        return None
+    hostname = "erp-test-%s.newlevel.media" % user
+    return (
+        f"{_ERP_TEST_SSH_MARK_START}\n"
+        f"Host erp-test-{user} {hostname}\n"
+        f"    HostName {hostname}\n"
+        f"    User {deploy_user}\n"
+        f"    StrictHostKeyChecking no\n"
+        f"{_ERP_TEST_SSH_MARK_END}"
+    )
+
+
+def _replace_unmarked_erp_test_stanza(text, user, block):
+    """Replace an UNMARKED ``Host erp-test-<user>`` stanza with ``block``.
+
+    ssh_config stanzas start with a ``Host`` or ``Match`` keyword at the
+    beginning of a line and extend to the next such keyword (or EOF).
+    An unmarked stanza is one NOT inside the managed marker comments.
+
+    Returns the text with the FIRST matching unmarked stanza replaced and
+    any further duplicates removed.  If no unmarked stanza is found,
+    returns ``text`` unchanged.
+    """
+    import re as _re
+    host_alias = "erp-test-%s" % user
+    host_fqdn = "erp-test-%s.newlevel.media" % user
+
+    # Determine the byte ranges covered by managed marker blocks — any Host
+    # line inside such a range is NOT an unmarked stanza.
+    marker_ranges = []
+    s_pos = 0
+    while True:
+        si = text.find(_ERP_TEST_SSH_MARK_START, s_pos)
+        if si < 0:
+            break
+        ei = text.find(_ERP_TEST_SSH_MARK_END, si)
+        if ei < 0:
+            break
+        marker_ranges.append((si, ei + len(_ERP_TEST_SSH_MARK_END)))
+        s_pos = ei + len(_ERP_TEST_SSH_MARK_END)
+
+    def _in_marker(pos):
+        for ms, me in marker_ranges:
+            if ms <= pos < me:
+                return True
+        return False
+
+    # Split into stanzas: each starts at a line matching ^Host or ^Match.
+    stanza_re = _re.compile(r"^(?=(?:Host|Match)\s)", _re.MULTILINE)
+    parts = stanza_re.split(text)
+    if len(parts) <= 1:
+        return text
+
+    # Reconstruct with character offsets to check marker membership.
+    rebuilt = []
+    replaced = False
+    offset = 0
+    for i, part in enumerate(parts):
+        if i == 0:
+            rebuilt.append(part)
+            offset += len(part)
+            continue
+        first_line = part.split("\n", 1)[0]
+        tokens = first_line.split()
+        is_match = (
+            len(tokens) >= 2
+            and tokens[0].lower() == "host"
+            and (host_alias in tokens[1:] or host_fqdn in tokens[1:])
+        )
+        if is_match and not _in_marker(offset):
+            if not replaced:
+                rebuilt.append(block + "\n")
+                replaced = True
+            # else: drop duplicate unmarked stanzas silently.
+        else:
+            rebuilt.append(part)
+        offset += len(part)
+    if not replaced:
+        return text
+    return "".join(rebuilt)
+
+
+def ensure_erp_test_ssh_config(user=None, ssh_config_path=None):
+    """Idempotently write/replace the erp-test ssh config block for `user`.
+
+    If the block already exists with the correct content, nothing changes
+    (returns False). A stale block (wrong User) is REPLACED in place —
+    both MARKED blocks (airuleset managed markers) AND UNMARKED manual
+    stanzas (the live shape on streams provisioned before #964).
+    A fresh block is appended. Non-stream users are a no-op (returns False).
+    Creates ~/.ssh/ if absent.
+
+    `ssh_config_path` is injectable for testing; defaults to ~/.ssh/config.
+    """
+    user = user or _current_user()
+    block = render_erp_test_ssh_config_block(user)
+    if block is None:
+        return False
+
+    if ssh_config_path is None:
+        ssh_config_path = Path.home() / ".ssh" / "config"
+
+    ssh_config_path = Path(ssh_config_path)
+    ssh_dir = ssh_config_path.parent
+    if not ssh_dir.exists():
+        ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    existing = ssh_config_path.read_text() if ssh_config_path.exists() else ""
+
+    start_marker = _ERP_TEST_SSH_MARK_START
+    end_marker = _ERP_TEST_SSH_MARK_END
+
+    # Phase 1: replace UNMARKED manual stanzas FIRST (the live shape on
+    # streams provisioned before #964 — ssh first-match means an unmarked
+    # stanza placed BEFORE the managed block would win and the fix would be
+    # a no-op). This phase skips stanzas inside marker comments.
+    new = _replace_unmarked_erp_test_stanza(existing, user, block)
+
+    # Phase 2: replace marked blocks (airuleset-managed markers).
+    if start_marker in new and end_marker in new:
+        import re as _re
+        # Replace the FIRST marked block with the managed block.
+        new = _re.sub(
+            _re.escape(start_marker) + r".*?" + _re.escape(end_marker),
+            block,
+            new,
+            count=1,
+            flags=_re.DOTALL,
+        )
+        # Drop any duplicate marked blocks (collapse to one).
+        idx = new.find(end_marker)
+        if idx >= 0:
+            tail = new[idx + len(end_marker):]
+            if start_marker in tail:
+                import re as _re2
+                tail = _re2.sub(
+                    _re2.escape(start_marker) + r".*?" + _re2.escape(end_marker),
+                    "",
+                    tail,
+                    flags=_re2.DOTALL,
+                )
+                new = new[:idx + len(end_marker)] + tail
+
+    # Phase 3: if nothing was replaced/found, append the managed block.
+    if start_marker not in new:
+        sep = "" if (new == "" or new.endswith("\n")) else "\n"
+        new = f"{new}{sep}\n{block}\n"
+
+    if new == existing:
+        return False
+
+    # Atomic write via tmp + os.replace.
+    tmp = ssh_config_path.with_suffix(ssh_config_path.suffix + ".airuleset-tmp")
+    tmp.write_text(new)
+    os.replace(str(tmp), str(ssh_config_path))
+    # Ensure the config file has restrictive permissions (ssh warns otherwise).
+    os.chmod(str(ssh_config_path), 0o600)
+    return True
 
 
 # Which Discord OWNER key a stream's linux user routes its pings under lives
