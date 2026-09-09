@@ -989,8 +989,114 @@ def _write_box_class_marker():
         print(f"  Box class marker error (non-fatal): {e}", file=sys.stderr)
 
 
+def _is_worktree_repo_dir(repo_dir):
+    """True when `repo_dir` lies under a `.claude/worktrees/` segment (#972).
+
+    When airuleset.py is executed from a worktree checkout, REPO_DIR resolves to
+    the worktree path (e.g. `…/.claude/worktrees/agent-xxx/`). install/push from
+    such a REPO_DIR creates symlinks pointing INTO the worktree that become
+    dangling the moment the worktree is removed — the incident that broke agent
+    types on the controller (2026-09-09).
+    """
+    parts = Path(repo_dir).resolve().parts
+    return any(a == ".claude" and b == "worktrees"
+               for a, b in zip(parts, parts[1:]))
+
+
+def _main_checkout_from_worktree(repo_dir):
+    """Derive the main checkout path from a worktree REPO_DIR (#972).
+
+    Given `…/project/.claude/worktrees/agent-xyz/…`, returns `…/project`.
+    """
+    s = str(Path(repo_dir).resolve())
+    idx = s.find("/.claude/worktrees/")
+    if idx < 0:
+        return Path(repo_dir)
+    return Path(s[:idx])
+
+
+def _check_symlink_health(link, expected_target, label):
+    """Check a managed symlink for dangling or worktree targets (#972).
+
+    Returns a status string for display. Detects three failure modes:
+    1. Symlink target is missing (dangling) — happens after worktree cleanup
+    2. Symlink target points under .claude/worktrees/ — will dangle after cleanup
+    3. Symlink target differs from expected — generic mismatch
+    """
+    if not link.is_symlink():
+        if link.exists():
+            return f"  {label}: NOT MANAGED (exists but not a symlink)"
+        return f"  {label}: NOT INSTALLED"
+    actual = Path(os.readlink(link))
+    actual_str = str(actual)
+    # Check for dangling symlink
+    if not link.exists():
+        main_hint = ""
+        if "/.claude/worktrees/" in actual_str:
+            main_hint = _main_checkout_from_worktree(actual)
+        else:
+            main_hint = REPO_DIR
+        return (f"  {label}: MISMATCH (dangling target: {actual}) "
+                f"— run install from {main_hint}")
+    # Check for worktree target (will dangle after worktree removal)
+    if "/.claude/worktrees/" in actual_str:
+        main_hint = _main_checkout_from_worktree(actual)
+        return (f"  {label}: MISMATCH (worktree target: {actual}) "
+                f"— run install from {main_hint}")
+    # Normal mismatch
+    if actual != expected_target:
+        return f"  {label}: MISMATCH (points to {actual})"
+    return f"  {label}: OK (symlinked to airuleset)"
+
+
+def _check_agent_symlinks():
+    """Print status of agent symlinks (#972).
+
+    This was entirely missing from cmd_status — agents were silent when their
+    symlinks dangled after the worktree cleanup incident.
+    """
+    print("\n~/.claude/agents/:")
+    for name in AGENT_NAMES:
+        link = AGENTS_DIR / f"{name}.md"
+        expected = REPO_DIR / "agents" / f"{name}.md"
+        print(_check_symlink_health(link, expected, name))
+
+
+def _check_worktree_repo_dir(cmd_name):
+    """Guard for cmd_install / cmd_push: refuse when REPO_DIR is a worktree.
+
+    Override: AIRULESET_INSTALL_FROM_WORKTREE=1 (for tests).
+    AIRULESET_ALLOW_WORKTREE_ESCAPE=1 does NOT bypass this — they protect
+    different things (escape = agent writing outside worktree boundary;
+    install-from-worktree = install producing worktree-path symlinks that
+    dangle after cleanup).
+    """
+    if os.environ.get("AIRULESET_INSTALL_FROM_WORKTREE") == "1":
+        return  # override for tests
+    if _is_worktree_repo_dir(REPO_DIR):
+        main_checkout = _main_checkout_from_worktree(REPO_DIR)
+        print(
+            f"\n🚫 REFUSED: `airuleset.py {cmd_name}` is running from a WORKTREE checkout.\n"
+            f"\n"
+            f"  REPO_DIR     : {REPO_DIR}\n"
+            f"  main checkout: {main_checkout}\n"
+            f"\n"
+            f"  install/push from a worktree creates symlinks (~/.claude/agents/*,\n"
+            f"  ~/.claude/skills/*) pointing INTO the worktree. When the worktree is\n"
+            f"  removed, these become dangling and Claude Code loses agent types.\n"
+            f"\n"
+            f"  FIX: run `python3 {main_checkout}/airuleset.py {cmd_name}` from the\n"
+            f"  main checkout instead.\n"
+            f"\n"
+            f"  Override (tests only): AIRULESET_INSTALL_FROM_WORKTREE=1\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
+    _check_worktree_repo_dir("install")
     print("airuleset install")
     print("=" * 50)
     check_runtime_deps()
@@ -1779,16 +1885,7 @@ def cmd_status(args):
     for skill in skill_names_for_user():
         link = SKILLS_DIR / skill
         expected_target = REPO_DIR / "skills" / skill
-        if link.is_symlink():
-            actual = Path(os.readlink(link))
-            if actual == expected_target:
-                print(f"  {skill}: OK (symlinked to airuleset)")
-            else:
-                print(f"  {skill}: MISMATCH (points to {actual})")
-        elif link.exists():
-            print(f"  {skill}: NOT MANAGED (exists but not a symlink)")
-        else:
-            print(f"  {skill}: NOT INSTALLED")
+        print(_check_symlink_health(link, expected_target, skill))
 
     # Other skills present
     if SKILLS_DIR.exists():
@@ -1797,6 +1894,10 @@ def cmd_status(args):
         unmanaged = all_skills - managed
         if unmanaged:
             print(f"\n  Unmanaged skills: {', '.join(sorted(unmanaged))}")
+
+    # --- Agents (#972: was entirely missing — dangling agent symlinks were
+    # invisible, so the session lost agent types with no diagnostic) ---
+    _check_agent_symlinks()
 
     # --- Hooks ---
     print("\n~/.claude/settings.json hooks:")

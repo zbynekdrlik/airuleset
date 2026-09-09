@@ -218,6 +218,33 @@ EOF
               fi
               ;;
           esac
+
+          # --- RULE B3 (#972): block `airuleset.py install|push` from a worktree
+          # agent. install/push from a worktree REPO_DIR creates symlinks
+          # (~/.claude/agents/*, skills/*) pointing INTO the worktree; after
+          # cleanup they dangle and Claude Code loses agent types (incident
+          # 2026-09-09). The Python-side _check_worktree_repo_dir() is the
+          # primary guard; this is the mechanical backstop for the Bash tool
+          # path. Fires ONLY for Bash tool calls in agent context (the
+          # enclosing `if` already guarantees agent_id + worktree cwd).
+          # Pattern: match `airuleset.py install` or `airuleset.py push` at a
+          # command position (optionally via python3, with any path prefix).
+          if printf '%s' "$STRIPPED" | grep -Eq '(^|;|&&?|\|\|?|\()[[:space:]]*(command[[:space:]]+)?(python3?[[:space:]]+)?[^[:space:]]*airuleset\.py[[:space:]]+(install|push)([[:space:]]|$|;|&|\|)'; then
+            cat >&2 <<B3EOF
+🚫 BLOCKED (RULE B3): airuleset.py install/push from a worktree agent is
+refused — it creates symlinks (~/.claude/agents/*, ~/.claude/skills/*)
+pointing INTO the worktree that become dangling after worktree cleanup,
+breaking agent types for the session (#972).
+
+  your worktree : $WTSTR
+
+FIX: a lane worker must NEVER run install/push. The supervisor runs
+install from the main checkout after integration.
+B3EOF
+            { echo "[block-foreign-airuleset-write:ruleB3] $AGENT_ID -> install/push from worktree: $CMD" \
+              >> /tmp/airuleset-worktree-escape-block.log; } 2>/dev/null || true
+            exit 2
+          fi
         fi
       fi
       ;;
