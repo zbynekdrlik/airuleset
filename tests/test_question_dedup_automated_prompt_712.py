@@ -45,7 +45,7 @@ _TASK_NOTIFICATION_PROMPT = (
 )
 
 # One representative live payload per machine-nudge family the fix must skip
-# (heads copied from the real constants: GOAL_LANE_NUDGE_TEXT, WORKING_NUDGE_TEXT,
+# (heads copied from the real constants: GOAL_LANE_NUDGE_TEXT_FN, WORKING_NUDGE_TEXT,
 # cross_stream bounce/gkreq nudges, OAUTH_REVOKED_NUDGE_TEXT).
 _MACHINE_NUDGES = [
     "lane-check: backlog=3 OTVORENÝCH tiketov (nie všetky musia byť hneď "

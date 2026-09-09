@@ -480,11 +480,33 @@ issue is not lost — it fills a LATER free lane, exactly like any issue that fa
 **Lane cap — up to 5 live lanes (resource-aware since #970); back off on a real resource signal +
 stagger (#848; the #332 numbers below are measured CONTEXT).** The lane cap (up to 5 live lanes,
 refilled continuously) is the primary concurrency bound — #848's restoration of #456's continuous
-refill. **#970 resource-aware cap:** when the project carries `.claude/lane-resources.json` with
-`{"max_lanes": N}` (N = 1..5), the effective ceiling is N instead of 5. A project with ONE shared
-test box declares `{"max_lanes": 1}` — the supervisor dispatches at most 1 lane at a time, and
-the watchdog nudge respects the same cap. Absent file = the flat 5 (today's default, backward
-compatible). Across all live lanes a SECOND, account-wide bound
+refill. **#970 resource-aware cap (per-resource since fix-forward):** the project's
+`.claude/lane-resources.json` declares the cap:
+
+```json
+{"max_lanes": 5, "resources": {"box": 1}}
+```
+
+`max_lanes` (1..5) is the TOTAL lane ceiling. `resources` (optional) maps per-resource concurrency
+caps — a project with ONE shared test box declares `"box": 1`. Absent file = the flat 5
+(backward compatible). **Refill doctrine with resources:** box-needing lanes fill up to
+`resources.box` slots; box-FREE lanes (code, CI, RFR, review, docs) fill the remaining slots up
+to `max_lanes`. The watchdog nudge counts live lanes per resource by reading `.lane-needs` files
+in live worktrees (see Step 3.2 below) and prints per-resource occupancy.
+
+**Step 3.2 — `.lane-needs` dispatch marker.** At dispatch, when a ticket needs a declared resource
+(e.g. its shadow/E2E test needs the erp-test box), the supervisor writes a `.lane-needs` marker
+file into the lane's worktree directory:
+
+```bash
+echo "box" > "$WORKTREE_PATH/.lane-needs"
+```
+
+The file is plain text, one resource name per line. A box-free ticket gets no `.lane-needs` file.
+The watchdog's `count_resource_usage(cwd, evidence)` reads these files from live worktrees to
+count per-resource usage. A lane that returns `blocked: box` (waited on the box lock and could
+not proceed) is a scheduler DEFECT — the nudge names it: the supervisor dispatched a box-needing
+lane when the box cap was already full. Across all live lanes a SECOND, account-wide bound
 still applies: the up-to-5 worker lanes PLUS the read-only `ticket-validator`
 dispatches Step 1b fires for EVERY member PLUS anything a
 DIFFERENT concurrent lane or session under this account runs are all the SAME kind of Claude-API

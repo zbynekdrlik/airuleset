@@ -30,7 +30,7 @@ from test_wrapped_draft import render_box
 # 400-700c and WRAP at 176 col, so their leading prefix (`lane-check: ` /
 # `stuck-check: `) sits on the box HEAD row, ABSENT from the wrapped TAIL — the
 # #506 dead-branch input (`_janitor_recover` read the tail).
-OWN_LANE_NUDGE = goal.GOAL_LANE_NUDGE_TEXT % (5, 0)      # 691c, "lane-check: "
+OWN_LANE_NUDGE = goal.GOAL_LANE_NUDGE_TEXT_FN(5, 0)      # 691c, "lane-check: "
 OWN_STUCK_NUDGE = wd.WORKING_NUDGE_TEXT                  # 431c, "stuck-check: "
 # A long FOREIGN draft that WRAPS but does NOT start with any own prefix — the
 # invariant control (head-read must not widen what the janitor claims as ours).
