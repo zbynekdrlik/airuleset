@@ -789,12 +789,16 @@ def test_drain_exhausted_flag_set(tmp_path):
 
 def test_drain_exhausted_false_at_88(tmp_path):
     """#925 F1: drain at 88 % that cannot reach 75 % target → NOT exhausted
-    (88 % < CRITICAL_PCT=90, so the badge band is not reached)."""
+    (88 % < CRITICAL_PCT=90, so the badge band is not reached).
+    #968: use a large-disk mock (>64 GB) so effective_critical_pct returns 90."""
     _seed_last_drain(tmp_path, 0.0)
+    # 100 GB disk at 88 % used
+    _total_blocks = 100 * 1024 * 1024 * 1024 // 4096
+    _free = int(_total_blocks * 0.12)
     dg.run_disk_guard(
         now=1000.0, home=str(tmp_path), dry_run=False,
         statvfs_fn=lambda _m: types.SimpleNamespace(
-            f_blocks=1000, f_bfree=120, f_bavail=120,
+            f_blocks=_total_blocks, f_bfree=_free, f_bavail=_free,
             f_frsize=4096, f_files=100000, f_ffree=50000),
         dev_fn=lambda _p: 1,
         geteuid_fn=lambda: 1000,
@@ -805,7 +809,8 @@ def test_drain_exhausted_false_at_88(tmp_path):
 
 
 def test_drain_exhausted_clear_below_critical(tmp_path):
-    """#925 F1: carry-forward clears drain_exhausted when < CRITICAL_PCT."""
+    """#925 F1: carry-forward clears drain_exhausted when < CRITICAL_PCT.
+    #968: use a large-disk mock (>64 GB) so effective_critical_pct returns 90."""
     # Seed a prior cache with drain_exhausted=True at 91 %
     d = tmp_path / ".claude" / "disk-guard"
     d.mkdir(parents=True, exist_ok=True)
@@ -813,11 +818,14 @@ def test_drain_exhausted_clear_below_critical(tmp_path):
         {"worst_pct": 91, "dim": "bytes", "level": "critical",
          "ts": 999.0, "drain_exhausted": True,
          "mounts": [{"mount": "/", "worst_pct": 91}]}))
-    # Now the box is at 85 % (below CRITICAL_PCT=90) — non-drain poll
+    # Now the box is at 85 % (below CRITICAL_PCT=90 on a large disk) — non-drain poll
+    # 100 GB disk at 85 % used
+    _total_blocks = 100 * 1024 * 1024 * 1024 // 4096
+    _free = int(_total_blocks * 0.15)
     dg.run_disk_guard(
         now=1000.0, home=str(tmp_path), dry_run=False,
         statvfs_fn=lambda _m: types.SimpleNamespace(
-            f_blocks=1000, f_bfree=150, f_bavail=150,
+            f_blocks=_total_blocks, f_bfree=_free, f_bavail=_free,
             f_frsize=4096, f_files=100000, f_ffree=50000),
         dev_fn=lambda _p: 1,
         geteuid_fn=lambda: 1000,
