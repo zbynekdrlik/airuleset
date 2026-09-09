@@ -192,10 +192,14 @@ class TestClaudyBootstrap(unittest.TestCase):
         self.assertIn("if id", script)
 
     def test_service_accounts_claudy_sessions(self):
-        """The claudy service account has per-human sessions."""
+        """The claudy service account has per-human sessions with chain."""
         spec = bootstrap.SERVICE_ACCOUNTS["claudy"]
-        self.assertEqual(spec["webterm_sessions"]["zbynek"], "zbynek")
-        self.assertEqual(spec["webterm_sessions"]["marek"], "marek")
+        self.assertEqual(spec["webterm_sessions"]["zbynek"]["preferred"], "zbynek")
+        self.assertEqual(spec["webterm_sessions"]["marek"]["preferred"], "marek")
+        self.assertEqual(spec["webterm_sessions"]["zbynek"]["start_dir_chain"],
+                         ["devel/claudy"])
+        self.assertEqual(spec["webterm_sessions"]["marek"]["start_dir_chain"],
+                         ["devel/claudy"])
 
     def test_service_accounts_preferred_matches_inventories(self):
         """Y2 drift-lock: SERVICE_ACCOUNTS preferred values must match the
@@ -204,11 +208,24 @@ class TestClaudyBootstrap(unittest.TestCase):
         # zbynek inventory
         zinv = profiles.zbynek_inventory()
         ze = [e for e in zinv if e["id"] == "claudy"][0]
-        self.assertEqual(ze["preferred"], spec["webterm_sessions"]["zbynek"])
+        self.assertEqual(ze["preferred"],
+                         spec["webterm_sessions"]["zbynek"]["preferred"])
         # marek inventory
         minv = profiles.marek_inventory()
         me = [e for e in minv if e["id"] == "claudy"][0]
-        self.assertEqual(me["preferred"], spec["webterm_sessions"]["marek"])
+        self.assertEqual(me["preferred"],
+                         spec["webterm_sessions"]["marek"]["preferred"])
+
+    def test_forced_command_uses_start_dir_chain(self):
+        """#960+#961: the rendered bootstrap's forced command must contain
+        devel/claudy (the start_dir_chain), not the default STREAM_DEV_CWD_CHAIN."""
+        script = bootstrap.render_root_bootstrap("claudy")
+        self.assertIn("devel/claudy", script)
+        # Must NOT contain the default odoo chain
+        from cli_bashrc_appliers import STREAM_DEV_CWD_CHAIN
+        for default_dir in STREAM_DEV_CWD_CHAIN:
+            self.assertNotIn(default_dir, script,
+                             "bootstrap should use devel/claudy, not %s" % default_dir)
 
 
 class TestClaudyRegistry(unittest.TestCase):

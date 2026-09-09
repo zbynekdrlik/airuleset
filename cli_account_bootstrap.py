@@ -25,20 +25,26 @@ import textwrap
 SERVICE_ACCOUNTS = {
     "claudy": {
         "webterm_sessions": {
-            "zbynek": "zbynek",     # owner's tmux session on claudy
-            "marek": "marek",       # marek's tmux session on claudy
+            # human → {preferred, start_dir_chain} — the forced command
+            # opens in the project dir, not the default STREAM_DEV_CWD_CHAIN.
+            "zbynek": {"preferred": "zbynek", "start_dir_chain": ["devel/claudy"]},
+            "marek": {"preferred": "marek", "start_dir_chain": ["devel/claudy"]},
         },
     },
 }
 
 
-def _forced_command_key_line(preferred, pubkey):
+def _forced_command_key_line(preferred, pubkey, start_dir_chain=None):
     """Build a ``restrict,pty,command="..."`` authorized_keys line that
     attaches the named tmux session.  Delegates to the SINGLE source
     ``_controller_lane_key_line`` in ``cli_webterm_only.py`` — Y1 Fable
-    review: two copies of authorized_keys escaping = drift hazard."""
+    review: two copies of authorized_keys escaping = drift hazard.
+
+    #960+#961: ``start_dir_chain`` threads to the forced command so the
+    tab opens in the correct project dir (e.g. ``devel/claudy``)."""
     from cli_webterm_only import _controller_lane_key_line
-    return _controller_lane_key_line(preferred, pubkey)
+    return _controller_lane_key_line(preferred, pubkey,
+                                     start_dir_chain=start_dir_chain)
 
 
 def desired_keys_for_service_account(account):
@@ -56,10 +62,13 @@ def desired_keys_for_service_account(account):
     # Per-human webterm forced-command keys
     spec = SERVICE_ACCOUNTS[account]
     for human in sorted(spec["webterm_sessions"]):
-        preferred = spec["webterm_sessions"][human]
+        sess = spec["webterm_sessions"][human]
+        preferred = sess["preferred"]
+        chain = sess.get("start_dir_chain")
         pubkey = WEBTERM_CONTROLLER_LANE_PUBKEYS.get(human)
         if pubkey:
-            keys.append(_forced_command_key_line(preferred, pubkey))
+            keys.append(_forced_command_key_line(preferred, pubkey,
+                                                start_dir_chain=chain))
 
     return keys
 
@@ -68,7 +77,7 @@ def render_authorized_keys(account):
     """Render the full authorized_keys content for a service account."""
     header = (
         "# airuleset:managed — service account %s (#960); "
-        "edits are overwritten by push\n" % account
+        "re-run bootstrap to refresh\n" % account
     )
     lines = desired_keys_for_service_account(account)
     return header + "".join(line.rstrip("\n") + "\n" for line in lines)
