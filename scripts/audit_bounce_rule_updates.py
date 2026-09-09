@@ -176,8 +176,72 @@ def compute_trends(issues_with_events, window_days=7):
 
 
 # ---------------------------------------------------------------------------
+# First-pass rate (#963)
+# ---------------------------------------------------------------------------
+
+def first_pass_rate(trends, issues_with_events):
+    """Compute per-stream first-pass rate.
+
+    first-pass rate = share of tickets with exactly 1 bounce event
+    (round 1 = the initial hand-off label = first-pass success).
+
+    Returns {stream: float} where 1.0 = 100% first-pass.
+    """
+    if not trends:
+        return {}
+
+    # Count per-stream: tickets total and tickets with exactly 1 bounce.
+    per_stream_total = {}
+    per_stream_single = {}
+
+    for item in issues_with_events:
+        n_bounces = len(item.get("bounce_timestamps", []))
+        for stream in item.get("streams", ["unknown"]):
+            if stream not in trends:
+                continue
+            per_stream_total[stream] = per_stream_total.get(stream, 0) + 1
+            if n_bounces == 1:
+                per_stream_single[stream] = (
+                    per_stream_single.get(stream, 0) + 1)
+
+    result = {}
+    for stream in trends:
+        total = per_stream_total.get(stream, 0)
+        if total == 0:
+            result[stream] = 0.0
+        else:
+            result[stream] = per_stream_single.get(stream, 0) / total
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
+
+def format_weekly_report(trends, issues_with_events):
+    """Format a compact markdown table for pasting on a tracking issue.
+
+    Columns: stream | recent | prior | trend | first-pass | treadmill
+    """
+    rates = first_pass_rate(trends, issues_with_events)
+    lines = []
+    lines.append("| stream | recent | prior | trend | first-pass | "
+                 "treadmill |")
+    lines.append("|--------|--------|-------|-------|------------|"
+                 "-----------|")
+
+    for stream in sorted(trends):
+        d = trends[stream]
+        rate_pct = "%.0f%%" % (rates.get(stream, 0.0) * 100)
+        treadmill = ""
+        if d["treadmill_issues"]:
+            treadmill = ",".join(str(n) for n in d["treadmill_issues"])
+        lines.append("| %s | %d | %d | %s | %s | %s |" % (
+            stream, d["recent_bounces"], d["prior_bounces"],
+            d["trend"], rate_pct, treadmill))
+
+    return "\n".join(lines)
+
 
 def print_text(trends):
     """Print TSV: stream  recent  prior  trend  [flags]."""
@@ -214,6 +278,9 @@ def main(argv=None):
                    help="Window size in days (default: 7)")
     p.add_argument("--json", dest="json_out", action="store_true",
                    help="Output as JSON")
+    p.add_argument("--weekly-report", dest="weekly_report",
+                   action="store_true",
+                   help="Print a compact markdown table with first-pass rate")
     args = p.parse_args(argv)
 
     if not args.rounds:
@@ -235,7 +302,9 @@ def main(argv=None):
 
     trends = compute_trends(issues, window_days=args.window)
 
-    if args.json_out:
+    if args.weekly_report:
+        print(format_weekly_report(trends, issues))
+    elif args.json_out:
         print_json(trends)
     else:
         print_text(trends)
