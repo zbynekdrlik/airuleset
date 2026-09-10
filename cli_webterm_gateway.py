@@ -731,7 +731,10 @@ class Gateway:
             return
         if path == "/":
             if self._authed(headers):
-                await self._send(writer, http_response("200 OK", self._dashboard_bytes()))
+                await self._send(writer, http_response(
+                    "200 OK", self._dashboard_bytes(),
+                    extra_headers=["Cache-Control: no-store, max-age=0",
+                                   "Pragma: no-cache"]))
             elif self.trust_access_header:
                 # Access mode, no trusted identity header => the request did not
                 # pass Cloudflare Access. Fail closed (no login form to send to).
