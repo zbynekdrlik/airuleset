@@ -6852,15 +6852,16 @@ def render_erp_test_ssh_config_block(user):
         return None
     hostname = "erp-test-%s.newlevel.media" % user
     key_name = erp_test_deploy_key_name(user)
-    identity_line = ""
-    if key_name:
-        identity_line = f"    IdentityFile ~/.ssh/{key_name}\n"
+    # key_name is never None here — erp_test_deploy_key_name gates on the
+    # same erp_test_deploy_user that already returned non-None above.  No
+    # silent fallback (BLUE-1, #987 review): a future divergence would fail
+    # loud as "~/.ssh/None" rather than silently omitting IdentityFile.
     return (
         f"{_ERP_TEST_SSH_MARK_START}\n"
         f"Host erp-test-{user} {hostname}\n"
         f"    HostName {hostname}\n"
         f"    User {deploy_user}\n"
-        f"{identity_line}"
+        f"    IdentityFile ~/.ssh/{key_name}\n"
         f"    StrictHostKeyChecking no\n"
         f"{_ERP_TEST_SSH_MARK_END}"
     )
