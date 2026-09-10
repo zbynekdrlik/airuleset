@@ -197,7 +197,10 @@ def render_gateway_unit(spec):
         execstart = execstart.replace(
             "--base-path {{TTYD_BASE}}",
             "--base-path {{TTYD_BASE}} --u-lane " + spec.profile)
-    return spec.unit_note + (
+    # #974 reopened: embed the gateway code hash so a code change triggers restart.
+    import cli_webterm_reconcile as _rec
+    code_hash = _rec.compute_gateway_code_hash(w.WEBTERM_GATEWAY_MODULE)
+    rendered = spec.unit_note + (
         execstart
         .replace("{{BIND_IP}}", spec.bind)
         .replace("{{GATEWAY_MODULE}}", str(w.WEBTERM_GATEWAY_MODULE))
@@ -208,6 +211,9 @@ def render_gateway_unit(spec):
         .replace("{{TTYD_BASE}}", w.WEBTERM_TTYD_BASE)
         .replace("webterm-ttyd.service", spec.ttyd_service_name)
         .replace("(dev1-only)", spec.label))
+    return rendered.replace(
+        "\n[Install]",
+        "\nEnvironment=AIRULESET_GATEWAY_CODE_HASH=%s\n\n[Install]" % code_hash)
 
 
 def retire_credential(cred_path, log_prefix):
@@ -428,10 +434,12 @@ def setup_service(spec, run=None, *, prereq_fn, write_artifacts_fn, tunnel_fn):
             log_prefix=spec.log_prefix)
         # #974: reconcile LIVE process argv against the rendered paths — a unit
         # started from a stale/worktree path survives installs otherwise.
+        # #974 reopened: also check gateway code hash.
         # Wrapped in its own try/except: this is best-effort hygiene and must
         # never gate ok_all/tunnel provisioning (HIGH-2 review finding).
         try:
             import cli_webterm_reconcile as _reconcile
+            gw_hash = _reconcile.compute_gateway_code_hash(w.WEBTERM_GATEWAY_MODULE)
             _reconcile.reconcile_live_argv(
                 _run_systemctl,
                 [spec.ttyd_service_name, spec.gateway_service_name],
@@ -440,6 +448,7 @@ def setup_service(spec, run=None, *, prereq_fn, write_artifacts_fn, tunnel_fn):
                     spec.gateway_service_name: str(w.WEBTERM_GATEWAY_MODULE),
                 },
                 log_prefix=spec.log_prefix,
+                code_hashes={spec.gateway_service_name: gw_hash},
             )
         except Exception as e:
             print("  %s: live-argv reconcile error (non-fatal): %r"
