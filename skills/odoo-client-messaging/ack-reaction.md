@@ -19,19 +19,13 @@ on its own authority, silently, without queuing an owner question.
 
 ## Recipe — guarded method (odoo-erp #6808, `company_base`)
 
-```python
-models.execute_kw(
-    db, uid, api_key,
-    "mail.message", "message_reaction_add_guarded",
-    [message_id, "👀"],
-)
-```
-
-The guarded method on `mail.message` (the WRITE sibling of #5577's
-`message_reactions_guarded` READ method) is designed as an ACL-safe
-public endpoint for `base.group_user` accounts (per the #6808 spec,
-not yet released as of 2026-09-10). Once shipped, it adds the reaction
-idempotently — a duplicate call on the same message + emoji is a no-op.
+Call `message_reaction_add_guarded(message_id, content)` on `mail.message`
+— the transport recipe is in the `add-reaction.md` transport companion.
+The guarded method (the WRITE sibling of #5577's `message_reactions_guarded`
+READ method) is designed as an ACL-safe public endpoint for
+`base.group_user` accounts (per the #6808 spec, not yet released as of
+2026-09-10). Once shipped, it adds the reaction idempotently — a duplicate
+call on the same message + emoji is a no-op.
 
 ## Availability — check per instance, fall back below
 
@@ -39,8 +33,8 @@ Reaches a client's PROD only once its `company_base` has RELEASED #6808 —
 not the instant it merged upstream.
 
 - A successful call (no exception) means the method is live — use it.
-- A `Fault` naming `message_reaction_add_guarded` as unknown (XML-RPC), or
-  a **404** "method does not exist" via JSON-2 → not released on this
+- A transport error naming `message_reaction_add_guarded` as an unknown
+  method, or a **404** "method does not exist" → not released on this
   instance yet — fall back below, re-check after the next release.
 
 ## Fallback — `ack-pending` marker (NEVER a fake ack, NEVER a silent skip)

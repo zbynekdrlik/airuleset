@@ -228,6 +228,31 @@ DIACRITIC_RED = (
 )
 
 
+# #978 fix-forward — 657 false-positive fixtures: the ASSISTANT's own first-person
+# send reports must NOT be caught as "a client wrote something".
+FP_657_GOOD_NAME_URL = (
+    "Pracujem vo vlákne „Zakaznicky portal 3“ na Odoo Discuss — "
+    "https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288 — "
+    "poslal som klientovi odpoveď."
+)
+
+FP_657_BARE_ID_URL = (
+    "Poslal som odpoveď do vlákna 288 na Odoo Discuss — "
+    "https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288"
+)
+
+FP_ODPOVEDAL_SOM = (
+    "Odpovedal som klientovi do vlákna na Odoo Discuss. "
+    "Ack-reaction: pending — method not available\n\n"
+    "⏳ WORKING: čakám na reakciu"
+)
+
+FP_KLIENTOVI_SOM = (
+    "Klientovi som poslal návrh do Discuss vlákna.\n\n"
+    "⏳ WORKING: čakám"
+)
+
+
 class TestAckReactionProseGate(TestCase):
 
     def test_miva1_red_fixture_is_blocked(self):
@@ -283,6 +308,32 @@ class TestAckReactionProseGate(TestCase):
         self.assertTrue(_blocked(p),
                         "diacritic 'Klient napisal' must be caught; "
                         "stderr=%s stdout=%s" % (p.stderr, p.stdout))
+
+    # --- #978 fix-forward negatives: assistant's own first-person sends ---
+
+    def test_657_good_name_url_passes(self):
+        """657 fixture: 'poslal som klientovi odpoveď' must PASS (first-person)."""
+        p = _run_prose(FP_657_GOOD_NAME_URL)
+        self.assertFalse(_blocked(p),
+                         "657 fixture 'poslal som' false-blocked: stderr=%s" % p.stderr)
+
+    def test_657_bare_id_url_passes(self):
+        """657 fixture: 'Poslal som odpoveď' must PASS (first-person)."""
+        p = _run_prose(FP_657_BARE_ID_URL)
+        self.assertFalse(_blocked(p),
+                         "657 fixture 'Poslal som' false-blocked: stderr=%s" % p.stderr)
+
+    def test_odpovedal_som_passes(self):
+        """'Odpovedal som klientovi' must PASS (first-person send)."""
+        p = _run_prose(FP_ODPOVEDAL_SOM)
+        self.assertFalse(_blocked(p),
+                         "'Odpovedal som klientovi' false-blocked: stderr=%s" % p.stderr)
+
+    def test_klientovi_som_passes(self):
+        """'Klientovi som poslal' must PASS (dative klientovi + first-person)."""
+        p = _run_prose(FP_KLIENTOVI_SOM)
+        self.assertFalse(_blocked(p),
+                         "'Klientovi som poslal' false-blocked: stderr=%s" % p.stderr)
 
 
 # ==================================================================== #
