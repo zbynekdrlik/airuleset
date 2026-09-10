@@ -308,113 +308,136 @@ STREAM_DEV_CWD_CHAIN = (STREAM_DEV_CWD_REL, "devel/odoo")
 # should attach straight into it instead of the user attaching by hand.
 STREAM_SSH_ATTACH_MARK_START = "# >>> airuleset: subdev ssh auto-attach >>>"
 STREAM_SSH_ATTACH_MARK_END = "# <<< airuleset: subdev ssh auto-attach <<<"
-STREAM_SSH_ATTACH_BLOCK = (
-    f"{STREAM_SSH_ATTACH_MARK_START}\n"
-    "# #264: one subdev stream account = one tmux session -- an interactive\n"
-    "# ssh login attaches straight into it (create-or-attach, `-A`). NEVER\n"
-    "# fires for a NON-interactive ssh run (push's `git pull && python3\n"
-    "# airuleset.py install`, scp/rsync, watchdog/gatekeeper automation) --\n"
-    "# those pass a COMMAND to ssh, which bash executes with `$-` carrying no\n"
-    "# 'i' and no PTY at all, so this whole block is a no-op for them; guarded\n"
-    "# on all three explicitly anyway (interactive shell, a real ssh TTY, not\n"
-    "# already inside tmux) so nothing here can ever race a live session.\n"
-    # command -v tmux: if tmux is ever missing/broken on a stream account,
-    # `exec tmux ...` would fail AFTER the shell has already been replaced
-    # -- closing the ssh session outright instead of leaving a working
-    # interactive shell behind (an adversarial review's finding — this
-    # guard keeps that failure mode from ever being reachable).
-    'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
-    '&& command -v tmux >/dev/null 2>&1; then\n'
-    # #563: cwd FALLBACK CHAIN -- first EXISTING dir of STREAM_DEV_CWD_CHAIN
-    # wins, else $HOME. A binary "odoo-erp or $HOME" fallback dropped montalu1
-    # (project dir ~/devel/odoo, no odoo-erp subdir) into $HOME, so a claude
-    # launched there wrote under the wrong project key (no history/memory).
-    '  __airuleset_cwd="$HOME"\n'
-    f'  for __airuleset_rel in {" ".join(STREAM_DEV_CWD_CHAIN)}; do\n'
-    '    if [ -d "$HOME/$__airuleset_rel" ]; then\n'
-    '      __airuleset_cwd="$HOME/$__airuleset_rel"; break\n'
-    '    fi\n'
-    '  done\n'
-    '  __airuleset_me="$(whoami)"\n'
-    "  # #284/#593: search for a live group survivor whose NAME may differ\n"
-    "  # from this exact username before the plain -A reattach. This once\n"
-    "  # guarded against a tmux destroy-unattached sweep (#254) reducing a\n"
-    "  # multi-member session GROUP down to one iteration-order-arbitrary\n"
-    "  # survivor -- but that sweep no longer happens globally after #591\n"
-    "  # (which REMOVED the global `destroy-unattached keep-last`; #591\n"
-    "  # scopes cleanup to a per-session `client-attached` hook per clone\n"
-    "  # instead -- cli_webterm's webterm clone and the survivor-join\n"
-    "  # below). The survivor search is KEPT as harmless defense-in-depth:\n"
-    "  # if a differently-named survivor ever exists (an older server's\n"
-    "  # leftover, a manual sweep), the plain -A path would silently\n"
-    "  # create a fresh EMPTY session while the real, populated one sits\n"
-    "  # orphaned in its own group. `=`-anchored EXACT match (#263's own\n"
-    "  # established fix: a bare target does PREFIX matching and would\n"
-    "  # wrongly match e.g. zbynek-4 for zbynek); if found, join it as a\n"
-    "  # new independent VIEW onto the SAME windows (grouped session),\n"
-    "  # which the survivor-join below now arms with its OWN per-session\n"
-    "  # destroy-unattached hook (#593) so its detached duplicates\n"
-    "  # self-clean. The survivor's own name is captured into a variable\n"
-    "  # and the `exec` happens AFTER the `while ... done < <(...)` loop\n"
-    "  # closes, never inside it -- an adversarial review proved live that\n"
-    "  # an `exec` sitting INSIDE the process-substitution loop inherits\n"
-    "  # that pipe as its own stdin, so a real tmux client refuses to\n"
-    "  # attach (`open terminal failed: not a terminal`) and the ssh login\n"
-    "  # dies right there, since `exec` already replaced the shell. Falls\n"
-    "  # through to the plain exact-name path below when no survivor is\n"
-    "  # found, or tmux itself is unreachable.\n"
-    '  if ! tmux has-session -t "=$__airuleset_me" 2>/dev/null; then\n'
-    '    __airuleset_survivor=""\n'
-    '    while read -r __airuleset_g __airuleset_n; do\n'
-    '      if [ -n "$__airuleset_n" ] '
-    '&& [ "$__airuleset_g" = "$__airuleset_me" ]; then\n'
-    '        __airuleset_survivor="$__airuleset_n"\n'
-    "        break\n"
-    "      fi\n"
-    "    done < <(tmux list-sessions "
-    "-F '#{session_group} #{session_name}' 2>/dev/null)\n"
-    '    if [ -n "$__airuleset_survivor" ]; then\n'
-    # #593: the survivor-join clone is ALSO a grouped-session creator
-    # (`new-session -t`), so give it the SAME per-session `client-attached
-    # destroy-unattached on` hook cli_webterm's #591 clone got -- otherwise,
-    # now that #591 removed the GLOBAL keep-last sweep, its detached
-    # duplicates orphan forever (the #254 pile-up, returning for the ssh
-    # path). Named explicitly (`-s`) so the hook can target it; created
-    # DETACHED (`-d`) then the hook armed then attached, because setting
-    # `destroy-unattached on` on a zero-client session destroys it
-    # IMMEDIATELY -- so the hook DEFERS the `on` to client-attached time
-    # (both live-verified tmux constraints carried verbatim from #591).
-    # `set-hook -t` does NOT take tmux's `=` exact-match anchor (only
-    # has-session/kill-session do), so the just-created clone is targeted by
-    # its bare, unambiguous name. The survivor is a DURABLE group member
-    # holding the group's windows (normally the `-A -s` base -- a standalone
-    # base is ungrouped, so the scan is only reached once a `-t` clone has
-    # grouped it), so the join safely self-destructs on the user's detach while
-    # that member keeps the windows alive -- no trap needed (unlike webterm's
-    # throwaway view): the per-session `on` IS the cleanup. If the only survivor
-    # is itself a transient view, the group's windows live only while some
-    # member remains -- the benign ownerless-clone residual cli_webterm
-    # documents. The detached-create is success-guarded so a failed create
-    # (name clash, tmux briefly unreachable) FALLS THROUGH to the plain `-A -s`
-    # base path below, never a dead ssh session OUTSIDE the documented
-    # transition residual. TRANSITION RESIDUAL (same class as
-    # #591-review B1): on a box NOT yet re-installed after #591 whose running
-    # server still carries the old GLOBAL keep-last, the detached clone is
-    # swept at creation and this connect fails -- self-heals on that box's
-    # next install, which unsets the global (cli_tmux_provisioning).
-    '      __airuleset_join="${__airuleset_me}-join-$$"\n'
-    '      if tmux new-session -d -t "$__airuleset_survivor" '
-    '-s "$__airuleset_join" 2>/dev/null; then\n'
-    '        tmux set-hook -t "$__airuleset_join" client-attached '
-    '"set-option destroy-unattached on" 2>/dev/null\n'
-    '        exec tmux attach-session -t "$__airuleset_join"\n'
-    "      fi\n"
-    "    fi\n"
-    "  fi\n"
-    '  exec tmux new-session -A -s "$__airuleset_me" -c "$__airuleset_cwd"\n'
-    "fi\n"
-    f"{STREAM_SSH_ATTACH_MARK_END}"
-)
+
+
+def render_ssh_attach_block(session_target, cwd_chain):
+    """Render the #264 ssh auto-attach marker block with parameterized
+    session target and cwd fallback chain.
+
+    `session_target` is a SHELL EXPRESSION baked into the assignment
+    `__airuleset_me=<session_target>` — either `"$(whoami)"` (the default
+    for subdev/gk accounts) or a literal like `"zbynek"` (the #985
+    controller override).
+
+    `cwd_chain` is a tuple of relative-to-$HOME dir names tried in order
+    (first existing wins, else $HOME).
+
+    The output is byte-identical to the pre-#985 STREAM_SSH_ATTACH_BLOCK
+    constant when called with `session_target='"$(whoami)"'` and
+    `cwd_chain=STREAM_DEV_CWD_CHAIN`."""
+    return (
+        f"{STREAM_SSH_ATTACH_MARK_START}\n"
+        "# #264: one subdev stream account = one tmux session -- an interactive\n"
+        "# ssh login attaches straight into it (create-or-attach, `-A`). NEVER\n"
+        "# fires for a NON-interactive ssh run (push's `git pull && python3\n"
+        "# airuleset.py install`, scp/rsync, watchdog/gatekeeper automation) --\n"
+        "# those pass a COMMAND to ssh, which bash executes with `$-` carrying no\n"
+        "# 'i' and no PTY at all, so this whole block is a no-op for them; guarded\n"
+        "# on all three explicitly anyway (interactive shell, a real ssh TTY, not\n"
+        "# already inside tmux) so nothing here can ever race a live session.\n"
+        # command -v tmux: if tmux is ever missing/broken on a stream account,
+        # `exec tmux ...` would fail AFTER the shell has already been replaced
+        # -- closing the ssh session outright instead of leaving a working
+        # interactive shell behind (an adversarial review's finding — this
+        # guard keeps that failure mode from ever being reachable).
+        'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
+        '&& command -v tmux >/dev/null 2>&1; then\n'
+        # #563: cwd FALLBACK CHAIN -- first EXISTING dir of cwd_chain
+        # wins, else $HOME. A binary "odoo-erp or $HOME" fallback dropped montalu1
+        # (project dir ~/devel/odoo, no odoo-erp subdir) into $HOME, so a claude
+        # launched there wrote under the wrong project key (no history/memory).
+        '  __airuleset_cwd="$HOME"\n'
+        f'  for __airuleset_rel in {" ".join(cwd_chain)}; do\n'
+        '    if [ -d "$HOME/$__airuleset_rel" ]; then\n'
+        '      __airuleset_cwd="$HOME/$__airuleset_rel"; break\n'
+        '    fi\n'
+        '  done\n'
+        f'  __airuleset_me={session_target}\n'
+        "  # #284/#593: search for a live group survivor whose NAME may differ\n"
+        "  # from this exact username before the plain -A reattach. This once\n"
+        "  # guarded against a tmux destroy-unattached sweep (#254) reducing a\n"
+        "  # multi-member session GROUP down to one iteration-order-arbitrary\n"
+        "  # survivor -- but that sweep no longer happens globally after #591\n"
+        "  # (which REMOVED the global `destroy-unattached keep-last`; #591\n"
+        "  # scopes cleanup to a per-session `client-attached` hook per clone\n"
+        "  # instead -- cli_webterm's webterm clone and the survivor-join\n"
+        "  # below). The survivor search is KEPT as harmless defense-in-depth:\n"
+        "  # if a differently-named survivor ever exists (an older server's\n"
+        "  # leftover, a manual sweep), the plain -A path would silently\n"
+        "  # create a fresh EMPTY session while the real, populated one sits\n"
+        "  # orphaned in its own group. `=`-anchored EXACT match (#263's own\n"
+        "  # established fix: a bare target does PREFIX matching and would\n"
+        "  # wrongly match e.g. zbynek-4 for zbynek); if found, join it as a\n"
+        "  # new independent VIEW onto the SAME windows (grouped session),\n"
+        "  # which the survivor-join below now arms with its OWN per-session\n"
+        "  # destroy-unattached hook (#593) so its detached duplicates\n"
+        "  # self-clean. The survivor's own name is captured into a variable\n"
+        "  # and the `exec` happens AFTER the `while ... done < <(...)` loop\n"
+        "  # closes, never inside it -- an adversarial review proved live that\n"
+        "  # an `exec` sitting INSIDE the process-substitution loop inherits\n"
+        "  # that pipe as its own stdin, so a real tmux client refuses to\n"
+        "  # attach (`open terminal failed: not a terminal`) and the ssh login\n"
+        "  # dies right there, since `exec` already replaced the shell. Falls\n"
+        "  # through to the plain exact-name path below when no survivor is\n"
+        "  # found, or tmux itself is unreachable.\n"
+        '  if ! tmux has-session -t "=$__airuleset_me" 2>/dev/null; then\n'
+        '    __airuleset_survivor=""\n'
+        '    while read -r __airuleset_g __airuleset_n; do\n'
+        '      if [ -n "$__airuleset_n" ] '
+        '&& [ "$__airuleset_g" = "$__airuleset_me" ]; then\n'
+        '        __airuleset_survivor="$__airuleset_n"\n'
+        "        break\n"
+        "      fi\n"
+        "    done < <(tmux list-sessions "
+        "-F '#{session_group} #{session_name}' 2>/dev/null)\n"
+        '    if [ -n "$__airuleset_survivor" ]; then\n'
+        # #593: the survivor-join clone is ALSO a grouped-session creator
+        # (`new-session -t`), so give it the SAME per-session `client-attached
+        # destroy-unattached on` hook cli_webterm's #591 clone got -- otherwise,
+        # now that #591 removed the GLOBAL keep-last sweep, its detached
+        # duplicates orphan forever (the #254 pile-up, returning for the ssh
+        # path). Named explicitly (`-s`) so the hook can target it; created
+        # DETACHED (`-d`) then the hook armed then attached, because setting
+        # `destroy-unattached on` on a zero-client session destroys it
+        # IMMEDIATELY -- so the hook DEFERS the `on` to client-attached time
+        # (both live-verified tmux constraints carried verbatim from #591).
+        # `set-hook -t` does NOT take tmux's `=` exact-match anchor (only
+        # has-session/kill-session do), so the just-created clone is targeted by
+        # its bare, unambiguous name. The survivor is a DURABLE group member
+        # holding the group's windows (normally the `-A -s` base -- a standalone
+        # base is ungrouped, so the scan is only reached once a `-t` clone has
+        # grouped it), so the join safely self-destructs on the user's detach while
+        # that member keeps the windows alive -- no trap needed (unlike webterm's
+        # throwaway view): the per-session `on` IS the cleanup. If the only survivor
+        # is itself a transient view, the group's windows live only while some
+        # member remains -- the benign ownerless-clone residual cli_webterm
+        # documents. The detached-create is success-guarded so a failed create
+        # (name clash, tmux briefly unreachable) FALLS THROUGH to the plain `-A -s`
+        # base path below, never a dead ssh session OUTSIDE the documented
+        # transition residual. TRANSITION RESIDUAL (same class as
+        # #591-review B1): on a box NOT yet re-installed after #591 whose running
+        # server still carries the old GLOBAL keep-last, the detached clone is
+        # swept at creation and this connect fails -- self-heals on that box's
+        # next install, which unsets the global (cli_tmux_provisioning).
+        '      __airuleset_join="${__airuleset_me}-join-$$"\n'
+        '      if tmux new-session -d -t "$__airuleset_survivor" '
+        '-s "$__airuleset_join" 2>/dev/null; then\n'
+        '        tmux set-hook -t "$__airuleset_join" client-attached '
+        '"set-option destroy-unattached on" 2>/dev/null\n'
+        '        exec tmux attach-session -t "$__airuleset_join"\n'
+        "      fi\n"
+        "    fi\n"
+        "  fi\n"
+        '  exec tmux new-session -A -s "$__airuleset_me" -c "$__airuleset_cwd"\n'
+        "fi\n"
+        f"{STREAM_SSH_ATTACH_MARK_END}"
+    )
+
+
+# The default stream block: session = $(whoami), cwd = odoo chain.
+# Byte-identical to the pre-#985 STREAM_SSH_ATTACH_BLOCK constant.
+STREAM_SSH_ATTACH_BLOCK = render_ssh_attach_block(
+    '"$(whoami)"', STREAM_DEV_CWD_CHAIN)
 
 # --- #562: gk box ssh auto-attach -------------------------------------------
 # The gk box `gatekeeper` account is NOT a subdev stream account (not in
@@ -429,11 +452,38 @@ STREAM_SSH_ATTACH_BLOCK = (
 # do tmux okrem ked sa ssh do gk, tam musim vsetko sam".
 SSH_ATTACH_EXTRA_USERS = frozenset({"gatekeeper"})
 
+# --- #985: controller ssh auto-attach ----------------------------------------
+# The controller's `airuleset` unix account is NOT a subdev stream and NOT
+# in SSH_ATTACH_EXTRA_USERS (adding it there would install the block on
+# every box where that username exists). So a SEPARATE set gated on the
+# box class: these users get the block ONLY when default_box_class() ==
+# "controller".
+SSH_ATTACH_CONTROLLER_USERS = frozenset({"airuleset"})
+
+# Per-account session-name override: the bash block's `__airuleset_me`
+# is normally `$(whoami)`, but the controller's `airuleset` user must
+# attach the OWNER's `zbynek` session (the owner's tmux group on that box).
+SSH_ATTACH_SESSION_OVERRIDE = {"airuleset": "zbynek"}
+
+# Per-account cwd-chain override: the controller's `airuleset` user works
+# in ~/devel/airuleset, not the odoo chain.
+SSH_ATTACH_CWD_OVERRIDE = {"airuleset": ("devel/airuleset",)}
+
+
+def default_box_class():
+    """Import-time-safe accessor for the box-class marker. Avoids a
+    module-level import of watchdog.reaper (which is heavyweight and
+    would create a circular import risk)."""
+    from watchdog.reaper import default_box_class as _dbc
+    return _dbc()
+
 
 def is_single_session_box_user(user: str = None) -> bool:
     """True iff `user` runs the fleet's ONE-tmux-session-per-account model
     (#264): a subdev stream account (AUTHORITY_BY_USER) or the gk box
-    `gatekeeper` account (SSH_ATTACH_EXTRA_USERS, #562). The owner's `newlevel`
+    `gatekeeper` account (SSH_ATTACH_EXTRA_USERS, #562), or the controller
+    box `airuleset` account (SSH_ATTACH_CONTROLLER_USERS, #985 — only
+    when default_box_class() == "controller"). The owner's `newlevel`
     boxes (dev1/dev2) run MANY project sessions and are NOT in this set.
 
     This is the ONE source of truth for that distinction. The #264 ssh
@@ -450,7 +500,12 @@ def is_single_session_box_user(user: str = None) -> bool:
     # neither the #264 ssh-auto-attach nor the #554/#592 window-naming block.
     if u in airuleset.WEBTERM_OBSERVER_USERS:
         return False
-    return u in airuleset.AUTHORITY_BY_USER or u in SSH_ATTACH_EXTRA_USERS
+    if u in airuleset.AUTHORITY_BY_USER or u in SSH_ATTACH_EXTRA_USERS:
+        return True
+    # #985: controller-only users — eligible only on the controller box.
+    if u in SSH_ATTACH_CONTROLLER_USERS and default_box_class() == "controller":
+        return True
+    return False
 
 
 def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
@@ -495,6 +550,21 @@ def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
     return spans
 
 
+def _ssh_attach_block_for_user(user):
+    """Return the correct ssh-attach block content for `user`.
+
+    Most users get the default STREAM_SSH_ATTACH_BLOCK (session=$(whoami),
+    cwd=odoo chain). Controller users (#985) get a parameterized variant
+    with their session-name override and cwd override."""
+    session_target = SSH_ATTACH_SESSION_OVERRIDE.get(user)
+    cwd_chain = SSH_ATTACH_CWD_OVERRIDE.get(user)
+    if session_target is None and cwd_chain is None:
+        return STREAM_SSH_ATTACH_BLOCK
+    return render_ssh_attach_block(
+        f'"{session_target}"' if session_target else '"$(whoami)"',
+        cwd_chain if cwd_chain else STREAM_DEV_CWD_CHAIN)
+
+
 def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     """Idempotently add/remove the #264 ssh-auto-attach marker block in
     ~/.bashrc, scoped to the ssh-attach eligibility set: subdev stream
@@ -502,7 +572,9 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     also keys off) UNION SSH_ATTACH_EXTRA_USERS (the gk box `gatekeeper`
     account, #562 -- eligible for the block but deliberately NOT in
     AUTHORITY_BY_USER, since that map is the stream registry and gatekeeper is
-    not a stream). Every account OUTSIDE that union (dev1/dev2 = `newlevel`,
+    not a stream) UNION SSH_ATTACH_CONTROLLER_USERS (the controller's
+    `airuleset` account, #985 -- eligible only when default_box_class() ==
+    "controller"). Every account OUTSIDE that union (dev1/dev2 = `newlevel`,
     any other): the marker is actively REMOVED there if ever present, so a
     future eligibility edit can never leave a stale attach block on the wrong
     account.
@@ -521,23 +593,26 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     u = user or airuleset._current_user()
     # The ssh-auto-attach eligibility set IS the single-session-per-account set
     # (#593): subdev streams (AUTHORITY_BY_USER) + the gk `gatekeeper` account
-    # (SSH_ATTACH_EXTRA_USERS, #562). Shared with the #592 window-name block via
-    # ONE predicate so the two can never drift on "which boxes are single-session".
+    # (SSH_ATTACH_EXTRA_USERS, #562) + the controller `airuleset` account
+    # (SSH_ATTACH_CONTROLLER_USERS, #985). Shared with the #592 window-name
+    # block via ONE predicate so the two can never drift on "which boxes are
+    # single-session".
     should_have = is_single_session_box_user(u)
     existing = bpath.read_text() if bpath.exists() else ""
     spans = _stream_marker_block_spans(existing)
+    block = _ssh_attach_block_for_user(u)
     if should_have:
         if spans:
             out, cursor = [], 0
             for s, e in spans:
                 out.append(existing[cursor:s])
-                out.append(STREAM_SSH_ATTACH_BLOCK)
+                out.append(block)
                 cursor = e
             out.append(existing[cursor:])
             new = "".join(out)
         else:
             sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
-            new = f"{existing}{sep}\n{STREAM_SSH_ATTACH_BLOCK}\n"
+            new = f"{existing}{sep}\n{block}\n"
     else:
         if not spans:
             return False
