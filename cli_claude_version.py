@@ -194,9 +194,13 @@ def ensure_claude_version_current(env=None, home=None, min_version=None):
     final_ver = parse_claude_version(final_raw) if final_raw else None
     if final_ver is None or (floor and final_ver < floor):
         result["below_floor"] = True
-        result["error"] = (
+        # Preserve the original update error (e.g. "no write permission to
+        # npm prefix") when appending the floor-guard message (#975 review).
+        prior = result.get("error") or ""
+        floor_msg = (
             "Claude CLI %s is BELOW the fleet floor %s after update"
             % (final_raw or "(unknown)", min_version))
+        result["error"] = ("%s (%s)" % (floor_msg, prior)) if prior else floor_msg
 
     return result
 

@@ -1480,11 +1480,17 @@ def cmd_install(args):
         print(f"  claude native user-space migration error (non-fatal): {e}",
               file=sys.stderr)
 
+    # #975: install_failed latch — hoisted here (before step 3f-update) so the
+    # version-floor step can latch it without sys.exit(1) mid-install, which
+    # would skip every later step (ffmpeg, filedrop, watchdog, webterm, etc.).
+    # Fable review finding HIGH: the #826 idiom is run-everything-then-exit.
+    install_failed = False
+
     # --- 3f-update. Claude CLI version floor enforcement (#975) ---
     # Check the local `claude --version` against FLEET_CLAUDE_MIN_VERSION,
     # fix autoUpdatesChannel stable→latest, run `claude update` if below
     # floor, and report the result. A target still below the floor after
-    # update is a FATAL install error (the CLI cannot talk to the API).
+    # update latches install_failed (the CLI cannot talk to the API).
     try:
         ver_result = ensure_claude_version_current()
         summary = format_version_summary(ver_result)
@@ -1492,7 +1498,7 @@ def cmd_install(args):
         if ver_result.get("below_floor"):
             print("  ⚠ Claude CLI version floor FAILED: %s"
                   % ver_result.get("error"), file=sys.stderr)
-            sys.exit(1)
+            install_failed = True
     except Exception as e:
         print(f"  claude version check error (non-fatal): {e}",
               file=sys.stderr)
@@ -1620,9 +1626,8 @@ def cmd_install(args):
     # failure (e.g. the tunnel restart failing 'No medium found') now returns
     # False and LATCHES install_failed, so this install exits non-zero and `push`
     # never reports OK over a stale tunnel — a benign no-op returns True and never
-    # trips it. install_failed is declared HERE (before the plugin steps) so this
-    # is the first step that can latch it. ---
-    install_failed = False
+    # trips it. install_failed is declared at step 3f-update (#975) so the
+    # version-floor step is the first that can latch it. ---
     try:
         import cli_drop_gateway
         if not cli_drop_gateway.reconcile_drop_ingress_on_install():

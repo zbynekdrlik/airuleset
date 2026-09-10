@@ -169,16 +169,19 @@ class TestEnsureClaudeVersionCurrent(unittest.TestCase):
         self.assertTrue(result["channel_fixed"])
 
     @patch("cli_claude_version.fix_auto_updates_channel", return_value=(False, "default"))
-    @patch("cli_claude_version.run_claude_update", return_value=(False, "update failed"))
+    @patch("cli_claude_version.run_claude_update", return_value=(False, "no write permission"))
     @patch("cli_claude_version.get_local_claude_version")
     def test_below_floor_after_update_is_failure(self, mock_ver, mock_upd, mock_fix):
-        """A target still below floor after update = deploy FAILURE."""
+        """A target still below floor after update = deploy FAILURE.
+        The error preserves the original update failure message."""
         mock_ver.side_effect = ["2.1.228", "2.1.228"]
         result = cv.ensure_claude_version_current(
             env={"PATH": "/usr/bin"}, home="/tmp/fake",
             min_version="2.1.251")
         self.assertTrue(result["below_floor"])
         self.assertIn("BELOW", result["error"])
+        # #975 review LOW: original update error must be preserved.
+        self.assertIn("no write permission", result["error"])
 
     @patch("cli_claude_version.fix_auto_updates_channel", return_value=(False, "default"))
     @patch("cli_claude_version.run_claude_update")
@@ -243,6 +246,43 @@ class TestCheckLocalVersionVsFloor(unittest.TestCase):
     def test_not_found(self, _):
         ver_str, status = cv.check_local_version_vs_floor(min_version="2.1.251")
         self.assertEqual(status, "UNKNOWN")
+
+
+class TestSubprocessSeams(unittest.TestCase):
+    """Real-seam tests: stub `claude` script on a temp PATH exercises
+    get_local_claude_version + run_claude_update through subprocess."""
+
+    def _stub_env(self, script_body):
+        """Create a temp dir with a stub `claude` script, return env."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        stub = os.path.join(d, "claude")
+        with open(stub, "w") as f:
+            f.write("#!/bin/bash\nset -euo pipefail\n" + script_body)
+        os.chmod(stub, 0o755)
+        return {"PATH": d + ":" + os.environ.get("PATH", "")}
+
+    def test_get_version_success(self):
+        env = self._stub_env('echo "2.1.267"\n')
+        v = cv.get_local_claude_version(env=env)
+        self.assertEqual(v, "2.1.267")
+
+    def test_get_version_failure(self):
+        env = self._stub_env('exit 1\n')
+        v = cv.get_local_claude_version(env=env)
+        self.assertIsNone(v)
+
+    def test_update_success(self):
+        env = self._stub_env('echo "Updated to 2.1.267"\n')
+        ok, out = cv.run_claude_update(env=env)
+        self.assertTrue(ok)
+        self.assertIn("Updated", out)
+
+    def test_update_failure(self):
+        env = self._stub_env('echo "failed" >&2; exit 1\n')
+        ok, out = cv.run_claude_update(env=env)
+        self.assertFalse(ok)
+        self.assertIn("failed", out)
 
 
 class TestFleetFloorConstant(unittest.TestCase):
