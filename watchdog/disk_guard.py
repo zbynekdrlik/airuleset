@@ -714,13 +714,8 @@ def discover_runner_update(runner_root=GH_RUNNER_HOME, pgrep_fn=None, dir_stats_
     root = Path(runner_root)
     if not root.is_dir():
         return []
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("runner-update pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    worker_live = bool(live.strip())
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    worker_live = _rwl(pgrep_fn=pgrep_fn)
     out = []
     try:
         for rd in sorted(root.glob("actions-runner*")):
@@ -757,13 +752,8 @@ def discover_stale_runner_checkouts(runner_root=GH_RUNNER_HOME, now=None,
     root = Path(runner_root)
     if not root.is_dir():
         return []
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("runner-checkout pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    if live.strip():
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    if _rwl(pgrep_fn=pgrep_fn):
         return [{"cls": "runner-checkout", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — CI job may hold a checkout, kept"}]
     cutoff = min_age_days * 86400
@@ -1267,13 +1257,8 @@ def discover_docker_images(now=None, images_fn=None, ps_fn=None, pgrep_fn=None,
     prune`. Docker absent / ps unknown → does nothing (fail-safe KEEP). Rows
     `docker-rmi`/skip; `path` is the image id `docker rmi` acts on."""
     now = time.time() if now is None else now
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("docker rung pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    if live.strip():
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    if _rwl(pgrep_fn=pgrep_fn):
         return [{"cls": "docker-image", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — CI may pull/build, docker rung skipped"}]
     images = (images_fn or _default_docker_images)()
@@ -2069,13 +2054,8 @@ def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
     root = Path(runner_root)
     if not root.is_dir():
         return []
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("runner-diag pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    if live.strip():
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    if _rwl(pgrep_fn=pgrep_fn):
         return [{"cls": "runner-diag", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — _diag may be written, kept"}]
     cutoff = min_age_days * 86400
@@ -3822,6 +3802,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 status["drain_exhausted_streak"] = 0
             else:
                 status["drain_exhausted_streak"] = prior["drain_exhausted_streak"]
+        # #980: carry forward drain_skipped_rungs
+        if isinstance(prior, dict) and isinstance(prior.get("drain_skipped_rungs"), list):
+            status["drain_skipped_rungs"] = prior["drain_skipped_rungs"]
     # #925 F5: carry forward drain_exhausted BEFORE the pre-drain status write
     if "drain_exhausted" not in status:
         _prior_ex = _read_status_cache(home) if will_drain else (prior if isinstance(prior, dict) else {})

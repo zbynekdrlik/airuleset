@@ -133,52 +133,46 @@ def discover_session_scratch(tmp_dir="/tmp", uid=None, now=None,
 
 def _classify_session_scratch(session_path, cwd_key, session_id, home, now,
                               proc_dir, transcript_age_hours, dir_stats_fn):
-    """Classify one session scratch dir as reclaimable or skip."""
+    """Classify one session scratch dir as reclaimable or skip.
+
+    Reuses ``cli_scratch_sweep.scratch_session_live_recheck`` — the reviewed
+    (#863/#355) tri-state liveness check including the sessions-registry
+    uuid→live-pid signal, cwd/fd scan, and transcript freshness.  A session
+    that is LIVE or UNDETERMINABLE is KEPT; only a provably DEAD session
+    whose transcript is older than ``transcript_age_hours`` is reclaimable.
+    """
     from watchdog.disk_guard import _safe_dir_size
 
     nbytes = _safe_dir_size(session_path, dir_stats_fn)
     base = {"cls": "session-scratch", "path": session_path, "bytes": nbytes}
 
-    # Check 1: any process with cwd or open fd inside this dir?
+    # Reuse the #863 tri-state liveness check (registry + fd/cwd + transcript).
     try:
-        from cli_target_purge import _target_in_live_use
-        if _target_in_live_use(session_path,
-                               proc_dir=proc_dir if proc_dir else None):
+        from cli_scratch_sweep import scratch_session_live_recheck
+        if scratch_session_live_recheck(session_path, home=home, now=now,
+                                        proc_dir=proc_dir):
             return {**base, "kind": "skip",
-                    "reason": "in live use (cwd/fd inside) — kept"}
+                    "reason": "session live or undeterminable — kept"}
     except Exception as e:
         return {**base, "kind": "skip",
                 "reason": "liveness check failed: %r — kept (fail-safe)" % e}
 
-    # Check 2: transcript exists and is old enough?
+    # The session is provably dead.  Additionally require the transcript
+    # (or the dir itself when no transcript exists) to be older than the
+    # configured age threshold — an extra belt beyond the liveness check.
     transcript = os.path.join(
         home, ".claude", "projects", cwd_key, "%s.jsonl" % session_id)
-    if os.path.isfile(transcript):
-        try:
-            mtime = os.stat(transcript).st_mtime
-            age_hours = (now - mtime) / 3600.0
-            if age_hours < transcript_age_hours:
-                return {**base, "kind": "skip",
-                        "reason": "transcript too recent (%.1fh < %dh) — kept"
-                        % (age_hours, transcript_age_hours)}
-        except OSError:
-            return {**base, "kind": "skip",
-                    "reason": "transcript stat failed — kept (fail-safe)"}
-    else:
-        # No transcript = session might have been created by a non-standard
-        # path.  If no process uses the dir (check 1 passed), and there is
-        # no transcript at all, the session is dead.  Still require a minimum
-        # age on the dir itself (24h).
-        try:
-            dir_mtime = os.stat(session_path).st_mtime
-            dir_age_hours = (now - dir_mtime) / 3600.0
-            if dir_age_hours < transcript_age_hours:
-                return {**base, "kind": "skip",
-                        "reason": "no transcript and dir too recent (%.1fh < %dh) — kept"
-                        % (dir_age_hours, transcript_age_hours)}
-        except OSError:
-            return {**base, "kind": "skip",
-                    "reason": "dir stat failed — kept (fail-safe)"}
+    try:
+        if os.path.isfile(transcript):
+            age_hours = (now - os.stat(transcript).st_mtime) / 3600.0
+        else:
+            age_hours = (now - os.stat(session_path).st_mtime) / 3600.0
+    except OSError:
+        return {**base, "kind": "skip",
+                "reason": "stat failed — kept (fail-safe)"}
+    if age_hours < transcript_age_hours:
+        return {**base, "kind": "skip",
+                "reason": "too recent (%.1fh < %dh) — kept"
+                % (age_hours, transcript_age_hours)}
 
-    # All three checks passed: this session is provably dead.
     return {**base, "kind": "delete", "reason": None}
