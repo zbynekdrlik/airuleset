@@ -74,10 +74,15 @@ class TestRunbook(unittest.TestCase):
     def test_break_glass_md_has_password_rotation(self):
         """#985: the runbook must document password rotation."""
         text = (REPO / "docs" / "break-glass.md").read_text()
-        self.assertIn("chpasswd", text,
-                      "must mention chpasswd for rotation")
+        self.assertIn("passwd airuleset", text,
+                      "must mention passwd for rotation")
         self.assertIn("secret show", text,
                       "must mention secret show for re-delivery")
+
+    def test_break_glass_md_has_ufw_note(self):
+        """#985: the runbook must mention ufw rate-limiting."""
+        text = (REPO / "docs" / "break-glass.md").read_text()
+        self.assertIn("ufw", text, "must mention ufw")
 
     def test_machine_identities_has_pointer(self):
         text = (REPO / "modules" / "core" / "machine-identities.md").read_text()
@@ -402,8 +407,12 @@ class TestControllerDNS(unittest.TestCase):
         with _patch_box_class("controller"):
             rows = g.check_controller_dns(resolve_fn=resolve)
         for name, ok, msg in rows:
-            self.assertFalse(ok)
-            self.assertIn("DRIFT", msg)
+            if name in g.CONTROLLER_DNS_PROXIED:
+                # Proxied names are presence-only — any resolution is OK.
+                self.assertTrue(ok, "%s proxied should be OK" % name)
+            else:
+                self.assertFalse(ok, "%s should be DRIFT" % name)
+                self.assertIn("DRIFT", msg)
 
     def test_unresolvable_is_red(self):
         def resolve(name):
@@ -435,8 +444,11 @@ class TestControllerDNS(unittest.TestCase):
         with _patch_box_class("controller"):
             rows = g.check_controller_dns(resolve_fn=resolve)
         for name, ok, msg in rows:
-            self.assertFalse(ok)
-            self.assertIn("DRIFT", msg)
+            if name in g.CONTROLLER_DNS_PROXIED:
+                self.assertTrue(ok, "%s proxied should be OK" % name)
+            else:
+                self.assertFalse(ok, "%s should be DRIFT" % name)
+                self.assertIn("DRIFT", msg)
 
     def test_ar_expects_public_ip(self):
         """#985: ar.newlevel.media expects the PUBLIC IP, not tailscale."""
@@ -570,19 +582,21 @@ class TestSshdPasswordProvision(unittest.TestCase):
             with _patch_box_class("controller"):
                 result = g.provision_sshd_password(run=fake_run, dest=dest)
         self.assertIn("applied", result)
-        # Must have called sshd -t before mv.
+        # Must have called mv BEFORE sshd -t (the include glob *.conf
+        # needs the file in place for sshd -t to validate it).
         verbs = []
         for call in calls:
             for arg in call:
-                if arg in ("mkdir", "tee", "chmod", "sshd", "mv",
+                if arg in ("mkdir", "tee", "chmod", "mv", "sshd",
                            "systemctl"):
                     verbs.append(arg)
                     break
-        self.assertEqual(verbs, ["mkdir", "tee", "chmod", "sshd", "mv",
+        self.assertEqual(verbs, ["mkdir", "tee", "chmod", "mv", "sshd",
                                  "systemctl"])
 
-    def test_sshd_t_failure_blocks_apply(self):
-        """If sshd -t fails, the drop-in must NOT be moved into place."""
+    def test_sshd_t_failure_rolls_back(self):
+        """If sshd -t fails AFTER mv, the drop-in must be ROLLED BACK
+        (removed or restored) and reload must NOT be called."""
         calls = []
 
         def fake_run(argv, **kw):
@@ -604,9 +618,15 @@ class TestSshdPasswordProvision(unittest.TestCase):
                 result = g.provision_sshd_password(run=fake_run, dest=dest)
         self.assertIn("FAILED", result)
         self.assertIn("sshd -t", result)
-        # mv must NOT have been called.
+        self.assertIn("ROLLED BACK", result)
+        # mv WAS called (mv before sshd -t), but rollback (rm) follows.
         mv_calls = [c for c in calls if "mv" in c]
-        self.assertEqual(mv_calls, [])
+        self.assertTrue(mv_calls, "mv must have been called")
+        rm_calls = [c for c in calls if "rm" in c]
+        self.assertTrue(rm_calls, "rollback rm must have been called")
+        # systemctl reload must NOT have been called.
+        reload_calls = [c for c in calls if "systemctl" in c]
+        self.assertEqual(reload_calls, [])
 
 
 class TestSshdPasswordStatus(unittest.TestCase):
@@ -647,6 +667,109 @@ class TestSshdPasswordStatus(unittest.TestCase):
                 ok, msg = g.check_sshd_password_status(dest=dest)
         self.assertFalse(ok)
         self.assertIn("DRIFT", msg)
+
+
+# ---------------------------------------------------------------------------
+# (6) ufw SSH rate-limit (#985)
+# ---------------------------------------------------------------------------
+class TestUfwProvision(unittest.TestCase):
+    """Provisioning of the ufw SSH rate-limit rule (#985)."""
+
+    def test_skipped_on_non_controller(self):
+        with _patch_box_class("workstation"):
+            result = g.provision_ufw_ssh()
+        self.assertIn("skipped", result)
+
+    def test_unchanged_when_rule_present(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            if "ufw" in argv and "status" in argv:
+                R.stdout = (
+                    "Status: active\n"
+                    "22/tcp                     LIMIT       Anywhere\n"
+                )
+            return R()
+
+        with _patch_box_class("controller"):
+            result = g.provision_ufw_ssh(run=fake_run)
+        self.assertIn("unchanged", result)
+
+    def test_adds_rule_when_absent(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            if "ufw" in argv and "status" in argv:
+                R.stdout = "Status: active\n"
+            return R()
+
+        with _patch_box_class("controller"):
+            result = g.provision_ufw_ssh(run=fake_run)
+        self.assertIn("applied", result)
+        limit_calls = [c for c in calls if "limit" in c and "22/tcp" in c]
+        self.assertTrue(limit_calls, "must have called ufw limit 22/tcp")
+
+
+class TestUfwStatus(unittest.TestCase):
+    """Status check for the ufw SSH rate-limit rule (#985)."""
+
+    def test_non_controller_is_na(self):
+        with _patch_box_class("workstation"):
+            ok, msg = g.check_ufw_ssh_status()
+        self.assertTrue(ok)
+        self.assertIn("n/a", msg)
+
+    def test_rule_present_is_ok(self):
+        ufw_out = (
+            "Status: active\n"
+            "22/tcp                     LIMIT       Anywhere\n"
+            "22/tcp (v6)                LIMIT       Anywhere (v6)\n"
+        )
+        with _patch_box_class("controller"):
+            ok, msg = g.check_ufw_ssh_status(ufw_output=ufw_out)
+        self.assertTrue(ok)
+        self.assertIn("OK", msg)
+
+    def test_rule_missing_is_red(self):
+        ufw_out = "Status: active\n80/tcp                     ALLOW       Anywhere\n"
+        with _patch_box_class("controller"):
+            ok, msg = g.check_ufw_ssh_status(ufw_output=ufw_out)
+        self.assertFalse(ok)
+        self.assertIn("MISSING", msg)
+
+
+# ---------------------------------------------------------------------------
+# (7) claudy is proxied — presence-only DNS check (#985)
+# ---------------------------------------------------------------------------
+class TestClaudyProxiedDns(unittest.TestCase):
+
+    def test_claudy_is_proxied(self):
+        self.assertIn("claudy.newlevel.media", g.CONTROLLER_DNS_PROXIED)
+
+    def test_claudy_resolves_ok_with_edge_ips(self):
+        """A proxied name resolving to Cloudflare edge IPs is OK."""
+        def resolve(name):
+            if name == "claudy.newlevel.media":
+                return {"104.21.75.79", "172.67.217.144"}
+            return g.CONTROLLER_DNS_EXPECTED.get(name, g.CONTROLLER_TAILSCALE_IP)
+
+        with _patch_box_class("controller"):
+            rows = g.check_controller_dns(resolve_fn=resolve)
+        claudy_rows = [(n, ok, m) for n, ok, m in rows
+                       if n == "claudy.newlevel.media"]
+        self.assertTrue(claudy_rows)
+        self.assertTrue(claudy_rows[0][1], "proxied name should be OK")
+        self.assertIn("proxied", claudy_rows[0][2])
 
 
 if __name__ == "__main__":

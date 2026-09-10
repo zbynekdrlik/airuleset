@@ -1364,6 +1364,15 @@ def cmd_install(args):
     except Exception as e:
         print(f"  sshd password error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-bis-3. ufw SSH rate-limit rule (#985):
+    # controller-only — ensures public SSH is rate-limited by ufw. ---
+    try:
+        from cli_disk_guard_root import provision_ufw_ssh
+        result = provision_ufw_ssh()
+        print(f"  ufw ssh: {result}")
+    except Exception as e:
+        print(f"  ufw ssh error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque-ter. Managed DNS records (#983): controller-only,
     # idempotent upsert of the proxied CNAME for claudy.newlevel.media and
     # the unproxied A record for ar.newlevel.media (#982). Non-fatal (a
@@ -2036,14 +2045,17 @@ def cmd_status(args):
         from cli_disk_guard_root import (check_owner_ignoreip_status,
                                          check_owner_key_status,
                                          check_controller_dns,
-                                         check_sshd_password_status)
+                                         check_sshd_password_status,
+                                         check_ufw_ssh_status)
         ig_ok, ig_msg = check_owner_ignoreip_status()
         key_ok, key_msg = check_owner_key_status()
         pw_ok, pw_msg = check_sshd_password_status()
+        ufw_ok, ufw_msg = check_ufw_ssh_status()
         dns_rows = check_controller_dns()
         # Show only on the controller (n/a → skip silently).
         if ("n/a" not in ig_msg or "n/a" not in key_msg
-                or "n/a" not in pw_msg or dns_rows):
+                or "n/a" not in pw_msg or "n/a" not in ufw_msg
+                or dns_rows):
             print("\nbreak-glass (#982/#985):")
             if "n/a" not in ig_msg:
                 tag = "OK" if ig_ok else "RED"
@@ -2054,6 +2066,9 @@ def cmd_status(args):
             if "n/a" not in pw_msg:
                 tag = "OK" if pw_ok else "RED"
                 print(f"  [{tag}] sshd password login (airuleset): {pw_msg}")
+            if "n/a" not in ufw_msg:
+                tag = "OK" if ufw_ok else "RED"
+                print(f"  [{tag}] {ufw_msg}")
             for name, dns_ok, dns_msg in dns_rows:
                 tag = "OK" if dns_ok else "RED"
                 print(f"  [{tag}] DNS {name}: {dns_msg}")

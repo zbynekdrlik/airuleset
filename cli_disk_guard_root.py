@@ -77,13 +77,16 @@ SSHD_PASSWORD_PATH = "/etc/ssh/sshd_config.d/60-airuleset-password.conf"
 # airuleset (MagicDNS) + claudy.newlevel.media -> the tailscale IP.
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
 CONTROLLER_PUBLIC_IP = "159.69.209.249"
-# Per-name expected IP: ar uses the public IP, the rest use tailscale.
+# Per-name expected IP: ar uses the public IP, airuleset uses tailscale.
+# claudy.newlevel.media is a PROXIED CNAME (resolves to Cloudflare edge IPs,
+# not any controller IP) — excluded from the IP check, presence-only.
 CONTROLLER_DNS_EXPECTED = {
     "ar.newlevel.media": CONTROLLER_PUBLIC_IP,
     "airuleset": CONTROLLER_TAILSCALE_IP,
-    "claudy.newlevel.media": CONTROLLER_TAILSCALE_IP,
 }
-CONTROLLER_DNS_NAMES = tuple(CONTROLLER_DNS_EXPECTED.keys())
+# All names to check: expected-IP entries + proxied entries (resolves-at-all).
+CONTROLLER_DNS_PROXIED = ("claudy.newlevel.media",)
+CONTROLLER_DNS_NAMES = tuple(CONTROLLER_DNS_EXPECTED.keys()) + CONTROLLER_DNS_PROXIED
 TMPFILES_PATH = "/etc/tmpfiles.d/50-airuleset-disk-guard.conf"
 REPORTER_SCRIPT_PATH = "/usr/local/lib/airuleset/disk-guard-root-report.sh"
 ROOT_SERVICE_PATH = "/etc/systemd/system/airuleset-disk-guard-root.service"
@@ -954,11 +957,23 @@ def provision_sshd_password(run=None, dest=None):
     if getattr(probe, "returncode", 1) != 0:
         return "skipped (no passwordless sudo)"
 
-    # Atomic write via sudo: tee to tmp, chmod, sshd -t, mv into place.
+    # Write via sudo: tee to tmp, chmod, mv into place, THEN sshd -t on the
+    # LIVE config (the Include glob is *.conf — a *.airuleset-tmp is invisible
+    # to sshd, so pre-mv validation is a no-op; the correct pattern is
+    # mv → sshd -t → restore on failure, per cli_webterm_only.py:747-762).
     tmp = dest + ".airuleset-tmp"
     try:
         run(["sudo", "-n", "mkdir", "-p", os.path.dirname(dest)],
             capture_output=True, text=True, timeout=10)
+        # Save previous content for rollback (best-effort).
+        prev_content = None
+        if os.path.isfile(dest):
+            try:
+                with open(dest, "r", encoding="utf-8", errors="replace") as fh:
+                    prev_content = fh.read()
+            except OSError as e:
+                print("  sshd-password: cannot read %s for rollback (%s)"
+                      % (dest, e), file=sys.stderr)
         r = run(["sudo", "-n", "tee", tmp], input=content,
                 capture_output=True, text=True, timeout=10)
         if getattr(r, "returncode", 1) != 0:
@@ -969,20 +984,25 @@ def provision_sshd_password(run=None, dest=None):
             run(["sudo", "-n", "rm", "-f", tmp],
                 capture_output=True, text=True, timeout=5)
             return "FAILED (chmod rc=%d)" % r.returncode
-        # sshd -t validates the config BEFORE moving into place.
-        r = run(["sudo", "-n", "sshd", "-t"],
-                capture_output=True, text=True, timeout=10)
-        if getattr(r, "returncode", 1) != 0:
-            run(["sudo", "-n", "rm", "-f", tmp],
-                capture_output=True, text=True, timeout=5)
-            return "FAILED (sshd -t rc=%d: %s)" % (
-                r.returncode, (r.stderr or "").strip()[:200])
         r = run(["sudo", "-n", "mv", "-f", tmp, dest],
                 capture_output=True, text=True, timeout=10)
         if getattr(r, "returncode", 1) != 0:
             run(["sudo", "-n", "rm", "-f", tmp],
                 capture_output=True, text=True, timeout=5)
             return "FAILED (mv rc=%d)" % r.returncode
+        # sshd -t validates the LIVE config (the new file is now in place).
+        r = run(["sudo", "-n", "sshd", "-t"],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            # ROLLBACK: restore previous content or remove the bad file.
+            if prev_content is not None:
+                run(["sudo", "-n", "tee", dest], input=prev_content,
+                    capture_output=True, text=True, timeout=10)
+            else:
+                run(["sudo", "-n", "rm", "-f", dest],
+                    capture_output=True, text=True, timeout=5)
+            return "FAILED (sshd -t rc=%d: %s — ROLLED BACK)" % (
+                r.returncode, (r.stderr or "").strip()[:200])
         r = run(["sudo", "-n", "systemctl", "reload", "ssh"],
                 capture_output=True, text=True, timeout=15)
         if getattr(r, "returncode", 1) != 0:
@@ -1022,6 +1042,85 @@ def check_sshd_password_status(dest=None):
     if content != expected:
         return (False, "DRIFT — content differs from expected render")
     return (True, "OK — sshd password login (airuleset)")
+
+
+def provision_ufw_ssh(run=None):
+    """Ensure ufw allows rate-limited SSH from anywhere on the controller (#985).
+
+    Idempotent: parses ``ufw status`` output, adds the rule only when absent.
+    Controller-only, sudo-gated, non-fatal. Returns a status string."""
+    run = run or subprocess.run
+
+    try:
+        from watchdog.reaper import default_box_class
+        bc = default_box_class()
+    except Exception:  # noqa: BLE001
+        bc = "unknown"
+    if bc != "controller":
+        return "skipped (box-class=%s, not controller)" % bc
+
+    # sudo gate.
+    try:
+        probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
+                    timeout=10)
+    except Exception as e:  # noqa: BLE001
+        return "skipped (sudo probe error: %r)" % e
+    if getattr(probe, "returncode", 1) != 0:
+        return "skipped (no passwordless sudo)"
+
+    # Check if the rule already exists.
+    try:
+        r = run(["sudo", "-n", "ufw", "status"],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            return "skipped (ufw status failed rc=%d)" % r.returncode
+        status_out = r.stdout or ""
+        # Look for a 22/tcp LIMIT rule from Anywhere.
+        for line in status_out.splitlines():
+            if "22/tcp" in line and "LIMIT" in line.upper() and "Anywhere" in line:
+                return "unchanged (22/tcp LIMIT Anywhere already present)"
+    except Exception as e:  # noqa: BLE001
+        return "skipped (ufw check error: %r)" % e
+
+    # Add the rule.
+    try:
+        r = run(["sudo", "-n", "ufw", "limit", "22/tcp",
+                 "comment", "airuleset break-glass ssh from anywhere (#985)"],
+                capture_output=True, text=True, timeout=15)
+        if getattr(r, "returncode", 1) != 0:
+            return "FAILED (ufw limit rc=%d: %s)" % (
+                r.returncode, (r.stderr or "").strip()[:200])
+    except Exception as e:  # noqa: BLE001
+        return "FAILED (ufw error: %r)" % e
+    return "applied (ufw limit 22/tcp)"
+
+
+def check_ufw_ssh_status(ufw_output=None):
+    """Status check for the ufw SSH rate-limit rule (#985).
+
+    Returns ``(ok, message)``. Non-controller returns ``(True, "n/a")``.
+    ``ufw_output`` is injectable for tests (the raw ``ufw status`` stdout)."""
+    try:
+        from watchdog.reaper import default_box_class
+        bc = default_box_class()
+    except Exception:  # noqa: BLE001
+        bc = "unknown"
+    if bc != "controller":
+        return (True, "n/a (not controller)")
+    if ufw_output is None:
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "ufw", "status"],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                return (False, "ufw status failed rc=%d" % r.returncode)
+            ufw_output = r.stdout or ""
+        except Exception as e:
+            return (False, "ufw check failed: %s" % e)
+    for line in ufw_output.splitlines():
+        if "22/tcp" in line and "LIMIT" in line.upper() and "Anywhere" in line:
+            return (True, "OK — ufw 22/tcp LIMIT Anywhere")
+    return (False, "MISSING — no 22/tcp LIMIT Anywhere rule in ufw")
 
 
 def check_owner_key_status(authorized_keys_path=None):
@@ -1093,11 +1192,20 @@ def check_controller_dns(resolve_fn=None):
                 return None
     rows = []
     for name in CONTROLLER_DNS_NAMES:
-        expected_ip = CONTROLLER_DNS_EXPECTED.get(name, CONTROLLER_TAILSCALE_IP)
         addrs = resolve_fn(name)
         if addrs is None:
             rows.append((name, False, "UNRESOLVABLE"))
-        elif isinstance(addrs, set):
+            continue
+        # Proxied names (Cloudflare edge): only check resolvability.
+        if name in CONTROLLER_DNS_PROXIED:
+            rows.append((name, True,
+                         "OK (proxied) → %s" % (sorted(addrs)
+                                                 if isinstance(addrs, set)
+                                                 else addrs)))
+            continue
+        # Expected-IP names: check the specific IP is in the set.
+        expected_ip = CONTROLLER_DNS_EXPECTED.get(name, CONTROLLER_TAILSCALE_IP)
+        if isinstance(addrs, set):
             if expected_ip in addrs:
                 rows.append((name, True,
                              "OK → %s (in %s)" % (expected_ip,

@@ -9,9 +9,8 @@ tmux attach -t zbynek
 Password re-delivery (from the controller itself):
 `airuleset.py secret show --file ~/.secrets/airuleset-ssh-password`
 
-Password rotation: generate a new strong random password, then:
-`echo 'airuleset:<newpass>' | sudo chpasswd`
-Update `~/.secrets/airuleset-ssh-password` (0600) and re-deliver via `secret show`.
+Password rotation: `sudo passwd airuleset` (interactive, avoids shell history),
+update `~/.secrets/airuleset-ssh-password` (0600), re-deliver via `secret show`.
 
 ## From the laptop (tailscale + key)
 ```powershell
@@ -29,3 +28,4 @@ recovery URL, save the key, and retry.
 - `ar.newlevel.media` → `159.69.209.249` (controller public IP, unproxied A record)
 - `airuleset` → `100.101.214.103` (tailscale MagicDNS)
 - fail2ban sshd jail: maxretry 3, bantime 1 h; owner laptop in ignoreip
+- public SSH is rate-limited by ufw (`limit 22/tcp`) + fail2ban
