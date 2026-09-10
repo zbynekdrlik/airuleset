@@ -428,6 +428,24 @@ class TestGatewayIntegration(unittest.TestCase):
                 await self._teardown(h)
         _run(go())
 
+    def test_dashboard_cache_control_no_store(self):
+        """#984: the dashboard must be served with Cache-Control: no-store to
+        prevent browsers / Cloudflare edge from caching stale tab inventories."""
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                tok = sessions.create()
+                resp = await h.request(
+                    b"GET / HTTP/1.1\r\nHost: x\r\nCookie: webterm_session=%s\r\n\r\n"
+                    % tok.encode())
+                self.assertIn(b"200 OK", resp)
+                self.assertIn(b"Cache-Control: no-store", resp)
+                self.assertIn(b"Pragma: no-cache", resp)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
     def test_logout_invalidates_session_and_clears_cookie(self):
         async def go():
             sessions = g.SessionStore()
