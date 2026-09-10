@@ -23,6 +23,15 @@ In an `/autopilot` / `/goal` / any autonomous run the user is AWAY. When a backg
 - **A timed-out `AskUserQuestion` is NOT an answer.** If you used the dialog and it auto-continued unanswered, do NOT treat that as resolved — re-deliver the SAME question (self-contained) as the `❓` text marker and wait / ask-and-continue (`message-status-marker.md`).
 - `AskUserQuestion`'s structured dialog is fine only when the user is PRESENT (interactive design/brainstorm at the terminal). For an away user it is the wrong channel.
 
+#### Klientský text na schválenie — INLINE citovaný blok, nikdy link (#977)
+
+A TEXT-approval ❓ (schválenie správy pre klienta) MUST carry the FULL proposed
+message INLINE as a `> ` quoted block — never as a share/file-drop URL, a work-
+products path, or "pozri draft na tikete". A share URL may accompany the inline
+text for a genuine attachment, never replace the text. Text longer than ~1500 cp
+→ split into two approvals. HOOK-ENFORCED (`stop-check-question-quality.sh`
+Check 8, #977).
+
 #### Povinná ŠTRUKTÚRA otázky — HOOK-ENFORCED template + ONE ping = ONE decision
 
 Every `❓ NEEDS YOU` / `❓ ASKED` turn is HARD-GATED by `stop-check-question-quality.sh` — a non-conforming question is BLOCKED at Stop and must be rewritten. **The gate enforces only for an AWAY user** (no real prompt in the last ~10 min — presence marker `/tmp/claude-user-active-<sid>` from UserPromptSubmit): the template protects the cold phone read; when the user is PRESENT and typing, the question is a live conversation and hard-gating it just re-printed questions + hook errors into their chat (camera-box "Hruza", 2026-07-05). Still WRITE questions decently when present — the gate absence is not a style licence. Two rules, both from live 2026-07-05 failures:
