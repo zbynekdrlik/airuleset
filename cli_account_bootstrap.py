@@ -44,6 +44,10 @@ SERVICE_ACCOUNTS = {
             "libnss3", "libnspr4", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
             "libatspi2.0-0t64", "libgbm1", "libasound2t64", "libxcomposite1",
             "libxdamage1", "libxext6", "libxfixes3", "libxrandr2",
+            # Playwright E2E glyph metrics — without these, DejaVu Sans
+            # replaces Liberation Sans and wider glyphs overflow tables
+            # (#973 reopen).
+            "fonts-liberation", "fontconfig",
         ],
     },
 }

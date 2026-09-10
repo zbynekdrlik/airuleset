@@ -1,7 +1,8 @@
 """#973: system_packages support in the bootstrap renderer.
 
 Tests that:
-(a) claudy's rendered script contains the apt step with all 12 packages
+(a) claudy's rendered script contains the apt step with all 14 packages
+    (12 Chromium libs + fonts-liberation + fontconfig, #973 reopen)
     and the dpkg-query idempotency guard.
 (b) An account without system_packages renders NO apt-get at all.
 (c) bash -n on the rendered script passes.
@@ -18,28 +19,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cli_account_bootstrap as bootstrap  # noqa: E402
 
 
-# The exact 12 packages that must appear in the claudy bootstrap (#973).
+# The exact 14 packages that must appear in the claudy bootstrap (#973).
+# 12 Chromium headless shell deps + fonts-liberation + fontconfig (#973 reopen).
 EXPECTED_PACKAGES = [
     "libnss3", "libnspr4", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
     "libatspi2.0-0t64", "libgbm1", "libasound2t64", "libxcomposite1",
     "libxdamage1", "libxext6", "libxfixes3", "libxrandr2",
+    "fonts-liberation", "fontconfig",
 ]
 
 
 class TestSystemPackagesClaudy(unittest.TestCase):
-    """(a) claudy render contains the apt step with all 12 packages."""
+    """(a) claudy render contains the apt step with all 14 packages."""
 
     def setUp(self):
         self.script = bootstrap.render_root_bootstrap("claudy")
 
-    def test_all_12_packages_present(self):
+    def test_all_14_packages_present(self):
         for pkg in EXPECTED_PACKAGES:
             self.assertIn(pkg, self.script,
                           "package %r missing from rendered script" % pkg)
 
-    def test_exactly_12_packages_declared(self):
+    def test_exactly_14_packages_declared(self):
         self.assertEqual(len(bootstrap.SERVICE_ACCOUNTS["claudy"]["system_packages"]),
-                         12)
+                         14)
 
     def test_dpkg_query_guard(self):
         self.assertIn("dpkg-query -W", self.script)
@@ -64,7 +67,7 @@ class TestSystemPackagesClaudy(unittest.TestCase):
 
     def test_idempotent_skip_message(self):
         """When all packages present, the script reports 'nothing to do'."""
-        self.assertIn("all 12 system packages already installed", self.script)
+        self.assertIn("all 14 system packages already installed", self.script)
 
 
 class TestNoSystemPackages(unittest.TestCase):
