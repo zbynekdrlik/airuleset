@@ -203,5 +203,90 @@ class TestEnsureErpTestSshConfig(unittest.TestCase):
         self.assertIn("Host another-host", text)
 
 
+class TestIdentityFileLine(unittest.TestCase):
+    """#987: the managed block must include IdentityFile for streams with
+    a deploy key.  The key filename is derived from cli_aliases so the
+    renderer and future provisioning share a single source."""
+
+    def test_david3_block_has_identity_file(self):
+        """david3 managed block must contain IdentityFile pointing at the
+        stream's deploy key — the line whose omission caused #987."""
+        import airuleset
+        block = airuleset.render_erp_test_ssh_config_block("david3")
+        self.assertIsNotNone(block)
+        self.assertIn("IdentityFile ~/.ssh/erp-test-david3_deploy", block)
+
+    def test_montalu2_block_has_identity_file(self):
+        """montalu2 managed block must contain IdentityFile."""
+        import airuleset
+        block = airuleset.render_erp_test_ssh_config_block("montalu2")
+        self.assertIsNotNone(block)
+        self.assertIn("IdentityFile ~/.ssh/erp-test-montalu2_deploy", block)
+
+    def test_miva1_block_has_identity_file(self):
+        """miva1 managed block must contain IdentityFile."""
+        import airuleset
+        block = airuleset.render_erp_test_ssh_config_block("miva1")
+        self.assertIsNotNone(block)
+        self.assertIn("IdentityFile ~/.ssh/erp-test-miva1_deploy", block)
+
+    def test_non_stream_block_is_none(self):
+        """Non-stream user renders None — byte-stable: no block, no
+        IdentityFile, unchanged behaviour."""
+        import airuleset
+        self.assertIsNone(airuleset.render_erp_test_ssh_config_block("gatekeeper"))
+        self.assertIsNone(airuleset.render_erp_test_ssh_config_block("newlevel"))
+
+    def test_ensure_idempotent_with_identity_file(self):
+        """The IdentityFile line must survive an idempotent re-render —
+        the block with IdentityFile is stable on re-run."""
+        import airuleset
+        home = tempfile.mkdtemp()
+        ssh_dir = Path(home) / ".ssh"
+        ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        config_path = ssh_dir / "config"
+        # First run: creates the block with IdentityFile.
+        airuleset.ensure_erp_test_ssh_config(
+            user="david3", ssh_config_path=config_path)
+        text1 = config_path.read_text()
+        self.assertIn("IdentityFile ~/.ssh/erp-test-david3_deploy", text1)
+        # Second run: no change (idempotent).
+        changed = airuleset.ensure_erp_test_ssh_config(
+            user="david3", ssh_config_path=config_path)
+        self.assertFalse(changed, "re-run should be a no-op")
+        text2 = config_path.read_text()
+        self.assertEqual(text1, text2, "block must be byte-stable")
+
+
+class TestErpTestDeployKeyName(unittest.TestCase):
+    """cli_aliases.erp_test_deploy_key_name: the SINGLE SOURCE for the
+    deploy-key filename (#987)."""
+
+    def test_david_streams(self):
+        from cli_aliases import erp_test_deploy_key_name
+        for user in ("david1", "david2", "david3", "david4"):
+            self.assertEqual(erp_test_deploy_key_name(user),
+                             f"erp-test-{user}_deploy",
+                             f"{user} key name mismatch")
+
+    def test_montalu_streams(self):
+        from cli_aliases import erp_test_deploy_key_name
+        for user in ("montalu1", "montalu2", "montalu3"):
+            self.assertEqual(erp_test_deploy_key_name(user),
+                             f"erp-test-{user}_deploy",
+                             f"{user} key name mismatch")
+
+    def test_miva1(self):
+        from cli_aliases import erp_test_deploy_key_name
+        self.assertEqual(erp_test_deploy_key_name("miva1"),
+                         "erp-test-miva1_deploy")
+
+    def test_non_stream_returns_none(self):
+        from cli_aliases import erp_test_deploy_key_name
+        for user in ("gatekeeper", "newlevel", "", None):
+            self.assertIsNone(erp_test_deploy_key_name(user),
+                              f"{user!r} should return None")
+
+
 if __name__ == "__main__":
     unittest.main()

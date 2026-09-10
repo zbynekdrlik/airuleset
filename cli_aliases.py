@@ -152,3 +152,18 @@ def erp_test_deploy_user(user):
         return None
     family = re.match(r"^([a-z]+)", u).group(1)
     return _ERP_TEST_DEPLOY_USER_BY_FAMILY.get(family)
+
+
+def erp_test_deploy_key_name(user):
+    """The deploy-key FILENAME for the stream's erp-test box, or None.
+
+    ``erp-test-{user}_deploy`` — e.g. ``erp-test-david3_deploy``.
+    Returns None for non-stream / no-erp-test-box users (same gate as
+    `erp_test_deploy_user`).  THE single source for the key filename
+    (#987) — the ssh config renderer and any future key provisioning
+    both call this, never a hand-typed name.
+    """
+    if erp_test_deploy_user(user) is None:
+        return None
+    u = (user or "").strip()
+    return "erp-test-%s_deploy" % u
