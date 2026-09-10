@@ -760,7 +760,7 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
     return failed
 
 
-def provision_owner_ignoreip(run=None):
+def provision_owner_ignoreip(run=None, dest=None):
     """Install the owner break-glass ``ignoreip`` drop-in on the controller
     (#982). LOCAL-only via ``sudo`` — follows the ``_provision_shared_fleet_dir``
     pattern (controller-only, passwordless-sudo-gated, non-fatal).
@@ -769,6 +769,9 @@ def provision_owner_ignoreip(run=None):
       * box-class is ``controller``
       * fail2ban is installed (``fail2ban-client`` exists)
       * passwordless sudo is available (``sudo -n true``)
+
+    *dest* overrides the drop-in path — used by tests to avoid reading
+    the live ``/etc`` state (#982 fix-forward hermeticity seam).
 
     IDEMPOTENT: writes the drop-in atomically (mktemp+mv via sudo), then
     reloads fail2ban. Returns a status string for logging."""
@@ -789,7 +792,7 @@ def provision_owner_ignoreip(run=None):
         return "skipped (fail2ban not installed)"
 
     content = render_owner_ignoreip()
-    dest = OWNER_IGNOREIP_PATH
+    dest = dest or OWNER_IGNOREIP_PATH
 
     # Idempotent short-circuit: if the drop-in already exists and is
     # byte-identical, skip the write + reload (the _provision_shared_fleet_dir
