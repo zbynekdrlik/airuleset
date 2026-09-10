@@ -69,7 +69,7 @@ FAIL2BAN_JAIL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.conf"
 OWNER_IGNOREIP_PATH = "/etc/fail2ban/jail.d/60-airuleset-owner-ignoreip.conf"
 # #982: DNS names that must resolve to the controller's tailscale IP.
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
-CONTROLLER_DNS_NAMES = ("ar.newlevel.media", "airuleset")
+CONTROLLER_DNS_NAMES = ("ar.newlevel.media", "airuleset", "claudy.newlevel.media")
 TMPFILES_PATH = "/etc/tmpfiles.d/50-airuleset-disk-guard.conf"
 REPORTER_SCRIPT_PATH = "/usr/local/lib/airuleset/disk-guard-root-report.sh"
 ROOT_SERVICE_PATH = "/etc/systemd/system/airuleset-disk-guard-root.service"

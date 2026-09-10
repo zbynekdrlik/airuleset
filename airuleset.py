@@ -1354,6 +1354,25 @@ def cmd_install(args):
     except Exception as e:
         print(f"  break-glass ignoreip error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-ter. Managed DNS records (#983): controller-only,
+    # idempotent upsert of the proxied CNAME for claudy.newlevel.media and
+    # the unproxied A record for ar.newlevel.media (#982). Non-fatal (a
+    # non-controller box or a missing DNS token skips). ---
+    try:
+        from watchdog.reaper import default_box_class as _dbc983
+        import pwd as _pwd983
+        if _dbc983() == "controller" and _pwd983.getpwuid(os.getuid()).pw_name == "airuleset":
+            import cli_cloudflare_dns as _dns
+            dns_ok, dns_results = _dns.ensure_managed_records(dry_run=False)
+            for r in dns_results:
+                tag = "OK" if r.get("ok") else "ERROR"
+                print("  DNS %s: [%s] %s" % (
+                    r.get("name", "?"), tag, r.get("action") or r.get("error", "?")))
+            if not dns_ok:
+                print("  DNS assertion failed (non-fatal)", file=sys.stderr)
+    except Exception as e:
+        print(f"  DNS assertion error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque. Webterm-only SSH key management (#869): manage the
     # authorized_keys for webterm-only accounts (david1-4, dominika).
     # ACTIVE ONLY when getpass.getuser() is a webterm-only user — every
