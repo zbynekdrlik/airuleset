@@ -108,7 +108,7 @@ class UnittestAncestorSuppression(unittest.TestCase):
             script = (
                 'MY_PID=$$; '
                 'mkdir -p "%s/$MY_PID"; '
-                'echo "PPid:\\t100" > "%s/$MY_PID/status"; '
+                'printf "PPid:\\t100\\n" > "%s/$MY_PID/status"; '
                 'printf "bash\\x00-c\\x00test\\x00" > "%s/$MY_PID/cmdline"; '
                 'source "%s" && log_hook_block unittest-ancestor-test "test-cmd"'
             ) % (fake_proc, fake_proc, fake_proc, LIB)
@@ -158,7 +158,7 @@ class UnittestAncestorSuppression(unittest.TestCase):
             script = (
                 'MY_PID=$$; '
                 'mkdir -p "%s/$MY_PID"; '
-                'echo "PPid:\\t100" > "%s/$MY_PID/status"; '
+                'printf "PPid:\\t100\\n" > "%s/$MY_PID/status"; '
                 'printf "bash\\x00-c\\x00test\\x00" > "%s/$MY_PID/cmdline"; '
                 'source "%s" && log_hook_block bash-ancestor-test "test-cmd"'
             ) % (fake_proc, fake_proc, fake_proc, LIB)

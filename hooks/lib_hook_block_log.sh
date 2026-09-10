@@ -6,12 +6,13 @@
 # Usage:  source "$(dirname "${BASH_SOURCE[0]}")/lib_hook_block_log.sh"
 #         log_hook_block "block-ci-poll-repeat" "$CMD"
 
-# _is_pytest_ancestor: walk the parent chain via /proc and return 0 (true)
-# if any ancestor's cmdline contains 'pytest'. Needs no env var — works even
-# when tests construct clean env dicts that omit PYTEST_CURRENT_TEST.
+# _is_test_runner_ancestor: walk the parent chain via /proc and return 0 (true)
+# if any ancestor's cmdline contains 'pytest' or 'unittest'. Needs no env var —
+# works even when tests construct clean env dicts that omit PYTEST_CURRENT_TEST.
+# Matches both runners because the push gate (Pass B) runs unittest discover.
 # Supports AIRULESET_PROC_ROOT seam for testing (default: /proc).
-# Fails OPEN on unreadable /proc (returns 1 = not pytest = write normally).
-_is_pytest_ancestor() {
+# Fails OPEN on unreadable /proc (returns 1 = not test runner = write normally).
+_is_test_runner_ancestor() {
     local proc_root="${AIRULESET_PROC_ROOT:-/proc}"
     local pid="$$"
     local i cmdline
@@ -25,9 +26,9 @@ _is_pytest_ancestor() {
         local cmdline_file="$proc_root/$pid/cmdline"
         [ -r "$cmdline_file" ] || return 1
         cmdline=$(tr '\0' ' ' < "$cmdline_file" 2>/dev/null) || return 1
-        # Check for pytest in any form
+        # Check for pytest or unittest in any form
         case "$cmdline" in
-            *" pytest "*|*"/pytest "*|*" pytest"|*"/pytest"|*"py.test"*|*"-m pytest"*|*".venv/bin/pytest"*)
+            *" pytest "*|*"/pytest "*|*" pytest"|*"/pytest"|*"py.test"*|*"-m pytest"*|*".venv/bin/pytest"*|*"-m unittest"*)
                 return 0 ;;
         esac
     done
@@ -41,14 +42,14 @@ log_hook_block() {
     # 1. AIRULESET_HOOK_BLOCK_LOG=<path> → write there (explicit override wins)
     #    AIRULESET_HOOK_BLOCK_LOG=off   → suppress entirely
     # 2. PYTEST_CURRENT_TEST set        → suppress (env guard)
-    # 3. pytest in ancestor chain       → suppress (/proc walk, #988 fix-forward)
+    # 3. test runner in ancestor chain   → suppress (/proc walk, #988 fix-forward)
     # 4. default                        → ~/.claude/hook-blocks.log
     if [[ -n "${AIRULESET_HOOK_BLOCK_LOG:-}" ]]; then
         [[ "${AIRULESET_HOOK_BLOCK_LOG}" == "off" ]] && return 0
         local log_file="${AIRULESET_HOOK_BLOCK_LOG}"
     elif [[ -n "${PYTEST_CURRENT_TEST:-}" ]]; then
         return 0
-    elif _is_pytest_ancestor; then
+    elif _is_test_runner_ancestor; then
         return 0
     else
         local log_file="${HOME}/.claude/hook-blocks.log"
