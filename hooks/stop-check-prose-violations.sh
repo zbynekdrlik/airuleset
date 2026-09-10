@@ -2053,15 +2053,29 @@ ACK_REACTION_UNKNOWN=0
 _ACK_HAS_ODOO=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE "$ODOO_ANCHOR_RX|vl[áa]kn" && echo 1 || echo 0)
 if [ "$_ACK_HAS_ODOO" = "1" ]; then
     # Stage 1: does the message mention processing a NEW client message?
-    # Two arms (ERE `.{0,80}` proximity — grep `.` already excludes newline):
-    #   A) klient/zákazn near napísal/napisal/poslal/poslala (active voice)
-    #   B) napísal/napisal/poslal/poslala near vlákn/discuss (sent TO a thread)
-    # Run on $MSG_MENTION (fenced/backtick/quoted spans stripped — HIGH-2
-    # review finding: raw $MSG blocks code blocks discussing the doctrine).
-    # LC_ALL=C.UTF-8 for diacritics (HIGH-1 review finding: bare grep in C
-    # locale misses ž/á/í in Slovak spellings).
-    if ! _ACK_CLIENT_MSG=$(LC_ALL=C.UTF-8 msg_lines "$MSG_MENTION" -iE "(klient|z[aá]kazn).{0,80}(nap[ií]sal|poslal)|(nap[ií]sal|poslal).{0,80}(klient|z[aá]kazn|vl[aá]kn|discuss)"); then
-        _ACK_CLIENT_MSG=""
+    # The CLIENT must be the grammatical SUBJECT (nominative), not the
+    # object (dative "klientovi", instrumental "klientom") — the
+    # assistant's own first-person send ("poslal som klientovi") must NOT
+    # match (#978 fix-forward, 657 false-positive).
+    # Two arms (ERE, run on $MSG_MENTION — fenced/backtick/quoted spans
+    # stripped; HIGH-2 fix; LC_ALL=C.UTF-8 for diacritics, HIGH-1 fix):
+    #   A) klient/zákazník in NOMINATIVE (≤2 words) before napísal/poslal
+    #   C) Capitalised Slovak name (≤2 words) before verb, message-noun
+    #      within 60 chars (pripomienk/otázk/požiadav/správ/súbor/do vlákn)
+    # First-person EXCLUSION: any candidate line with \bsom\b within 12
+    # chars of the verb is dropped (catches "poslal som", "som poslal",
+    # "napísal som").
+    #
+    # Accepted residuals (#978 fix-forward): a third-person sentence where
+    # the subject is neither klient/zákazník NOR a capitalised name will
+    # not fire — acceptable (very rare in stream prose).
+    _ACK_CLIENT_MSG=""
+    if ! _ACK_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG_MENTION" -iE "(klient(ka)?|z[aá]kazn[ií](k|[čc]k)a?)\b.{0,20}(nap[ií]sala?|poslala?)\b|[[:upper:]][[:lower:]]{2,}.{0,20}(nap[ií]sala?|poslala?)\b.{0,60}(pripomienk|ot[áa]zk|po[žz]iadav|spr[áa]v[ua]|s[úu]bor|do vl[áa]kn)"); then
+        _ACK_LINES=""
+    fi
+    if [ -n "$_ACK_LINES" ]; then
+        # Exclude first-person lines: "som" within 12 chars of the verb
+        _ACK_CLIENT_MSG=$(printf '%s\n' "$_ACK_LINES" | LC_ALL=C.UTF-8 grep -ivE "(nap[ií]sala?|poslala?).{0,12}\bsom\b|\bsom\b.{0,12}(nap[ií]sala?|poslala?)" || true)
     fi
     if [ -n "$_ACK_CLIENT_MSG" ]; then
         # Stage 2: does the message carry an Ack-reaction evidence line?
