@@ -454,20 +454,15 @@ WATCHDOG_TIMER_TEMPLATE = REPO_DIR / "settings" / "api-watchdog.timer.template"
 WATCHDOG_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchdog.service"
 WATCHDOG_TIMER_DEST = Path.home() / ".config" / "systemd" / "user" / "api-watchdog.timer"
 
-# --- Session-restart managed drop-in (#947 follow-on) ----------------------
-# DEFAULT ON — every managed box gets the drop-in setting
-# AIRULESET_SESSION_RESTART_ACTION=1. A per-box OPT-OUT marker removes it.
-SESSION_RESTART_DROPIN_DEST = (
+# --- Session-restart drop-in CLEANUP (#947 reversal, 2026-09-10) -----------
+# The #947 action path is DELETED (owner directive). On install, remove any
+# previously rendered drop-in files so they don't set a stale env var.
+_SESSION_RESTART_DROPIN_CLEANUP = (
     Path.home() / ".config" / "systemd" / "user"
-    / "api-watchdog.service.d" / "50-airuleset-session-restart.conf"
-)
-# The hand-written gk file (the drift this replaces).
-SESSION_RESTART_DROPIN_HAND = (
+    / "api-watchdog.service.d" / "50-airuleset-session-restart.conf",
     Path.home() / ".config" / "systemd" / "user"
-    / "api-watchdog.service.d" / "50-session-restart-947.conf"
+    / "api-watchdog.service.d" / "50-session-restart-947.conf",
 )
-# Per-box opt-out: touch this file to disable session-restart on this box.
-SESSION_RESTART_OPTOUT_MARKER = Path.home() / ".claude" / "airuleset-session-restart-off"
 
 
 def watchdog_disable_marker():
@@ -487,124 +482,38 @@ def watchdog_disable_marker():
     return Path.home() / ".claude" / "api-watchdog.disabled"
 
 
-def render_session_restart_dropin():
-    """Return the managed drop-in content for the session-restart env var.
-    Pure render — no I/O, no side-effects."""
-    return (
-        "# Managed by airuleset (#947) — enables Job 46 session-restart-on-\n"
-        "# degradation. DEFAULT ON on every managed box; opt-out by touching\n"
-        "# ~/.claude/airuleset-session-restart-off (install removes this file\n"
-        "# when the marker exists).\n"
-        "[Service]\n"
-        "Environment=AIRULESET_SESSION_RESTART_ACTION=1\n"
-    )
+def cleanup_session_restart_dropins(paths=None, daemon_reload_fn=None):
+    """One-time cleanup: remove previously rendered session-restart drop-ins.
 
+    #947 reversal (owner directive 2026-09-10): the session-restart action
+    path is DELETED. This removes any stale drop-in files that would set
+    ``AIRULESET_SESSION_RESTART_ACTION=1`` — a dead env var now, but
+    leaving the file is confusing. Idempotent, logged, never raises.
 
-def setup_session_restart_dropin(dropin_path=None, optout_path=None,
-                                 hand_path=None, daemon_reload_fn=None):
-    """Declarative provisioning of the session-restart drop-in (#947 follow-on).
-
-    DEFAULT ON — renders the drop-in unless the opt-out marker exists.
-    Idempotent: content-compare before write, daemon-reload only on change
-    (#736 change-conditional pattern). Deletes the hand-written gk file
-    (``50-session-restart-947.conf``) when it exists — superseded.
-
-    All paths are injectable for testing. Returns True on success, False on
-    failure. Never raises.
+    All params are injectable for testing.
     """
-    if dropin_path is None:
-        dropin_path = SESSION_RESTART_DROPIN_DEST
-    if optout_path is None:
-        optout_path = SESSION_RESTART_OPTOUT_MARKER
-    if hand_path is None:
-        hand_path = SESSION_RESTART_DROPIN_HAND
+    if paths is None:
+        paths = _SESSION_RESTART_DROPIN_CLEANUP
     if daemon_reload_fn is None:
         def daemon_reload_fn():
             rc, _o, err = _run_systemctl(["daemon-reload"])
             if rc != 0:
-                print(f"  session-restart: daemon-reload FAILED (rc={rc}): "
-                      f"{err.strip()}", file=sys.stderr)
-                return False
-            return True
-
-    dropin_path = Path(dropin_path)
-    optout_path = Path(optout_path)
-    hand_path = Path(hand_path)
-
-    try:
-        changed = False
-
-        # Clean up the hand-written gk drop-in if present (superseded).
-        if hand_path.exists():
-            hand_path.unlink()
-            print("  session-restart: deleted hand-written drop-in "
-                  f"({hand_path.name}) — superseded by managed")
-            changed = True
-
-        if optout_path.exists():
-            # OPT-OUT: remove the drop-in if it exists.
-            if dropin_path.exists():
-                dropin_path.unlink()
-                print("  session-restart: removed drop-in (opt-out marker "
-                      f"present: {optout_path})")
-                changed = True
-            else:
-                pass  # No drop-in, no change needed.
-        else:
-            # DEFAULT ON: render the drop-in.
-            content = render_session_restart_dropin()
-            dropin_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                existing = dropin_path.read_text(encoding="utf-8")
-            except (OSError, ValueError):
-                existing = None
-            if existing != content:
-                dropin_path.write_text(content, encoding="utf-8")
-                print("  session-restart: wrote managed drop-in "
-                      f"({dropin_path.name})")
-                changed = True
-
-        if changed:
-            result = daemon_reload_fn()
-            if result is False:
-                return False
-
-        # Always report the configured state (L3: no-change path also prints).
-        source = configured_session_restart_source(dropin_path, optout_path)
-        print(f"  session-restart: configured={source}")
-        return True
-    except Exception as e:
-        print(f"  session-restart drop-in error: {e}", file=sys.stderr)
-        return False
-
-
-def configured_session_restart_source(dropin_path=None, optout_path=None):
-    """Report the CONFIGURED source of the session-restart flag.
-
-    Returns the source string: ``"managed"`` (drop-in present),
-    ``"opt-out"`` (marker present), or ``"none"`` (no drop-in, no marker
-    -- falls through to the env var / EnvironmentFile, which the caller
-    reads via ``action_enabled()``).
-
-    NOTE: systemd ``EnvironmentFile=`` overrides ``Environment=`` from a
-    drop-in, so the configured source is NOT the effective action -- the
-    caller derives the effective action from the env var (``sr_enabled``).
-
-    Injectable paths for testing. Never raises.
-    """
-    if dropin_path is None:
-        dropin_path = SESSION_RESTART_DROPIN_DEST
-    if optout_path is None:
-        optout_path = SESSION_RESTART_OPTOUT_MARKER
-
-    dropin_path = Path(dropin_path)
-    optout_path = Path(optout_path)
-
-    if optout_path.exists():
-        return "opt-out"
-    if dropin_path.exists():
-        return "managed"
-    return "none"
+                print("  session-restart cleanup: daemon-reload failed "
+                      "(rc=%d): %s" % (rc, err.strip()), file=sys.stderr)
+    removed = []
+    for p in paths:
+        p = Path(p)
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except OSError as e:
+            print("  session-restart cleanup: failed to remove %s: %s"
+                  % (p.name, e), file=sys.stderr)
+    if removed:
+        print("  session-restart: removed stale drop-in(s): %s (#947 reversal)"
+              % ", ".join(removed))
+        daemon_reload_fn()
 
 
 def setup_watchdog_service():
@@ -665,5 +574,5 @@ def setup_watchdog_service():
 
 def maybe_setup_watchdog():
     setup_watchdog_service()
-    # #947 follow-on: render the managed session-restart drop-in (default ON).
-    setup_session_restart_dropin()
+    # #947 reversal (2026-09-10): remove stale session-restart drop-ins.
+    cleanup_session_restart_dropins()
