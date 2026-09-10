@@ -1950,17 +1950,14 @@ def cmd_status(args):
     # invisible, so the session lost agent types with no diagnostic) ---
     _check_agent_symlinks()
 
-    # --- Webterm live-argv health (#974: a stale worktree argv survived
-    # two installs — make the process-layer mismatch visible in status) ---
+    # --- Webterm live-argv health (#974 + MEDIUM-4 fix-forward: enumerate
+    # BOTH owner-box AND lane-profile units via LANE_HOST-driven derivation,
+    # so the controller's 8 lane units appear too — not just the dev1 pair) ---
     try:
-        from cli_webterm import is_webterm_gateway, WEBTERM_LAUNCH_PATH, WEBTERM_GATEWAY_MODULE
-        if is_webterm_gateway():
+        import cli_webterm_reconcile as _reconcile
+        rendered = _reconcile.enumerate_status_units()
+        if rendered:
             from cli_filedrop_watchdog import _run_systemctl
-            import cli_webterm_reconcile as _reconcile
-            rendered = {
-                "webterm-ttyd.service": str(WEBTERM_LAUNCH_PATH),
-                "webterm-gateway.service": str(WEBTERM_GATEWAY_MODULE),
-            }
             print("\nwebterm live argv:")
             for line in _reconcile.check_webterm_argv_health(
                     _run_systemctl, rendered):

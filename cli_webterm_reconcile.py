@@ -18,6 +18,7 @@ regenerated the files correctly but never restarted the units because
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -151,3 +152,68 @@ def check_webterm_argv_health(
         else:
             lines.append("  %s: OK (live argv matches rendered)" % unit)
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Status enumeration — which webterm units exist on THIS box (#974 MEDIUM-4)
+# ---------------------------------------------------------------------------
+
+def _box_class() -> str:
+    """Return this box's class: 'controller' or the nodename.
+
+    Reuses ``watchdog.reaper.default_box_class`` when available; falls
+    back to 'workstation' (the same fail-open as ``maybe_setup_webterm``)."""
+    try:
+        from watchdog.reaper import default_box_class
+        return default_box_class()
+    except ImportError:
+        return "workstation"
+
+
+def enumerate_status_units() -> dict[str, str]:
+    """Return ``{unit_name: rendered_path}`` for every webterm unit on this box.
+
+    Reuses the SAME ``profiles.LANE_HOST`` + ``_HUMAN_TO_MODULE`` +
+    ``mod._spec()`` derivation as ``_setup_controller_webterm`` (cli_webterm.py
+    L1735-1751), so the enumeration never diverges from the install step.
+
+    Returns an empty dict when the box has no webterm units."""
+    import importlib
+    from cli_webterm import (
+        is_webterm_gateway, WEBTERM_LAUNCH_PATH, WEBTERM_GATEWAY_MODULE,
+        _HUMAN_TO_MODULE,
+    )
+    import cli_webterm_profiles as profiles
+
+    rendered: dict[str, str] = {}
+
+    # Owner-box pair (dev1 — is_webterm_gateway checks nodename == "dev1")
+    if is_webterm_gateway():
+        rendered["webterm-ttyd.service"] = str(WEBTERM_LAUNCH_PATH)
+        rendered["webterm-gateway.service"] = str(WEBTERM_GATEWAY_MODULE)
+
+    # Lane-profile units: iterate LANE_HOST for lanes hosted on this box,
+    # exactly as _setup_controller_webterm does for "controller".
+    box = _box_class()
+    if box == "controller":
+        hosted_humans = [h for h, b in profiles.LANE_HOST.items()
+                         if b == "controller"]
+    else:
+        # Non-controller: lanes hosted on this nodename (subdev shape)
+        nodename = os.uname().nodename
+        hosted_humans = [h for h, b in profiles.LANE_HOST.items()
+                         if b == nodename]
+
+    for human in hosted_humans:
+        mod_name = _HUMAN_TO_MODULE.get(human)
+        if mod_name is None:
+            continue
+        try:
+            mod = importlib.import_module(mod_name)
+            spec = mod._spec()
+            rendered[spec.ttyd_service_name] = str(spec.launch_path)
+            rendered[spec.gateway_service_name] = str(WEBTERM_GATEWAY_MODULE)
+        except Exception:
+            continue
+
+    return rendered
