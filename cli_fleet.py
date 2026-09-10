@@ -22,6 +22,12 @@ pure leaf of the dependency DAG.
 # FROM the controller box) flips this to True.
 CONTROLLER_CUTOVER_DONE = True
 
+# #975: the minimum Claude CLI version every fleet target must run.
+# The API floor quoted in the 400 error: "Claude Code 2.1.236 does not support
+# this model; version 2.1.251 or newer is required." Bump this deliberately
+# when Anthropic raises the floor again.
+FLEET_CLAUDE_MIN_VERSION = "2.1.251"
+
 # Remote machines that should receive airuleset updates.
 # host = the TAILSCALE IP (stable across LAN switches; see #1). Was 10.77.8.134.
 REMOTE_HOSTS = [
