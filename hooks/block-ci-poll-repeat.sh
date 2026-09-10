@@ -365,7 +365,18 @@ if [ "$IS_LOOP" = "0" ]; then
         OS_COUNT=$((OS_COUNT + 1))
         printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
         if [ "$OS_COUNT" -gt "$ONESHOT_FREE" ]; then
-            IS_ONESHOT_BLOCK=1
+            # #988: a completed run is not a poll — reading the final status
+            # after a detached waiter reported is a legitimate terminal read.
+            # Check a completion-marker file: the waiter or session touches
+            # $STATE_DIR/airuleset-cipoll-completed-<runid> when the run
+            # reaches terminal state, and this hook skips counting.
+            MARKER_DIR="${AIRULESET_CIPOLL_COMPLETED_MARKER_DIR:-$STATE_DIR}"
+            if [ -n "$RUN_ID" ] && [ -e "$MARKER_DIR/airuleset-cipoll-completed-$RUN_ID" ]; then
+                OS_COUNT=0
+                printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
+            else
+                IS_ONESHOT_BLOCK=1
+            fi
         fi
     fi
 fi

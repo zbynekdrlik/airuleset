@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -199,27 +198,22 @@ class CompletedRunNotAPoll988(unittest.TestCase):
             )
 
     def test_completed_run_passes_despite_high_oneshot_count(self):
-        """A run that is already completed should not be blocked as a poll,
-        even when the oneshot counter exceeds the free threshold."""
-        # This test requires gh CLI to be available and the run to exist.
-        # We mock the gh call by setting a test env var that the hook reads.
+        """A run that is already completed (marker file exists) should not
+        be blocked as a poll, even when the oneshot counter exceeds the
+        free threshold."""
         sid = "t988-cpoll-%d" % os.getpid()
-        # The hook needs to query the run status. For testing, we use a
-        # completion-marker file approach: the hook checks if a completion
-        # marker exists for this run.
-        out = self._run_hook(sid, "1234567890",
-                             env_extra={"AIRULESET_CIPOLL_COMPLETED_MARKER_DIR": "/tmp"})
-        # Create the completion marker
-        marker = Path("/tmp/airuleset-cipoll-completed-1234567890")
-        marker.touch()
-        self.addCleanup(lambda: marker.unlink(missing_ok=True))
-        # The fix should make this pass; without the fix it blocks
-        out2 = self._run_hook(sid, "1234567890",
-                              env_extra={"AIRULESET_CIPOLL_COMPLETED_MARKER_DIR": "/tmp"})
-        # At least one of the runs should pass after the fix
-        # For RED: we expect the current code to block (exit 2)
-        self.assertEqual(out2.returncode, 0,
-                         "completed run should not be blocked as a poll: " + out2.stderr)
+        run_id = "1234567890"
+        with TemporaryDirectory() as marker_dir:
+            # Create the completion marker BEFORE the hook runs
+            marker = Path(marker_dir) / ("airuleset-cipoll-completed-%s" % run_id)
+            marker.touch()
+            out = self._run_hook(
+                sid, run_id,
+                env_extra={"AIRULESET_CIPOLL_COMPLETED_MARKER_DIR": marker_dir},
+            )
+            self.assertEqual(out.returncode, 0,
+                             "completed run should not be blocked as a poll: "
+                             + out.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -246,16 +240,18 @@ class HeredocBodyFile988(unittest.TestCase):
         )
 
     def test_heredoc_then_issue_create_blocked_with_separate_command_message(self):
-        """A compound command that creates the body file via heredoc and then
-        references it with -F should block with a clear 'write the body file
-        in a SEPARATE command' message, not a Scope-gate violation."""
+        """A compound command that creates the body file via a redirect and
+        then references it with -F should block with a clear 'write the body
+        file in a SEPARATE command' message, not an opaque Scope-gate
+        violation or 'body file not readable'."""
+        # Use printf > file (NOT cat > file, which CATFILE_RE already handles).
+        # This is the shape that triggers the real-world "body file not
+        # readable" block — the file doesn't exist at hook time and the
+        # heredoc wasn't captured.
         cmd = (
-            "cat > /tmp/body-988.md << 'EOF'\n"
-            "Scope-gate: user-request\n"
-            "## Title\n"
-            "Body\n"
-            "EOF\n"
-            "gh issue create -R zbynekdrlik/test -t 'Test' -F /tmp/body-988.md"
+            "printf '%s\\n' 'Scope-gate: user-request' 'Dedup-checked: none' "
+            "'## Title' 'Body' > /tmp/body-988-nonexist.md && "
+            "gh issue create -R zbynekdrlik/test -t 'Test' -F /tmp/body-988-nonexist.md"
         )
         out = self._run_hook(cmd)
         self.assertEqual(out.returncode, 2, "should still block")
