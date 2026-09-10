@@ -1480,6 +1480,23 @@ def cmd_install(args):
         print(f"  claude native user-space migration error (non-fatal): {e}",
               file=sys.stderr)
 
+    # --- 3f-update. Claude CLI version floor enforcement (#975) ---
+    # Check the local `claude --version` against FLEET_CLAUDE_MIN_VERSION,
+    # fix autoUpdatesChannel stable→latest, run `claude update` if below
+    # floor, and report the result. A target still below the floor after
+    # update is a FATAL install error (the CLI cannot talk to the API).
+    try:
+        ver_result = ensure_claude_version_current()
+        summary = format_version_summary(ver_result)
+        print(f"  {summary}")
+        if ver_result.get("below_floor"):
+            print("  ⚠ Claude CLI version floor FAILED: %s"
+                  % ver_result.get("error"), file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"  claude version check error (non-fatal): {e}",
+              file=sys.stderr)
+
     # --- 3f-bis. ffmpeg static binary: fleet-wide, best-effort, no sudo
     # needed (#275) -- the meeting-analysis skill's own ffmpeg extraction
     # step has no other install path on the no-sudo subdev stream accounts
@@ -1969,6 +1986,14 @@ def cmd_status(args):
         # webterm not provisioned or module unavailable — non-fatal for status
         print("  webterm live argv: skipped (%s)" % e, file=sys.stderr)
 
+    # --- Claude CLI version (#975) ---
+    print("\nclaude CLI version:")
+    try:
+        ver_str, ver_status = check_local_version_vs_floor()
+        print(f"  {ver_str} [{ver_status}]")
+    except Exception as e:
+        print(f"  error: {e}", file=sys.stderr)
+
     # --- Hooks ---
     print("\n~/.claude/settings.json hooks:")
     if SETTINGS_JSON.exists():
@@ -2123,6 +2148,19 @@ from cli_binary_installers import (  # noqa: E402, F401
     TTYD_STATIC_DEST,
     _ttyd_available,
     ensure_ttyd_static_binary,
+)
+
+# --- #975: Claude CLI version floor enforcement — extracted to cli_claude_version.py ---
+from cli_claude_version import (  # noqa: E402, F401
+    parse_claude_version as parse_claude_version,
+    version_tuple_to_str as version_tuple_to_str,
+    read_auto_updates_channel as read_auto_updates_channel,
+    fix_auto_updates_channel as fix_auto_updates_channel,
+    get_local_claude_version as get_local_claude_version,
+    run_claude_update as run_claude_update,
+    ensure_claude_version_current as ensure_claude_version_current,
+    format_version_summary as format_version_summary,
+    check_local_version_vs_floor as check_local_version_vs_floor,
 )
 
 
@@ -4702,6 +4740,7 @@ from cli_account_bootstrap import (  # noqa: E402, F401
 # reach it via `airuleset.` without a third import site.
 from cli_fleet import (  # noqa: E402, F401
     REMOTE_HOSTS as REMOTE_HOSTS,
+    FLEET_CLAUDE_MIN_VERSION as FLEET_CLAUDE_MIN_VERSION,
     is_paused as is_paused,
     paused_reason as paused_reason,
 )
