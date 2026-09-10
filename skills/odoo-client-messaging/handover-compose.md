@@ -28,9 +28,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   and it is the approval question for EVERY message (opening handover AND every
   follow-up), never only a new thread.** The FULL proposed client text MUST be
   INLINE as a `> ` quoted block — NEVER a share URL or path instead (#977).
-  A share URL may accompany for an attachment, never replace the text.
-  Text longer than ~1500 cp → split into two approvals. HOOK-ENFORCED:
-  Check 8 blocks a text-approval ❓ with a share URL and no `>` quote. Put in the chat message itself: (1) the
+  A share URL may only ACCOMPANY an attachment; > ~1500 cp → two approvals;
+  hook Check 8 blocks a share URL with no `>` quote. Put in the chat message itself: (1) the
   target thread on its OWN SEPARATE, clearly-shown line — the exact thread name,
   the full human NAME (+ parent channel where it helps), NEVER only the internal
   channel number and NEVER only wrapped in prose:
@@ -218,10 +217,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
   nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
-- **STANDING ack-reaction grant (#978):** a bare 👀 reaction on a client
-  message carries NO text and is NOT subject to the owner text-approval rule
-  — the stream adds it on its own authority. Full doctrine + recipe + fallback
-  in `skills/odoo-client-messaging/ack-reaction.md`.
+- **STANDING ack-reaction grant (#978):** a bare 👀 on a client message carries
+  no text → no owner text-approval; doctrine + recipe: `ack-reaction.md`.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
   (#788; #853 compliance).**
