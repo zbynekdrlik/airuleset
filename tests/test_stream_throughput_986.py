@@ -202,11 +202,11 @@ class TestWdrainStaleOnly(unittest.TestCase):
     """W-drain gate blocks on stale W count, not total W."""
 
     def test_high_total_w_low_stale_passes(self):
-        """W=20 but stale=2 — must PASS (below stale threshold 3)."""
+        """W=15 (under hard ceiling 16) but stale=2 — must PASS."""
         with tempfile.TemporaryDirectory() as td:
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=2)
+            _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=2)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -217,7 +217,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=5)
+            _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=5)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
@@ -228,8 +228,8 @@ class TestWdrainStaleOnly(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
-            # No ops_wait_stale → fall back to ops_wait=20 > threshold=8
-            _make_wdrain_cache(td, cwd, ops_wait=20)
+            # No ops_wait_stale → fall back to ops_wait=10 > threshold=8
+            _make_wdrain_cache(td, cwd, ops_wait=10)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
@@ -240,11 +240,22 @@ class TestWdrainStaleOnly(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
-            _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=3)
+            _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=3)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
                              "Stale at threshold was blocked: " + stderr)
+
+    def test_hard_ceiling_still_blocks_despite_low_stale(self):
+        """Hard ceiling (2*threshold=16) blocks even with stale=0."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = pathlib.Path(td) / "repo"
+            cwd.mkdir()
+            _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=0)
+            p = _wdrain_payload(cwd)
+            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
+            self.assertEqual(rc, 2,
+                             "Hard ceiling did not block")
 
 
 # ---------- Item 5: Closes-finding sha validation -------------------------

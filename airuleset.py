@@ -3210,6 +3210,19 @@ def cmd_tickets_status(args):
                 # release/deploy train (see `_count_deploy_wait`'s own
                 # docstring for the heuristic + fail-safe rationale).
                 entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
+                # #986: stale W count for the dispatch gate.
+                # _stale_ops_wait_flagged is expensive (reads comments
+                # per-member) but this is the SLOW background refresh
+                # path, not the hot footer render. Bounded by
+                # OPS_WAIT_STALE_MAX_FETCHES. Fail-open: any error -> omit
+                # the field (the hook falls back to total ops_wait).
+                try:
+                    _stale = _stale_ops_wait_flagged(
+                        ops_wait, cwd=root)
+                    entry["ops_wait_stale"] = len(_stale)
+                except Exception as _e:
+                    sys.stderr.write("tickets-status: stale W count "
+                                     "skipped (%s)\n" % _e)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -3271,6 +3284,14 @@ def cmd_tickets_status(args):
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
                 # #953: deploy-target exempt count (same as the slice path above).
                 entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
+                # #986: stale W count (same as the slice path above).
+                try:
+                    _stale = _stale_ops_wait_flagged(
+                        ops_wait, cwd=root)
+                    entry["ops_wait_stale"] = len(_stale)
+                except Exception as _e:
+                    sys.stderr.write("tickets-status: stale W count "
+                                     "skipped (%s)\n" % _e)
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
@@ -3617,6 +3638,36 @@ def _load_lens_list(repo_root=None):
     return list(HANDOFF_DEFAULT_LENSES)
 
 
+def _validate_closes_finding_shas(findings, cwd=None):
+    """#986: validate that shas referenced in Closes-finding lines exist
+    in the current branch.
+
+    Each finding line may contain ``fixed in <sha>`` — when it does, the
+    sha must resolve to a commit in the repo at *cwd*. Lines without a
+    sha pattern pass without validation (legacy format).
+
+    Returns ``(ok: bool, reason: str)``."""
+    import re as _re
+    import subprocess as _sp
+    _SHA_RE = _re.compile(r'fixed in ([0-9a-f]{7,40})', _re.IGNORECASE)
+    for line in (findings or []):
+        m = _SHA_RE.search(line)
+        if not m:
+            continue  # no sha pattern — legacy format, pass
+        sha = m.group(1)
+        try:
+            r = _sp.run(["git", "rev-parse", "--verify",
+                         sha + "^{commit}"],
+                        capture_output=True, text=True, timeout=10,
+                        cwd=cwd)
+            if r.returncode != 0:
+                return False, ("Closes-finding sha %s does not exist in "
+                               "the branch" % sha)
+        except Exception as e:
+            return False, "Closes-finding sha verification failed: %s" % e
+    return True, "ok"
+
+
 def _validate_self_review_table(table_text, lenses):
     """Validate a Self-review table has one row per lens with evidence.
 
@@ -3826,6 +3877,13 @@ def cmd_handoff(args):
         if tier_val not in REVIEWED_BY_TIER_VALUES:
             print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
                   % ", ".join(sorted(REVIEWED_BY_TIER_VALUES)))
+            return 1
+
+    # #986: validate Closes-finding shas exist in the branch.
+    if closes_finding:
+        cf_ok, cf_reason = _validate_closes_finding_shas(closes_finding)
+        if not cf_ok:
+            print("handoff BLOCK: %s" % cf_reason)
             return 1
 
     # Stamp Verified-at-UTC (now).

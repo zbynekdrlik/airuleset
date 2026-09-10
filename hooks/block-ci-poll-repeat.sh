@@ -190,6 +190,19 @@ RAW_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "
 SID=$(printf '%s' "$RAW_SID" | tr -cd 'A-Za-z0-9_-')
 SID="${SID:-unknown}"
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || echo "")
+
+# ---- #986: worker agent types get ONE extra free loop --------------------
+# An autopilot-worker / finisher has no alternative to a foreground wait:
+# run_in_background terminates it (#28), and returning costs a cold
+# re-dispatch (150-250k tokens, 30-60 min per PR — montalu1 measurement
+# 10.9.2026). Granting ONE additional free loop (loop 2 = the sanctioned
+# long foreground wait) covers >90% of CI waits without the supervisor
+# round-trip.
+IS_WORKER_AGENT=0
+case "$AGENT_TYPE" in
+    autopilot-worker|finisher) IS_WORKER_AGENT=1 ;;
+esac
 
 # ---- run-id -> state key ------------------------------------------------
 RUN_ID=$(printf '%s' "$FLAT" | grep -oE '(^|[^0-9])[0-9]{8,}([^0-9]|$)' \
@@ -420,6 +433,18 @@ if [ "$IS_LOOP" = "1" ] && [ ! -e "$LOOP_BLOCKED_FILE" ]; then
         : > "$FIRST_FILE" 2>/dev/null || true
         exit 0
     fi
+fi
+
+# ---- #986: worker agent types get ONE extra free loop (loop 2) ----------
+# The first-loop carve-out above uses FIRST_FILE; a worker's second loop
+# uses a SEPARATE WORKER_SECOND_FILE so the two do not collide with each
+# other or with the LOOP_BLOCKED_FILE that gates the standard carve-out.
+WORKER_SECOND_FILE="$STATE_DIR/airuleset-cipoll-worker2nd-${SID}-${KEY}"
+if [ "$IS_LOOP" = "1" ] && [ "$IS_WORKER_AGENT" = "1" ] \
+        && [ -e "$FIRST_FILE" ] && [ ! -e "$WORKER_SECOND_FILE" ]; then
+    : > "$WORKER_SECOND_FILE" 2>/dev/null || true
+    log_exempt "worker-long-foreground-wait"
+    exit 0
 fi
 
 # ---- BLOCK -------------------------------------------------------------

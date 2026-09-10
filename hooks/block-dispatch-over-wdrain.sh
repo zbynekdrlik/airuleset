@@ -81,8 +81,18 @@ else
     exit 0   # fail-open: no ts
 fi
 
-# Threshold check: W > 8
+# Threshold check
 THRESHOLD=8
+
+# #986: gate on STALE W count when available (ops_wait_stale), not total W.
+# A well-maintained W bucket with actively-recited acceptance waits should
+# not block dispatch; only genuinely stale (un-pushed) members matter.
+# STALE_THRESHOLD is lower than THRESHOLD (3 vs 8) because stale members
+# indicate a real drain failure. Falls back to ops_wait for legacy caches.
+STALE_THRESHOLD=3
+
+OPS_WAIT_STALE=$(jq -r '.ops_wait_stale // empty' "$CACHE_FILE" 2>/dev/null || echo "")
+case "$OPS_WAIT_STALE" in ''|*[!0-9]*) OPS_WAIT_STALE="" ;; esac
 
 # #953: deploy-target exempt — W members blocked on a release/deploy train
 # do not count toward the threshold. The effective W is reduced by the exempt
@@ -93,6 +103,11 @@ case "$DEPLOY_WAIT" in ''|*[!0-9]*) DEPLOY_WAIT=0 ;; esac
 HARD_CEILING=$(( THRESHOLD * 2 ))
 if [ "$OPS_WAIT" -gt "$HARD_CEILING" ]; then
     : # fall through to receipt/bypass/block — hard ceiling breached
+elif [ -n "$OPS_WAIT_STALE" ]; then
+    # #986: stale-aware path — gate on stale count, not total W
+    if [ "$OPS_WAIT_STALE" -le "$STALE_THRESHOLD" ]; then
+        exit 0   # stale count under threshold — allow
+    fi
 elif [ "$DEPLOY_WAIT" -gt 0 ] 2>/dev/null; then
     EFFECTIVE_W=$(( OPS_WAIT - DEPLOY_WAIT ))
     if [ "$EFFECTIVE_W" -lt 0 ]; then EFFECTIVE_W=0; fi
@@ -100,7 +115,7 @@ elif [ "$DEPLOY_WAIT" -gt 0 ] 2>/dev/null; then
         exit 0   # under threshold after exemption — allow
     fi
 elif [ "$OPS_WAIT" -le "$THRESHOLD" ]; then
-    exit 0   # under threshold — allow
+    exit 0   # under threshold — allow (legacy cache fallback)
 fi
 
 # Check for a valid wdrain receipt

@@ -444,13 +444,15 @@ class ModulePointerTest(unittest.TestCase):
     text this test is actually about lives.
     """
 
-    def test_foreground_bullet_names_the_hook_once(self):
+    def test_foreground_bullet_names_the_hook(self):
         text = (REPO / "skills" / "ci-monitoring-deep" / "DEEP.md").read_text()
-        self.assertEqual(
+        # #986: the hook is named twice — once in the original foreground
+        # bullet and once in the worker-long-wait paragraph.
+        self.assertGreaterEqual(
             text.count("block-ci-poll-repeat.sh"), 1,
-            "exactly one pointer — this ticket is not a third rewrite")
+            "no pointer to block-ci-poll-repeat.sh found")
         self.assertIn("Foreground bounded poll loop", text)
-        # the pointer sits in the foreground bullet's own paragraph
+        # the FIRST pointer sits in the foreground bullet's own paragraph
         head, _, tail = text.partition("block-ci-poll-repeat.sh")
         self.assertIn("nudge-poll-loop-timeout.sh", head[-600:])
 
