@@ -426,6 +426,18 @@ def setup_service(spec, run=None, *, prereq_fn, write_artifacts_fn, tunnel_fn):
             [(spec.ttyd_service_name, ttyd_changed),
              (spec.gateway_service_name, gateway_changed)],
             log_prefix=spec.log_prefix)
+        # #974: reconcile LIVE process argv against the rendered paths — a unit
+        # started from a stale/worktree path survives installs otherwise.
+        import cli_webterm_reconcile as _reconcile
+        _reconcile.reconcile_live_argv(
+            _run_systemctl,
+            [spec.ttyd_service_name, spec.gateway_service_name],
+            {
+                spec.ttyd_service_name: str(spec.launch_path),
+                spec.gateway_service_name: str(w.WEBTERM_GATEWAY_MODULE),
+            },
+            log_prefix=spec.log_prefix,
+        )
         # Bring the public HTTPS front up too — but ONLY once the loopback gateway/
         # ttyd came up (ok_all), so the tunnel never fronts a dead origin. Prereq-
         # gated no-op if the creds JSON is not present.
