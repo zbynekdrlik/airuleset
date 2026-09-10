@@ -15,11 +15,22 @@ set -euo pipefail
 #   - docker compose exec … odoo shell/python3 inside an ssh to a prod host.
 #
 # READ shapes are ALWAYS allowed (untouched):
-#   - SELECT, search_read, read, fields_get, /json/2/<model>/read.
+#   - SELECT, search_read, read, search_count, name_search, fields_get.
+#
+# OUT OF SCOPE (documented, not a gap):
+#   - HTTP/local-xmlrpc writes to non-`*-prod` hostnames (e.g.
+#     erp.montalu.cloud) — those use a FQDN, not an ssh alias; the
+#     odoo-erp lane's own preflight gate covers them.
+#   - DELETE/unlink — intentionally excluded; the notification-storm risk
+#     is on CREATE/WRITE paths, not deletions.
 #
 # Prod-host detection rule: any host/alias whose name ends in `-prod`
-# (the Odoo convention: montalu-prod, miva-prod, etc.) — the same
-# convention block-destructive-remote.sh recognises for ssh targets.
+# followed by end-of-string or a dot (the Odoo ssh alias convention:
+# montalu-prod, miva-prod). Does NOT match `-prod-copy` (a copy host).
+#
+# Budget file host key = the EXACT ssh alias / URL hostname as typed
+# (user@montalu-prod → montalu-prod; montalu-prod.example.com stays FQDN).
+# The odoo-erp lane's `prod_write_preflight.py` must write the same key.
 #
 # Budget file contract:
 #   ~/.claude/prod-write-budget/<host>-<YYYYMMDD>.json
@@ -65,10 +76,39 @@ if m:
 ' 2>/dev/null || echo "")
 
 if [ -n "$BYPASS_PATH" ]; then
-    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
-    mkdir -p "$(dirname "$AUDIT_LOG")"
-    echo "$(date -Iseconds)  project=$PROJECT  inline-bypass  # airuleset:prod-write-ok $BYPASS_PATH" >> "$AUDIT_LOG"
-    exit 0
+    # Validate that the bypass path points to a real, valid budget file
+    BYPASS_VALID=$(python3 -c "
+import json, sys, os
+p = os.path.expanduser(sys.argv[1])
+if not os.path.exists(p):
+    print('INVALID: file does not exist: ' + p)
+    sys.exit(0)
+try:
+    data = json.load(open(p))
+except Exception as e:
+    print('INVALID: malformed JSON: ' + str(e))
+    sys.exit(0)
+for k in ('mail_mail','mail_notification','mail_message','mail_activity'):
+    if k not in data:
+        print('INVALID: missing key ' + k)
+        sys.exit(0)
+cr = data.get('copy_run','')
+if not cr or not str(cr).strip():
+    print('INVALID: empty copy_run')
+    sys.exit(0)
+print('OK')
+" "$BYPASS_PATH" 2>/dev/null || echo "INVALID: python3 error")
+
+    if [ "$BYPASS_VALID" = "OK" ]; then
+        PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+        mkdir -p "$(dirname "$AUDIT_LOG")"
+        echo "$(date -Iseconds)  project=$PROJECT  inline-bypass  # airuleset:prod-write-ok $BYPASS_PATH" >> "$AUDIT_LOG"
+        exit 0
+    else
+        # The path was given but is not a valid budget file — do NOT bypass,
+        # fall through to the normal classification (which will block if needed).
+        true
+    fi
 fi
 
 # ---------- main classifier (python3) ------------------------------------
@@ -87,21 +127,76 @@ if not cmd.strip():
 # ---- helpers ----
 
 def is_prod_host(host):
-    """True if the host/alias ends with -prod (the Odoo convention)."""
-    return bool(re.search(r'-prod\b', host, re.IGNORECASE))
+    """True if the host/alias ends with -prod (the Odoo ssh alias convention).
+    Does NOT match -prod-copy or -prod-staging (those are copy/staging hosts)."""
+    return bool(re.search(r'-prod(\.|$)', host, re.IGNORECASE))
 
-def extract_ssh_target(cmd):
-    """Extract the ssh target host from a command. Returns (host, remote_cmd)
-    or (None, None) if not an ssh command."""
-    c = cmd.strip()
-    c = re.sub(r'^(sudo\s+|env\s+\S+=\S+\s+|sshpass\s+\S+\s+)*', '', c)
+def _split_segments(cmd):
+    """Split a command on unquoted &&, ;, |, and newlines into segments.
+    Same concept as block-destructive-remote.sh's split_segments."""
+    segments = []
+    cur = []
+    in_sq = False
+    in_dq = False
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            cur.append(ch)
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+            cur.append(ch)
+        elif not in_sq and not in_dq:
+            if ch == '&' and i + 1 < len(cmd) and cmd[i + 1] == '&':
+                segments.append(''.join(cur))
+                cur = []
+                i += 2
+                continue
+            elif ch in (';', '|', '\n'):
+                segments.append(''.join(cur))
+                cur = []
+            else:
+                cur.append(ch)
+        else:
+            cur.append(ch)
+        i += 1
+    if cur:
+        segments.append(''.join(cur))
+    return [s.strip() for s in segments if s.strip()]
+
+def _strip_prefix(segment):
+    """Strip sudo, env VAR=val, sshpass, time, nice, timeout, cd ... &&
+    prefixes from a segment. Same concept as block-destructive-remote.sh's
+    strip_prefix."""
+    s = segment.strip()
+    changed = True
+    while changed:
+        changed = False
+        for pat in (r'^sudo\s+', r'^env\s+\S+=\S+\s+', r'^sshpass\s+\S+\s+',
+                    r'^time\s+', r'^nice\s+(?:-n\s+\d+\s+)?',
+                    r'^ionice\s+(?:-c\s+\d+\s+)?', r'^timeout\s+\d+\s+',
+                    r'^command\s+', r'^nohup\s+'):
+            m = re.match(pat, s)
+            if m:
+                s = s[m.end():].strip()
+                changed = True
+        # Strip leading VAR=val tokens
+        m = re.match(r'^[A-Za-z_][A-Za-z_0-9]*=\S*\s+', s)
+        if m:
+            s = s[m.end():].strip()
+            changed = True
+    return s
+
+def extract_ssh_target(segment):
+    """Extract the ssh target host from a SINGLE segment (already prefix-
+    stripped). Returns (host, remote_cmd) or (None, None)."""
+    c = segment.strip()
     m = re.match(r'ssh\s+', c)
     if not m:
         return None, None
     rest = c[m.end():]
-    # Tokenise respecting quotes (shlex-like, simplified)
     tokens = _shell_split(rest)
-    # Skip ssh flags to find the host
     i = 0
     host = None
     while i < len(tokens):
@@ -121,9 +216,7 @@ def extract_ssh_target(cmd):
         return None, None
     if '@' in host:
         host = host.split('@', 1)[1]
-    # Everything after the host token is the remote command
     remote_cmd = ' '.join(tokens[i:])
-    # Unquote if wrapped
     if remote_cmd.startswith('"') and remote_cmd.endswith('"'):
         remote_cmd = remote_cmd[1:-1]
     elif remote_cmd.startswith("'") and remote_cmd.endswith("'"):
@@ -132,7 +225,7 @@ def extract_ssh_target(cmd):
 
 def _shell_split(s):
     """Simple quote-aware tokeniser: splits on unquoted whitespace, keeps
-    quoted segments as single tokens (with quotes stripped)."""
+    quoted segments as single tokens (with quotes preserved)."""
     tokens = []
     cur = []
     in_sq = False
@@ -154,28 +247,55 @@ def _shell_split(s):
         tokens.append(''.join(cur))
     return tokens
 
-def is_write_shape(text):
-    """True if the text contains a WRITE shape (not a read)."""
+def has_write_shape(text):
+    """True if the text contains a WRITE shape."""
     t = text.lower()
     if re.search(r'docker\s+compose\s+exec\b.*\bodoo\s+(shell|python3?)\b', t):
         return True
-    if re.search(r'execute_kw\b.*\b(create|write|unlink|import)\b', t):
+    if re.search(r'execute_kw\b.*\b(create|write|unlink)\b', t):
         return True
     if re.search(r'\bpsql\b', t) and re.search(r'\b(INSERT|UPDATE)\b', text, re.IGNORECASE):
         return True
-    if re.search(r'\bpython3?\b.*\b(import|create|write|approve|confirm)\b', t):
+    # python3 with a data-mutating Odoo method — but NOT bare 'import sys'
+    if re.search(r'\bpython3?\b.*\b(create|write|approve|confirm)\b', t):
         return True
-    if re.search(r'\b(import|load|migrate|seed|sync)[\w_]*\.(py|sh)\b', t):
+    # Script names suggesting data import/load — but only .py/.sh scripts
+    # that START with the import/load verb (not any script with 'import' in it)
+    if re.search(r'\b(import|load|migrate|seed|sync)_[\w]*\.(py|sh)\b', t):
         return True
     return False
 
-def is_read_only(text):
-    """True if the command is clearly a read-only operation."""
+def has_read_shape(text):
+    """True if the text contains a READ shape."""
+    t = text.lower()
+    if re.search(r'\bpsql\b', t) and re.search(r'\bSELECT\b', text, re.IGNORECASE):
+        return True
+    if re.search(r'\b(search_read|fields_get|search_count|name_search)\b', t):
+        return True
+    if re.search(r'execute_kw\b.*\b(read|search|search_read|fields_get)\b', t):
+        return True
+    return False
+
+def is_write_not_read(text):
+    """True if the text has a write shape AND does NOT consist solely of
+    reads. A script that does BOTH read and write is a write (MAJOR 2 fix:
+    the read classifier must NOT short-circuit a write)."""
+    if not has_write_shape(text):
+        return False
+    # If it has ONLY read shapes and no write shapes in the Odoo/psql sense,
+    # it's a read. But we already know has_write_shape is True, so it's a write.
+    return True
+
+def is_pure_read(text):
+    """True if the command has ONLY read shapes and NO write shapes."""
+    if has_write_shape(text):
+        return False
+    if has_read_shape(text):
+        return True
+    # psql SELECT-only
     t = text.lower()
     if re.search(r'\bpsql\b', t) and re.search(r'\bSELECT\b', text, re.IGNORECASE) \
        and not re.search(r'\b(INSERT|UPDATE|DELETE)\b', text, re.IGNORECASE):
-        return True
-    if re.search(r'\b(search_read|fields_get)\b', t):
         return True
     return False
 
@@ -227,28 +347,32 @@ def check_budget_file(host):
 
 violations = []
 
-# Shape 1: ssh to a *-prod host with a write command
-ssh_target, remote_cmd = extract_ssh_target(cmd)
-if ssh_target and is_prod_host(ssh_target):
-    if remote_cmd and not is_read_only(remote_cmd) and is_write_shape(remote_cmd):
-        ok, reason = check_budget_file(ssh_target)
-        if not ok:
-            violations.append(f'PROD write via ssh to {ssh_target}: {reason}')
+# Split on unquoted && ; | newlines, strip prefixes per segment
+for segment in _split_segments(cmd):
+    seg = _strip_prefix(segment)
 
-# Shape 2: curl/wget POST to /json/2/<model>/create|write on a *-prod host
-curl_host = extract_curl_prod_host(cmd)
-if curl_host:
-    ok, reason = check_budget_file(curl_host)
-    if not ok:
-        violations.append(f'PROD write via HTTP to {curl_host}: {reason}')
+    # Shape 1: ssh to a *-prod host with a write command
+    ssh_target, remote_cmd = extract_ssh_target(seg)
+    if ssh_target and is_prod_host(ssh_target):
+        if remote_cmd and not is_pure_read(remote_cmd) and is_write_not_read(remote_cmd):
+            ok, reason = check_budget_file(ssh_target)
+            if not ok:
+                violations.append(f'PROD write via ssh to {ssh_target}: {reason}')
 
-# Shape 3: psql INSERT/UPDATE with -h *-prod
-psql_host = extract_psql_host(cmd)
-if psql_host and is_prod_host(psql_host):
-    if re.search(r'\b(INSERT|UPDATE)\b', cmd, re.IGNORECASE):
-        ok, reason = check_budget_file(psql_host)
+    # Shape 2: curl/wget POST to /json/2/<model>/create|write on a *-prod host
+    curl_host = extract_curl_prod_host(seg)
+    if curl_host:
+        ok, reason = check_budget_file(curl_host)
         if not ok:
-            violations.append(f'PROD write via psql to {psql_host}: {reason}')
+            violations.append(f'PROD write via HTTP to {curl_host}: {reason}')
+
+    # Shape 3: psql INSERT/UPDATE with -h *-prod
+    psql_host = extract_psql_host(seg)
+    if psql_host and is_prod_host(psql_host):
+        if re.search(r'\b(INSERT|UPDATE)\b', seg, re.IGNORECASE):
+            ok, reason = check_budget_file(psql_host)
+            if not ok:
+                violations.append(f'PROD write via psql to {psql_host}: {reason}')
 
 if violations:
     print('\n'.join(violations))

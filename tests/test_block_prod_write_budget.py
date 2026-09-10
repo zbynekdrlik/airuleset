@@ -115,6 +115,32 @@ class TestSshProdWriteWithoutBudget(_Runner):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("BLOCKED", r.stderr)
 
+    # --- MAJOR 1 fix: prefix/chain must not bypass ---
+
+    def test_cd_then_ssh_blocked(self):
+        """cd ~/x && ssh ... must be blocked (MAJOR 1)."""
+        r = self.run_hook(
+            'cd ~/x && ssh user@montalu-prod "docker compose exec web odoo shell -c 1"'
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
+
+    def test_timeout_prefix_blocked(self):
+        """timeout 60 ssh ... must be blocked (MAJOR 1)."""
+        r = self.run_hook(
+            'timeout 60 ssh user@montalu-prod "python3 import_leaves.py"'
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
+
+    def test_env_var_prefix_blocked(self):
+        """FOO=1 ssh ... must be blocked (MAJOR 1)."""
+        r = self.run_hook(
+            'FOO=1 ssh user@montalu-prod "python3 import_leaves.py"'
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
+
 
 # ===========================================================================
 # Shape 1 with valid budget → passes
@@ -186,6 +212,19 @@ class TestMalformedBudget(_Runner):
 # Reads always pass (untouched)
 # ===========================================================================
 
+class TestReadWriteComboBlocked(_Runner):
+    """MAJOR 2 fix: a script that does BOTH search_read AND write is a write."""
+
+    def test_search_read_then_write_blocked(self):
+        r = self.run_hook(
+            'ssh user@montalu-prod "python3 -c \'ids = models.execute_kw(db, uid, pwd, '
+            '\"hr.leave\", \"search_read\", [[]]); '
+            'models.execute_kw(db, uid, pwd, \"hr.leave\", \"write\", [ids, vals])\'"'
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
+
+
 class TestReadsAlwaysPass(_Runner):
     """Read-only operations must NEVER be blocked, even without a budget."""
 
@@ -206,6 +245,13 @@ class TestReadsAlwaysPass(_Runner):
         r = self.run_hook(
             'ssh user@montalu-prod "python3 -c \'models.execute_kw(db, uid, pwd, '
             '\"hr.leave\", \"fields_get\", [])\'"'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_python_import_sys_not_blocked(self):
+        """MINOR 4 fix: python3 -c 'import sys' must not be blocked."""
+        r = self.run_hook(
+            'ssh user@montalu-prod "python3 -c \'import sys; print(sys.version)\'"'
         )
         self.assertEqual(r.returncode, 0, r.stderr)
 
@@ -290,6 +336,13 @@ class TestNonProdHostsUntouched(_Runner):
         )
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_prod_copy_host_not_blocked(self):
+        """montalu-prod-copy is a COPY host, not prod."""
+        r = self.run_hook(
+            'ssh user@montalu-prod-copy "docker compose exec web odoo shell -c 1"'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 # ===========================================================================
 # Bypass marker
@@ -307,21 +360,31 @@ class TestBypassMarker(_Runner):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("BLOCKED", r.stderr)
 
-    def test_bypass_with_path_passes_and_logs(self):
+    def test_bypass_with_valid_path_passes_and_logs(self):
+        """Bypass with a path pointing to a VALID budget file passes."""
+        budget_path = self._make_budget("montalu-prod")
         audit_dir = self.home / "devel" / "airuleset" / "audits"
         audit_dir.mkdir(parents=True, exist_ok=True)
-        # Override HOME so audit log goes to our temp dir
         r = self.run_hook(
             'ssh user@montalu-prod "docker compose exec -T web odoo shell -c '
             '\'self.env[\"hr.leave\"].create(vals)\'"  '
-            '# airuleset:prod-write-ok /path/to/budget.json'
+            '# airuleset:prod-write-ok ' + str(budget_path)
         )
         self.assertEqual(r.returncode, 0, r.stderr)
         log_path = audit_dir / "prod-write-budget-bypasses.log"
         self.assertTrue(log_path.exists(), "bypass must be logged")
         log_content = log_path.read_text()
         self.assertIn("prod-write-ok", log_content)
-        self.assertIn("/path/to/budget.json", log_content)
+
+    def test_bypass_with_nonexistent_path_blocked(self):
+        """MAJOR 3 fix: bypass with a nonexistent path must NOT bypass."""
+        r = self.run_hook(
+            'ssh user@montalu-prod "docker compose exec -T web odoo shell -c '
+            '\'self.env[\"hr.leave\"].create(vals)\'"  '
+            '# airuleset:prod-write-ok /nonexistent/budget.json'
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
 
 
 # ===========================================================================
