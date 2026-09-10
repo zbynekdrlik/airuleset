@@ -32,6 +32,10 @@ MANAGED_RECORDS = [
         "content": "f85ea304-920b-4ba4-96bc-a68001ce6fb4.cfargotunnel.com",
         "proxied": True,
         "comment": "airuleset-managed (#983) — claudy dashboard tunnel",
+        # Gate: the proxied CNAME must NOT be created until the Cloudflare
+        # Access app exists — otherwise the dashboard is world-readable
+        # until `webterm-access --apply` runs (RED-1 review finding).
+        "requires_access_hostname": "claudy.newlevel.media",
     },
     {
         "zone": "newlevel.media",
@@ -148,6 +152,10 @@ def ensure_record(client, zone_name, name, rtype, content, proxied,
         return result
 
     existing, (st, body) = client.find_record(zone_id, name, rtype)
+    if st != 200 or not body.get("success"):
+        result["error"] = ("cannot list DNS records for %s (HTTP %s): %s"
+                           % (name, st, _first_err(body)))
+        return result
 
     payload = {
         "type": rtype,
@@ -200,22 +208,57 @@ def ensure_record(client, zone_name, name, rtype, content, proxied,
     return result
 
 
-def ensure_managed_records(dry_run=True, token_path=DNS_TOKEN_FILE):
-    """Reconcile ALL ``MANAGED_RECORDS``. Returns ``(all_ok, results_list)``.
-    Called from ``cmd_install`` on the controller."""
+def _access_app_exists(hostname, check_fn=None):
+    """Check whether a Cloudflare Access app exists for ``hostname``.
+    ``check_fn`` is injectable for tests; the default loads the Access
+    token and probes the real API."""
+    if check_fn is not None:
+        return check_fn(hostname)
     try:
-        token = _load_token(token_path)
-    except OSError as e:
-        return False, [{"ok": False, "error":
-                        "cannot read DNS token %s: %s" % (token_path, e)}]
-    if not token:
-        return False, [{"ok": False, "error":
-                        "DNS token file %s is empty" % token_path}]
+        import cli_webterm_access as acc
+        token = acc._load_token()
+        cl = acc.AccessClient(acc.WEBTERM_ACCESS_ACCOUNT_ID, token=token)
+        app, _ = cl.find_app_by_domain(hostname)
+        return app is not None
+    except Exception:
+        return False
 
-    client = DnsClient(token=token)
+
+def ensure_managed_records(dry_run=True, token_path=DNS_TOKEN_FILE,
+                           client=None, check_access_fn=None):
+    """Reconcile ALL ``MANAGED_RECORDS``. Returns ``(all_ok, results_list)``.
+    Called from ``cmd_install`` on the controller.
+    ``client`` is injectable for offline tests (skip token loading).
+    ``check_access_fn(hostname) -> bool`` is injectable to test the
+    Access-app gate (RED-1) without hitting the real API."""
+    if client is None:
+        try:
+            token = _load_token(token_path)
+        except OSError as e:
+            return False, [{"ok": False, "error":
+                            "cannot read DNS token %s: %s" % (token_path, e)}]
+        if not token:
+            return False, [{"ok": False, "error":
+                            "DNS token file %s is empty" % token_path}]
+        client = DnsClient(token=token)
+
     results = []
     all_ok = True
     for rec in MANAGED_RECORDS:
+        # RED-1 gate: a record that requires an Access app must NOT be
+        # created until the app exists — otherwise the origin is public
+        # and unauthenticated until `webterm-access --apply` runs.
+        access_host = rec.get("requires_access_hostname")
+        if access_host and not dry_run:
+            if not _access_app_exists(access_host, check_access_fn):
+                r = {"ok": False, "name": rec["name"],
+                     "action": None, "record_id": None,
+                     "error": ("Access app for %s not found — run "
+                               "`airuleset.py webterm-access --apply` "
+                               "FIRST, then re-run install" % access_host)}
+                results.append(r)
+                all_ok = False
+                continue
         r = ensure_record(
             client, rec["zone"], rec["name"], rec["type"],
             rec["content"], rec["proxied"], rec.get("comment", ""),

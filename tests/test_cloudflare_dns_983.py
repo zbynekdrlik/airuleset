@@ -279,5 +279,128 @@ class TestTokenNotPrinted(unittest.TestCase):
             self.fail("Token value might be printed: %s" % m.group())
 
 
+class TestFindRecordError(unittest.TestCase):
+    """YELLOW-1: a find_record error must not be treated as absent."""
+
+    def test_find_record_403_is_error_not_create(self):
+        def transport(method, path, body):
+            if "zones?" in path:
+                return 200, {"success": True, "result": [{"id": "z1"}]}
+            if "dns_records?" in path:
+                return 403, {"success": False,
+                             "errors": [{"message": "forbidden"}]}
+            return 200, {"success": True, "result": {}}
+        client = dns.DnsClient(token="tok", transport=transport)
+        r = dns.ensure_record(client, "example.com", "x.example.com",
+                              "A", "1.2.3.4", False, dry_run=False)
+        self.assertFalse(r["ok"])
+        self.assertIn("cannot list DNS records", r["error"])
+        # No POST attempted.
+        self.assertFalse(any(m == "POST" for m, _ in client.calls))
+
+
+class TestManagedRecordsSeam(unittest.TestCase):
+    """YELLOW-2: ensure_managed_records with injectable client."""
+
+    def test_happy_path_both_records(self):
+        t = FakeTransport(records=[])
+        client = dns.DnsClient(token="tok", transport=t)
+        ok, results = dns.ensure_managed_records(
+            dry_run=False, client=client,
+            check_access_fn=lambda _h: True)
+        self.assertEqual(len(results), len(dns.MANAGED_RECORDS))
+        for r in results:
+            self.assertIn("name", r)
+
+    def test_one_record_fails_all_ok_false(self):
+        call_count = [0]
+        def transport(method, path, body):
+            if "zones?" in path:
+                return 200, {"success": True, "result": [{"id": "z1"}]}
+            if "dns_records?" in path:
+                return 200, {"success": True, "result": []}
+            if method == "POST":
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return 422, {"success": False,
+                                 "errors": [{"message": "boom"}]}
+                return 201, {"success": True, "result": {"id": "new"}}
+            return 200, {"success": True, "result": {}}
+        client = dns.DnsClient(token="tok", transport=transport)
+        ok, results = dns.ensure_managed_records(
+            dry_run=False, client=client,
+            check_access_fn=lambda _h: True)
+        self.assertFalse(ok)
+
+
+class TestAccessGate(unittest.TestCase):
+    """RED-1: DNS creation gated on Access app existence."""
+
+    def test_claudy_has_access_gate(self):
+        claudy = [r for r in dns.MANAGED_RECORDS
+                  if r["name"] == "claudy.newlevel.media"][0]
+        self.assertEqual(claudy.get("requires_access_hostname"),
+                         "claudy.newlevel.media")
+
+    def test_ar_has_no_access_gate(self):
+        ar = [r for r in dns.MANAGED_RECORDS
+              if r["name"] == "ar.newlevel.media"][0]
+        self.assertIsNone(ar.get("requires_access_hostname"))
+
+    def test_gated_record_blocked_when_access_missing(self):
+        t = FakeTransport(records=[])
+        client = dns.DnsClient(token="tok", transport=t)
+        ok, results = dns.ensure_managed_records(
+            dry_run=False, client=client,
+            check_access_fn=lambda _h: False)
+        # The claudy record must fail, ar should proceed.
+        claudy_r = [r for r in results
+                    if r.get("name") == "claudy.newlevel.media"]
+        self.assertTrue(claudy_r)
+        self.assertFalse(claudy_r[0]["ok"])
+        self.assertIn("Access app", claudy_r[0]["error"])
+        self.assertFalse(ok)
+
+    def test_gated_record_passes_when_access_present(self):
+        t = FakeTransport(records=[])
+        client = dns.DnsClient(token="tok", transport=t)
+        ok, results = dns.ensure_managed_records(
+            dry_run=False, client=client,
+            check_access_fn=lambda _h: True)
+        claudy_r = [r for r in results
+                    if r.get("name") == "claudy.newlevel.media"]
+        self.assertTrue(claudy_r)
+        self.assertTrue(claudy_r[0]["ok"])
+
+    def test_dry_run_skips_access_check(self):
+        """Dry-run should not check Access (reads only)."""
+        t = FakeTransport(records=[])
+        client = dns.DnsClient(token="tok", transport=t)
+        ok, results = dns.ensure_managed_records(
+            dry_run=True, client=client,
+            check_access_fn=lambda _h: False)
+        claudy_r = [r for r in results
+                    if r.get("name") == "claudy.newlevel.media"]
+        self.assertTrue(claudy_r)
+        # Dry-run does not gate on Access.
+        self.assertTrue(claudy_r[0]["ok"])
+
+
+class TestClaudyAccessDenyDefault(unittest.TestCase):
+    """BLUE: assert the policy decision is allow + exactly two emails."""
+
+    def test_policy_decision_is_allow_with_exact_emails(self):
+        import cli_webterm_access as acc
+        claudy = acc.WEBTERM_ACCESS_APPS["claudy"]
+        p = acc.build_app_payload(claudy)
+        policy = p["policies"][0]
+        self.assertEqual(policy["decision"], "allow")
+        includes = policy["include"]
+        self.assertEqual(includes, [
+            {"email": {"email": "drlik.zbynek@gmail.com"}},
+            {"email": {"email": "drlik.marek@gmail.com"}},
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()
