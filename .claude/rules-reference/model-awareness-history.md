@@ -8,6 +8,12 @@ always-on in the module.
 
 ---
 
+## Opus tier fleet-wide: claude-opus-4-6 → claude-opus-4-8 (2026-09-10, #990)
+
+**Owner directive (2026-09-10, verbatim):** *"Prehod pravidlo pouzivania a namiesto opuss 4.6 daj opus 4.8"*
+
+**What changed:** `MODEL_TIERS["opus"]` swapped from `claude-opus-4-6` to `claude-opus-4-8`. All dispatch surfaces (agent frontmatter, hook allowlist, doctrine, tests) updated. A stale `claude-opus-4-6` `opts.model` is now REJECTED (off-lineup). The allowlist-of-exact-ids + pinned-agent-type + no-`model`-param architecture from #871 stays fully intact; only the Opus member changes.
+
 ## Fable 5.1 @ medium — tiering revision (2026-09-05, #894, revises #871)
 
 **Owner directive (2026-09-05, verbatim):** *"Čítal som na X-ku, že fable 5.1 najlepšie pracuje na medium efforte. Zatiaľ sme sa tu bavili o tom, aký má byť model používaný na čo, ale zatiaľ som ani raz nepočul, že by sa využíval pre subagentov a tu v hlavnom agente aj výber effortu. Chcel by som teda miesto fable 5.0, na ktorý sme prešli, využívať fable 5.1 medium effort, a tiež pri používaní opus-4.6 by som možno uprednostnil trošku vyšší effort, ak by to mohlo niečomu pomôcť."*
