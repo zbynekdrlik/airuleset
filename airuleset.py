@@ -313,12 +313,7 @@ from cli_filedrop_watchdog import (  # noqa: E402
     watchdog_disable_marker as watchdog_disable_marker,
     setup_watchdog_service as setup_watchdog_service,
     maybe_setup_watchdog as maybe_setup_watchdog,
-    SESSION_RESTART_DROPIN_DEST as SESSION_RESTART_DROPIN_DEST,
-    SESSION_RESTART_DROPIN_HAND as SESSION_RESTART_DROPIN_HAND,
-    SESSION_RESTART_OPTOUT_MARKER as SESSION_RESTART_OPTOUT_MARKER,
-    render_session_restart_dropin as render_session_restart_dropin,
-    setup_session_restart_dropin as setup_session_restart_dropin,
-    configured_session_restart_source as configured_session_restart_source,
+    cleanup_session_restart_dropins as cleanup_session_restart_dropins,
 )
 
 # --- web terminal gateway (#555): dev1-only ttyd + tailscale-serve brána.
@@ -6146,7 +6141,6 @@ def cmd_watchdog(args):
                     # on the registry declaration existing. Left None in
                     # run_once unit tests.
                     deploy_state_fetch=_watchdog_deploy_state_fetch(),
-                    session_restart_enabled=True,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

@@ -84,7 +84,7 @@ EXPECTED_STANDALONE = [
     "mdreview_cadence",                 # (43) — #858 mdreview recurring cadence
     "priority_policy",                  # (44) — #885 priority policy enforcer
     "orphan_poll_reaper",               # (45) — #885 orphan bg-poll-loop reaper
-    "session_restart",                  # (46) — #947 session-restart-on-degradation
+    "session_health_observe",            # (46) — #947 session-health-observation (REVERSED 2026-09-10)
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
