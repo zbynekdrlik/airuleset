@@ -977,7 +977,8 @@ def _discuss_audit_scope(cwd):
 # the read. Doctrine-only, no count change.
 _DISCUSS_TRIGGER = (
     "DISCUSS-AUDIT (#695): zavri tikety bez `Discuss-closed:` -- "
-    "`gh issue list -s closed -S \"discuss.channel_\" -L 30`.")
+    "`gh issue list -s closed -S \"discuss.channel_\" -L 30`; "
+    "nová klientska správa → 👀 reakciu (#978).")
 
 
 # #753 (b) -- the UNPARK-AUDIT clause (odoo-erp only, the SAME scope as
@@ -991,16 +992,6 @@ _UNPARK_AUDIT_TRIGGER = (
     "UNPARK-AUDIT %d (#753): re-read cited Discuss threads of acceptance-W "
     "members (aj reakcie #745) -- novšia klientska odpoveď po našom pushi ⇒ "
     "zlož `ops-wait` s citáciou.")
-
-# #978 — ACK-REACTION clause: remind the session to add a 👀 reaction on
-# every NEW client message it reads during a W re-entry. The reaction is
-# the standing fleet acknowledgement ("evidujeme, pracujeme") — added BEFORE
-# any reply is composed. Points at the doctrine in ack-reaction.md.
-_ACK_REACTION_TRIGGER = (
-    "ACK-REACTION (#978): pri čítaní NOVEJ klientskej správy pridaj 👀 "
-    "reakciu (`message_reaction_add_guarded`); ak metóda nie je na PROD, "
-    "zapíš `Ack-reaction: pending`.")
-
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
                 release_landed=None, discuss_audit=False, unpark_audit_n=0,
@@ -1055,11 +1046,6 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     if isinstance(unpark_audit_n, int) and not isinstance(unpark_audit_n, bool) \
             and unpark_audit_n > 0:
         optional.append(_UNPARK_AUDIT_TRIGGER % unpark_audit_n)
-    # #978: the ack-reaction reminder — on EVERY W re-entry that involves client
-    # Discuss threads (same scope as discuss_audit), so the session never processes
-    # a new client message without the 👀 doctrine loaded.
-    if discuss_audit:
-        optional.append(_ACK_REACTION_TRIGGER)
     detail = []
     for item in optional:
         cand = (_NUDGE_HEAD + core_body + " "

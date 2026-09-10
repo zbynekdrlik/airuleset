@@ -28,9 +28,10 @@ models.execute_kw(
 ```
 
 The guarded method on `mail.message` (the WRITE sibling of #5577's
-`message_reactions_guarded` READ method) is an ACL-safe public endpoint
-for `base.group_user` accounts. It adds the reaction idempotently — a
-duplicate call on the same message + emoji is a no-op, never an error.
+`message_reactions_guarded` READ method) is designed as an ACL-safe
+public endpoint for `base.group_user` accounts (per the #6808 spec,
+not yet released as of 2026-09-10). Once shipped, it adds the reaction
+idempotently — a duplicate call on the same message + emoji is a no-op.
 
 ## Availability — check per instance, fall back below
 

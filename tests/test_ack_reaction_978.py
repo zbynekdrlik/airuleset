@@ -204,6 +204,29 @@ FEMININE_RED = (
     "⏳ WORKING: riesim"
 )
 
+# A code block mentioning "klient napisal" — must PASS (HIGH-2 fix: uses MSG_MENTION).
+CODE_BLOCK_PASS = (
+    "Implementoval som ack-reaction check.\n\n"
+    "```\n"
+    "# Pattern: klient napisal do vlakna Discuss\n"
+    "```\n\n"
+    "✅ DONE: check implementovany"
+)
+
+# A non-Odoo turn mentioning "klient napisal" — must PASS (MEDIUM-3 fix: Odoo anchor).
+NON_ODOO_PASS = (
+    "TCP klient poslal SYN a server neodpovedal. "
+    "Pracujem na debugovani.\n\n"
+    "⏳ WORKING: debugujem TCP problem"
+)
+
+# Diacritic Slovak — "Klient napisal" with proper diacritics — must block (HIGH-1 fix).
+DIACRITIC_RED = (
+    "Prečítal som správy. Klient napísal do Discuss vlákna "
+    "Zákaznícky portál 3 nové pripomienky.\n\n"
+    "⏳ WORKING: riešim pripomienky"
+)
+
 
 class TestAckReactionProseGate(TestCase):
 
@@ -242,36 +265,53 @@ class TestAckReactionProseGate(TestCase):
                         "feminine 'poslala do vlakna' must be caught; "
                         "stderr=%s stdout=%s" % (p.stderr, p.stdout))
 
+    def test_code_block_passes(self):
+        """A code block mentioning 'klient napisal' must PASS (HIGH-2 fix)."""
+        p = _run_prose(CODE_BLOCK_PASS)
+        self.assertFalse(_blocked(p),
+                         "code block mention must pass; stderr=%s" % p.stderr)
+
+    def test_non_odoo_passes(self):
+        """A non-Odoo turn with 'klient poslal' must PASS (MEDIUM-3 fix)."""
+        p = _run_prose(NON_ODOO_PASS)
+        self.assertFalse(_blocked(p),
+                         "non-Odoo 'klient poslal' must pass; stderr=%s" % p.stderr)
+
+    def test_diacritic_red(self):
+        """Diacritic 'Klient napisal' in Discuss context must be blocked (HIGH-1)."""
+        p = _run_prose(DIACRITIC_RED)
+        self.assertTrue(_blocked(p),
+                        "diacritic 'Klient napisal' must be caught; "
+                        "stderr=%s stdout=%s" % (p.stderr, p.stdout))
+
 
 # ==================================================================== #
-# 3. Nudge text carries the ACK-REACTION clause
+# 3. Nudge text carries the #978 ack clause folded into DISCUSS_TRIGGER
 # ==================================================================== #
 
 class TestNudgeAckReaction(TestCase):
 
-    def test_ack_reaction_trigger_constant_exists(self):
-        """The _ACK_REACTION_TRIGGER constant must exist in ops_wait_recheck."""
+    def test_discuss_trigger_carries_978_clause(self):
+        """The _DISCUSS_TRIGGER constant must carry the #978 ack-reaction clause."""
         import importlib
         owr = importlib.import_module("watchdog.ops_wait_recheck")
-        self.assertTrue(hasattr(owr, "_ACK_REACTION_TRIGGER"),
-                        "_ACK_REACTION_TRIGGER constant missing")
-        self.assertIn("#978", owr._ACK_REACTION_TRIGGER)
-        self.assertIn("ACK-REACTION", owr._ACK_REACTION_TRIGGER)
+        self.assertIn("#978", owr._DISCUSS_TRIGGER,
+                      "_DISCUSS_TRIGGER must carry #978 ack-reaction clause")
 
-    def test_nudge_with_discuss_audit_carries_ack_clause(self):
-        """When discuss_audit=True, the nudge text must carry the ACK-REACTION clause."""
+    def test_nudge_with_discuss_audit_carries_978(self):
+        """When discuss_audit=True, the nudge text must carry the #978 clause."""
         import importlib
         owr = importlib.import_module("watchdog.ops_wait_recheck")
         text = owr._nudge_text(
-            i_count=0,
-            w_members=[{"number": 42}],
+            i_count=2,
+            w_members=[{"number": 42}, {"number": 43}],
             discuss_audit=True,
         )
-        self.assertIn("ACK-REACTION", text,
-                      "nudge with discuss_audit must carry ACK-REACTION clause")
+        self.assertIn("#978", text,
+                      "nudge with discuss_audit + I=2 must carry #978 clause")
 
-    def test_nudge_without_discuss_audit_omits_ack_clause(self):
-        """When discuss_audit=False, the nudge text must NOT carry ACK-REACTION."""
+    def test_nudge_without_discuss_audit_omits_978(self):
+        """When discuss_audit=False, the nudge text must NOT carry #978."""
         import importlib
         owr = importlib.import_module("watchdog.ops_wait_recheck")
         text = owr._nudge_text(
@@ -279,8 +319,8 @@ class TestNudgeAckReaction(TestCase):
             w_members=[],
             discuss_audit=False,
         )
-        self.assertNotIn("ACK-REACTION", text,
-                         "nudge without discuss_audit must not carry ACK-REACTION")
+        self.assertNotIn("#978", text,
+                         "nudge without discuss_audit must not carry #978")
 
 
 # ==================================================================== #

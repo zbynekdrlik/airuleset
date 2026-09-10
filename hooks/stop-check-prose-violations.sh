@@ -2038,26 +2038,37 @@ fi
 # with NO visible acknowledgement — the exact regression the owner reported
 # (#978, miva1 2026-09-10).
 #
-# NARROW by design: only fires when the turn mentions a NEW client message
-# (present-tense or recent-past action verbs near client/thread context), never
-# on a turn that merely recaps an OLD message, discusses doctrine, or works in
-# a code block. Negatives tested: "klient napísal minulý týždeň" without a
-# new-action context, code-block mentions, rule-discussion prose.
+# NARROW by design: only fires when the turn (a) has an Odoo anchor
+# (Discuss/vlákn/message_post/active_id), AND (b) mentions a NEW client message
+# (active-voice verbs near client/thread context in $MSG_MENTION — fenced/
+# backtick/quoted spans stripped), never on a turn that merely recaps an OLD
+# message, discusses doctrine in a code block, or operates outside Odoo.
+# Negatives tested: old-message recap, code-block mentions, non-Odoo prose,
+# diacritic spellings under C locale.
 ACK_REACTION_MENTION=""
 ACK_REACTION_UNKNOWN=0
-# Stage 1: does the message mention processing a NEW client message?
-# Two arms (ERE `.{0,80}` proximity — grep `.` already excludes newline):
-#   A) klient/zákazn near napísal/napisal/poslal/poslala (active voice: "client wrote")
-#   B) napísal/napisal/poslal/poslala near vlákn/discuss (sent TO a thread)
-# `pripomienk` was DROPPED as a standalone trigger — "dostali pripomienky od
-# zákazníka" is a passive recap (false positive on OLD_MESSAGE_PASS fixture).
-if ! _ACK_CLIENT_MSG=$(msg_lines "$MSG" -iE "(klient|z[aá]kazn).{0,80}(nap[ií]sal|poslal)|(nap[ií]sal|poslal).{0,80}(klient|z[aá]kazn|vl[aá]kn|discuss)"); then
-    _ACK_CLIENT_MSG=""
-fi
-if [ -n "$_ACK_CLIENT_MSG" ]; then
-    # Stage 2: does the message carry an Ack-reaction evidence line?
-    if ! msg_has "$MSG" -iE "Ack-reaction:"; then
-        ACK_REACTION_MENTION="1"
+# Stage 0: Odoo anchor gate — only fire in an Odoo/Discuss context (MEDIUM-3
+# review finding: without this, "TCP klient poslal SYN" blocks fleet-wide).
+# Reuses the same ODOO_ANCHOR_RX already computed at line ~496 for #657.
+_ACK_HAS_ODOO=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE "$ODOO_ANCHOR_RX|vl[áa]kn" && echo 1 || echo 0)
+if [ "$_ACK_HAS_ODOO" = "1" ]; then
+    # Stage 1: does the message mention processing a NEW client message?
+    # Two arms (ERE `.{0,80}` proximity — grep `.` already excludes newline):
+    #   A) klient/zákazn near napísal/napisal/poslal/poslala (active voice)
+    #   B) napísal/napisal/poslal/poslala near vlákn/discuss (sent TO a thread)
+    # Run on $MSG_MENTION (fenced/backtick/quoted spans stripped — HIGH-2
+    # review finding: raw $MSG blocks code blocks discussing the doctrine).
+    # LC_ALL=C.UTF-8 for diacritics (HIGH-1 review finding: bare grep in C
+    # locale misses ž/á/í in Slovak spellings).
+    if ! _ACK_CLIENT_MSG=$(LC_ALL=C.UTF-8 msg_lines "$MSG_MENTION" -iE "(klient|z[aá]kazn).{0,80}(nap[ií]sal|poslal)|(nap[ií]sal|poslal).{0,80}(klient|z[aá]kazn|vl[aá]kn|discuss)"); then
+        _ACK_CLIENT_MSG=""
+    fi
+    if [ -n "$_ACK_CLIENT_MSG" ]; then
+        # Stage 2: does the message carry an Ack-reaction evidence line?
+        # Exoneration on raw $MSG (an Ack-reaction: inside a code block still counts).
+        if ! msg_has "$MSG" -iE "Ack-reaction:"; then
+            ACK_REACTION_MENTION="1"
+        fi
     fi
 fi
 if [ "$ACK_REACTION_MENTION" = "1" ]; then
