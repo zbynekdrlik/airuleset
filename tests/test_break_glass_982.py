@@ -119,10 +119,12 @@ class TestProvisionIgnoreip(unittest.TestCase):
             return R()
 
         import shutil
-        with _patch_box_class("controller"), \
-             mock.patch.object(shutil, "which",
-                               return_value="/usr/bin/fail2ban-client"):
-            result = g.provision_owner_ignoreip(run=fake_run)
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
         self.assertIn("skipped", result)
         self.assertIn("sudo", result)
 
@@ -139,12 +141,14 @@ class TestProvisionIgnoreip(unittest.TestCase):
             return R()
 
         import shutil
-        with _patch_box_class("controller"), \
-             mock.patch.object(shutil, "which",
-                               return_value="/usr/bin/fail2ban-client"):
-            result = g.provision_owner_ignoreip(run=fake_run)
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
         self.assertIn("applied", result)
-        self.assertIn(g.OWNER_IGNOREIP_PATH, result)
+        self.assertIn(dest, result)
         # Verify the ORDERED sequence: mkdir, tee, chmod, mv, reload.
         verbs = []
         for call in calls:
@@ -172,10 +176,12 @@ class TestProvisionIgnoreip(unittest.TestCase):
             return R()
 
         import shutil
-        with _patch_box_class("controller"), \
-             mock.patch.object(shutil, "which",
-                               return_value="/usr/bin/fail2ban-client"):
-            result = g.provision_owner_ignoreip(run=fake_run)
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
         self.assertIn("FAILED", result)
         self.assertIn("mv", result)
         # Should have attempted cleanup (rm of tmp).
@@ -195,16 +201,19 @@ class TestProvisionIgnoreip(unittest.TestCase):
             return R()
 
         import shutil
-        with _patch_box_class("controller"), \
-             mock.patch.object(shutil, "which",
-                               return_value="/usr/bin/fail2ban-client"):
-            result = g.provision_owner_ignoreip(run=fake_run)
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
         self.assertIn("FAILED", result)
         self.assertIn("reload", result)
         self.assertIn("NOT live", result)
 
     def test_unchanged_file_short_circuits(self):
-        """MEDIUM-4 fix: byte-identical file skips write + reload."""
+        """MEDIUM-4 fix: byte-identical file skips write + reload.
+        Uses the dest seam for hermeticity (#982 fix-forward)."""
         content = g.render_owner_ignoreip()
         calls = []
 
@@ -218,16 +227,46 @@ class TestProvisionIgnoreip(unittest.TestCase):
             return R()
 
         import shutil
-        with _patch_box_class("controller"), \
-             mock.patch.object(shutil, "which",
-                               return_value="/usr/bin/fail2ban-client"), \
-             mock.patch("os.path.isfile", return_value=True), \
-             mock.patch("builtins.open",
-                        mock.mock_open(read_data=content)):
-            result = g.provision_owner_ignoreip(run=fake_run)
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
         self.assertIn("unchanged", result)
         # No calls at all — short-circuited before the sudo probe.
         self.assertEqual(calls, [])
+
+    def test_unchanged_via_dest_seam(self):
+        """Unchanged branch exercised through the dest seam, not mocks —
+        hermetic on any box regardless of /etc state (#982 fix-forward)."""
+        content = g.render_owner_ignoreip()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import shutil
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
+            self.assertIn("unchanged", result)
+            self.assertIn(dest, result)
+            # No calls at all — short-circuited before the sudo probe.
+            self.assertEqual(calls, [])
 
 
 # ---------------------------------------------------------------------------
