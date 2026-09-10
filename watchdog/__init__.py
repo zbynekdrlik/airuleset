@@ -1951,12 +1951,13 @@ from watchdog.conformance import (  # noqa: E402
     CONFORMANCE_BASELINE_NAME as CONFORMANCE_BASELINE_NAME,
 )
 
-# #543 — job 35, central dead-box heartbeat-missing detector (dev1-only). The
-# per-box conformance check (job 34) cannot report a DEAD box; this reads the
-# already-collected fleet.jsonl liveness and pings when a box goes silent past a
-# threshold. Extracted to `watchdog/conformance_heartbeat.py`; re-exported here
-# so `run_once`'s job-35 dispatch resolves unchanged. Same circular-import-safe
-# idiom as conformance.py (its own `import watchdog`, call-time attribute access).
+# #543 — job 35, central dead-box heartbeat-missing detector (controller-only,
+# #971 — was dev1-only). The per-box conformance check (job 34) cannot
+# report a DEAD box; this reads the already-collected fleet.jsonl liveness
+# and pings when a box goes silent past a threshold. Extracted to
+# `watchdog/conformance_heartbeat.py`; re-exported here so `run_once`'s
+# job-35 dispatch resolves unchanged. Same circular-import-safe idiom as
+# conformance.py (its own `import watchdog`, call-time attribute access).
 from watchdog.conformance_heartbeat import (  # noqa: E402
     run_conformance_heartbeat_check as run_conformance_heartbeat_check,
     classify_collection as classify_collection,
@@ -2064,7 +2065,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
              sleep_fn=None, burn_snapshot_path=None,
              compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
-             fleet_path=None, burn_alert_enabled=False,
+             fleet_path=None, shared_fleet_path=None,
+             burn_alert_enabled=False,
              goal_jobs_enabled=False, long_turn_enabled=False,
              goal_requests_path=None, delivery_probe=None, card_probe=None,
              closed_fetch=None,
@@ -2281,12 +2283,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           survived. Number retained (not reused) for historical
           addressability of prior comments/logs referencing "job 15".
       (16) (only when `fleet_fetch` is given) HOURLY FLEET BURN (#55) —
-          coordinator-only (cmd_watchdog wires this ONLY on dev1): merges
-          every managed box's own hourly burn-snapshot row (job 13's output,
+          coordinator-only (cmd_watchdog wires this ONLY on the controller,
+          box-class `controller` — #971, was hostname `dev1`): merges every
+          managed box's own hourly burn-snapshot row (job 13's output,
           tailed over ssh via `fleet_fetch`) into ONE combined
           `~/.claude/burn-history/fleet.jsonl` row per hour
           (fleet_burn_job), plus a deduped Discord ping when the observed
           weekly-%/day pace exceeds the budget implied by the usage cache.
+          When `shared_fleet_path` is given (#971), the same row is ALSO
+          written to a world-readable path for cross-account consumers.
       (17) HARD CONTEXT CEILING BACKSTOP — REMOVED (#102, 2026-07-27). Used
           to fire `/compact` purely off CONTEXT SIZE (a fixed ceiling),
           regardless of idle duration and even into a BUSY pane — the same
@@ -2312,7 +2317,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           window) via `burn.hourly_burn_alert` — any one firing sends ONE
           combined Discord ping (burn_alert_job). Coordinator-only, same
           "wired = on" convention as job 16 (cmd_watchdog computes the
-          dev1-only gate; this module stays host-agnostic).
+          controller-only gate; this module stays host-agnostic).
       (20) (only when `goal_jobs_enabled` is truthy) GOAL DARK-WATCH + LANE
           NUDGE (#403, collapsing the old 968-line goal_rearm machinery into
           `watchdog/goal.py`, whose own module docstring is the single source
@@ -2633,26 +2638,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           surfaces an unchanged divergence without daily re-spam yet is never
           permanently silent (#134), an UNDETERMINED sweep never drops a prior
           episode (#486-G5), resolution clears the dedup. No ssh, no central
-          fan-out (works even when dev1 sleeps); the dead-box gap is a filed
+          fan-out (works even when the controller sleeps, #971 — was "dev1
+          sleeps"); the dead-box gap is a filed
           central-heartbeat follow-up. See `run_conformance_check` in
           `watchdog/conformance.py`.
 
-      (35) (only on dev1 — `conformance_hb_enabled`) CENTRAL DEAD-BOX HEARTBEAT
-          DETECTOR (#543) — closes job 34's structural gap: a DEAD box's own
-          self-check sends NOTHING (its watchdog stopped), so silence looks like
-          health. dev1 (the always-on deploy source) reads the already-collected
-          `fleet.jsonl` liveness (each box's hourly burn snapshot, job 16) — a box
-          FRESH in a fleet row was alive that hour, a dead box is `{"error": ...}`
-          — derives each deployable box's last-fresh instant, and LOUD-pings the
-          owner when one goes silent past ~36h (env-tunable, generous — survives a
-          reboot / brief job-16 hiccup). PURE deciders (True alive / False dead /
-          None undetermined). FAIL-SAFE: if the COLLECTION itself is stale (dev1's
-          job 16 degraded), the per-box check would false-alarm the WHOLE fleet —
-          so a stale collection pings ONCE about the collector and SKIPS the
-          per-box check. Deduped per-box + reping (3d) + fresh dedup_key (#535
-          patterns); `pending` rename targets filtered via `_deployable_hosts`
-          (#537); UNDETERMINED never drops an episode (#486-G5); dry_run mutates
-          nothing. See `run_conformance_heartbeat_check` in
+      (35) (only on the controller — `conformance_hb_enabled`, #971) CENTRAL
+          DEAD-BOX HEARTBEAT DETECTOR (#543) — closes job 34's structural gap:
+          a DEAD box's own self-check sends NOTHING (its watchdog stopped), so
+          silence looks like health. The controller (the always-on deploy
+          source) reads the already-collected `fleet.jsonl` liveness (each
+          box's hourly burn snapshot, job 16) — a box FRESH in a fleet row was
+          alive that hour, a dead box is `{"error": ...}` — derives each
+          deployable box's last-fresh instant, and LOUD-pings the owner when
+          one goes silent past ~36h (env-tunable, generous — survives a reboot
+          / brief job-16 hiccup). PURE deciders (True alive / False dead /
+          None undetermined). FAIL-SAFE: if the COLLECTION itself is stale
+          (the controller's job 16 degraded), the per-box check would
+          false-alarm the WHOLE fleet — so a stale collection pings ONCE
+          about the collector and SKIPS the per-box check. Deduped per-box +
+          reping (3d) + fresh dedup_key (#535 patterns); `pending` rename
+          targets filtered via `_deployable_hosts` (#537); UNDETERMINED never
+          drops an episode (#486-G5); dry_run mutates nothing. See
+          `run_conformance_heartbeat_check` in
           `watchdog/conformance_heartbeat.py`.
       (36) (only when `gkorphan_fetch` is given) ORPHANED gk HAND-OFF MARKER
           BACKSTOP (#551) — the SUPERVISOR-side detection complement of the
@@ -4250,21 +4258,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # (15) and the removed section comment above `_pane_compacting`.
 
     # Job 16 — HOURLY FLEET BURN (#55): only when `fleet_fetch` is given
-    # (cmd_watchdog wires this ONLY on the coordinator, dev1 — every other
-    # managed box already writes its own local hourly row via job 13, so
-    # this job just merges them). Same "wired = on" convention as jobs
-    # 3/7/8/11/13/14. Best-effort; internally also cadence-gated to at most
-    # once per hour.
+    # (cmd_watchdog wires this ONLY on the controller, box-class `controller`
+    # — #971, was hostname `dev1` — every other managed box already writes
+    # its own local hourly row via job 13, so this job just merges them).
+    # Same "wired = on" convention as jobs 3/7/8/11/13/14. Best-effort;
+    # internally also cadence-gated to at most once per hour.
     _add("fleet_burn_job", lambda: fleet_fetch is not None,
          lambda: fleet_burn_job(now, state, fleet_hosts or [], send_fn,
                                 fetch=fleet_fetch, fleet_path=fleet_path,
+                                shared_fleet_path=shared_fleet_path,
                                 owner=account_owner or None, dry_run=dry_run),
          "fleet-burn error")
 
     # Job 19 — HOURLY BURN ALERT (#81): only when `burn_alert_enabled` is
-    # truthy (cmd_watchdog computes it the SAME dev1-only way it computes
-    # `fleet_fetch` for job 16 — every other managed box never writes
-    # fleet.jsonl at all, so this job would just see an empty file there).
+    # truthy (cmd_watchdog computes it the SAME controller-only way it
+    # computes `fleet_fetch` for job 16 — every other managed box never
+    # writes fleet.jsonl at all, so this job would just see an empty file).
     # Runs right after job 16 so it evaluates the row job 16 may have just
     # written THIS sweep. Best-effort; internally cadence-gated to at most
     # once per hour bucket.
@@ -4550,15 +4559,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              persist=lambda: save_state(state_path, state)),
          "conformance-check error")
 
-    # Job 35 (#543) — CENTRAL DEAD-BOX HEARTBEAT-MISSING DETECTOR, dev1-only.
-    # The per-box conformance check (job 34) cannot report a DEAD box (its own
-    # watchdog sends nothing); this reads the already-collected fleet.jsonl
-    # liveness (burn snapshot per box, job 16) and LOUD-pings the owner when a
-    # box goes silent past ~36h — with a collection-stale fail-safe (never
-    # false-alarm the whole fleet). Coordinator-only (`conformance_hb_enabled`
-    # = dev1, the SAME host gate job 16/19 use — only dev1 collects fleet.jsonl).
-    # Internally cadence-gated (own `conformance_hb_last_check` key) + injectable
-    # I/O seams; best-effort, every verdict fails safe to UNDETERMINED.
+    # Job 35 (#543) — CENTRAL DEAD-BOX HEARTBEAT-MISSING DETECTOR,
+    # controller-only (#971, was dev1). The per-box conformance check (job
+    # 34) cannot report a DEAD box (its own watchdog sends nothing); this
+    # reads the already-collected fleet.jsonl liveness (burn snapshot per
+    # box, job 16) and LOUD-pings the owner when a box goes silent past
+    # ~36h — with a collection-stale fail-safe (never false-alarm the whole
+    # fleet). Coordinator-only (`conformance_hb_enabled` = controller,
+    # the SAME box-class gate job 16/19 use — only the controller collects
+    # fleet.jsonl). Internally cadence-gated (own
+    # `conformance_hb_last_check` key) + injectable I/O seams; best-effort,
+    # every verdict fails safe to UNDETERMINED.
     _add("conformance_heartbeat_check", lambda: conformance_hb_enabled,
          lambda: run_conformance_heartbeat_check(
              now, state, send_fn=send_fn, dry_run=dry_run,
