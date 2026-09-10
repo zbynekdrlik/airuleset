@@ -51,7 +51,7 @@ class AncestorGuardSuppression(unittest.TestCase):
                 "HOME": str(fake_home),
             }
 
-            r = subprocess.run(
+            subprocess.run(
                 ["bash", "-c",
                  'source "%s" && log_hook_block ancestor-test "test-cmd"' % LIB],
                 env=clean_env, capture_output=True, text=True,
