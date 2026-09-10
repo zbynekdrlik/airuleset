@@ -448,9 +448,9 @@ class ModulePointerTest(unittest.TestCase):
         text = (REPO / "skills" / "ci-monitoring-deep" / "DEEP.md").read_text()
         # #986: the hook is named twice — once in the original foreground
         # bullet and once in the worker-long-wait paragraph.
-        self.assertGreaterEqual(
-            text.count("block-ci-poll-repeat.sh"), 1,
-            "no pointer to block-ci-poll-repeat.sh found")
+        self.assertEqual(
+            text.count("block-ci-poll-repeat.sh"), 2,
+            "expected exactly 2 pointers to block-ci-poll-repeat.sh")
         self.assertIn("Foreground bounded poll loop", text)
         # the FIRST pointer sits in the foreground bullet's own paragraph
         head, _, tail = text.partition("block-ci-poll-repeat.sh")

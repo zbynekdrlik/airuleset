@@ -101,13 +101,15 @@ DEPLOY_WAIT=$(jq -r '.ops_wait_deploy_wait // empty' "$CACHE_FILE" 2>/dev/null |
 case "$DEPLOY_WAIT" in ''|*[!0-9]*) DEPLOY_WAIT=0 ;; esac
 
 HARD_CEILING=$(( THRESHOLD * 2 ))
-if [ "$OPS_WAIT" -gt "$HARD_CEILING" ]; then
-    : # fall through to receipt/bypass/block — hard ceiling breached
-elif [ -n "$OPS_WAIT_STALE" ]; then
-    # #986: stale-aware path — gate on stale count, not total W
+if [ -n "$OPS_WAIT_STALE" ]; then
+    # #986: stale-aware path — gate on stale count, not total W.
+    # When per-member evidence is available, the hard ceiling is
+    # stale-aware too — a W=20 with stale=0 is genuinely healthy.
     if [ "$OPS_WAIT_STALE" -le "$STALE_THRESHOLD" ]; then
         exit 0   # stale count under threshold — allow
     fi
+elif [ "$OPS_WAIT" -gt "$HARD_CEILING" ]; then
+    : # fall through to receipt/bypass/block — hard ceiling breached
 elif [ "$DEPLOY_WAIT" -gt 0 ] 2>/dev/null; then
     EFFECTIVE_W=$(( OPS_WAIT - DEPLOY_WAIT ))
     if [ "$EFFECTIVE_W" -lt 0 ]; then EFFECTIVE_W=0; fi
@@ -148,9 +150,13 @@ fi
 
 # BLOCK the dispatch
 {
-    echo "BLOCKED: W-drain gate — |W|=$OPS_WAIT > threshold $THRESHOLD."
+    if [ -n "$OPS_WAIT_STALE" ]; then
+        echo "BLOCKED: W-drain gate — stale=$OPS_WAIT_STALE > threshold $STALE_THRESHOLD (total W=$OPS_WAIT)."
+    else
+        echo "BLOCKED: W-drain gate — |W|=$OPS_WAIT > threshold $THRESHOLD."
+    fi
     echo ""
-    echo "  The parked-W bucket exceeds OPS_WAIT_WDRAIN_THRESHOLD ($THRESHOLD)."
+    echo "  The parked-W bucket exceeds the drain threshold."
     echo "  Drain it BEFORE dispatching a new implementation lane:"
     echo ""
     echo "  1. Review:  python3 ~/devel/airuleset/airuleset.py core-quals --ops-wait"

@@ -3211,15 +3211,18 @@ def cmd_tickets_status(args):
                 # docstring for the heuristic + fail-safe rationale).
                 entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
                 # #986: stale W count for the dispatch gate.
-                # _stale_ops_wait_flagged is expensive (reads comments
-                # per-member) but this is the SLOW background refresh
-                # path, not the hot footer render. Bounded by
-                # OPS_WAIT_STALE_MAX_FETCHES. Fail-open: any error -> omit
-                # the field (the hook falls back to total ops_wait).
+                # Subtract the #799 tacit-window set from the raw stale
+                # set so the cache field matches the CLI --ops-wait
+                # rendered stale! count (one derivation, per #510).
+                # Fail-open: any error -> omit the field (hook falls
+                # back to total ops_wait).
                 try:
                     _stale = _stale_ops_wait_flagged(
                         ops_wait, cwd=root)
-                    entry["ops_wait_stale"] = len(_stale)
+                    _tacit = _tacit_window_flagged(
+                        ops_wait, cwd=root)
+                    _net_stale = _stale - _tacit
+                    entry["ops_wait_stale"] = len(_net_stale)
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
@@ -3288,7 +3291,10 @@ def cmd_tickets_status(args):
                 try:
                     _stale = _stale_ops_wait_flagged(
                         ops_wait, cwd=root)
-                    entry["ops_wait_stale"] = len(_stale)
+                    _tacit = _tacit_window_flagged(
+                        ops_wait, cwd=root)
+                    _net_stale = _stale - _tacit
+                    entry["ops_wait_stale"] = len(_net_stale)
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
@@ -3639,12 +3645,12 @@ def _load_lens_list(repo_root=None):
 
 
 def _validate_closes_finding_shas(findings, cwd=None):
-    """#986: validate that shas referenced in Closes-finding lines exist
-    in the current branch.
+    """#986: validate that shas referenced in Closes-finding lines are
+    reachable from HEAD on the current branch.
 
     Each finding line may contain ``fixed in <sha>`` — when it does, the
-    sha must resolve to a commit in the repo at *cwd*. Lines without a
-    sha pattern pass without validation (legacy format).
+    sha must be an ancestor of HEAD in the repo at *cwd*. Lines without
+    a sha pattern pass without validation (legacy format).
 
     Returns ``(ok: bool, reason: str)``."""
     import re as _re
@@ -3656,13 +3662,13 @@ def _validate_closes_finding_shas(findings, cwd=None):
             continue  # no sha pattern — legacy format, pass
         sha = m.group(1)
         try:
-            r = _sp.run(["git", "rev-parse", "--verify",
-                         sha + "^{commit}"],
+            r = _sp.run(["git", "merge-base", "--is-ancestor",
+                         sha, "HEAD"],
                         capture_output=True, text=True, timeout=10,
                         cwd=cwd)
             if r.returncode != 0:
-                return False, ("Closes-finding sha %s does not exist in "
-                               "the branch" % sha)
+                return False, ("Closes-finding sha %s is not reachable "
+                               "from HEAD" % sha)
         except Exception as e:
             return False, "Closes-finding sha verification failed: %s" % e
     return True, "ok"

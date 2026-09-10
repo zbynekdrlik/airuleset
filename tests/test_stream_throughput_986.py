@@ -138,6 +138,18 @@ class TestWorkerLongForegroundWait(unittest.TestCase):
         self.assertEqual(r2.returncode, 2,
                          "Non-worker subagent loop 2 was not blocked")
 
+    def test_sonnet_implementer_also_gets_extra_loop(self):
+        """sonnet-implementer gets the same extra loop as autopilot-worker."""
+        r1 = self._run_ci_hook(
+            _short_poll_loop(RUN_A),
+            agent_id="agent-789", agent_type="sonnet-implementer")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        r2 = self._run_ci_hook(
+            _long_foreground_loop(RUN_A),
+            agent_id="agent-789", agent_type="sonnet-implementer")
+        self.assertEqual(r2.returncode, 0,
+                         "sonnet-implementer loop 2 was blocked: " + r2.stderr)
+
     def test_bg_waiter_still_allowed_through_this_hook(self):
         """A background CI poll passes this hook (block-subagent-bg-ci-poll.sh
         handles it)."""
@@ -246,16 +258,29 @@ class TestWdrainStaleOnly(unittest.TestCase):
             self.assertEqual(rc, 0,
                              "Stale at threshold was blocked: " + stderr)
 
-    def test_hard_ceiling_still_blocks_despite_low_stale(self):
-        """Hard ceiling (2*threshold=16) blocks even with stale=0."""
+    def test_stale_aware_passes_even_at_hard_ceiling(self):
+        """W=20 (above hard ceiling 16) but stale=0 — passes because
+        stale-aware path supersedes the hard ceiling when per-member
+        evidence is available (#986 MAJOR-1 fix)."""
         with tempfile.TemporaryDirectory() as td:
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=0)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
+            self.assertEqual(rc, 0,
+                             "Stale-aware path did not supersede ceiling: " + stderr)
+
+    def test_legacy_hard_ceiling_still_blocks(self):
+        """Without ops_wait_stale, W=20 > hard ceiling 16 still blocks."""
+        with tempfile.TemporaryDirectory() as td:
+            cwd = pathlib.Path(td) / "repo"
+            cwd.mkdir()
+            _make_wdrain_cache(td, cwd, ops_wait=20)
+            p = _wdrain_payload(cwd)
+            rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
-                             "Hard ceiling did not block")
+                             "Legacy hard ceiling did not block")
 
 
 # ---------- Item 5: Closes-finding sha validation -------------------------
@@ -290,12 +315,13 @@ class TestClosesFindingShaValidation(unittest.TestCase):
             "airuleset._validate_closes_finding_shas does not exist")
 
     def test_validate_rejects_bad_sha(self):
-        """_validate_closes_finding_shas rejects a non-existent sha."""
+        """_validate_closes_finding_shas rejects a non-reachable sha."""
         import airuleset
         findings = ["F1 — fixed in deadbeefcafe, symbol kept because rename"]
         ok, reason = airuleset._validate_closes_finding_shas(
             findings, cwd=self.td)
         self.assertFalse(ok, "Bad sha was not rejected: %s" % reason)
+        self.assertIn("not reachable", reason)
 
     def test_validate_accepts_good_sha(self):
         """_validate_closes_finding_shas accepts a sha that exists."""

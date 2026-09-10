@@ -201,7 +201,7 @@ AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || echo ""
 # round-trip.
 IS_WORKER_AGENT=0
 case "$AGENT_TYPE" in
-    autopilot-worker|finisher) IS_WORKER_AGENT=1 ;;
+    autopilot-worker|sonnet-implementer) IS_WORKER_AGENT=1 ;;
 esac
 
 # ---- run-id -> state key ------------------------------------------------
