@@ -635,7 +635,7 @@ gap in either.
      at bounce round ≥ 3 as `round3!`. A `round3!` member gets a GATED `fable-advisor` DESIGN
      CONSULT (digest of ALL prior gk findings for that ticket) BEFORE the worker re-implements —
      the digest goes into the worker's dispatch prompt. The worker's own CYCLE step 6 review then
-     runs at the escalated tier (fable-gate OPEN → `fable-advisor`, CLOSED → `claude-opus-4-6`),
+     runs at the escalated tier (fable-gate OPEN → `fable-advisor`, CLOSED → `claude-opus-4-8`),
      and `--reviewed-by-tier` on `airuleset.py handoff` records which tier actually ran.
    - **Grow greedily** by adding more open backlog issues that EACH pass the **bundling gate** vs the
      seed and the batch-so-far:
@@ -766,19 +766,19 @@ gap in either.
      exception is ABOLISHED — the same split on every repo). A ticket runs on TWO tiers, never one:
      **(a) the DESIGN phase** (Step 1c) and **(b) the REVIEW phase** are the gated dispatches of the
      pinned `fable-advisor` agent; **(c) the IMPLEMENTATION worker** runs Sonnet 5 by default (a
-     settled-design ticket) or Opus 4.6 (complexity) — chosen by WHICH PINNED AGENT TYPE you
+     settled-design ticket) or Opus 4.8 (complexity) — chosen by WHICH PINNED AGENT TYPE you
      dispatch, never a param: `subagent_type: "sonnet-implementer"` (no `model` param — its
      frontmatter pins `claude-sonnet-5`) for an ordinary SETTLED-DESIGN ticket, or `subagent_type:
-     "autopilot-worker"` (its frontmatter pins `claude-opus-4-6`) to ESCALATE when the
+     "autopilot-worker"` (its frontmatter pins `claude-opus-4-8`) to ESCALATE when the
      implementation carries complexity — a multi-component change, concurrency, a security
      boundary, a hard-debug lane, or a prior Sonnet worker already failed on this ticket (unsure →
-     `autopilot-worker`; the pin is the ONLY way to reach Opus 4.6 now — fail-safe UP). Either way
+     `autopilot-worker`; the pin is the ONLY way to reach Opus 4.8 now — fail-safe UP). Either way
      **the implementation worker NEVER dispatches as `fable-advisor`** — never a Fable override,
      never Sonnet for a complex ticket (#721).
      For the DESIGN consult (Step 1c) and the REVIEW pass, run
      `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE —
      **gate OPEN (exit 0) → dispatch the pinned `fable-advisor` agent for that PHASE; gate CLOSED
-     (exit 1) → dispatch `autopilot-worker` AS-IS (`claude-opus-4-6`).**
+     (exit 1) → dispatch `autopilot-worker` AS-IS (`claude-opus-4-8`).**
      Whether a ticket EARNS the Fable design + review phases is the JUDGMENT-CONTENT phase selector
      (non-trivial implementation, review of a non-trivial change, hard debug, design/synthesis —
      when unsure, it QUALIFIES for those phases); a genuinely routine/mechanical ticket (one obvious
@@ -794,7 +794,7 @@ gap in either.
        issue(s) #N in <repo>" — since it follows the same CYCLE, at its Sonnet tier). A member that
        is design-heavy, OR carries any of — a multi-component change, concurrency, a security
        boundary, a hard-debug lane, or a prior Sonnet worker already failed on this ticket — →
-       dispatch `subagent_type: "autopilot-worker"` (its own pin, Opus 4.6); unsure →
+       dispatch `subagent_type: "autopilot-worker"` (its own pin, Opus 4.8); unsure →
        `autopilot-worker`. "Settled" means the APPROACH is decided (a design-heavy member already
        got its Step-1c Fable synthesis), NOT that the worker's own CYCLE-step-2 design comment is
        already posted — the worker still writes that during implementation, on its dispatched tier.

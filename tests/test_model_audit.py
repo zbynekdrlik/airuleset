@@ -95,10 +95,10 @@ class TestAuditModelFloats(TestCase):
     def test_flags_banned_main_and_sub(self):
         panes = [("%p1", "/a"), ("%p2", "/b")]
         # /a main is floated to 5.0 (retired, off-allowlist); /a has a sub on
-        # opus-4-8 (BANNED, superseded); /b main on the allowlisted sonnet (ok).
+        # opus-4-6 (BANNED, superseded); /b main on the allowlisted sonnet (ok).
         model_of = {
             "/x/a.jsonl": "claude-fable-5",
-            "/x/a.jsonl#sub0": "claude-opus-4-8",
+            "/x/a.jsonl#sub0": "claude-opus-4-6",
             "/x/b.jsonl": "claude-sonnet-5",
         }
         find = self._fake_find({"/a": "claude-fable-5", "/b": "claude-sonnet-5"})
@@ -115,7 +115,7 @@ class TestAuditModelFloats(TestCase):
 
     def test_allowlisted_models_never_flagged(self):
         panes = [("%p", "/c")]
-        find = self._fake_find({"/c": "claude-opus-4-6"})
+        find = self._fake_find({"/c": "claude-opus-4-8"})
         for allowed in airuleset.MODEL_TIERS.values():
             read = lambda p, a=allowed: a  # noqa: E731
             recs = cli_model_audit.audit_model_floats(panes, "/proj", find, read,

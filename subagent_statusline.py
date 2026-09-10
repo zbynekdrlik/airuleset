@@ -68,7 +68,7 @@ def _clean(s):
 def short_model(model_id):
     """A resolved model id → a compact human badge: family + dotted version.
 
-    `claude-opus-4-6` → `opus-4.6`, `claude-sonnet-5` → `sonnet-5`,
+    `claude-opus-4-8` → `opus-4.6`, `claude-sonnet-5` → `sonnet-5`,
     `claude-haiku-4-5` → `haiku-4.5`, `claude-fable-5-1[1m]` → `fable-5`. An
     unknown id degrades to a best-effort shortening (never blank, never a
     crash); a missing/blank/non-string id → "" (the caller then skips the
