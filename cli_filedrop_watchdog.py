@@ -482,16 +482,27 @@ def watchdog_disable_marker():
     return Path.home() / ".claude" / "api-watchdog.disabled"
 
 
-def cleanup_session_restart_dropins():
+def cleanup_session_restart_dropins(paths=None, daemon_reload_fn=None):
     """One-time cleanup: remove previously rendered session-restart drop-ins.
 
     #947 reversal (owner directive 2026-09-10): the session-restart action
     path is DELETED. This removes any stale drop-in files that would set
     ``AIRULESET_SESSION_RESTART_ACTION=1`` — a dead env var now, but
     leaving the file is confusing. Idempotent, logged, never raises.
+
+    All params are injectable for testing.
     """
+    if paths is None:
+        paths = _SESSION_RESTART_DROPIN_CLEANUP
+    if daemon_reload_fn is None:
+        def daemon_reload_fn():
+            rc, _o, err = _run_systemctl(["daemon-reload"])
+            if rc != 0:
+                print("  session-restart cleanup: daemon-reload failed "
+                      "(rc=%d): %s" % (rc, err.strip()), file=sys.stderr)
     removed = []
-    for p in _SESSION_RESTART_DROPIN_CLEANUP:
+    for p in paths:
+        p = Path(p)
         try:
             if p.exists():
                 p.unlink()
@@ -502,10 +513,7 @@ def cleanup_session_restart_dropins():
     if removed:
         print("  session-restart: removed stale drop-in(s): %s (#947 reversal)"
               % ", ".join(removed))
-        rc, _o, err = _run_systemctl(["daemon-reload"])
-        if rc != 0:
-            print("  session-restart cleanup: daemon-reload failed (rc=%d): %s"
-                  % (rc, err.strip()), file=sys.stderr)
+        daemon_reload_fn()
 
 
 def setup_watchdog_service():

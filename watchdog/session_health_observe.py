@@ -6,9 +6,8 @@ taketo random existovanie target claude urcite nikdy neschvalil a som proti
 tomu aby sa nieco take dialo!!!"
 
 This module was originally ``session_restart.py`` — a two-phase state machine
-that typed ``/exit`` + ``claude --continue`` into tmux panes to restart
-degraded Claude Code sessions.  The action path is DELETED: no ``/exit``, no
-``claude --continue``, no ``tmux send-keys``, no keystroke of any kind.
+that typed keystrokes into tmux panes to restart degraded Claude Code sessions.
+The action path is DELETED: no keystroke of any kind.
 
 What REMAINS is the read-only health measurement (RSS+Swap from /proc, uptime)
 as a journal-only observation with the SAME thresholds, so the degradation is
@@ -65,13 +64,13 @@ def _is_degraded(rss_swap_kb, uptime_s):
 
 
 def observe(pane_id, rss_swap_kb, uptime_s):
-    """PURE observation for one pane.  Returns a log line (str).
+    """PURE observation for one pane.  Returns a log line (str) or None.
 
     This is journal-only — no action, no keystroke, no Discord.  The owner
-    reads the journal to see which sessions are degraded.
+    reads the journal to see which sessions are degraded.  Only degraded
+    sessions are logged (healthy sessions produce no output — B2 review).
     """
     if _is_degraded(rss_swap_kb, uptime_s):
         return ("session-health: %s degraded rss_swap=%s uptime=%s"
                 % (pane_id, rss_swap_kb, uptime_s))
-    return ("session-health: %s healthy rss_swap=%s uptime=%s"
-            % (pane_id, rss_swap_kb, uptime_s))
+    return None

@@ -4712,6 +4712,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # `watchdog/session_health_observe.py`'s docstring is the SSOT.
     def _job_session_health_observe():
         from watchdog import session_health_observe as _sho
+        # B1: pop stale session_restart state from prior versions.
+        state.pop("session_restart", None)
         sho_logs = []
         for sid, (pid, captured) in panes_by_sid.items():
             ppid = (run(["tmux", "display-message", "-p", "-t", pid,
@@ -4725,7 +4727,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             start = _proc_start_epoch(cpid)
             uptime = (now - start) if start else None
             line = _sho.observe(pid, rss_swap, uptime)
-            sho_logs.append(line)
+            if line is not None:
+                sho_logs.append(line)
         return sho_logs
     _add("session_health_observe", lambda: True,
          _job_session_health_observe, "session-health-observe error")

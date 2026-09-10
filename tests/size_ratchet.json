@@ -596,7 +596,7 @@
     "watchdog/resource_guard.py": 154,
     "watchdog/resurrect.py": 242,
     "watchdog/roster.py": 154,
-    "watchdog/session_health_observe.py": 79,
+    "watchdog/session_health_observe.py": 76,
     "watchdog/session_status.py": 400,
     "watchdog/stash.py": 1515,
     "watchdog/sweep_jobs.py": 368,
