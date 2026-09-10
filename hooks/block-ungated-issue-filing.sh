@@ -580,7 +580,16 @@ def _unreadable_body_err(bf, eff_cwd):
     path that could not be read, replacing the opaque `-> none`. Names the
     file, the effective cwd it was resolved against (or that it was
     unresolvable), and the fix (an absolute -F path). One line -- it crosses
-    the tab-separated hand-off to bash (see _clean_field)."""
+    the tab-separated hand-off to bash (see _clean_field).
+    #988: when the same compound command contains a redirect writing the
+    same file, give a clear "write in a SEPARATE command" message."""
+    # #988: check if the raw command creates this file via redirect/heredoc
+    basename = os.path.basename(bf)
+    if basename and ("> " + bf) in cmd or (">>" + bf) in cmd or \
+            (">" + bf) in cmd:
+        return ("body file '%s' does not exist yet -- write the body file "
+                "in a SEPARATE Bash call first, then run gh issue create -F %s"
+                % (bf, bf))
     if os.path.isabs(bf):
         return ("body file '%s' not readable -- path is missing or unreadable "
                 "(check the absolute -F path)" % bf)

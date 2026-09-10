@@ -1267,7 +1267,7 @@ class DispatchRatioNudge80(unittest.TestCase):
     marker is never counted and never blocked (or the escape hatch would
     dead-end)."""
 
-    def _run(self, sid, command="gh issue view 42", n=None, agent_id=None,
+    def _run(self, sid, command="echo status-check", n=None, agent_id=None,
              tool="Bash", armed=True, extra_env=None):
         env = dict(os.environ)
         env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = str(3 if n is None else n)

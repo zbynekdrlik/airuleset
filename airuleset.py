@@ -2104,6 +2104,30 @@ def cmd_status(args):
     else:
         print("  settings.json does not exist")
 
+    # --- #988: hook-blocks measurement ---
+    _print_hook_blocks_count()
+
+
+def _print_hook_blocks_count():
+    """#988: print the number of hook blocks in the last 24 hours."""
+    hook_blocks_log = Path.home() / ".claude" / "hook-blocks.log"
+    if not hook_blocks_log.exists():
+        return
+    import datetime as _dt
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(hours=24)).isoformat()
+    count = 0
+    try:
+        with open(hook_blocks_log, "r", errors="replace") as fh:
+            for line in fh:
+                ts = line.split(" ", 1)[0] if line.strip() else ""
+                if ts >= cutoff:
+                    count += 1
+    except OSError as exc:
+        print(f"\nhook blocks (24 h): error reading log: {exc}")
+        return
+    print(f"\nhook blocks (24 h): {count}")
+
 
 # (systemd --user helpers + File-Drop service install: _run_systemctl / _whoami /
 #  setup_filedrop_service / ... -> cli_filedrop_watchdog.py, #433 L-B)
