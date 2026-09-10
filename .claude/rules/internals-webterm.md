@@ -10,7 +10,12 @@ The webterm sizing area has been reopened many times (#584/#586/#613×3/#615/#64
 Non-obvious, hard-won invariants (deep detail lives in the code comments of the named symbols,
 which auto-load when you read `cli_webterm.py`):
 
+<<<<<<< HEAD
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #984 51200-byte cap, 2026-09-10 — grep "#736" there]** **#736 (incident 2026-08-27, 2× dev1 fleet-kill) — the LOCAL connect must scope-detach the tmux server from th…
+=======
+- **[Moved to `.claude/rules-reference/internals-archive.md` at #985 51200-byte cap, 2026-09-10]** #736 (incident 2026-08-27, 2x dev1 fleet-kill) — scope-detach + change-conditional restart. Grep the archive for "#736".
+- **#985 — break-glass SSH password login for the `airuleset` user (controller-only, re-scoped from bg.newlevel.media).** `render_sshd_password_conf()` in `cli_disk_guard_root.py` renders `60-airuleset-password.conf` (`Match User airuleset` -> `PasswordAuthentication yes` + `KbdInteractiveAuthentication yes`); `provision_sshd_password()` follows the ignoreip pattern (controller-only, sudo-gated, idempotent, `sshd -t` before mv, `ssh` reload); `check_sshd_password_status()` for `cmd_status`. DNS: `ar.newlevel.media` A record repointed to PUBLIC IP `159.69.209.249` (was tailscale `100.101.214.103`); `check_controller_dns` now uses per-name `CONTROLLER_DNS_EXPECTED` dict (ar=public, rest=tailscale). Runbook `docs/break-glass.md`: "from any device" SSH+password section FIRST, then laptop key path, then IP reference + password rotation. Tests: render byte-identical to live, provision sshd-t-validated (mv THEN sshd-t with rollback on failure, per cli_webterm_only.py pattern), status rows, DNS content, runbook order. UFW: `provision_ufw_ssh()` adds `ufw limit 22/tcp` idempotently (controller-only). `claudy.newlevel.media` is a PROXIED CNAME (resolves to Cloudflare edge IPs) — presence-only check, never IP comparison.
+>>>>>>> refs/wip/985
 
 - **#672 REWORK (owner ruling 2026-08-25) — ONE canonical grid for EVERY tab; the per-tab
   browser stream grid is REVERSED, the crop is a TMUX-side fix, and #648 is REVERSED too.**
