@@ -66,7 +66,7 @@ if [ "${AIRULESET_976_BREAK_IDENTITY:-0}" = "1" ]; then
     done
 fi
 # Pass through to real python3
-exec /usr/bin/python3 "$@"
+exec "${AIRULESET_976_REAL_PYTHON3}" "$@"
 """
 
 
@@ -109,12 +109,14 @@ def _run(cmd, cwd, author="", labels="", app_token_dir=None,
     if break_identity:
         path_dirs.insert(0, _python3_wrapper_dir())
         env["AIRULESET_976_BREAK_IDENTITY"] = "1"
+        env["AIRULESET_976_REAL_PYTHON3"] = sys.executable
     else:
         env.pop("AIRULESET_976_BREAK_IDENTITY", None)
     env["PATH"] = os.pathsep.join(path_dirs) + os.pathsep + env.get("PATH", "")
     env["FAKE_GH_AUTHOR"] = author
     env["FAKE_GH_LABELS"] = labels
-    env["FAKE_GH_API_USER_403"] = "1"
+    # NB: the fake gh's 403 behavior is baked into its script body
+    # (always returns 403 for "api user"), not toggled by an env var.
     if app_token_dir is not None:
         env["GH_APP_TOKEN_DIR"] = app_token_dir
     else:
@@ -189,6 +191,90 @@ class TestAppToken403DirectDetection(TestCase):
         )
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    # --- blocks: a non-App 403 (rate-limit) must NOT trigger detection ---
+
+    def test_blocks_on_rate_limit_403_not_app_token(self):
+        """A rate-limit 403 (different error message) must NOT set ME to
+        the App bot login — only the specific 'not accessible by
+        integration' App-token signature triggers the detection."""
+        d = tempfile.mkdtemp()
+        gh = Path(d) / "gh"
+        gh.write_text("""\
+#!/usr/bin/env bash
+case "$1 $2" in
+  "api user")
+    echo "gh: API rate limit exceeded for user (HTTP 403)" >&2
+    exit 1;;
+  "issue view")
+    if printf '%s ' "$@" | grep -q -- '--json labels,comments'; then
+      jq -n '{labels: [], comments: []}'
+    elif printf '%s ' "$@" | grep -q -- '--json labels'; then
+      for lbl in ${FAKE_GH_LABELS:-}; do echo "$lbl"; done
+    else
+      echo "${FAKE_GH_AUTHOR:-}"
+    fi;;
+  *) exit 1;;
+esac
+""")
+        gh.chmod(0o755)
+        payload = json.dumps({"tool_input": {"command":
+            "gh issue close 4986 --comment done"}})
+        env = dict(os.environ)
+        path_dirs = [str(d), _python3_wrapper_dir()]
+        env["PATH"] = os.pathsep.join(path_dirs) + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_AUTHOR"] = airuleset.STREAM_APP_BOT_LOGIN
+        env["FAKE_GH_LABELS"] = ""
+        env["AIRULESET_976_BREAK_IDENTITY"] = "1"
+        env["AIRULESET_976_REAL_PYTHON3"] = sys.executable
+        env.pop("GH_APP_TOKEN_DIR", None)
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True,
+                           cwd=self.branch, env=env)
+        # Rate-limit 403 is NOT the App-token signature — ME stays empty,
+        # the self-close carve-out does not fire, and the close is BLOCKED.
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_on_non_403_gh_failure_with_bot_author(self):
+        """A non-403 gh error (404, network failure) with a bot-authored
+        ticket must NOT trigger the 403 detection — the 403 check is the
+        ONLY gate, not a catch-all for any gh failure. This pins the
+        fail-safe direction: non-403 failure + broken chain = BLOCK."""
+        d = tempfile.mkdtemp()
+        gh = Path(d) / "gh"
+        gh.write_text("""\
+#!/usr/bin/env bash
+case "$1 $2" in
+  "api user")
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1;;
+  "issue view")
+    if printf '%s ' "$@" | grep -q -- '--json labels,comments'; then
+      jq -n '{labels: [], comments: []}'
+    elif printf '%s ' "$@" | grep -q -- '--json labels'; then
+      for lbl in ${FAKE_GH_LABELS:-}; do echo "$lbl"; done
+    else
+      echo "${FAKE_GH_AUTHOR:-}"
+    fi;;
+  *) exit 1;;
+esac
+""")
+        gh.chmod(0o755)
+        payload = json.dumps({"tool_input": {"command":
+            "gh issue close 4986 --comment done"}})
+        env = dict(os.environ)
+        path_dirs = [str(d), _python3_wrapper_dir()]
+        env["PATH"] = os.pathsep.join(path_dirs) + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_AUTHOR"] = airuleset.STREAM_APP_BOT_LOGIN
+        env["FAKE_GH_LABELS"] = ""
+        env["AIRULESET_976_BREAK_IDENTITY"] = "1"
+        env["AIRULESET_976_REAL_PYTHON3"] = sys.executable
+        env.pop("GH_APP_TOKEN_DIR", None)
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True,
+                           cwd=self.branch, env=env)
+        # 404 is NOT the App-token signal — ME stays empty, BLOCK.
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     # --- normal paths still work without the break ---
 
     def test_normal_403_close_still_works(self):
@@ -226,7 +312,6 @@ esac
         env = dict(os.environ)
         env["PATH"] = str(d) + os.pathsep + env.get("PATH", "")
         env["FAKE_GH_AUTHOR"] = "kvaskodev"
-        env["FAKE_GH_API_USER_403"] = "0"
         env.pop("GH_APP_TOKEN_DIR", None)
         r = subprocess.run(["bash", str(HOOK)], input=payload,
                            capture_output=True, text=True,

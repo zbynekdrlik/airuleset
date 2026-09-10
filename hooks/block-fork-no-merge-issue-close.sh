@@ -607,12 +607,15 @@ if [ -n "$ISSUE_NUM" ]; then
     # (python --self-login, this direct 403 probe, the #773 --app-bot-login
     # fallback below) is sufficient. Fail-SAFE: a non-403 failure (broken gh,
     # network error) leaves ME empty → falls through to the existing BLOCK.
-    # The constant is hardcoded here (not fetched from python) PRECISELY so
-    # this path works when the python chain is broken.
+    # The App bot login is fetched from `authority --app-bot-login` (the
+    # single-source constant) first; if the python call ALSO fails
+    # (the whole chain is broken), the HARDCODED constant is the
+    # last-resort fallback so this belt works even with zero python.
     if [ -z "$ME" ]; then
         _GH_API_USER_ERR=$(gh api user 2>&1 >/dev/null) || true
-        if grep -qi '403' <<< "$_GH_API_USER_ERR"; then
-            ME="app/odoo-erp-stream-tokens"
+        if grep -qi 'not accessible by integration' <<< "$_GH_API_USER_ERR"; then
+            ME=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
+            [ -z "$ME" ] && ME="app/odoo-erp-stream-tokens"
             echo "#976: ME resolved via direct 403 detection (authority --self-login returned empty)" >&2
         fi
     fi
