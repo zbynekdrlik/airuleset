@@ -60,8 +60,12 @@ LOGROTATE_WTMP_PATH = "/etc/logrotate.d/wtmp"
 JOURNALD_CAP_PATH = "/etc/systemd/journald.conf.d/50-airuleset-journal-cap.conf"
 FAIL2BAN_JAIL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.conf"
 # #982: owner break-glass ignoreip — controller-only, separate from the
-# fleet-wide hardening. The `60-` prefix loads AFTER the `50-` fleet default
-# (fail2ban reads jail.d in alphabetical order, later files override/extend).
+# fleet-wide hardening. The `60-` prefix loads AFTER the `50-` fleet default.
+# NOTE: fail2ban [DEFAULT] ignoreip is LAST-WRITER-WINS — the 60- file
+# REPLACES (not extends) any 50- ignoreip on the same box. This is safe
+# because the controller is NOT in DISK_GUARD_ROOT_HOSTS, so 50-airuleset-
+# hardening.conf is never deployed there. If the controller is ever added
+# to DISK_GUARD_ROOT_HOSTS, this file must fold in the 50-'s ignoreip too.
 OWNER_IGNOREIP_PATH = "/etc/fail2ban/jail.d/60-airuleset-owner-ignoreip.conf"
 # #982: DNS names that must resolve to the controller's tailscale IP.
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
@@ -784,6 +788,22 @@ def provision_owner_ignoreip(run=None):
     if not _shutil.which("fail2ban-client"):
         return "skipped (fail2ban not installed)"
 
+    content = render_owner_ignoreip()
+    dest = OWNER_IGNOREIP_PATH
+
+    # Idempotent short-circuit: if the drop-in already exists and is
+    # byte-identical, skip the write + reload (the _provision_shared_fleet_dir
+    # pattern). The file is 0644, readable without sudo — checked BEFORE
+    # the sudo probe so an unchanged file never shells out at all.
+    if os.path.isfile(dest):
+        try:
+            with open(dest, "r", encoding="utf-8", errors="replace") as fh:
+                if fh.read() == content:
+                    return "unchanged (%s)" % dest
+        except OSError as e:
+            print("  break-glass: cannot read %s (%s), rewriting"
+                  % (dest, e), file=sys.stderr)
+
     # sudo gate — never prompt.
     try:
         probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
@@ -793,27 +813,37 @@ def provision_owner_ignoreip(run=None):
     if getattr(probe, "returncode", 1) != 0:
         return "skipped (no passwordless sudo)"
 
-    content = render_owner_ignoreip()
-    # Atomic write via sudo: write to a temp file, then mv into place.
-    dest = OWNER_IGNOREIP_PATH
+    # Atomic write via sudo: tee to tmp, chmod, mv into place.
+    # Every rc is checked — a silent failure would leave the owner IP
+    # un-whitelisted while reporting "applied".
+    tmp = dest + ".airuleset-tmp"
     try:
-        # Ensure the directory exists.
         run(["sudo", "-n", "mkdir", "-p", os.path.dirname(dest)],
             capture_output=True, text=True, timeout=10)
-        # Write content through sudo tee to a temp file, then mv.
-        tmp = dest + ".airuleset-tmp"
         r = run(["sudo", "-n", "tee", tmp], input=content,
                 capture_output=True, text=True, timeout=10)
         if getattr(r, "returncode", 1) != 0:
             return "FAILED (tee rc=%d)" % r.returncode
-        run(["sudo", "-n", "chmod", "0644", tmp],
-            capture_output=True, text=True, timeout=10)
-        run(["sudo", "-n", "mv", "-f", tmp, dest],
-            capture_output=True, text=True, timeout=10)
-        # Reload fail2ban so the ignoreip takes effect.
-        run(["sudo", "-n", "fail2ban-client", "reload"],
-            capture_output=True, text=True, timeout=15)
+        r = run(["sudo", "-n", "chmod", "0644", tmp],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            run(["sudo", "-n", "rm", "-f", tmp],
+                capture_output=True, text=True, timeout=5)
+            return "FAILED (chmod rc=%d)" % r.returncode
+        r = run(["sudo", "-n", "mv", "-f", tmp, dest],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            run(["sudo", "-n", "rm", "-f", tmp],
+                capture_output=True, text=True, timeout=5)
+            return "FAILED (mv rc=%d)" % r.returncode
+        r = run(["sudo", "-n", "fail2ban-client", "reload"],
+                capture_output=True, text=True, timeout=15)
+        if getattr(r, "returncode", 1) != 0:
+            return "FAILED (fail2ban reload rc=%d — file written but NOT live)" \
+                   % r.returncode
     except Exception as e:  # noqa: BLE001
+        run(["sudo", "-n", "rm", "-f", tmp],
+            capture_output=True, text=True, timeout=5)
         return "FAILED (error: %r)" % e
     return "applied (%s)" % dest
 
@@ -905,22 +935,34 @@ def check_controller_dns(resolve_fn=None):
         import socket
 
         def resolve_fn(name):
+            """Return the SET of IPv4 addresses for *name*, or None on
+            gaierror. A multi-homed name (public + tailscale) returns both."""
             try:
                 results = socket.getaddrinfo(name, None, socket.AF_INET)
-                return results[0][4][0] if results else None
+                return set(r[4][0] for r in results) if results else None
             except socket.gaierror:
                 return None
     rows = []
     for name in CONTROLLER_DNS_NAMES:
-        addr = resolve_fn(name)
-        if addr is None:
+        addrs = resolve_fn(name)
+        if addrs is None:
             rows.append((name, False, "UNRESOLVABLE"))
-        elif addr != CONTROLLER_TAILSCALE_IP:
+        elif isinstance(addrs, set):
+            if CONTROLLER_TAILSCALE_IP in addrs:
+                rows.append((name, True,
+                             "OK → %s (in %s)" % (CONTROLLER_TAILSCALE_IP,
+                                                   sorted(addrs))))
+            else:
+                rows.append((name, False,
+                             "DRIFT — resolves to %s, expected %s in set"
+                             % (sorted(addrs), CONTROLLER_TAILSCALE_IP)))
+        elif addrs == CONTROLLER_TAILSCALE_IP:
+            # Legacy single-address resolve_fn (injected by tests).
+            rows.append((name, True, "OK → %s" % addrs))
+        else:
             rows.append((name, False,
                          "DRIFT — resolves to %s, expected %s"
-                         % (addr, CONTROLLER_TAILSCALE_IP)))
-        else:
-            rows.append((name, True, "OK → %s" % addr))
+                         % (addrs, CONTROLLER_TAILSCALE_IP)))
     return rows
 
 

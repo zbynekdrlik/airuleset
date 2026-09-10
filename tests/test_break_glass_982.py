@@ -53,6 +53,8 @@ class TestRunbook(unittest.TestCase):
         self.assertIn("zbynek-windows", text, "must mention the key name")
         self.assertIn("airuleset@airuleset", text,
                       "must mention MagicDNS fallback")
+        self.assertIn("100.101.214.103", text,
+                      "must show the IP visibly (not just in HTML comment)")
 
     def test_machine_identities_has_pointer(self):
         text = (REPO / "modules" / "core" / "machine-identities.md").read_text()
@@ -128,7 +130,7 @@ class TestProvisionIgnoreip(unittest.TestCase):
         calls = []
 
         def fake_run(argv, **kw):
-            calls.append(argv)
+            calls.append(list(argv))
 
             class R:
                 returncode = 0
@@ -143,9 +145,89 @@ class TestProvisionIgnoreip(unittest.TestCase):
             result = g.provision_owner_ignoreip(run=fake_run)
         self.assertIn("applied", result)
         self.assertIn(g.OWNER_IGNOREIP_PATH, result)
-        all_args = [str(a) for call in calls for a in call]
-        self.assertIn("tee", all_args)
-        self.assertIn("fail2ban-client", all_args)
+        # Verify the ORDERED sequence: mkdir, tee, chmod, mv, reload.
+        verbs = []
+        for call in calls:
+            for arg in call:
+                if arg in ("mkdir", "tee", "chmod", "mv", "fail2ban-client"):
+                    verbs.append(arg)
+                    break
+        self.assertEqual(verbs, ["mkdir", "tee", "chmod", "mv",
+                                 "fail2ban-client"])
+
+    def test_failed_mv_returns_failed_and_cleans_tmp(self):
+        call_log = []
+
+        def fake_run(argv, **kw):
+            call_log.append(list(argv))
+            rc = 0
+            # Make mv fail
+            if "mv" in argv:
+                rc = 1
+
+            class R:
+                returncode = rc
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import shutil
+        with _patch_box_class("controller"), \
+             mock.patch.object(shutil, "which",
+                               return_value="/usr/bin/fail2ban-client"):
+            result = g.provision_owner_ignoreip(run=fake_run)
+        self.assertIn("FAILED", result)
+        self.assertIn("mv", result)
+        # Should have attempted cleanup (rm of tmp).
+        rm_calls = [c for c in call_log if "rm" in c]
+        self.assertTrue(rm_calls, "should clean up tmp on mv failure")
+
+    def test_failed_reload_returns_failed_with_explanation(self):
+        def fake_run(argv, **kw):
+            rc = 0
+            if "fail2ban-client" in argv:
+                rc = 1
+
+            class R:
+                returncode = rc
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import shutil
+        with _patch_box_class("controller"), \
+             mock.patch.object(shutil, "which",
+                               return_value="/usr/bin/fail2ban-client"):
+            result = g.provision_owner_ignoreip(run=fake_run)
+        self.assertIn("FAILED", result)
+        self.assertIn("reload", result)
+        self.assertIn("NOT live", result)
+
+    def test_unchanged_file_short_circuits(self):
+        """MEDIUM-4 fix: byte-identical file skips write + reload."""
+        content = g.render_owner_ignoreip()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import shutil
+        with _patch_box_class("controller"), \
+             mock.patch.object(shutil, "which",
+                               return_value="/usr/bin/fail2ban-client"), \
+             mock.patch("os.path.isfile", return_value=True), \
+             mock.patch("builtins.open",
+                        mock.mock_open(read_data=content)):
+            result = g.provision_owner_ignoreip(run=fake_run)
+        self.assertIn("unchanged", result)
+        # No calls at all — short-circuited before the sudo probe.
+        self.assertEqual(calls, [])
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +351,28 @@ class TestControllerDNS(unittest.TestCase):
         for name, ok, msg in rows:
             self.assertFalse(ok)
             self.assertIn("UNRESOLVABLE", msg)
+
+    def test_multi_address_with_tailscale_ip_is_ok(self):
+        """HIGH-1 fix: a multi-homed name (public + tailscale) must be OK
+        when the tailscale IP is in the set, even if not first."""
+        def resolve(name):
+            return {"159.69.209.249", g.CONTROLLER_TAILSCALE_IP}
+
+        with _patch_box_class("controller"):
+            rows = g.check_controller_dns(resolve_fn=resolve)
+        for name, ok, msg in rows:
+            self.assertTrue(ok, "%s should be OK: %s" % (name, msg))
+            self.assertIn("OK", msg)
+
+    def test_multi_address_without_tailscale_ip_is_drift(self):
+        def resolve(name):
+            return {"159.69.209.249", "1.2.3.4"}
+
+        with _patch_box_class("controller"):
+            rows = g.check_controller_dns(resolve_fn=resolve)
+        for name, ok, msg in rows:
+            self.assertFalse(ok)
+            self.assertIn("DRIFT", msg)
 
 
 # ---------------------------------------------------------------------------
