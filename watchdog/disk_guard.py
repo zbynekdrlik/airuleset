@@ -113,6 +113,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "android-build", "scratch-worktree",
     # #968 — stale agent worktrees (drain rung, every box class):
     "stale-agent-worktree",
+    # #980 — dead-session /tmp/claude-<uid>/ scratchpad dirs:
+    "session-scratch",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -712,13 +714,8 @@ def discover_runner_update(runner_root=GH_RUNNER_HOME, pgrep_fn=None, dir_stats_
     root = Path(runner_root)
     if not root.is_dir():
         return []
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("runner-update pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    worker_live = bool(live.strip())
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    worker_live = _rwl(pgrep_fn=pgrep_fn)
     out = []
     try:
         for rd in sorted(root.glob("actions-runner*")):
@@ -755,13 +752,8 @@ def discover_stale_runner_checkouts(runner_root=GH_RUNNER_HOME, now=None,
     root = Path(runner_root)
     if not root.is_dir():
         return []
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("runner-checkout pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    if live.strip():
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    if _rwl(pgrep_fn=pgrep_fn):
         return [{"cls": "runner-checkout", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — CI job may hold a checkout, kept"}]
     cutoff = min_age_days * 86400
@@ -1265,13 +1257,8 @@ def discover_docker_images(now=None, images_fn=None, ps_fn=None, pgrep_fn=None,
     prune`. Docker absent / ps unknown → does nothing (fail-safe KEEP). Rows
     `docker-rmi`/skip; `path` is the image id `docker rmi` acts on."""
     now = time.time() if now is None else now
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("docker rung pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    if live.strip():
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    if _rwl(pgrep_fn=pgrep_fn):
         return [{"cls": "docker-image", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — CI may pull/build, docker rung skipped"}]
     images = (images_fn or _default_docker_images)()
@@ -1345,7 +1332,9 @@ def _default_running_claude_version():
     (e.g. `2.1.258 (Claude Code)` → `2.1.258`). None on any failure → the guard
     then KEEPS every version dir (fail-safe: never delete the active binary)."""
     try:
-        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
+        env = dict(os.environ)
+        env["PATH"] = os.path.join(os.path.expanduser("~"), ".local", "bin") + ":" + env.get("PATH", "")
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10, env=env)
         m = _re.search(r"(\d+\.\d+\.\d+)", r.stdout or "")
         return m.group(1) if m else None
     except Exception as e:
@@ -2065,13 +2054,8 @@ def discover_runner_diag_logs(runner_root=GH_RUNNER_HOME, now=None,
     root = Path(runner_root)
     if not root.is_dir():
         return []
-    pgrep_fn = pgrep_fn or _default_pgrep_any
-    try:
-        live = pgrep_fn(RUNNER_WORKER_PROC_RE) or ""
-    except Exception as e:
-        _dbg("runner-diag pgrep failed: %r" % e)
-        live = "PGREP-ERROR"
-    if live.strip():
+    from watchdog.disk_guard_runner import runner_worker_live as _rwl
+    if _rwl(pgrep_fn=pgrep_fn):
         return [{"cls": "runner-diag", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "Runner.Worker live — _diag may be written, kept"}]
     cutoff = min_age_days * 86400
@@ -2695,6 +2679,13 @@ def _plan_home_snapshot(home, now):
                  "reason": "home-snapshot discovery error: %r" % e}]
 
 
+
+
+def _plan_session_scratch(home, now):
+    """#980 — dead-session /tmp/claude-<uid>/ scratchpad dirs."""  # noqa: E501
+    from watchdog.disk_guard_runner import discover_session_scratch
+    return [_norm_action("session-scratch", r, "delete")
+            for r in discover_session_scratch(now=now, home=home)]
 def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
@@ -2705,6 +2696,7 @@ def _default_planners(home, now, scratch_rows=None):
     return [
         # #920 — cheapest/safest first: test-runner /tmp + runner diag + npm/uv cache
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
+        ("session-scratch", lambda: _plan_session_scratch(home, now)),
         ("runner-diag", lambda: _plan_runner_diag(home, now)),
         ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
         ("apt-cache", lambda: _plan_apt_cache(home, now)),
@@ -3053,6 +3045,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 continue
             if kind == "skip":
                 rung_lines.append(_log_line(now, "SKIP", path, planned, reason))
+                status.setdefault("drain_skipped_rungs", []).append({"rung": _label, "cls": acls, "path": path, "reason": reason})
                 continue
             if kind == "report":
                 rung_lines.append(_log_line(now, "REPORT", path, planned,
@@ -3809,6 +3802,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 status["drain_exhausted_streak"] = 0
             else:
                 status["drain_exhausted_streak"] = prior["drain_exhausted_streak"]
+        # #980: carry forward drain_skipped_rungs
+        if isinstance(prior, dict) and isinstance(prior.get("drain_skipped_rungs"), list):
+            status["drain_skipped_rungs"] = prior["drain_skipped_rungs"]
     # #925 F5: carry forward drain_exhausted BEFORE the pre-drain status write
     if "drain_exhausted" not in status:
         _prior_ex = _read_status_cache(home) if will_drain else (prior if isinstance(prior, dict) else {})
@@ -3957,6 +3953,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 if isinstance(_cur, dict):
                     _cur["drain_exhausted"] = post["drain_exhausted"]
                     _cur["drain_exhausted_streak"] = post["drain_exhausted_streak"]
+                    # #980: carry per-rung skip reasons into status.json
+                    _cur["drain_skipped_rungs"] = status.get("drain_skipped_rungs", [])
                     _cur["worst_pct"] = post["worst_pct"]
                     _cur["level"] = post["level"]
                     _cur["ts"] = post["ts"]

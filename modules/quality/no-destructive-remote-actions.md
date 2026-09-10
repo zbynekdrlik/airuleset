@@ -6,6 +6,7 @@
 
 - `shutdown`, `restart`, `reboot` of the HOST machine — **NEVER** without asking first
 - `rm -rf`, `del /S`, `Remove-Item -Recurse` on remote paths — **NEVER** without asking first
+- Remote disk/memory drain (`rm -rf /tmp/claude-*`, `find … -delete/-exec rm`, `swapoff`, container `prune`, `pkill` of another user) — use `airuleset.py disk-guard --drain --once` on the box instead. Hook: `block-manual-remote-drain.sh` (gk scratchpad incident 2026-09-10).
 - Database `DROP`, `DELETE`, `TRUNCATE` — **NEVER** without asking first
 - Stopping / killing (`Stop-Service`, `sc stop`, `taskkill /F`, `systemctl stop`) a prod service or process **UNRELATED to the work in hand** — **NEVER** without asking first
 - Rollbacks that overwrite newer production state with older bytes — **NEVER** without asking first
@@ -26,7 +27,7 @@ Wait for explicit "yes", "go ahead", or "approved". Silence is NOT approval. **A
 
 #### Enforcement — the hook covers a narrow, high-confidence subset
 
-A `block-destructive-remote.sh` PreToolUse(Bash) hook automatically BLOCKS three shapes without asking: remote HOST shutdown/reboot/halt/poweroff over ssh, a filesystem-root wipe (`rm -rf /`, not any `rm -rf` — a temp/build-dir wipe is routine and NOT blocked) over ssh, and SQL `DROP TABLE/DATABASE/SCHEMA` or `TRUNCATE` against a remote database (ssh-wrapped, or a direct `psql`/`mysql` call naming an explicit non-local host). It deliberately does NOT block the sanctioned deploy flow (`systemctl stop/start/restart`, `taskkill /F`, `sc start/stop` — those are the WORK, see "NOT gated" above) or plain `DELETE FROM` (too common in routine app cleanup to gate without false positives). Bypass (rare, logged): `# airuleset:destructive-ok <reason>` inline, or `AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1`. The hook is a narrow backstop, not the whole rule — most of this module's scope (a rollback overwriting prod, killing an unrelated service, a destructive action reached through a wrapper script) has no reliable argv-level signature and stays discipline-only.
+`block-destructive-remote.sh` BLOCKS three shapes: remote HOST shutdown/reboot over ssh, filesystem-root wipe (`rm -rf /`) over ssh, SQL `DROP`/`TRUNCATE` against a remote DB. `block-manual-remote-drain.sh` BLOCKS manual drain shapes (recursive delete on scratch/cache/claude dirs, `find -delete`, `swapoff`, container prune, cross-user kill) over ssh or `sudo -u`. Neither blocks the sanctioned deploy flow (see "NOT gated"). Bypass (rare, logged): `# airuleset:destructive-ok <reason>` / `# airuleset:manual-drain-ok <owner order ref>`. The hooks are narrow backstops — most of this module's scope stays discipline-only.
 
 #### Context does not matter
 

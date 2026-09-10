@@ -977,7 +977,8 @@ def _discuss_audit_scope(cwd):
 # the read. Doctrine-only, no count change.
 _DISCUSS_TRIGGER = (
     "DISCUSS-AUDIT (#695): zavri tikety bez `Discuss-closed:` -- "
-    "`gh issue list -s closed -S \"discuss.channel_\" -L 30`.")
+    "`gh issue list -s closed -S \"discuss.channel_\" -L 30`; "
+    "nová klientska správa → 👀 reakciu (#978).")
 
 
 # #753 (b) -- the UNPARK-AUDIT clause (odoo-erp only, the SAME scope as
@@ -991,7 +992,6 @@ _UNPARK_AUDIT_TRIGGER = (
     "UNPARK-AUDIT %d (#753): re-read cited Discuss threads of acceptance-W "
     "members (aj reakcie #745) -- novšia klientska odpoveď po našom pushi ⇒ "
     "zlož `ops-wait` s citáciou.")
-
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
                 release_landed=None, discuss_audit=False, unpark_audit_n=0,

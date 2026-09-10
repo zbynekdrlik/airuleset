@@ -194,16 +194,10 @@ class TestNoSessionEndingKeystroke(unittest.TestCase):
         # cover EVERY watchdog/*.py, or a payload could hide in a leaf
         # (the cluster-G review's 🔵 finding: this scan lagged the split).
         for py in sorted((REPO / "watchdog").glob("*.py")):
-            if py.name == "session_restart.py":
-                # #947 (owner directive 2026-09-08): the ONE sanctioned
-                # session-ending keystroke — Job 46 relaunches a degraded
-                # claude process (`/exit` then the managed `--continue`
-                # launch) at an idle turn boundary behind the recent-human,
-                # idle-prompt and live-background-work gates, opt-in via
-                # AIRULESET_SESSION_RESTART_ACTION. Its gates are locked by
-                # tests/test_session_restart.py; every OTHER watchdog module
-                # stays under this guard.
-                continue
+            # #947 reversal (2026-09-10): the session_restart.py exemption
+            # is REMOVED — the action path is deleted, the replacement
+            # session_health_observe.py has no /exit, so ALL watchdog
+            # modules are now under this guard.
             tree = ast.parse(py.read_text(encoding="utf-8"))
             docstring_nodes = set()
             for node in ast.walk(tree):

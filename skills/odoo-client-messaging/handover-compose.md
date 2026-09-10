@@ -26,7 +26,10 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   post: `airuleset:discuss-approval-ok`.
 - **The proposal you present to the owner is COMPLETE and lives IN THE CHAT —
   and it is the approval question for EVERY message (opening handover AND every
-  follow-up), never only a new thread.** Put in the chat message itself: (1) the
+  follow-up), never only a new thread.** The FULL proposed client text MUST be
+  INLINE as a `> ` quoted block — NEVER a share URL or path instead (#977).
+  A share URL may only ACCOMPANY an attachment; > ~1500 cp → two approvals;
+  hook Check 8 blocks a share URL with no `>` quote. Put in the chat message itself: (1) the
   target thread on its OWN SEPARATE, clearly-shown line — the exact thread name,
   the full human NAME (+ parent channel where it helps), NEVER only the internal
   channel number and NEVER only wrapped in prose:
@@ -34,15 +37,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   message body verbatim; (3) the member list. NEVER "the text is on the ticket" —
   the owner does not read tickets, so a proposal pointing at a ticket instead of
   carrying the whole text is not a proposal. Naming the target only by its
-  internal number is what forced the owner to ask „do akého vlákna to má ísť?"
-  (airuleset #632: target only „vlákno 250"). Every owner-facing mention
-  of a thread also carries its own clickable deep URL, never a bare channel
-  number (airuleset #657/#650, uniform doctrine in
-  `modules/core/issue-reference-context.md`):
+  internal number forced „do akého vlákna to má ísť?" (airuleset #632:
+  „vlákno 250"). Every thread mention carries its deep URL, never a bare
+  channel number (airuleset #657/#650):
   `Vlákno: „Tabula objednavok 1" — https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288`
-  — open it and confirm it loads before pasting; this is the ❓-approval-question
-  case of the rule (`hooks/stop-check-question-quality.sh` Check 6, #650) as well
-  as the wider owner-facing surface (`hooks/stop-check-prose-violations.sh`, #657).
+  — confirm it loads before pasting (Check 6 #650 + `stop-check-prose-violations.sh` #657).
 - **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
   a glance which stream owns it (montalu3 → "Kontrola zákazníckych e-mailov 3"),
   formalizing the existing IT-support convention on montalu PROD. The suffix is
@@ -103,9 +102,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **This applies to EVERY openable reference in the message, not only the
   handed-over feature:** a record, screen, action, report or dashboard — each gets
   its OWN direct functional URL, verified live before sending, never a prose menu
-  path (owner directive, airuleset #595: msg 1723308 described two live features
-  only by menu path, rejected). This generalizes completion-report.md's 🌐-line
-  rule to client-facing Discuss messages.
+  path (airuleset #595: msg 1723308, rejected). This generalizes
+  completion-report.md's 🌐-line rule to Discuss messages.
 - **State the owner's thread membership EXPLICITLY in the proposal.** The posting
   recipe already puts the owner on `partner_ids` (control ping) — but the PROPOSAL
   text you show the owner must SAY so ("teba pridám do vlákna ako člena"), so the
@@ -219,6 +217,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
   nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
+- **STANDING ack-reaction grant (#978):** a bare 👀 on a client message carries
+  no text → no owner text-approval; doctrine + recipe: `ack-reaction.md`.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
   (#788; #853 compliance).**

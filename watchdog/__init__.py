@@ -2086,8 +2086,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              nice_check_enabled=False,
              mdreview_cadence_enabled=False,
              priority_policy_enabled=False,
-             deploy_state_fetch=None,
-             session_restart_enabled=False):
+             deploy_state_fetch=None):
     """Scan every `claude` pane once. 46 numbered jobs per poll — 40 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2812,18 +2811,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           Conservative: never kills a loop with a live Claude ancestor.
           Max 3 gh API calls/cycle. Never Discord (#546).
           `watchdog/priority_policy.py`'s docstring is the SSOT.
-      (46) (only when `session_restart_enabled` is truthy) SESSION-RESTART-ON-
-          DEGRADATION (#947) — proactively restarts a DEGRADED-but-ALIVE claude
-          process (RSS+Swap > 700 MB or uptime > 24 h) at an idle turn boundary.
-          Two-phase: (1) type /exit into the idle pane (CC exits, pane falls to
-          shell), (2) next sweep: PID gone + bare-idle shell → type
-          `claude --continue` (restores the same session). Gate cascade:
-          pane_at_idle_prompt + no bg agents + no busy-waiting + no compacting +
-          no recent human + 6 h cooldown + opt-in flag
-          `AIRULESET_SESSION_RESTART_ACTION` (default OFF). Abandon after 3
-          sweeps if /exit didn't take effect. Goal re-arm: the existing
-          dark-watch (job 20) handles it. Log-only (journal), never Discord.
-          `watchdog/session_restart.py`'s docstring is the SSOT.
+      (46) SESSION-HEALTH-OBSERVATION (#947, REVERSED 2026-09-10) — passive
+          journal-only health observation of claude processes. Reads RSS+Swap
+          from /proc and uptime; logs ``session-health: <pane> degraded|healthy
+          rss_swap=<kb> uptime=<s>`` when thresholds are breached (RSS+Swap
+          > 700 MB or uptime > 24 h). NEVER types into a pane, never sends
+          keystrokes, never Discord. The original #947 action path (two-phase
+          /exit + claude --continue) was DELETED by owner directive 2026-09-10.
+          `watchdog/session_health_observe.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4712,63 +4707,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              dry_run=dry_run),
          "orphan-poll-reaper error")
 
-    # Job 46 (#947) — SESSION-RESTART-ON-DEGRADATION. Gated on
-    # `session_restart_enabled` (cmd_watchdog passes True; unit tests leave it
-    # False). Proactively restarts a degraded-but-alive claude process at an
-    # idle turn boundary. Two-phase: /exit then claude --continue.
-    # `watchdog/session_restart.py`'s docstring is the SSOT.
-    def _job_session_restart():
-        from watchdog import session_restart as _sr
-        from watchdog.ops_wait_recheck import _pane_busy_waiting as _sr_busy
-        import watchdog.resurrect as _resurrect
-        sr_state = state.setdefault("session_restart", {})
-        sr_logs = []
-        sr_enabled = _sr.action_enabled()
-        # #947 follow-on: log the effective state + configured source.
-        # action derives from the env (sr_enabled) — the truth the process
-        # has; source is the file-level configuration (managed drop-in /
-        # opt-out marker / none). EnvironmentFile can override the drop-in,
-        # so source != action is a real, diagnosable state.
-        from cli_filedrop_watchdog import configured_session_restart_source
-        _sr_source = configured_session_restart_source()
-        sr_logs.append("session-restart: action=%s configured=%s"
-                       % ("on" if sr_enabled else "off", _sr_source))
-
-        # --- PHASE 2: walk persisted exit-sent entries (R2 fix) ----------- #
-        # After /exit the pane hosts a shell, so it drops out of
-        # list_claude_panes / panes_by_sid. Phase 2 must iterate state
-        # directly and locate the pane by recorded cwd.
-        for sr_sid, pentry in list(sr_state.items()):
-            if not isinstance(pentry, dict) or pentry.get("phase") != "exit-sent":
-                continue
-            rec_cwd = pentry.get("cwd")
-            rec_pane = pentry.get("pane_id")
-            # Is the old claude PID gone?
-            rpane = _resurrect.find_pane(rec_cwd, run)
-            if rpane:
-                pentry["pid_gone"] = True
-                pentry["pane_bare_idle"] = _resurrect.pane_is_bare_idle(
-                    rpane, run)
-            else:
-                pentry["pid_gone"] = False
-            rh, rr = _goal_autoarm_recent_human_activity(
-                sr_sid, None, now, pane_target=rpane, run=run)
-            line, action = _sr.decide(
-                pentry, None, None,
-                pane_idle=False, bg_live=False, busy_waiting=False,
-                compacting=False, human_recent=rh,
-                human_reason=rr, enabled=sr_enabled,
-                dry_run=dry_run, now=now, pane_id=rec_pane or sr_sid)
-            sr_logs.append(line)
-            if action == "relaunch" and rpane:
-                _resurrect.relaunch(rpane, _sr._LAUNCH_CONTINUE, run)
-
-        # --- PHASE 1: evaluate live claude panes for degradation ---------- #
+    # Job 46 (#947, REVERSED 2026-09-10) — SESSION-HEALTH-OBSERVATION.
+    # Passive journal-only health measurement. NEVER types into a pane.
+    # `watchdog/session_health_observe.py`'s docstring is the SSOT.
+    def _job_session_health_observe():
+        from watchdog import session_health_observe as _sho
+        # B1: pop stale session_restart state from prior versions.
+        state.pop("session_restart", None)
+        sho_logs = []
         for sid, (pid, captured) in panes_by_sid.items():
-            pentry = sr_state.setdefault(sid, {})
-            if pentry.get("phase") == "exit-sent":
-                continue  # handled above
-            # Resolve the numeric pane_pid from tmux (R1 fix).
             ppid = (run(["tmux", "display-message", "-p", "-t", pid,
                          "#{pane_pid}"]) or "").strip()
             if not ppid or not ppid.isdigit():
@@ -4776,35 +4723,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             cpid = _pane_claude_pid(ppid)
             if cpid is None:
                 continue
-            rss_swap = _sr.read_health(cpid, _proc_read)
+            rss_swap = _sho.read_health(cpid, _proc_read)
             start = _proc_start_epoch(cpid)
             uptime = (now - start) if start else None
-            # Read gates from captured pane.
-            idle = pane_at_idle_prompt(captured)
-            bg = _pane_has_bg_agent(captured)
-            busy = _sr_busy(captured)
-            comp = _pane_compacting(captured)
-            # Find transcript for recent-human check.
-            cwd = cwd_by_sid.get(sid)
-            tinfo = find_active_transcript(projects_dir, cwd) if cwd else None
-            tpath = tinfo[0] if tinfo else None
-            rh, rr = _goal_autoarm_recent_human_activity(
-                sid, tpath, now, pane_target=pid, run=run)
-            line, action = _sr.decide(
-                pentry, rss_swap, uptime,
-                pane_idle=idle, bg_live=bg, busy_waiting=busy,
-                compacting=comp, human_recent=rh,
-                human_reason=rr, enabled=sr_enabled,
-                dry_run=dry_run, now=now, pane_id=pid)
-            sr_logs.append(line)
-            if action == "exit":
-                # Record pane_id and cwd for phase-2 lookup (Y1 fix).
-                pentry["pane_id"] = pid
-                pentry["cwd"] = cwd
-                _sr.execute_exit(pid, run)
-        return sr_logs
-    _add("session_restart", lambda: session_restart_enabled,
-         _job_session_restart, "session-restart error")
+            line = _sho.observe(pid, rss_swap, uptime)
+            if line is not None:
+                sho_logs.append(line)
+        return sho_logs
+    _add("session_health_observe", lambda: True,
+         _job_session_health_observe, "session-health-observe error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
