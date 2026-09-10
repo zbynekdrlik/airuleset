@@ -1950,6 +1950,25 @@ def cmd_status(args):
     # invisible, so the session lost agent types with no diagnostic) ---
     _check_agent_symlinks()
 
+    # --- Webterm live-argv health (#974: a stale worktree argv survived
+    # two installs — make the process-layer mismatch visible in status) ---
+    try:
+        from cli_webterm import is_webterm_gateway, WEBTERM_LAUNCH_PATH, WEBTERM_GATEWAY_MODULE
+        if is_webterm_gateway():
+            from cli_filedrop_watchdog import _run_systemctl
+            import cli_webterm_reconcile as _reconcile
+            rendered = {
+                "webterm-ttyd.service": str(WEBTERM_LAUNCH_PATH),
+                "webterm-gateway.service": str(WEBTERM_GATEWAY_MODULE),
+            }
+            print("\nwebterm live argv:")
+            for line in _reconcile.check_webterm_argv_health(
+                    _run_systemctl, rendered):
+                print(line)
+    except Exception as e:
+        # webterm not provisioned or module unavailable — non-fatal for status
+        print("  webterm live argv: skipped (%s)" % e, file=sys.stderr)
+
     # --- Hooks ---
     print("\n~/.claude/settings.json hooks:")
     if SETTINGS_JSON.exists():

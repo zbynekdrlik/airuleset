@@ -1663,6 +1663,20 @@ def setup_webterm_service(run=None):
         [("webterm-ttyd.service", ttyd_changed),
          ("webterm-gateway.service", gateway_changed)])
 
+    # #974: reconcile LIVE process argv against the rendered paths — a unit
+    # started from a stale/worktree path keeps the broken argv across installs
+    # because _webterm_apply_restarts only checks file-change, not live-argv.
+    import cli_webterm_reconcile as _reconcile
+    _reconcile.reconcile_live_argv(
+        _run_systemctl,
+        ["webterm-ttyd.service", "webterm-gateway.service"],
+        {
+            "webterm-ttyd.service": str(WEBTERM_LAUNCH_PATH),
+            "webterm-gateway.service": str(WEBTERM_GATEWAY_MODULE),
+        },
+        log_prefix="webterm",
+    )
+
     # #635: in Access mode the public front is the MANAGED cloudflared tunnel —
     # provision it here (prereq-gated no-op until the creds JSON exists) so a routine
     # install reconciles it, and it survives reboot. A tunnel skip does NOT fail the
