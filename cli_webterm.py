@@ -1779,6 +1779,11 @@ def _setup_controller_webterm():
     import cli_drop_gateway as _dg
     ingress_rules.extend(_dg.drop_ingress_rules_for_controller())
 
+    # #983: claudy dashboard — static ingress rule (origin is the tailscale
+    # bind on this same controller box; claudy.service is NOT touched).
+    ingress_rules.append(
+        ("claudy.newlevel.media", "http://100.101.214.103:8791"))
+
     config_text = tun.render_cloudflared_multi_ingress_config(
         CONTROLLER_TUNNEL_UUID, str(creds_path), ingress_rules)
 

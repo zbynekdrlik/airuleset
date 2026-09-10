@@ -119,6 +119,17 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["nika.sarikova@gmail.com"],   # owner-provided, #867
         "session_duration": "720h",
     },
+    # claudy.newlevel.media — the claudy dashboard public hostname (#983,
+    # owner request 2026-09-10: "pristup na web claudy ... chraneny cloudflare
+    # prihlasenim cez email ... marek a zbynek"). Origin is the controller's
+    # claudy.service (100.101.214.103:8791) fronted by the shared controller
+    # tunnel; this Access app gates the public hostname with email OTP.
+    "claudy": {
+        "hostname": "claudy.newlevel.media",
+        "name": "claudy dashboard",
+        "allowed_emails": ["drlik.zbynek@gmail.com", "drlik.marek@gmail.com"],
+        "session_duration": "720h",
+    },
 }
 
 POLICY_NAME = "webterm allowed developers"
