@@ -59,6 +59,10 @@ FILE_B_NAMES = [
     "STREAM_SSH_ATTACH_MARK_START",
     "STREAM_SSH_ATTACH_MARK_END",
     "STREAM_SSH_ATTACH_BLOCK",
+    "render_ssh_attach_block",
+    "SSH_ATTACH_CONTROLLER_USERS",
+    "SSH_ATTACH_SESSION_OVERRIDE",
+    "SSH_ATTACH_CWD_OVERRIDE",
     "_stream_marker_block_spans",
     "apply_stream_ssh_attach",
 ]
