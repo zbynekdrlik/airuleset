@@ -11,6 +11,7 @@ from unittest import TestCase, main
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import airuleset  # noqa: E402
 from watchdog.model_audit_job import model_float_audit_job  # noqa: E402
 
 
@@ -25,7 +26,7 @@ class TestModelFloatAuditJob(TestCase):
         panes = [("%p", "/repo")]
         find = _find({"/repo": 1})
         models = {"/t/repo.jsonl": "claude-fable-5",          # main on retired 5.0
-                  "/t/repo.jsonl.sub": "claude-opus-4-8"}    # sub on superseded opus
+                  "/t/repo.jsonl.sub": "claude-opus-4-6"}    # sub on off-lineup opus
         read = lambda p: models.get(str(p), "")  # noqa: E731
         subs = lambda main, now: [str(main) + ".sub"]  # noqa: E731
         state = {}
@@ -33,7 +34,7 @@ class TestModelFloatAuditJob(TestCase):
                                     subs, due_fn=lambda *a, **k: True)
         self.assertEqual(len(out), 2, out)
         self.assertTrue(any("claude-fable-5" in ln and "main" in ln for ln in out))
-        self.assertTrue(any("claude-opus-4-8" in ln and "sub" in ln for ln in out))
+        self.assertTrue(any("claude-opus-4-6" in ln and "sub" in ln for ln in out))
         self.assertIn("model_audit_last_ts", state)
 
     def test_allowlisted_models_silent(self):
@@ -137,6 +138,45 @@ class TestModelFloatAuditJob(TestCase):
             # single line here, since the two paths differ).
             sub_lines = [ln for ln in out if " sub " in ln]
             self.assertEqual(len(sub_lines), 1, out)
+
+
+class TestNoAllowedModelUsedAsSupersededFixture(TestCase):
+    """#990 fix-forward: scan tests/*.py for an allowlisted model id used as
+    a banned/superseded/off-lineup example — the class that broke
+    test_flags_floated_main_and_sub when opus moved 4-6 → 4-8."""
+
+    def test_no_allowed_model_in_superseded_fixture_lines(self):
+        """A bulk model-id sed that changes the fleet tier can miss fixtures
+        where the OLD id is a BANNED/superseded example — the exact class
+        that broke test_flags_floated_main_and_sub on #990.  Catch it early:
+        flag any line where an ALLOWED model id appears as a DATA string
+        (between quotes) and the line's comment says superseded/banned/etc."""
+        import re
+        allowed = set(airuleset.MODEL_TIERS.values())
+        keyword = re.compile(
+            r"superseded|banned|retired|off.lineup",
+            re.IGNORECASE,
+        )
+        violations = []
+        for f in sorted(ROOT.glob("tests/*.py")):
+            for i, line in enumerate(f.read_text().splitlines(), 1):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    continue  # pure-comment lines are prose, not fixtures
+                # check the comment portion (after #) for the keyword
+                code_comment = line.split("#", 1)
+                if len(code_comment) < 2:
+                    continue  # no inline comment
+                comment = code_comment[1]
+                if not keyword.search(comment):
+                    continue
+                # check the code portion for the model in a string literal
+                code = code_comment[0]
+                for model_id in allowed:
+                    if ('"%s"' % model_id in code
+                            or "'%s'" % model_id in code):
+                        violations.append(f"{f.name}:{i}: {model_id}")
+        self.assertEqual(violations, [], "Allowed model used as superseded example")
 
 
 if __name__ == "__main__":
