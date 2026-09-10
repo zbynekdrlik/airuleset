@@ -30,6 +30,14 @@ SERVICE_ACCOUNTS = {
             "zbynek": {"preferred": "zbynek", "start_dir_chain": ["devel/claudy"]},
             "marek": {"preferred": "marek", "start_dir_chain": ["devel/claudy"]},
         },
+        # Playwright chromium headless shell deps for the claudy-controller
+        # runner (#973).  Without these the E2E test job cannot launch
+        # chromium and claudy#239 is blocked.
+        "system_packages": [
+            "libnss3", "libnspr4", "libatk1.0-0t64", "libatk-bridge2.0-0t64",
+            "libatspi2.0-0t64", "libgbm1", "libasound2t64", "libxcomposite1",
+            "libxdamage1", "libxext6", "libxfixes3", "libxrandr2",
+        ],
     },
 }
 
@@ -83,6 +91,56 @@ def render_authorized_keys(account):
     return header + "".join(line.rstrip("\n") + "\n" for line in lines)
 
 
+def _render_system_packages_step(packages):
+    """Render the idempotent apt-get step for system_packages.
+
+    Returns a bash snippet that checks each package with dpkg-query and
+    installs only missing ones.  Returns '' when *packages* is empty/None
+    so the caller can unconditionally concatenate it (#973)."""
+    if not packages:
+        return ""
+    pkg_list = " ".join(packages)
+    # The loop collects names of packages not yet installed, then runs ONE
+    # apt-get call (cheaper and cleaner than N individual installs).
+    return textwrap.dedent("""\
+
+        # 8. System packages (idempotent) — #973
+        NEED_INSTALL=()
+        for pkg in {pkg_list}; do
+            if dpkg-query -W -f='${{Status}}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+                :  # already present
+            else
+                NEED_INSTALL+=("$pkg")
+            fi
+        done
+        if [ ${{#NEED_INSTALL[@]}} -gt 0 ]; then
+            echo "  installing ${{#NEED_INSTALL[@]}} missing packages: ${{NEED_INSTALL[*]}}"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${{NEED_INSTALL[@]}}"
+        else
+            echo "  all {n_pkgs} system packages already installed — nothing to do"
+        fi
+    """).format(pkg_list=pkg_list, n_pkgs=len(packages))
+
+
+def _render_system_packages_readback(packages):
+    """Render the read-back lines for system packages.
+
+    Returns '' when *packages* is empty/None (#973)."""
+    if not packages:
+        return ""
+    pkg_list = " ".join(packages)
+    return textwrap.dedent("""\
+        echo "  system packages:"
+        for pkg in {pkg_list}; do
+            if dpkg-query -W -f='${{Status}}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+                echo "    $pkg: installed"
+            else
+                echo "    $pkg: MISSING"
+            fi
+        done
+    """).format(pkg_list=pkg_list)
+
+
 def render_root_bootstrap(account):
     """Render an idempotent bash script for root that creates the service
     account on the controller.  Returns the script as a string."""
@@ -90,6 +148,9 @@ def render_root_bootstrap(account):
         raise ValueError("unknown service account: %r" % account)
 
     ak_content = render_authorized_keys(account)
+    spec = SERVICE_ACCOUNTS[account]
+    packages = spec.get("system_packages", [])
+
     # Shell-escape the authorized_keys content for a heredoc
     # Using a quoted heredoc delimiter so no shell expansion happens
     script = textwrap.dedent("""\
@@ -137,6 +198,13 @@ def render_root_bootstrap(account):
 
         # 7. Create devel directory for the repo clone
         install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/devel"
+    """).format(account=account, ak_content=ak_content)
+
+    # 8. System packages — only when the account declares them (#973)
+    script += _render_system_packages_step(packages)
+
+    # Read-back section
+    readback = textwrap.dedent("""\
 
         echo ""
         echo "=== Read-back ==="
@@ -147,12 +215,16 @@ def render_root_bootstrap(account):
         echo "  authorized_keys: $(wc -l < /home/$ACCOUNT/.ssh/authorized_keys) lines"
         echo "  key fingerprints:"
         ssh-keygen -lf "/home/$ACCOUNT/.ssh/authorized_keys" 2>/dev/null || echo "    (ssh-keygen failed)"
+    """)
+    readback += _render_system_packages_readback(packages)
+    readback += textwrap.dedent("""\
         echo ""
         echo "=== Next steps (as $ACCOUNT) ==="
         echo "  1. git clone https://github.com/zbynekdrlik/airuleset.git ~/devel/airuleset"
         echo "  2. python3 ~/devel/airuleset/airuleset.py install"
         echo "  3. Verify: ssh -i ~/.secrets/airuleset_push_ed25519 $ACCOUNT@100.101.214.103 true"
-    """).format(account=account, ak_content=ak_content)
+    """)
+    script += readback
     return script
 
 
