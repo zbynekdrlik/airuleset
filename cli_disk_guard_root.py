@@ -59,6 +59,17 @@ LOGROTATE_BTMP_PATH = "/etc/logrotate.d/btmp"
 LOGROTATE_WTMP_PATH = "/etc/logrotate.d/wtmp"
 JOURNALD_CAP_PATH = "/etc/systemd/journald.conf.d/50-airuleset-journal-cap.conf"
 FAIL2BAN_JAIL_PATH = "/etc/fail2ban/jail.d/50-airuleset-hardening.conf"
+# #982: owner break-glass ignoreip — controller-only, separate from the
+# fleet-wide hardening. The `60-` prefix loads AFTER the `50-` fleet default.
+# NOTE: fail2ban [DEFAULT] ignoreip is LAST-WRITER-WINS — the 60- file
+# REPLACES (not extends) any 50- ignoreip on the same box. This is safe
+# because the controller is NOT in DISK_GUARD_ROOT_HOSTS, so 50-airuleset-
+# hardening.conf is never deployed there. If the controller is ever added
+# to DISK_GUARD_ROOT_HOSTS, this file must fold in the 50-'s ignoreip too.
+OWNER_IGNOREIP_PATH = "/etc/fail2ban/jail.d/60-airuleset-owner-ignoreip.conf"
+# #982: DNS names that must resolve to the controller's tailscale IP.
+CONTROLLER_TAILSCALE_IP = "100.101.214.103"
+CONTROLLER_DNS_NAMES = ("ar.newlevel.media", "airuleset")
 TMPFILES_PATH = "/etc/tmpfiles.d/50-airuleset-disk-guard.conf"
 REPORTER_SCRIPT_PATH = "/usr/local/lib/airuleset/disk-guard-root-report.sh"
 ROOT_SERVICE_PATH = "/etc/systemd/system/airuleset-disk-guard-root.service"
@@ -180,6 +191,28 @@ def render_fail2ban_hardening():
         "[recidive]\n"
         "enabled = true\n"
         % (FAIL2BAN_BANTIME, FAIL2BAN_IGNOREIP)
+    )
+
+
+def render_owner_ignoreip(ips=None):
+    """Owner break-glass ``ignoreip`` (#982) — controller-only.
+
+    Renders the ``60-airuleset-owner-ignoreip.conf`` drop-in with ONLY the
+    owner's specific device IPs (never the whole CGNAT range). The ``60-``
+    prefix ensures it loads AFTER the fleet-wide ``50-`` hardening. ``ips``
+    defaults to ``cli_fleet.OWNER_BREAK_GLASS_IPS`` (late-bound to avoid a
+    circular import at module level)."""
+    if ips is None:
+        import cli_fleet
+        ips = cli_fleet.OWNER_BREAK_GLASS_IPS
+    ip_str = " ".join(["127.0.0.1/8", "::1"] + list(ips))
+    return (
+        "# Managed by airuleset (#982) — owner break-glass ignoreip.\n"
+        "# Controller-only. Specific owner device IPs; NEVER the whole\n"
+        "# tailscale CGNAT range (the fleet-wide 50-* already covers that\n"
+        "# for the recidive jail; this is the narrow break-glass path).\n"
+        "[DEFAULT]\n"
+        "ignoreip = %s\n" % ip_str
     )
 
 
@@ -725,6 +758,212 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
             print("  disk-guard-root: applied + verified on %s%s"
                   % (name, ("\n    " + out.replace("\n", "\n    ")) if out else ""))
     return failed
+
+
+def provision_owner_ignoreip(run=None):
+    """Install the owner break-glass ``ignoreip`` drop-in on the controller
+    (#982). LOCAL-only via ``sudo`` — follows the ``_provision_shared_fleet_dir``
+    pattern (controller-only, passwordless-sudo-gated, non-fatal).
+
+    Called from ``cmd_install`` — runs on every box, but is a no-op unless:
+      * box-class is ``controller``
+      * fail2ban is installed (``fail2ban-client`` exists)
+      * passwordless sudo is available (``sudo -n true``)
+
+    IDEMPOTENT: writes the drop-in atomically (mktemp+mv via sudo), then
+    reloads fail2ban. Returns a status string for logging."""
+    import shutil as _shutil
+    run = run or subprocess.run
+
+    # Controller-only gate (same pattern as _provision_shared_fleet_dir).
+    try:
+        from watchdog.reaper import default_box_class
+        bc = default_box_class()
+    except Exception:  # noqa: BLE001
+        bc = "unknown"
+    if bc != "controller":
+        return "skipped (box-class=%s, not controller)" % bc
+
+    # fail2ban gate — a controller without fail2ban is left clean.
+    if not _shutil.which("fail2ban-client"):
+        return "skipped (fail2ban not installed)"
+
+    content = render_owner_ignoreip()
+    dest = OWNER_IGNOREIP_PATH
+
+    # Idempotent short-circuit: if the drop-in already exists and is
+    # byte-identical, skip the write + reload (the _provision_shared_fleet_dir
+    # pattern). The file is 0644, readable without sudo — checked BEFORE
+    # the sudo probe so an unchanged file never shells out at all.
+    if os.path.isfile(dest):
+        try:
+            with open(dest, "r", encoding="utf-8", errors="replace") as fh:
+                if fh.read() == content:
+                    return "unchanged (%s)" % dest
+        except OSError as e:
+            print("  break-glass: cannot read %s (%s), rewriting"
+                  % (dest, e), file=sys.stderr)
+
+    # sudo gate — never prompt.
+    try:
+        probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
+                    timeout=10)
+    except Exception as e:  # noqa: BLE001
+        return "skipped (sudo probe error: %r)" % e
+    if getattr(probe, "returncode", 1) != 0:
+        return "skipped (no passwordless sudo)"
+
+    # Atomic write via sudo: tee to tmp, chmod, mv into place.
+    # Every rc is checked — a silent failure would leave the owner IP
+    # un-whitelisted while reporting "applied".
+    tmp = dest + ".airuleset-tmp"
+    try:
+        run(["sudo", "-n", "mkdir", "-p", os.path.dirname(dest)],
+            capture_output=True, text=True, timeout=10)
+        r = run(["sudo", "-n", "tee", tmp], input=content,
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            return "FAILED (tee rc=%d)" % r.returncode
+        r = run(["sudo", "-n", "chmod", "0644", tmp],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            run(["sudo", "-n", "rm", "-f", tmp],
+                capture_output=True, text=True, timeout=5)
+            return "FAILED (chmod rc=%d)" % r.returncode
+        r = run(["sudo", "-n", "mv", "-f", tmp, dest],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) != 0:
+            run(["sudo", "-n", "rm", "-f", tmp],
+                capture_output=True, text=True, timeout=5)
+            return "FAILED (mv rc=%d)" % r.returncode
+        r = run(["sudo", "-n", "fail2ban-client", "reload"],
+                capture_output=True, text=True, timeout=15)
+        if getattr(r, "returncode", 1) != 0:
+            return "FAILED (fail2ban reload rc=%d — file written but NOT live)" \
+                   % r.returncode
+    except Exception as e:  # noqa: BLE001
+        run(["sudo", "-n", "rm", "-f", tmp],
+            capture_output=True, text=True, timeout=5)
+        return "FAILED (error: %r)" % e
+    return "applied (%s)" % dest
+
+
+def check_owner_ignoreip_status():
+    """Status check for the owner break-glass ``ignoreip`` drop-in on the
+    controller (#982). Returns ``(ok, message)`` — ``ok=True`` when the drop-in
+    exists and carries ALL managed IPs; ``ok=False`` (RED row) when it is missing
+    or incomplete. A non-controller box always returns ``(True, "n/a")``.
+
+    Called from ``cmd_status`` — never modifies anything."""
+    try:
+        from watchdog.reaper import default_box_class
+        bc = default_box_class()
+    except Exception:  # noqa: BLE001
+        bc = "unknown"
+    if bc != "controller":
+        return (True, "n/a (not controller)")
+    if not os.path.isfile(OWNER_IGNOREIP_PATH):
+        return (False, "MISSING — %s does not exist" % OWNER_IGNOREIP_PATH)
+    try:
+        with open(OWNER_IGNOREIP_PATH, "r", encoding="utf-8",
+                  errors="replace") as fh:
+            content = fh.read()
+    except OSError as e:
+        return (False, "UNREADABLE — %s" % e)
+    import cli_fleet
+    missing = [ip for ip in cli_fleet.OWNER_BREAK_GLASS_IPS
+               if ip not in content]
+    if missing:
+        return (False, "INCOMPLETE — missing IPs: %s" % ", ".join(missing))
+    return (True, "OK — %s" % OWNER_IGNOREIP_PATH)
+
+
+def check_owner_key_status(authorized_keys_path=None):
+    """Status check for the owner break-glass SSH key on the controller (#982).
+    Returns ``(ok, message)`` — ``ok=True`` when ALL managed break-glass keys
+    are present in the ``airuleset`` account's ``authorized_keys``;
+    ``ok=False`` (RED row) when any key is missing. A non-controller box always
+    returns ``(True, "n/a")``.
+
+    ``authorized_keys_path`` defaults to ``~/.ssh/authorized_keys`` (injectable
+    for tests). Called from ``cmd_status`` — never modifies anything."""
+    try:
+        from watchdog.reaper import default_box_class
+        bc = default_box_class()
+    except Exception:  # noqa: BLE001
+        bc = "unknown"
+    if bc != "controller":
+        return (True, "n/a (not controller)")
+    if authorized_keys_path is None:
+        authorized_keys_path = os.path.expanduser("~/.ssh/authorized_keys")
+    if not os.path.isfile(authorized_keys_path):
+        return (False, "MISSING — %s does not exist" % authorized_keys_path)
+    try:
+        with open(authorized_keys_path, "r", encoding="utf-8",
+                  errors="replace") as fh:
+            content = fh.read()
+    except OSError as e:
+        return (False, "UNREADABLE — %s" % e)
+    import cli_fleet
+    missing = []
+    for key_line in cli_fleet.OWNER_BREAK_GLASS_KEYS:
+        parts = key_line.split()
+        blob = parts[1] if len(parts) >= 2 else None
+        if blob and blob not in content:
+            comment = parts[2] if len(parts) >= 3 else "(no comment)"
+            missing.append(comment)
+    if missing:
+        return (False, "MISSING key(s): %s" % ", ".join(missing))
+    return (True, "OK")
+
+
+def check_controller_dns(resolve_fn=None):
+    """Status check for DNS names resolving to the controller's tailscale IP
+    (#982). Returns a list of ``(name, ok, message)`` rows. A non-controller
+    box always returns an empty list.
+
+    ``resolve_fn(name)`` defaults to ``socket.getaddrinfo`` lookup returning
+    the first A-record address (injectable for tests)."""
+    try:
+        from watchdog.reaper import default_box_class
+        bc = default_box_class()
+    except Exception:  # noqa: BLE001
+        bc = "unknown"
+    if bc != "controller":
+        return []
+    if resolve_fn is None:
+        import socket
+
+        def resolve_fn(name):
+            """Return the SET of IPv4 addresses for *name*, or None on
+            gaierror. A multi-homed name (public + tailscale) returns both."""
+            try:
+                results = socket.getaddrinfo(name, None, socket.AF_INET)
+                return set(r[4][0] for r in results) if results else None
+            except socket.gaierror:
+                return None
+    rows = []
+    for name in CONTROLLER_DNS_NAMES:
+        addrs = resolve_fn(name)
+        if addrs is None:
+            rows.append((name, False, "UNRESOLVABLE"))
+        elif isinstance(addrs, set):
+            if CONTROLLER_TAILSCALE_IP in addrs:
+                rows.append((name, True,
+                             "OK → %s (in %s)" % (CONTROLLER_TAILSCALE_IP,
+                                                   sorted(addrs))))
+            else:
+                rows.append((name, False,
+                             "DRIFT — resolves to %s, expected %s in set"
+                             % (sorted(addrs), CONTROLLER_TAILSCALE_IP)))
+        elif addrs == CONTROLLER_TAILSCALE_IP:
+            # Legacy single-address resolve_fn (injected by tests).
+            rows.append((name, True, "OK → %s" % addrs))
+        else:
+            rows.append((name, False,
+                         "DRIFT — resolves to %s, expected %s"
+                         % (addrs, CONTROLLER_TAILSCALE_IP)))
+    return rows
 
 
 def cmd_disk_guard_root(args):

@@ -797,3 +797,22 @@ DISK_GUARD_ROOT_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
 ]
+
+# #982: owner break-glass SSH access to the controller — specific device IPs
+# whitelisted in fail2ban on the controller ONLY (the `60-airuleset-owner-
+# ignoreip.conf` drop-in, higher priority than the fleet-wide
+# `50-airuleset-hardening.conf`). NEVER the whole 100.64.0.0/10 CGNAT range —
+# that covers every tailscale node, which is too broad for a break-glass path
+# (the fleet-wide hardening already carries the CGNAT range for the recidive
+# jail, but the owner ignoreip is deliberately narrow).
+OWNER_BREAK_GLASS_IPS = ("100.118.105.43",)  # zbynek-nb tailscale
+
+# #982: owner break-glass public keys whose presence on the controller's
+# `~airuleset/.ssh/authorized_keys` is ASSERTED by install + status. PUBLIC
+# key material only (safe to commit), matched by the base64 blob — same
+# convention as cli_owner_keys.OWNER_PUBKEYS. Each entry is a full
+# authorized_keys line (`<type> <base64> <comment>`).
+OWNER_BREAK_GLASS_KEYS = (
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDXysBDPzwyPUO"
+    "+7hs4u0P/0Ef0kx4MEd+uenFPTjgnk zbynek-windows",
+)
