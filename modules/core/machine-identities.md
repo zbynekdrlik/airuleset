@@ -4,11 +4,11 @@ Three managed machines. Do NOT waste turns figuring out "which computer is this 
 
 | Name | Hostname | Tailscale (use this) | Role |
 |---|---|---|---|
-| **controller** | `airuleset` | `100.101.214.103` | airuleset SoT. `push` runs HERE. Hosts webterm lanes. |
+| **controller** | `airuleset` | `ar.newlevel.media` / `airuleset` (MagicDNS) / `100.101.214.103` | airuleset SoT. `push` runs HERE. Hosts webterm lanes. Break-glass SSH: `docs/break-glass.md`. |
 | **dev1** | `dev1` | `dev1` / `100.104.8.125` | Primary workstation. Most projects live here. Deploy target. Hosts the file-drop. |
 | **dev2** | `dev2` | `dev2` / `100.82.64.27` | Secondary. GPU/CUDA workloads + a few projects (e.g. `bakerion-ai`, `presenter`, `codex-bridge`). |
 
-**Address by TAILSCALE, not the LAN IP.** LAN IPs drift; tailscale IPs and MagicDNS names are stable. The controller has no MagicDNS name — use its tailscale IP `100.101.214.103`.
+**Address by TAILSCALE, not the LAN IP.** LAN IPs drift; tailscale IPs and MagicDNS names are stable. The controller is `ar.newlevel.media` (public A record → `100.101.214.103`, tailnet-only) or MagicDNS `airuleset`.
 
 - **Which am I on?** `hostname` → `dev1` / `dev2` / `airuleset` (controller). Or `tailscale ip -4`.
 - **SSH:** dev1→dev2 `ssh newlevel@dev2`; dev2→dev1 `ssh newlevel@dev1`. MagicDNS resolves from any tailnet node.

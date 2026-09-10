@@ -1348,6 +1348,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  owner-sudo provisioning error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-bis. Owner break-glass fail2ban ignoreip (#982):
+    # controller-only, sudo-gated — writes the owner-specific ignoreip
+    # drop-in so the owner's laptop IP is never banned by fail2ban.
+    # Non-fatal (a non-controller box or a box without sudo skips). ---
+    try:
+        from cli_disk_guard_root import provision_owner_ignoreip
+        result = provision_owner_ignoreip()
+        print(f"  break-glass ignoreip: {result}")
+    except Exception as e:
+        print(f"  break-glass ignoreip error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque. Webterm-only SSH key management (#869): manage the
     # authorized_keys for webterm-only accounts (david1-4, dominika).
     # ACTIVE ONLY when getpass.getuser() is a webterm-only user — every
@@ -1965,6 +1976,29 @@ def cmd_status(args):
     except Exception as e:
         # webterm not provisioned or module unavailable — non-fatal for status
         print("  webterm live argv: skipped (%s)" % e, file=sys.stderr)
+
+    # --- Break-glass (#982): owner ignoreip + owner key on the controller ---
+    try:
+        from cli_disk_guard_root import (check_owner_ignoreip_status,
+                                         check_owner_key_status,
+                                         check_controller_dns)
+        ig_ok, ig_msg = check_owner_ignoreip_status()
+        key_ok, key_msg = check_owner_key_status()
+        dns_rows = check_controller_dns()
+        # Show only on the controller (n/a → skip silently).
+        if "n/a" not in ig_msg or "n/a" not in key_msg or dns_rows:
+            print("\nbreak-glass (#982):")
+            if "n/a" not in ig_msg:
+                tag = "OK" if ig_ok else "RED"
+                print(f"  [{tag}] fail2ban ignoreip: {ig_msg}")
+            if "n/a" not in key_msg:
+                tag = "OK" if key_ok else "RED"
+                print(f"  [{tag}] owner key (zbynek-windows): {key_msg}")
+            for name, dns_ok, dns_msg in dns_rows:
+                tag = "OK" if dns_ok else "RED"
+                print(f"  [{tag}] DNS {name}: {dns_msg}")
+    except Exception as e:
+        print(f"  break-glass status error (non-fatal): {e}", file=sys.stderr)
 
     # --- Hooks ---
     print("\n~/.claude/settings.json hooks:")
