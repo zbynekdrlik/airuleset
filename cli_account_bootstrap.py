@@ -10,8 +10,15 @@ ZERO outbound imports by design (the L-E leaf convention); constants are
 imported LAZILY inside render functions so the module loads with no side effects.
 """
 
+import re
 import sys
 import textwrap
+
+
+# Debian package name grammar (Policy §5.6.1): [a-z0-9][a-z0-9.+\-]+
+# with minimum length 2.  We validate at render time so a stray
+# space/quote/metachar fails LOUD instead of silently breaking the script.
+_PACKAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.+\-]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +98,18 @@ def render_authorized_keys(account):
     return header + "".join(line.rstrip("\n") + "\n" for line in lines)
 
 
+def _validate_package_names(packages):
+    """Validate that every name in *packages* matches Debian policy §5.6.1.
+
+    Raises ValueError on the first invalid name.  Called at render time so
+    a typo / metachar fails LOUD instead of silently producing a broken
+    script (#973 Fable review BLUE)."""
+    for name in packages:
+        if not _PACKAGE_NAME_RE.match(name):
+            raise ValueError(
+                "invalid Debian package name in system_packages: %r" % name)
+
+
 def _render_system_packages_step(packages):
     """Render the idempotent apt-get step for system_packages.
 
@@ -99,6 +118,7 @@ def _render_system_packages_step(packages):
     so the caller can unconditionally concatenate it (#973)."""
     if not packages:
         return ""
+    _validate_package_names(packages)
     pkg_list = " ".join(packages)
     # The loop collects names of packages not yet installed, then runs ONE
     # apt-get call (cheaper and cleaner than N individual installs).
@@ -115,7 +135,7 @@ def _render_system_packages_step(packages):
         done
         if [ ${{#NEED_INSTALL[@]}} -gt 0 ]; then
             echo "  installing ${{#NEED_INSTALL[@]}} missing packages: ${{NEED_INSTALL[*]}}"
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${{NEED_INSTALL[@]}}"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o DPkg::Lock::Timeout=60 "${{NEED_INSTALL[@]}}"
         else
             echo "  all {n_pkgs} system packages already installed — nothing to do"
         fi

@@ -48,6 +48,8 @@ class TestSystemPackagesClaudy(unittest.TestCase):
     def test_apt_get_install(self):
         self.assertIn("DEBIAN_FRONTEND=noninteractive", self.script)
         self.assertIn("apt-get install -y -q", self.script)
+        # Fable review YELLOW: must carry the repo's DPkg lock timeout idiom
+        self.assertIn("DPkg::Lock::Timeout", self.script)
 
     def test_step_8_heading(self):
         self.assertIn("# 8. System packages (idempotent)", self.script)
@@ -169,6 +171,39 @@ class TestHelperFunctions(unittest.TestCase):
         rb = bootstrap._render_system_packages_readback(["libfoo"])
         self.assertIn("libfoo", rb)
         self.assertIn("system packages:", rb)
+
+
+class TestPackageNameValidation(unittest.TestCase):
+    """Fable review BLUE: package names validated at render time."""
+
+    def test_valid_names_pass(self):
+        # Should not raise
+        bootstrap._validate_package_names(["libnss3", "libatk1.0-0t64"])
+
+    def test_invalid_name_with_space_raises(self):
+        with self.assertRaises(ValueError):
+            bootstrap._validate_package_names(["lib foo"])
+
+    def test_invalid_name_with_quote_raises(self):
+        with self.assertRaises(ValueError):
+            bootstrap._validate_package_names(["lib'foo"])
+
+    def test_invalid_name_with_semicolon_raises(self):
+        with self.assertRaises(ValueError):
+            bootstrap._validate_package_names(["libfoo;rm -rf"])
+
+    def test_empty_name_raises(self):
+        with self.assertRaises(ValueError):
+            bootstrap._validate_package_names([""])
+
+    def test_single_char_raises(self):
+        with self.assertRaises(ValueError):
+            bootstrap._validate_package_names(["x"])
+
+    def test_all_claudy_packages_valid(self):
+        # Should not raise
+        bootstrap._validate_package_names(
+            bootstrap.SERVICE_ACCOUNTS["claudy"]["system_packages"])
 
 
 if __name__ == "__main__":
