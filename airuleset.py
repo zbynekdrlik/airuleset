@@ -69,7 +69,7 @@ MANAGED_EFFORT_LEVEL = "high"
 # fleet ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
     "fable": "claude-fable-5-1",        # main default + design/review phases (5.1 @ medium)
-    "opus": "claude-opus-4-6",        # implementation escalation / gate-CLOSED fallback
+    "opus": "claude-opus-4-8",        # implementation escalation / gate-CLOSED fallback
     "sonnet": "claude-sonnet-5",      # settled-design implementation + mechanical
     "haiku": "claude-haiku-4-5",      # trivial reads
 }
@@ -105,7 +105,7 @@ def is_allowed_model(value):
     """True iff `value` is one of the EXACT allowlisted tier ids
     (MODEL_TIERS.values()), tolerating the `[1m]` context tag (so the Fable
     main form `claude-fable-5-1[1m]` is allowed). EXACT membership, never a
-    substring — a superseded/floating id (`claude-opus-4-7`,
+    substring — a superseded/floating id (`claude-opus-4-6`,
     retired `claude-fable-5`, a bare alias) is never allowed."""
     v = _normalize_model(value)
     return bool(v) and v in {m.lower() for m in MODEL_TIERS.values()}
@@ -123,8 +123,8 @@ def is_banned_model(value):
     never drift (#495 one-source lesson). Allowlist semantics (owner directive
     2026-09-04, #871): a non-empty value that is neither an exact allowlisted
     tier id nor empty is banned — this covers every bare alias (which floats),
-    every superseded id (`claude-opus-4-7`/`-4-8`, the BANNED `claude-opus-5`,
-    `claude-fable-5-1`), and any unknown id. An EMPTY value is not "banned"
+    every superseded id (`claude-opus-4-6`/`-4-7`, the BANNED `claude-opus-5`,
+    retired `claude-fable-5`), and any unknown id. An EMPTY value is not "banned"
     (there is nothing to heal). MANAGED_MODEL is itself allowlisted, so the
     unconditional self-heal can only ever land an allowed id.
 
@@ -8028,7 +8028,7 @@ def main():
     p_ho.add_argument("--prevencia-read",
                       help="Prevencia-read: <path> (required round >= 2)")
     p_ho.add_argument("--reviewed-by-tier",
-                      help="Reviewed-by-tier: claude-fable-5-1 | claude-opus-4-6 "
+                      help="Reviewed-by-tier: claude-fable-5-1 | claude-opus-4-8 "
                            "(required round >= 2)")
     p_ho.add_argument("--sign-only", dest="sign_only",
                       help="Sign-only mode (#919): create a receipt for an "
@@ -8058,7 +8058,7 @@ def main():
 
     p_gate = sub.add_parser(
         "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
-                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-6)")
+                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-8)")
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 

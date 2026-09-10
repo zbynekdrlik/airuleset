@@ -4,7 +4,7 @@ set -euo pipefail
 # Hook: SubagentStop — #876 review-tier consistency gate. A worktree-mode
 # autopilot-worker's LANE-RETURN (or full-flow merged return) MUST carry a
 # `reviewed-by-tier:` line naming the tier that produced the review
-# (claude-fable-5-1 | claude-opus-4-6), consistent with the gate state and the
+# (claude-fable-5-1 | claude-opus-4-8), consistent with the gate state and the
 # dispatch observable in its own transcript.
 #
 # Stage 1 (message only): a COMPLETED return with no `reviewed-by-tier:` line
@@ -15,8 +15,8 @@ set -euo pipefail
 #   and `fable-advisor` Agent dispatches. Table:
 #   - OPEN + claude-fable-5-1 line + fable-advisor dispatch => pass
 #   - claude-fable-5-1 line with NO fable-advisor dispatch => BLOCK (fabricated)
-#   - OPEN + claude-opus-4-6 without trivial-diff => BLOCK (downtier)
-#   - CLOSED + claude-opus-4-6 => pass
+#   - OPEN + claude-opus-4-8 without trivial-diff => BLOCK (downtier)
+#   - CLOSED + claude-opus-4-8 => pass
 #   - trivial-diff declaration, no gate call => pass
 #   - unreadable transcript + line present => pass (fail-open) + log
 #   - fable dispatch at CLOSED => pass + log (over-spend, not a lie)
@@ -142,7 +142,7 @@ try:
     from airuleset import REVIEWED_BY_TIER_VALUES
     valid_tiers = REVIEWED_BY_TIER_VALUES
 except Exception:
-    valid_tiers = {"claude-fable-5-1", "claude-opus-4-6"}
+    valid_tiers = {"claude-fable-5-1", "claude-opus-4-8"}
 
 if tier_val not in valid_tiers:
     # Invalid tier value — pass (fail-open, the handoff CLI validates).
@@ -222,13 +222,13 @@ if tier_val == "claude-fable-5-1":
     if not has_fable_dispatch:
         verdict = "BLOCK_NO_DISPATCH"
     # else: fable tier + dispatch = consistent, pass.
-elif tier_val == "claude-opus-4-6":
+elif tier_val == "claude-opus-4-8":
     if has_trivial:
         pass  # Trivial-diff declaration — pass regardless of gate state.
     elif gate_open is True:
         verdict = "BLOCK_DOWNTIER"
     elif gate_open is False:
-        pass  # Gate CLOSED + claude-opus-4-6 is correct — pass.
+        pass  # Gate CLOSED + claude-opus-4-8 is correct — pass.
     elif gate_open is None:
         verdict = "PASS_NO_GATE"
 
@@ -318,7 +318,7 @@ case "$VERDICT" in
         REASON="Completed return has NO reviewed-by-tier line (#876). Every worktree-mode
 and full-flow return MUST carry:
 
-  reviewed-by-tier: claude-fable-5-1|claude-opus-4-6 [trivial-diff] gate:<OPEN|CLOSED|n/a>
+  reviewed-by-tier: claude-fable-5-1|claude-opus-4-8 [trivial-diff] gate:<OPEN|CLOSED|n/a>
 
 Missing for:
 ${LINES}
@@ -342,7 +342,7 @@ You are blocked once per issue; if the review genuinely cannot be dispatched,
 report that and stop."
         ;;
     BLOCK_DOWNTIER)
-        REASON="reviewed-by-tier claims claude-opus-4-6 but fable-gate was OPEN in the
+        REASON="reviewed-by-tier claims claude-opus-4-8 but fable-gate was OPEN in the
 transcript (#876). A non-trivial diff with gate OPEN must dispatch fable-advisor
 and record reviewed-by-tier: claude-fable-5-1 — or declare trivial-diff explicitly.
 

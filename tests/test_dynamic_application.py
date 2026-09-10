@@ -138,13 +138,13 @@ class TestModelCombinationFixes(TestCase):
         # Opus id pinned in frontmatter (never the banned `opus` alias, never
         # sonnet — see tests/test_model_tiering.py's lineup locks). #871
         # renamed the exact-id allowlist's implementation-escalation/
-        # gate-CLOSED-fallback tier from claude-opus-4-8 to claude-opus-4-6
+        # gate-CLOSED-fallback tier from claude-opus-4-8 to claude-opus-4-8
         # (MODEL_TIERS["opus"] — airuleset.py) and swept every pinned-agent
         # frontmatter, this one included, to match.
         # window widened 400 -> 500: the full-id spelling is longer than the
         # old bare alias; the intent (an explicit tier in the frontmatter,
         # near the top of the file) is unchanged.
-        self.assertIn("model: claude-opus-4-6",
+        self.assertIn("model: claude-opus-4-8",
                       read("agents/ticket-validator.md")[:500])
 
 

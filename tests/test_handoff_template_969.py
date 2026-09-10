@@ -222,7 +222,7 @@ class TestRenderGenericBody(unittest.TestCase):
             bounce_round=2,
             root_cause="lens -- why",
             prevencia_read="/path",
-            reviewed_by_tier="claude-opus-4-6",
+            reviewed_by_tier="claude-opus-4-8",
         )
         m = BOUNCE_ROUND_RE.search(body)
         self.assertIsNotNone(m)

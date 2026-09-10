@@ -4,7 +4,7 @@ set -euo pipefail
 # Hook: PreToolUse (Agent + Workflow) — #871 (owner directive 2026-09-04).
 #
 # The fleet model lineup is an ALLOWLIST of EXACT ids (airuleset.MODEL_TIERS):
-# claude-fable-5-1 / claude-opus-4-6 / claude-sonnet-5 / claude-haiku-4-5. A bare
+# claude-fable-5-1 / claude-opus-4-8 / claude-sonnet-5 / claude-haiku-4-5. A bare
 # alias (fable|opus|sonnet|haiku) FLOATS to the latest model of its family —
 # `fable` silently floated to an unvetted model the day a new one shipped. So a
 # dispatch NEVER carries a `model` param — the model choice is carried by a
@@ -61,7 +61,7 @@ $FILE_CONTENT"
 fi
 
 # The exact-id allowlist — keep in sync with airuleset.MODEL_TIERS (lock-tested).
-ALLOWLIST_RE='^(claude-fable-5-1|claude-opus-4-6|claude-sonnet-5|claude-haiku-4-5)(\[[0-9]+m\])?$'
+ALLOWLIST_RE='^(claude-fable-5-1|claude-opus-4-8|claude-sonnet-5|claude-haiku-4-5)(\[[0-9]+m\])?$'
 
 _pointer() {
     echo "" >&2
@@ -69,7 +69,7 @@ _pointer() {
     echo "  latest model (the Fable 5.1 failure, #871). The model choice is carried" >&2
     echo "  by a PINNED agent type / Workflow opts.model:" >&2
     echo "    - fable 5.1 design/review consult -> subagent_type: \"fable-advisor\"" >&2
-    echo "    - opus 4.6 escalation / gate-CLOSED -> the claude-opus-4-6-pinned agent" >&2
+    echo "    - opus 4.8 escalation / gate-CLOSED -> the claude-opus-4-8-pinned agent" >&2
     echo "                                            (autopilot-worker / ticket-validator)" >&2
     echo "    - sonnet 5 settled-design impl       -> subagent_type: \"sonnet-implementer\"" >&2
     echo "    - sonnet 5 mechanical/read-only      -> subagent_type: \"sonnet-mechanical\"" >&2

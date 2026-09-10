@@ -65,7 +65,7 @@ class TestModelAwarenessDeep(_CoverageMixin, TestCase):
     # --- enforcement core stays in stub ---
     def test_stub_has_tier_table(self):
         self.assertIn("claude-fable-5", self.stub)
-        self.assertIn("claude-opus-4-6", self.stub)
+        self.assertIn("claude-opus-4-8", self.stub)
         self.assertIn("claude-sonnet-5", self.stub)
 
     def test_stub_has_no_model_param(self):
@@ -271,7 +271,7 @@ class TestModelAwarenessInjection(_InjectorTestBase):
         sid = uuid.uuid4().hex
         out = self._run_injector(
             "Bash",
-            {"command": "echo claude-opus-4-6"},
+            {"command": "echo claude-opus-4-8"},
             session_id=sid,
         )
         self.assertIn("JUDGMENT-CONTENT test", out)

@@ -25,7 +25,7 @@ HOOK_CPR = REPO / "hooks" / "block-ci-poll-repeat.sh"
 HOOK_UGI = REPO / "hooks" / "block-ungated-issue-filing.sh"
 
 
-def goal_armed_transcript(model="claude-opus-4-6"):
+def goal_armed_transcript(model="claude-opus-4-8"):
     return (
         '{"type":"assistant","message":{"content":"test","model":"%s"}}\n'
         '{"type":"user","message":{"content":"'

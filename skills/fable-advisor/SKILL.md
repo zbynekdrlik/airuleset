@@ -9,9 +9,9 @@ description: One-shot Fable 5.1 ADVISOR consult — digest in, decision out. Dis
 
 The affordable way to get Fable-grade judgment on a HARD call from a
 NON-Fable context (airuleset #32 — since 2026-08-13 the managed MAIN default
-IS Fable, so this consult shape mostly serves the Opus 4.6 execution
+IS Fable, so this consult shape mostly serves the Opus 4.8 execution
 workers): the caller grounds the problem into a tight digest, Fable is
-consulted as a ONE-SHOT advisor, and an Opus 4.6 worker executes the
+consulted as a ONE-SHOT advisor, and an Opus 4.8 worker executes the
 decision. Never let Fable ground itself or type the implementation — a
 Fable session re-reading everything every turn is the 2026-07-01 burn (the
 presenter incident 2026-07-24; hook-enforced by
@@ -27,7 +27,7 @@ without progress). NB (2026-08-26, per-phase): this bar gates only the EXTRA
 mid-task advisor call — the dispatch-time model split is PER-PHASE
 (`model-awareness.md`): the DESIGN and REVIEW phases of a non-trivial ticket
 run gated Fable, the implementation worker runs Sonnet 5 by default for a
-settled-design ticket (Opus 4.6 on complexity, #721); do not read this
+settled-design ticket (Opus 4.8 on complexity, #721); do not read this
 consult bar as the tiering boundary.
 
 ## Protocol
@@ -37,16 +37,16 @@ consult bar as the tiering boundary.
    python3 ~/devel/airuleset/airuleset.py fable-gate
    ```
    Exit 0 = OPEN → advisor runs on `fable`. Exit 1 = CLOSED (incl.
-   missing/stale cache) → the SAME consult runs on **Opus 4.6**
-   (`claude-opus-4-6`) instead — never the bare `opus` alias (it resolves
-   to the BANNED Opus 5, directive 2026-08-13): reach Opus 4.6 via a
-   `claude-opus-4-6`-pinned agent definition or by omitting the `model`
-   override from a `claude-opus-4-6` session; a Fable MAIN at gate CLOSED
+   missing/stale cache) → the SAME consult runs on **Opus 4.8**
+   (`claude-opus-4-8`) instead — never the bare `opus` alias (it resolves
+   to the BANNED Opus 5, directive 2026-08-13): reach Opus 4.8 via a
+   `claude-opus-4-8`-pinned agent definition or by omitting the `model`
+   override from a `claude-opus-4-8` session; a Fable MAIN at gate CLOSED
    holds the judgment itself rather than spending a new dispatch. Never
    skip the gate, never re-poll it within the task.
 
 2. **Ground the problem into a TIGHT digest — in THIS session, or via one
-   cheap read stage (`claude-opus-4-6` low where a surface names it;
+   cheap read stage (`claude-opus-4-8` low where a surface names it;
    `sonnet` only for genuinely trivial collection).** The digest carries:
    the facts (measured, not
    assumed), the constraints, what was already tried and how it failed, and
@@ -58,26 +58,26 @@ consult bar as the tiering boundary.
    Agent tool — `subagent_type: fable-advisor` with NO `model` param (its
    frontmatter pins `claude-fable-5-1` = Fable 5.1, the fleet Fable tier
    since #894 — #871 had banned it, #894 reversed that) when the gate is
-   OPEN (at CLOSED use the Opus 4.6 route above — a dispatch NEVER carries
+   OPEN (at CLOSED use the Opus 4.8 route above — a dispatch NEVER carries
    a `model` alias param, #871; there is no bare `fable` alias — the tier
    is reached ONLY via this pinned agent type), `effort: medium` (#894),
    `run_in_background: true`;
    prompt = the digest + the question + "Return ONLY the decision with a
    short rationale — do not read the repository, do not execute anything."
 
-4. **Execute via the pinned Opus 4.6 IMPLEMENTATION worker (per-phase,
+4. **Execute via the pinned Opus 4.8 IMPLEMENTATION worker (per-phase,
    2026-08-26).** The master receives the decision, records it durably
    (ticket comment — `durable-decisions-to-tickets.md`), and dispatches the
-   IMPLEMENTATION on Opus 4.6: the implementing worker is NEVER a Fable
+   IMPLEMENTATION on Opus 4.8: the implementing worker is NEVER a Fable
    dispatch (never the `fable-advisor` agent), on any repo (the airuleset
    exception is abolished, fleet-wide). Fable is confined to the DESIGN and REVIEW phase
    dispatches (this consult IS a design-phase / hard-wall consult). Routine
-   execution (or gate CLOSED) runs the Opus 4.6 tier via the repo's two
+   execution (or gate CLOSED) runs the Opus 4.8 tier via the repo's two
    pinned definitions,
    `agents/autopilot-worker.md` and `agents/ticket-validator.md`
-   (`model: claude-opus-4-6` frontmatter). A `subagent-driven-development`
+   (`model: claude-opus-4-8` frontmatter). A `subagent-driven-development`
    implementer or other ad-hoc execution dispatch has NO repo pin and
-   inherits the session's model — from a worker that is Opus 4.6, from a Fable
+   inherits the session's model — from a worker that is Opus 4.8, from a Fable
    main it stays Fable, so prefer the pinned worker for routine
    issue-shaped execution (never sonnet for anything complex). The master
    reviews the worker's diff — that is the oversight role.
@@ -89,7 +89,7 @@ consult bar as the tiering boundary.
 - Escalating genuinely MECHANICAL work (a CI poll, a lookup, a
   format-only transform) to Fable → those stay sonnet/haiku; and
   implementation (the actual work) runs its tier (Sonnet 5 for a settled-design
-  ticket, Opus 4.6 on complexity — #721) — never Fable. (Since
+  ticket, Opus 4.8 on complexity — #721) — never Fable. (Since
   2026-08-26 Fable is confined to the DESIGN and REVIEW PHASES of a
   non-trivial ticket — never the implementing worker end-to-end.)
 - Skipping the gate because "it's just one call" → every automatic Fable
@@ -104,7 +104,7 @@ Moved VERBATIM from `modules/core/model-awareness.md` (#92 item 2): the always-o
 
 ### The lineup and what each tier costs
 
-**CURRENT lineup (2026-08-26 revision — the model ids, pricing and Opus 5 ban below are unchanged; the ESCALATION BOUNDARY is now PER-PHASE + FLEET-WIDE, see the 2026-08-26 section): Fable 5** (`claude-fable-5-1[1m]` main launch / `claude-fable-5-1` pinned dispatch via `fable-advisor` — never a bare `fable` alias (#871's exact-id allowlist means no dispatch ever carries a model alias at all; `claude-fable-5-1` is the sanctioned fleet tier per #894, reversing #871's short-lived ban of it, see that section below) — Anthropic's Mythos-class tier, the most intelligent generally-available Claude) **is the managed MAIN default AND (budget-gated) the tier for the DESIGN phase and the REVIEW phase of a non-trivial ticket — never the implementing worker end-to-end, fleet-wide; Opus 4.6** (`claude-opus-4-6`) **is the implementation ESCALATION (complexity) + gate-CLOSED fallback tier; Sonnet 5** (`claude-sonnet-5`, via the pinned `sonnet-implementer`/`sonnet-mechanical` agents) is the settled-design implementation DEFAULT AND the LIGHT / mechanical tier (CI polling, log/grep sweeps, read-only lookups — never anything complex; #721); **Haiku 4.5** (`claude-haiku-4-5`, via a pinned agent) for the most trivial reads. **Opus 5** (`claude-opus-5`, and the bare `opus` alias that resolves to it) is **BANNED since 2026-08-13** — the user's directive, driven by widespread community dissatisfaction with Opus 5 ("intenet je plny obrovskej nespokojnosti s opus 5"). Historical record of its era (2026-07-25 → 2026-08-13, when it WAS the default main + judgment tier): measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF the price (https://www.anthropic.com/news/claude-opus-5), and it shipped thinking ON by default (a change from Opus 4.6, where it was opt-in) — Fable 5 cannot disable thinking at all, so its output tokens are structurally higher for the same task. Pricing per Mtok in/out (official pricing page, 2026-07-25): Fable 5 $10/$50 · Opus 5 $5/$25 (cache read $0.50, cache write $6.25 5-min / $10 1-hour) · Sonnet 5 $2/$10 · Haiku 4.5 $1/$5; ALL current models ship the 1M context window at standard pricing. (Literalism behavior holds across the family — the top tiers are concise, grounded, honest, and need less anti-slop frontend prompting.)
+**CURRENT lineup (2026-08-26 revision — the model ids, pricing and Opus 5 ban below are unchanged; the ESCALATION BOUNDARY is now PER-PHASE + FLEET-WIDE, see the 2026-08-26 section): Fable 5** (`claude-fable-5-1[1m]` main launch / `claude-fable-5-1` pinned dispatch via `fable-advisor` — never a bare `fable` alias (#871's exact-id allowlist means no dispatch ever carries a model alias at all; `claude-fable-5-1` is the sanctioned fleet tier per #894, reversing #871's short-lived ban of it, see that section below) — Anthropic's Mythos-class tier, the most intelligent generally-available Claude) **is the managed MAIN default AND (budget-gated) the tier for the DESIGN phase and the REVIEW phase of a non-trivial ticket — never the implementing worker end-to-end, fleet-wide; Opus 4.8** (`claude-opus-4-8`) **is the implementation ESCALATION (complexity) + gate-CLOSED fallback tier; Sonnet 5** (`claude-sonnet-5`, via the pinned `sonnet-implementer`/`sonnet-mechanical` agents) is the settled-design implementation DEFAULT AND the LIGHT / mechanical tier (CI polling, log/grep sweeps, read-only lookups — never anything complex; #721); **Haiku 4.5** (`claude-haiku-4-5`, via a pinned agent) for the most trivial reads. **Opus 5** (`claude-opus-5`, and the bare `opus` alias that resolves to it) is **BANNED since 2026-08-13** — the user's directive, driven by widespread community dissatisfaction with Opus 5 ("intenet je plny obrovskej nespokojnosti s opus 5"). Historical record of its era (2026-07-25 → 2026-08-13, when it WAS the default main + judgment tier): measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF the price (https://www.anthropic.com/news/claude-opus-5), and it shipped thinking ON by default (a change from Opus 4.8, where it was opt-in) — Fable 5 cannot disable thinking at all, so its output tokens are structurally higher for the same task. Pricing per Mtok in/out (official pricing page, 2026-07-25): Fable 5 $10/$50 · Opus 5 $5/$25 (cache read $0.50, cache write $6.25 5-min / $10 1-hour) · Sonnet 5 $2/$10 · Haiku 4.5 $1/$5; ALL current models ship the 1M context window at standard pricing. (Literalism behavior holds across the family — the top tiers are concise, grounded, honest, and need less anti-slop frontend prompting.)
 
 ### Why Opus 5 WAS the recommended MAIN default (2026-07-25 rewrite — superseded 2026-08-13)
 
