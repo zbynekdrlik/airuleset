@@ -6846,16 +6846,21 @@ def render_erp_test_ssh_config_block(user):
     The block is wrapped in marker comments for idempotent replacement by
     `ensure_erp_test_ssh_config`.
     """
-    from cli_aliases import erp_test_deploy_user
+    from cli_aliases import erp_test_deploy_user, erp_test_deploy_key_name
     deploy_user = erp_test_deploy_user(user)
     if deploy_user is None:
         return None
     hostname = "erp-test-%s.newlevel.media" % user
+    key_name = erp_test_deploy_key_name(user)
+    identity_line = ""
+    if key_name:
+        identity_line = f"    IdentityFile ~/.ssh/{key_name}\n"
     return (
         f"{_ERP_TEST_SSH_MARK_START}\n"
         f"Host erp-test-{user} {hostname}\n"
         f"    HostName {hostname}\n"
         f"    User {deploy_user}\n"
+        f"{identity_line}"
         f"    StrictHostKeyChecking no\n"
         f"{_ERP_TEST_SSH_MARK_END}"
     )

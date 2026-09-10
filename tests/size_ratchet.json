@@ -1,10 +1,10 @@
 {
   "files": {
-    "airuleset.py": 8538,
+    "airuleset.py": 8543,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_account_bootstrap.py": 285,
-    "cli_aliases.py": 154,
+    "cli_aliases.py": 169,
     "cli_autopilot_lock.py": 793,
     "cli_bashrc_appliers.py": 833,
     "cli_binary_installers.py": 467,
@@ -202,7 +202,7 @@
     "tests/test_durable_decisions.py": 110,
     "tests/test_dynamic_application.py": 152,
     "tests/test_ensure_timezone.py": 116,
-    "tests/test_erp_test_ssh_config.py": 207,
+    "tests/test_erp_test_ssh_config.py": 292,
     "tests/test_external_blocks.py": 58,
     "tests/test_family_acceptance_755.py": 200,
     "tests/test_filedrop.py": 1004,
