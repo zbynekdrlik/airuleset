@@ -189,6 +189,11 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null ||
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$CMD" ] && exit 0
 
+# #988(g): shared hook-block measurement log
+_HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
+[ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+type log_hook_block >/dev/null 2>&1 || log_hook_block() { :; }
+
 # #842 req 1 -- a WORKTREE WORKER (subagent, payload `.agent_id` — the SAME
 # subagent signal block-subagent-bg-ci-poll.sh / subagent-stop-check-*.sh, #496,
 # already use) may NOT file a GitHub issue: it FIXES what it finds in-lane and
@@ -232,6 +237,7 @@ block as a `followup_candidates:` line (title + which criterion it clears + est.
 LoC) — the SUPERVISOR decides and files it, never the worker (#842). A return
 containing a `filed:` line is REJECTED at integration and the lane is sent back.
 MSG
+        log_hook_block "block-ungated-issue-filing" "$CMD"
         exit 2
     fi
 fi
@@ -580,7 +586,16 @@ def _unreadable_body_err(bf, eff_cwd):
     path that could not be read, replacing the opaque `-> none`. Names the
     file, the effective cwd it was resolved against (or that it was
     unresolvable), and the fix (an absolute -F path). One line -- it crosses
-    the tab-separated hand-off to bash (see _clean_field)."""
+    the tab-separated hand-off to bash (see _clean_field).
+    #988: when the same compound command contains a redirect writing the
+    same file, give a clear "write in a SEPARATE command" message."""
+    # #988: check if the raw command creates this file via redirect/heredoc
+    basename = os.path.basename(bf)
+    if basename and ("> " + bf) in cmd or (">>" + bf) in cmd or \
+            (">" + bf) in cmd:
+        return ("body file '%s' does not exist yet -- write the body file "
+                "in a SEPARATE Bash call first, then run gh issue create -F %s"
+                % (bf, bf))
     if os.path.isabs(bf):
         return ("body file '%s' not readable -- path is missing or unreadable "
                 "(check the absolute -F path)" % bf)
@@ -1626,6 +1641,7 @@ of silently filing. See modules/quality/complete-planned-work.md and
 modules/quality/no-dropped-work.md. Genuine bypass: append
 `# airuleset:scope-gate-ok <reason>` to the command.
 MSG
+    log_hook_block "block-ungated-issue-filing" "$CMD"
     exit 2
 fi
 

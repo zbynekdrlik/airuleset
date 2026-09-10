@@ -142,6 +142,11 @@ INPUT=$(cat 2>/dev/null || echo "")
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
 [ -n "$CMD" ] || exit 0
 
+# #988(g): shared hook-block measurement log
+_HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
+[ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+type log_hook_block >/dev/null 2>&1 || log_hook_block() { :; }
+
 # ---- never block the compliant path -----------------------------------
 BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null || echo "false")
 [ "$BG" = "true" ] && exit 0
@@ -378,7 +383,32 @@ if [ "$IS_LOOP" = "0" ]; then
         OS_COUNT=$((OS_COUNT + 1))
         printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
         if [ "$OS_COUNT" -gt "$ONESHOT_FREE" ]; then
-            IS_ONESHOT_BLOCK=1
+            # #988: a completed run is not a poll — reading the final status
+            # after a detached waiter reported is a legitimate terminal read.
+            # Check: (1) a completion-marker file (fast, no network), or
+            # (2) query the run status inline (only on the 3rd+ check).
+            MARKER_DIR="${AIRULESET_CIPOLL_COMPLETED_MARKER_DIR:-$STATE_DIR}"
+            _RUN_COMPLETED=0
+            if [ -n "$RUN_ID" ]; then
+                if [ -e "$MARKER_DIR/airuleset-cipoll-completed-$RUN_ID" ]; then
+                    _RUN_COMPLETED=1
+                else
+                    # Inline status query — only fires on the 3rd+ oneshot,
+                    # so cost is bounded. Fail-open: a gh error → still block.
+                    _RS=$(gh run view "$RUN_ID" --json status -q .status 2>/dev/null || echo "")
+                    if [ "$_RS" = "completed" ]; then
+                        _RUN_COMPLETED=1
+                        # Cache for future reads
+                        : > "$MARKER_DIR/airuleset-cipoll-completed-$RUN_ID" 2>/dev/null || true
+                    fi
+                fi
+            fi
+            if [ "$_RUN_COMPLETED" = "1" ]; then
+                OS_COUNT=0
+                printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
+            else
+                IS_ONESHOT_BLOCK=1
+            fi
         fi
     fi
 fi
@@ -626,4 +656,5 @@ MSG=${MSG//__RUNID__/$ID_FOR_MSG}
 MSG=${MSG//__TARGET__/$WAITER_TARGET}
 MSG=${MSG//__PRELUDE__/$PRELUDE}
 printf '%s\n' "$MSG" >&2
+log_hook_block "block-ci-poll-repeat" "$CMD"
 exit 2

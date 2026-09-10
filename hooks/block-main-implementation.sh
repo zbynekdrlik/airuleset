@@ -775,6 +775,10 @@ AWAY_S="${AIRULESET_MAIN_GUARD_AWAY_S:-900}"
 case "$AWAY_S" in ''|*[!0-9]*) AWAY_S=900 ;; esac
 _PRESENCE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-presence.sh"
 [ -r "$_PRESENCE_LIB" ] && . "$_PRESENCE_LIB"
+# #988(g): shared hook-block measurement log
+_HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
+[ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+type log_hook_block >/dev/null 2>&1 || log_hook_block() { :; }
 type airuleset_presence_is_away >/dev/null 2>&1 || airuleset_presence_is_away() { return 1; }
 AWAY=0
 if airuleset_presence_is_away "${SESSION_ID:-unknown}"; then AWAY=1; fi
@@ -850,6 +854,8 @@ log_block() {
     { printf '%s main-exec BLOCK session=%s tool=%s rule=%s match=%s cmd=%s\n' \
         "$(date -Is)" "$SESSION_ID" "$TOOL_NAME" "$RULE_TAG" "$detail" "$snippet" \
         >> "$BLOCK_LOG"; } 2>/dev/null || true
+    # #988: unified hook-blocks measurement log (shared lib)
+    log_hook_block "block-main-implementation" "$snippet"
 }
 
 # ---- Bash path (#66): classify, don't size-gate ----
@@ -1081,11 +1087,11 @@ def is_allowed_segment(tk):
         if len(tk) >= 3 and tk[1] == "issue" and tk[2] in (
                 "view", "list", "create", "comment", "edit", "close"):
             return True
-        if len(tk) >= 3 and tk[1] == "run" and tk[2] in ("list", "view"):
+        if len(tk) >= 3 and tk[1] == "run" and tk[2] in ("list", "view", "rerun"):
             return True
         return False
     if tk[0] == "git":
-        if len(tk) >= 2 and tk[1] in ("status", "rev-parse", "fetch"):
+        if len(tk) >= 2 and tk[1] in ("status", "rev-parse", "fetch", "worktree"):
             return True
         if len(tk) >= 2 and tk[1] == "log" and "--oneline" in tk[2:]:
             rest = tk[2:]
@@ -1280,6 +1286,28 @@ def _is_narrow_readonly_953(tk):
     return True
 
 
+# #988: a sed -i on ~/.claude/work-products/** is coordination (bookkeeping),
+# not implementation — the Fable-main impl ban on repo code stays unchanged.
+_HOME = os.path.expanduser("~")
+_WORK_PRODUCTS_PREFIX = os.path.join(_HOME, ".claude", "work-products")
+
+def _is_coordination_write(tk):
+    if not tk:
+        return False
+    h = tk[0]
+    if h == "sed" and any(t == "-i" or t.startswith("-i") for t in tk[1:]):
+        # Extract file arguments (non-flag tokens after the script)
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        files = nf[1:] if nf else []  # first non-flag = script, rest = files
+        if files and all(
+            os.path.realpath(os.path.expanduser(f)).startswith(
+                _WORK_PRODUCTS_PREFIX + os.sep)
+            for f in files
+        ):
+            return True
+    return False
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
@@ -1387,25 +1415,46 @@ def first_pipe_stage(statement):
 
 
 def classify(text):
+    # #988: track whether ALL segments are coordination (allowed or narrow
+    # readonly) — if so, the command is pure coordination and should be
+    # exempt from the per-dispatch counter.
+    all_coordination = True
     for statement in STATEMENTS_RE.split(text):
         seg = first_pipe_stage(statement)
+        # #988 review: a multi-stage pipe is NOT pure coordination — the
+        # tail stages (grep -rn, awk, etc.) can be bulk reads. Only
+        # single-stage statements qualify as coordination.
+        if seg.strip() != statement.strip():
+            all_coordination = False
         tk = strip_prefix(tokens_of(seg))
         script = shell_dash_c_script(tk)
         if script is not None:
             inner = classify(script)
-            if inner:
+            if inner and inner != "COORDINATION":
                 return inner
+            if inner != "COORDINATION":
+                all_coordination = False
             continue
+        if not tk:
+            continue  # pure env assignment / empty after prefix-strip
         if is_allowed_segment(tk):
             continue
+        if _is_narrow_readonly_953(tk):
+            continue
+        if _is_coordination_write(tk):
+            continue
+        all_coordination = False
         if is_blocked_segment(tk):
             return " ".join(tk[:3]) if tk else seg.strip()
-    return None
+    return "COORDINATION" if all_coordination else None
 
 
 blocked_reason = classify(cmd)
 
-if blocked_reason:
+if blocked_reason == "COORDINATION":
+    print("COORDINATION")
+    sys.exit(0)
+elif blocked_reason:
     print(blocked_reason)
     sys.exit(2)
 sys.exit(0)
@@ -1414,6 +1463,15 @@ PYEOF
     CLASS_RC=${CLASS_RC:-0}
 
     if [ "$CLASS_RC" -ne 2 ]; then
+        # ---- #988: pure coordination commands skip the counter entirely ----
+        # A command where every segment passed is_allowed_segment() or
+        # _is_narrow_readonly_953() prints "COORDINATION" to stdout. These
+        # are read-only gh/git coordination calls that must never be blocked
+        # by the per-dispatch counter, regardless of count.
+        if [ "$CLASS" = "COORDINATION" ]; then
+            exit 0
+        fi
+
         # ---- #80: the command's CLASS is not the lever — the COUNT is. ----
         # Every main turn re-sends the whole context, so a `gh issue view` is
         # as expensive as a `grep`; #66 optimised the wrong variable and gk's

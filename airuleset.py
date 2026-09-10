@@ -2104,6 +2104,45 @@ def cmd_status(args):
     else:
         print("  settings.json does not exist")
 
+    # --- #988: hook-blocks measurement ---
+    _print_hook_blocks_count()
+
+
+def _print_hook_blocks_count():
+    """#988: print the number of hook blocks in the last 24 hours, with per-hook breakdown."""
+    hook_blocks_log = Path.home() / ".claude" / "hook-blocks.log"
+    if not hook_blocks_log.exists():
+        return
+    import datetime as _dt
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(hours=24)).isoformat()
+    count = 0
+    per_hook: dict = {}
+    try:
+        with open(hook_blocks_log, "r", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Format: <ISO-ts>\t<hook-name>\t<snippet>
+                # Legacy format: <ISO-ts> <hook-name> <snippet>
+                parts = stripped.split("\t", 2) if "\t" in stripped else stripped.split(" ", 2)
+                ts = parts[0] if parts else ""
+                if ts >= cutoff:
+                    count += 1
+                    hook_name = parts[1] if len(parts) > 1 else "unknown"
+                    per_hook[hook_name] = per_hook.get(hook_name, 0) + 1
+    except OSError as exc:
+        print(f"\nhook blocks (24 h): error reading log: {exc}")
+        return
+    print(f"\nhook blocks (24 h): {count}")
+    if per_hook:
+        breakdown = " · ".join(
+            f"{name} {n}" for name, n in
+            sorted(per_hook.items(), key=lambda x: -x[1])
+        )
+        print(f"  {breakdown}")
+
 
 # (systemd --user helpers + File-Drop service install: _run_systemctl / _whoami /
 #  setup_filedrop_service / ... -> cli_filedrop_watchdog.py, #433 L-B)
