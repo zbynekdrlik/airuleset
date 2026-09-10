@@ -26,7 +26,19 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   post: `airuleset:discuss-approval-ok`.
 - **The proposal you present to the owner is COMPLETE and lives IN THE CHAT —
   and it is the approval question for EVERY message (opening handover AND every
-  follow-up), never only a new thread.** Put in the chat message itself: (1) the
+  follow-up), never only a new thread.** The FULL proposed client text MUST be
+  INLINE in the ❓ block as a `> ` quoted block, exactly as it will be posted —
+  NEVER a link to a share/file-drop URL, a work-products file, or a ticket
+  comment instead of the text (airuleset #977, owner miva1 2026-09-10: "miesto
+  toho aby si mi tu napísal text čo chceš poslať, nikde neevidujem že by som
+  definoval že texty majú chodiť do externej web!!!"). A share URL may
+  ACCOMPANY the inline text for a genuine attachment (a PDF, a spreadsheet), but
+  it NEVER replaces the message body itself. If the proposed text is longer than
+  the notify forwarder's ~1500 codepoint cap, split it into TWO approval
+  questions (each with its own inline quoted portion), never link the whole
+  text. HOOK-ENFORCED: `stop-check-question-quality.sh` Check 8 blocks a
+  text-approval ❓ block carrying a share/file-drop URL without >= 2 `> ` quoted
+  lines. Put in the chat message itself: (1) the
   target thread on its OWN SEPARATE, clearly-shown line — the exact thread name,
   the full human NAME (+ parent channel where it helps), NEVER only the internal
   channel number and NEVER only wrapped in prose:

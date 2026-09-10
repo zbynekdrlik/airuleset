@@ -607,21 +607,35 @@ fi
 if [ -z "$VIOLATION" ]; then
     # (a) Approval intent — approval/send verb families in the block.
     APPROVE_INTENT_RX='schv[áa][ľl]|schvaľuje|po[šs]l[ai]|posiel|odosiel|odpoved.{0,20}(klient|z[áa]kazn[íi]k|do[[:space:]]+vl[áa]kn)|spr[áa]v.{0,20}(klient|z[áa]kazn[íi]k|schv[áa]l|po[šs]l)'
-    # (b) Pointer — a filesystem path or redirect phrase (the incident shapes).
+    # (b) Pointer — a filesystem path, redirect phrase, OR share/file-drop URL
+    # (the incident shapes: #936 filesystem paths, #977 share URLs).
     POINTER_PATH_RX='~/|/tmp/|\.md([[:space:]]|$)|work-products/'
     POINTER_PHRASE_RX='na[[:space:]]+tikete|v[[:space:]]+drafte|v[[:space:]]+s[úu]bore|v[[:space:]]+koment[áa]ri|pozri[[:space:]]+(s[úu]bor|draft|koment[áa]r)'
+    # #977 — share/file-drop URL patterns: :8795/ (share), :8788/ (filedrop),
+    # drop-<host> (public drop gateway), or a text-file extension URL
+    # (.html/.md/.txt as a URL path, not a bare filename). TEXT_APPROVAL_RX
+    # detects a text/message approval context (text, správ, odpove, návrh)
+    # so a screenshot/image share URL does NOT trip this check.
+    POINTER_URL_RX=':879[0-9]/|:8788/|drop-[a-z]'
+    TEXT_APPROVAL_RX='(n[áa]vrh|text|spr[áa]v|odpove)'
     # (c) Inline body evidence: a fenced code block (``` ... ```) or blockquote
-    # (> ...) with at least 40 chars of content.
+    # (> ...) with at least 40 chars of content (for path/phrase pointers), or
+    # >= 2 blockquote lines (for URL pointers — #977).
     approve_intent=""
     if LC_ALL=C.UTF-8 grep -qiE "$APPROVE_INTENT_RX" <<<"$BLOCK"; then
         approve_intent=1
     fi
     pointer=""
+    pointer_url=""
     if [ -n "$approve_intent" ]; then
         if LC_ALL=C.UTF-8 grep -qiE "$POINTER_PATH_RX" <<<"$BLOCK"; then
             pointer=1
         elif LC_ALL=C.UTF-8 grep -qiE "$POINTER_PHRASE_RX" <<<"$BLOCK"; then
             pointer=1
+        elif LC_ALL=C.UTF-8 grep -qiE "$TEXT_APPROVAL_RX" <<<"$BLOCK" \
+            && LC_ALL=C.UTF-8 grep -qiE "$POINTER_URL_RX" <<<"$BLOCK"; then
+            pointer=1
+            pointer_url=1
         fi
     fi
     if [ -n "$approve_intent" ] && [ -n "$pointer" ]; then
@@ -637,7 +651,14 @@ if [ -z "$VIOLATION" ]; then
             END { print body }')
         # LC_ALL=C.UTF-8 so ${#} counts CHARS not bytes (#936 review 🔵5).
         INLINE_LEN=$(LC_ALL=C.UTF-8; echo ${#INLINE_BODY})
-        if [ "${INLINE_LEN:-0}" -lt 40 ]; then
+        if [ -n "$pointer_url" ]; then
+            # #977 — for share/file-drop URL pointers, require >= 2 blockquote
+            # lines (the draft text must be inline as `> ` quoted lines).
+            QUOTE_LINES=$(printf '%s\n' "$BLOCK" | grep -cE '^[[:space:]]*>' || true)
+            if [ "${QUOTE_LINES:-0}" -lt 2 ]; then
+                VIOLATION="approvebody"
+            fi
+        elif [ "${INLINE_LEN:-0}" -lt 40 ]; then
             VIOLATION="approvebody"
         fi
     fi
@@ -662,7 +683,7 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
         task)
             REASON="Your ❓ block is about Odoo work but does NOT carry an Odoo task reference URL. Per #907 (owner directive montalu 2026-09-06): EVERY Odoo-context question MUST carry the project.task deep URL — napr. https://erp.montalu.cloud/odoo/project/4/tasks/503 — a meno tasku + stage. Odoo task je primárny klientsky tracking; GitHub issue je len developerský. Ak task neexistuje, napíš to explicitne ('Odoo task neexistuje — čisto technická úloha'). NIKDY nepoužívaj model-form URL (/odoo/project.task/503) — ten otvorí natívny formulár bez custom záložiek. See issue-reference-context.md." ;;
         approvebody)
-            REASON="Your ❓ block asks to APPROVE/SEND a client message but the message body is NOT inline — it points at a file path or ticket comment instead. The owner reads the ping on their phone/webterm and has NO access to your filesystem or terminal scrollback. INLINE the FULL proposed text as a fenced code block (\`\`\`...body...\`\`\`) or blockquote (> ...) right in the ❓ block, at least 40 chars. NEVER 'text je v súbore ~/…' / 'pozri draft na tikete' / 'v komentári #N'. See skills/odoo-client-messaging/handover-compose.md (#936)." ;;
+            REASON="Your ❓ block asks to APPROVE/SEND a client message but the message body is NOT inline — it points at a file path, ticket comment, or share/file-drop URL instead. The owner reads the ping on their phone/webterm and has NO access to your filesystem, terminal scrollback, or external URLs. INLINE the FULL proposed text as a blockquote (> ...) right in the ❓ block (>= 2 quoted lines for a share URL, >= 40 chars for a path pointer). NEVER 'text je v súbore ~/…' / 'pozri draft na tikete' / 'Návrh textu: http://…:8795/…'. A share URL may ACCOMPANY the inline text (e.g. for an attachment), never REPLACE it. See skills/odoo-client-messaging/handover-compose.md (#936/#977)." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
