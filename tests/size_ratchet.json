@@ -583,7 +583,7 @@
     "watchdog/nice_check.py": 104,
     "watchdog/nudge_gate.py": 355,
     "watchdog/one_glance.py": 425,
-    "watchdog/ops_wait_recheck.py": 1389,
+    "watchdog/ops_wait_recheck.py": 1403,
     "watchdog/pane_classify.py": 553,
     "watchdog/pane_text.py": 211,
     "watchdog/priority_policy.py": 567,

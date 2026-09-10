@@ -219,6 +219,10 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
   nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
+- **STANDING ack-reaction grant (#978):** a bare 👀 reaction on a client
+  message carries NO text and is NOT subject to the owner text-approval rule
+  — the stream adds it on its own authority. Full doctrine + recipe + fallback
+  in `skills/odoo-client-messaging/ack-reaction.md`.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
   (#788; #853 compliance).**

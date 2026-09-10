@@ -2029,6 +2029,42 @@ if [ "$ODOO_POST_ACTION" = "1" ]; then
     fi
 fi
 
+# #978 — Ack-reaction evidence check. When the assistant's message reports
+# processing a NEW client message in an Odoo Discuss thread (a client wrote /
+# sent something, a remark, a question — detected by Slovak verbs: klient
+# napísal/poslal, <name> poslal/a do vlákna, pripomienk near klient/vlákno),
+# the message MUST carry an `Ack-reaction:` evidence line (msg id + emoji, or
+# `pending — <reason>`). Without it, the stream processed a client message
+# with NO visible acknowledgement — the exact regression the owner reported
+# (#978, miva1 2026-09-10).
+#
+# NARROW by design: only fires when the turn mentions a NEW client message
+# (present-tense or recent-past action verbs near client/thread context), never
+# on a turn that merely recaps an OLD message, discusses doctrine, or works in
+# a code block. Negatives tested: "klient napísal minulý týždeň" without a
+# new-action context, code-block mentions, rule-discussion prose.
+ACK_REACTION_MENTION=""
+ACK_REACTION_UNKNOWN=0
+# Stage 1: does the message mention processing a NEW client message?
+# Two arms (ERE `.{0,80}` proximity — grep `.` already excludes newline):
+#   A) klient/zákazn near napísal/napisal/poslal/poslala (active voice: "client wrote")
+#   B) napísal/napisal/poslal/poslala near vlákn/discuss (sent TO a thread)
+# `pripomienk` was DROPPED as a standalone trigger — "dostali pripomienky od
+# zákazníka" is a passive recap (false positive on OLD_MESSAGE_PASS fixture).
+if ! _ACK_CLIENT_MSG=$(msg_lines "$MSG" -iE "(klient|z[aá]kazn).{0,80}(nap[ií]sal|poslal)|(nap[ií]sal|poslal).{0,80}(klient|z[aá]kazn|vl[aá]kn|discuss)"); then
+    _ACK_CLIENT_MSG=""
+fi
+if [ -n "$_ACK_CLIENT_MSG" ]; then
+    # Stage 2: does the message carry an Ack-reaction evidence line?
+    if ! msg_has "$MSG" -iE "Ack-reaction:"; then
+        ACK_REACTION_MENTION="1"
+    fi
+fi
+if [ "$ACK_REACTION_MENTION" = "1" ]; then
+    echo "VIOLATION: Your message reports processing a NEW client message in a Discuss thread but carries no Ack-reaction: evidence line. The moment you read a new client message, add a 👀 reaction via message_reaction_add_guarded(message_id, \"👀\") — or, if the method is not yet released on this instance, record 'Ack-reaction: pending — <reason>'. Include the evidence line in your message. See skills/odoo-client-messaging/ack-reaction.md (#978)." >&2
+    add_hard "New client message processed without Ack-reaction: evidence line — add 👀 reaction or record pending (#978)"
+fi
+
 # #194 — the global suppression that used to sit here is GONE. It asked "did ANY
 # check error" and, on yes, discarded EVERY hard violation, including ones
 # decided by a different pattern on a different regex engine that never errored:
