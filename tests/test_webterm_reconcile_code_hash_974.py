@@ -25,7 +25,7 @@ class TestComputeGatewayCodeHash(unittest.TestCase):
 
         gateway = Path(__file__).resolve().parent.parent / "cli_webterm_gateway.py"
         if not gateway.exists():
-            self.skipTest("cli_webterm_gateway.py not found")
+            self.fail("cli_webterm_gateway.py not found — cannot verify hash")
         h = rec.compute_gateway_code_hash(gateway)
         # Must be a valid hex SHA256
         self.assertEqual(len(h), 64)
@@ -58,7 +58,7 @@ class TestComputeGatewayCodeHash(unittest.TestCase):
 
         gateway = Path(__file__).resolve().parent.parent / "cli_webterm_gateway.py"
         if not gateway.exists():
-            self.skipTest("cli_webterm_gateway.py not found")
+            self.fail("cli_webterm_gateway.py not found — cannot verify hash")
         h1 = rec.compute_gateway_code_hash(gateway)
         h2 = rec.compute_gateway_code_hash(gateway)
         self.assertEqual(h1, h2)
@@ -356,3 +356,48 @@ class TestStatusCodeHashVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRenderedUnitCarriesHash(unittest.TestCase):
+    """MEDIUM-1 fix: the PRIMARY path — rendered gateway units must carry
+    Environment=AIRULESET_GATEWAY_CODE_HASH in [Service], before [Install]."""
+
+    def test_owner_unit_carries_hash(self):
+        """_render_webterm_gateway_unit embeds the code hash."""
+        from cli_webterm import _render_webterm_gateway_unit, WEBTERM_GATEWAY_MODULE
+        import cli_webterm_reconcile as rec
+        with patch("cli_webterm._tailscale_ip", return_value="100.104.8.125"):
+            unit_text = _render_webterm_gateway_unit("100.104.8.125")
+        expected_hash = rec.compute_gateway_code_hash(WEBTERM_GATEWAY_MODULE)
+        self.assertIn("Environment=AIRULESET_GATEWAY_CODE_HASH=" + expected_hash,
+                       unit_text)
+        # Must be between [Service] and [Install]
+        service_idx = unit_text.index("[Service]")
+        install_idx = unit_text.index("[Install]")
+        hash_idx = unit_text.index("AIRULESET_GATEWAY_CODE_HASH=")
+        self.assertGreater(hash_idx, service_idx)
+        self.assertLess(hash_idx, install_idx)
+
+    def test_lane_unit_carries_hash(self):
+        """render_gateway_unit (lane path) embeds the code hash."""
+        from cli_webterm_lane import render_gateway_unit
+        from cli_webterm import WEBTERM_GATEWAY_MODULE
+        import cli_webterm_reconcile as rec
+
+        class FakeSpec:
+            unit_note = ""
+            bind = "127.0.0.1"
+            gateway_port = 8081
+            dash_index = "/tmp/dash.html"
+            ttyd_port = 7683
+            profile = "david"
+            ttyd_service_name = "webterm-david-ttyd.service"
+            gateway_sock_basename = "webterm-david-gateway.sock"
+            ttyd_sock_basename = "webterm-david-ttyd.sock"
+            label = "(david lane)"
+            collector_mode = None
+
+        unit_text = render_gateway_unit(FakeSpec())
+        expected_hash = rec.compute_gateway_code_hash(WEBTERM_GATEWAY_MODULE)
+        self.assertIn("Environment=AIRULESET_GATEWAY_CODE_HASH=" + expected_hash,
+                       unit_text)
