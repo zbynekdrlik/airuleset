@@ -481,9 +481,7 @@ def default_box_class():
 def is_single_session_box_user(user: str = None) -> bool:
     """True iff `user` runs the fleet's ONE-tmux-session-per-account model
     (#264): a subdev stream account (AUTHORITY_BY_USER) or the gk box
-    `gatekeeper` account (SSH_ATTACH_EXTRA_USERS, #562), or the controller
-    box `airuleset` account (SSH_ATTACH_CONTROLLER_USERS, #985 — only
-    when default_box_class() == "controller"). The owner's `newlevel`
+    `gatekeeper` account (SSH_ATTACH_EXTRA_USERS, #562). The owner's `newlevel`
     boxes (dev1/dev2) run MANY project sessions and are NOT in this set.
 
     This is the ONE source of truth for that distinction. The #264 ssh
@@ -492,7 +490,14 @@ def is_single_session_box_user(user: str = None) -> bool:
     (`apply_stream_tmux_window_name`) names that single window -- so BOTH gate
     on this predicate. A multi-project box must NEVER get either: naming every
     window the same literal + `automatic-rename off` destroys the owner's
-    per-project navigation (#593, the #592 regression on dev1/dev2)."""
+    per-project navigation (#593, the #592 regression on dev1/dev2).
+
+    NOTE (#985): the controller's `airuleset` user is deliberately NOT in this
+    set — it attaches session `zbynek` (not whoami), so the sibling consumers
+    (`_owner_session_default`, `apply_stream_tmux_window_name`,
+    `apply_owner_session_created_audit`) must NOT flip for it. The ssh-attach
+    eligibility is widened ONLY inside `apply_stream_ssh_attach` via the
+    separate `_is_ssh_attach_eligible` helper."""
     import airuleset
     u = user or airuleset._current_user()
     # #867: a webterm OBSERVER (dominika) is in AUTHORITY_BY_USER only for the
@@ -500,10 +505,22 @@ def is_single_session_box_user(user: str = None) -> bool:
     # neither the #264 ssh-auto-attach nor the #554/#592 window-naming block.
     if u in airuleset.WEBTERM_OBSERVER_USERS:
         return False
-    if u in airuleset.AUTHORITY_BY_USER or u in SSH_ATTACH_EXTRA_USERS:
+    return u in airuleset.AUTHORITY_BY_USER or u in SSH_ATTACH_EXTRA_USERS
+
+
+def _is_ssh_attach_eligible(user):
+    """True iff `user` should get the #264 ssh auto-attach block.
+
+    This is `is_single_session_box_user(user)` PLUS the #985 controller
+    extension: the `airuleset` user on a `controller` box class. The
+    controller user is deliberately NOT in `is_single_session_box_user`
+    because that predicate's sibling consumers (`_owner_session_default`,
+    `apply_stream_tmux_window_name`, `apply_owner_session_created_audit`)
+    must NOT flip for it — the `airuleset` user attaches session `zbynek`
+    (not whoami), so the single-session-per-account contract does not hold."""
+    if is_single_session_box_user(user):
         return True
-    # #985: controller-only users — eligible only on the controller box.
-    if u in SSH_ATTACH_CONTROLLER_USERS and default_box_class() == "controller":
+    if user in SSH_ATTACH_CONTROLLER_USERS and default_box_class() == "controller":
         return True
     return False
 
@@ -591,13 +608,14 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     import airuleset
     bpath = bashrc_path or airuleset.BASHRC
     u = user or airuleset._current_user()
-    # The ssh-auto-attach eligibility set IS the single-session-per-account set
-    # (#593): subdev streams (AUTHORITY_BY_USER) + the gk `gatekeeper` account
-    # (SSH_ATTACH_EXTRA_USERS, #562) + the controller `airuleset` account
-    # (SSH_ATTACH_CONTROLLER_USERS, #985). Shared with the #592 window-name
-    # block via ONE predicate so the two can never drift on "which boxes are
-    # single-session".
-    should_have = is_single_session_box_user(u)
+    # The ssh-auto-attach eligibility is `_is_ssh_attach_eligible` — a SUPERSET
+    # of `is_single_session_box_user` that also covers the #985 controller
+    # `airuleset` account. The sibling consumers (`apply_stream_tmux_window_name`,
+    # `_owner_session_default`, `apply_owner_session_created_audit`) keep gating
+    # on the narrower `is_single_session_box_user` — the controller user attaches
+    # session `zbynek` (not whoami), so the single-session contract does not hold
+    # for them.
+    should_have = _is_ssh_attach_eligible(u)
     existing = bpath.read_text() if bpath.exists() else ""
     spans = _stream_marker_block_spans(existing)
     block = _ssh_attach_block_for_user(u)

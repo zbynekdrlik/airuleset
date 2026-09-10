@@ -1035,6 +1035,28 @@ class TestControllerSshAttach(TestCase):
                 '"$(whoami)"',
                 airuleset.STREAM_DEV_CWD_CHAIN))
 
+    def test_stream_block_golden_hash(self):
+        # Non-tautological lock: the pre-#985 STREAM_SSH_ATTACH_BLOCK's
+        # sha256 is baked here, not derived from the code under test.
+        import hashlib
+        h = hashlib.sha256(
+            airuleset.STREAM_SSH_ATTACH_BLOCK.encode()).hexdigest()
+        self.assertEqual(
+            h, "42fe3ea8b527613b749cb7825f6da7641771380e"
+               "b8baa998fa82977b69891755")
+
+    def test_controller_does_not_regress_sibling_consumers(self):
+        # RED-1 from fable review: widening is_single_session_box_user
+        # would flip _owner_session_default, apply_stream_tmux_window_name,
+        # and apply_owner_session_created_audit on the controller. The
+        # ssh-attach eligibility is scoped to _is_ssh_attach_eligible
+        # instead, so is_single_session_box_user must stay False for
+        # airuleset even on the controller.
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="controller"):
+            from cli_bashrc_appliers import is_single_session_box_user
+            self.assertFalse(is_single_session_box_user("airuleset"))
+
 
 # ---------------------------------------------------------------------------
 # #284: grouped-session cleanup survivor -- the launcher's exact-name -A
