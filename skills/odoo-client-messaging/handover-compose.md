@@ -28,8 +28,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   and it is the approval question for EVERY message (opening handover AND every
   follow-up), never only a new thread.** The FULL proposed client text MUST be
   INLINE as a `> ` quoted block — NEVER a share URL or path instead (#977).
-  A share URL may only ACCOMPANY an attachment; > ~1500 cp → two approvals;
-  `stop-check-question-quality.sh` Check 8 blocks a share URL with no `>` quote. Put in the chat message itself: (1) the
+  A share URL may only accompany an attachment; `stop-check-question-quality.sh`
+  Check 8 blocks a share URL with no `>` quote. Put in the chat message itself: (1) the
   target thread on its OWN SEPARATE, clearly-shown line — the exact thread name,
   the full human NAME (+ parent channel where it helps), NEVER only the internal
   channel number and NEVER only wrapped in prose:
