@@ -503,6 +503,105 @@ class HookBlockLogRedact988g(unittest.TestCase):
                 run_file.unlink(missing_ok=True)
 
 
+# G4. Test-driven blocks must not pollute the production log (#988 fix-forward)
+# ---------------------------------------------------------------------------
+
+class TestPytestSuppression988(unittest.TestCase):
+    """#988 fix-forward: when PYTEST_CURRENT_TEST is set (as it always is under
+    pytest) and no explicit AIRULESET_HOOK_BLOCK_LOG overrides, the default
+    ~/.claude/hook-blocks.log must NOT be written — otherwise the test suite
+    inflates the production metric."""
+
+    def test_default_log_not_written_under_pytest(self):
+        """A block under PYTEST_CURRENT_TEST with no explicit override must
+        NOT write to the default log file."""
+        with TemporaryDirectory() as d:
+            fake_home = Path(d) / "home"
+            fake_home.mkdir()
+            claude_dir = fake_home / ".claude"
+            claude_dir.mkdir()
+            default_log = claude_dir / "hook-blocks.log"
+            env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            env["PYTEST_CURRENT_TEST"] = "tests/test_hook_simplification_988.py::TestPytestSuppression988::test_default_log_not_written_under_pytest (call)"
+            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
+            # Remove any explicit override so the lib uses the default
+            env.pop("AIRULESET_HOOK_BLOCK_LOG", None)
+            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)
+            sid = "t988-pytest-suppress-%d" % os.getpid()
+            tp_dir = Path(d) / "transcript"
+            tp_dir.mkdir()
+            tp = tp_dir / "sess.jsonl"
+            tp.write_text(goal_armed_transcript())
+            presence = Path("/tmp/airuleset-presence-%s" % sid)
+            presence.touch()
+            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
+            run_file.write_text("4")  # over cap → will block
+            try:
+                payload = {
+                    "session_id": sid,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "some-unknown-cmd arg"},
+                    "transcript_path": str(tp),
+                }
+                r = subprocess.run(
+                    ["bash", str(HOOK_BMI)],
+                    input=json.dumps(payload), env=env,
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(r.returncode, 2, "should block")
+                self.assertFalse(default_log.exists(),
+                                 "default log must NOT be written when "
+                                 "PYTEST_CURRENT_TEST is set and no "
+                                 "AIRULESET_HOOK_BLOCK_LOG overrides")
+            finally:
+                presence.unlink(missing_ok=True)
+                run_file.unlink(missing_ok=True)
+
+    def test_explicit_override_writes_despite_pytest(self):
+        """When AIRULESET_HOOK_BLOCK_LOG=<path> is set, the log IS written
+        there even under PYTEST_CURRENT_TEST — so tests that want to assert
+        the log mechanism still work."""
+        with TemporaryDirectory() as d:
+            explicit_log = Path(d) / "explicit-blocks.log"
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(explicit_log)
+            env["PYTEST_CURRENT_TEST"] = "tests/test_hook_simplification_988.py::TestPytestSuppression988::test_explicit_override_writes_despite_pytest (call)"
+            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
+            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)
+            sid = "t988-pytest-explicit-%d" % os.getpid()
+            tp_dir = Path(d) / "transcript"
+            tp_dir.mkdir()
+            tp = tp_dir / "sess.jsonl"
+            tp.write_text(goal_armed_transcript())
+            presence = Path("/tmp/airuleset-presence-%s" % sid)
+            presence.touch()
+            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
+            run_file.write_text("4")
+            try:
+                payload = {
+                    "session_id": sid,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "some-unknown-cmd arg"},
+                    "transcript_path": str(tp),
+                }
+                subprocess.run(
+                    ["bash", str(HOOK_BMI)],
+                    input=json.dumps(payload), env=env,
+                    capture_output=True, text=True,
+                )
+                self.assertTrue(explicit_log.exists(),
+                                "explicit AIRULESET_HOOK_BLOCK_LOG path "
+                                "must be written even under PYTEST_CURRENT_TEST")
+                content = explicit_log.read_text()
+                self.assertIn("block-main-implementation", content)
+            finally:
+                presence.unlink(missing_ok=True)
+                run_file.unlink(missing_ok=True)
+
+
 # G3. Status breakdown
 # ---------------------------------------------------------------------------
 
