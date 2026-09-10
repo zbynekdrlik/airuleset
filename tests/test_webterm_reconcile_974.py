@@ -95,11 +95,11 @@ class TestReconcileLiveArgv(unittest.TestCase):
         self.assertEqual(len(restart_calls), 0)
 
     def test_mismatched_script_path_triggers_restart(self):
-        """A unit whose argv names a DIFFERENT script path (not worktree, but wrong)
-        must be restarted."""
+        """A unit whose argv names the SAME basename from a DIFFERENT directory
+        (not worktree, but wrong location) must be restarted."""
         import cli_webterm_reconcile as rec
 
-        old_path = "/home/user/.claude/old-airuleset-webterm-ttyd.sh"
+        old_path = "/home/old-user/.claude/airuleset-webterm-ttyd.sh"
         new_path = "/home/user/.claude/airuleset-webterm-ttyd.sh"
         self._pid_map = {"webterm-ttyd.service": "12345"}
         self._make_proc_cmdline(12345, ["/usr/bin/env", "bash", old_path])
@@ -162,6 +162,55 @@ class TestReconcileLiveArgv(unittest.TestCase):
         restarted = rec.reconcile_live_argv(
             self._run_systemctl,
             ["webterm-ttyd.service"],
+            rendered_paths,
+            log_prefix="webterm",
+            proc_root=Path(self._home) / "fake_proc",
+        )
+        self.assertEqual(restarted, [])
+
+    def test_real_ttyd_argv_no_false_positive(self):
+        """CRITICAL-1 fix: ttyd's real argv carries cli_webterm.py (the connect
+        script exec'd by the launcher), NOT the .sh launcher. The reconcile must
+        NOT flag this as stale — basenames differ (.py vs .sh)."""
+        import cli_webterm_reconcile as rec
+
+        # Real ttyd argv: the launcher exec's ttyd, which carries cli_webterm.py
+        repo = "/home/user/devel/airuleset"
+        ttyd_argv = [
+            "ttyd", "-i", "127.0.0.1", "-p", "7682", "-b", "/t",
+            "python3", repo + "/cli_webterm.py", "webterm-connect",
+        ]
+        self._pid_map = {"webterm-ttyd.service": "12345"}
+        self._make_proc_cmdline(12345, ttyd_argv)
+
+        # Rendered path is the .sh launcher — different basename
+        rendered_paths = {
+            "webterm-ttyd.service": repo + "/../.claude/airuleset-webterm-ttyd.sh",
+        }
+        restarted = rec.reconcile_live_argv(
+            self._run_systemctl,
+            ["webterm-ttyd.service"],
+            rendered_paths,
+            log_prefix="webterm",
+            proc_root=Path(self._home) / "fake_proc",
+        )
+        self.assertEqual(restarted, [])
+
+    def test_rendered_worktree_path_skipped(self):
+        """MEDIUM-3: if the rendered path itself is a worktree, reconcile must
+        skip (never restart into the same stale argv)."""
+        import cli_webterm_reconcile as rec
+
+        wt_rendered = "/home/user/devel/airuleset/.claude/worktrees/agent-x/cli_webterm_gateway.py"
+        self._pid_map = {"webterm-gateway.service": "12345"}
+        self._make_proc_cmdline(12345, [
+            "/usr/bin/env", "python3", wt_rendered, "--bind", "100.0.0.1",
+        ])
+
+        rendered_paths = {"webterm-gateway.service": wt_rendered}
+        restarted = rec.reconcile_live_argv(
+            self._run_systemctl,
+            ["webterm-gateway.service"],
             rendered_paths,
             log_prefix="webterm",
             proc_root=Path(self._home) / "fake_proc",

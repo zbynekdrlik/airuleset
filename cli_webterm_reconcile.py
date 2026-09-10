@@ -55,19 +55,28 @@ def _get_main_pid(run_systemctl, unit: str) -> int:
 def _argv_is_stale(argv: list[str], rendered_path: str) -> tuple[bool, str]:
     """Check whether ``argv`` references a stale/wrong script path.
 
-    Returns ``(is_stale, reason)``."""
+    Returns ``(is_stale, reason)``.
+
+    Two checks:
+    1. ANY argv element containing the worktree marker is stale (the incident
+       class — a .claude/worktrees/ path that will dangle after cleanup).
+    2. An argv element with the SAME basename as the rendered path but a
+       DIFFERENT directory is stale (a relocated script). Only same-basename
+       elements are compared, so ttyd's ``cli_webterm.py`` connect arg is
+       never compared against the ``.sh`` launcher (CRITICAL-1 fix)."""
     for part in argv:
         if WORKTREE_MARKER in part:
             return True, "worktree path in argv: %s" % part
-    # Check if any argv element looks like a script/module path that differs
-    # from the rendered one. We compare just the elements that end in .sh or
-    # .py (the launcher script or the gateway module).
+    # Secondary check: same-basename, different directory.
+    import os
     rendered_str = str(rendered_path)
+    rendered_basename = os.path.basename(rendered_str)
     for part in argv:
-        if part.endswith((".sh", ".py")) and "/" in part:
-            if part != rendered_str:
-                return True, "argv script %s differs from rendered %s" % (
-                    part, rendered_str)
+        if "/" not in part:
+            continue
+        if os.path.basename(part) == rendered_basename and part != rendered_str:
+            return True, "argv script %s differs from rendered %s" % (
+                part, rendered_str)
     return False, ""
 
 
@@ -89,6 +98,13 @@ def reconcile_live_argv(
     for unit in units:
         rendered = rendered_paths.get(unit)
         if rendered is None:
+            continue
+        # MEDIUM-3: if the rendered path itself is a worktree, restarting would
+        # loop into the same stale argv — warn and skip, never restart.
+        if WORKTREE_MARKER in str(rendered):
+            print("  %s: WARNING — rendered path %s is itself a worktree; "
+                  "skipping reconcile for %s (run install from the main checkout)"
+                  % (log_prefix, rendered, unit), file=sys.stderr)
             continue
         pid = _get_main_pid(run_systemctl, unit)
         if pid <= 0:
