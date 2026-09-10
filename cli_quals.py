@@ -1530,6 +1530,27 @@ def _tacit_window_flagged(rows, cwd=None, now=None, self_login=None,
     return tacit_wait, tacit_close
 
 
+def _compute_net_stale_w(ops_wait, cwd=None, ages_fn=None, now=None):
+    """#989: compute the net stale W count — ``_stale_ops_wait_flagged`` minus
+    the ``_tacit_window_flagged`` exemption.
+
+    ``_tacit_window_flagged`` returns a 2-tuple ``(tacit_wait, tacit_close)``
+    that must be unpacked and unioned before subtraction.  The #986 review
+    commit (55864130) inlined this subtraction in ``cmd_tickets_status`` but
+    forgot the unpacking, producing ``set - tuple`` → ``TypeError``.  This
+    helper encapsulates the correct pattern (matching ``cli_quals_cmd.py``
+    lines 528-531) so both call sites share the tested derivation.
+
+    Returns the count (``int``) of net-stale members.  Raises on any
+    upstream failure (the caller's ``try/except`` is the fail-open wrapper)."""
+    stale = _stale_ops_wait_flagged(ops_wait, cwd=cwd, ages_fn=ages_fn,
+                                    now=now)
+    tacit_wait, tacit_close = _tacit_window_flagged(ops_wait, cwd=cwd,
+                                                    ages_fn=ages_fn, now=now)
+    net_stale = stale - (tacit_wait | tacit_close)
+    return len(net_stale)
+
+
 # #699 — RELEASE-parked W freshness: the TIGHT hourly cadence, distinct from the
 # 24h `stale!` third-party-reminder window. Owner ruled (2026-08-25) that a
 # release-parked ops-wait member must be deployed-state re-checked (#588) by the

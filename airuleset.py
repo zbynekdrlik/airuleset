@@ -3263,18 +3263,14 @@ def cmd_tickets_status(args):
                 # docstring for the heuristic + fail-safe rationale).
                 entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
                 # #986: stale W count for the dispatch gate.
-                # Subtract the #799 tacit-window set from the raw stale
-                # set so the cache field matches the CLI --ops-wait
-                # rendered stale! count (one derivation, per #510).
-                # Fail-open: any error -> omit the field (hook falls
-                # back to total ops_wait).
+                # #989: use _compute_net_stale_w which correctly unpacks
+                # the (tacit_wait, tacit_close) tuple from
+                # _tacit_window_flagged (the inline set - tuple was a
+                # TypeError — #989). Fail-open: any error -> omit the
+                # field (hook falls back to total ops_wait).
                 try:
-                    _stale = _stale_ops_wait_flagged(
+                    entry["ops_wait_stale"] = _compute_net_stale_w(
                         ops_wait, cwd=root)
-                    _tacit = _tacit_window_flagged(
-                        ops_wait, cwd=root)
-                    _net_stale = _stale - _tacit
-                    entry["ops_wait_stale"] = len(_net_stale)
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
@@ -3340,13 +3336,11 @@ def cmd_tickets_status(args):
                 # #953: deploy-target exempt count (same as the slice path above).
                 entry["ops_wait_deploy_wait"] = _count_deploy_wait(ops_wait)
                 # #986: stale W count (same as the slice path above).
+                # #989: use _compute_net_stale_w (same fix as the slice
+                # path — the inline set - tuple was a TypeError).
                 try:
-                    _stale = _stale_ops_wait_flagged(
+                    entry["ops_wait_stale"] = _compute_net_stale_w(
                         ops_wait, cwd=root)
-                    _tacit = _tacit_window_flagged(
-                        ops_wait, cwd=root)
-                    _net_stale = _stale - _tacit
-                    entry["ops_wait_stale"] = len(_net_stale)
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
@@ -7306,6 +7300,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _tacit_window_flagged as _tacit_window_flagged,
+    _compute_net_stale_w as _compute_net_stale_w,
     _release_recheck_flagged as _release_recheck_flagged,
     _release_train_drained as _release_train_drained,
     _unpark_release_flagged as _unpark_release_flagged,
