@@ -324,5 +324,225 @@ class HookBlockLogging988(unittest.TestCase):
                 run_file.unlink(missing_ok=True)
 
 
+# G2. Measurement: ci-poll-repeat and ungated-issue-filing also log
+# ---------------------------------------------------------------------------
+
+class HookBlockLogCiPoll988g(unittest.TestCase):
+    """#988(g): block-ci-poll-repeat logs to hook-blocks.log on block."""
+
+    def test_cipoll_block_logs(self):
+        """A blocked CI loop should append to hook-blocks.log."""
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            state_dir = Path(d) / "state"
+            state_dir.mkdir()
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_CIPOLL_STATE_DIR"] = str(state_dir)
+            sid = "t988g-cpr-%d" % os.getpid()
+            run_id = "12345678"
+            key = "run-%s" % run_id
+            # Pre-seed: first loop already ran (second loop blocks)
+            first_file = state_dir / ("airuleset-cipoll-first-%s-%s" % (sid, key))
+            first_file.write_text("1")
+            payload = {
+                "session_id": sid,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {
+                    "command": "while true; do gh run view %s --json status; sleep 60; done" % run_id,
+                    "run_in_background": False,
+                },
+            }
+            r = subprocess.run(
+                ["bash", str(HOOK_CPR)],
+                input=json.dumps(payload), env=env,
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 2,
+                             "should block: " + r.stderr[:500])
+            self.assertTrue(log_file.exists(),
+                            "hook-blocks.log should be created on ci-poll block")
+            content = log_file.read_text()
+            self.assertIn("block-ci-poll-repeat", content)
+
+    def test_cipoll_pass_no_log(self):
+        """A passing ci-poll (no loop match) should NOT log."""
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            payload = {
+                "session_id": "t988g-cpr-pass-%d" % os.getpid(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hello"},
+            }
+            subprocess.run(
+                ["bash", str(HOOK_CPR)],
+                input=json.dumps(payload), env=env,
+                capture_output=True, text=True,
+            )
+            self.assertFalse(log_file.exists(),
+                             "hook-blocks.log should NOT be created on pass")
+
+
+class HookBlockLogUGI988g(unittest.TestCase):
+    """#988(g): block-ungated-issue-filing logs to hook-blocks.log on block."""
+
+    def test_worker_block_logs(self):
+        """A worker filing attempt should block AND log."""
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            payload = {
+                "session_id": "t988g-ugi-%d" % os.getpid(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "agent_id": "agent-worker-988",
+                "tool_input": {"command": "gh issue create --title test --body test"},
+            }
+            r = subprocess.run(
+                ["bash", str(HOOK_UGI)],
+                input=json.dumps(payload), env=env,
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 2)
+            self.assertTrue(log_file.exists(),
+                            "hook-blocks.log should be created on worker block")
+            content = log_file.read_text()
+            self.assertIn("block-ungated-issue-filing", content)
+
+    def test_pass_no_log(self):
+        """A non-filing command should NOT log."""
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            payload = {
+                "session_id": "t988g-ugi-pass-%d" % os.getpid(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo hello"},
+            }
+            subprocess.run(
+                ["bash", str(HOOK_UGI)],
+                input=json.dumps(payload), env=env,
+                capture_output=True, text=True,
+            )
+            self.assertFalse(log_file.exists(),
+                             "hook-blocks.log should NOT be created on pass")
+
+
+class HookBlockLogBMI988g(unittest.TestCase):
+    """#988(g): block-main-implementation no-log-on-pass."""
+
+    def test_pass_no_log(self):
+        """A passing command (subagent) should NOT log."""
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            payload = {
+                "session_id": "t988g-bmi-pass-%d" % os.getpid(),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "agent_id": "worker-1",
+                "tool_input": {"command": "echo hello"},
+            }
+            subprocess.run(
+                ["bash", str(HOOK_BMI)],
+                input=json.dumps(payload), env=env,
+                capture_output=True, text=True,
+            )
+            self.assertFalse(log_file.exists(),
+                             "hook-blocks.log should NOT be created on pass")
+
+
+class HookBlockLogRedact988g(unittest.TestCase):
+    """#988(g): secret commands are redacted in hook-blocks.log."""
+
+    def test_secret_redacted(self):
+        """A command containing 'secret' should be redacted."""
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            env = dict(os.environ)
+            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
+            sid = "t988g-redact-%d" % os.getpid()
+            tp_dir = Path(d) / "transcript"
+            tp_dir.mkdir()
+            tp = tp_dir / "sess.jsonl"
+            tp.write_text(goal_armed_transcript())
+            presence = Path("/tmp/airuleset-presence-%s" % sid)
+            presence.touch()
+            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
+            run_file.write_text("4")
+            try:
+                payload = {
+                    "session_id": sid,
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "vault secret show mypassword"},
+                    "transcript_path": str(tp),
+                }
+                subprocess.run(
+                    ["bash", str(HOOK_BMI)],
+                    input=json.dumps(payload), env=env,
+                    capture_output=True, text=True,
+                )
+                if log_file.exists():
+                    content = log_file.read_text()
+                    self.assertNotIn("mypassword", content)
+                    self.assertIn("<redacted>", content)
+            finally:
+                presence.unlink(missing_ok=True)
+                run_file.unlink(missing_ok=True)
+
+
+# G3. Status breakdown
+# ---------------------------------------------------------------------------
+
+class StatusBreakdown988g(unittest.TestCase):
+    """#988(g): airuleset.py status shows per-hook breakdown."""
+
+    def test_breakdown(self):
+        """_print_hook_blocks_count should print per-hook breakdown."""
+        from io import StringIO
+        import contextlib
+
+        with TemporaryDirectory() as d:
+            log_file = Path(d) / "hook-blocks.log"
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            lines = [
+                "%s\tblock-main-implementation\tsome cmd\n" % now,
+                "%s\tblock-main-implementation\tanother cmd\n" % now,
+                "%s\tblock-ci-poll-repeat\tgh run view\n" % now,
+                "%s\tblock-ungated-issue-filing\tgh issue create\n" % now,
+            ]
+            log_file.write_text("".join(lines))
+            import unittest.mock as m
+            with m.patch("airuleset.Path.home", return_value=Path(d).parent):
+                # Adjust: _print_hook_blocks_count reads Path.home() / ".claude" / "hook-blocks.log"
+                pass
+            # More direct: set the env and patch
+            claude_dir = Path(d) / ".claude"
+            claude_dir.mkdir()
+            log_in_claude = claude_dir / "hook-blocks.log"
+            log_in_claude.write_text("".join(lines))
+            import unittest.mock as m
+            buf = StringIO()
+            with m.patch("airuleset.Path.home", return_value=Path(d)):
+                with contextlib.redirect_stdout(buf):
+                    airuleset._print_hook_blocks_count()
+            output = buf.getvalue()
+            self.assertIn("hook blocks (24 h): 4", output)
+            self.assertIn("block-main-implementation 2", output)
+            self.assertIn("block-ci-poll-repeat 1", output)
+            self.assertIn("block-ungated-issue-filing 1", output)
+
+
 if __name__ == "__main__":
     unittest.main()

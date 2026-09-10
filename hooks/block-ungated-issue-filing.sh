@@ -189,6 +189,10 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null ||
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 [ -z "$CMD" ] && exit 0
 
+# #988(g): shared hook-block measurement log
+_HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
+[ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+
 # #842 req 1 -- a WORKTREE WORKER (subagent, payload `.agent_id` — the SAME
 # subagent signal block-subagent-bg-ci-poll.sh / subagent-stop-check-*.sh, #496,
 # already use) may NOT file a GitHub issue: it FIXES what it finds in-lane and
@@ -232,6 +236,7 @@ block as a `followup_candidates:` line (title + which criterion it clears + est.
 LoC) — the SUPERVISOR decides and files it, never the worker (#842). A return
 containing a `filed:` line is REJECTED at integration and the lane is sent back.
 MSG
+        log_hook_block "block-ungated-issue-filing" "$CMD"
         exit 2
     fi
 fi
@@ -1635,6 +1640,7 @@ of silently filing. See modules/quality/complete-planned-work.md and
 modules/quality/no-dropped-work.md. Genuine bypass: append
 `# airuleset:scope-gate-ok <reason>` to the command.
 MSG
+    log_hook_block "block-ungated-issue-filing" "$CMD"
     exit 2
 fi
 

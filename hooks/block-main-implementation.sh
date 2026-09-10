@@ -775,6 +775,9 @@ AWAY_S="${AIRULESET_MAIN_GUARD_AWAY_S:-900}"
 case "$AWAY_S" in ''|*[!0-9]*) AWAY_S=900 ;; esac
 _PRESENCE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-presence.sh"
 [ -r "$_PRESENCE_LIB" ] && . "$_PRESENCE_LIB"
+# #988(g): shared hook-block measurement log
+_HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
+[ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
 type airuleset_presence_is_away >/dev/null 2>&1 || airuleset_presence_is_away() { return 1; }
 AWAY=0
 if airuleset_presence_is_away "${SESSION_ID:-unknown}"; then AWAY=1; fi
@@ -850,21 +853,8 @@ log_block() {
     { printf '%s main-exec BLOCK session=%s tool=%s rule=%s match=%s cmd=%s\n' \
         "$(date -Is)" "$SESSION_ID" "$TOOL_NAME" "$RULE_TAG" "$detail" "$snippet" \
         >> "$BLOCK_LOG"; } 2>/dev/null || true
-    # #988: unified hook-blocks measurement log
-    _log_hook_block "$snippet"
-}
-
-# #988: append one line to the unified hook-blocks log so airuleset.py status
-# can print "hook blocks (24 h): N" — the owner's observability target.
-_log_hook_block() {
-    local snippet="${1:-}"
-    local log_file="${AIRULESET_HOOK_BLOCKS_LOG:-${HOME}/.claude/hook-blocks.log}"
-    local log_dir
-    log_dir=$(dirname "$log_file")
-    { mkdir -p "$log_dir" 2>/dev/null || true
-      printf '%s block-main-implementation %s\n' \
-          "$(date -Is)" "$(printf '%s' "$snippet" | head -c 80)" \
-          >> "$log_file"; } 2>/dev/null || true
+    # #988: unified hook-blocks measurement log (shared lib)
+    log_hook_block "block-main-implementation" "$snippet"
 }
 
 # ---- Bash path (#66): classify, don't size-gate ----
