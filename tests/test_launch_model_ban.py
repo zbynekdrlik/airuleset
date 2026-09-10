@@ -73,9 +73,9 @@ class TestBannedPredicateItself(TestCase):
 
     def test_clears_every_allowed_model(self):
         # #871: exact-id allowlist semantics -- only the CURRENT MODEL_TIERS
-        # ids (+ the Fable main [1m] form) clear the predicate. claude-opus-4-8
-        # is the SUPERSEDED predecessor (renamed to claude-opus-4-8) and is
-        # correctly BANNED now -- see test_superseded_opus_4_8_is_now_banned.
+        # ids (+ the Fable main [1m] form) clear the predicate. claude-opus-4-6
+        # is the SUPERSEDED predecessor (replaced by claude-opus-4-8) and is
+        # correctly BANNED now -- see test_superseded_opus_4_6_is_now_banned.
         for ok in ("claude-fable-5-1[1m]", "claude-fable-5-1",
                    "claude-opus-4-8[1m]", "claude-opus-4-8",
                    "claude-sonnet-5", "claude-haiku-4-5"):

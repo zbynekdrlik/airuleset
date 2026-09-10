@@ -578,7 +578,7 @@ class TestAdvisorHistoryPreserved(TestCase):
         self.assertIn("Sonnet 5 could not reliably carry the coordinator role", a)
         self.assertIn("within 0.5% of Fable 5 on CursorBench 3.2", a)
         self.assertIn("https://www.anthropic.com/news/claude-opus-5", a)
-        self.assertIn("community reports of Opus 4.8 degradation", a)
+        self.assertIn("community reports of Opus 4.6 degradation", a)
         self.assertIn("no 4.6 model regression so far", a)
 
     def test_opus_5_era_section_is_marked_superseded(self):
@@ -830,23 +830,26 @@ class TestNoOpus46Residue(TestCase):
         import airuleset
         self.assertTrue(airuleset.is_allowed_model("claude-opus-4-8"))
 
-    def test_no_opus_4_6_in_governance(self):
-        import subprocess
-        # Scan governance surfaces for the old id — modules, skills, agents,
-        # hooks (not tests, not history, not airuleset.py itself whose
-        # docstrings legitimately name it as a superseded example).
-        r = subprocess.run(
-            ["grep", "-rlE", r"claude-opus-4-6|Opus 4\.6",
-             "--include=*.md", "--include=*.sh",
-             "--exclude-dir=.git",
-             "--exclude-dir=rules-reference",
-             "."],
-            capture_output=True, text=True, cwd=str(ROOT))
-        hits = [f for f in r.stdout.strip().splitlines()
-                if f and not f.startswith("./tests/")]
-        self.assertEqual(hits, [],
-                         "Stale claude-opus-4-6 / Opus 4.6 found in "
-                         "governance files: %s" % hits)
+    def test_no_opus_4_6_in_live_dispatch_surfaces(self):
+        # The exact id must not appear in LIVE dispatch surfaces: agent
+        # frontmatter, hook allowlists, module tier tables, SKILL live
+        # sections. Historical narrative (fable-advisor ### dated sections,
+        # playbook lessons, airuleset.py docstrings) legitimately names it.
+        import airuleset
+        # MODEL_TIERS value
+        self.assertNotEqual(airuleset.MODEL_TIERS["opus"], "claude-opus-4-6")
+        # Agent frontmatter pins
+        for agent in ("agents/autopilot-worker.md",
+                      "agents/ticket-validator.md"):
+            fm = read(agent).split("---")[1]
+            self.assertNotIn("claude-opus-4-6", fm,
+                             "%s frontmatter still pins 4-6" % agent)
+        # Hook allowlist
+        hook = read("hooks/block-unpinned-model-dispatch.sh")
+        for line in hook.splitlines():
+            if "ALLOWLIST_RE" in line and "=" in line:
+                self.assertNotIn("claude-opus-4-6", line,
+                                 "hook allowlist still contains 4-6")
 
 
 if __name__ == "__main__":
