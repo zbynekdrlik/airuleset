@@ -113,6 +113,8 @@ RECLAIMABLE_CLASSES = frozenset({
     "android-build", "scratch-worktree",
     # #968 — stale agent worktrees (drain rung, every box class):
     "stale-agent-worktree",
+    # #980 — dead-session /tmp/claude-<uid>/ scratchpad dirs:
+    "session-scratch",
 })
 
 # #854 — the ROOT-owned cache classes: their deletes go through `sudo -n` when
@@ -1345,7 +1347,9 @@ def _default_running_claude_version():
     (e.g. `2.1.258 (Claude Code)` → `2.1.258`). None on any failure → the guard
     then KEEPS every version dir (fail-safe: never delete the active binary)."""
     try:
-        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
+        env = dict(os.environ)
+        env["PATH"] = os.path.join(os.path.expanduser("~"), ".local", "bin") + ":" + env.get("PATH", "")
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10, env=env)
         m = _re.search(r"(\d+\.\d+\.\d+)", r.stdout or "")
         return m.group(1) if m else None
     except Exception as e:
@@ -2695,6 +2699,13 @@ def _plan_home_snapshot(home, now):
                  "reason": "home-snapshot discovery error: %r" % e}]
 
 
+
+
+def _plan_session_scratch(home, now):
+    """#980 — dead-session /tmp/claude-<uid>/ scratchpad dirs."""  # noqa: E501
+    from watchdog.disk_guard_runner import discover_session_scratch
+    return [_norm_action("session-scratch", r, "delete")
+            for r in discover_session_scratch(now=now, home=home)]
 def _default_planners(home, now, scratch_rows=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
@@ -2705,6 +2716,7 @@ def _default_planners(home, now, scratch_rows=None):
     return [
         # #920 — cheapest/safest first: test-runner /tmp + runner diag + npm/uv cache
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
+        ("session-scratch", lambda: _plan_session_scratch(home, now)),
         ("runner-diag", lambda: _plan_runner_diag(home, now)),
         ("npm-uv-cache", lambda: _plan_npm_uv_cache(home, now)),
         ("apt-cache", lambda: _plan_apt_cache(home, now)),
@@ -3053,6 +3065,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 continue
             if kind == "skip":
                 rung_lines.append(_log_line(now, "SKIP", path, planned, reason))
+                status.setdefault("drain_skipped_rungs", []).append({"rung": _label, "cls": acls, "path": path, "reason": reason})
                 continue
             if kind == "report":
                 rung_lines.append(_log_line(now, "REPORT", path, planned,
@@ -3957,6 +3970,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 if isinstance(_cur, dict):
                     _cur["drain_exhausted"] = post["drain_exhausted"]
                     _cur["drain_exhausted_streak"] = post["drain_exhausted_streak"]
+                    # #980: carry per-rung skip reasons into status.json
+                    _cur["drain_skipped_rungs"] = status.get("drain_skipped_rungs", [])
                     _cur["worst_pct"] = post["worst_pct"]
                     _cur["level"] = post["level"]
                     _cur["ts"] = post["ts"]
