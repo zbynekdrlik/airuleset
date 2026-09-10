@@ -595,6 +595,27 @@ if [ -n "$ISSUE_NUM" ]; then
     # The App identity (distinct from the maintainer) restores the
     # self-vs-assigned distinguishability the pre-App shared-PAT setup destroyed.
     ME=$(python3 "$REPO_DIR/airuleset.py" authority --self-login 2>/dev/null || echo "")
+    # #976: direct shell-level App-token 403 detection — a belt on the python
+    # `authority --self-login` chain. When ME is empty (the python chain could
+    # not resolve the identity — missing App-token dir, stale deploy, import
+    # error), probe `gh api user` directly: a 403 with "not accessible by
+    # integration" is the DEFINITIVE, structural signal of a GitHub App
+    # installation token (never intermittent, never a transient). On that
+    # signal, set ME to the known App bot login constant. This makes identity
+    # resolution independent of _is_gh_app_token_box() directory detection
+    # and of the python subprocess chain — any ONE of the three paths
+    # (python --self-login, this direct 403 probe, the #773 --app-bot-login
+    # fallback below) is sufficient. Fail-SAFE: a non-403 failure (broken gh,
+    # network error) leaves ME empty → falls through to the existing BLOCK.
+    # The constant is hardcoded here (not fetched from python) PRECISELY so
+    # this path works when the python chain is broken.
+    if [ -z "$ME" ]; then
+        _GH_API_USER_ERR=$(gh api user 2>&1 >/dev/null) || true
+        if grep -qi '403' <<< "$_GH_API_USER_ERR"; then
+            ME="app/odoo-erp-stream-tokens"
+            echo "#976: ME resolved via direct 403 detection (authority --self-login returned empty)" >&2
+        fi
+    fi
     MAINTAINER_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --maintainer-login 2>/dev/null || echo "")
     if [ -n "$REPO_ARG" ]; then
         AUTHOR=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json author -q .author.login 2>/dev/null || echo "")
