@@ -31,6 +31,8 @@ set -euo pipefail
 #
 # Bypass: '# airuleset:manual-drain-ok <owner order ref>' (ref required, logged).
 # Exit code 2 = block the tool call.
+#
+# Dry-run (#963): echo '{"tool_input":{"command":"<cmd>"}}' | bash hooks/block-manual-remote-drain.sh; echo "exit=$?"
 
 PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
@@ -80,7 +82,10 @@ DRAIN_TARGETS = [
     r'/home/[^/]+/\.claude\b',
     r'\$HOME/\.claude\b',
     r'actions-runner',
-    r'\.cache\b',
+    r'~/\.cache\b',
+    r'/home/[^/]+/\.cache\b',
+    r'\$HOME/\.cache\b',
+    r'/root/\.cache\b',
     r'/var/cache\b',
     r'/var/lib/containerd\b',
     r'/var/lib/docker\b',
@@ -96,14 +101,15 @@ DELETE_SHAPES = [
     r'\bfind\b[^;|&]*-delete\b',
     # find with -exec rm
     r'\bfind\b[^;|&]*-exec\s+rm\b',
+    # xargs rm (piped from find)
+    r'\bxargs\b[^;|&]*\brm\b',
     # swapoff (no target needed — always a drain)
     r'\bswapoff\b',
-    # container image removal
-    r'\b(ctr|docker|podman|nerdctl)\s+[a-z]*\s*(rm|rmi|prune)\b',
+    # container image removal / system prune (not bare `docker rm` = deploy)
+    r'\b(ctr|docker|podman|nerdctl)\s+[a-z]*\s*(rmi|prune)\b',
     r'\b(ctr|docker|podman|nerdctl)\s+(image|images|system)\s+(rm|rmi|prune)\b',
-    # pkill / kill (cross-user process kill)
+    # pkill / kill of another user's processes (requires drain target path)
     r'\b(pkill|killall)\b',
-    r'\bkill\s+(-[0-9]+\s+|-KILL\s+|-TERM\s+|-9\s+|-s\s+\S+\s+)',
 ]
 DELETE_SHAPE_RE = re.compile('|'.join(DELETE_SHAPES), re.IGNORECASE)
 
@@ -209,9 +215,10 @@ def is_ssh_drain(segment):
     # Container prune/rmi and swapoff need no target path match — they are
     # always a drain shape regardless of target.
     NO_TARGET_RE = re.compile(
-        r'\b(ctr|docker|podman|nerdctl)\s+[a-z]*\s*(rm|rmi|prune)\b'
+        r'\b(ctr|docker|podman|nerdctl)\s+[a-z]*\s*(rmi|prune)\b'
         r'|\b(ctr|docker|podman|nerdctl)\s+(image|images|system)\s+(rm|rmi|prune)\b'
-        r'|\bswapoff\b',
+        r'|\bswapoff\b'
+        r'|\b(pkill|killall)\s+-u\b',
         re.IGNORECASE)
 
     def _is_drain(seg_text):

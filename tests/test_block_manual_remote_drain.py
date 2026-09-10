@@ -184,6 +184,40 @@ class TestAllowsSafeCommands(_Runner):
         r = self.run_hook("")
         self.assertEqual(r.returncode, 0)
 
+    def test_allows_ssh_rm_rf_non_drain_path(self):
+        """Y-4: rm -rf on a non-drain path (deploy old release) must pass."""
+        r = self.run_hook('ssh user@host "rm -rf /opt/app/releases/old"')
+        self.assertEqual(r.returncode, 0, f"stderr={r.stderr}")
+
+    def test_allows_ssh_docker_rm_container(self):
+        """Y-1: bare docker rm (deploy container stop) must pass."""
+        r = self.run_hook('ssh user@host "docker rm -f myapp"')
+        self.assertEqual(r.returncode, 0, f"stderr={r.stderr}")
+
+    def test_allows_ssh_rm_node_modules_cache(self):
+        """Y-1: node_modules/.cache is NOT a session/home cache target."""
+        r = self.run_hook('ssh user@host "rm -rf node_modules/.cache"')
+        self.assertEqual(r.returncode, 0, f"stderr={r.stderr}")
+
+
+class TestBlocksPkillCrossUser(_Runner):
+    """pkill/killall -u (cross-user process kill) over ssh."""
+
+    def test_blocks_ssh_pkill_u(self):
+        r = self.run_hook('ssh user@host "pkill -u claudy -f claude"')
+        self.assertEqual(r.returncode, 2, f"stdout={r.stdout}\nstderr={r.stderr}")
+
+    def test_blocks_ssh_killall_u(self):
+        r = self.run_hook('ssh user@host "killall -u claudy python3"')
+        self.assertEqual(r.returncode, 2, f"stdout={r.stdout}\nstderr={r.stderr}")
+
+    def test_blocks_ssh_xargs_rm(self):
+        """Y-3: find | xargs rm is the first thing reached after -exec is blocked."""
+        r = self.run_hook(
+            'ssh user@host "find /tmp/claude-1000 -mmin +720 | xargs rm -rf"'
+        )
+        self.assertEqual(r.returncode, 2, f"stdout={r.stdout}\nstderr={r.stderr}")
+
 
 class TestBypass(_Runner):
     """Bypass with and without a ref."""
