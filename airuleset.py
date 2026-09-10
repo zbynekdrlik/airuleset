@@ -2109,7 +2109,12 @@ def cmd_status(args):
 
 
 def _print_hook_blocks_count():
-    """#988: print the number of hook blocks in the last 24 hours, with per-hook breakdown."""
+    """#988: print the number of hook blocks in the last 24 hours, with per-hook breakdown.
+
+    Only well-formed 3-column tab-separated rows are counted. Legacy rows
+    (space-separated, from the first inline writer) are skipped and reported
+    as 'legacy rows skipped: N' (#988 fix-forward).
+    """
     hook_blocks_log = Path.home() / ".claude" / "hook-blocks.log"
     if not hook_blocks_log.exists():
         return
@@ -2117,6 +2122,7 @@ def _print_hook_blocks_count():
     cutoff = (_dt.datetime.now(_dt.timezone.utc)
               - _dt.timedelta(hours=24)).isoformat()
     count = 0
+    legacy = 0
     per_hook: dict = {}
     try:
         with open(hook_blocks_log, "r", errors="replace") as fh:
@@ -2124,13 +2130,18 @@ def _print_hook_blocks_count():
                 stripped = line.strip()
                 if not stripped:
                     continue
-                # Format: <ISO-ts>\t<hook-name>\t<snippet>
-                # Legacy format: <ISO-ts> <hook-name> <snippet>
-                parts = stripped.split("\t", 2) if "\t" in stripped else stripped.split(" ", 2)
-                ts = parts[0] if parts else ""
+                # Well-formed format: <ISO-ts>\t<hook-name>\t<snippet>
+                if "\t" not in stripped:
+                    legacy += 1
+                    continue
+                parts = stripped.split("\t", 2)
+                if len(parts) < 3:
+                    legacy += 1
+                    continue
+                ts = parts[0]
                 if ts >= cutoff:
                     count += 1
-                    hook_name = parts[1] if len(parts) > 1 else "unknown"
+                    hook_name = parts[1]
                     per_hook[hook_name] = per_hook.get(hook_name, 0) + 1
     except OSError as exc:
         print(f"\nhook blocks (24 h): error reading log: {exc}")
@@ -2142,6 +2153,8 @@ def _print_hook_blocks_count():
             sorted(per_hook.items(), key=lambda x: -x[1])
         )
         print(f"  {breakdown}")
+    if legacy:
+        print(f"  legacy rows skipped: {legacy}")
 
 
 # (systemd --user helpers + File-Drop service install: _run_systemctl / _whoami /
