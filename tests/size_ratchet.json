@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 8504,
+    "airuleset.py": 8510,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_account_bootstrap.py": 285,
@@ -40,18 +40,18 @@
     "cli_tmux_provisioning.py": 2005,
     "cli_vault.py": 1080,
     "cli_wdrain.py": 274,
-    "cli_webterm.py": 1852,
+    "cli_webterm.py": 1865,
     "cli_webterm_access.py": 378,
     "cli_webterm_dash_template.py": 997,
     "cli_webterm_david.py": 196,
     "cli_webterm_dominika.py": 250,
     "cli_webterm_gateway.py": 1211,
-    "cli_webterm_lane.py": 464,
+    "cli_webterm_lane.py": 475,
     "cli_webterm_marek.py": 256,
     "cli_webterm_only.py": 806,
     "cli_webterm_profiles.py": 859,
     "cli_webterm_pwa.py": 215,
-    "cli_webterm_reconcile.py": 220,
+    "cli_webterm_reconcile.py": 320,
     "cli_webterm_tunnel.py": 190,
     "cli_webterm_zbynek.py": 154,
     "cli_worktree_sweep.py": 1994,
@@ -612,7 +612,8 @@
     "watchdog/usage.py": 395,
     "watchdog/wedge.py": 315,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "tests/test_webterm_reconcile_code_hash_974.py": 360
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,

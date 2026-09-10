@@ -2005,9 +2005,12 @@ def cmd_status(args):
         rendered = _reconcile.enumerate_status_units()
         if rendered:
             from cli_filedrop_watchdog import _run_systemctl
+            from cli_webterm import WEBTERM_GATEWAY_MODULE
+            gw_hash = _reconcile.compute_gateway_code_hash(WEBTERM_GATEWAY_MODULE)
+            _code_hashes = {u: gw_hash for u in rendered if "gateway" in u}
             print("\nwebterm live argv:")
             for line in _reconcile.check_webterm_argv_health(
-                    _run_systemctl, rendered):
+                    _run_systemctl, rendered, code_hashes=_code_hashes):
                 print(line)
     except Exception as e:
         # webterm not provisioned or module unavailable — non-fatal for status

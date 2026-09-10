@@ -1424,13 +1424,20 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     # IP, never a wildcard (in Access mode bind_ip is already reset to loopback and
     # survives only in the header comment, so this is a no-op there).
     bind_ip = _reject_wildcard_bind(bind_ip, "gateway unit")
-    return note + (tmpl.replace("{{BIND_IP}}", bind_ip)
-                   .replace("{{GATEWAY_MODULE}}", str(WEBTERM_GATEWAY_MODULE))
-                   .replace("{{GATEWAY_PORT}}", str(WEBTERM_GATEWAY_PORT))
-                   .replace("{{DASH_INDEX}}", str(WEBTERM_DASH_INDEX))
-                   .replace("{{CRED_PATH}}", cred_sub)
-                   .replace("{{TTYD_PORT}}", str(WEBTERM_TTYD_PORT))
-                   .replace("{{TTYD_BASE}}", WEBTERM_TTYD_BASE))
+    # #974 reopened: embed a content hash of the gateway code set so a code
+    # change (same argv) triggers the file-change restart gate AND the reconcile.
+    import cli_webterm_reconcile as _rec
+    code_hash = _rec.compute_gateway_code_hash(WEBTERM_GATEWAY_MODULE)
+    rendered = note + (tmpl.replace("{{BIND_IP}}", bind_ip)
+                       .replace("{{GATEWAY_MODULE}}", str(WEBTERM_GATEWAY_MODULE))
+                       .replace("{{GATEWAY_PORT}}", str(WEBTERM_GATEWAY_PORT))
+                       .replace("{{DASH_INDEX}}", str(WEBTERM_DASH_INDEX))
+                       .replace("{{CRED_PATH}}", cred_sub)
+                       .replace("{{TTYD_PORT}}", str(WEBTERM_TTYD_PORT))
+                       .replace("{{TTYD_BASE}}", WEBTERM_TTYD_BASE))
+    return rendered.replace(
+        "\n[Install]",
+        "\nEnvironment=AIRULESET_GATEWAY_CODE_HASH=%s\n\n[Install]" % code_hash)
 
 
 # dev1's tailscale IP must be inside the CGNAT block tailscale uses
@@ -1666,7 +1673,10 @@ def setup_webterm_service(run=None):
     # #974: reconcile LIVE process argv against the rendered paths — a unit
     # started from a stale/worktree path keeps the broken argv across installs
     # because _webterm_apply_restarts only checks file-change, not live-argv.
+    # #974 reopened: also check gateway code hash (a code change is invisible
+    # to the argv predicate when the script path stays the same).
     import cli_webterm_reconcile as _reconcile
+    gw_hash = _reconcile.compute_gateway_code_hash(WEBTERM_GATEWAY_MODULE)
     _reconcile.reconcile_live_argv(
         _run_systemctl,
         ["webterm-ttyd.service", "webterm-gateway.service"],
@@ -1675,6 +1685,7 @@ def setup_webterm_service(run=None):
             "webterm-gateway.service": str(WEBTERM_GATEWAY_MODULE),
         },
         log_prefix="webterm",
+        code_hashes={"webterm-gateway.service": gw_hash},
     )
 
     # #635: in Access mode the public front is the MANAGED cloudflared tunnel —
