@@ -41,9 +41,9 @@ MANAGED_RECORDS = [
         "zone": "newlevel.media",
         "name": "ar.newlevel.media",
         "type": "A",
-        "content": "100.101.214.103",
+        "content": "159.69.209.249",
         "proxied": False,
-        "comment": "airuleset-managed (#982) — owner break-glass SSH",
+        "comment": "airuleset-managed (#982/#985) — owner break-glass SSH (public IP)",
     },
 ]
 

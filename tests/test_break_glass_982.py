@@ -39,11 +39,11 @@ class TestRunbook(unittest.TestCase):
         path = REPO / "docs" / "break-glass.md"
         self.assertTrue(path.exists(), "docs/break-glass.md must exist")
 
-    def test_break_glass_md_is_at_most_15_lines(self):
+    def test_break_glass_md_is_at_most_35_lines(self):
         path = REPO / "docs" / "break-glass.md"
         lines = path.read_text(encoding="utf-8").splitlines()
-        self.assertLessEqual(len(lines), 15,
-                             "break-glass.md must be <=15 lines")
+        self.assertLessEqual(len(lines), 35,
+                             "break-glass.md must be <=35 lines")
 
     def test_break_glass_md_has_key_content(self):
         text = (REPO / "docs" / "break-glass.md").read_text()
@@ -54,7 +54,30 @@ class TestRunbook(unittest.TestCase):
         self.assertIn("airuleset@airuleset", text,
                       "must mention MagicDNS fallback")
         self.assertIn("100.101.214.103", text,
-                      "must show the IP visibly (not just in HTML comment)")
+                      "must show the tailscale IP")
+        self.assertIn("159.69.209.249", text,
+                      "must show the public IP (#985)")
+
+    def test_break_glass_md_any_device_section_comes_first(self):
+        """#985: the 'from any device' SSH password section must appear
+        BEFORE the laptop/tailscale/key section."""
+        text = (REPO / "docs" / "break-glass.md").read_text()
+        any_device_pos = text.find("any device")
+        laptop_pos = text.find("laptop")
+        self.assertGreater(any_device_pos, -1,
+                           "must have 'any device' section")
+        self.assertGreater(laptop_pos, -1,
+                           "must have 'laptop' section")
+        self.assertLess(any_device_pos, laptop_pos,
+                        "'any device' must come BEFORE 'laptop'")
+
+    def test_break_glass_md_has_password_rotation(self):
+        """#985: the runbook must document password rotation."""
+        text = (REPO / "docs" / "break-glass.md").read_text()
+        self.assertIn("chpasswd", text,
+                      "must mention chpasswd for rotation")
+        self.assertIn("secret show", text,
+                      "must mention secret show for re-delivery")
 
     def test_machine_identities_has_pointer(self):
         text = (REPO / "modules" / "core" / "machine-identities.md").read_text()
@@ -361,8 +384,9 @@ class TestControllerDNS(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_correct_resolution_is_ok(self):
+        """Each name resolves to its per-name expected IP (#985)."""
         def resolve(name):
-            return g.CONTROLLER_TAILSCALE_IP
+            return g.CONTROLLER_DNS_EXPECTED.get(name, g.CONTROLLER_TAILSCALE_IP)
 
         with _patch_box_class("controller"):
             rows = g.check_controller_dns(resolve_fn=resolve)
@@ -391,11 +415,12 @@ class TestControllerDNS(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("UNRESOLVABLE", msg)
 
-    def test_multi_address_with_tailscale_ip_is_ok(self):
-        """HIGH-1 fix: a multi-homed name (public + tailscale) must be OK
-        when the tailscale IP is in the set, even if not first."""
+    def test_multi_address_with_expected_ip_is_ok(self):
+        """#985: a multi-homed name is OK when its PER-NAME expected IP
+        is in the returned set."""
         def resolve(name):
-            return {"159.69.209.249", g.CONTROLLER_TAILSCALE_IP}
+            expected = g.CONTROLLER_DNS_EXPECTED.get(name, g.CONTROLLER_TAILSCALE_IP)
+            return {"1.2.3.4", expected}
 
         with _patch_box_class("controller"):
             rows = g.check_controller_dns(resolve_fn=resolve)
@@ -403,15 +428,30 @@ class TestControllerDNS(unittest.TestCase):
             self.assertTrue(ok, "%s should be OK: %s" % (name, msg))
             self.assertIn("OK", msg)
 
-    def test_multi_address_without_tailscale_ip_is_drift(self):
+    def test_multi_address_without_expected_ip_is_drift(self):
         def resolve(name):
-            return {"159.69.209.249", "1.2.3.4"}
+            return {"99.99.99.99", "1.2.3.4"}
 
         with _patch_box_class("controller"):
             rows = g.check_controller_dns(resolve_fn=resolve)
         for name, ok, msg in rows:
             self.assertFalse(ok)
             self.assertIn("DRIFT", msg)
+
+    def test_ar_expects_public_ip(self):
+        """#985: ar.newlevel.media expects the PUBLIC IP, not tailscale."""
+        self.assertEqual(
+            g.CONTROLLER_DNS_EXPECTED["ar.newlevel.media"],
+            g.CONTROLLER_PUBLIC_IP)
+        self.assertNotEqual(
+            g.CONTROLLER_DNS_EXPECTED["ar.newlevel.media"],
+            g.CONTROLLER_TAILSCALE_IP)
+
+    def test_magicDNS_expects_tailscale_ip(self):
+        """airuleset (MagicDNS) expects the tailscale IP."""
+        self.assertEqual(
+            g.CONTROLLER_DNS_EXPECTED["airuleset"],
+            g.CONTROLLER_TAILSCALE_IP)
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +479,174 @@ class TestBreakGlassConst(unittest.TestCase):
             found = any(blob in pk for pk in cli_owner_keys.OWNER_PUBKEYS)
             self.assertTrue(found,
                             "break-glass key blob must be in OWNER_PUBKEYS")
+
+
+# ---------------------------------------------------------------------------
+# (5) sshd password login (#985)
+# ---------------------------------------------------------------------------
+class TestSshdPasswordRender(unittest.TestCase):
+    """Render of the sshd password drop-in (#985)."""
+
+    def test_render_has_match_user(self):
+        content = g.render_sshd_password_conf()
+        self.assertIn("Match User airuleset", content)
+
+    def test_render_has_password_auth_yes(self):
+        content = g.render_sshd_password_conf()
+        self.assertIn("PasswordAuthentication yes", content)
+
+    def test_render_has_kbd_interactive(self):
+        content = g.render_sshd_password_conf()
+        self.assertIn("KbdInteractiveAuthentication yes", content)
+
+    def test_render_is_byte_identical_to_live(self):
+        """The rendered text must match the live file the supervisor
+        already applied (the supervisor read it and posted it as the
+        RE-SCOPE comment)."""
+        expected = (
+            "# airuleset owner directive 2026-09-10: password login for "
+            "the airuleset account only (break-glass from any device); "
+            "fail2ban sshd jail guards it\n"
+            "Match User airuleset\n"
+            "    PasswordAuthentication yes\n"
+            "    KbdInteractiveAuthentication yes\n"
+        )
+        self.assertEqual(g.render_sshd_password_conf(), expected)
+
+    def test_render_custom_user(self):
+        content = g.render_sshd_password_conf(user="testuser")
+        self.assertIn("Match User testuser", content)
+        self.assertNotIn("airuleset", content.split("Match User")[1]
+                         .split("\n")[0])
+
+    def test_path_is_60_prefix(self):
+        self.assertTrue(g.SSHD_PASSWORD_PATH.startswith(
+            "/etc/ssh/sshd_config.d/60-"))
+
+
+class TestSshdPasswordProvision(unittest.TestCase):
+    """Provisioning of the sshd password drop-in (#985)."""
+
+    def test_skipped_on_non_controller(self):
+        with _patch_box_class("workstation"):
+            result = g.provision_sshd_password()
+        self.assertIn("skipped", result)
+
+    def test_unchanged_short_circuits(self):
+        """Byte-identical file skips write + reload."""
+        content = g.render_sshd_password_conf()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-password.conf")
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            with _patch_box_class("controller"):
+                result = g.provision_sshd_password(run=fake_run, dest=dest)
+        self.assertIn("unchanged", result)
+        self.assertEqual(calls, [])
+
+    def test_applies_on_controller_with_sudo(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-password.conf")
+            with _patch_box_class("controller"):
+                result = g.provision_sshd_password(run=fake_run, dest=dest)
+        self.assertIn("applied", result)
+        # Must have called sshd -t before mv.
+        verbs = []
+        for call in calls:
+            for arg in call:
+                if arg in ("mkdir", "tee", "chmod", "sshd", "mv",
+                           "systemctl"):
+                    verbs.append(arg)
+                    break
+        self.assertEqual(verbs, ["mkdir", "tee", "chmod", "sshd", "mv",
+                                 "systemctl"])
+
+    def test_sshd_t_failure_blocks_apply(self):
+        """If sshd -t fails, the drop-in must NOT be moved into place."""
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            rc = 0
+            stderr = ""
+            if "sshd" in argv:
+                rc = 1
+                stderr = "bad config"
+            class R:
+                returncode = rc
+                stdout = ""
+            R.stderr = stderr
+            return R()
+
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-password.conf")
+            with _patch_box_class("controller"):
+                result = g.provision_sshd_password(run=fake_run, dest=dest)
+        self.assertIn("FAILED", result)
+        self.assertIn("sshd -t", result)
+        # mv must NOT have been called.
+        mv_calls = [c for c in calls if "mv" in c]
+        self.assertEqual(mv_calls, [])
+
+
+class TestSshdPasswordStatus(unittest.TestCase):
+    """Status check for the sshd password drop-in (#985)."""
+
+    def test_non_controller_is_na(self):
+        with _patch_box_class("workstation"):
+            ok, msg = g.check_sshd_password_status()
+        self.assertTrue(ok)
+        self.assertIn("n/a", msg)
+
+    def test_missing_is_red(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "nonexistent.conf")
+            with _patch_box_class("controller"):
+                ok, msg = g.check_sshd_password_status(dest=dest)
+        self.assertFalse(ok)
+        self.assertIn("MISSING", msg)
+
+    def test_matching_content_is_ok(self):
+        content = g.render_sshd_password_conf()
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-password.conf")
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            with _patch_box_class("controller"):
+                ok, msg = g.check_sshd_password_status(dest=dest)
+        self.assertTrue(ok)
+        self.assertIn("OK", msg)
+        self.assertIn("sshd password login", msg)
+
+    def test_different_content_is_drift(self):
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-password.conf")
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write("Match User nobody\n    PasswordAuthentication no\n")
+            with _patch_box_class("controller"):
+                ok, msg = g.check_sshd_password_status(dest=dest)
+        self.assertFalse(ok)
+        self.assertIn("DRIFT", msg)
 
 
 if __name__ == "__main__":

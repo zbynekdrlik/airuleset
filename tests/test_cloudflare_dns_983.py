@@ -191,7 +191,7 @@ class TestManagedRecords(unittest.TestCase):
         ar = [r for r in dns.MANAGED_RECORDS
               if r["name"] == "ar.newlevel.media"][0]
         self.assertEqual(ar["type"], "A")
-        self.assertEqual(ar["content"], "100.101.214.103")
+        self.assertEqual(ar["content"], "159.69.209.249")
         self.assertFalse(ar["proxied"])
 
     def test_ensure_managed_records_token_missing(self):
