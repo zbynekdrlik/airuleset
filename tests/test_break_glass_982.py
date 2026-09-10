@@ -229,6 +229,35 @@ class TestProvisionIgnoreip(unittest.TestCase):
         # No calls at all — short-circuited before the sudo probe.
         self.assertEqual(calls, [])
 
+    def test_unchanged_via_dest_seam(self):
+        """Unchanged branch exercised through the dest seam, not mocks —
+        hermetic on any box regardless of /etc state (#982 fix-forward)."""
+        content = g.render_owner_ignoreip()
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        import shutil
+        with tempfile.TemporaryDirectory() as td:
+            dest = os.path.join(td, "60-airuleset-owner-ignoreip.conf")
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            with _patch_box_class("controller"), \
+                 mock.patch.object(shutil, "which",
+                                   return_value="/usr/bin/fail2ban-client"):
+                result = g.provision_owner_ignoreip(run=fake_run, dest=dest)
+            self.assertIn("unchanged", result)
+            self.assertIn(dest, result)
+            # No calls at all — short-circuited before the sudo probe.
+            self.assertEqual(calls, [])
+
 
 # ---------------------------------------------------------------------------
 # (2) + (3) Status checks
