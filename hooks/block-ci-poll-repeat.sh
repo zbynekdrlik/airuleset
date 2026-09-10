@@ -367,11 +367,25 @@ if [ "$IS_LOOP" = "0" ]; then
         if [ "$OS_COUNT" -gt "$ONESHOT_FREE" ]; then
             # #988: a completed run is not a poll — reading the final status
             # after a detached waiter reported is a legitimate terminal read.
-            # Check a completion-marker file: the waiter or session touches
-            # $STATE_DIR/airuleset-cipoll-completed-<runid> when the run
-            # reaches terminal state, and this hook skips counting.
+            # Check: (1) a completion-marker file (fast, no network), or
+            # (2) query the run status inline (only on the 3rd+ check).
             MARKER_DIR="${AIRULESET_CIPOLL_COMPLETED_MARKER_DIR:-$STATE_DIR}"
-            if [ -n "$RUN_ID" ] && [ -e "$MARKER_DIR/airuleset-cipoll-completed-$RUN_ID" ]; then
+            _RUN_COMPLETED=0
+            if [ -n "$RUN_ID" ]; then
+                if [ -e "$MARKER_DIR/airuleset-cipoll-completed-$RUN_ID" ]; then
+                    _RUN_COMPLETED=1
+                else
+                    # Inline status query — only fires on the 3rd+ oneshot,
+                    # so cost is bounded. Fail-open: a gh error → still block.
+                    _RS=$(gh run view "$RUN_ID" --json status -q .status 2>/dev/null || echo "")
+                    if [ "$_RS" = "completed" ]; then
+                        _RUN_COMPLETED=1
+                        # Cache for future reads
+                        : > "$MARKER_DIR/airuleset-cipoll-completed-$RUN_ID" 2>/dev/null || true
+                    fi
+                fi
+            fi
+            if [ "$_RUN_COMPLETED" = "1" ]; then
                 OS_COUNT=0
                 printf '%s' "$OS_COUNT" > "$ONESHOT_FILE" 2>/dev/null || true
             else

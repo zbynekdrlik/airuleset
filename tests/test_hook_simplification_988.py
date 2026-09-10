@@ -157,6 +157,23 @@ class CoordinationExemptFromCounter988(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stderr)
         self.assertIn("DISPATCH", out.stderr)
 
+    def test_pipe_with_bulk_tail_still_counted(self):
+        """A piped command (gh pr view | grep -rn) is NOT pure coordination
+        — the pipe tail can be a bulk read (review finding MEDIUM)."""
+        sid = self._sid("neg3")
+        out = self._run(sid, "gh pr view 1 --json body | grep -rn TODO .")
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_sed_i_on_traversed_work_products_path_still_counted(self):
+        """sed -i on a path that traverses OUT of work-products via ..
+        must still be counted (review finding MEDIUM — security)."""
+        sid = self._sid("neg4")
+        out = self._run(
+            sid,
+            "sed -i 's/x/y/' ~/.claude/work-products/../../devel/x.py",
+        )
+        self.assertEqual(out.returncode, 2, out.stderr)
+
 
 # ---------------------------------------------------------------------------
 # C. block-ci-poll-repeat.sh: completed runs are not polls

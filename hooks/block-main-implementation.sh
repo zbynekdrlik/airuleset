@@ -1309,7 +1309,8 @@ def _is_coordination_write(tk):
         nf = [t for t in tk[1:] if not t.startswith("-")]
         files = nf[1:] if nf else []  # first non-flag = script, rest = files
         if files and all(
-            os.path.expanduser(f).startswith(_WORK_PRODUCTS_PREFIX)
+            os.path.realpath(os.path.expanduser(f)).startswith(
+                _WORK_PRODUCTS_PREFIX + os.sep)
             for f in files
         ):
             return True
@@ -1429,6 +1430,11 @@ def classify(text):
     all_coordination = True
     for statement in STATEMENTS_RE.split(text):
         seg = first_pipe_stage(statement)
+        # #988 review: a multi-stage pipe is NOT pure coordination — the
+        # tail stages (grep -rn, awk, etc.) can be bulk reads. Only
+        # single-stage statements qualify as coordination.
+        if seg.strip() != statement.strip():
+            all_coordination = False
         tk = strip_prefix(tokens_of(seg))
         script = shell_dash_c_script(tk)
         if script is not None:

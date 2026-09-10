@@ -1978,3 +1978,5 @@ The #672 REWORK bullet in internals-webterm.md marks these two as the OLD design
   is treated as "changed" (fail-safe: restart, never silently skip). Rollout verify: after a fresh
   webterm connect on dev1 AND on marek@subdev, `/proc/$(tmux server pid)/cgroup` = `run-*.scope`;
   then retire the runtime mitigations (`set-property` overrides + `tmux-detach-anchor.service`).
+
+- **A worktree WORKER commit message citing a FOREIGN-repo `#N` trips `block-commit-without-design.sh` (and `block-worker-close-trigger.sh`).** These hooks scan the WHOLE commit-message text for `#N` via `design_gate.issue_refs`; a cross-repo ref like `odoo-erp #3864` is read as an AIRULESET issue, and since airuleset#3864 is unresolvable the design gate fails toward STILL-REQUIRED and BLOCKS the commit ("no design comment posted yet for #3864"). Cost me two blocked commits this ticket. Fix: cite a foreign ticket WITHOUT the hash — `odoo-erp issue 3864` — in commit messages; the `#N` hash form is only for THIS repo's own tickets (and never a close-trigger keyword before it). [Moved from internals-hooks.md at the #988 cap.]
