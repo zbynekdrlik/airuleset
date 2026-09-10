@@ -921,6 +921,122 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# #985: controller ssh auto-attach
+# ---------------------------------------------------------------------------
+
+class TestControllerSshAttach(TestCase):
+    """#985: the controller `airuleset` account gets the ssh auto-attach
+    block targeting the OWNER session `zbynek`, with ~/devel/airuleset cwd,
+    gated on box-class == controller."""
+
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".bashrc"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_adds_block_for_airuleset_on_controller(self):
+        from cli_bashrc_appliers import SSH_ATTACH_CONTROLLER_USERS
+        self.assertIn("airuleset", SSH_ATTACH_CONTROLLER_USERS)
+        p = self._tmp("# existing content\n")
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="controller"):
+            changed = airuleset.apply_stream_ssh_attach(p, user="airuleset")
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_START, text)
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_END, text)
+
+    def test_controller_block_targets_zbynek_session(self):
+        from cli_bashrc_appliers import SSH_ATTACH_SESSION_OVERRIDE
+        self.assertEqual(SSH_ATTACH_SESSION_OVERRIDE.get("airuleset"), "zbynek")
+        p = self._tmp("# existing content\n")
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="controller"):
+            airuleset.apply_stream_ssh_attach(p, user="airuleset")
+        text = p.read_text()
+        # The session target is the literal "zbynek", not $__airuleset_me
+        self.assertIn('__airuleset_me="zbynek"', text)
+
+    def test_controller_block_uses_airuleset_cwd(self):
+        p = self._tmp("# existing content\n")
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="controller"):
+            airuleset.apply_stream_ssh_attach(p, user="airuleset")
+        text = p.read_text()
+        # cwd chain must be devel/airuleset, not the odoo chain
+        self.assertIn("devel/airuleset", text)
+        self.assertNotIn("devel/odoo/odoo-erp", text)
+
+    def test_no_block_for_airuleset_on_non_controller(self):
+        for box_class in ("workstation", "shared-stream", None):
+            p = self._tmp("# existing content\n")
+            with m.patch("cli_bashrc_appliers.default_box_class",
+                          return_value=box_class):
+                changed = airuleset.apply_stream_ssh_attach(
+                    p, user="airuleset")
+            self.assertFalse(changed,
+                             f"airuleset must not get block on {box_class}")
+            self.assertNotIn(airuleset.STREAM_SSH_ATTACH_MARK_START,
+                             p.read_text(),
+                             f"airuleset must not get block on {box_class}")
+
+    def test_stale_block_stripped_from_airuleset_on_non_controller(self):
+        p = self._tmp(
+            f"# before\n{airuleset.STREAM_SSH_ATTACH_BLOCK}\n# after\n")
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="workstation"):
+            changed = airuleset.apply_stream_ssh_attach(
+                p, user="airuleset")
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertNotIn(airuleset.STREAM_SSH_ATTACH_MARK_START, text)
+        self.assertIn("# before", text)
+        self.assertIn("# after", text)
+
+    def test_gatekeeper_unchanged_by_controller_feature(self):
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_ssh_attach(p, user="gatekeeper")
+        text = p.read_text()
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_START, text)
+        self.assertIn('__airuleset_me="$(whoami)"', text)
+
+    def test_newlevel_unchanged_by_controller_feature(self):
+        p = self._tmp("# existing content\n")
+        changed = airuleset.apply_stream_ssh_attach(p, user="newlevel")
+        self.assertFalse(changed)
+        self.assertNotIn(airuleset.STREAM_SSH_ATTACH_MARK_START, p.read_text())
+
+    def test_controller_block_has_all_safety_guards(self):
+        p = self._tmp("# existing content\n")
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="controller"):
+            airuleset.apply_stream_ssh_attach(p, user="airuleset")
+        text = p.read_text()
+        self.assertIn('$- == *i*', text)
+        self.assertIn('SSH_TTY', text)
+        self.assertIn('-z "${TMUX:-}"', text)
+        self.assertIn("command -v tmux", text)
+
+    def test_controller_block_idempotent(self):
+        p = self._tmp("# existing content\n")
+        with m.patch("cli_bashrc_appliers.default_box_class",
+                      return_value="controller"):
+            airuleset.apply_stream_ssh_attach(p, user="airuleset")
+            changed = airuleset.apply_stream_ssh_attach(
+                p, user="airuleset")
+        self.assertFalse(changed)
+
+    def test_stream_block_byte_identical_after_refactor(self):
+        self.assertEqual(
+            airuleset.STREAM_SSH_ATTACH_BLOCK,
+            airuleset.render_ssh_attach_block(
+                '"$(whoami)"',
+                airuleset.STREAM_DEV_CWD_CHAIN))
+
+
+# ---------------------------------------------------------------------------
 # #284: grouped-session cleanup survivor -- the launcher's exact-name -A
 # reattach must not silently orphan a surviving, differently-named sibling
 # once #254's destroy-unattached sweep reduces a multi-member group down to
