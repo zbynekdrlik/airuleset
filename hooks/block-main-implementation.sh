@@ -778,6 +778,7 @@ _PRESENCE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-pre
 # #988(g): shared hook-block measurement log
 _HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
 [ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+type log_hook_block >/dev/null 2>&1 || log_hook_block() { :; }
 type airuleset_presence_is_away >/dev/null 2>&1 || airuleset_presence_is_away() { return 1; }
 AWAY=0
 if airuleset_presence_is_away "${SESSION_ID:-unknown}"; then AWAY=1; fi

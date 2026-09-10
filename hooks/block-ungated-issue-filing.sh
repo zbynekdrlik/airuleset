@@ -192,6 +192,7 @@ SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 # #988(g): shared hook-block measurement log
 _HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
 [ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+type log_hook_block >/dev/null 2>&1 || log_hook_block() { :; }
 
 # #842 req 1 -- a WORKTREE WORKER (subagent, payload `.agent_id` — the SAME
 # subagent signal block-subagent-bg-ci-poll.sh / subagent-stop-check-*.sh, #496,

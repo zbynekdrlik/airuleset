@@ -487,15 +487,17 @@ class HookBlockLogRedact988g(unittest.TestCase):
                     "tool_input": {"command": "vault secret show mypassword"},
                     "transcript_path": str(tp),
                 }
-                subprocess.run(
+                r = subprocess.run(
                     ["bash", str(HOOK_BMI)],
                     input=json.dumps(payload), env=env,
                     capture_output=True, text=True,
                 )
-                if log_file.exists():
-                    content = log_file.read_text()
-                    self.assertNotIn("mypassword", content)
-                    self.assertIn("<redacted>", content)
+                self.assertEqual(r.returncode, 2)
+                self.assertTrue(log_file.exists(),
+                                "hook-blocks.log should be created on block")
+                content = log_file.read_text()
+                self.assertNotIn("mypassword", content)
+                self.assertIn("<redacted>", content)
             finally:
                 presence.unlink(missing_ok=True)
                 run_file.unlink(missing_ok=True)
@@ -513,7 +515,6 @@ class StatusBreakdown988g(unittest.TestCase):
         import contextlib
 
         with TemporaryDirectory() as d:
-            log_file = Path(d) / "hook-blocks.log"
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
             lines = [
@@ -522,12 +523,6 @@ class StatusBreakdown988g(unittest.TestCase):
                 "%s\tblock-ci-poll-repeat\tgh run view\n" % now,
                 "%s\tblock-ungated-issue-filing\tgh issue create\n" % now,
             ]
-            log_file.write_text("".join(lines))
-            import unittest.mock as m
-            with m.patch("airuleset.Path.home", return_value=Path(d).parent):
-                # Adjust: _print_hook_blocks_count reads Path.home() / ".claude" / "hook-blocks.log"
-                pass
-            # More direct: set the env and patch
             claude_dir = Path(d) / ".claude"
             claude_dir.mkdir()
             log_in_claude = claude_dir / "hook-blocks.log"

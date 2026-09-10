@@ -19,7 +19,7 @@ log_hook_block() {
     log_dir=$(dirname "$log_file")
     { mkdir -p "$log_dir" 2>/dev/null || true
       printf '%s\t%s\t%s\n' \
-          "$(date -Is)" "$hook_name" \
+          "$(date -u -Is)" "$hook_name" \
           "$(printf '%s' "$snippet" | tr '\n' ' ' | head -c 80)" \
           >> "$log_file"; } 2>/dev/null || true
 }

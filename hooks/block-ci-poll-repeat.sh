@@ -145,6 +145,7 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "
 # #988(g): shared hook-block measurement log
 _HOOK_BLOCK_LOG_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib_hook_block_log.sh"
 [ -r "$_HOOK_BLOCK_LOG_LIB" ] && . "$_HOOK_BLOCK_LOG_LIB"
+type log_hook_block >/dev/null 2>&1 || log_hook_block() { :; }
 
 # ---- never block the compliant path -----------------------------------
 BG=$(echo "$INPUT" | jq -r '.tool_input.run_in_background // false' 2>/dev/null || echo "false")
