@@ -289,7 +289,7 @@ class HookBlockLogging988(unittest.TestCase):
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
             sid = "t988-log-%d" % os.getpid()
             tp_dir = Path(d) / "transcript"
@@ -337,7 +337,7 @@ class HookBlockLogCiPoll988g(unittest.TestCase):
             state_dir = Path(d) / "state"
             state_dir.mkdir()
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             env["AIRULESET_CIPOLL_STATE_DIR"] = str(state_dir)
             sid = "t988g-cpr-%d" % os.getpid()
             run_id = "12345678"
@@ -371,7 +371,7 @@ class HookBlockLogCiPoll988g(unittest.TestCase):
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             payload = {
                 "session_id": "t988g-cpr-pass-%d" % os.getpid(),
                 "hook_event_name": "PreToolUse",
@@ -395,7 +395,7 @@ class HookBlockLogUGI988g(unittest.TestCase):
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             payload = {
                 "session_id": "t988g-ugi-%d" % os.getpid(),
                 "hook_event_name": "PreToolUse",
@@ -419,7 +419,7 @@ class HookBlockLogUGI988g(unittest.TestCase):
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             payload = {
                 "session_id": "t988g-ugi-pass-%d" % os.getpid(),
                 "hook_event_name": "PreToolUse",
@@ -443,7 +443,7 @@ class HookBlockLogBMI988g(unittest.TestCase):
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             payload = {
                 "session_id": "t988g-bmi-pass-%d" % os.getpid(),
                 "hook_event_name": "PreToolUse",
@@ -468,7 +468,7 @@ class HookBlockLogRedact988g(unittest.TestCase):
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
             env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCKS_LOG"] = str(log_file)
+            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
             env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
             sid = "t988g-redact-%d" % os.getpid()
             tp_dir = Path(d) / "transcript"
@@ -527,7 +527,7 @@ class TestPytestSuppression988(unittest.TestCase):
             env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
             # Remove any explicit override so the lib uses the default
             env.pop("AIRULESET_HOOK_BLOCK_LOG", None)
-            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)
+            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)  # legacy name
             sid = "t988-pytest-suppress-%d" % os.getpid()
             tp_dir = Path(d) / "transcript"
             tp_dir.mkdir()
@@ -569,7 +569,7 @@ class TestPytestSuppression988(unittest.TestCase):
             env["AIRULESET_HOOK_BLOCK_LOG"] = str(explicit_log)
             env["PYTEST_CURRENT_TEST"] = "tests/test_hook_simplification_988.py::TestPytestSuppression988::test_explicit_override_writes_despite_pytest (call)"
             env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
-            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)
+            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)  # legacy name
             sid = "t988-pytest-explicit-%d" % os.getpid()
             tp_dir = Path(d) / "transcript"
             tp_dir.mkdir()

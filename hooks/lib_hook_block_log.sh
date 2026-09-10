@@ -9,7 +9,18 @@
 log_hook_block() {
     local hook_name="${1:-unknown}"
     local snippet="${2:-}"
-    local log_file="${AIRULESET_HOOK_BLOCKS_LOG:-${HOME}/.claude/hook-blocks.log}"
+    # Explicit override: AIRULESET_HOOK_BLOCK_LOG=<path> writes there,
+    # =off suppresses entirely. When unset, PYTEST_CURRENT_TEST suppresses
+    # (pytest sets it for every test), so test-driven blocks never pollute
+    # the production metric. (#988 fix-forward)
+    if [[ -n "${AIRULESET_HOOK_BLOCK_LOG:-}" ]]; then
+        [[ "${AIRULESET_HOOK_BLOCK_LOG}" == "off" ]] && return 0
+        local log_file="${AIRULESET_HOOK_BLOCK_LOG}"
+    elif [[ -n "${PYTEST_CURRENT_TEST:-}" ]]; then
+        return 0
+    else
+        local log_file="${HOME}/.claude/hook-blocks.log"
+    fi
     # Redact commands that may contain secrets
     case "$snippet" in
         *secret*|*token*|*password*|*SECRET*|*TOKEN*|*PASSWORD*)
