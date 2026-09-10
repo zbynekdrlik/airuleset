@@ -27,18 +27,10 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 - **The proposal you present to the owner is COMPLETE and lives IN THE CHAT —
   and it is the approval question for EVERY message (opening handover AND every
   follow-up), never only a new thread.** The FULL proposed client text MUST be
-  INLINE in the ❓ block as a `> ` quoted block, exactly as it will be posted —
-  NEVER a link to a share/file-drop URL, a work-products file, or a ticket
-  comment instead of the text (airuleset #977, owner miva1 2026-09-10: "miesto
-  toho aby si mi tu napísal text čo chceš poslať, nikde neevidujem že by som
-  definoval že texty majú chodiť do externej web!!!"). A share URL may
-  ACCOMPANY the inline text for a genuine attachment (a PDF, a spreadsheet), but
-  it NEVER replaces the message body itself. If the proposed text is longer than
-  the notify forwarder's ~1500 codepoint cap, split it into TWO approval
-  questions (each with its own inline quoted portion), never link the whole
-  text. HOOK-ENFORCED: `stop-check-question-quality.sh` Check 8 blocks a
-  text-approval ❓ block carrying a share/file-drop URL without >= 2 `> ` quoted
-  lines. Put in the chat message itself: (1) the
+  INLINE as a `> ` quoted block — NEVER a share URL or path instead (#977).
+  A share URL may accompany for an attachment, never replace the text.
+  Text longer than ~1500 cp → split into two approvals. HOOK-ENFORCED:
+  Check 8 blocks a text-approval ❓ with a share URL and no `>` quote. Put in the chat message itself: (1) the
   target thread on its OWN SEPARATE, clearly-shown line — the exact thread name,
   the full human NAME (+ parent channel where it helps), NEVER only the internal
   channel number and NEVER only wrapped in prose:
@@ -46,15 +38,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   message body verbatim; (3) the member list. NEVER "the text is on the ticket" —
   the owner does not read tickets, so a proposal pointing at a ticket instead of
   carrying the whole text is not a proposal. Naming the target only by its
-  internal number is what forced the owner to ask „do akého vlákna to má ísť?"
-  (airuleset #632: target only „vlákno 250"). Every owner-facing mention
-  of a thread also carries its own clickable deep URL, never a bare channel
-  number (airuleset #657/#650, uniform doctrine in
-  `modules/core/issue-reference-context.md`):
+  internal number forced „do akého vlákna to má ísť?" (airuleset #632:
+  „vlákno 250"). Every thread mention carries its deep URL, never a bare
+  channel number (airuleset #657/#650):
   `Vlákno: „Tabula objednavok 1" — https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288`
-  — open it and confirm it loads before pasting; this is the ❓-approval-question
-  case of the rule (`hooks/stop-check-question-quality.sh` Check 6, #650) as well
-  as the wider owner-facing surface (`hooks/stop-check-prose-violations.sh`, #657).
+  — confirm it loads before pasting (Check 6 #650 + `stop-check-prose-violations.sh` #657).
 - **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
   a glance which stream owns it (montalu3 → "Kontrola zákazníckych e-mailov 3"),
   formalizing the existing IT-support convention on montalu PROD. The suffix is
@@ -115,9 +103,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **This applies to EVERY openable reference in the message, not only the
   handed-over feature:** a record, screen, action, report or dashboard — each gets
   its OWN direct functional URL, verified live before sending, never a prose menu
-  path (owner directive, airuleset #595: msg 1723308 described two live features
-  only by menu path, rejected). This generalizes completion-report.md's 🌐-line
-  rule to client-facing Discuss messages.
+  path (airuleset #595: msg 1723308, rejected). This generalizes
+  completion-report.md's 🌐-line rule to Discuss messages.
 - **State the owner's thread membership EXPLICITLY in the proposal.** The posting
   recipe already puts the owner on `partner_ids` (control ping) — but the PROPOSAL
   text you show the owner must SAY so ("teba pridám do vlákna ako člena"), so the

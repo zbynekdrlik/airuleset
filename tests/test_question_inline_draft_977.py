@@ -12,8 +12,9 @@ The owner's comment: "miesto toho aby si mi tu napísal text čo chceš poslať,
 nikde neevidujem že by som definoval že texty majú chodiť do externej web!!!"
 
 The fix extends Check 8 (approvebody) to also detect share/file-drop URLs as
-pointers (`:8795/`, `:8788/`, `drop-` host, `.html`/`.md`/`.txt` URL links),
-and requires >= 2 ``> `` quoted lines as satisfying inline evidence.
+pointers (per-uid share ports `:8788-:8819/`, ``//drop-`` host gateway),
+and requires >= 2 ``> `` quoted lines (or >= 40 chars fenced block) as
+satisfying inline evidence.
 
 Three fixture classes:
   - RED: the miva1 block (share URL, no quoted block) -> must exit 2 (BLOCK)
@@ -95,7 +96,7 @@ DROP_HOST_URL_NO_QUOTE = (
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/511\n"
     "\n"
-    "Text odpovede: https://drop-subdev.newlevel.media/abc123/reply.html\n"
+    "Text odpovede: https://drop-subdev.newlevel.media/abc123/reply.txt\n"
     "\n"
     "• Schváliť (odporúčam)\n"
     "• Upraviť\n"
@@ -152,7 +153,34 @@ SHARE_URL_WITH_QUOTE = (
 
 
 # ---------------------------------------------------------------------------
+# RED: 1-quote-line boundary — MUST BLOCK (pins the >= 2 threshold)
+# ---------------------------------------------------------------------------
+
+ONE_QUOTE_LINE_BLOCKS = (
+    "**Otázka — projekt odoo-erp (Odoo ERP pre klienta MIVA):**"
+    " Odpoveď pre klienta.\n"
+    "Vlákno: " + _LQ + "Zákaznícky portál 3" + _RQ + " "
+    "— https://erp.montalu.cloud/odoo/discuss?active_id="
+    "discuss.channel_290\n"
+    "Odoo task: " + _LQ + "Portál" + _RQ + " "
+    "(stage: V riešení) "
+    "— https://erp.montalu.cloud/odoo/project/4/tasks/510\n"
+    "\n"
+    "Návrh textu (http://100.118.174.27:8795/abc/draft.html):\n"
+    "\n"
+    "> Dobrý deň, ZbynekAI 1\n"
+    "\n"
+    "• Schváliť a poslať (odporúčam)\n"
+    "• Upraviť\n"
+    "\n"
+    "❓ NEEDS YOU: schvaľuš správu?\n"
+)
+
+# ---------------------------------------------------------------------------
 # GREEN-pass: non-text ❓ with a share URL (e.g. screenshot) -> PASS
+# This fixture carries an APPROVAL INTENT verb (schvaľuješ) to exercise
+# the TEXT_APPROVAL_RX narrowing gate — a screenshot has no text/správ/odpove
+# context so TEXT_APPROVAL_RX does NOT match.
 # ---------------------------------------------------------------------------
 
 SCREENSHOT_SHARE_URL = (
@@ -164,10 +192,10 @@ SCREENSHOT_SHARE_URL = (
     "\n"
     "Screenshot: http://100.118.174.27:8795/abc123/screenshot.png\n"
     "\n"
-    "• Opraviť graf (odporúčam)\n"
+    "• Schváliť opravu grafu (odporúčam)\n"
     "• Nechať\n"
     "\n"
-    "❓ NEEDS YOU: opraviť graf predajov?\n"
+    "❓ NEEDS YOU: schvaľuješ opravu grafu?\n"
 )
 
 
@@ -194,6 +222,12 @@ class TestInlineDraftBlock(_HookCase):
         r = self._run(FILEDROP_8788_URL_NO_QUOTE)
         self.assertTrue(self._blocked(r),
                         ":8788 URL with no inline quote should BLOCK")
+
+    def test_one_quote_line_blocks(self):
+        """Pins the >= 2 threshold: 1 quote line is NOT enough."""
+        r = self._run(ONE_QUOTE_LINE_BLOCKS)
+        self.assertTrue(self._blocked(r),
+                        "1 quote line with share URL should BLOCK")
 
 
 class TestInlineDraftPass(_HookCase):

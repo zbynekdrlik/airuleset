@@ -611,12 +611,14 @@ if [ -z "$VIOLATION" ]; then
     # (the incident shapes: #936 filesystem paths, #977 share URLs).
     POINTER_PATH_RX='~/|/tmp/|\.md([[:space:]]|$)|work-products/'
     POINTER_PHRASE_RX='na[[:space:]]+tikete|v[[:space:]]+drafte|v[[:space:]]+s[úu]bore|v[[:space:]]+koment[áa]ri|pozri[[:space:]]+(s[úu]bor|draft|koment[áa]r)'
-    # #977 — share/file-drop URL patterns: :8795/ (share), :8788/ (filedrop),
-    # drop-<host> (public drop gateway), or a text-file extension URL
-    # (.html/.md/.txt as a URL path, not a bare filename). TEXT_APPROVAL_RX
-    # detects a text/message approval context (text, správ, odpove, návrh)
-    # so a screenshot/image share URL does NOT trip this check.
-    POINTER_URL_RX=':879[0-9]/|:8788/|drop-[a-z]'
+    # #977 — share/file-drop URL patterns: per-uid share port (:8788-:8819,
+    # from filedrop DEFAULT_PORT + uid % 1000, managed uids 1000-1014 +
+    # collision fallback), drop-<host>.newlevel.media (public drop gateway).
+    # TEXT_APPROVAL_RX detects a text/message approval context so a
+    # screenshot/image share URL does NOT trip this check. Accepted
+    # residuals: TEXT_APPROVAL_RX stem-broad (správne, kontext match) =
+    # over-block, safe; drop-<host> anchored to //drop- to avoid "drop-in".
+    POINTER_URL_RX=':(878[89]|879[0-9]|88[01][0-9])/|//drop-[a-z]'
     TEXT_APPROVAL_RX='(n[áa]vrh|text|spr[áa]v|odpove)'
     # (c) Inline body evidence: a fenced code block (``` ... ```) or blockquote
     # (> ...) with at least 40 chars of content (for path/phrase pointers), or
@@ -653,9 +655,10 @@ if [ -z "$VIOLATION" ]; then
         INLINE_LEN=$(LC_ALL=C.UTF-8; echo ${#INLINE_BODY})
         if [ -n "$pointer_url" ]; then
             # #977 — for share/file-drop URL pointers, require >= 2 blockquote
-            # lines (the draft text must be inline as `> ` quoted lines).
+            # lines OR a fenced block with >= 40 chars (the draft text must be
+            # inline, either as `> ` quoted lines or a ``` fenced block).
             QUOTE_LINES=$(printf '%s\n' "$BLOCK" | grep -cE '^[[:space:]]*>' || true)
-            if [ "${QUOTE_LINES:-0}" -lt 2 ]; then
+            if [ "${QUOTE_LINES:-0}" -lt 2 ] && [ "${INLINE_LEN:-0}" -lt 40 ]; then
                 VIOLATION="approvebody"
             fi
         elif [ "${INLINE_LEN:-0}" -lt 40 ]; then
