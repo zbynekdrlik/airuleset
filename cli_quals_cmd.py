@@ -13,6 +13,32 @@ import json
 import os
 import sys
 
+# #993 -- the top lane-priority label. A row carrying it sorts BEFORE every
+# other row in every seed listing (rank 0), so the /goal loop's oldest-picks-
+# first selection takes an architecture-rework ticket ahead of any other lane
+# (lane order: architecture-rework -> prio:bounce -> infra -> independent).
+ARCHITECTURE_REWORK_LABEL = "architecture-rework"
+
+
+def _row_label_rank(row):
+    """0 when `row` carries the architecture-rework label (highest lane
+    priority), else 1 -- the PRIMARY sort key for every seed listing, ahead
+    of the createdAt tie-break. A row with no readable labels is rank 1 (never
+    spuriously promoted)."""
+    labels = row.get("labels") if isinstance(row, dict) else None
+    if isinstance(labels, list):
+        for lb in labels:
+            if isinstance(lb, dict) and lb.get("name") == ARCHITECTURE_REWORK_LABEL:
+                return 0
+    return 1
+
+
+def _row_sort_key(rows, k):
+    """(label-rank, createdAt) -- architecture-rework first, then oldest-first
+    within each rank. Shared by every seed/audit listing so priority and age
+    ordering can never drift between them (#993)."""
+    return (_row_label_rank(rows[k]), rows[k].get("createdAt") or "")
+
 
 def _row_action(row, own_stream=None):
     """What THIS box may do with an issue row: `action-only` or `implement`.
@@ -138,7 +164,7 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     converge_numbers = converge_numbers or set()
     no_target_numbers = no_target_numbers or set()
     deploy_target_numbers = deploy_target_numbers or set()
-    for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
+    for n in sorted(rows, key=lambda k: _row_sort_key(rows, k)):
         row = rows[n]
         action = _row_action(row, own_stream)
         if reason_fn is None:
@@ -249,7 +275,7 @@ def _print_audit_rows(rows, own_stream=None):
     (`ready-for-review`/`needs-gatekeeper`, no commas) and the real vocabulary
     (`stream:*`, `ops-wait`, `bug`, …) carries none, so a mis-split only garbles
     the cosmetic label display, never a routing/labelling decision."""
-    for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
+    for n in sorted(rows, key=lambda k: _row_sort_key(rows, k)):
         row = rows[n]
         action = _row_action(row, own_stream)
         names = ",".join(
