@@ -687,5 +687,91 @@ class TestSelfReviewModel991(unittest.TestCase):
         self.assertIn("--self-review-model", r.stdout)
 
 
+class TestCanonicalSelfReviewModel991(unittest.TestCase):
+    """#991 review finding 1: the emitted Self-review-model id is the
+    CANONICAL MODEL_TIERS value, so a case/[1m]-tag variant the tolerant
+    predicate accepts never breaks a line-exact gate match."""
+
+    def test_canonicalizes_tag_and_case(self):
+        self.assertEqual(
+            airuleset._canonical_self_review_model("claude-fable-5-1[1m]"),
+            "claude-fable-5-1")
+        self.assertEqual(
+            airuleset._canonical_self_review_model("Claude-Opus-4-8"),
+            "claude-opus-4-8")
+        self.assertEqual(
+            airuleset._canonical_self_review_model("claude-opus-4-8"),
+            "claude-opus-4-8")
+
+    def test_rejects_alias_banned_and_empty(self):
+        for bad in ("fable", "opus", "claude-opus-5", "claude-opus-4-6",
+                    "", None):
+            self.assertIsNone(
+                airuleset._canonical_self_review_model(bad),
+                "%r must not canonicalize" % (bad,))
+
+
+class TestSignOnlyRequiresSelfReviewModel991(unittest.TestCase):
+    """#991 review finding 2: the sign-only path must ALSO require a
+    Self-review-model: line in the body (the odoo-erp gate needs it on every
+    readiness comment) -- otherwise a stream gets a receipt here and a bounce
+    there (#957 friction)."""
+
+    def _gate_patches(self, td):
+        import unittest.mock as m
+        gate_dir = os.path.join(td, "gate")
+        os.makedirs(gate_dir, exist_ok=True)
+        home = os.path.expanduser("~")
+        return (
+            gate_dir,
+            m.patch.object(airuleset, "HANDOFF_GATE_DIR",
+                           os.path.relpath(gate_dir, home)),
+            m.patch.object(airuleset, "HANDOFF_GATE_LOG",
+                           os.path.relpath(
+                               os.path.join(td, "gate.log"), home)),
+        )
+
+    def _args(self, sign_only):
+        import argparse
+        return argparse.Namespace(
+            repo="zbynekdrlik/odoo-erp", issue=42, branch=None,
+            self_review_file=None, root_cause=None, closes_finding=None,
+            prevencia_read=None, self_review_model=None, sign_only=sign_only)
+
+    def test_sign_only_missing_self_review_model_blocked(self):
+        import io
+        import unittest.mock as m
+        body = ("READY-FOR-REVIEW: branch test\n\n"
+                "Verified-at-UTC: 2026-09-11T00:00:00Z\nHEAD: abc123\n")
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "b.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            _, p1, p2 = self._gate_patches(td)
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(self._args(bp))
+            self.assertEqual(1, rc)
+            self.assertIn("Self-review-model", out.getvalue())
+
+    def test_sign_only_with_self_review_model_ok(self):
+        import io
+        import unittest.mock as m
+        body = ("READY-FOR-REVIEW: branch test\n\n"
+                "Self-review-model: claude-opus-4-8\n"
+                "Verified-at-UTC: 2026-09-11T00:00:00Z\nHEAD: abc123\n")
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "b.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            gate_dir, p1, p2 = self._gate_patches(td)
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", new_callable=io.StringIO):
+                rc = airuleset.cmd_handoff(self._args(bp))
+            self.assertEqual(0, rc)
+
+
 if __name__ == "__main__":
     unittest.main()
