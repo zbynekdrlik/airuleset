@@ -12,14 +12,13 @@ overlap-check receipt (the independence check must have been run for that unit).
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
-import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parents[1]
-import sys
 sys.path.insert(0, str(REPO))
 import cli_lane_overlap as lo  # noqa: E402
 
@@ -106,7 +105,6 @@ class TestHookReceiptGate(TestCase):
             capture_output=True, text=True, env=env, timeout=60)
 
     def _seed_receipt(self, issues, ts=None):
-        import cli_lane_overlap as _lo
         d = Path(self.home) / ".claude" / "lane-overlap"
         d.mkdir(parents=True, exist_ok=True)
         rec = {"checked_issues": issues, "ts": ts or time.time(),
