@@ -140,10 +140,11 @@ class TestProductDocsDropped(TestCase):
             "#### Verification tools",
         ]:
             self.assertIn(keep, t, f"behavioural content must stay: {keep}")
-        # #859 batch 3: Workflow detail + fable-stage guidance moved to companion
+        # #859 batch 3: Workflow authoring detail lives in the companion (#991:
+        # per-stage tiering doctrine removed — model per stage is a native choice).
         wf = read("skills/claude-code-workflows/DEEP.md")
         self.assertIn("Dynamic Workflows", wf)
-        self.assertIn("never bake in an ungated Fable stage", wf)
+        self.assertIn("Model per stage is your native choice", wf)
         # The stub carries a pointer to the companion
         self.assertIn("skills/claude-code-workflows/DEEP.md", t)
 

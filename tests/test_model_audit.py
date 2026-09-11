@@ -94,14 +94,14 @@ class TestAuditModelFloats(TestCase):
 
     def test_flags_banned_main_and_sub(self):
         panes = [("%p1", "/a"), ("%p2", "/b")]
-        # /a main is floated to 5.0 (retired, off-allowlist); /a has a sub on
-        # opus-4-6 (BANNED, superseded); /b main on the allowlisted sonnet (ok).
+        # #991 ban-list: /a main + sub floated onto Opus 5 (BANNED); /b main on
+        # the allowlisted sonnet (ok — never flagged).
         model_of = {
-            "/x/a.jsonl": "claude-fable-5",
-            "/x/a.jsonl#sub0": "claude-opus-4-6",
+            "/x/a.jsonl": "claude-opus-5",
+            "/x/a.jsonl#sub0": "claude-opus-5",
             "/x/b.jsonl": "claude-sonnet-5",
         }
-        find = self._fake_find({"/a": "claude-fable-5", "/b": "claude-sonnet-5"})
+        find = self._fake_find({"/a": "claude-opus-5", "/b": "claude-sonnet-5"})
         read = lambda p: model_of.get(str(p), "")  # noqa: E731
         subs = lambda main: [str(main) + "#sub0"] if str(main).endswith("a.jsonl") else []  # noqa: E731
 
@@ -109,7 +109,7 @@ class TestAuditModelFloats(TestCase):
                                                   subagent_iter=subs)
         by = {(r["cwd"], r["kind"]): r for r in recs}
         self.assertTrue(by[("/a", "main")]["banned"])
-        self.assertEqual(by[("/a", "main")]["model"], "claude-fable-5")
+        self.assertEqual(by[("/a", "main")]["model"], "claude-opus-5")
         self.assertTrue(by[("/a", "sub")]["banned"])
         self.assertFalse(by[("/b", "main")]["banned"])
 
@@ -168,11 +168,11 @@ class TestAuditModelFloats(TestCase):
         self.assertEqual(len(recs), 1)
         self.assertFalse(recs[0]["banned"], recs[0])
 
-    def test_fable_5_0_flagged_as_off_allowlist(self):
-        # #894: claude-fable-5 (5.0) is retired from the lineup.
+    def test_opus5_flagged_as_banned(self):
+        # #991: the audit is BAN-LIST — a pane floated onto Opus 5 is flagged.
         panes = [("%p", "/e")]
-        find = self._fake_find({"/e": "claude-fable-5"})
-        read = lambda p: "claude-fable-5"  # noqa: E731
+        find = self._fake_find({"/e": "claude-opus-5"})
+        read = lambda p: "claude-opus-5"  # noqa: E731
         recs = cli_model_audit.audit_model_floats(panes, "/proj", find, read,
                                                   subagent_iter=lambda m: [])
         self.assertEqual(len(recs), 1)
@@ -240,30 +240,37 @@ class TestSubagentRecencyWindow(TestCase):
             self.assertEqual(out, [recent])
 
 
-class TestAuditTolerantPredicate(TestCase):
-    """#871 adversarial review 🔴3a: airuleset.is_banned_model_for_audit
-    tolerates a served dated-snapshot id for an allowlisted tier -- the
-    dispatch-surface airuleset.is_banned_model stays exact and unaffected."""
+class TestAuditBanListPredicate(TestCase):
+    """#991: the Job-41 audit predicate is BAN-LIST (Opus 5 only), tolerating a
+    served dated-snapshot / provider prefix. A pane on any allowlisted tier
+    (sonnet/haiku/fable/opus-4-8) is never flagged — the working model may
+    legitimately float there natively."""
 
-    def test_dated_haiku_allowed_by_audit_predicate(self):
+    def test_opus5_banned_by_audit_predicate(self):
+        self.assertTrue(airuleset.is_banned_model_for_audit("claude-opus-5"))
+
+    def test_dated_opus5_banned_by_audit_predicate(self):
+        self.assertTrue(
+            airuleset.is_banned_model_for_audit("claude-opus-5-20260514"))
+
+    def test_provider_prefixed_opus5_banned_by_audit_predicate(self):
+        self.assertTrue(
+            airuleset.is_banned_model_for_audit("us.anthropic.claude-opus-5"))
+
+    def test_opus_alias_banned_by_audit_predicate(self):
+        self.assertTrue(airuleset.is_banned_model_for_audit("opus"))
+
+    def test_dated_haiku_not_banned_by_audit_predicate(self):
         self.assertFalse(
             airuleset.is_banned_model_for_audit("claude-haiku-4-5-20251001"))
 
-    def test_dated_haiku_still_banned_by_exact_dispatch_predicate(self):
-        # the DISPATCH-surface predicate is unaffected -- still exact.
-        self.assertTrue(
-            airuleset.is_banned_model("claude-haiku-4-5-20251001"))
+    def test_fable_5_0_not_banned_by_audit_predicate(self):
+        # #991: only Opus 5 is banned; a retired-but-not-banned tier (fable 5.0)
+        # is NOT flagged by the audit.
+        self.assertFalse(airuleset.is_banned_model_for_audit("claude-fable-5"))
 
-    def test_fable_5_1_allowed_by_audit_predicate(self):
-        # #894: claude-fable-5-1 is now the allowed Fable tier.
-        self.assertFalse(airuleset.is_banned_model_for_audit("claude-fable-5-1"))
-
-    def test_fable_5_0_banned_by_audit_predicate(self):
-        # #894: claude-fable-5 (5.0) is retired from the lineup.
-        self.assertTrue(airuleset.is_banned_model_for_audit("claude-fable-5"))
-
-    def test_bare_alias_still_banned_by_audit_predicate(self):
-        self.assertTrue(airuleset.is_banned_model_for_audit("fable"))
+    def test_sonnet_not_banned_by_audit_predicate(self):
+        self.assertFalse(airuleset.is_banned_model_for_audit("claude-sonnet-5"))
 
     def test_every_allowlisted_id_clears_audit_predicate(self):
         for ok in airuleset.MODEL_TIERS.values():

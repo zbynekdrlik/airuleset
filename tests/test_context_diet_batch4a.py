@@ -58,47 +58,6 @@ class _CoverageMixin:
                         "stub should be smaller than companion (enforcement-core only)")
 
 
-class TestModelAwarenessDeep(_CoverageMixin, TestCase):
-    MODULE_REL = "modules/core/model-awareness.md"
-    COMPANION_REL = "skills/model-awareness-deep/DEEP.md"
-
-    # --- enforcement core stays in stub ---
-    def test_stub_has_tier_table(self):
-        self.assertIn("claude-fable-5", self.stub)
-        self.assertIn("claude-opus-4-8", self.stub)
-        self.assertIn("claude-sonnet-5", self.stub)
-
-    def test_stub_has_no_model_param(self):
-        self.assertIn("NEVER carries a `model` param", self.stub)
-
-    def test_stub_has_opus5_banned(self):
-        self.assertIn("Opus 5", self.stub)
-        self.assertIn("BANNED", self.stub)
-
-    def test_stub_has_fable51_banned(self):
-        self.assertIn("Fable 5.1", self.stub)
-
-    def test_stub_has_pointer(self):
-        self.assertIn("skills/model-awareness-deep/DEEP.md", self.stub)
-
-    # --- deep content is in companion ---
-    def test_companion_has_judgment_content_test(self):
-        self.assertIn("JUDGMENT-CONTENT test", self.companion)
-
-    def test_companion_has_design_heavy(self):
-        self.assertIn("DESIGN-HEAVY (HARD) taxonomy", self.companion)
-
-    def test_companion_has_advisor_shape(self):
-        self.assertIn("ADVISOR: digest in, decision out", self.companion)
-
-    # --- deep content NOT in stub ---
-    def test_judgment_content_not_in_stub(self):
-        self.assertNotIn("JUDGMENT-CONTENT test", self.stub)
-
-    def test_design_heavy_not_in_stub(self):
-        self.assertNotIn("DESIGN-HEAVY (HARD) taxonomy", self.stub)
-
-
 class TestAskBeforeAssumingDeep(_CoverageMixin, TestCase):
     MODULE_REL = "modules/core/ask-before-assuming.md"
     COMPANION_REL = "skills/ask-before-assuming-deep/DEEP.md"
@@ -254,52 +213,6 @@ class _InjectorTestBase(TestCase):
                       f"Expected '{expected_fragment}' in pass-2 output for {tool_name}")
 
 
-class TestModelAwarenessInjection(_InjectorTestBase):
-    """model-awareness-deep fires on fable-gate Bash (no co-fire conflict)."""
-
-    def test_fable_gate_bash_injects(self):
-        """fable-gate Bash has no competing rows -> fires on first call."""
-        sid = uuid.uuid4().hex
-        out = self._run_injector(
-            "Bash",
-            {"command": "python3 airuleset.py fable-gate"},
-            session_id=sid,
-        )
-        self.assertIn("JUDGMENT-CONTENT test", out)
-
-    def test_model_id_bash_injects(self):
-        sid = uuid.uuid4().hex
-        out = self._run_injector(
-            "Bash",
-            {"command": "echo claude-opus-4-8"},
-            session_id=sid,
-        )
-        self.assertIn("JUDGMENT-CONTENT test", out)
-
-    def test_agent_dispatch_injects_on_second_call(self):
-        """Agent tool co-fires subagent-type-discipline first; DEEP loads on pass 2."""
-        self._prime_and_inject(
-            "Agent",
-            {"prompt": "do the work", "subagent_type": "general-purpose"},
-            "JUDGMENT-CONTENT test",
-        )
-
-    def test_workflow_injects(self):
-        """Workflow tool fires claude-code-workflows-tool + model-awareness-deep."""
-        sid = uuid.uuid4().hex
-        out = self._run_injector(
-            "Workflow",
-            {"scriptPath": "/tmp/test.js"},
-            session_id=sid,
-        )
-        self.assertIn("JUDGMENT-CONTENT", out)
-
-    def test_unrelated_bash_does_not_inject(self):
-        sid = uuid.uuid4().hex
-        out = self._run_injector("Bash", {"command": "ls -la"}, session_id=sid)
-        self.assertNotIn("JUDGMENT-CONTENT", out)
-
-
 class TestGhCliRecipesInjection(_InjectorTestBase):
     """gh-cli-recipes-deep fires on gh commands."""
 
@@ -412,7 +325,6 @@ class TestTriggerRowsRegistered(TestCase):
         """situational-triggers.conf has all batch 4a topic rows."""
         conf = _read("hooks/situational-triggers.conf")
         for topic in [
-            "model-awareness-deep",
             "ask-before-assuming-deep",
             "gh-cli-recipes-deep",
             "no-dropped-work-deep",
@@ -438,10 +350,6 @@ class TestMaxBodySoftCap(TestCase):
                 text = text[end + 5:]
         return len(text.strip())
 
-    def test_model_awareness_deep_under_cap(self):
-        sz = self._companion_len("skills/model-awareness-deep/DEEP.md")
-        self.assertLessEqual(sz, self.SOFT_CAP,
-                             f"model-awareness-deep {sz} > {self.SOFT_CAP}")
 
     def test_ask_before_assuming_deep_under_cap(self):
         sz = self._companion_len("skills/ask-before-assuming-deep/DEEP.md")

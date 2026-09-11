@@ -605,13 +605,13 @@ class TestBatchDispatchMandate(TestCase):
             self.assertIn("integration mutex", read(rel).lower(),
                           "%s missing the integration-mutex" % rel)
 
-    def test_autopilot_names_a_lane_cap_not_a_batch_cap(self):
-        # #848: the lane cap (up to 5, refilled continuously) is the primary
-        # bound; the retired "batch cap" and pre-#723 "3-5 fixed cap" / "keep the
-        # lanes full" must not appear, and the lane-cap doctrine must be PRESENT.
+    def test_autopilot_names_a_lane_count_not_a_batch_cap(self):
+        # #991: no fixed lane cap — the live lane COUNT is sized to what the box
+        # and backlog bear; the retired "batch cap" and pre-#723 "3-5 fixed cap"
+        # / "keep the lanes full" must not appear.
         body = read(SKILL).lower()
-        self.assertIn("lane cap", body, "SKILL dropped the #848 lane-cap doctrine")
-        self.assertIn("up to 5", body, "SKILL dropped the up-to-5 lane size")
+        self.assertIn("lane count", body, "SKILL dropped the #991 lane-count doctrine")
+        self.assertIn("box and backlog", body, "SKILL dropped the box+backlog sizing")
         self.assertNotIn("batch cap", body, "SKILL still carries the retired #723 batch-cap")
         self.assertNotIn("keep the lanes full", body)
         self.assertIsNone(re.search(r"3[-–]5", body),

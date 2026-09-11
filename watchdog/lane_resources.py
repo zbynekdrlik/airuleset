@@ -1,7 +1,7 @@
 """Per-resource lane cap (#970 fix-forward).
 
 Extracted from ``watchdog/goal.py`` to keep that module under its size ratchet
-(LOW finding #3 of the fable-advisor review: 5604 lines, ceiling raised
+(LOW finding #3 of an adversarial review: 5604 lines, ceiling raised
 instead of split).  The module owns:
 
 - ``_LANE_RESOURCE_FILE`` / ``_LANE_NEEDS_FILE`` — file-path constants

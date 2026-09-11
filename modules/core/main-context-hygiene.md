@@ -2,7 +2,7 @@
 
 **Context gate — related rules you MUST also apply:**
 - `claude-code-tooling.md` — the in-session subagent / agent-strip surfaces (foreground vs background)
-- `model-awareness.md` — tier the delegated read: low/medium effort on the cheap end (Opus 4.8 low where a surface can name it; an ad-hoc read-only sweep dispatches the pinned `sonnet-mechanical` agent (no `model` param — a dispatch never carries an alias param, #871) — never an inherited-Fable mechanical dispatch; the pinned Haiku tier for the most trivial)
+- **Least tool authority for the task** — a review / audit / verify / read-only sweep gets read-only `Explore` (no Edit/Write, enforced by the harness), never write-capable `general-purpose`; the subagent's model is the working model's native choice (`model-awareness.md`).
 - `subagent-type-discipline.md` — use ONLY a listed `subagent_type` (`Explore` / `general-purpose`); never invent one
 - `subagent-continuation.md` — every dispatch is one-shot; embed all context in the prompt
 

@@ -60,8 +60,8 @@ class TestModelAwarenessConversion(TestCase):
         self.assertIn("Opus 5", self.module)
         self.assertIn("BANNED", self.module)
 
-    def test_fable_gate_stays(self):
-        self.assertIn("fable-gate", self.module)
+    def test_ban_hook_named(self):
+        self.assertIn("block-banned-model.sh", self.module)
 
     def test_pointer_exists(self):
         self.assertIn("model-awareness-history.md", self.module)

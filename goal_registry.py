@@ -58,13 +58,14 @@ class Clause:
 # The reconciliation the owner asked to be VISIBLE in the registry, not buried
 # in prose (#848, 2026-09-02, retiring the #723/#724 batch doctrine after the
 # STEP-0 live experiment proved a compact over live lanes is safe on CC 2.1.258):
-# `saturation-core` keeps up to 5 PARALLEL worktree lanes live and refills a
+# `saturation-core` keeps parallel worktree lanes live and refills a
 # returned lane's slot IMMEDIATELY (continuous refill, reversing the #723 batch
-# mode back to #456's shape); `saturation-delivery` integrates each returned
+# mode back to #456's shape; the live lane count is sized to what the box and
+# backlog bear, #991); `saturation-delivery` integrates each returned
 # branch SERIALLY under the mutex as it returns; `compact-boundary` fires the
 # compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not
 # (the lanes reconcile from durable state after the compaction, #844's LANE-RETURN
-# net). So dispatch is continuous-refill up to 5 lanes, integration is serial, and
+# net). So dispatch is continuous-refill, integration is serial, and
 # compact is per cycle; the clauses cannot contradict. Tests assert compact-boundary
 # fires EVERY cycle (live lanes or not) and that the old batch "ZERO live tasks →
 # next batch / NEVER compact while lanes live" framing is GONE.
@@ -150,7 +151,7 @@ CLAUSES = [
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
     Clause("saturation-core", PROFILES,
-        "CONTINUOUS REFILL, never one ticket per turn: keep up to 5 PARALLEL `isolation:worktree` autopilot-worker lanes live — refill a returned lane's slot IMMEDIATELY while backlog remains;"),
+        "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` autopilot-worker lanes live — refill a returned lane's slot IMMEDIATELY while backlog remains;"),
     Clause("saturation-delivery", PROFILES, {
         "full": "integrate returned branches SERIALLY under the integration mutex as they return;",
         "branch-merge": "merge returned branches into the integration branch SERIALLY under the mutex as they return;",

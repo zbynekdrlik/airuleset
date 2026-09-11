@@ -13,7 +13,7 @@ The hook blocks WRITE git ops + airuleset.py push/install targeting any
 */devel/airuleset checkout unless the SESSION ITSELF is an airuleset session
 (payload transcript_path encodes the launch dir; CLAUDE_PROJECT_DIR accepted
 as a secondary signal). Read ops, the sanctioned airuleset.py CLI surface
-(notify/share/tickets-status/fable-gate/…) and gh issue traffic stay open.
+(notify/share/tickets-status/authority/…) and gh issue traffic stay open.
 """
 
 import json
@@ -81,7 +81,6 @@ class ForeignSessionBlocked(TestCase):
         for c in ("python3 ~/devel/airuleset/airuleset.py notify --run-card --repo x/y --issue 1",
                   "python3 ~/devel/airuleset/airuleset.py share /tmp/f.png",
                   "python3 ~/devel/airuleset/airuleset.py tickets-status --refresh --cwd /x",
-                  "python3 ~/devel/airuleset/airuleset.py fable-gate",
                   "python3 ~/devel/airuleset/airuleset.py authority"):
             self.assertAllowed(c)
 

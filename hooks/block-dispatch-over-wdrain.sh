@@ -10,10 +10,10 @@ set -euo pipefail
 # dispatch action the montalu3 W=34 incident abused — dispatching new I-lanes
 # for days while finished W tickets rotted.
 #
-# Gate ONLY for `subagent_type` in {autopilot-worker, sonnet-implementer} —
-# never ticket-validator / fable-advisor / sonnet-mechanical / Explore /
-# general-purpose (those are read-only / judgment / mechanical, not I-lane
-# dispatches).
+# Gate ONLY for `subagent_type` == autopilot-worker — never ticket-validator /
+# Explore / general-purpose / an ad-hoc review consult (those are read-only /
+# judgment, not I-lane dispatches). (#991: the pinned tier-agent types are gone;
+# the single I-lane worker type is autopilot-worker.)
 #
 # Fail-OPEN on missing jq, missing/unparseable cache, stale cache (>30 min),
 # non-int ops_wait (#539/#570 "never a false accusation").
@@ -40,7 +40,7 @@ esac
 # Only gate implementation-worker types
 SUBAGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
 case "$SUBAGENT_TYPE" in
-    autopilot-worker|sonnet-implementer) ;;
+    autopilot-worker) ;;
     *) exit 0 ;;
 esac
 

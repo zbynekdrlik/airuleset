@@ -1,15 +1,16 @@
-"""airuleset.py model-audit — READ-ONLY allowlist check for model FLOAT (#871).
+"""airuleset.py model-audit — READ-ONLY ban-list check for model FLOAT (#871/#991).
 
 The managed launch pin (`MANAGED_MODEL`) fixes a session's model at LAUNCH, but
 a running session can still emit a `model_changed` record and FLOAT mid-lifetime
-onto a model outside the exact-id allowlist (`airuleset.MODEL_TIERS`) — e.g. the
-banned Opus 5 (`claude-opus-5`) or a superseded model. No code surface can
+onto a BANNED model (`airuleset.BANNED_MODELS` — Opus 5). No code surface can
 prevent an in-session float; this command SURFACES it (read-only, no keystrokes
-— feedback_never_keystroke_human_active_pane / no_manual_pane_nudges).
+— feedback_never_keystroke_human_active_pane / no_manual_pane_nudges). #991
+narrowed the check from the exact-id allowlist to the ban-list: the working
+model may legitimately float onto sonnet/haiku/another allowlisted tier.
 
 For every live managed tmux pane it reads the newest-assistant `model` of the
 pane's MAIN transcript AND of every subagent transcript under it, and flags any
-that is not on the allowlist. A watchdog job (machine-channel only, never an
+that is a BANNED model. A watchdog job (machine-channel only, never an
 owner ping — the #850 repo-health class) journals violations; the owner's remedy
 per floated session is `/model → Fable 5.1` (or a relaunch, which re-lands the
 launch pin automatically).
@@ -92,9 +93,8 @@ def audit_model_floats(panes, projects_dir, find_transcript, read_model,
             records.append({
                 "pane": pane_id, "cwd": cwd, "kind": "main",
                 "transcript": str(main_path), "model": main_model,
-                # #871 review 🔴3a: the AUDIT-tolerant predicate — tolerates a
-                # served dated snapshot id for an allowlisted tier, never a
-                # dispatch-surface check (those stay exact elsewhere).
+                # #991: the AUDIT ban-list predicate — flags only a BANNED model
+                # (Opus 5), tolerating a served dated snapshot / provider prefix.
                 "banned": airuleset.is_banned_model_for_audit(main_model),
             })
         for sub in subagent_iter(main_path):
@@ -114,7 +114,7 @@ def audit_model_floats(panes, projects_dir, find_transcript, read_model,
 
 def cmd_model_audit(args):
     """READ-ONLY: list every live pane's (and its subagents') newest served
-    model, flag any outside the exact-id allowlist. Never keystrokes, never
+    model, flag any BANNED model (Opus 5). Never keystrokes, never
     writes. `--json` for machine output; `--violations-only` to print only
     flagged rows; exit 1 if any banned model is live (so a watchdog job can act
     on the exit code), else 0."""
@@ -139,16 +139,16 @@ def cmd_model_audit(args):
     if getattr(args, "json", False):
         print(_json.dumps({"records": shown,
                            "violations": len(flagged),
-                           "allowlist": sorted(airuleset.MODEL_TIERS.values())}))
+                           "banned": sorted(airuleset.BANNED_MODELS)}))
     else:
         if not shown:
-            print("model-audit: %d live pane(s), 0 violations (allowlist: %s)"
-                  % (len(panes), ", ".join(sorted(airuleset.MODEL_TIERS.values()))))
+            print("model-audit: %d live pane(s), 0 violations (banned: %s)"
+                  % (len(panes), ", ".join(sorted(airuleset.BANNED_MODELS))))
         for r in shown:
             print("%s  %-6s %-20s %s  [%s]" % (
                 r["pane"], r["kind"], r["model"], r["cwd"],
                 "BANNED" if r["banned"] else "ok"))
         if flagged:
-            print("model-audit: %d BANNED (floated off the allowlist) — owner "
+            print("model-audit: %d BANNED (floated to a banned model) — owner "
                   "remedy per session: /model -> Fable 5.1, or relaunch" % len(flagged))
     return 1 if flagged else 0

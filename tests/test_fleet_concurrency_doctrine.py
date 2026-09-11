@@ -57,25 +57,25 @@ class TestBatchCapWithinBatchResourceSignal(TestCase):
     validators combined."""
 
     def test_the_section_states_the_lane_cap_and_resource_signal(self):
-        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
-        self.assertIn("up to 5", w.lower())
-        self.assertIn("lane cap", w.lower())
+        w = window(read(AUTOPILOT), "**Lane count", "**Serial fallback")
+        self.assertIn("box + backlog", w.lower())
+        self.assertIn("lane count", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertNotIn("at 8.", w)
 
     def test_the_section_cites_the_real_measured_incident(self):
-        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane count", "**Serial fallback")
         self.assertIn("18 total agents", w)
         self.assertIn("3 of them", w)
         self.assertIn("rate limit", w.lower())
         self.assertIn("2026-08-08", w)
 
     def test_the_section_names_stagger_into_waves(self):
-        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane count", "**Serial fallback")
         self.assertIn("waves", w.lower())
 
     def test_the_section_covers_validators_not_just_workers(self):
-        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane count", "**Serial fallback")
         self.assertIn("validator", w.lower())
         self.assertIn("workers", w.lower())
 
@@ -87,7 +87,7 @@ class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
         t = read(AUTOPILOT)
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
-        self.assertIn("lane cap section", w.lower())
+        self.assertIn("lane count section", w.lower())
         self.assertIn("resource signal", w.lower())
         self.assertIn("wave", w.lower())
 
@@ -197,7 +197,7 @@ class TestAccountWideCapScopeNotPerRound(TestCase):
     def test_the_rule_sentence_says_account_wide_across_live_lanes(self):
         # #848: the second bound stays ACCOUNT-WIDE (never per lane / per repo);
         # "per round"/"per batch" is gone with the batch model itself.
-        w = window(read(AUTOPILOT), "**Lane cap",
+        w = window(read(AUTOPILOT), "**Lane count",
                    "**Serial fallback")
         self.assertNotIn("at 8.", w)
         self.assertIn("ACCOUNT-WIDE", w)
@@ -243,12 +243,12 @@ class TestMeasurementClaimsAreAccurate(TestCase):
     combined with the failing validator burst."""
 
     def test_kolo_2_claim_does_not_overstate_zero_issues(self):
-        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane count", "**Serial fallback")
         self.assertIn("no rate-limit kills", w.lower())
         self.assertNotIn("ran clean with zero issues", w)
 
     def test_the_five_worker_band_is_not_claimed_clean(self):
-        w = window(read(AUTOPILOT), "**Lane cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**Lane count", "**Serial fallback")
         self.assertNotIn("(4–5 workers, no validator burst)", w)
         self.assertNotIn("(4-5 workers, no validator burst)", w)
 

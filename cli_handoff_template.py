@@ -119,7 +119,6 @@ def render_extended_body(
     # Bounce-specific fields.
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
-    reviewed_by_tier: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
 ) -> str:
     """Compose a full READY-FOR-REVIEW comment body for a repo with the
@@ -135,9 +134,7 @@ def render_extended_body(
     parts.append("READY-FOR-REVIEW: branch %s" % branch_field)
     parts.append("")
 
-    # Self-review block — Self-review-model: goes BEFORE the table (#969 R1).
-    if reviewed_by_tier:
-        parts.append("Self-review-model: %s" % reviewed_by_tier)
+    # Self-review block.
     parts.append("**Self-review:**")
     parts.append("")
     parts.append(self_review_table.strip())
@@ -168,8 +165,6 @@ def render_extended_body(
             parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
         if prevencia_read:
             parts.append("Prevencia-read: %s" % prevencia_read)
-        if reviewed_by_tier:
-            parts.append("Reviewed-by-tier: %s" % reviewed_by_tier)
 
     for cf in (closes_finding or []):
         parts.append("Closes-finding: %s" % cf)
@@ -192,7 +187,6 @@ def render_generic_body(
     bounce_round: int,
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
-    reviewed_by_tier: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
 ) -> str:
     """Compose the original generic READY-FOR-REVIEW comment body.
@@ -216,8 +210,6 @@ def render_generic_body(
             parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
         if prevencia_read:
             parts.append("Prevencia-read: %s" % prevencia_read)
-        if reviewed_by_tier:
-            parts.append("Reviewed-by-tier: %s" % reviewed_by_tier)
 
     for cf in (closes_finding or []):
         parts.append("Closes-finding: %s" % cf)
@@ -234,7 +226,6 @@ def validate_extended_flags(
     stack: Optional[str],
     harness: Optional[str],
     shared_benefit: Optional[str],
-    reviewed_by_tier: Optional[str] = None,
 ) -> Optional[str]:
     """Return an error message if any unconditionally-required extended
     template field is missing, or None if all present."""
@@ -245,8 +236,6 @@ def validate_extended_flags(
         missing.append("--harness")
     if not (shared_benefit or "").strip():
         missing.append("--shared-benefit")
-    if not (reviewed_by_tier or "").strip():
-        missing.append("--reviewed-by-tier (Self-review-model)")
     if missing:
         return ("handoff BLOCK: repo has extended template — missing "
                 "required flags: %s" % ", ".join(missing))
@@ -270,7 +259,6 @@ def compose_body(
     evidence_head: Optional[str] = None,
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
-    reviewed_by_tier: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
 ) -> tuple[str, Optional[str]]:
     """Compose the comment body, choosing extended or generic shape.
@@ -287,8 +275,7 @@ def compose_body(
         use_extended = True  # caller intent overrides a failed probe
     if use_extended:
         err = validate_extended_flags(
-            stack=stack, harness=harness, shared_benefit=shared_benefit,
-            reviewed_by_tier=reviewed_by_tier)
+            stack=stack, harness=harness, shared_benefit=shared_benefit)
         if err:
             return ("", err)
         branch_field = derive_branch_field(branch, repo)
@@ -299,7 +286,7 @@ def compose_body(
             bounce_round=bounce_round, tested_tree=tested_tree,
             evidence_head=evidence_head, tenant_scope=tenant_scope,
             source_verified=source_verified, root_cause=root_cause,
-            prevencia_read=prevencia_read, reviewed_by_tier=reviewed_by_tier,
+            prevencia_read=prevencia_read,
             closes_finding=closes_finding,
         )
     else:
@@ -308,7 +295,6 @@ def compose_body(
             verified_at_utc=verified_at_utc,
             self_review_table=self_review_table, bounce_round=bounce_round,
             root_cause=root_cause, prevencia_read=prevencia_read,
-            reviewed_by_tier=reviewed_by_tier,
             closes_finding=closes_finding,
         )
     return (body, None)

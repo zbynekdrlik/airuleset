@@ -132,10 +132,12 @@ class TestSaturationDirectiveIsReal(TestCase):
 
     def test_saturation_core_states_the_full_directive(self):
         core = next(c for c in gr.CLAUSES if c.id == "saturation-core").text
-        for token in ("CONTINUOUS REFILL", "up to 5", "PARALLEL",
+        for token in ("CONTINUOUS REFILL",
                       "isolation:worktree", "autopilot-worker", "IMMEDIATELY"):
             self.assertIn(token, core)
-        # TEETH: the retired batch wording must be GONE.
+        # TEETH: the retired batch wording must be GONE, and #991 dropped the
+        # fixed lane cap wording (count = box + backlog).
+        self.assertNotIn("up to 5", core)
         self.assertNotIn("BATCH MODE", core)
         self.assertNotIn("NO refill", core)
 

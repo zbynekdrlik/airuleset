@@ -446,7 +446,6 @@ class TestDoctrineContentLock843(unittest.TestCase):
     def test_worker_names_handoff_flags(self):
         t = self._read(self._WORKER)
         self.assertIn("--self-review-file", t)
-        self.assertIn("--reviewed-by-tier", t)
         self.assertIn("--root-cause", t)
         self.assertIn("--prevencia-read", t)
 
@@ -462,10 +461,9 @@ class TestDoctrineContentLock843(unittest.TestCase):
         t = self._read(self._SKILL)
         self.assertIn("round3!", t)
 
-    def test_skill_names_fable_advisor_design_consult(self):
+    def test_skill_names_round3_design_consult(self):
         t = self._read(self._SKILL)
-        self.assertIn("fable-advisor", t)
-        # The round3! clause must mention the design consult
+        # The round3! clause must mention a design consult (#991: no tier agent)
         idx = t.find("round3!")
         self.assertGreater(idx, -1)
         window = t[idx:idx + 500]

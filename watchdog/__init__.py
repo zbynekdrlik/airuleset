@@ -1726,7 +1726,7 @@ def _owner_disabled(kind):
 # succeed even if it needed to reach back into `watchdog` (it currently does
 # not -- it imports only stdlib), and (b) every existing consumer that
 # resolves these names via `watchdog.<name>` dotted access or via
-# `from watchdog import <name>` (airuleset.py's cmd_watchdog/cmd_fable_gate)
+# `from watchdog import <name>` (airuleset.py's cmd_watchdog)
 # keeps working with ZERO changes, since the names still live in watchdog's
 # own top-level namespace -- just re-exported instead of defined in this
 # file directly. This is the FIRST facade-re-export split in this repo
@@ -1742,7 +1742,6 @@ from watchdog.usage import (  # noqa: E402
     weekly_percent as weekly_percent,
     usage_windows as usage_windows,
     write_usage_cache as write_usage_cache,
-    fable_gate as fable_gate,
     check_usage as check_usage,
     _account_email as _account_email,
     _local_account as _local_account,

@@ -38,19 +38,6 @@ class TestWorkflowCostDiscipline(TestCase):
         # The anti-patterns line must name the kill-and-discard waste + point at the module.
         self.assertIn("salvage-before-discarding-work.md", t)
 
-    def test_tiering_still_names_a_miss_and_keeps_lookups_light(self):
-        t = read("skills/model-awareness-deep/DEEP.md")
-        # The self-audit must still name a tiering MISS (inverted under max-performance).
-        self.assertIn("tiering MISS", t)
-        # Mechanical lookups stay on a light/low tier under EVERY policy. The
-        # #455 (2026-08-14) refinement rehabilitated Sonnet 5 as the LIGHT-work
-        # tier ("moze byt aj sonnet 5 vyuzivany"), so the cheap end is now
-        # Sonnet 5 (Opus 4.8 low where a surface can name it); see
-        # tests/test_model_tiering.py for the full lineup locks.
-        self.assertIn(
-            "Purely MECHANICAL / READ-ONLY / LIGHT plumbing = Sonnet 5", t)
-        # Redundancy stays banned even with unlimited budget.
-        self.assertIn("Redundancy is still waste, not rigor", t)
 
     def test_salvage_module_exists_and_wired(self):
         m = read("modules/core/salvage-before-discarding-work.md")

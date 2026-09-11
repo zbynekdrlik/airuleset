@@ -29,21 +29,8 @@ def read(rel):
 # VERBATIM in the new skill, taken from the start/middle/end of the original
 # file so the test proves nothing was summarized away])
 NEW_SKILLS = {
-    "subagent-type-discipline": (
-        "modules/core/subagent-type-discipline.md",
-        [
-            "**The `Agent` tool's `subagent_type` parameter MUST be one of the "
-            "agent types listed in the Agent tool's own description in your "
-            "environment. NEVER invent agent names. Hallucinated names burn "
-            "tokens on silent fallback dispatches.**",
-            "49.8k tokens spent on a real dispatch with the wrong agent",
-            "`superpowers:subagent-driven-development` uses `general-purpose` "
-            "for all three roles",
-            "Applies to all rewordings and semantic equivalents — any "
-            "made-up `<plugin>:<agent>` string is banned regardless of "
-            "plugin name.",
-        ],
-    ),
+    # (subagent-type-discipline removed #991 — native subagent_type validation
+    # replaces it; the module + skill are deleted.)
     "verify-issue-still-valid": (
         "modules/quality/verify-issue-still-valid.md",
         [

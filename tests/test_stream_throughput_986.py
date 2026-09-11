@@ -138,17 +138,6 @@ class TestWorkerLongForegroundWait(unittest.TestCase):
         self.assertEqual(r2.returncode, 2,
                          "Non-worker subagent loop 2 was not blocked")
 
-    def test_sonnet_implementer_also_gets_extra_loop(self):
-        """sonnet-implementer gets the same extra loop as autopilot-worker."""
-        r1 = self._run_ci_hook(
-            _short_poll_loop(RUN_A),
-            agent_id="agent-789", agent_type="sonnet-implementer")
-        self.assertEqual(r1.returncode, 0, r1.stderr)
-        r2 = self._run_ci_hook(
-            _long_foreground_loop(RUN_A),
-            agent_id="agent-789", agent_type="sonnet-implementer")
-        self.assertEqual(r2.returncode, 0,
-                         "sonnet-implementer loop 2 was blocked: " + r2.stderr)
 
     def test_bg_waiter_still_allowed_through_this_hook(self):
         """A background CI poll passes this hook (block-subagent-bg-ci-poll.sh

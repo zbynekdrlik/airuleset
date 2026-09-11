@@ -637,8 +637,7 @@ def shared_weekly_window(cache):
     """(percent, resets_at) for the ACCOUNT-WIDE weekly window (model is
     falsy — the per-model weekly windows, e.g. Fable's, are a DIFFERENT
     number) — or None when no such window is present. Across multiple
-    matching entries takes the MAX percent, mirroring
-    `watchdog.fable_gate`'s own shared-window selection."""
+    matching entries takes the MAX percent (the binding window decides)."""
     best = None
     for w in (cache or {}).get("windows") or []:
         if w.get("group") != "weekly" or w.get("model"):
@@ -794,9 +793,9 @@ FLEET_WEEKLY_CANDIDATE_MAX_AGE = 6 * 3600
 def _weekly_candidate_is_fresh(ts, now_epoch):
     """True iff `ts` (a host's own usage-cache WRITE time, unix epoch
     seconds — see `_fleet_remote_row`'s `weekly_ts`) is within
-    `FLEET_WEEKLY_CANDIDATE_MAX_AGE` of `now_epoch`. Mirrors
-    `watchdog.fable_gate()`'s own clock-skew-safe staleness check for the
-    SAME cache file: age outside `[0, MAX]` — including a FUTURE `ts`
+    `FLEET_WEEKLY_CANDIDATE_MAX_AGE` of `now_epoch`. Clock-skew-safe
+    staleness check for the usage cache file: age outside `[0, MAX]`
+    — including a FUTURE `ts`
     (clock skew, a cache synced off another box), which a plain
     `age > MAX` check would wrongly call "fresh" forever — is unknown,
     never trusted. A missing/non-numeric `ts` (a legacy pre-#286 row that

@@ -102,7 +102,7 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 ## Dispatch: Phases 1-3 on a goal-armed box (#926)
 
 When `/goal` is armed, `block-main-implementation.sh` blocks bulk bash in main. Dispatch
-Phases 1-3 (extract/transcribe/dedup — mechanical) to a `sonnet-mechanical` worker with
+Phases 1-3 (extract/transcribe/dedup — mechanical) to a read-only worker subagent with
 WORK dir + VIDEO path in its prompt; main reads only the returned `frames_kept/` count +
 `summary.json`. Phase 4 (reading screens via Read tool) stays in main — it needs vision.
 
