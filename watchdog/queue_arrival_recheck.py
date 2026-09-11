@@ -277,7 +277,9 @@ def _nudge_text(arrivals, cur_count):
         "čakajúca na waiter je slepá na nové hand-offy — re-deriv svoj gk "
         "backlog (core-quals --count / tvoj /goal stop-proof) a spracuj nové "
         "tickety: reviewni ready-for-review, konaj needs-gatekeeper, vezmi späť "
-        "prio:bounce. Ak už na nich robíš, potvrď."
+        "prio:bounce. Poradie riešenia riadi priorita dohodnutá v tejto session "
+        "(architektúra > architecture-rework > prio:bounce > backlog, #993), nie "
+        "tento nudge. Ak už na nich robíš, potvrď."
         % (_fmt_arrivals(arrivals), cur_count))
     if len(text) <= NUDGE_MAX_CHARS:
         return text

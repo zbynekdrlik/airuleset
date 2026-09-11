@@ -294,21 +294,27 @@ class TestCountResourceUsage(unittest.TestCase):
 class TestLaneNudgeText(unittest.TestCase):
     """Tests for _lane_nudge_text -- the resource-aware nudge formatter."""
 
-    def test_default_cap_produces_text_with_5(self):
+    def test_default_cap_no_count_prescription(self):
+        # #994: the nudge no longer prescribes the cap count ("menej než N" /
+        # "až N PARALELNÝCH"). It keeps the #848 refill mechanism and defers to
+        # the session-agreed priority (#993).
         text = lane_resources._lane_nudge_text(10, 2, {"total": 5})
-        self.assertIn("menej než 5", text)
-        self.assertIn("až 5 PARALELNÝCH", text)
+        self.assertNotIn("menej než", text)
+        self.assertNotIn("drž až", text)
+        self.assertIn("refill", text.lower())
+        self.assertIn("#993", text)
 
-    def test_cap_1_produces_text_with_1(self):
+    def test_cap_1_no_count_prescription(self):
         text = lane_resources._lane_nudge_text(10, 2, {"total": 1})
-        self.assertIn("menej než 1", text)
-        self.assertIn("až 1 PARALELNÝCH", text)
-        self.assertNotIn("menej než 5", text)
+        self.assertNotIn("až 1 PARALELNÝCH", text)
+        self.assertNotIn("menej než 1", text)
+        self.assertIn("#993", text)
 
-    def test_cap_2_produces_text_with_2(self):
+    def test_cap_2_no_count_prescription(self):
         text = lane_resources._lane_nudge_text(10, 2, {"total": 2})
-        self.assertIn("menej než 2", text)
-        self.assertIn("až 2 PARALELNÝCH", text)
+        self.assertNotIn("až 2 PARALELNÝCH", text)
+        self.assertNotIn("menej než 2", text)
+        self.assertIn("#993", text)
 
     def test_backlog_and_waiters_are_formatted(self):
         text = lane_resources._lane_nudge_text(7, 3, {"total": 5})
@@ -342,8 +348,9 @@ class TestLaneNudgeText(unittest.TestCase):
     def test_backward_compat_fn(self):
         """GOAL_LANE_NUDGE_TEXT_FN backward compat helper."""
         text = goal.GOAL_LANE_NUDGE_TEXT_FN(10, 2)
-        self.assertIn("menej než 5", text)
         self.assertIn("backlog=10", text)
+        self.assertNotIn("menej než 5", text)      # #994: no cap-count prescription
+        self.assertIn("#993", text)
 
 
 class TestLaneResourceGuardConstants(unittest.TestCase):

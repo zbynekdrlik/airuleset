@@ -257,7 +257,8 @@ class DeliverDiscordRepliesRetryEscapesFirst(unittest.TestCase):
         # and assert the delegation.
         calls = []
 
-        def _sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None, out=None):
+        def _sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
+                out=None, user_authored=False):
             calls.append({"pid": pid, "text": text})
             return True
 

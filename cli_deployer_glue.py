@@ -323,6 +323,12 @@ try:
     dsk = statusbar.disk_segment()
     if dsk:
         segs.append(dsk)
+    # #994: 'nudges OFF' badge — shown while the owner has turned machine nudges
+    # OFF (the ~/.claude/nudges-off marker), so OFF is never silent. Placed after
+    # disk in the width-budget order.
+    noff = statusbar.nudges_off_segment()
+    if noff:
+        segs.append(noff)
     # #950: per-account quota % on shared-stream boxes (after disk, same cache).
     qta = statusbar.quota_segment()
     if qta:

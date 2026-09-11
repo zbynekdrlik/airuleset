@@ -514,6 +514,21 @@ def disk_segment(home=None, now=None):
     return "\033[38;5;196mdisk %d%%\033[0m" % int(worst)
 
 
+def nudges_off_segment(home=None):
+    """The `nudges OFF` footer segment (#994): shown ONLY while the owner has
+    turned machine nudges OFF — the `~/.claude/nudges-off` marker exists —
+    hidden otherwise, so OFF is never silent. EXISTENCE-based, matching
+    `watchdog.nudges_enabled`'s fail-safe semantics (a present-but-corrupt
+    marker still reads OFF). Reads ONLY a machine-local file, never blocks /
+    touches the network; renders as no segment on any error (the shim wraps the
+    whole assembly, and `Path.exists()` returns False rather than raising for
+    the ordinary missing-file case). Modelled on `disk_segment`, placed after
+    `disk` in the width-budget order."""
+    if (_claude_dir(home) / "nudges-off").exists():
+        return "\033[38;5;208mnudges OFF\033[0m"
+    return ""
+
+
 def quota_segment(home=None, now=None):
     """#950: the ``quota NN%`` footer segment — per-account disk quota usage
     on shared-stream boxes.  Shown at >= 90 % of the hard quota, hidden below.

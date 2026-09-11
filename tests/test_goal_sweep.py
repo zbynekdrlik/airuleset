@@ -2961,7 +2961,7 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
         self.assertIn("sériovo", low)
-        # #848: continuous refill, not the retired batch "start a NEW batch".
+        # #848: continuous refill mechanism kept (refill a returned slot).
         self.assertIn("refill", low)
         self.assertIn("doplň", low)
         self.assertNotIn("várk", low)
@@ -2969,6 +2969,13 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         # NOT the retired #442 fixed "cap 8".
         self.assertIn("rate-limit", low)
         self.assertNotIn("cap 8", low)
+        # #994: the nudge no longer PRESCRIBES priority or a lane COUNT — it
+        # defers to the session-agreed priority (#993) and drops "up to N" /
+        # "saturuj" / "čo najviac".
+        self.assertIn("#993", rendered)
+        self.assertNotIn("drž až", low)
+        self.assertNotIn("saturuj", low)
+        self.assertNotIn("čo najviac", low)
 
     def test_saturation_workers_is_a_named_constant(self):
         # #481: the batch ceiling is a named constant. #729 removed the

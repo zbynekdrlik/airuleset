@@ -67,6 +67,67 @@ SEND_VERIFY_S = 1
 SEND_TYPE_SETTLE_POLLS = 8
 SEND_TYPE_SETTLE_S = 1
 
+# --------------------------------------------------------------------------- #
+# #994 -- the global nudge KILL SWITCH. ONE predicate consulted at the TOP of
+# each of the five keystroke helpers below (`send_verified`, `send_continue`,
+# `send_subagent_nudge`, `submit_own_goal_verified`, `submit_own_draft_verified`)
+# -- the ONLY places machine-composed text is typed into a Claude pane, so this
+# is the single chokepoint and there is NO per-job check anywhere else. When the
+# owner turns nudges OFF, the machine stops overriding the priority the owner
+# just agreed with the session (the incident: a lane nudge announcing "priority
+# = as many parallel subagents from I as possible"). Mirrors the EXISTING owner
+# kill-switch `_owner_disabled` (#400): existence of the marker is the whole
+# signal (fail-safe OFF -- a corrupt/partial marker still suppresses, never a
+# silent re-enable), and `AIRULESET_TEST_IGNORE_DISABLE` is honored so a real
+# box's OFF flag never fails the suite / the pre-push gate. The ONLY bypass is
+# the owner's OWN Discord reply (the `user_authored` kwarg, set solely by
+# `discord_replies`): the owner speaking is never a machine nudge.
+# --------------------------------------------------------------------------- #
+NUDGES_OFF_MARKER = "nudges-off"
+
+
+def nudges_marker_path(home=None):
+    """Path to the owner's global nudge kill-switch marker. Present == nudges
+    OFF (the same existence semantics as `_owner_disabled`'s
+    `~/.claude/watchdog-disable-*`)."""
+    base = home if home is not None else os.path.expanduser("~")
+    return os.path.join(base, ".claude", NUDGES_OFF_MARKER)
+
+
+def read_nudges_marker(home=None):
+    """The marker's advisory JSON `{"since","by","reason"}` when OFF, else None.
+    EXISTENCE is the source of truth (see `nudges_enabled`); this only decodes
+    the detail for `status` / the badge. A present-but-corrupt marker returns
+    `{}` (still OFF), never None -- None means ABSENT (nudges ON)."""
+    path = nudges_marker_path(home)
+    if not os.path.exists(path):
+        return None
+    try:
+        import json
+        with open(path, encoding="utf-8") as h:
+            data = json.load(h)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def nudges_enabled(home=None):
+    """False when the owner has turned machine nudges OFF (#994). EXISTENCE of
+    `~/.claude/nudges-off` is the whole signal (fail-safe OFF). Honors
+    `AIRULESET_TEST_IGNORE_DISABLE` exactly like `_owner_disabled` (#400) so a
+    real box's OFF flag never fails the suite / the pre-push gate."""
+    if os.environ.get("AIRULESET_TEST_IGNORE_DISABLE"):
+        return True
+    return not os.path.exists(nudges_marker_path(home))
+
+
+def _suppress_nudge(kind, text, logs):
+    """Journal ONE line for a nudge suppressed by the #994 kill switch (an
+    explicit #486-direction decision log). `kind` names the helper; the first
+    60 chars of `text` identify the specific suppressed nudge."""
+    if isinstance(logs, list):
+        logs.append("nudges OFF: suppressed %s %s" % (kind, (text or "")[:60]))
+
 
 def _default_run(argv, timeout=8):
     import subprocess
@@ -396,8 +457,13 @@ def _strip_selected(captured):
     return False
 
 
-def send_continue(pane_id, text=NUDGE_TEXT, run=None):
+def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None):
     """Type `text` literally into the pane, then press Enter to submit it.
+
+    #994: when the owner has turned nudges OFF, type NOTHING, journal one line
+    and return False (the caller reads the return -- `compact._compact_submit_
+    verified` -- so the request stays pending, never booked delivered). Returns
+    True on an attempted send (this helper never post-verifies).
 
     Captures the pane FIRST (issue #36): if the agent-strip selector holds
     focus (`_strip_selected`), send ONE Escape before typing — otherwise the
@@ -408,6 +474,9 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     submit) already Escape-and-retry on a swallowed submit. NEVER send a
     second Escape here — a rapid double-Escape into a pane holding a draft
     PERMANENTLY DELETES it (empirically confirmed, issue #35)."""
+    if not watchdog.nudges_enabled():
+        _suppress_nudge("continue", text, logs)
+        return False
     run = run or watchdog._default_run
     captured = watchdog.capture_pane(pane_id, run, lines=10)
     if _strip_selected(captured):
@@ -424,6 +493,7 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     # text at all).
     run(["tmux", "send-keys", "-t", pane_id, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    return True
 
 
 def _subagent_nudge_signature(worker_id):
@@ -456,6 +526,9 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
     (returns False) rather than the old raw-`send_continue` book-as-delivered:
     an unverifiable send left a swallowed stuck-check stranded in the composer.
     A refused send is retried next sweep once a transcript is resolvable."""
+    if not watchdog.nudges_enabled():
+        _suppress_nudge("subagent", "%s (%s)" % (worker_id, kind), logs)
+        return False
     text = ("stuck-check: %s (%s v subagents/%s.jsonl) "
             "— over jeho transcript a zasiahni (dispatchni znova alebo naň nadviaž), "
             "nič nerob naslepo." % (_subagent_nudge_signature(worker_id), kind, worker_id))
@@ -677,7 +750,7 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
 
 
 def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                  out=None):
+                  out=None, user_authored=False):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -737,7 +810,15 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     unreadable `tpath` refuses to send rather than typing blind or reading from
     byte 0. Bare-box ONLY: a pane holding a DRAFT is delivered via
     `deliver_with_stash`; a draft that RACED into the box since the caller's own
-    check is rescued and the send aborted."""
+    check is rescued and the send aborted.
+
+    `user_authored` (#994): True ONLY for the owner's OWN Discord reply (set
+    solely by `discord_replies`). It BYPASSES the nudge kill switch -- the owner
+    speaking is never a machine nudge -- so an OFF box still delivers the owner's
+    answer. Every machine caller leaves it False and is suppressed when OFF."""
+    if not user_authored and not watchdog.nudges_enabled():
+        _suppress_nudge("send", text, logs)
+        return False
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -837,7 +918,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
 
 def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
                               sleep_fn=None, logs=None, caller_proven_own=False,
-                              out=None):
+                              out=None, user_authored=False):
     """#501 — SUBMIT an EXISTING recognized-own nudge draft already sitting in
     the input box, transcript-verified — WITHOUT typing anything. The missing
     "submit an already-composed OWN draft" member of the delivery family
@@ -909,7 +990,15 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
 
     Returns True ONLY on a transcript-CONFIRMED submit; False = not delivered,
     retryable next sweep (the caller leaves its own budget unconsumed). A
-    falsy/unreadable `tpath` refuses (the transcript is the whole proof)."""
+    falsy/unreadable `tpath` refuses (the transcript is the whole proof).
+
+    `user_authored` (#994): True ONLY for the owner's OWN Discord reply (set
+    solely by `discord_replies`). It BYPASSES the nudge kill switch so an OFF
+    box still submits the owner's own answer draft; every machine caller leaves
+    it False and is suppressed when OFF."""
+    if not user_authored and not watchdog.nudges_enabled():
+        _suppress_nudge("draft", draft, logs)
+        return False
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1048,7 +1137,13 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
     Escape+Enter (never a second Escape #35), re-verified. On a genuinely
     unconfirmed submit the box is left EXACTLY as-is (never backspace our own
     complete payload; it is a legit pending arm), logged honestly, return False;
-    the caller's escalation fires."""
+    the caller's escalation fires.
+
+    #994: goal auto-arm is machine-composed, so an OFF box suppresses it (type
+    NOTHING, journal one line, return False -- the caller retries when back ON)."""
+    if not watchdog.nudges_enabled():
+        _suppress_nudge("goal", text, logs)
+        return False
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 

@@ -191,16 +191,25 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
         parts.append("box-free %d/%d free" % (box_free_avail, max(0, box_free_cap)))
         resource_snippet = " (%s)" % " · ".join(parts)
 
+    # #994 — FACTS + the #848 CONTINUOUS REFILL mechanism, but NEVER a
+    # count/priority PRESCRIPTION. The nudge reports backlog, live lanes,
+    # waiters + resource caps and keeps the refill/worktree/serial-integration
+    # mechanism, but it no longer says "hold up to N parallel lanes" / "saturate"
+    # / "as many as possible" (the exact priority override the owner reported):
+    # HOW MANY lanes and WHICH tickets first are the session's call, bounded by
+    # real resource limits, and PRIORITY is the one the owner agreed this session
+    # (#993), not this nudge.
     return (
         "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
         "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
-        "NErátaj; dispatchni len naozaj workable), no BEŽÍ menej než %d živých lán "
-        "(waiterov beží: %d)%s — sú VOĽNÉ sloty. Podľa CONTINUOUS REFILL doktríny "
-        "skills/autopilot SKILL.md (#848/#970): drž až %d PARALELNÝCH "
-        "isolation:\"worktree\" autopilot-worker lán (run_in_background) živých — "
-        "doplň vrátený slot HNEĎ, oldest-first; ustúp (back off) len na REÁLNY "
-        "resource signál — server-side rate-limit error, memory pressure boxu, "
-        "alebo CC max-subagents strop; vrátené vetvy integruj výhradne SÉRIOVO pod "
-        "integračným mutexom; po každom integračnom cykle sprav compact-request "
-        "--self (aj keď lány bežia)."
-    ) % (backlog_n, total, waiters, resource_snippet, total)
+        "NErátaj; dispatchni len naozaj workable), BEŽÍ %d živých lán "
+        "(waiterov beží: %d)%s. Sú VOĽNÉ sloty — workable tikety dispatchni "
+        "PARALELNÝMI isolation:\"worktree\" autopilot-worker lánmi "
+        "(run_in_background), refill (doplň) vrátený slot po jeho návrate, "
+        "integruj SÉRIOVO pod integračným mutexom a po každom integračnom cykle "
+        "sprav compact-request --self; ustúp len na REÁLNY resource signál "
+        "(server-side rate-limit, memory pressure boxu, CC max-subagents strop). "
+        "PRIORITU (ČO riešiť a v akom poradí) ani POČET lán NEURČUJE tento nudge "
+        "— platí priorita dohodnutá v tejto session: architektúra > "
+        "architecture-rework > prio:bounce > backlog (#993)."
+    ) % (backlog_n, live_workers, waiters, resource_snippet)

@@ -179,7 +179,11 @@ class TestCompactPendingWhenOff(unittest.TestCase):
         import watchdog.compact as compact
         rec = _Recorder()
         logs = []
-        with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False):
+        # A BARE idle box (`_input_line_text` == "") so the pre-send raced-busy
+        # gate passes and the ladder reaches the `send_continue` chokepoint,
+        # where the #994 kill switch suppresses the /compact.
+        with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False), \
+                m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
             out = compact._compact_submit_verified(
                 PID, rec, lambda *a, **k: None, logs.append)
         self.assertEqual(out, "nudges-off")
@@ -298,19 +302,26 @@ class TestNudgeTextPhraseLock(unittest.TestCase):
         import re
         return re.search(r"up to 5|saturuj|čo najviac", text, re.I)
 
+    def _no_count_prescription(self, text):
+        # #994 point 5: no "hold up to N" count prescription. `PARALELNÝMI`
+        # (the kept #848 mechanism word) is fine; the banned shapes are the
+        # count phrasings the owner reported.
+        self.assertIsNone(self._banned(text))
+        self.assertNotIn("drž až", text)               # "hold up to N lanes"
+        self.assertNotIn("menej než", text)            # cap-count framing
+
     def test_lane_nudge_text_facts_no_count(self):
         from watchdog.lane_resources import _lane_nudge_text
         text = _lane_nudge_text(7, 1, {"total": 5}, usage=None, live_workers=2)
-        self.assertIsNone(self._banned(text))
-        self.assertNotIn("PARALELNÝCH", text)          # count prescription gone
+        self._no_count_prescription(text)
         self.assertIn("backlog", text)                 # still reports the fact
         self.assertIn("#993", text)                    # agreed-priority reference
 
     def test_goal_lane_nudge_text_fn_no_count(self):
         import watchdog.goal as goal
         text = goal.GOAL_LANE_NUDGE_TEXT_FN(7, 1)
-        self.assertIsNone(self._banned(text))
-        self.assertNotIn("PARALELNÝCH", text)
+        self._no_count_prescription(text)
+        self.assertIn("#993", text)
 
     def test_queue_arrival_nudge_text_no_count(self):
         from watchdog.queue_arrival_recheck import _nudge_text as q_nudge
