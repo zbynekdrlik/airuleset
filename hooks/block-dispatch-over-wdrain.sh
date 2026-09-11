@@ -63,10 +63,12 @@ CWD_KEY=$(printf '%s' "$CWD" | sha1sum | cut -c1-12)
 # allows + logs, exactly like WDRAIN-BYPASS below.
 OVERLAP_TTL=1800
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // empty' 2>/dev/null || echo "")
-# Extract issue numbers that follow "issue"/"issues" (the autopilot dispatch
-# shape "Work issue #N" / "Work issues #A #B #C") — never a stray #ref elsewhere.
-ISSUE_SPAN=$(printf '%s' "$PROMPT" | grep -oiE 'issues?[[:space:]]+#[0-9]+([[:space:]]+#[0-9]+)*' | head -1 || true)
-ISSUES=$(printf '%s' "$ISSUE_SPAN" | grep -oE '#[0-9]+' | tr -d '#' || true)
+# Extract EVERY issue number on the "issue(s) #…" line (the autopilot dispatch
+# shape "Work issue #N" / "Work issues #A #B #C" / "#A, #B and #C") — the whole
+# line, not a space-only run, so a comma/"and"-separated batch is fully covered
+# (#993-review: a truncated span left later members independence-unchecked).
+ISSUE_LINE=$(printf '%s' "$PROMPT" | grep -oiE '(work[[:space:]]+)?issues?[[:space:]]+#[0-9].*' | head -1 || true)
+ISSUES=$(printf '%s' "$ISSUE_LINE" | grep -oE '#[0-9]+' | tr -d '#' || true)
 if [ -n "$ISSUES" ]; then
     # OVERLAP-BYPASS escape (line-anchored, logged)
     if printf '%s' "$PROMPT" | grep -qE '^OVERLAP-BYPASS:'; then

@@ -1435,6 +1435,19 @@ for seg in split_top_level(skeleton):
                              "rework ticket per area)",
                              parents_str, target_repo, ""))
             continue
+        # #993-review: an architecture-rework filing MUST also carry the
+        # `-l architecture-rework` LABEL (mirrors #962's -l needs-gatekeeper
+        # requirement) -- the picker (`_row_label_rank`) promotes ONLY labeled
+        # rework tickets, and requiring the label as a deliberate act raises the
+        # bar against relabelling an ordinary discovery as this exempt criterion.
+        if crit_l == "architecture-rework" \
+                and "architecture-rework" not in _all_labels(tk, api_call):
+            results.append(("BLOCK", clean_title,
+                             "architecture-rework-missing-label (add "
+                             "`-l architecture-rework` -- the picker promotes only "
+                             "labeled rework tickets)",
+                             parents_str, target_repo, ""))
+            continue
         # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
         # pre-#842 flow untouched, so these never touch the owner). presence-gate
         # (req 3): an unattended loop cannot claim the owner asked for a

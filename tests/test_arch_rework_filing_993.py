@@ -39,13 +39,21 @@ def _away_sid(tc):
 
 
 class TestArchitectureReworkCriterion(TestCase):
-    def test_valid_criterion_with_area_passes(self):
+    def test_valid_criterion_with_area_and_label_passes(self):
         body = ("Area: autopilot orchestration (skills/autopilot/SKILL.md)\n"
                 "Patchwork signs: duplicated sources of truth.\n"
                 "Target concept: one doctrine home.")
         r = run(body_cmd("rework autopilot orchestration area", body,
-                         scope_gate="architecture-rework"))
+                         scope_gate="architecture-rework",
+                         labels=["architecture-rework"]))
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_missing_label_blocks(self):
+        body = ("Area: watchdog\nPatchwork signs: x.\nTarget concept: y.")
+        r = run(body_cmd("rework watchdog", body,
+                         scope_gate="architecture-rework"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("label", r.stderr.lower())
 
     def test_missing_area_line_blocks(self):
         body = ("Patchwork signs: duplicated sources of truth.\n"
@@ -73,7 +81,8 @@ class TestArchitectureReworkCriterion(TestCase):
                 "Patchwork signs: incident-driven exceptions stacked.\n"
                 "Target concept: structured state.")
         r = run(body_cmd("rework watchdog area", body,
-                         scope_gate="architecture-rework"),
+                         scope_gate="architecture-rework",
+                         labels=["architecture-rework"]),
                 home=home, gh_bin=gh, session_id=_away_sid(self))
         self.assertEqual(r.returncode, 0, r.stderr)
 

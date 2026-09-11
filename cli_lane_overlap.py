@@ -120,19 +120,31 @@ def gather_live_lanes(repo_root, run=None):
         return lanes
     if wt.returncode != 0:
         return lanes
+    branches = []
+    base_branch = None
     for line in (wt.stdout or "").splitlines():
         if line.startswith("branch "):
-            branch = line.split(" ", 1)[1].strip().rsplit("/", 1)[-1]
-            if branch.startswith("worktree-"):
-                files = _lane_files(repo_root, branch, run)
-                lanes.append({"ref": branch, "files": files, "topic": branch})
+            b = line.split(" ", 1)[1].strip().rsplit("/", 1)[-1]
+            # the FIRST worktree entry is the main checkout — its branch is the
+            # integration base (main/dev/master), never a lane (#993-review 🔵:
+            # never a hardcoded `main`).
+            if base_branch is None:
+                base_branch = b
+            if b.startswith("worktree-"):
+                branches.append(b)
+    base_branch = base_branch or "main"
+    for branch in branches:
+        lanes.append({"ref": branch,
+                      "files": _lane_files(repo_root, branch, run, base_branch),
+                      "topic": _lane_topic(repo_root, branch, run)})
     return lanes
 
 
-def _lane_files(repo_root, branch, run):
-    """Files a worktree branch touches vs main (best-effort, [] on error)."""
+def _lane_files(repo_root, branch, run, base_branch):
+    """Files a worktree branch touches vs the integration base (best-effort,
+    [] on error)."""
     try:
-        base = run(["git", "-C", repo_root, "merge-base", "main", branch])
+        base = run(["git", "-C", repo_root, "merge-base", base_branch, branch])
         if base.returncode != 0:
             return []
         b = (base.stdout or "").strip()
@@ -143,6 +155,18 @@ def _lane_files(repo_root, branch, run):
     except Exception as e:
         print("lane-overlap: diff for %s failed (%s)" % (branch, e), file=sys.stderr)
         return []
+
+
+def _lane_topic(repo_root, branch, run):
+    """A lane's topic = its last commit subject (the branch NAME is an opaque
+    hash → no real topic match, #993-review 🔵). Branch name on error."""
+    try:
+        r = run(["git", "-C", repo_root, "log", "-1", "--format=%s", branch])
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return r.stdout.strip()
+    except Exception as e:
+        print("lane-overlap: topic for %s failed (%s)" % (branch, e), file=sys.stderr)
+    return branch
 
 
 def gather_open_prs(run=None):

@@ -819,24 +819,44 @@ def swap_size_gb(mem_total_kb):
 
 def render_swap_setup_script(size_gb):
     """Idempotent bash creating a size_gb /swapfile: re-checks swap + the fstab
-    line so a second run is a no-op. Uses fallocate, falling back to dd."""
+    line so a second run is a no-op. Uses fallocate, falling back to dd.
+
+    #993-review hardening: (a) a FREE-SPACE check (need size + 2 GB headroom)
+    before allocating — these boxes are drained at >=80% (#834); (b) a
+    trailing-newline guard before the fstab append (an fstab whose last line
+    lacks \\n would otherwise get the entry glued onto that mount line); (c) a
+    blkid guard so mkswap never runs over a pre-existing NON-swap file at the
+    path."""
     p = SWAPFILE_PATH
+    need_kb = (size_gb + 2) * 1024 * 1024   # size + 2 GB headroom, in KB
     return (
         "set -euo pipefail\n"
         "if [ \"$(swapon --show=NAME --noheadings 2>/dev/null | wc -l)\" -gt 0 ]; then\n"
         "  echo 'swap already active — skip'; exit 0\n"
         "fi\n"
+        "avail=$(df --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')\n"
+        "if [ -n \"$avail\" ] && [ \"$avail\" -lt %(need)d ]; then\n"
+        "  echo 'swap: skipped — insufficient free space on / (need %(needg)dG incl. headroom)'; exit 0\n"
+        "fi\n"
         "if [ ! -f %(p)s ]; then\n"
         "  fallocate -l %(n)dG %(p)s || dd if=/dev/zero of=%(p)s bs=1M count=%(mb)d\n"
         "fi\n"
         "chmod 600 %(p)s\n"
+        "ftype=$(blkid -o value -s TYPE %(p)s 2>/dev/null || true)\n"
+        "if [ -n \"$ftype\" ] && [ \"$ftype\" != swap ]; then\n"
+        "  echo \"swap: refusing — %(p)s already holds a $ftype filesystem\"; exit 1\n"
+        "fi\n"
         "if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx %(p)s; then\n"
         "  mkswap %(p)s\n"
         "  swapon %(p)s\n"
         "fi\n"
-        "grep -qE '^%(p)s[[:space:]]' /etc/fstab || echo '%(p)s none swap sw 0 0' >> /etc/fstab\n"
+        "if ! grep -qE '^%(p)s[[:space:]]' /etc/fstab; then\n"
+        "  [ -z \"$(tail -c1 /etc/fstab 2>/dev/null)\" ] || printf '\\n' >> /etc/fstab\n"
+        "  echo '%(p)s none swap sw 0 0' >> /etc/fstab\n"
+        "fi\n"
         "echo 'swap: created %(n)dG at %(p)s'\n"
-        % {"p": p, "n": size_gb, "mb": size_gb * 1024}
+        % {"p": p, "n": size_gb, "mb": size_gb * 1024,
+           "need": need_kb, "needg": size_gb + 2}
     )
 
 

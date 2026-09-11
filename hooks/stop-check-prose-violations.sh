@@ -1650,7 +1650,11 @@ if [ "$IS_COMPLETION" = "1" ]; then
     # is a REQUIRED-FIELD msg_has (an unevaluable grep never becomes an
     # accusation). LC_ALL forced (the pattern carries the 🏛 multibyte glyph +
     # the 'á' diacritic — the same locale lesson as Výstup).
-    ARCH_RX='🏛[[:space:]]*\**[[:space:]]*(architekt[uú]ra|architecture)[[:space:]]*\**[[:space:]]*:'
+    # #993-review 🟡: U+1F3DB is TEXT-default, so models/terminals routinely emit
+    # it with the VS16 emoji-presentation selector (U+FE0F) — `🏛️`. Accept an
+    # OPTIONAL VS16 after the glyph so a correct report is never false-blocked.
+    _ARCH_VS16=$'\xef\xb8\x8f'
+    ARCH_RX='🏛('"$_ARCH_VS16"')?[[:space:]]*\**[[:space:]]*(architekt[uú]ra|architecture)[[:space:]]*\**[[:space:]]*:'
     HAS_ARCH=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$ARCH_RX" && echo 1 || echo 0)
     if [ "$HAS_ARCH" = "0" ]; then
         echo "VIOLATION: Work Complete report missing the '🏛 Architektúra:' area-review verdict line — required on EVERY report (#993). Each integrated change passes a main-session (Fable) review of the whole AREA the change lands in (not just the diff), with a binary verdict; the verdict is visible in the report. Add one of:" >&2

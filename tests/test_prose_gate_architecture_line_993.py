@@ -102,6 +102,12 @@ class TestArchitectureLineRequired(_HookCase):
             "%s Architektúra: watchdog — REWORK #1001 (watchdog state rework)\n"
             % ARCH)))
 
+    def test_vs16_emoji_presentation_glyph_is_accepted(self):
+        # #993-review 🟡: 🏛️ (U+1F3DB U+FE0F) is the common emoji-presentation
+        # form models emit — it must not false-block a correct report.
+        self.assertClean(self._run(_report(
+            "\U0001f3db️ Architektúra: autopilot orchestrácia — OK\n")))
+
 
 if __name__ == "__main__":
     unittest.main()

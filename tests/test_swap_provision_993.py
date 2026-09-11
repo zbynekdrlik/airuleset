@@ -54,12 +54,17 @@ class TestRenderSwapScript(TestCase):
             self.assertIn(token, s)
 
     def test_render_is_idempotent_guarded(self):
-        # the script itself re-checks swap/fstab so a second run is a no-op
+        # #993-review: assert the actual GUARDS, not mere substrings — the
+        # early-exit when swap is active, the fstab-line dedup, the
+        # trailing-newline guard, the free-space check, and the blkid guard.
         s = dg.render_swap_setup_script(2)
-        self.assertIn("swapon", s)
-        self.assertRegex(s, r"fstab")
-        # size is baked in
-        self.assertIn("2", s)
+        self.assertIn("swapon --show=NAME --noheadings", s)
+        self.assertIn("-gt 0", s)                       # already-active early exit
+        self.assertIn("grep -qE '^/swapfile", s)        # fstab-line dedup
+        self.assertIn("tail -c1 /etc/fstab", s)         # trailing-newline guard
+        self.assertIn("df --output=avail", s)           # free-space check
+        self.assertIn("blkid", s)                       # non-swap-file guard
+        self.assertIn("2G", s)                          # size baked in
 
 
 class TestSwapSizeClamp(TestCase):

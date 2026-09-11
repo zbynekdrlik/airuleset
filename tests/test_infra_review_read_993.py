@@ -79,6 +79,39 @@ class TestNonInfraStillBlocked(TestCase):
         r = _run("grep -rn foo src/")
         self.assertEqual(r.returncode, 2, r.stdout)
 
+    # --- #993-review 🔴/🟡: writes disguised as infra reads must stay blocked ---
+    def test_sed_in_place_ni_flag_is_blocked(self):
+        r = _run("sed -ni 's/a/b/p' hooks/x.sh")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_sed_long_in_place_is_blocked(self):
+        r = _run("sed --in-place 's/a/b/' hooks/x.sh")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    # NB: `sed -n 's/…/w file' hooks/x.sh` is a PRE-EXISTING `_is_narrow_readonly_953`
+    # (#953) write hole — base c63617d8 also allows it (rc 0), so it is NOT a
+    # regression of this diff (my `_is_infra_review_read` rejects it as defence
+    # in depth). Recorded as a followup_candidate for the narrow-readonly gate.
+
+    def test_cat_infra_with_amp_redirect_to_non_infra_is_blocked(self):
+        r = _run("cat hooks/a.sh hooks/b.sh hooks/c.sh &> cli_out.py")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_path_traversal_out_of_infra_is_blocked(self):
+        r = _run("cat hooks/../../../../etc/passwd hooks/a.sh hooks/b.sh")
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+
+class TestInfraReadEdgeCasesAllowed(TestCase):
+    def test_sed_n_print_range_over_infra_is_allowed(self):
+        r = _run("sed -n '10,40p' hooks/big-hook.sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_dotfile_infra_dirs_are_recognised(self):
+        # `.claude`/`.github` must match (the old lstrip('./') ate the dot)
+        r = _run("cat .claude/rules/a.md .claude/rules/b.md .github/workflows/c.yml")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 
 class TestNonFableMainUntouched(TestCase):
     def test_opus_main_is_not_gated_at_all(self):

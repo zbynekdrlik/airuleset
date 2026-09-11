@@ -111,21 +111,14 @@ set -euo pipefail
 # or len=N, and the first ~120 chars of the command/file) — same
 # append-only style as the bypass log, via `log_block()`.
 #
-# #73 ALSO closed three classifier holes where the command's first token
-# was neither allow- nor block-listed, so it fell into "ambiguous -> allow"
-# even though it was really a bulk read/search wrapped or hidden one level
-# down: a for/while LOOP BODY (`for f in a b; do cat $f; done` — the `do`/
-# `then`/`else`/`elif` leader is stripped so the body classifies exactly
-# like a standalone command; the loop HEADER segment stays ambiguous on
-# purpose), a `timeout N` / `nice [-n N]` PREFIX WRAPPER (its own flags and
-# duration/niceness argument are skipped in `strip_prefix()`), and a
-# `bash -c '...'` / `sh -c '...'` (also zsh/dash) SUB-SHELL (`classify()` is
-# now recursive: it finds the wrapper's `-c`/`-Xc` flag and reclassifies the
-# QUOTED script string itself). The non-negotiable regression guard is the
-# CI-poll shape from ci-monitoring.md — `for i in $(seq 1 18); do gh run
-# view <id> ...; sleep 30; done` — which must NEVER block just for being a
-# loop; its body (`gh run view ...`) is already allow-listed once `do` is
-# stripped.
+# #73 ALSO closed three "ambiguous -> allow" classifier holes where a bulk
+# read/search was wrapped one level down: a for/while LOOP BODY (the
+# `do`/`then`/`else`/`elif` leader is stripped; the loop HEADER stays
+# ambiguous), a `timeout N`/`nice [-n N]` PREFIX WRAPPER (skipped in
+# `strip_prefix()`), and a `bash -c '...'`/`sh -c` SUB-SHELL (`classify()`
+# recurses into the quoted script). Regression guard: the ci-monitoring.md
+# CI-poll loop (`for i in $(seq 1 18); do gh run view …; sleep 30; done`)
+# must NEVER block just for being a loop — its body is allow-listed.
 #
 # #80 (gatekeeper measurement, 2026-07-26) — the classifier's own FALSE
 # POSITIVE is what disabled all of #66. `cat > body.md <<'EOF' ... EOF` (the
@@ -151,52 +144,31 @@ set -euo pipefail
 # `gh issue view` costs the same as a `grep`, and gk's ratio after #66 was
 # UNCHANGED (main Bash 687 : Agent 22 = 31:1 on 2026-07-26, ten hours with
 # zero dispatches, runs of up to 119 Bash calls between two dispatches).
-# The lever is the COUNT of main-agent Bash turns. So on top of the
-# classification above there is now a per-dispatch COUNTER
-# (/tmp/airuleset-main-bash-run-<session_id>): every allow-listed/ambiguous
-# main Bash call in a goal-armed/Fable session increments it, a DISPATCH
-# (PreToolUse Agent/Task/Workflow — the hook is wired on those matchers too,
-# exact tool names, never a regex that could silently never match) deletes
-# it, and passing AIRULESET_MAIN_BASH_PER_DISPATCH (default 20, 0 = off)
-# blocks ONCE with batching/dispatch instructions.
+# The lever is the COUNT of main-agent Bash turns, so a per-dispatch COUNTER
+# (/tmp/airuleset-main-bash-run-<session_id>) increments on every allow-listed/
+# ambiguous main Bash call in a goal-armed/Fable session, is DELETED by a
+# DISPATCH (PreToolUse Agent/Task/Workflow, exact tool names), and
+# AIRULESET_MAIN_BASH_PER_DISPATCH (default 20, 0 = off) blocks ONCE with
+# batching instructions. The block RESETS the counter (never two in a row —
+# #80 forbids stopping the loop); arming the bypass marker is never counted.
 #
-# That nudge RESETS the counter on purpose: #80's acceptance forbids any
-# block that could genuinely stop the loop, so this is at most one block per
-# N calls and NEVER two in a row — re-running the same command immediately
-# after a nudge passes. Arming the bypass marker (`touch ...-exec-ok-<sid>`)
-# is never counted and never blocked, or the cap would sit in front of the
-# only documented way out of it.
-#
-# #80 also RE-TUNED the block-list itself, by replaying ALL 687 of gk's real
-# main-agent Bash commands from 2026-07-26 through this hook and reading
-# every block. Three false-positive classes were found that way and are now
-# guarded by tests: an output REDUCER after a pipe (`gh pr merge ... 2>&1 |
-# tail -2` — only a statement's FIRST pipe stage is classified now), a
-# BOUNDED peek (`head -5 /tmp/out`, `tail -3 SKILL.md`, `sed -n '250,260p'`
-# — judge the SIZE that comes back, not the head token; the bound is
-# AIRULESET_PEEK_MAX_LINES, default 50), and an ASSERTION (`grep -c`,
-# `grep -q` return one number / nothing). Block rate on that corpus went
-# 18.6% -> 14.1%, and what remains is genuinely main reading source files
-# and logs into its own context — exactly what should be dispatched.
-#
-# The ticket's direction 1 (">N gh calls per TURN → batch them") was
-# REFUTED by the same measurement and deliberately NOT built: 687 of 687
-# main turns carried exactly ONE Bash call, so a per-turn counter could
-# never fire. Batching pressure lives in the nudge's message instead.
+# #80 also RE-TUNED the block-list (measured on gk's real corpus): three
+# false-positive classes are now test-guarded — an output REDUCER after a pipe
+# (only a statement's FIRST pipe stage is classified), a BOUNDED peek (judge
+# the SIZE returned, not the head token; AIRULESET_PEEK_MAX_LINES, default 50),
+# and an ASSERTION (`grep -c`/`-q`). A per-TURN gh-call counter was REFUTED
+# (every main turn carried exactly ONE Bash call); batching pressure lives in
+# the nudge message instead.
 #
 # #178 (user decision, 2026-07-31, option 1): the classifier above judges
 # an operation by its CLASS (bulk read/search/build/test vs. coordination),
 # but a genuinely SMALL, bounded operation is cheap regardless of class —
 # and the user's standing directive is that small bounded operations run
 # on MAIN regardless of model; only genuinely large sweeps and repo
-# implementation stay blocked. Production evidence, all same day: five
-# false blocks in one session — a `cat` of a 20-line config file, a
-# 7-pattern `grep` sweep over `tests/`, and two ~1KB scratchpad writes —
-# each one a bounded, harmless read/write that had no business being
-# gated. This also matches Anthropic's own Opus 5 prompting guidance,
-# which advises against delegating small, cheap operations to a subagent
-# when the calling agent can just do them directly — dispatch overhead is
-# for genuinely bulk or unbounded work, not for reading one small file.
+# implementation stay blocked (production evidence: five false blocks in one
+# session — a small `cat`, a 7-pattern `grep` over `tests/`, two ~1KB
+# scratchpad writes). This matches Anthropic's Opus 5 prompting guidance:
+# dispatch overhead is for genuinely bulk/unbounded work, not one small file.
 #
 # Two additions, both size-based rather than class-based:
 #   1. Edit/Write to a `/tmp/` scratchpad path, or a path matching
@@ -1288,38 +1260,64 @@ _INFRA_DIRS = ("hooks", ".github", "modules", "skills", "agents", "watchdog",
                "scripts", "tests", "profiles", "rules", "notify", "burn",
                "filedrop", ".claude")
 
-def _under_infra(p):
-    p = (p or "").lstrip("./")
-    if p and any(p == d or p.startswith(d + "/") for d in _INFRA_DIRS):
+def _under_infra(p, cwd=None):
+    p = (p or "").strip()
+    if not p:
+        return False
+    p = re.sub(r'^(?:\./)+', '', p)   # strip literal ./ ONLY (never lstrip chars)
+    if p == ".." or p.startswith("../") or "/../" in p or p.endswith("/.."):
+        return False                  # #993-review: reject traversal
+    if os.path.isabs(p):              # #993-review: resolve absolute → relative to cwd
+        base = cwd or os.getcwd()
+        try:
+            rel = os.path.relpath(os.path.realpath(p), os.path.realpath(base))
+        except (OSError, ValueError):
+            return False
+        if rel.startswith(".."):
+            return False
+        p = rel
+    if any(p == d or p.startswith(d + "/") for d in _INFRA_DIRS):
         return True
-    return "/" not in p and bool(p) and (
+    return "/" not in p and (
         p == "airuleset.py" or p.startswith("cli_") or p.endswith(
             ("_gate.py", "_guard.py", "_classify.py", "_registry.py",
              "_trigger.py", "_counts.py")) or p in ("statusbar.py", "goal.py"))
 
-def _is_infra_review_read(tk):
+def _is_infra_review_read(tk, cwd=None):
     if not tk or tk[0] not in ("cat", "head", "tail", "nl", "wc", "ls",
                                "sed", "grep"):
         return False
     h = tk[0]
-    if h == "sed" and any(t == "-i" or t.startswith("-i") for t in tk[1:]):
+    # ANY output redirect in the tokens is a WRITE, never a review read (the
+    # caller ALSO refuses the exception when the raw statement carries a
+    # redirect — `&>` is split off by STATEMENTS_RE, #993-review 🔴).
+    if any(t.startswith(">") or t.startswith("1>") or t.startswith("&>")
+           for t in tk):
         return False
-    if any(t.startswith(">") or t.startswith("1>") for t in tk):
-        return False
-    if h == "grep":
+    if h == "sed":
+        # a review sed is ONLY `-n` + a pure print-range script — never an
+        # in-place edit (`-i`/`-ni`/`-Ei`/`--in-place`) and never a `w`/`e`/`r`
+        # script command (all WRITES/exec), #993-review 🔴.
+        if not any(t == "-n" for t in tk[1:]):
+            return False
+        for t in tk[1:]:
+            if re.match(r'^-[A-Za-z]*i', t) or t.startswith("--in-place"):
+                return False
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        if not nf or not (_SED_RANGE_RE.match(nf[0]) or _SED_SINGLE_RE.match(nf[0])):
+            return False
+        fls = nf[1:]
+    elif h == "grep":
         nf = [t for t in tk[1:] if not t.startswith("-")]
         he = any(t == "-e" or t.startswith("--regexp") for t in tk[1:])
         fls = nf if he else nf[1:]
     elif h == "cat":
         fls = cat_files(tk)
-    elif h == "sed":
-        nf = [t for t in tk[1:] if not t.startswith("-")]
-        fls = nf[1:] if nf else []
     else:
         fls = [t for t in tk[1:] if not t.startswith("-")]
     if not fls or any(any(c in p for c in "*?$") for p in fls):
         return False
-    return all(_under_infra(p) for p in fls)
+    return all(_under_infra(p, cwd) for p in fls)
 
 
 def is_blocked_segment(tk):
@@ -1328,8 +1326,6 @@ def is_blocked_segment(tk):
     if redirects_stdout_to_file(tk):
         return False
     if _is_narrow_readonly_953(tk):
-        return False
-    if _is_infra_review_read(tk):
         return False
     head = tk[0]
     if head in ("grep", "rg", "ag"):
@@ -1435,6 +1431,12 @@ def classify(text):
     # readonly) — if so, the command is pure coordination and should be
     # exempt from the per-dispatch counter.
     all_coordination = True
+    # #993-review 🔴: the infra-review-read exemption NEVER fires when the raw
+    # command carries ANY output redirect (`>`, `&>`, `2>…`) — `&>` is split off
+    # by STATEMENTS_RE so the read segment alone looks redirect-free, and a
+    # redirect means a WRITE, not a review read. A conservative whole-text check
+    # (a legit review read never redirects) closes that hole.
+    _infra_read_ok = ">" not in text
     for statement in STATEMENTS_RE.split(text):
         seg = first_pipe_stage(statement)
         # #988 review: a multi-stage pipe is NOT pure coordination — the
@@ -1457,7 +1459,7 @@ def classify(text):
             continue
         if _is_narrow_readonly_953(tk):
             continue
-        if _is_infra_review_read(tk):   # #993 item 5 — coordinator infra review
+        if _infra_read_ok and _is_infra_review_read(tk, cwd):   # #993 item 5
             continue
         if _is_coordination_write(tk):
             continue

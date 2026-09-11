@@ -143,6 +143,16 @@ class TestHookReceiptGate(TestCase):
         r2 = self._run("Work issues #41 #43 #47 in camera-box as one bundled PR")
         self.assertEqual(r2.returncode, 0, r2.stderr)
 
+    def test_comma_and_separated_batch_is_fully_covered(self):
+        # #993-review: "Work issues #41, #43 and #47" must require ALL three,
+        # not just #41 (the span regex used to truncate at the first non-space).
+        self._seed_receipt([41, 43])
+        r = self._run("Work issues #41, #43 and #47 in camera-box")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self._seed_receipt([41, 43, 47])
+        r2 = self._run("Work issues #41, #43 and #47 in camera-box")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+
     def test_non_autopilot_worker_dispatch_is_untouched(self):
         env = {**os.environ, "HOME": self.home}
         payload = json.dumps({
