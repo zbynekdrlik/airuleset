@@ -219,34 +219,15 @@ set -euo pipefail
 #      `-c` byte-dump/redirect-to-file form. Narrower on file COUNT,
 #      broader on command set — the two allowances are independent checks.
 #
-# FIXED (fresh-context adversarial review of the #178 diff, same day): three
-# real holes in the first cut, all closed here.
-#   a) PATH TRAVERSAL defeated bullet 1 entirely — a `file_path` of
-#      `/tmp/../home/.../PWNED.py` string-matches `/tmp/*` and a 5000-char
-#      Write exited 0 straight into the repo tree (reproduced live). Any
-#      `file_path` containing `..` now gets NO bookkeeping exemption at
-#      all — it falls through to the ordinary AIRULESET_FABLE_EDIT_MAX
-#      threshold, fail-closed. A legitimate scratchpad/memory path never
-#      contains `..`, so nothing real is lost.
-#   b) UNBOUNDED bookkeeping writes let a main session stage an arbitrarily
-#      large implementation to `/tmp` and `cp` it into the repo (`cp` is
-#      ambiguous -> allow in the Bash classifier, and this fix deliberately
-#      does NOT add `cp` gating — that is a materially different, more
-#      invasive change than the ticket asked for, and would false-block
-#      routine copies). So bullet 1's exemption is now SIZE-CAPPED at
-#      AIRULESET_MAIN_READ_MAX_BYTES too (same env as bullet 2, default
-#      131072 — ~100x the production false blocks this was built for,
-#      ~1 KB scratchpad notes) — a non-numeric length gets NO exemption,
-#      fail-closed. The residual — staging up to that cap in `/tmp` then
-#      `cp`-ing it in — is accepted, bounded by the same 128 KB cap.
-#   c) AGGREGATE-SIZE bypass in bullet 2 — N `cat`/`grep` segments chained
-#      with `;`/`&&`, each just under the per-file cap, summed to 1.2 MB in
-#      one command (10 x 120000-byte `cat`s, reproduced live). The
-#      exemption now draws from ONE shared per-command budget
-#      (`READ_BUDGET`, seeded at AIRULESET_MAIN_READ_MAX_BYTES and consumed,
-#      never refunded, by every segment that draws from it) — the WHOLE
-#      command's aggregate small-file exemption is bounded to the same cap,
-#      not each segment independently.
+# FIXED (fresh-context review of the #178 diff): three holes closed — (a) PATH
+# TRAVERSAL (`..` in a scratchpad/memory file_path gets NO bookkeeping
+# exemption → the ordinary AIRULESET_FABLE_EDIT_MAX threshold, fail-closed);
+# (b) UNBOUNDED bookkeeping writes (bullet 1's exemption is SIZE-CAPPED at
+# AIRULESET_MAIN_READ_MAX_BYTES, default 131072; the stage-to-/tmp-then-`cp`
+# residual is accepted, bounded by that cap; `cp` itself is deliberately not
+# gated); (c) AGGREGATE-SIZE bypass (N chained cat/grep segments now draw from
+# ONE shared per-command `READ_BUDGET`, consumed never refunded, so the whole
+# command's small-file exemption is bounded to the same cap, not per-segment).
 
 command -v jq &>/dev/null || exit 0
 
@@ -293,31 +274,22 @@ RAW_SID="${RAW_SID//[!A-Za-z0-9_-]/}"   # #835: fork-free sanitize (was `tr -cd`
 RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 
 # #492: per-USER audit/bypass log paths. A FIXED /tmp name is owned by the
-# FIRST user to create it on a shared box (subdev: montalu2-8, david, marek,
-# simap, miva1); every OTHER user's `>>` append then fails EACCES, and (see
-# the brace-group at each write site) that error LEAKS to stderr as a
-# `PreToolUse hook error` on every block. The ${EUID} suffix gives each user
-# its own file, which still ACCUMULATES across that user's sessions — what
-# these "did it fire, on what" logs want; a per-SESSION suffix would fragment
-# them. ${EUID} is a bash builtin, always set; id -u is the fallback for a
-# non-bash re-exec. Same class as odoo-erp #115 (the shared upload-log). The
-# per-uid name is still predictable in sticky /tmp, so a hostile local user
-# could pre-create it unwritable — but that only silences a victim's own
-# telemetry (the brace-group below keeps it leak-free either way), never a
-# concern on these trusted dev boxes and no worse than the old fixed name.
+# FIRST user to create it on a shared box; every OTHER user's `>>` then fails
+# EACCES and (see the brace-group at each write site) LEAKS to stderr as a
+# `PreToolUse hook error`. The ${EUID} suffix gives each user its own file
+# (accumulating across that user's sessions — what these "did it fire" logs
+# want); ${EUID} is a bash builtin (id -u fallback for a non-bash re-exec).
+# Residual: the per-uid name is predictable in sticky /tmp, but a pre-created
+# unwritable file only silences the victim's own telemetry (leak-free either
+# way) — no concern on trusted dev boxes.
 # #732: the block/bypass logs are the ONLY cross-SESSION-shared artifacts this
-# hook writes — everything else (bypass markers, run counter, presence marker)
-# is SID-keyed and thus unique per session. During the airuleset push gate the
-# fail-closed test suite runs on the LIVE dev box, where concurrent worker lanes
-# + the supervisor session (all the SAME uid) genuinely arm/consume bypass
-# markers, appending to these SAME per-uid logs mid-suite — so a test that
-# counts WHOLE-FILE log lines miscounts (the v0.1.88 gate "2 != 1" false
-# push-block, 2026-08-26). AIRULESET_MAIN_EXEC_LOG_DIR lets a test redirect BOTH
-# logs into an isolated dir it owns (the per-uid suffix is preserved), so no
-# concurrent real fleet session — which never sets this var — can touch the file
-# the test reads. FAIL-SAFE: unset / empty / not-a-directory / not-WRITABLE /
-# root-`/` (its trailing slash strips to the empty string) ALL fall back to the
-# current /tmp path BYTE-FOR-BYTE, so real (non-test) invocations are unchanged
+# hook writes (everything else is SID-keyed). During the push gate the suite
+# runs on the LIVE box where concurrent same-uid sessions append to these SAME
+# per-uid logs mid-suite, so a whole-file line-count test miscounts (the
+# v0.1.88 "2 != 1" false push-block). AIRULESET_MAIN_EXEC_LOG_DIR lets a test
+# redirect BOTH logs into an isolated dir it owns (per-uid suffix preserved).
+# FAIL-SAFE: unset / empty / non-dir / non-writable / root-`/` ALL fall back to
+# the /tmp path BYTE-FOR-BYTE, so real (non-test) invocations are unchanged
 # and a bad override never silently sends the audit trail to an unwritable dir.
 # An `if` condition's failure never trips `set -e`; the `:-` handles `set -u`.
 _EXEC_LOG_DIR="/tmp"
@@ -1308,12 +1280,56 @@ def _is_coordination_write(tk):
     return False
 
 
+# #993 item 5 — a coordinator design/review READ of an INFRA unit's files is
+# the coordinator's job (#992 req 4): allowed by ONE allowlist rule (no per-read
+# marker). Read-only command names only, EVERY path arg under an infra area, no
+# write (`sed -i`, `>`). git diff/show are not gated by this hook at all.
+_INFRA_DIRS = ("hooks", ".github", "modules", "skills", "agents", "watchdog",
+               "scripts", "tests", "profiles", "rules", "notify", "burn",
+               "filedrop", ".claude")
+
+def _under_infra(p):
+    p = (p or "").lstrip("./")
+    if p and any(p == d or p.startswith(d + "/") for d in _INFRA_DIRS):
+        return True
+    return "/" not in p and bool(p) and (
+        p == "airuleset.py" or p.startswith("cli_") or p.endswith(
+            ("_gate.py", "_guard.py", "_classify.py", "_registry.py",
+             "_trigger.py", "_counts.py")) or p in ("statusbar.py", "goal.py"))
+
+def _is_infra_review_read(tk):
+    if not tk or tk[0] not in ("cat", "head", "tail", "nl", "wc", "ls",
+                               "sed", "grep"):
+        return False
+    h = tk[0]
+    if h == "sed" and any(t == "-i" or t.startswith("-i") for t in tk[1:]):
+        return False
+    if any(t.startswith(">") or t.startswith("1>") for t in tk):
+        return False
+    if h == "grep":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        he = any(t == "-e" or t.startswith("--regexp") for t in tk[1:])
+        fls = nf if he else nf[1:]
+    elif h == "cat":
+        fls = cat_files(tk)
+    elif h == "sed":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        fls = nf[1:] if nf else []
+    else:
+        fls = [t for t in tk[1:] if not t.startswith("-")]
+    if not fls or any(any(c in p for c in "*?$") for p in fls):
+        return False
+    return all(_under_infra(p) for p in fls)
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
     if redirects_stdout_to_file(tk):
         return False
     if _is_narrow_readonly_953(tk):
+        return False
+    if _is_infra_review_read(tk):
         return False
     head = tk[0]
     if head in ("grep", "rg", "ag"):
@@ -1440,6 +1456,8 @@ def classify(text):
         if is_allowed_segment(tk):
             continue
         if _is_narrow_readonly_953(tk):
+            continue
+        if _is_infra_review_read(tk):   # #993 item 5 — coordinator infra review
             continue
         if _is_coordination_write(tk):
             continue
