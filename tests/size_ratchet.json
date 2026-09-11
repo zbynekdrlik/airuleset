@@ -160,7 +160,7 @@
     "tests/test_conformance_heartbeat.py": 405,
     "tests/test_content_dedup_687.py": 249,
     "tests/test_context_diet_batch4a.py": 361,
-    "tests/test_context_diet_tier1.py": 198,
+    "tests/test_context_diet_tier1.py": 199,
     "tests/test_context_diet_tier2.py": 432,
     "tests/test_context_diet_tier3.py": 375,
     "tests/test_context_ratchet.py": 866,
