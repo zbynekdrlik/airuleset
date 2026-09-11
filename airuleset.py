@@ -7609,6 +7609,9 @@ from cli_onboard import (  # noqa: E402
     cmd_onboard_project as cmd_onboard_project,
 )
 
+# --- #993: lane-overlap independence-check CLI leaf ---
+from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402, F401
+
 # --- #857: context-baseline + skill-usage CLI leaves ---
 from cli_context_baseline import (  # noqa: E402, F401
     cmd_context_baseline as cmd_context_baseline,
@@ -8496,6 +8499,18 @@ def main():
     p_goalinv.add_argument(
         "--json", action="store_true", help="Print the inventory as JSON")
 
+    # --- #993: lane-overlap independence check ---
+    p_lo = sub.add_parser(
+        "lane-overlap",
+        help="Independence check: candidate unit's paths/topics vs live lanes "
+             "+ open PRs; writes the dispatch-gate receipt (#992/#993)")
+    p_lo.add_argument("--paths", default=None,
+                      help="Comma-separated touched paths of the candidate unit")
+    p_lo.add_argument("--topics", default=None,
+                      help="Comma-separated topic keywords of the candidate unit")
+    p_lo.add_argument("--issue", action="append", default=None,
+                      help="Issue number(s) the check covers (repeatable)")
+
     # --- #857: context-baseline + skill-usage ---
     p_cb = sub.add_parser(
         "context-baseline",
@@ -8805,6 +8820,7 @@ SUBCOMMANDS = {
     "goal-inventory": cmd_goal_inventory,
     "model-audit": cmd_model_audit,
     "model-tiers": cmd_model_tiers,
+    "lane-overlap": cmd_lane_overlap,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
     "wdrain-pass": cmd_wdrain_pass,
