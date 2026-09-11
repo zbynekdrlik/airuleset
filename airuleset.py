@@ -68,10 +68,10 @@ MANAGED_EFFORT_LEVEL = "high"
 # id>`) or a Workflow `opts.model: '<exact id>'`. A new model version joins the
 # fleet ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
-    "fable": "claude-fable-5-1",        # main default + design/review phases (5.1 @ medium)
-    "opus": "claude-opus-4-8",        # implementation escalation / gate-CLOSED fallback
-    "sonnet": "claude-sonnet-5",      # settled-design implementation + mechanical
-    "haiku": "claude-haiku-4-5",      # trivial reads
+    "fable": "claude-fable-5-1",      # main session model (MANAGED_MODEL)
+    "opus": "claude-opus-4-8",        # fleet subagent default (CLAUDE_CODE_SUBAGENT_MODEL)
+    "sonnet": "claude-sonnet-5",      # allowed dispatch choice
+    "haiku": "claude-haiku-4-5",      # allowed dispatch choice (trivial reads)
 }
 
 # Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is

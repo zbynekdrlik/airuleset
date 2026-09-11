@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 8786,
+    "airuleset.py": 8751,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2338,
     "cli_account_bootstrap.py": 285,
@@ -105,7 +105,7 @@
     "tests/test_autopilot_master_skill.py": 302,
     "tests/test_backlog_marker_gate.py": 129,
     "tests/test_batch_boundary_waiver_730.py": 150,
-    "tests/test_batch_orchestration.py": 286,
+    "tests/test_batch_orchestration.py": 290,
     "tests/test_bg_bash_staleness_defer_604.py": 55,
     "tests/test_block_banned_model.py": 113,
     "tests/test_block_commit_without_design.py": 661,
@@ -572,7 +572,7 @@
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_worktree_write_guard.py": 598,
     "tests/test_wrapped_draft.py": 627,
-    "watchdog/__init__.py": 4747,
+    "watchdog/__init__.py": 4751,
     "watchdog/burn_jobs.py": 364,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
