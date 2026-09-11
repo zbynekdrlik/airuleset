@@ -3794,6 +3794,7 @@ def cmd_handoff(args):
     root_cause = getattr(args, "root_cause", None)
     closes_finding = getattr(args, "closes_finding", None) or []
     prevencia_read = getattr(args, "prevencia_read", None)
+    self_review_model = getattr(args, "self_review_model", None)
     sign_only = getattr(args, "sign_only", None)
     # Extended template fields (#969).
     stack = getattr(args, "stack", None)
@@ -3879,6 +3880,21 @@ def cmd_handoff(args):
 
     if not repo or not issue or not branch or not self_review_file:
         print("handoff: --repo, --issue, --branch, --self-review-file required")
+        return 1
+
+    # --self-review-model is REQUIRED and must be an EXACT model id (#991).
+    # This is a FACT (which model performed the fresh-context self-review),
+    # the evidence line the odoo-erp gate consumes — NOT tiering doctrine.
+    # Single source of truth: MODEL_TIERS.values() / BANNED_MODELS, via the
+    # shared is_allowed_model / is_banned_model predicates.
+    if not (self_review_model or "").strip():
+        print("handoff BLOCK: --self-review-model (Self-review-model) required")
+        return 1
+    if not is_allowed_model(self_review_model) or \
+            is_banned_model(self_review_model):
+        allowed = ", ".join(sorted(MODEL_TIERS.values()))
+        print("handoff BLOCK: --self-review-model %r is not an allowed exact "
+              "model id — use one of: %s" % (self_review_model, allowed))
         return 1
 
     # Read self-review table.
@@ -3971,6 +3987,7 @@ def cmd_handoff(args):
         evidence_head=evidence_head, root_cause=root_cause,
         prevencia_read=prevencia_read,
         closes_finding=closes_finding,
+        self_review_model=self_review_model,
     )
     if err:
         print(err)
@@ -4021,6 +4038,16 @@ def cmd_handoff(args):
 
     print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
           % (issue, rnd, head_sha[:12]))
+    return 0
+
+
+def cmd_model_tiers(args):
+    """#991: expose the model allowlist as JSON for an external gate to
+    consume (odoo-erp #6935 reads it instead of hard-coding the ids), so the
+    two repos share ONE source of truth. MODEL_TIERS + BANNED_MODELS are that
+    source; this just serialises them. No other output modes."""
+    print(json.dumps({"tiers": dict(MODEL_TIERS),
+                      "banned": sorted(BANNED_MODELS)}))
     return 0
 
 
@@ -8010,6 +8037,12 @@ def main():
                       help="Closes-finding: <id> — <evidence> (repeatable)")
     p_ho.add_argument("--prevencia-read",
                       help="Prevencia-read: <path> (required round >= 2)")
+    p_ho.add_argument("--self-review-model", dest="self_review_model",
+                      help="Self-review-model: the EXACT model id that "
+                           "performed the fresh-context self-review "
+                           "(e.g. claude-opus-4-8). Required; must be an "
+                           "exact MODEL_TIERS id, never an alias — a FACT "
+                           "the gate reads, not tiering doctrine.")
     p_ho.add_argument("--sign-only", dest="sign_only",
                       help="Sign-only mode (#919): create a receipt for an "
                            "existing body file without posting it. The stream "
@@ -8035,6 +8068,14 @@ def main():
     p_ho.add_argument("--evidence-head", dest="evidence_head",
                       help="Evidence-HEAD: commit evidence was captured at "
                            "(optional)")
+
+    p_mt = sub.add_parser(
+        "model-tiers",
+        help="#991: print the model allowlist (MODEL_TIERS) + BANNED_MODELS "
+             "as JSON, for an external gate (odoo-erp #6935) to read from "
+             "one source of truth")
+    p_mt.add_argument("--json", action="store_true",
+                      help="machine-readable output (JSON is the only mode)")
 
     p_maudit = sub.add_parser(
         "model-audit",
@@ -8731,6 +8772,7 @@ SUBCOMMANDS = {
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
     "model-audit": cmd_model_audit,
+    "model-tiers": cmd_model_tiers,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
     "wdrain-pass": cmd_wdrain_pass,

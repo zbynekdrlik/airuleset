@@ -77,6 +77,7 @@ from validated inputs, stamping `Verified-at-UTC` + `HEAD:` at compose time (liv
 `Self-review:` table (from CYCLE step 6) to a temp file, then:
 `python3 ~/devel/airuleset/airuleset.py handoff --repo <owner/name> --issue <N> --branch <branch>`
 `  --self-review-file <table.md>`
+`  --self-review-model <the exact model id YOU are running as — read it from your own transcript/launch, e.g. claude-opus-4-8>`
 `  [--root-cause "<lens> — <why my self-review missed it>"]`
 `  [--closes-finding "<id> — <evidence>"]`
 `  [--prevencia-read "<path to the Prevencia rule file>"]`

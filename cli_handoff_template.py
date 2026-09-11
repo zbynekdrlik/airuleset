@@ -120,19 +120,29 @@ def render_extended_body(
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
+    # Which exact model performed the fresh-context self-review (#991). A
+    # FACT, not tiering doctrine — the odoo-erp gate requires it as the
+    # self-review evidence line. Validated to an exact MODEL_TIERS id by the
+    # CLI (cmd_handoff); required there, so it is always present in practice.
+    self_review_model: Optional[str] = None,
 ) -> str:
     """Compose a full READY-FOR-REVIEW comment body for a repo with the
     extended template (odoo-erp shape).
 
     Field order follows the ``subdev-handoff-comment.md`` template:
-    READY-FOR-REVIEW header, Self-review block, Branch, HEAD, Stack,
-    Verified-at-UTC, Harness, then optional/conditional fields.
+    READY-FOR-REVIEW header, Self-review-model, Self-review block, Branch,
+    HEAD, Stack, Verified-at-UTC, Harness, then optional/conditional fields.
     """
     parts: list[str] = []
 
     # Header.
     parts.append("READY-FOR-REVIEW: branch %s" % branch_field)
     parts.append("")
+
+    # Self-review-model: the model that performed the fresh-context
+    # self-review (#991) — goes BEFORE the Self-review block.
+    if self_review_model:
+        parts.append("Self-review-model: %s" % self_review_model)
 
     # Self-review block.
     parts.append("**Self-review:**")
@@ -188,6 +198,7 @@ def render_generic_body(
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
+    self_review_model: Optional[str] = None,
 ) -> str:
     """Compose the original generic READY-FOR-REVIEW comment body.
 
@@ -198,6 +209,8 @@ def render_generic_body(
 
     parts.append("READY-FOR-REVIEW: branch %s" % branch)
     parts.append("")
+    if self_review_model:
+        parts.append("Self-review-model: %s" % self_review_model)
     parts.append("**Self-review:**")
     parts.append("")
     parts.append(self_review_table.strip())
@@ -260,6 +273,7 @@ def compose_body(
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
+    self_review_model: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     """Compose the comment body, choosing extended or generic shape.
 
@@ -288,6 +302,7 @@ def compose_body(
             source_verified=source_verified, root_cause=root_cause,
             prevencia_read=prevencia_read,
             closes_finding=closes_finding,
+            self_review_model=self_review_model,
         )
     else:
         body = render_generic_body(
@@ -296,5 +311,6 @@ def compose_body(
             self_review_table=self_review_table, bounce_round=bounce_round,
             root_cause=root_cause, prevencia_read=prevencia_read,
             closes_finding=closes_finding,
+            self_review_model=self_review_model,
         )
     return (body, None)
