@@ -335,5 +335,38 @@ class TestNudgeTextPhraseLock(unittest.TestCase):
         self.assertIsNone(self._banned(text))
 
 
+# --------------------------------------------------------------------------- #
+# Source lock: the owner-reply bypass may be granted from ONE place only.
+# --------------------------------------------------------------------------- #
+class TestUserAuthoredCallSiteLock(unittest.TestCase):
+    """`user_authored=True` bypasses the kill switch, so the set of production
+    call sites that grant it is a security boundary: it must stay exactly
+    {watchdog/discord_replies.py}. `watchdog/tmux_io.py` only DEFINES the kwarg
+    (default `user_authored=False`) and is not a grant site. A new grant added
+    anywhere else (a machine nudge that quietly opts itself back in at OFF)
+    fails this test."""
+
+    def test_only_discord_replies_grants_bypass(self):
+        grant_files = set()
+        for path in REPO.rglob("*.py"):
+            rel = path.relative_to(REPO)
+            parts = rel.parts
+            # Production source only: skip the test suite (behavioural tests here
+            # legitimately call helpers with user_authored=True) and vendored/vcs
+            # trees.
+            if "tests" in parts or rel.name.startswith("test_"):
+                continue
+            if any(p in (".git", "worktrees", "__pycache__") for p in parts):
+                continue
+            if "user_authored=True" in path.read_text(encoding="utf-8", errors="ignore"):
+                grant_files.add(rel.as_posix())
+        self.assertEqual(
+            grant_files,
+            {"watchdog/discord_replies.py"},
+            "user_authored=True (kill-switch bypass) may be granted from "
+            "watchdog/discord_replies.py ONLY; found: %r" % sorted(grant_files),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

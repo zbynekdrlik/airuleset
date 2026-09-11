@@ -765,10 +765,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                         out=send_out) or send_out.get("delivered_unconfirmed")
                 else:
                     _record_dreply_typed(state, pid, prompt, now)
-                    # #994 — the owner's OWN Discord reply is NOT a machine
-                    # nudge, so it bypasses the kill switch (user_authored=True):
-                    # an OFF box still delivers the owner's answer. The later
-                    # ticket-fallback POINTER below stays machine-suppressed.
+                    # #994 — owner's OWN reply is not a machine nudge, so it
+                    # bypasses the kill switch; the machine POINTER below stays suppressed.
                     delivered = watchdog.send_verified(
                         pid, prompt, run, tpath, sleep_fn=sleep_fn, logs=logs,
                         user_authored=True,
