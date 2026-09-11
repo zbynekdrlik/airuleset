@@ -343,6 +343,15 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       feature that also needs an `env` key does not silently clobber this
       one (or vice versa).
 
+    - `env["CLAUDE_CODE_SUBAGENT_MODEL"] = MODEL_TIERS["opus"]` (#991) is the
+      fleet DEFAULT subagent model — the native env var Claude Code applies to a
+      dispatched subagent that carries no per-dispatch `model` param and whose
+      agent definition pins no model. The native precedence order stays intact
+      (per-dispatch model -> agent frontmatter -> this env -> main), so the
+      working model overrides per dispatch by its own judgment; removing this
+      one key turns the default off. No `_FORCE` variant — a DEFAULT, not an
+      override.
+
     - `cleanupPeriodDays = MANAGED_CLEANUP_PERIOD_DAYS` (#376) overrides
       Claude Code's OWN native transcript-retention auto-cleanup (default
       30 days when unset -- see MANAGED_CLEANUP_PERIOD_DAYS's own comment
@@ -385,6 +394,15 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     existing_env = result.get("env")
     result["env"] = dict(existing_env) if isinstance(existing_env, dict) else {}
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION
+    # #991: the fleet DEFAULT subagent model — the native env var Claude Code
+    # reads for a dispatched subagent with no per-dispatch `model` param and no
+    # agent-frontmatter model. Set to the Opus tier (claude-opus-4-8) so a bare
+    # dispatch runs on the escalation tier by default, while the native
+    # precedence (per-dispatch model -> agent frontmatter -> this env -> main)
+    # is untouched: the working model still overrides per dispatch by its own
+    # judgment, and REMOVING this one key turns the whole default off. No _FORCE
+    # variant — this is a DEFAULT, not an override.
+    result["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = airuleset.MODEL_TIERS["opus"]
     # #950: shared Playwright browsers — set PLAYWRIGHT_BROWSERS_PATH on
     # shared-stream boxes so Playwright (and its MCP plugin) uses the
     # root-owned /opt/ms-playwright instead of per-user ~/.cache/ms-playwright.

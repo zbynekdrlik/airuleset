@@ -1,11 +1,12 @@
-"""#871 — model-FLOAT audit job (machine-channel only, never an owner ping).
+"""#871/#991 — model-FLOAT audit job (machine-channel only, never an owner ping).
 
 Hourly, reads the newest-assistant model of every live pane's MAIN transcript
 and every RECENT subagent transcript under it (recency-windowed — see
 `cli_model_audit.MODEL_AUDIT_SUBAGENT_RECENCY_S`, #871 fix), and JOURNALS any
-model that is NOT on the exact-id allowlist (`airuleset.MODEL_TIERS`) — a
-session that FLOATED off the launch pin mid-lifetime (`model_changed`), e.g.
-off the allowlist. The audit is about sessions that CAN STILL FLOAT —
+model on the BAN-LIST (`airuleset.BANNED_MODELS` — Opus 5; #991 narrowed this
+from the exact-id allowlist to the ban-list, since the working model may
+legitimately float onto sonnet/haiku/another allowlisted tier). The audit is
+about sessions that CAN STILL FLOAT —
 i.e. LIVE state only — so a subagent transcript is considered ONLY when its
 mtime is within the shared recency window; a subagent dispatched weeks ago
 (long dead, possibly from before the ban even existed) is not a live float
@@ -26,12 +27,12 @@ MODEL_AUDIT_INTERVAL_S = 3600
 def _flag(read_model, path, kind, pane, cwd, out):
     import airuleset
     m = read_model(path)
-    # #871 review 🔴3a: the AUDIT-tolerant predicate — a served dated
-    # snapshot id for an allowlisted tier (e.g. claude-haiku-4-5-20251001)
-    # must not journal a false model-float violation.
+    # #991: the AUDIT ban-list predicate — flags only a BANNED model (Opus 5),
+    # tolerating a served dated snapshot / provider prefix. A pane on any
+    # allowlisted tier (incl. sonnet/haiku) is never journaled.
     if m and airuleset.is_banned_model_for_audit(m):
         out.append("model-float %s pane=%s model=%s cwd=%s "
-                    "(off the allowlist — /model -> Fable 5.1 or relaunch)"
+                    "(BANNED model — /model -> Fable 5.1 or relaunch)"
                     % (kind, pane, m, cwd))
 
 

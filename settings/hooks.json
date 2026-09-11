@@ -240,12 +240,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/pre-agent-validate-subagent-type.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-unpinned-model-dispatch.sh",
+            "command": "bash ~/devel/airuleset/hooks/block-banned-model.sh",
             "timeout": 5
           },
           {
@@ -372,7 +367,7 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-unpinned-model-dispatch.sh",
+            "command": "bash ~/devel/airuleset/hooks/block-banned-model.sh",
             "timeout": 5
           },
           {
@@ -565,11 +560,6 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/notify-compact-subagent-boundary.sh",
-            "timeout": 15
-          },
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/subagent-stop-check-review-tier.sh",
             "timeout": 15
           }
         ]
