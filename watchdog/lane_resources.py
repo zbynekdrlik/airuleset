@@ -211,5 +211,8 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
         "(server-side rate-limit, memory pressure boxu, CC max-subagents strop). "
         "PRIORITU (ČO riešiť a v akom poradí) ani POČET lán NEURČUJE tento nudge "
         "— platí priorita dohodnutá v tejto session: architektúra > "
-        "architecture-rework > prio:bounce > backlog (#993)."
+        "architecture-rework > prio:bounce > backlog (#993). "
+        "Infra jednotky (CI/hooks/gates/release/deploy/airuleset moduly-skills-agents) "
+        "sú SÉRIOVÉ — refill platí LEN pre nezávislé jednotky; ak sú workable len "
+        "infra tikety a jedna infra lane žije, NErefillni ďalšiu (#992/#993)."
     ) % (backlog_n, live_workers, waiters, resource_snippet)
