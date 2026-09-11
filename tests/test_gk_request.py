@@ -55,7 +55,7 @@ def seed_repo_cache(home, root, name, **extra):
 # (see test_bounce_backstop for the same pattern; mechanics in
 # test_send_verified.py, swallowed-submit handling in
 # test_send_verified_adoption.py).
-def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None, user_authored=False):
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True

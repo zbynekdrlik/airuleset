@@ -48,7 +48,7 @@ def seed_repo_cache(home, root, name):
 # verification / chunk-typing / undo-on-swallow is covered end to end in
 # test_send_verified.py; the swallowed-submit (False) job handling in
 # test_send_verified_adoption.py.
-def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None, user_authored=False):
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True

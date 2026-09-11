@@ -28,7 +28,7 @@ import watchdog as wd
 # module-wide by a happy-path fake that byte-mirrors send_continue (type `-l --`
 # + Enter, returns True). Swallowed-submit handling: test_send_verified_adoption.
 def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                          out=None):
+                          out=None, user_authored=False):
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True
@@ -46,7 +46,7 @@ class _ReplySendVerifiedRec:
         self.calls = []
 
     def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                 out=None):
+                 out=None, user_authored=False):
         self.calls.append({"pid": pid, "text": text, "tpath": tpath})
         if self.unconfirmed and isinstance(out, dict):
             out["delivered_unconfirmed"] = True
@@ -64,7 +64,7 @@ class _ReplySubmitOwnRec:
         self.calls = []
 
     def __call__(self, pid, draft, run=None, tpath=None, sleep_fn=None,
-                 logs=None, caller_proven_own=False, out=None):
+                 logs=None, caller_proven_own=False, out=None, user_authored=False):
         self.calls.append({"pid": pid, "draft": draft,
                            "caller_proven_own": caller_proven_own})
         if self.unconfirmed and isinstance(out, dict):
@@ -1649,7 +1649,7 @@ def _sv_recorder(result=True):
     records every call's pid/text/tpath, returns a fixed result."""
     calls = []
 
-    def sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    def sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None, user_authored=False):
         calls.append({"pid": pid, "text": text, "tpath": tpath})
         return result
     sv.calls = calls

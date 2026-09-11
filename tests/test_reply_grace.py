@@ -52,7 +52,7 @@ import watchdog as wd
 # module-wide by a happy-path fake byte-mirroring the old typing (`-l --` + Enter,
 # returns True).
 def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None,
-                          logs=None, out=None):
+                          logs=None, out=None, user_authored=False):
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True
