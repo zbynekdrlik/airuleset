@@ -3833,6 +3833,14 @@ def cmd_handoff(args):
             print("handoff BLOCK: sign-only file has no "
                   "READY-FOR-REVIEW marker")
             return 1
+        # Self-review-model: is a FACT the odoo-erp gate requires on EVERY
+        # readiness comment (#991 review finding 2). A sign-only body that
+        # omits it would get a receipt here and a bounce at the gate (#957
+        # friction), so require it in the body directly (all rounds).
+        if not _re.compile(r'^Self-review-model:', _re.MULTILINE).search(body):
+            print("handoff BLOCK: sign-only body missing Self-review-model: "
+                  "line (required on every readiness comment)")
+            return 1
         # Round >= 2 validation (#919 review RED-1): airuleset's OWN
         # cross-repo fields must be present even in sign-only mode.
         self_login = _stream_self_login()
@@ -3890,12 +3898,15 @@ def cmd_handoff(args):
     if not (self_review_model or "").strip():
         print("handoff BLOCK: --self-review-model (Self-review-model) required")
         return 1
-    if not is_allowed_model(self_review_model) or \
-            is_banned_model(self_review_model):
+    canonical_srm = _canonical_self_review_model(self_review_model)
+    if canonical_srm is None:
         allowed = ", ".join(sorted(MODEL_TIERS.values()))
         print("handoff BLOCK: --self-review-model %r is not an allowed exact "
               "model id — use one of: %s" % (self_review_model, allowed))
         return 1
+    # Emit the canonical id (#991 review finding 1) so a line-exact gate
+    # match never fails on a case/[1m]-tag variant.
+    self_review_model = canonical_srm
 
     # Read self-review table.
     try:
@@ -4039,6 +4050,27 @@ def cmd_handoff(args):
     print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
           % (issue, rnd, head_sha[:12]))
     return 0
+
+
+def _canonical_self_review_model(value):
+    """Return the CANONICAL MODEL_TIERS id for a --self-review-model value,
+    or None if it is not an allowed exact model id (#991 review finding 1).
+
+    Tolerates case + the ``[Nm]`` context tag via ``_normalize_model`` (a
+    Fable main reports ``claude-fable-5-1[1m]``), then maps back to the
+    literal MODEL_TIERS constant so the emitted ``Self-review-model:`` line
+    is always gate-EXACT. Banned/alias/unknown/empty -> None. Single source
+    of truth: MODEL_TIERS / BANNED_MODELS via is_allowed_model/is_banned_model.
+    """
+    if not (value or "").strip():
+        return None
+    if is_banned_model(value) or not is_allowed_model(value):
+        return None
+    norm = _normalize_model(value)
+    for canonical in MODEL_TIERS.values():
+        if _normalize_model(canonical) == norm:
+            return canonical
+    return None
 
 
 def cmd_model_tiers(args):

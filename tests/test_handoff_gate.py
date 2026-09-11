@@ -518,6 +518,7 @@ class TestSignOnly919(unittest.TestCase):
         import unittest.mock as m
         body = (
             "READY-FOR-REVIEW: branch worktree-agent-test\n\n"
+            "Self-review-model: claude-opus-4-8\n"
             "Stack: airuleset\n"
             "Harness: claude-code\n"
             "Verified-at-UTC: 2026-09-07T01:00:00Z\n"
@@ -596,6 +597,7 @@ class TestSignOnly919(unittest.TestCase):
         import io
         body = (
             "READY-FOR-REVIEW: branch test\n\n"
+            "Self-review-model: claude-opus-4-8\n"
             "Ready for gatekeeper cross-fork review.\n"
         )
         with tempfile.TemporaryDirectory() as td:
