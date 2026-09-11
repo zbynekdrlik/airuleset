@@ -2881,12 +2881,12 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("skip:covered" in ln for ln in logs), logs)
 
     def test_937_finished_non_worker_not_counted_as_coverage(self):
-        # #937-review C1: a finished fable-advisor/Explore subagent is NOT
+        # #937-review C1: a finished ticket-validator/Explore subagent is NOT
         # an implementation worker and must NOT count as coverage.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         ev = [WorkerLane("w1", "live", 60, "autopilot-worker", ""),
-              WorkerLane("w2", "finished", 120, "fable-advisor", ""),
+              WorkerLane("w2", "finished", 120, "ticket-validator", ""),
               WorkerLane("w3", "finished", 120, "Explore", "")]
         with m.patch.object(wd, "count_live_workers", return_value=(1, ev)):
             logs, owns, tmux = self._call(

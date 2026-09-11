@@ -139,7 +139,6 @@ class TestRenderExtendedBody(unittest.TestCase):
             bounce_round=2,
             root_cause="lens -- why",
             prevencia_read="/path/to/prevencia.md",
-            reviewed_by_tier="claude-fable-5-1",
         )
         m = BOUNCE_ROUND_RE.search(body)
         self.assertIsNotNone(m, "Bounce-round must appear on round 2")
@@ -150,7 +149,6 @@ class TestRenderExtendedBody(unittest.TestCase):
             bounce_round=3,
             root_cause="lens -- why",
             prevencia_read="/path/to/prevencia.md",
-            reviewed_by_tier="claude-fable-5-1",
         )
         m = BOUNCE_ROUND_RE.search(body)
         self.assertIsNotNone(m)
@@ -190,15 +188,6 @@ class TestRenderExtendedBody(unittest.TestCase):
         self.assertIn("Closes-finding: F1 -- fixed", body)
         self.assertIn("Closes-finding: F2 -- fixed", body)
 
-    def test_self_review_model_emitted_when_tier_given(self):
-        """R1 fable-advisor finding: Self-review-model: is gate-required."""
-        body = self._render(reviewed_by_tier="claude-fable-5-1")
-        self.assertIn("Self-review-model: claude-fable-5-1", body)
-        # Must appear BEFORE the Self-review: marker.
-        model_idx = body.index("Self-review-model:")
-        review_idx = body.index("**Self-review:**")
-        self.assertLess(model_idx, review_idx)
-
 
 class TestRenderGenericBody(unittest.TestCase):
     """The generic body preserves the pre-#969 shape, minus Bounce-round: 1."""
@@ -222,7 +211,6 @@ class TestRenderGenericBody(unittest.TestCase):
             bounce_round=2,
             root_cause="lens -- why",
             prevencia_read="/path",
-            reviewed_by_tier="claude-opus-4-8",
         )
         m = BOUNCE_ROUND_RE.search(body)
         self.assertIsNotNone(m)
@@ -282,7 +270,6 @@ class TestValidateExtendedFlags(unittest.TestCase):
             stack="#100",
             harness="pytest",
             shared_benefit="shared -- mechanism",
-            reviewed_by_tier="claude-fable-5-1",
         ))
 
     def test_missing_stack(self):
@@ -290,7 +277,6 @@ class TestValidateExtendedFlags(unittest.TestCase):
             stack="",
             harness="pytest",
             shared_benefit="shared",
-            reviewed_by_tier="claude-fable-5-1",
         )
         self.assertIn("--stack", result)
 
@@ -299,21 +285,10 @@ class TestValidateExtendedFlags(unittest.TestCase):
             stack=None,
             harness=None,
             shared_benefit=None,
-            reviewed_by_tier=None,
         )
         self.assertIn("--stack", result)
         self.assertIn("--harness", result)
         self.assertIn("--shared-benefit", result)
-        self.assertIn("--reviewed-by-tier", result)
-
-    def test_missing_reviewed_by_tier(self):
-        result = validate_extended_flags(
-            stack="#100",
-            harness="pytest",
-            shared_benefit="shared",
-            reviewed_by_tier="",
-        )
-        self.assertIn("--reviewed-by-tier", result)
 
 
 class TestComposeBody(unittest.TestCase):
@@ -335,7 +310,6 @@ class TestComposeBody(unittest.TestCase):
                 stack="#100",
                 harness="pytest",
                 shared_benefit="shared",
-                reviewed_by_tier="claude-fable-5-1",
             )
         self.assertIsNone(err)
         fields = _parse_fields(body)

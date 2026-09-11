@@ -228,10 +228,8 @@ class TestAgentOnlySkillFlags(unittest.TestCase):
 
     # plan-check dropped disable-model-invocation (#859 batch 3b, 🔴4:
     # completion-report.md mandates `Invoke plan-check` = Skill tool call).
-    # fable-advisor keeps it: loaded via situational trigger on fable-gate,
-    # not the Skill tool; model-awareness says "load it" but the conf binding
-    # handles that load path.
-    AGENT_ONLY = ["fable-advisor", "ci-monitor", "notification-mechanics"]
+    # (the tier advisor agent + its skill were removed in #991.)
+    AGENT_ONLY = ["ci-monitor", "notification-mechanics"]
 
     def test_agent_only_skills_have_disable_model_invocation(self):
         for name in self.AGENT_ONLY:

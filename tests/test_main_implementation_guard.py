@@ -24,9 +24,6 @@ anyway — the exact failure class a HOOK enforces:
   = touch /tmp/airuleset-main-exec-ok-<session_id> (logged), with the
   original /tmp/airuleset-fable-exec-ok-<session_id> still honored for
   backward compatibility.
-- `fable-advisor` skill: the one-command ADVISOR path for a cheap master —
-  fable-gate → tight digest → ONE Agent dispatch model:fable effort:xhigh →
-  decision back; execution goes to a Sonnet worker.
 
 Goal-armed detection is INDEPENDENT of the Fable-model detection (#38's
 stale-model-after-/model-switch caveat applies ONLY to the model path, never
@@ -2508,21 +2505,6 @@ class TestWiringAndSkill(unittest.TestCase):
         for tool in ("Bash", "Write", "Edit"):
             self.assertIn(tool, toks,
                           "consumer matcher %r must cover %s" % (matcher, tool))
-
-    def test_fable_advisor_skill_exists_and_registered(self):
-        sk = REPO / "skills" / "fable-advisor" / "SKILL.md"
-        self.assertTrue(sk.exists())
-        txt = sk.read_text()
-        for needle in ("fable-gate", "digest", "xhigh", "sonnet"):
-            self.assertIn(needle, txt, needle)
-        self.assertIn("fable-advisor", airuleset.SKILL_NAMES)
-
-    def test_model_awareness_points_at_the_enforcement(self):
-        txt = (REPO / "skills" / "model-awareness-deep" / "DEEP.md").read_text()
-        self.assertIn("block-main-implementation.sh", txt)
-        self.assertIn("fable-advisor", txt)
-        self.assertIn("#54", txt)
-        self.assertRegex(txt, r"(?i)armed[^\n]*(/goal|goal)")
 
 
 class CrossUserLogPathCollision492(unittest.TestCase):

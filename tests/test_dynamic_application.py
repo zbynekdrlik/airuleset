@@ -123,29 +123,19 @@ class TestPathRuleConversions(TestCase):
 class TestModelCombinationFixes(TestCase):
     def test_main_session_is_users_model_choice_not_hardcoded_opus(self):
         t = read("modules/core/model-awareness.md")
-        self.assertIn("main model is the user's call", t)
+        # #991: the MAIN session model is the user's call (Fable 5.1); the
+        # subagent model is the working model's native choice, never hardcoded.
+        self.assertIn("the user's call", t)
         self.assertNotIn("The primary Claude Code agent runs **Opus 4.8**", t)
 
-    def test_unverified_community_numbers_are_labelled(self):
-        # The community advisor-vs-solo cost numbers moved to the fable-advisor
-        # skill with the rest of the justification layer (#92 item 2) — the
-        # HONESTY requirement (labelled UNVERIFIED) travels with them.
-        self.assertIn("UNVERIFIED indicative numbers",
-                      read("skills/fable-advisor/SKILL.md"))
-
-    def test_ticket_validator_has_an_explicit_model_tier(self):
-        # 2026-08-13 Opus 5 ban: the validator's explicit tier is the full
-        # Opus id pinned in frontmatter (never the banned `opus` alias, never
-        # sonnet — see tests/test_model_tiering.py's lineup locks). #871
-        # renamed the exact-id allowlist's implementation-escalation/
-        # gate-CLOSED-fallback tier from claude-opus-4-8 to claude-opus-4-8
-        # (MODEL_TIERS["opus"] — airuleset.py) and swept every pinned-agent
-        # frontmatter, this one included, to match.
-        # window widened 400 -> 500: the full-id spelling is longer than the
-        # old bare alias; the intent (an explicit tier in the frontmatter,
-        # near the top of the file) is unchanged.
-        self.assertIn("model: claude-opus-4-8",
-                      read("agents/ticket-validator.md")[:500])
+    def test_subagent_model_is_native_default_not_a_pinned_tier(self):
+        # #991: agents carry NO model: frontmatter (the env default carries it,
+        # main overrides natively). The exact-id allowlist lives in MODEL_TIERS.
+        import re
+        tv = read("agents/ticket-validator.md")
+        m = re.match(r"^---\n(.*?)\n---\n", tv, re.S)
+        fm = m.group(1) if m else ""
+        self.assertNotRegex(fm, r"(?m)^\s*model:")
 
 
 if __name__ == "__main__":
