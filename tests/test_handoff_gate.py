@@ -493,7 +493,7 @@ class TestSignOnly919(unittest.TestCase):
         defaults = dict(
             repo="zbynekdrlik/odoo-erp", issue=42, branch=None,
             self_review_file=None, root_cause=None, closes_finding=None,
-            prevencia_read=None, reviewed_by_tier=None, sign_only=None)
+            prevencia_read=None, self_review_model=None, sign_only=None)
         defaults.update(kw)
         return argparse.Namespace(**defaults)
 
@@ -590,8 +590,8 @@ class TestSignOnly919(unittest.TestCase):
 
     def test_sign_only_round2_missing_fields_blocked(self):
         """RED-1 review finding: at bounce round >= 2, sign-only must
-        require Root-cause-of-previous-bounce, Prevencia-read, and
-        Reviewed-by-tier lines in the body."""
+        require Root-cause-of-previous-bounce and Prevencia-read lines in
+        the body."""
         import unittest.mock as m
         import io
         body = (
@@ -621,6 +621,70 @@ class TestSignOnly919(unittest.TestCase):
                        os.path.abspath(__file__))))
         self.assertIn("--sign-only", r.stdout,
                        "handoff --help must list --sign-only")
+
+
+class TestSelfReviewModel991(unittest.TestCase):
+    """#991 round 3: the handoff CLI requires + validates --self-review-model
+    as an exact model id (single source: airuleset.MODEL_TIERS / BANNED_MODELS).
+    These checks run BEFORE any git/gh call, so no mocking is needed beyond
+    stdout capture."""
+
+    def _args(self, **kw):
+        import argparse
+        defaults = dict(
+            repo="zbynekdrlik/airuleset", issue=991,
+            branch="worktree-x", self_review_file="/nonexistent/tbl.md",
+            root_cause=None, closes_finding=None, prevencia_read=None,
+            sign_only=None, self_review_model="claude-opus-4-8",
+            stack=None, harness=None, shared_benefit=None,
+            tenant_scope=None, source_verified=None, tested_tree=None,
+            evidence_head=None)
+        defaults.update(kw)
+        return argparse.Namespace(**defaults)
+
+    def test_missing_self_review_model_blocked(self):
+        import io
+        import unittest.mock as m
+        args = self._args(self_review_model=None)
+        with m.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = airuleset.cmd_handoff(args)
+        self.assertEqual(1, rc)
+        self.assertIn("--self-review-model", out.getvalue())
+
+    def test_alias_or_banned_value_rejected(self):
+        import io
+        import unittest.mock as m
+        for bad in ("fable", "opus", "claude-opus-5", "claude-opus-4-6"):
+            args = self._args(self_review_model=bad)
+            with m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(args)
+            self.assertEqual(1, rc, "%r must be rejected" % bad)
+            txt = out.getvalue()
+            self.assertIn("not an allowed", txt)
+            # message names the allowed exact ids (single source of truth)
+            self.assertIn("claude-opus-4-8", txt)
+
+    def test_valid_exact_id_passes_model_validation(self):
+        """A valid exact id gets PAST model validation -- proven by the
+        next-stage error being the (nonexistent) self-review FILE, not the
+        model rejection."""
+        import io
+        import unittest.mock as m
+        args = self._args(self_review_model="claude-opus-4-8")
+        with m.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = airuleset.cmd_handoff(args)
+        self.assertEqual(1, rc)
+        txt = out.getvalue()
+        self.assertIn("self-review file", txt)
+        self.assertNotIn("not an allowed", txt)
+
+    def test_argparse_flag_present(self):
+        import subprocess as sp
+        r = sp.run([sys.executable, "airuleset.py", "handoff", "--help"],
+                   capture_output=True, text=True, timeout=10,
+                   cwd=os.path.dirname(os.path.dirname(
+                       os.path.abspath(__file__))))
+        self.assertIn("--self-review-model", r.stdout)
 
 
 if __name__ == "__main__":

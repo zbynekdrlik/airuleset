@@ -339,5 +339,67 @@ class TestHasExtendedTemplate(unittest.TestCase):
         ))
 
 
+SELF_REVIEW_MODEL_RE = re.compile(
+    r"(?im)^[ \t]*[-*]?[ \t]*\**Self-review-model\**[ \t]*:[ \t]*(\S.*?)[ \t]*$"
+)
+
+
+class TestSelfReviewModel991(unittest.TestCase):
+    """#991 round 3: the Self-review-model: FACT line is restored under a
+    fact name (which exact model performed the fresh-context self-review).
+    The doctrine-named echo line is NOT restored."""
+
+    def _extended(self, **kw):
+        defaults = dict(
+            branch_field="stream:dev",
+            head_sha="abc123",
+            verified_at_utc="2026-09-11T00:00:00Z",
+            stack="#991",
+            harness="pytest",
+            shared_benefit="shared -- x",
+            self_review_table=REVIEW_TABLE,
+            bounce_round=1,
+            self_review_model="claude-opus-4-8",
+        )
+        defaults.update(kw)
+        return render_extended_body(**defaults)
+
+    def test_extended_emits_exactly_one_self_review_model_line(self):
+        body = self._extended()
+        self.assertEqual(SELF_REVIEW_MODEL_RE.findall(body),
+                         ["claude-opus-4-8"])
+
+    def test_generic_emits_exactly_one_self_review_model_line(self):
+        body = render_generic_body(
+            branch="dev", head_sha="abc123",
+            verified_at_utc="2026-09-11T00:00:00Z",
+            self_review_table=REVIEW_TABLE, bounce_round=1,
+            self_review_model="claude-opus-4-8",
+        )
+        self.assertEqual(SELF_REVIEW_MODEL_RE.findall(body),
+                         ["claude-opus-4-8"])
+
+    def test_no_reviewed_by_tier_echo(self):
+        """The doctrine-named echo line is NOT restored, even at round >= 2."""
+        body = self._extended(bounce_round=3, root_cause="lens -- why",
+                              prevencia_read="/p")
+        self.assertNotIn("Reviewed-by-tier", body)
+
+    def test_compose_body_passes_self_review_model(self):
+        import unittest.mock as m
+        with m.patch("cli_handoff_template.has_extended_template",
+                      return_value=True):
+            body, err = compose_body(
+                repo="zbynekdrlik/odoo-erp", branch="dev",
+                head_sha="abc123", verified_at_utc="2026-09-11T00:00:00Z",
+                self_review_table=REVIEW_TABLE, bounce_round=1,
+                stack="#991", harness="pytest", shared_benefit="shared",
+                self_review_model="claude-opus-4-8",
+            )
+        self.assertIsNone(err)
+        self.assertEqual(SELF_REVIEW_MODEL_RE.findall(body),
+                         ["claude-opus-4-8"])
+
+
 if __name__ == "__main__":
     unittest.main()

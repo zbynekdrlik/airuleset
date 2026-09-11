@@ -159,6 +159,31 @@ class TestTieringTokenScan(TestCase):
                          % sorted(offenders))
 
 
+class TestModelTiersJSON991(TestCase):
+    """#991 — `airuleset.py model-tiers --json` exposes the allowlist for an
+    external gate (odoo-erp #6935) to read from the SINGLE source of truth."""
+
+    def test_json_shape_matches_constants(self):
+        import subprocess
+        import sys
+        r = subprocess.run(
+            [sys.executable, "airuleset.py", "model-tiers", "--json"],
+            capture_output=True, text=True, timeout=15, cwd=REPO)
+        self.assertEqual(0, r.returncode, r.stderr)
+        data = json.loads(r.stdout)
+        self.assertEqual(data.get("tiers"), dict(airuleset.MODEL_TIERS))
+        self.assertEqual(data.get("banned"), sorted(airuleset.BANNED_MODELS))
+
+
+class TestWorkerDocSelfReviewModel991(TestCase):
+    """#991 — the worker hand-off recipe passes --self-review-model."""
+
+    def test_worker_doc_has_self_review_model(self):
+        p = os.path.join(REPO, "agents", "autopilot-worker.md")
+        text = open(p, encoding="utf-8").read()
+        self.assertIn("--self-review-model", text)
+
+
 class TestHooksJsonClean(TestCase):
     """Lock 6 — the deleted hooks are gone from hooks.json; the new ban hook is
     wired; the file is valid JSON."""
