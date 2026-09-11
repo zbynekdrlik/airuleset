@@ -133,9 +133,12 @@ class TestTieringTokenScan(TestCase):
         me = os.path.abspath(__file__)
         offenders = []
         for root, dirs, files in os.walk(REPO):
+            # Skip build/vcs dirs AND a nested `.claude/worktrees` tree — exclude
+            # by dir NAME, never by path substring (REPO itself may live under
+            # `.claude/worktrees/agent-*`, so a substring test would prune the
+            # whole walk).
             dirs[:] = [d for d in dirs
-                       if d not in self._SKIP_DIRS
-                       and "worktrees" not in os.path.join(root, d)]
+                       if d not in self._SKIP_DIRS and d != "worktrees"]
             for f in files:
                 p = os.path.join(root, f)
                 if p == me or not f.endswith(self._SCAN_EXT):

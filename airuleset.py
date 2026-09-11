@@ -481,10 +481,9 @@ from cli_deployer_glue import (  # noqa: E402
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/.
-# Only the two claude-opus-4-8-pinned-BY-ENV worker agents survive (#991): the
-# subagent MODEL default is the native env CLAUDE_CODE_SUBAGENT_MODEL, and the
-# working model chooses TYPE/MODEL/COUNT natively — the fable-advisor /
-# sonnet-implementer / sonnet-mechanical tier agents are removed.
+# Only the two worker agents survive (#991): the subagent MODEL default is the
+# native env CLAUDE_CODE_SUBAGENT_MODEL (claude-opus-4-8), and the working model
+# chooses TYPE/MODEL/COUNT natively — the old pinned tier-agent types are removed.
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"

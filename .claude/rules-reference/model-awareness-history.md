@@ -8,6 +8,42 @@ always-on in the module.
 
 ---
 
+## SOTA native subagent selection — tiering doctrine REMOVED (2026-09-11, #991)
+
+Owner directive (verbatim):
+
+> "potrebujem aby si spravil review toho ako sa rozhoduju subagenti a ich modely
+> a aj pocet. Chcel by som to cele mat extrahovane a vediet to vypnut. … fable by
+> mohol aj sam vediet ako riesit ulohy a nemuselo by to byt dane ako rozne strict
+> pravidla ktore zbytocne zahlcuju context. … nechavat stale viac harnessu na
+> claude cli ktore je k tomu optimalizovane"
+
+> "ok mozes to prerobit na sota tvar, a daj si zalezat aby to bolo by design
+> spravne, uz mam dost tvojich patchworkov … Cely nas airuleset sa musi uz konecne
+> zacat zostihlovat a delit na strukturovanu zrozumitelnu architecturu. … pracu
+> subagentov by mal vzdy skontrolovat a reviewnut hlavny fable aby bola velmi
+> prisna kontrola kvality a architectury."
+
+The whole per-phase tiering doctrine that accreted through #690 / #715 / #721 /
+#871 / #894 (phase table, pinned tier agents `fable-advisor` / `sonnet-implementer`
+/ `sonnet-mechanical`, the `fable-gate` budget gate, the `model-awareness-deep`
+situational injections, the `reviewed-by-tier` / `subagent-stop-check-review-tier`
+machinery) was REMOVED, not toggled. The choice of a subagent's TYPE, MODEL and
+COUNT is now the working model's, resolved by Claude Code natively. airuleset
+contributes exactly two things: (1) a fleet DEFAULT subagent model via the native
+env `CLAUDE_CODE_SUBAGENT_MODEL = MODEL_TIERS["opus"]` (`claude-opus-4-8`), no
+`_FORCE` — the native precedence (per-dispatch `model` → agent frontmatter → env →
+main) stays, so main overrides by its own judgment, and the default is turned off
+by removing the env var; (2) a BAN of Opus 5 (`airuleset.BANNED_MODELS` =
+`claude-opus-5` + the `opus`/`opusplan` alias) enforced by one small dispatch hook
+`hooks/block-banned-model.sh` (Agent `model` + Workflow `opts.model`) plus the
+launch/settings self-heal and a reduced Job-41 audit (ban-list detection only).
+Review of subagent work is done by the MAIN Fable before integration (the "Main
+review gate" in `skills/autopilot/SKILL.md`): the supervisor reads
+`git diff main...<ref>` + the LANE-RETURN and strictly judges architecture and
+quality — reviewer has the whole conversation context, the subagent does not.
+The MAIN session model stays Fable 5.1 (`MANAGED_MODEL = claude-fable-5-1[1m]`).
+
 ## Opus tier fleet-wide: claude-opus-4-6 → claude-opus-4-8 (2026-09-10, #990)
 
 **Owner directive (2026-09-10, verbatim):** *"Prehod pravidlo pouzivania a namiesto opuss 4.6 daj opus 4.8"*
