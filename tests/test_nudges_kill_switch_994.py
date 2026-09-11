@@ -346,6 +346,29 @@ class TestUserAuthoredCallSiteLock(unittest.TestCase):
     anywhere else (a machine nudge that quietly opts itself back in at OFF)
     fails this test."""
 
+    @staticmethod
+    def _grants_bypass(src):
+        """True if any call in `src` passes `user_authored=<not-literal-False>`.
+        AST-based (not a substring match) so `user_authored=True`,
+        `user_authored = True`, and `user_authored=<expr>` are all caught, and a
+        mention in a comment/string is not."""
+        import ast
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            return False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "user_authored":
+                    continue
+                v = kw.value
+                if isinstance(v, ast.Constant) and v.value is False:
+                    continue  # the default/deny value — not a grant
+                return True
+        return False
+
     def test_only_discord_replies_grants_bypass(self):
         grant_files = set()
         for path in REPO.rglob("*.py"):
@@ -358,13 +381,13 @@ class TestUserAuthoredCallSiteLock(unittest.TestCase):
                 continue
             if any(p in (".git", "worktrees", "__pycache__") for p in parts):
                 continue
-            if "user_authored=True" in path.read_text(encoding="utf-8", errors="ignore"):
+            if self._grants_bypass(path.read_text(encoding="utf-8", errors="ignore")):
                 grant_files.add(rel.as_posix())
         self.assertEqual(
             grant_files,
             {"watchdog/discord_replies.py"},
-            "user_authored=True (kill-switch bypass) may be granted from "
-            "watchdog/discord_replies.py ONLY; found: %r" % sorted(grant_files),
+            "user_authored bypass (a truthy/non-False user_authored kwarg) may be "
+            "granted from watchdog/discord_replies.py ONLY; found: %r" % sorted(grant_files),
         )
 
 
