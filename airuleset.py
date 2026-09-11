@@ -1376,6 +1376,16 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ufw ssh error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
+    # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
+    # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
+    # provisioning step rather than a manual intervention. ---
+    try:
+        from cli_disk_guard_root import provision_swap
+        print(f"  {provision_swap()}")
+    except Exception as e:
+        print(f"  swap provisioning error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque-ter. Managed DNS records (#983): controller-only,
     # idempotent upsert of the proxied CNAME for claudy.newlevel.media and
     # the unproxied A record for ar.newlevel.media (#982). Non-fatal (a
@@ -2057,6 +2067,13 @@ def cmd_status(args):
         print(f"  {ver_str} [{ver_status}]")
     except Exception as e:
         print(f"  error: {e}", file=sys.stderr)
+
+    # --- Managed swap (#992/#993 item 9) ---
+    try:
+        from cli_disk_guard_root import swap_status
+        print("\n" + swap_status())
+    except Exception as e:
+        print(f"\nswap: error ({e})", file=sys.stderr)
 
     # --- Break-glass (#982/#985): ignoreip + key + sshd password + DNS ---
     try:
