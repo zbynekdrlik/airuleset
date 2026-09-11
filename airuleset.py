@@ -52,7 +52,7 @@ EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")
 # accepts only low|medium|high|xhigh (docs: `max`/`ultracode` session-only);
 # the launch script (CLAUDE_LAUNCH_SCRIPT_CONTENT) no longer bakes
 # `--settings '{"ultracode":true}'` into any mode. Only the LAUNCH FLAGS
-# reversed — max-acceleration doctrine + per-phase model tiering UNCHANGED.
+# reversed — max-acceleration doctrine UNCHANGED.
 # User can still raise per session with `/effort`, or opt into ultracode by hand.
 MANAGED_EFFORT_LEVEL = "high"
 
@@ -61,12 +61,8 @@ MANAGED_EFFORT_LEVEL = "high"
 # directive 2026-09-04, #871: "chcem pouzivat by default vzdy sonnet-5,
 # opus-4.6, fable-5.0"). The float vector this closes: a bare alias
 # (`fable`/`opus`/`sonnet`/`haiku`) resolves to the LATEST model of that
-# family, so `fable` silently became the BANNED Fable 5.1 the day 5.1 shipped
-# (and `sonnet` would jump to the next Sonnet the day it ships). An exact id
-# never floats. A dispatch therefore NEVER carries a `model` param — the model
-# choice is carried by a PINNED agent definition (frontmatter `model: <exact
-# id>`) or a Workflow `opts.model: '<exact id>'`. A new model version joins the
-# fleet ONLY by an owner-approved edit of this table, never by an alias float.
+# family, so an exact id never floats. A new model version joins the fleet
+# ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
     "fable": "claude-fable-5-1",      # main session model (MANAGED_MODEL)
     "opus": "claude-opus-4-8",        # fleet subagent default (CLAUDE_CODE_SUBAGENT_MODEL)
