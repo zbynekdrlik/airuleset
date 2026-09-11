@@ -653,7 +653,7 @@ gap in either.
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
    are independent, so validate them in parallel, **but they are the SAME account-wide rate-limited
-   agents as the worker fleet (the Lane cap section above): bounded by the live lane set,
+   agents as the worker fleet (the Lane count section above): bounded by the live lane set,
    they stagger into sequential WAVES only when a real resource signal — a rate-limit error, box
    memory pressure, or CC's max-subagents ceiling — hits
    (#332/#848).** A validator KILLED by a rate limit (or any

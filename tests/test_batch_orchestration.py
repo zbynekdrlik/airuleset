@@ -61,9 +61,11 @@ class TestRegistryClausesAreContinuous(TestCase):
 
     def test_saturation_core_is_continuous_refill(self):
         core = self._clause("saturation-core")
-        for tok in ("CONTINUOUS REFILL", "up to 5", "PARALLEL",
+        for tok in ("CONTINUOUS REFILL",
                     "isolation:worktree", "autopilot-worker", "IMMEDIATELY"):
             self.assertIn(tok, core)
+        # #991: the fixed lane cap wording is gone (count = box + backlog).
+        self.assertNotIn("up to 5", core)
         # the batch directive it replaced must be gone
         self.assertNotIn("BATCH MODE", core)
         self.assertNotIn("NO refill while a batch runs", core)
@@ -99,7 +101,7 @@ class TestSkillContinuousDoctrine(TestCase):
 
     def test_the_continuous_refill_section_exists(self):
         body = read(SKILL)
-        self.assertIn("**Continuous refill — up to 5 live lanes", body)
+        self.assertIn("**Continuous refill — sized to box + backlog", body)
 
     def test_refill_a_returned_slot_immediately_is_stated(self):
         body = read(SKILL).lower()
@@ -112,10 +114,13 @@ class TestSkillContinuousDoctrine(TestCase):
         self.assertIn("live lanes or not", body)
         self.assertNotIn("DRAINED BATCH BOUNDARY", body)
 
-    def test_the_lane_cap_is_five(self):
+    def test_the_lane_count_is_sized_to_box_and_backlog(self):
+        # #991: no fixed lane cap — the live lane count is sized to what the
+        # box and backlog bear (declared resource caps + rate-limit signal).
         body = read(SKILL).lower()
-        self.assertIn("lane cap", body)
-        self.assertIn("up to 5", body)
+        self.assertIn("lane count", body)
+        self.assertIn("box and backlog", body)
+        self.assertNotIn("up to 5 live lanes", body)
 
     def test_the_doctrine_reversal_is_named_honestly(self):
         body = read(SKILL)
@@ -179,13 +184,15 @@ class TestNoBatchReversion(TestCase):
 
 
 class TestToolingModuleReconciled(TestCase):
-    """The always-on max-acceleration module points at continuous refill without
-    re-deriving the doctrine (pointer-class, #701)."""
+    """The always-on module states parallelism is the working model's decision,
+    sized to box + backlog, without re-deriving the doctrine (pointer-class,
+    #701/#991)."""
 
-    def test_the_pointer_names_continuous_refill(self):
+    def test_the_pointer_names_parallelism_decision(self):
         body = read(TOOLING)
-        self.assertIn("CONTINUOUS REFILL", body)
-        self.assertIn("#848", body)
+        self.assertIn("Parallelism is the working model's decision", body)
+        self.assertIn("box and backlog", body)
+        self.assertIn("cli_resource_guards", body)
         self.assertNotIn("BOUNDED BATCHES", body)
 
 
