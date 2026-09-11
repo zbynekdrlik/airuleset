@@ -1981,6 +1981,18 @@ def cmd_status(args):
     print("airuleset status")
     print("=" * 50)
 
+    # --- nudges kill switch (#994) ---
+    import watchdog as _wd_nudges
+    _nmk = _wd_nudges.read_nudges_marker()
+    if _nmk is None:
+        print("\nnudges: ON")
+    else:
+        _line = "nudges: OFF since %s by %s" % (
+            _nmk.get("since") or "?", _nmk.get("by") or "?")
+        if _nmk.get("reason"):
+            _line += " — %s" % _nmk["reason"]
+        print("\n" + _line)
+
     # --- CLAUDE.md ---
     print("\n~/.claude/CLAUDE.md:")
     if CLAUDE_MD.exists():
@@ -8504,6 +8516,19 @@ def main():
     p_ab.add_argument("--render", metavar="ACCOUNT",
                       help="Account name to render bootstrap for")
 
+    # --- #994: owner nudge kill switch ---
+    p_nudges = sub.add_parser(
+        "nudges",
+        help="Owner nudge kill switch: off|on|status [--reason ...] [--fleet]")
+    p_nudges.add_argument("nudges_action", nargs="?", default="status",
+                          choices=["off", "on", "status"],
+                          help="off = suppress every machine nudge; on = "
+                               "re-enable; status = report (default)")
+    p_nudges.add_argument("--reason", default=None,
+                          help="Optional note recorded in the OFF marker")
+    p_nudges.add_argument("--fleet", action="store_true",
+                          help="Run the verb on every non-paused box via ssh")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -8602,6 +8627,107 @@ def cmd_goal_inventory(args):
                 print("    %-22s %4d" % (clause["id"], clause["len"]))
 
 
+# --------------------------------------------------------------------------- #
+# #994 — the owner nudge KILL SWITCH CLI (`nudges off|on|status [--fleet]`).
+# The RUNTIME predicate lives in `watchdog.tmux_io.nudges_enabled` (consulted at
+# the five keystroke helpers); this is the owner-facing WRITE/read side.
+# --------------------------------------------------------------------------- #
+def _print_nudges_status(home=None):
+    """Print the ONE canonical `nudges: OFF|ON …` line (the `--fleet` driver
+    greps OFF/ON out of it). EXISTENCE-based via `read_nudges_marker`."""
+    import watchdog as _wd
+    marker = _wd.read_nudges_marker(home)
+    if marker is None:
+        print("nudges: ON")
+        return
+    line = "nudges: OFF since %s by %s" % (
+        marker.get("since") or "?", marker.get("by") or "?")
+    if marker.get("reason"):
+        line += " — %s" % marker["reason"]
+    print(line)
+
+
+def _nudges_fleet(verb, runner=None):
+    """Run `airuleset.py nudges <verb>` on every non-paused REMOTE_HOSTS entry
+    (#994 `--fleet`), reusing the `cli_mdreview_audit.run_fleet` ssh pattern
+    (`cli_remote.host_key_check_opts` + per-host `identity`). Returns a list of
+    `(name, "OFF"|"ON"|"unreachable")` in host order. `runner(entry) ->
+    (stdout, rc)` is injectable for tests; the default shells out over ssh."""
+    import cli_fleet
+    import cli_remote
+
+    def _default_runner(entry):
+        import subprocess
+        addr = entry.get("host", "")
+        user = entry.get("user", "newlevel")
+        repo_path = entry.get("repo_path", "~/devel/airuleset")
+        ssh_base = ["ssh", "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=10"] + cli_remote.host_key_check_opts(entry)
+        identity = entry.get("identity", "")
+        if identity:
+            ssh_base += ["-i", os.path.expanduser(identity),
+                         "-o", "IdentitiesOnly=yes"]
+        ssh_base += ["%s@%s" % (user, addr)]
+        cmd = ssh_base + ["python3", "%s/airuleset.py" % repo_path,
+                          "nudges", verb]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return r.stdout, r.returncode
+        except (OSError, subprocess.SubprocessError):
+            return "", 255
+
+    runner = runner or _default_runner
+    results = []
+    for entry in cli_fleet.REMOTE_HOSTS:
+        if cli_fleet.is_paused(entry):
+            continue          # paused (e.g. simap1) — never ssh'd
+        name = entry.get("name", entry.get("host", "unknown"))
+        stdout, rc = runner(entry)
+        if rc != 0:
+            results.append((name, "unreachable"))
+        elif "nudges: OFF" in (stdout or ""):
+            results.append((name, "OFF"))
+        elif "nudges: ON" in (stdout or ""):
+            results.append((name, "ON"))
+        else:
+            results.append((name, "unreachable"))
+    return results
+
+
+def cmd_nudges(args):
+    """#994 owner nudge kill switch — `nudges off|on|status [--reason ...]
+    [--fleet]`. `off` writes the `~/.claude/nudges-off` marker (suppressing
+    every machine nudge at the watchdog chokepoint), `on` removes it, `status`
+    reports. No auto-expiry, no auto re-enable (that would be the machine
+    overriding the owner). `--fleet` fans the same verb across every non-paused
+    box via ssh and prints one `<name>: OFF|ON|unreachable` line per target."""
+    import watchdog as _wd
+    action = getattr(args, "nudges_action", None) or "status"
+
+    if getattr(args, "fleet", False):
+        for name, state in _nudges_fleet(action):
+            print("%s: %s" % (name, state))
+        return 0
+
+    marker = _wd.nudges_marker_path()
+    if action == "off":
+        import datetime
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        payload = {
+            "since": datetime.datetime.now(datetime.timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "by": _current_user(),
+            "reason": getattr(args, "reason", None),
+        }
+        with open(marker, "w", encoding="utf-8") as h:
+            json.dump(payload, h)
+    elif action == "on":
+        if os.path.exists(marker):
+            os.remove(marker)
+    _print_nudges_status()
+    return 0
+
+
 # Command dispatch table (module-level so tests can assert registration).
 SUBCOMMANDS = {
     "install": cmd_install,
@@ -8650,6 +8776,7 @@ SUBCOMMANDS = {
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
     "account-bootstrap": cmd_account_bootstrap,
+    "nudges": cmd_nudges,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

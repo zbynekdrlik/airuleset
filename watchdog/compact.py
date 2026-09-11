@@ -1315,7 +1315,17 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
             log_fn(r)
         log_fn("compact-submit raced-busy: box not bare pre-send, not typed")
         return "raced-busy"
-    watchdog.send_continue(pid, COMPACT_TEXT, run)
+    # #994 — the kill switch lives at the `send_continue` chokepoint. When
+    # nudges are OFF it types NOTHING and returns False; forward its journal
+    # line and leave the request PENDING (a non-terminal word, like a swallow /
+    # raced-busy) so `deliver_compact` never books it delivered and the next
+    # sweep re-delivers once nudges are back ON. A bare box after a suppressed
+    # no-op would otherwise misclassify as `sent`.
+    sc_logs = []
+    if not watchdog.send_continue(pid, COMPACT_TEXT, run, logs=sc_logs):
+        for r in sc_logs:
+            log_fn(r)
+        return "nudges-off"
     if not _compact_still_in_box(pid, run, sleep_fn):
         return _compact_post_send_classify(pid, run, sleep_fn)  # #822/#833: sent vs queued
     # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective

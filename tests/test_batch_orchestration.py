@@ -205,16 +205,20 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
     def test_nudge_text_teaches_refill(self):
         rendered = goal.GOAL_LANE_NUDGE_TEXT_FN(37, 2)
         low = rendered.lower()
-        self.assertIn("refill", low)        # "CONTINUOUS REFILL"
-        self.assertIn("doplň", low)         # "doplň vrátený slot HNEĎ"
+        self.assertIn("refill", low)        # refill mechanism kept (#848)
+        self.assertIn("doplň", low)         # "refill (doplň) vrátený slot"
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
         self.assertIn("sériovo", low)       # serial integration under the mutex
-        self.assertIn("5", rendered)        # up to 5 lanes
         self.assertIn("rate-limit", low)
         self.assertNotIn("cap 8", low)      # not the retired #442 fixed "cap 8"
         # the retired batch noun must be GONE
         self.assertNotIn("várk", low)
+        # #994: no lane-COUNT prescription (was `assertIn("5")` for "up to 5
+        # lanes") and no priority override — defers to the #993 session priority.
+        self.assertIn("#993", rendered)
+        self.assertNotIn("drž až", low)
+        self.assertNotIn("saturuj", low)
 
     def test_nudge_text_dropped_the_batch_phrasing(self):
         low = goal.GOAL_LANE_NUDGE_TEXT_FN(1, 0).lower()

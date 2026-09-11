@@ -66,7 +66,7 @@ _SV_PATCHER = None
 
 
 def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None,
-                          logs=None, out=None):
+                          logs=None, out=None, user_authored=False):
     # `out=` mirrors the real send_verified signature (#594/#814) so the
     # lane-occupancy nudge's `out=send_out` call resolves; a confirmed True
     # submit leaves the dict untouched.

@@ -9401,7 +9401,7 @@ class TestApiWatchdog(TestCase):
         # nudge look swallowed. The chunk-typed job-4/4a texts also avoid the real
         # inter-chunk `time.sleep` this way.
         def _typing_send_verified(pid, text, run=None, tpath=None,
-                                  sleep_fn=None, logs=None):
+                                  sleep_fn=None, logs=None, user_authored=False):
             run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
             run(["tmux", "send-keys", "-t", pid, "Enter"])
             return True

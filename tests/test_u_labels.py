@@ -313,7 +313,8 @@ class DeliveredCaptureIntegration(unittest.TestCase):
         # delivered_unconfirmed channel), so the fake MUST accept out= (#804).
         sv = m.patch.object(wd, "send_verified",
                             lambda pid, text, run=None, tpath=None,
-                            sleep_fn=None, logs=None, out=None: True)
+                            sleep_fn=None, logs=None, out=None,
+                            user_authored=False: True)
         sv.start()
         self.addCleanup(sv.stop)
         self.sent = []

@@ -82,7 +82,7 @@ CAMERA_BOX_TEXT = ('court <invoke name="Read"><parameter name="file_path">'
 # path fake that byte-mirrors the old `send_continue` (type `-l --` + Enter,
 # returns True). The keystroke mechanics live in test_send_verified.py; the
 # swallowed-submit (False) path in test_send_verified_adoption.py.
-def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None, user_authored=False):
     run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     return True
