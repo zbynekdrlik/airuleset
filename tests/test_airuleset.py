@@ -3444,7 +3444,10 @@ class TestProseViolationsPrlessCompletion(TestCase):
                # The '✅ Výstup:' content-verification line became MANDATORY for
                # every completion report (montalu3 0 € email incident) — a
                # "genuinely clean" report now carries it by definition.
-               "✅ Výstup: kiosk obrazovka zobrazuje meno zamestnanca a čas 07:45\n\n"
+               "✅ Výstup: kiosk obrazovka zobrazuje meno zamestnanca a čas 07:45\n"
+               # #993 — the '🏛 Architektúra:' area-review verdict line is now
+               # MANDATORY on every completion report (fork variant included).
+               "🏛 Architektúra: dochádzkový kiosk — OK\n\n"
                "---\n\n"
                "**Goal:** Dochádzkový kiosk pre výrobu.\n"
                "**What changed:** Kiosk beží na erp-test-david, odovzdané gatekeeperovi.\n\n"

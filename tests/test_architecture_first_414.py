@@ -52,9 +52,11 @@ class TestArchitectureFirstProductionByDefault(TestCase):
         self.assertIn("#414", self.text)
 
     def test_the_original_bullets_are_untouched(self):
-        # this ticket ADDS, never rewrites the pre-existing content.
+        # #414 ADDED bullets; #993 deliberately REWROTE the No-patchwork bullet
+        # to carry the mechanical integration-time area-review rule (was the
+        # "propose a redesign to the user" prose). The other originals stand.
         self.assertIn("Follow existing patterns", self.text)
-        self.assertIn("No patchwork.", self.text)
+        self.assertIn("No patchwork — area-reviewed at integration", self.text)
         self.assertIn("No circular development", self.text)
 
     def test_file_stays_short_house_style(self):

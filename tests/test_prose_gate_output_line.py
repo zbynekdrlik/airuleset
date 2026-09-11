@@ -64,8 +64,11 @@ _HEAD = ("## ✅ Work Complete\n\n"
          "✅ /review: clean — 0 %s 0 %s 0 %s\n"
          "✅ /requesting-code-review: clean — 0 %s 0 %s 0 %s\n"
          "✅ Deploy: notifikačné emaily o stave objednávky nasadené — "
-         "odoslanie aj doručenie overené\n" % (RED, YELLOW, BLUE,
-                                               RED, YELLOW, BLUE))
+         "odoslanie aj doručenie overené\n"
+         # #993 — the '🏛 Architektúra:' area-review verdict line is now
+         # MANDATORY on every completion report (sibling of the Výstup line).
+         "🏛 Architektúra: notifikačné emaily — OK\n" % (RED, YELLOW, BLUE,
+                                                         RED, YELLOW, BLUE))
 _TAIL_GLOBE = ("\n---\n\n"
                "**Goal:** Zákazník má dostať email pri zmene stavu objednávky.\n"
                "**What changed:** Pri zmene stavu objednávky sa zákazníkovi "
@@ -84,6 +87,9 @@ _FORK_HEAD = ("## ✅ Work Complete\n\n"
               "✅ /requesting-code-review: clean — 0 %s 0 %s 0 %s\n"
               "✅ Lokálne overenie: testy + lint zelené (fork vetva david/kiosk)\n"
               "✅ Hand-off: READY-FOR-REVIEW komentár na #1393 (kiosk) + karta\n"
+              # #993 — the '🏛 Architektúra:' area-review verdict line is now
+              # MANDATORY on every completion report.
+              "🏛 Architektúra: dochádzkový kiosk — OK\n"
               % (RED, YELLOW, BLUE, RED, YELLOW, BLUE))
 _FORK_TAIL = ("\n---\n\n"
               "**Goal:** Dochádzkový kiosk pre výrobu.\n"
