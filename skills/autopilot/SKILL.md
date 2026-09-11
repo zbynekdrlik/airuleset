@@ -479,6 +479,30 @@ independently editing the same file in two separate worktrees is a guaranteed me
 integration — worse than simply waiting until the overlapping lane has integrated. An overlapping
 issue is not lost — it fills a LATER free lane, exactly like any issue that fails the bundling gate today.
 
+**Work class `infra` = STRICTLY SERIAL (#992/#993).** CI workflows, hooks/gates, the release chain,
+deploy tooling, the runner pool, and airuleset modules/skills/agents are `infra`: ONE lane at a
+time, its DESIGN + REVIEW done in MAIN (Fable, reading the touched files — the coordinator's job,
+`block-main-implementation.sh`'s infra-review-read allowance), and the NEXT infra change dispatched
+only after ONE CLEAN cycle of the current one (airuleset: push + CI green + fleet install + one turn
+with no hook-block/regression; a 3-branch repo: cut→shadow→main→PROD→one hand-off through the gate).
+An `architecture-rework` ticket is infra class. **Lane order:** `architecture-rework` → `prio:bounce`
+→ infra (serial) → independent ordinary units (parallel). **Refill (Step 3.2) applies ONLY to
+independent units:** when the only workable tickets are infra and one infra lane is live, do NOT
+refill — the `[lane-occupancy]`/`[queue-arrival]` nudges say so (`watchdog/lane_resources.py`,
+`watchdog/queue_arrival_recheck.py`), they never push a second infra lane. The parallelism-without-
+context treadmill (odoo-erp#6883: ~64% of gk lanes repairing gk's own infra breakage) is what this
+prevents.
+
+**Independence check BEFORE every dispatch (#992/#993).** Before filling a lane, RECORD an
+`Independence:` note for the unit — its touched paths AND topic vs every LIVE lane AND every open
+stream branch — and run the mechanical helper `python3 ~/devel/airuleset/airuleset.py lane-overlap
+--paths <p1,p2> --topics <topic> --issue <N>`, which compares the unit against live worktree lanes +
+open PR file lists and writes the receipt the dispatch gate reads. `hooks/block-dispatch-over-wdrain.sh`
+BLOCKS an `autopilot-worker` dispatch whose issue(s) have no fresh overlap-check receipt (the existing
+dispatch hook, no new hook); `OVERLAP-BYPASS: <reason>` in the prompt escapes it (logged). Two units
+on the same feature/area = STOP one or merge them; a lane that would touch the same files as a live
+lane WAITS (it is not lost — it fills a later free lane).
+
 **Lane count — sized to box + backlog, resource-aware (#970); back off on a real resource signal +
 stagger (#848; the #332 numbers below are measured CONTEXT).** The live lane count is bounded by the
 project's declared resource caps and the account-wide rate-limit signal, refilled continuously —
@@ -984,7 +1008,23 @@ gap in either.
    >    stubs, commented-out blocks, or a parallel new mechanism where a deletion was called for;
    >    **(c)** RED→GREEN commit order (the RED test commit precedes its GREEN fix — `git log`, not
    >    the LANE-RETURN claim, is the proof); **(d)** no new hook/module/skill outside the rule
-   >    intake gate; **(e)** no scope creep beyond the named issue(s). Also confirm the claimed
+   >    intake gate; **(e)** no scope creep beyond the named issue(s); **(f)** AREA-LEVEL verdict
+   >    (#993) — read the whole AREA the diff lands in, not only the diff (the module / dir / hook
+   >    family, per the taxonomy: airuleset = the `.claude/rules/internals-<area>.md` split +
+   >    `modules/`/`skills/`/`agents/`; another project = its playbook `.claude/rules/<area>.md`, else
+   >    the top-level dir the diff touches) and judge it OK or REWORK — is the area a considered
+   >    concept with ONE source of truth, or layers of reactions to requests (patchwork:
+   >    duplicated sources of truth, shim/compat layers, hook-on-hook, incident-driven exceptions,
+   >    prose replacing a native function)? **Every integration records the verdict in the report's
+   >    `🏛 Architektúra: <oblasť> — OK|REWORK #N` line** (`completion-report.md`, hook-enforced). A
+   >    `REWORK` verdict → the supervisor files an `architecture-rework` ticket THAT TURN
+   >    (`durable-decisions-to-tickets`; label `architecture-rework`, body: area + files + concrete
+   >    patchwork signs + target concept + contributing tickets; `Scope-gate: architecture-rework`
+   >    + `Area:` + `Dedup-checked:` — the filing hook requires them). ONE open rework ticket per
+   >    area: a further finding in that area = a COMMENT on the existing ticket, never a second.
+   >    The rework ticket is INFRA class (below) and jumps the lane queue. A change into an area
+   >    with an OPEN rework ticket does NOT integrate as more patchwork — it waits for the rework,
+   >    or is folded into it. Also confirm the claimed
    >    commits, RED/GREEN test pairs, and clean `/review` + `/requesting-code-review` results
    >    genuinely exist on that branch. Result: INTEGRATE if it passes, or BOUNCE it back with the
    >    findings on the ticket + re-dispatch a fresh worker from durable state.

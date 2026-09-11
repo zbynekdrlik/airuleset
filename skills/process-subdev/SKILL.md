@@ -92,6 +92,17 @@ first: merged-but-unreleased slices and open `prio:bounce` tickets of this strea
 STILL this pipeline's work (see step 7 — the /goal holds until released, not until the
 queue is empty).
 
+### 1b. Cross-stream overlap at hand-off (#992/#993)
+
+Before spending review effort, check the OTHER streams' open tickets for the SAME
+addon/model this hand-off touches (gk reads across all streams' queues — the same
+independence discipline the dispatch-time `lane-overlap` check applies, now at the
+hand-off point). Two open stream tickets touching the same addon/model → FLAG BOTH
+before review, never let both proceed blind: comment the overlap on each, and either
+stop one or coordinate them so two forks do not land conflicting changes to the same
+module. This is the cross-stream sibling of the dispatch independence check — same goal
+(no parallelism without change-context), applied where two SEPARATE streams converge.
+
 ### 2. Get the work in front of you
 
 - **fork-no-merge stream:** fetch the fork branch, push it upstream, open the PR into
