@@ -1114,17 +1114,28 @@ def render_stream_tmux_window_block(name):
     )
 
 
-def _live_apply_stream_window_name(new_name, run=None):
+def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
     """Best-effort live-apply on any RUNNING tmux server for this box, so an
     ALREADY-running/attached session updates on the next push WITHOUT waiting
     for a session re-create. Called ONLY for a single-session-per-account box
-    (gk + subdev streams, #593). `new_name` is the box alias to rename every
-    window to (#592, e.g. `m2`/`gk`). Purely configuration-path (`set-option` /
-    `set-hook` / `rename-window` -- NEVER a `send-keys` keystroke into any
-    pane), failure-tolerant (no server -> no-op), and it NEVER creates or
-    resurrects a session (the standing 'never touch a session the user
-    deliberately stopped' rule): `rename-window` only relabels a window that
-    already exists.
+    (gk + subdev streams, #593). `new_name` is the box alias — the default name
+    for a window that matches no declaration (#592, e.g. `m2`/`gk`).
+
+    #998 (owner 2026-09-12 "prečo mám dva gk"): `windows` is the box's DECLARED
+    managed windows (`cli_fleet.box_windows(user)`, `[]` for every target but
+    gk). A window whose pane cwd matches a declared window's cwd is named its
+    DECLARED name (`gk-infra` for `~/devel/odoo/odoo-erp-infra`), never the box
+    alias — the old rename-EVERY-window-to-alias turned the owner's hand-made
+    infra window into a second `gk`. `home` (the box user's home; default the
+    running user's) expands the declared `~/...` cwd for the match. When
+    `windows` is empty (every non-gk target) EVERY window falls back to the
+    alias — byte-identical to today.
+
+    Purely configuration-path (`set-option` / `set-hook` / `rename-window` --
+    NEVER a `send-keys` keystroke into any pane), failure-tolerant (no server ->
+    no-op), and it NEVER creates or resurrects a session (the standing 'never
+    touch a session the user deliberately stopped' rule): `rename-window` only
+    relabels a window that already exists.
 
     #592-review (B3): renames EVERY window on this user's server (`list-windows
     -a`), NOT just the `=<unix-user>` session -- on gk the owner's real session
@@ -1150,23 +1161,34 @@ def _live_apply_stream_window_name(new_name, run=None):
         except Exception as e:
             print("  tmux stream-window live-apply skipped (non-fatal): %s" % e,
                   file=sys.stderr)
-    # Rename EVERY window on this user's server to the alias so an attached
-    # session updates immediately, whatever its name. No server (or the injected
-    # test `run` returning None) makes list-windows exit non-zero -> no rename.
+    # Name EVERY window on this user's server so an attached session updates
+    # immediately: a window whose cwd matches a DECLARED window gets its declared
+    # name, else the box alias (#998). Query cwd alongside the id (tab-separated;
+    # a tmux path never contains a tab). No server (or the injected test `run`
+    # returning None) makes list-windows exit non-zero -> no rename.
+    import cli_concurrency
+    windows = windows or []
     try:
-        result = runner(["tmux", "list-windows", "-a", "-F", "#{window_id}"])
+        result = runner(["tmux", "list-windows", "-a", "-F",
+                         "#{window_id}\t#{pane_current_path}"])
     except Exception as e:
         print("  tmux stream-window live-apply (list) skipped (non-fatal): %s" % e,
               file=sys.stderr)
         return
     if getattr(result, "returncode", 1) != 0:
         return
-    for wid in (getattr(result, "stdout", "") or "").splitlines():
+    for line in (getattr(result, "stdout", "") or "").splitlines():
+        if not line.strip():
+            continue
+        wid, _, cwd = line.partition("\t")
         wid = wid.strip()
         if not wid:
             continue
+        match = cli_concurrency._match_window(cwd.strip() or None, None,
+                                              windows, home)
+        target = match["name"] if match else new_name
         try:
-            runner(["tmux", "rename-window", "-t", wid, new_name])
+            runner(["tmux", "rename-window", "-t", wid, target])
         except Exception:
             # one window's failure never skips the rest
             pass
@@ -1498,7 +1520,7 @@ def _live_normalize_owner_session(owner, run=None, audit_dir=None,
 
 
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
-                                   run=None):
+                                   run=None, home=None):
     """Idempotently add/remove the #554/#592 window-naming marker block in
     ~/.tmux.conf. #593: rendered ONLY on a SINGLE-SESSION-per-account box
     (`is_single_session_box_user` -- subdev streams + the gk `gatekeeper`
@@ -1571,7 +1593,12 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
         # rename EVERY window on this (single-session) box's server to the alias
         # -- the account's own session name may differ from the unix user (on gk
         # the owner session is zbynek-N, #562), so `list-windows -a` covers it.
-        _live_apply_stream_window_name(alias, run)
+        # #998: name each window by its DECLARED cwd (gk -> gk/gk-infra), else
+        # the box alias. box_windows is [] for every non-declaring target, so
+        # the live-apply stays byte-identical (all windows -> alias) there.
+        import cli_fleet
+        _live_apply_stream_window_name(
+            alias, windows=cli_fleet.box_windows(u), home=home, run=run)
     elif safe_alias and not single_session:
         # #593: a multi-project owner box (dev1/dev2) the pre-#593 code wrongly
         # provisioned -- self-heal any running server that still carries the bad
