@@ -329,3 +329,24 @@ def dispatchable_numbers(rows, slug, dep_map, infra_lane_live):
     if rows and not dispatchable_set:
         reason = "dep-wait" if (held_dep and not held_infra) else "infra-serial"
     return dispatchable_set, reason
+
+
+def classify_number(number, slug, runner, root, infra_lane_live):
+    """The dispatch class of ONE issue: ``"dispatchable"`` | ``"infra-serial"``
+    | ``"dep-wait"`` (the queue-arrival nudge's per-arrival gate, #993 item 4).
+    Fetches the issue's labels + ``Depends-on:`` via ``runner`` (gh). ``infra_
+    lane_live`` is resolved ONCE by the caller (via ``live_infra_lane``) and
+    passed in so a wave of arrivals shares one live-lane read."""
+    labels = labels_of(number, runner, root)
+    cls = work_class(slug, labels)
+    body, comments = _issue_body_comments(number, runner, root)
+    refs = depends_on_refs(body, comments) if (body is not None or comments) else []
+    deps = [d for d in (normalize_ref(r, slug) for r in refs) if d is not None]
+    ni = _as_int(number)
+    self_ref = (slug, ni) if (slug and ni is not None) else None
+    is_dw = bool(deps) and dep_wait(
+        deps, lambda rp, nu: issue_state(rp, nu, runner, root),
+        self_ref=self_ref)[0]
+    if dispatchable(cls, is_dw, infra_lane_live):
+        return "dispatchable"
+    return "dep-wait" if is_dw else "infra-serial"

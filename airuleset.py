@@ -5644,6 +5644,49 @@ def _watchdog_queue_fetch(cwd):
     return sorted(nums)
 
 
+def _watchdog_queue_classify(cwd):
+    """#993 item 4 — a per-arrival dispatch-class FACTORY for the queue-arrival
+    rider, or None. Returns `classify_fn(number)` → `"dispatchable"` /
+    `"infra-serial"` / `"dep-wait"` (the combined `workable ∧ deps satisfied ∧
+    (independent ∨ no live infra lane)` gate). FULL-authority only (a reduced box
+    returns None; the rider also gates). The repo slug + the ONE live-infra-lane
+    read (git worktree/wip-ref scan) are computed LAZILY on the first arrival and
+    memoized in the closure, so a no-arrival sweep (the common case) costs
+    nothing beyond the cheap authority check; each classify call then does a
+    bounded per-issue labels + `Depends-on:` gh fetch. Any error fails safe to
+    `infra-serial` (HOLD — never a spurious infra parallel dispatch). Wired HERE
+    like every other network seam so run_once unit tests stay network-free (they
+    leave `queue_classify` None → the rider treats every arrival dispatchable)."""
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    if authority != "full":
+        return None
+    import cli_work_class as _wc
+
+    def _runner(argv, cd):
+        return _gh_out(*argv[1:], cwd=cd, timeout=15)
+
+    ctx = {}
+
+    def classify_fn(number):
+        if "slug" not in ctx:
+            ctx["slug"] = _repo_slug(cwd=root)
+            try:
+                ctx["infra"] = _wc.live_infra_lane(ctx["slug"], _runner, root)
+            except Exception:
+                ctx["infra"] = True   # fail-safe serial
+        try:
+            return _wc.classify_number(number, ctx["slug"], _runner, root,
+                                       ctx["infra"])
+        except Exception:
+            return "infra-serial"     # fail-safe: HOLD on any classify error
+
+    return classify_fn
+
+
 def _watchdog_u_fetch(cwd):
     """#797 — the footer `U` (user-waiting) count + cache write time for the repo
     at `cwd`, read from the SAME machine-local tickets-status cache the footer
@@ -6365,6 +6408,11 @@ def cmd_watchdog(args):
                     # repo per TTL (~5 min) inside the module, FULL-authority
                     # only. Wired on EVERY box; the rider self-gates authority.
                     queue_fetch=_watchdog_queue_fetch,
+                    # #993 item 4 — the queue-arrival rider's per-arrival
+                    # dispatch-class factory (work-class + Depends-on + live
+                    # infra lane), so an infra-while-infra-lane-live or dep-wait
+                    # arrival is HELD, not nudged. FULL-authority only, lazy.
+                    queue_classify=_watchdog_queue_classify,
                     # #797 — job 20's U-freshness reconcile rider reads the
                     # footer `user_waiting` count from the SAME machine-local
                     # tickets-status cache the footer renders (a LOCAL file read,
@@ -7393,6 +7441,8 @@ from cli_work_class import (  # noqa: E402  (#993 — orchestration classificati
     live_infra_lane as live_infra_lane,
     dispatchable_numbers as dispatchable_numbers,
     issue_state as issue_state,
+    labels_of as labels_of,
+    classify_number as classify_number,
 )
 from cli_quals_cmd import (  # noqa: E402  (#433 cluster I facade — leaf re-export)
     _row_action as _row_action,

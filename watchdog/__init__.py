@@ -2082,7 +2082,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
-             release_state_fetch=None, queue_fetch=None,
+             release_state_fetch=None, queue_fetch=None, queue_classify=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
              u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
@@ -4369,6 +4369,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
             release_state_fetch=release_state_fetch,     # #616
             queue_fetch=queue_fetch,                     # #733
+            queue_classify=queue_classify,               # #993 item 4
             u_fetch=u_fetch,                             # #797
             reconcile_fetch=reconcile_fetch,             # #844
             deploy_state_fetch=deploy_state_fetch)       # #944

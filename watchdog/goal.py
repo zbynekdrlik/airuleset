@@ -5187,6 +5187,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
                     release_state_fetch=None, queue_fetch=None,
+                    queue_classify=None,
                     u_fetch=None, reconcile_fetch=None,
                     deploy_state_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
@@ -5403,7 +5404,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 queue_fetch=queue_fetch, state=state, sleep_fn=sleep_fn,
-                captured=captured,
+                captured=captured, classify_builder=queue_classify,   # #993 item 4
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "queue-arrival" in _eligible else None))
         # #797 -- U-freshness reconcile for this armed pane.
