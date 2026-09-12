@@ -81,6 +81,57 @@ class TestReceipt(TestCase):
         self.assertIn("/lane-overlap/", p)
         self.assertTrue(p.endswith("abc.json"))
 
+    def test_receipt_records_deps_satisfied(self):
+        # #993 item 7: the receipt records the dispatched unit's dep state.
+        p = lo.write_receipt(self.home, "d1", [993], "clear", [],
+                             deps="satisfied")
+        got = json.loads(Path(p).read_text())
+        self.assertEqual(got["deps"], "satisfied")
+
+    def test_receipt_deps_defaults_satisfied(self):
+        p = lo.write_receipt(self.home, "d2", [1], "clear", [])
+        got = json.loads(Path(p).read_text())
+        self.assertEqual(got["deps"], "satisfied")
+
+
+class TestResolveIssueDeps(TestCase):
+    """#993 item 7 — cli_work_class.resolve_issue_deps: 'satisfied' or the list
+    of unsatisfied blocking refs, for the lane-overlap receipt."""
+
+    def _runner(self, bodies, states):
+        import json as _j
+
+        def runner(argv, _cwd):
+            n = int(argv[argv.index("view") + 1])
+            joined = " ".join(argv)
+            if "body,comments" in joined:
+                b, c = bodies.get(n, ("", []))
+                return _j.dumps({"body": b, "comments": [{"body": x} for x in c]})
+            if "state" in joined:
+                repo = argv[argv.index("-R") + 1] if "-R" in argv else None
+                st = states.get((repo, n)) or states.get((None, n))
+                return _j.dumps({"state": st}) if st else "{}"
+            return "{}"
+        return runner
+
+    def test_no_deps_is_satisfied(self):
+        import cli_work_class as wc
+        r = self._runner({993: ("no deps here", [])}, {})
+        self.assertEqual(wc.resolve_issue_deps([993], "o/r", r, "/root"),
+                         "satisfied")
+
+    def test_closed_dep_is_satisfied(self):
+        import cli_work_class as wc
+        r = self._runner({993: ("Depends-on: #10", [])}, {("o/r", 10): "CLOSED"})
+        self.assertEqual(wc.resolve_issue_deps([993], "o/r", r, "/root"),
+                         "satisfied")
+
+    def test_open_dep_is_unsatisfied(self):
+        import cli_work_class as wc
+        r = self._runner({993: ("Depends-on: #10", [])}, {("o/r", 10): "OPEN"})
+        self.assertEqual(wc.resolve_issue_deps([993], "o/r", r, "/root"),
+                         ["#10"])
+
 
 def _dispatch_payload(prompt, cwd, home):
     return json.dumps({
