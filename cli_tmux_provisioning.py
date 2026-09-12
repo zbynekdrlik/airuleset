@@ -1140,6 +1140,14 @@ def render_stream_tmux_window_block(name, windows=None):
     streams), never an owner/newlevel multi-project box -- the render is not
     where that gate lives.
 
+    #998 item 1(a): `windows` is the box's DECLARED managed windows
+    (`cli_fleet.box_windows(user)`; [] for every target but gk). With a
+    NON-primary declared window (gk-infra), the SAME `session-created` hook is
+    EXTENDED (via `_render_session_created_hook_line`) to also CREATE that
+    window if missing on session creation -- reboot-safe, path-agnostic
+    (webterm/ssh/manual), idempotent. `windows` None/[]/single-window ->
+    byte-identical to the pre-#998 render (a bare `rename-window <name>` hook).
+
     `after-new-window` is DELIBERATELY not emitted: it fires ONLY on windows
     opened AFTER the initial one, so it never names the session's FIRST
     (claude) window -- the one the owner sees on attach -- which
