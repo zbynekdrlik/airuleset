@@ -2169,6 +2169,13 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nswap: error ({e})", file=sys.stderr)
 
+    # --- Concurrency mode/role (#998) ---
+    try:
+        import cli_concurrency
+        print("\n" + cli_concurrency.concurrency_status_row(os.getcwd()))
+    except Exception as e:
+        print(f"\nconcurrency: error ({e})", file=sys.stderr)
+
     # --- Break-glass (#982/#985): ignoreip + key + sshd password + DNS ---
     try:
         from cli_disk_guard_root import (check_owner_ignoreip_status,
@@ -3219,6 +3226,38 @@ def _count_deploy_wait(ops_wait):
     return dw
 
 
+def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
+    """#998 — apply the pane's RESOLVED role (a declared managed window → role)
+    to the footer partition so the two gk windows show DIFFERENT `I`: the review
+    window counts core MINUS infra/architecture-rework, the infra window ONLY
+    those. Role is resolved from `cwd` via the single resolver
+    (`cli_concurrency.resolve_role`); when it is None (every box but the gk
+    windows) all three are returned unchanged — byte-identical to today.
+    Fail-SAFE: any resolver / slug error leaves all three UNFILTERED (the safe
+    over-count direction, #589/#636) and is LOGGED, never a footer crash."""
+    try:
+        import cli_concurrency
+        import cli_quals_cmd
+        role = cli_concurrency.resolve_role(cwd)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("tickets-status: role resolve skipped (%s)\n" % e)
+        return workable, waiting, ops_wait
+    if role not in ("review", "infra"):
+        return workable, waiting, ops_wait
+    try:
+        workable = cli_quals_cmd._apply_role_filter(workable, root, role)
+        waiting = cli_quals_cmd._apply_role_filter(waiting, root, role)
+        ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role)
+    except SystemExit as e:
+        # _apply_role_filter fail-CLOSES (sys.exit 1) on an unresolvable slug;
+        # the footer must never die on it — degrade to unfiltered + log.
+        sys.stderr.write("tickets-status: role filter unavailable "
+                         "(slug unresolved, %s) — unfiltered\n" % e)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("tickets-status: role filter skipped (%s)\n" % e)
+    return workable, waiting, ops_wait
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -3366,6 +3405,9 @@ def cmd_tickets_status(args):
                 # `--waiting` path, never this hot footer refresh. #654:
                 # own_stream keeps THIS box's OWN stream rows in its own U.
                 workable_rows, waiting, ops_wait = _partition_workable(rows, own_stream=_current_user())
+                # #998: slice by the pane's resolved role (no-op off a role window).
+                workable_rows, waiting, ops_wait = _role_filter_footer(
+                    workable_rows, waiting, ops_wait, root, cwd)
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
@@ -3450,6 +3492,10 @@ def cmd_tickets_status(args):
                 # #622: bare needs-acceptance → U unconditionally (queued for owner
                 # approval, never dispatchable-now I).
                 workable, waiting, ops_wait = _partition_workable(seen)
+                # #998: slice by the pane's resolved role — the two gk windows
+                # (review vs infra) show DIFFERENT I (no-op off a role window).
+                workable, waiting, ops_wait = _role_filter_footer(
+                    workable, waiting, ops_wait, root, cwd)
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
