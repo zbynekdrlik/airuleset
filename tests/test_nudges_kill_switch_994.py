@@ -26,8 +26,12 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd  # noqa: E402
+import watchdog.goal as goal  # noqa: E402
 import statusbar  # noqa: E402
 import airuleset  # noqa: E402
+from _goal_arm_helpers import (  # noqa: E402
+    DeliverGoalFakeTmux, GOAL_DRAFT_CAP, _write_marker_transcript,
+    _isolate_goal_state)
 
 PID = "%9"
 
@@ -389,6 +393,108 @@ class TestUserAuthoredCallSiteLock(unittest.TestCase):
             "user_authored bypass (a truthy/non-False user_authored kwarg) may be "
             "granted from watchdog/discord_replies.py ONLY; found: %r" % sorted(grant_files),
         )
+
+
+# --------------------------------------------------------------------------- #
+# #994 REOPEN — the gate lives at the literal-typing PRIMITIVE, not five helpers.
+# The hole: `deliver_goal` -> `deliver_with_stash` -> `stash._type_literal`
+# (`tmux send-keys -l`) typed at OFF because the #994 checks were on the FIVE
+# tmux_io helpers only, and stash.py's `_type_literal` was misclassified as a
+# control-key site. These reproduce the hole (RED) and lock it shut.
+# --------------------------------------------------------------------------- #
+class TestTypeLiteralPrimitiveGate(unittest.TestCase):
+    def _off(self):
+        return m.patch.object(wd, "nudges_enabled", lambda *a, **k: False)
+
+    def test_type_literal_types_nothing_at_off(self):
+        # The ROOT of the reopen: the single literal-typing primitive itself
+        # must type nothing when nudges are OFF (default = machine caller).
+        rec = _Recorder()
+        with self._off():
+            wd._type_literal(PID, rec, "lane-check: backlog=5")
+        self.assertEqual(
+            rec.sent_keys(), [],
+            "the literal-typing primitive TYPED while nudges were OFF: %r"
+            % rec.sent_keys())
+
+
+class TestGoalSweepHoleClosed(unittest.TestCase):
+    """The reopen incident end-to-end: goal-sweep's `deliver_goal` draft path
+    (-> `deliver_with_stash`) must reach the pane with ZERO keystrokes at OFF and
+    journal `nudges OFF: suppressed goal`. Against the pre-fix tree the stash
+    `C-s` fires before the abort, so `keys()` is non-empty (RED)."""
+
+    SID = "sess-994-goalsweep"
+    CWD = "/home/newlevel/devel/kill994"
+
+    def setUp(self):
+        _isolate_goal_state(self)
+
+    def test_deliver_goal_draft_path_suppressed_at_off(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name)
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_DRAFT_CAP, model_type=True)
+        logs = []
+        with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False):
+            word = goal.deliver_goal(
+                self.SID, self.CWD, "/goal STOP CONDITIONS x", "full",
+                run=tmux, projects_dir=proj, sleep_fn=lambda s: None, logs=logs)
+        self.assertEqual(
+            tmux.keys(), [],
+            "keystrokes reached the pane while nudges were OFF: %r" % tmux.keys())
+        self.assertTrue(
+            any("nudges OFF: suppressed goal" in ln for ln in logs),
+            "expected a `nudges OFF: suppressed goal` journal line: %r" % logs)
+        self.assertNotEqual(word, "sent")
+
+
+class TestLiteralTypingPrimitiveLock(unittest.TestCase):
+    """Repo-wide structural lock: EVERY `tmux send-keys ... -l` (literal-typing)
+    emission in `watchdog/` must live inside the ONE function `_type_literal`, so
+    no seventh literal-typing primitive can silently reappear and reopen the hole
+    (the #994 root cause). AST-based, not a substring grep."""
+
+    @staticmethod
+    def _funcs_emitting_literal_send_keys(path):
+        import ast
+        names = set()
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+
+        def _is_literal_send_keys(node):
+            # a list literal whose Constant elements include both "send-keys"
+            # and the literal-typing flag "-l"
+            if not isinstance(node, ast.List):
+                return False
+            consts = {e.value for e in node.elts
+                      if isinstance(e, ast.Constant)}
+            return "send-keys" in consts and "-l" in consts
+
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for sub in ast.walk(fn):
+                if _is_literal_send_keys(sub):
+                    names.add(fn.name)
+                    break
+        return names
+
+    def test_only_type_literal_emits_literal_send_keys(self):
+        wd_dir = REPO / "watchdog"
+        offenders = {}
+        for path in wd_dir.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            fns = self._funcs_emitting_literal_send_keys(path)
+            for fn in fns:
+                offenders.setdefault(fn, []).append(
+                    path.relative_to(REPO).as_posix())
+        self.assertEqual(
+            set(offenders), {"_type_literal"},
+            "every `send-keys ... -l` emission in watchdog/ must live in "
+            "`_type_literal`; found emitters: %r" % offenders)
 
 
 if __name__ == "__main__":
