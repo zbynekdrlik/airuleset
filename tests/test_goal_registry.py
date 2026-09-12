@@ -131,15 +131,21 @@ class TestSaturationDirectiveIsReal(TestCase):
     must NOT read as batch mode."""
 
     def test_saturation_core_states_the_full_directive(self):
+        # #993 r2: the refill directive is now WORK-CLASS + DEPENDENCY AWARE —
+        # refill ONLY with a dispatchable unit; infra is SERIAL (the "refill
+        # IMMEDIATELY while backlog remains" blanket-pressure phrase is retired).
         core = next(c for c in gr.CLAUSES if c.id == "saturation-core").text
-        for token in ("CONTINUOUS REFILL",
-                      "isolation:worktree", "autopilot-worker", "IMMEDIATELY"):
+        for token in ("CONTINUOUS REFILL", "isolation:worktree",
+                      "autopilot-worker", "DISPATCHABLE", "SERIAL",
+                      "one live infra lane"):
             self.assertIn(token, core)
         # TEETH: the retired batch wording must be GONE, and #991 dropped the
-        # fixed lane cap wording (count = box + backlog).
+        # fixed lane cap wording (count = box + backlog). #993 r2: the retired
+        # blanket-refill pressure phrase is GONE too.
         self.assertNotIn("up to 5", core)
         self.assertNotIn("BATCH MODE", core)
         self.assertNotIn("NO refill", core)
+        self.assertNotIn("IMMEDIATELY while backlog remains", core)
 
     def test_saturation_delivery_integrates_serially(self):
         for p in gr.PROFILES:
@@ -302,7 +308,11 @@ class TestShippedSkillMatchesRegistry(TestCase):
         for line in lines:
             self.assertIn("CONTINUOUS REFILL", line)
             self.assertIn("isolation:worktree", line)
-            self.assertIn("refill a returned lane's slot IMMEDIATELY", line)
+            # #993 r2: refill is dispatchable-only, infra serial (the retired
+            # blanket "refill a returned lane's slot IMMEDIATELY" is gone).
+            self.assertIn("refill ONLY with a DISPATCHABLE unit", line)
+            self.assertIn("infra units are SERIAL", line)
+            self.assertNotIn("returned lane's slot IMMEDIATELY", line)
             # TEETH: no batch wording survives in the shipped lines.
             self.assertNotIn("BATCH MODE", line)
             self.assertNotIn("NO refill while a batch runs", line)

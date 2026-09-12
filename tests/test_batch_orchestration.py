@@ -61,14 +61,17 @@ class TestRegistryClausesAreContinuous(TestCase):
 
     def test_saturation_core_is_continuous_refill(self):
         core = self._clause("saturation-core")
-        for tok in ("CONTINUOUS REFILL",
-                    "isolation:worktree", "autopilot-worker", "IMMEDIATELY"):
+        # #993 r2: refill is work-class + dependency aware (dispatchable-only,
+        # infra serial); the blanket "IMMEDIATELY while backlog remains" is gone.
+        for tok in ("CONTINUOUS REFILL", "isolation:worktree",
+                    "autopilot-worker", "DISPATCHABLE", "SERIAL"):
             self.assertIn(tok, core)
         # #991: the fixed lane cap wording is gone (count = box + backlog).
         self.assertNotIn("up to 5", core)
         # the batch directive it replaced must be gone
         self.assertNotIn("BATCH MODE", core)
         self.assertNotIn("NO refill while a batch runs", core)
+        self.assertNotIn("IMMEDIATELY while backlog remains", core)
 
     def test_compact_boundary_is_disabled_911(self):
         # #911: callback compact DISABLED by owner flag.
