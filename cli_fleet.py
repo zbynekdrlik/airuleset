@@ -63,9 +63,11 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
         # #998 — DECLARED managed tmux windows (owner directive 2026-09-12).
         # ONE declaration drives everything: role+mode resolution
-        # (cli_concurrency.resolve_concurrency), idempotent window creation
-        # (cli_bashrc_appliers.render_managed_windows_block), resurrect
-        # relaunch (watchdog/resurrect), the infra clone as a managed checkout
+        # (cli_concurrency.resolve_concurrency), idempotent reboot-safe window
+        # creation (cli_tmux_provisioning._managed_windows_create_body, wired
+        # into the session-created hook + provisioning-time live-apply, #998
+        # item 1(a)), resurrect relaunch (watchdog/resurrect), the infra clone
+        # as a managed checkout
         # (session-start-fetch.sh). The infra window runs SEQUENTIAL (one unit
         # at a time — a sensitive box-maintenance / architecture-rework lane);
         # the review window keeps today's PARALLEL behaviour. Every OTHER

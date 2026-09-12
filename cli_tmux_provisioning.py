@@ -1074,6 +1074,18 @@ STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
 _SAFE_STREAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
+# #998 review F1/F1b (security): values baked into the create-if-missing shell
+# snippet must carry NO shell metacharacter. A real declared window name / cwd
+# and a real tmux session name are all path/token shaped (alnum plus . _ - /);
+# anything with a quote, `$`, backtick, `;`, `|`, `(`, whitespace, ... is
+# rejected so a (mis)declared cwd or a hand-renamed session can never break the
+# quoting or inject a command. Defense-in-depth over cli_fleet.validate_windows
+# (the loud intake gate) at the SHELL boundary, where the value first reaches a
+# `sh -c` string. `/` is allowed (cwd is a path); `~` is stripped before the
+# check (the $HOME anchor is emitted by us, not taken from the value).
+_SHELL_TOKEN_SAFE_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
 def _managed_windows_create_body(windows):
     """#998 item 1(a): the reusable POSIX-sh create-if-missing snippet for the
     box's NON-primary DECLARED managed windows (``windows[1:]``), or ``""`` when
@@ -1118,6 +1130,12 @@ def _managed_windows_create_body(windows):
         # both anchor under $HOME at runtime — portable, and it matches the
         # `pane_current_path` tmux reports on the box (the cwd-dedup predicate).
         tail = cwd[2:] if cwd.startswith("~/") else cwd.lstrip("/")
+        # review F1 (security): reject any name/cwd carrying a shell metachar
+        # before it is baked into the shell snippet (a real path/token always
+        # passes; skip fail-closed toward NOT injecting).
+        if not _SHELL_TOKEN_SAFE_RE.match(name) or \
+                not _SHELL_TOKEN_SAFE_RE.match(tail):
+            continue
         cwd_sh = '"$HOME/%s"' % tail
         blocks.append(
             'if tmux list-windows -t "$S" -F "##{window_name}" | grep -Fxq %s; '
@@ -1303,6 +1321,12 @@ def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
     for sname in (getattr(sres, "stdout", "") or "").splitlines():
         sname = sname.strip()
         if not sname:
+            continue
+        # review F1b (security): `sname` is a live session name (from
+        # list-sessions), NOT covered by validate_windows; skip any that carries
+        # a shell metachar before it is interpolated into the run-shell command
+        # string (a real tmux session name — the box alias / `zbynek` — passes).
+        if not _SHELL_TOKEN_SAFE_RE.match(sname):
             continue
         try:
             runner(["tmux", "run-shell", "S=%s; %s" % (sname, create_body)])
