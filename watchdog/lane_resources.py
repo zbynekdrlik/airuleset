@@ -166,14 +166,28 @@ def count_resource_usage(cwd, evidence):
 # Nudge text -- resource-aware
 # ---------------------------------------------------------------------------
 
-def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
+def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
+                     candidate_n=None):
     """Build the lane-check nudge text with resource-aware info (#970).
 
     ``caps`` is the dict from ``lane_resource_caps`` (``{"total": N, "box": M}``
     or ``{"total": N}``).  ``usage`` is from ``count_resource_usage`` or
     ``None``.  ``live_workers`` is the total live lane count for the
     resource snippet.
+
+    ``candidate_n`` (#993 item 3): the DISPATCHABLE-candidate count (workable ∧
+    deps satisfied ∧ (independent ∨ no live infra lane)). When given, the action
+    sentence names it — "dispatchni N DISPATCHOVATEĽNÝCH jednotiek" — instead of
+    the old unconditional "sú voľné sloty — workable tikety dispatchni" pressure
+    (the DECISION already refused to fire when candidate_n was 0). None keeps the
+    legacy wording (a caller that has no dispatchable count, e.g. the backward-
+    compat GOAL_LANE_NUDGE_TEXT_FN).
     """
+    if isinstance(candidate_n, int) and not isinstance(candidate_n, bool):
+        _action = ("Je %d DISPATCHOVATEĽNÝCH jednotiek (nezávislé + so zavretými "
+                   "závislosťami) — dispatchni ich" % candidate_n)
+    else:
+        _action = "Sú VOĽNÉ sloty — workable tikety dispatchni"
     total = caps.get("total", GOAL_LANE_SATURATION_WORKERS)
     resource_keys = sorted(k for k in caps if k != "total")
     resource_snippet = ""
@@ -203,7 +217,7 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
         "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
         "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
         "NErátaj; dispatchni len naozaj workable), BEŽÍ %d živých lán "
-        "(waiterov beží: %d)%s. Sú VOĽNÉ sloty — workable tikety dispatchni "
+        "(waiterov beží: %d)%s. " + _action + " "
         "PARALELNÝMI isolation:\"worktree\" autopilot-worker lánmi "
         "(run_in_background), refill (doplň) vrátený slot po jeho návrate, "
         "integruj SÉRIOVO pod integračným mutexom a po každom integračnom cykle "

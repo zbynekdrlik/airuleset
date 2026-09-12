@@ -5466,6 +5466,50 @@ def _watchdog_backlog_fetch(cwd):
         return None
 
 
+def _watchdog_dispatchable_fetch(cwd):
+    """#993 item 3 — the DISPATCHABLE-candidate signal (`workable ∧ deps
+    satisfied ∧ (independent ∨ no live infra lane)`) for the repo at `cwd`, as a
+    ONE-element list `[{"count": N, "reason": r}]` (never `[]`), or None on any
+    failure/refusal. Sibling of `_watchdog_backlog_fetch`: same authority-aware
+    command choice (`core-quals`/`slice-quals`) + `_repo_root(cwd=cwd)` resolution
+    + refuse→None contract — only the flag differs (`--count-dispatchable`, which
+    prints the count on line 1 and, when the count is 0, a `reason:<infra-serial|
+    dep-wait>` line). The lane nudge reads it through `goal._cached_dispatchable`
+    (per-cwd TTL) so the O(workable) `--count-dispatchable` subprocess fires at
+    most once per repo per window, never every sweep. Wired HERE, like every
+    network call in this file, so run_once unit tests stay network-free
+    (dispatchable_fetch None → the lane nudge does NOT class-gate)."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    cmd_name = "core-quals" if authority == "full" else "slice-quals"
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), cmd_name,
+             "--count-dispatchable"],
+            cwd=cwd, capture_output=True, text=True,
+            timeout=_BACKLOG_LIVE_COUNT_TIMEOUT_S)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        count = int(lines[0])
+    except ValueError:
+        return None
+    reason = None
+    for ln in lines[1:]:
+        if ln.startswith("reason:"):
+            reason = ln.split(":", 1)[1].strip() or None
+    return [{"count": count, "reason": reason}]
+
+
 def _watchdog_ops_wait_fetch(cwd):
     """#547 — the parked W (`ops-wait`) member NUMBERS for THIS box's slice of
     the repo at `cwd`, or None on any failure/refusal. The 1:1 sibling of
@@ -6413,6 +6457,12 @@ def cmd_watchdog(args):
                     # infra lane), so an infra-while-infra-lane-live or dep-wait
                     # arrival is HELD, not nudged. FULL-authority only, lazy.
                     queue_classify=_watchdog_queue_classify,
+                    # #993 item 3 — job 20's lane-occupancy nudge reads the
+                    # DISPATCHABLE-candidate count (work-class + Depends-on +
+                    # live infra lane) so a free slot with no dispatchable unit
+                    # (infra-serial / dep-wait) is journaled skip, not nudged.
+                    # Cached per-cwd; full-authority resolves core-quals.
+                    dispatchable_fetch=_watchdog_dispatchable_fetch,
                     # #797 — job 20's U-freshness reconcile rider reads the
                     # footer `user_waiting` count from the SAME machine-local
                     # tickets-status cache the footer renders (a LOCAL file read,

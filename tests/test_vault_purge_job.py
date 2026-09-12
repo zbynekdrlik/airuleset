@@ -288,6 +288,10 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # on its own trailing line; the mutation target vault_purge=None
                # is untouched.
                "             release_state_fetch=None, queue_fetch=None, queue_classify=None,\n"
+               # #993 item 3 re-pin: dispatchable_fetch=None (the lane-occupancy
+               # candidate-count seam) inserted on its own trailing line after
+               # queue_classify; the mutation target vault_purge=None is untouched.
+               "             dispatchable_fetch=None,\n"
                "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
                "             resource_guard_gk_request=None,\n"
                # #866 re-pin: nice_check_enabled=False (job 42's nice-check
