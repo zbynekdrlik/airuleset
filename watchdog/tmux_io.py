@@ -476,7 +476,11 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None):
     PERMANENTLY DELETES it (empirically confirmed, issue #35)."""
     run = run or watchdog._default_run
     captured = watchdog.capture_pane(pane_id, run, lines=10)
-    if _strip_selected(captured):
+    # #994 REOPEN -- the strip-deselect Escape is the control-key sibling of the
+    # type gate: it exists ONLY to make the following (now-suppressed) submit
+    # land, so at OFF a machine caller fires ZERO keystrokes (not even a stray
+    # Escape into the owner's pane). The type below is gated at `_type_literal`.
+    if _strip_selected(captured) and watchdog.nudges_enabled():
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
     # #994 REOPEN -- the literal type goes through the ONE gated primitive
     # `_type_literal` (never an inline `send-keys -l` here -- that was a second,
@@ -832,7 +836,10 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
         _log("send-verified abort: box not bare pre-send")
         return False
-    if watchdog._strip_selected(cap):
+    # #994 REOPEN -- the strip-deselect Escape only enables the following submit;
+    # at OFF a machine caller fires ZERO keystrokes. The owner's OWN reply
+    # (`user_authored`) still deselects + delivers.
+    if watchdog._strip_selected(cap) and (user_authored or watchdog.nudges_enabled()):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
     # Re-verify bare AFTER the strip-Escape and immediately before the type
     # keystroke — a draft racing into that gap would otherwise be typed over

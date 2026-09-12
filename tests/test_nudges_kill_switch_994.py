@@ -387,10 +387,17 @@ class TestUserAuthoredCallSiteLock(unittest.TestCase):
                 if kw.arg != "user_authored":
                     continue
                 v = kw.value
-                # A hard-coded truthy CONSTANT (True / any truthy literal) is a
-                # grant. A Constant False, or a Name/expr forward, is not.
-                if isinstance(v, ast.Constant) and v.value:
-                    return True
+                if isinstance(v, ast.Constant):
+                    if v.value:            # a truthy literal (True) = a grant
+                        return True
+                    continue               # False / None / 0 = deny, not a grant
+                # Not a constant: ONLY the same-name plumbing forward
+                # (`user_authored=user_authored`) is allowed. Any OTHER value —
+                # a different Name, a call, an attribute, an expression — is a
+                # grant (a machine caller opting a keystroke past OFF).
+                if isinstance(v, ast.Name) and v.id == "user_authored":
+                    continue
+                return True
         return False
 
     def test_only_discord_replies_grants_bypass(self):
@@ -484,6 +491,78 @@ class TestGoalSweepHoleClosed(unittest.TestCase):
             any("nudges OFF: suppressed goal" in ln for ln in logs),
             "expected a `nudges OFF: suppressed goal` journal line: %r" % logs)
         self.assertNotEqual(word, "sent")
+
+
+class TestNoStrayKeystrokeAtOff(unittest.TestCase):
+    """#994 REOPEN review finding (correctness): even the PRE-TYPE strip-deselect
+    Escape must not reach the pane at OFF. The Escape only exists to make the
+    following (now-suppressed) submit land, so at OFF a machine caller must fire
+    ZERO keystrokes — 'OFF -> type NOTHING' covers the control keystroke too."""
+
+    def _off(self):
+        return m.patch.object(wd, "nudges_enabled", lambda *a, **k: False)
+
+    def test_send_continue_no_escape_at_off_when_strip_selected(self):
+        # send_continue reads its OWN module-local `_strip_selected`, so drive it
+        # with a REAL strip-selected capture (`❯ ● main`), not a facade patch.
+        class _StripRec(_Recorder):
+            def __call__(self, argv, timeout=8):
+                self.calls.append(argv)
+                return "❯ ● main\n❯ \n" if "capture-pane" in " ".join(argv) else ""
+        rec = _StripRec()
+        logs = []
+        with self._off():
+            r = wd.send_continue(PID, "/compact", rec, logs=logs)
+        self.assertFalse(r)
+        self.assertEqual(rec.sent_keys(), [],
+                         "a stray keystroke reached the pane at OFF: %r"
+                         % rec.sent_keys())
+
+    def test_send_verified_no_escape_at_off_when_strip_selected(self):
+        rec = _Recorder()
+        logs = []
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                    m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
+                    self._off():
+                ok = wd.send_verified(PID, "lane-check: x", rec, tpath=tp,
+                                      logs=logs)
+        self.assertFalse(ok)
+        self.assertEqual(rec.sent_keys(), [],
+                         "a stray keystroke reached the pane at OFF: %r"
+                         % rec.sent_keys())
+
+    def test_send_verified_user_authored_still_escapes_at_off(self):
+        # The owner's own reply must STILL deselect + deliver at OFF.
+        rec = _Recorder()
+        logs = []
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                    m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
+                    self._off():
+                wd.send_verified(PID, "owner reply", rec, tpath=tp, logs=logs,
+                                 user_authored=True)
+        # user_authored bypass -> the strip-Escape DOES fire (delivery proceeds).
+        self.assertTrue(any(a[-1] == "Escape" for a in rec.sent_keys()),
+                        "owner reply must still deselect the strip at OFF: %r"
+                        % rec.sent_keys())
+
+    def test_send_goal_verified_no_escape_at_off_when_strip_selected(self):
+        rec = _Recorder()
+        logs = []
+        with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
+                self._off():
+            ok = goal._send_goal_verified(PID, "/goal x", rec,
+                                          sleep_fn=lambda *_a: None, logs=logs)
+        self.assertFalse(ok)
+        self.assertEqual(rec.sent_keys(), [],
+                         "a stray keystroke reached the pane at OFF: %r"
+                         % rec.sent_keys())
 
 
 class TestDeliverWithStashPrimitiveGate(unittest.TestCase):

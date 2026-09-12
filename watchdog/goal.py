@@ -833,7 +833,9 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pid, cap, logs=logs)
         _log("goal-verify-abort: not-bare")
         return False                       # not a bare box -- caller's problem
-    if watchdog._strip_selected(cap):
+    # #994 REOPEN -- goal-arm is machine text; at OFF fire ZERO keystrokes, not
+    # even the pre-type strip-deselect Escape (the type below is gated).
+    if watchdog._strip_selected(cap) and watchdog.nudges_enabled():
         run(["tmux", "send-keys", "-t", pid, "Escape"])
     fresh = watchdog.capture_pane(pid, run, lines=40)
     if watchdog._input_line_text(fresh) != "":
