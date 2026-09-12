@@ -136,12 +136,31 @@ def gather_issue_deps(repo_root, issues, run=None):
     return wc.resolve_issue_deps(issues, slug, wc_runner, repo_root)
 
 
+def _lane_is_merged(repo_root, branch, base_branch, run):
+    """#998 — True when the worktree branch's tip is an ANCESTOR of the base
+    (main): the lane is FINISHED (its work is integrated) and is NO LONGER a
+    live lane, so overlap must ignore it. ``git merge-base --is-ancestor
+    <branch> <base>`` exits 0 when true. Fail-SAFE: any error/other rc → False
+    (keep it LIVE — never drop a genuinely unmerged lane from the overlap set)."""
+    try:
+        r = run(["git", "-C", repo_root, "merge-base", "--is-ancestor",
+                 branch, base_branch])
+    except Exception as e:
+        print("lane-overlap: merged check for %s failed (%s)" % (branch, e),
+              file=sys.stderr)
+        return False
+    return r.returncode == 0
+
+
 def gather_live_lanes(repo_root, run=None):
     """Live worktree lanes: each live worktree branch (worktree-*) and its
-    touched files vs the repo base. Fails toward [] (logs, never raises) — the
-    receipt is still written; a missing lane list only means fewer known
-    overlaps, and the supervisor's own ``Independence:`` record is the durable
-    authority."""
+    touched files vs the repo base. A MERGED lane (tip is an ancestor of the
+    integration base — #998) is FINISHED, not live, and is EXCLUDED: liveness =
+    the agent still working, not "the worktree directory still exists" (8/8
+    remaining worktrees were merged lanes yet lane-overlap reported a false
+    overlap with one). Fails toward [] (logs, never raises) — the receipt is
+    still written; a missing lane list only means fewer known overlaps, and the
+    supervisor's own ``Independence:`` record is the durable authority."""
     run = run or _run_default
     lanes = []
     try:
@@ -165,6 +184,10 @@ def gather_live_lanes(repo_root, run=None):
                 branches.append(b)
     base_branch = base_branch or "main"
     for branch in branches:
+        # #998 — a merged lane (tip is an ancestor of the base) is FINISHED, not
+        # a live lane; overlap ignores it. Unmerged lanes stay live.
+        if _lane_is_merged(repo_root, branch, base_branch, run):
+            continue
         lanes.append({"ref": branch,
                       "files": _lane_files(repo_root, branch, run, base_branch),
                       "topic": _lane_topic(repo_root, branch, run)})

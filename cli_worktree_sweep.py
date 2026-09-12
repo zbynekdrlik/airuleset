@@ -1183,15 +1183,32 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
         # clean chain). A recently-active OR in-live-use worktree is kept --
         # this can only ever turn a candidate into a skip, never the reverse.
         if kind == "worktree":
-            idle_min = _worktree_env_age_s("AIRULESET_WORKTREE_IDLE_MIN_AGE_S",
-                                           STALE_WORKTREE_IDLE_MIN_AGE_S)
-            rec = _worktree_recency_age_s(c.get("repo"), c.get("path"), now)
-            if rec is not None and rec <= idle_min:
-                entry["reason"] = ("active within %.1fh (idle threshold %.1fh) "
-                                   "-- kept (live-worker guard)"
-                                   % (rec / 3600.0, idle_min / 3600.0))
-                results.append(entry)
-                continue
+            # #998 -- a MERGED lane (tip is an ancestor of the base; every
+            # genuine `discover_stale_worktrees` candidate is 0-ahead = merged)
+            # is FINISHED: reclaim it IMMEDIATELY with NO 24h idle threshold
+            # (its work is on the base, the branch ref survives, the wip backup
+            # stays durable). liveness = the AGENT still working, not the
+            # worktree's mtime -- a live in-session worker's worktree is LOCKED
+            # (so it never reaches here as a plain 0-ahead candidate) and the
+            # in-live-use guard below is the belt. An UNMERGED worktree
+            # (defensive -- should never be a candidate) keeps today's recency
+            # guard.
+            base = c.get("base")
+            merged = bool(base) and git_run(
+                ["merge-base", "--is-ancestor",
+                 "refs/heads/%s" % c.get("branch"),
+                 "refs/heads/%s" % base], c.get("repo")) is not None
+            if not merged:
+                idle_min = _worktree_env_age_s(
+                    "AIRULESET_WORKTREE_IDLE_MIN_AGE_S",
+                    STALE_WORKTREE_IDLE_MIN_AGE_S)
+                rec = _worktree_recency_age_s(c.get("repo"), c.get("path"), now)
+                if rec is not None and rec <= idle_min:
+                    entry["reason"] = ("active within %.1fh (idle threshold "
+                                       "%.1fh) -- kept (live-worker guard)"
+                                       % (rec / 3600.0, idle_min / 3600.0))
+                    results.append(entry)
+                    continue
             if _worktree_in_live_use(c.get("path")):
                 entry["reason"] = "in live use (process rooted in tree) -- kept (live-worker guard)"
                 results.append(entry)
