@@ -38,5 +38,54 @@ class TestQueueNudgeInfraSerial(TestCase):
         self.assertLessEqual(len(t), qa.NUDGE_MAX_CHARS)
 
 
+NOW = 1_000_000
+
+
+class TestQueueDecisionClassAware(TestCase):
+    """#993 item 4 — the queue-arrival DECISION filters arrivals by dispatch
+    class: an arrival that is infra-while-infra-lane-live or dep-wait is HELD
+    (no nudge); the nudge fires only for dispatchable arrivals."""
+
+    def _base(self, base):
+        return {"base": base, "first_seen": NOW - 100, "last_nudge": None}
+
+    def test_no_classify_fn_is_legacy_all_dispatchable(self):
+        action, _out, _r, arr = qa._queue_decision(self._base([1]), [1, 9], NOW)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(arr, [9])
+
+    def test_all_infra_serial_arrivals_hold(self):
+        action, out, reason, arr = qa._queue_decision(
+            self._base([1]), [1, 9], NOW,
+            classify_fn=lambda n: "infra-serial")
+        self.assertEqual(action, "hold")
+        self.assertEqual(reason, "infra-serial")
+        self.assertEqual(out["base"], [1])   # base kept OLD → re-detect later
+        self.assertEqual(arr, [9])
+
+    def test_all_dep_wait_arrivals_hold_with_dep_wait_reason(self):
+        action, _out, reason, _arr = qa._queue_decision(
+            self._base([1]), [1, 9], NOW,
+            classify_fn=lambda n: "dep-wait")
+        self.assertEqual(action, "hold")
+        self.assertEqual(reason, "dep-wait")
+
+    def test_mixed_nudges_only_dispatchable_arrivals(self):
+        cls = {8: "dispatchable", 9: "infra-serial"}
+        action, _out, _r, arr = qa._queue_decision(
+            self._base([1]), [1, 8, 9], NOW,
+            classify_fn=lambda n: cls[n])
+        self.assertEqual(action, "nudge")
+        self.assertEqual(arr, [8])          # only the dispatchable arrival named
+
+    def test_mixed_infra_and_dep_holds_infra_serial(self):
+        cls = {8: "dep-wait", 9: "infra-serial"}
+        action, _out, reason, _arr = qa._queue_decision(
+            self._base([1]), [1, 8, 9], NOW,
+            classify_fn=lambda n: cls[n])
+        self.assertEqual(action, "hold")
+        self.assertEqual(reason, "infra-serial")   # any infra held → infra-serial
+
+
 if __name__ == "__main__":
     main()

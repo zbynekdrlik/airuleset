@@ -264,13 +264,14 @@ class _OrchBase(unittest.TestCase):
                                    transcript_path=self.tpath, **kw)
 
     def _run(self, qrecs, fetch, tmux, *, dry_run=False, handled=None,
-             state=None, authority="full", captured=None):
+             state=None, authority="full", captured=None, classify_builder=None):
         with m.patch("airuleset.resolve_authority", return_value=authority):
             return qa.goal_queue_arrival_recheck(
                 NOW, tmux, qrecs, self.sid, self.CWD, "%9", self.tpath, "sess:0",
                 dry_run, handled, queue_fetch=fetch,
                 state=state if state is not None else {},
-                sleep_fn=lambda *a, **k: None, captured=captured)
+                sleep_fn=lambda *a, **k: None, captured=captured,
+                classify_builder=classify_builder)
 
 
 class TestOrchestrator(_OrchBase):
@@ -361,6 +362,26 @@ class TestOrchestrator(_OrchBase):
         self.assertTrue(any("busy-bg-agent" in ln for ln in logs))
         self.assertEqual(tmux.typed_texts(), [])
         self.assertEqual(qrecs[self.sid]["base"], [1])   # not advanced -> retry
+
+    def test_infra_only_arrival_held_no_keystroke(self):
+        # #993 item 4: a non-dispatchable (infra-while-lane-live) arrival is HELD
+        # via the injected classify_builder — no keystroke, base kept OLD.
+        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
+        tmux = self._tmux()
+        logs = self._run(qrecs, lambda cwd: [1, 9], tmux, handled=set(),
+                         classify_builder=lambda cwd: (lambda n: "infra-serial"))
+        self.assertTrue(any("hold:infra-serial" in ln for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertEqual(qrecs[self.sid]["base"], [1])   # kept OLD -> re-detect
+
+    def test_dispatchable_arrival_still_nudges_with_classify(self):
+        # #993 item 4: a dispatchable arrival still fires (classify_builder wired).
+        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
+        tmux = self._tmux()
+        logs = self._run(qrecs, lambda cwd: [1, 9], tmux, handled=set(), state={},
+                         classify_builder=lambda cwd: (lambda n: "dispatchable"))
+        self.assertTrue(any("queue-arrival nudge" in ln for ln in logs), logs)
+        self.assertIn("#9", "".join(tmux.typed_texts()))
 
     def test_swallowed_submit_does_not_advance_base(self):
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
