@@ -9,7 +9,6 @@ live lane is refused (exit 2); parallel (or zero live lanes) passes.
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path

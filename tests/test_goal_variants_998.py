@@ -8,7 +8,6 @@ cwd and uses the SAME renderer for variants (SKILL.md read for the default).
 import json
 import sys
 import tempfile
-import unittest.mock as m
 from pathlib import Path
 from unittest import TestCase, main
 

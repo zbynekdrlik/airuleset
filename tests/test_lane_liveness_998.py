@@ -1,22 +1,29 @@
-"""#998 item 8 — lane liveness = the agent is alive, not "the worktree exists".
+"""#998 item 8 (part 1) — lane liveness for OVERLAP = the agent is alive, not
+"the worktree exists".
 
-A MERGED lane (tip is an ancestor of main) is FINISHED: cli_lane_overlap.
-gather_live_lanes EXCLUDES it (overlap ignores it) and cli_worktree_sweep
-reclaims it IMMEDIATELY with no 24h idle threshold. An UNMERGED lane keeps
-today's guards. RED: merged worktree -> not live; unmerged -> live.
+A MERGED lane (tip is an ancestor of the base) is FINISHED, so
+cli_lane_overlap.gather_live_lanes EXCLUDES it — this fixes the false OVERLAP
+the 8/8 merged worktrees caused (the reason #998's own dispatch needed an
+OVERLAP-BYPASS). RED: merged worktree -> not live; unmerged -> live.
+
+NOTE (part 2 deferred): item 8 also asked the sweep to reclaim a merged lane
+IMMEDIATELY (no 24h idle threshold). That directly conflicts with the #513
+data-loss guard (test_disk_hygiene_513.py's TestLiveWorkerGuard/TestReviewFixes
+protect a fresh / intra-sweep-raced / overnight-blocked UNLOCKED-but-live
+0-ahead worktree via exactly that 24h recency guard). Reversing a hard-won
+data-loss guard on an inference is out of a worker's remit — flagged in the
+LANE-RETURN for the owner/supervisor to resolve; the sweep is UNCHANGED here.
 """
 import os
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 import cli_lane_overlap as lo  # noqa: E402
-import cli_worktree_sweep as ws  # noqa: E402
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -61,47 +68,6 @@ class TestGatherLiveLanesMerged(TestCase):
         self._add_lane("fresh", commit=False)
         lanes = lo.gather_live_lanes(str(self.repo))
         self.assertNotIn("worktree-fresh", {ln["ref"] for ln in lanes})
-
-
-class TestSweepMergedImmediate(TestCase):
-    """The sweep drops the 24h idle guard for a MERGED candidate (its work is on
-    base); an UNMERGED candidate keeps today's recency guard."""
-
-    def _fresh_dir(self):
-        d = tempfile.mkdtemp()  # a real dir with fresh mtime (< 24h)
-        self.addCleanup(lambda: None)
-        return d
-
-    def _fake_git(self, merged):
-        def run(args, cwd, timeout=15):
-            if args[:2] == ["merge-base", "--is-ancestor"]:
-                return "" if merged else None   # rc0="" (ancestor), rc1=None
-            if args[:2] == ["rev-list", "--count"]:
-                return "0"
-            return ""                            # remove / branch -D succeed
-        return run
-
-    def _candidate(self, path):
-        return {"path": path, "branch": "worktree-x", "repo": "/repo",
-                "reason": None, "kind": "worktree", "base": "main"}
-
-    def test_merged_recent_candidate_is_reclaimed(self):
-        path = self._fresh_dir()
-        results = ws.sweep_stale_worktrees(
-            dry_run=True, force=True, now=time.time(),
-            candidates=[self._candidate(path)], git_run=self._fake_git(True),
-            log_path=Path(tempfile.mkdtemp()) / "log")
-        row = [r for r in results if r.get("path") == path][0]
-        self.assertIn("would remove", row["reason"])  # NOT kept by idle guard
-
-    def test_unmerged_recent_candidate_is_kept(self):
-        path = self._fresh_dir()
-        results = ws.sweep_stale_worktrees(
-            dry_run=True, force=True, now=time.time(),
-            candidates=[self._candidate(path)], git_run=self._fake_git(False),
-            log_path=Path(tempfile.mkdtemp()) / "log")
-        row = [r for r in results if r.get("path") == path][0]
-        self.assertIn("kept", row["reason"])          # recency guard still applies
 
 
 if __name__ == "__main__":
