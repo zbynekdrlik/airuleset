@@ -1074,7 +1074,63 @@ STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
 _SAFE_STREAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
-def render_stream_tmux_window_block(name):
+def _managed_windows_create_body(windows):
+    """#998 item 1(a): the reusable POSIX-sh create-if-missing snippet for the
+    box's NON-primary DECLARED managed windows (``windows[1:]``), or ``""`` when
+    there is at most one declared window (every target but gk today) — which
+    keeps the ``session-created`` hook byte-identical to today's single
+    ``rename-window``. ONE render, consumed by BOTH callers below: the
+    session-created hook (reboot / webterm-ssh connect) and the provisioning-
+    time ``_live_apply_stream_window_name`` (immediate, per running session).
+
+    For each non-primary declared window it renders a self-contained
+    ``if/elif/else/fi`` block: skip if a window of that NAME already exists OR a
+    window whose pane cwd equals the declared cwd exists (so the owner's
+    hand-made window in the same cwd is never DUPLICATED — the incident this
+    dedup prevents), else ``new-window -d -t "$S" -n <name> -c "$HOME/<cwd>"
+    <managed launcher>``. The new window STARTS the managed claude launcher —
+    the SAME command the box's primary pane runs (the ``claude()`` bashrc
+    wrapper, ``cli_bashrc_appliers.ULTRACODE_BASHRC_BLOCK``), reused via
+    ``CLAUDE_LAUNCH_SCRIPT_DEST`` (never a hand-written ``claude`` string).
+
+    Inner tmux formats are DOUBLED (``##{window_name}``) so the OUTER run-shell
+    format-expansion — which BOTH the hook path and the provisioning ``tmux
+    run-shell`` path apply — collapses ``##`` → ``#`` and hands the INNER
+    ``list-windows`` a literal ``#{window_name}`` (NOT the created session's own
+    window name). The session is read from ``$S``, which each caller binds (the
+    hook via ``S=#{session_name}``; provisioning via the actual session name).
+    Only double-quotes internally (no single quote), so the hook can wrap it in
+    single quotes. Validated live on tmux 3.7b (controller + dev2); gk's own
+    tmux is verified by the supervisor after install."""
+    windows = windows or []
+    if len(windows) < 2:
+        return ""
+    from cli_claude_scripts import CLAUDE_LAUNCH_SCRIPT_DEST
+    launcher = '"$HOME/.claude/%s" default' % CLAUDE_LAUNCH_SCRIPT_DEST.name
+    blocks = []
+    for w in windows[1:]:
+        name = (w.get("name") or "").strip()
+        cwd = (w.get("cwd") or "").strip()
+        if not name or not cwd:
+            continue
+        # declared cwd -> a $HOME-anchored shell path. validate_windows forbids
+        # an absolute cwd and `..`, so a leading `~/` OR a plain relative path
+        # both anchor under $HOME at runtime — portable, and it matches the
+        # `pane_current_path` tmux reports on the box (the cwd-dedup predicate).
+        tail = cwd[2:] if cwd.startswith("~/") else cwd.lstrip("/")
+        cwd_sh = '"$HOME/%s"' % tail
+        blocks.append(
+            'if tmux list-windows -t "$S" -F "##{window_name}" | grep -Fxq %s; '
+            'then :; '
+            'elif tmux list-windows -t "$S" -F "##{pane_current_path}" | '
+            'grep -Fxq %s; then :; '
+            'else tmux new-window -d -t "$S" -n %s -c %s %s; fi'
+            % (name, cwd_sh, name, cwd_sh, launcher)
+        )
+    return "; ".join(blocks)
+
+
+def render_stream_tmux_window_block(name, windows=None):
     """The managed ~/.tmux.conf block that names this box's tmux windows after
     `name` -- the box's short TARGET ALIAS (#592; already validated against
     `_SAFE_STREAM_NAME_RE` by the caller). #554 baked the subdev username here;
@@ -1109,8 +1165,30 @@ def render_stream_tmux_window_block(name):
         "# streams), never an owner multi-project box; the alias is the SAME\n"
         "# source the webterm tabs use (cli_aliases.short_target_alias).\n"
         "set-option -gw automatic-rename off\n"
-        f'set-hook -g session-created "rename-window {name}"\n'
+        f"{_render_session_created_hook_line(name, windows)}"
         f"{STREAM_TMUX_WINDOW_MARK_END}"
+    )
+
+
+def _render_session_created_hook_line(name, windows):
+    """#998: the ``set-hook -g session-created "..."`` line. Undeclared / ≤1
+    declared window -> exactly today's ``rename-window <name>`` (byte-identical).
+    A box with NON-primary declared windows (gk) extends the SAME hook: rename
+    window 0 FIRST (today's behaviour — a run-shell exec failure can never
+    affect it), THEN a single ``run-shell`` of the reusable create-if-missing
+    snippet. Combined via tmux's core ``;`` command separator (no ``-ga``
+    dependency). The run-shell arg is single-quoted; the snippet's own
+    double-quotes are escaped for the OUTER set-hook double-quoted value;
+    ``#{session_name}`` binds the created session at fire time (kept a single
+    ``#`` so run-shell expands it), while the snippet's inner ``##{...}`` formats
+    survive to the inner ``list-windows``."""
+    body = _managed_windows_create_body(windows)
+    if not body:
+        return f'set-hook -g session-created "rename-window {name}"\n'
+    body_conf = body.replace('"', '\\"')
+    return (
+        'set-hook -g session-created "rename-window ' + name
+        + " ; run-shell 'S=#{session_name}; " + body_conf + "'\"\n"
     )
 
 
@@ -1191,6 +1269,37 @@ def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
             runner(["tmux", "rename-window", "-t", wid, target])
         except Exception:
             # one window's failure never skips the rest
+            pass
+    # #998 item 1(a): create each NON-primary declared managed window if missing,
+    # on every session of this (single-session) box — so gk gets `gk-infra`
+    # immediately at provisioning time, not only after a reboot re-fires the
+    # session-created hook. The SAME reusable create-if-missing body (single
+    # source, no second implementation) fired via `tmux run-shell` per session,
+    # `$S` bound to the session name; tmux's run-shell format-expansion collapses
+    # the `##{...}` back to `#{...}` for the inner list-windows. `windows` is []
+    # for every target but gk => body "" => early return, byte-identical (no new
+    # tmux calls). Config/creation-path only, failure-tolerant (no server / no
+    # sessions => skip); it NEVER resurrects a session, only adds a DECLARED
+    # managed window to an already-existing one.
+    create_body = _managed_windows_create_body(windows)
+    if not create_body:
+        return
+    try:
+        sres = runner(["tmux", "list-sessions", "-F", "#{session_name}"])
+    except Exception as e:
+        print("  tmux managed-window create (list-sessions) skipped "
+              "(non-fatal): %s" % e, file=sys.stderr)
+        return
+    if getattr(sres, "returncode", 1) != 0:
+        return
+    for sname in (getattr(sres, "stdout", "") or "").splitlines():
+        sname = sname.strip()
+        if not sname:
+            continue
+        try:
+            runner(["tmux", "run-shell", "S=%s; %s" % (sname, create_body)])
+        except Exception:
+            # one session's failure never skips the rest
             pass
 
 
@@ -1544,11 +1653,16 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     them (`_live_revert_stream_window_name`), so a running server self-heals.
     Returns True iff ~/.tmux.conf changed."""
     import airuleset
+    import cli_fleet
     from cli_aliases import short_target_alias
     from cli_bashrc_appliers import is_single_session_box_user
     path = tmux_conf_path or TMUX_CONF
     u = user or airuleset._current_user()
     box = host or os.uname().nodename
+    # #998: the box's DECLARED managed windows drive both the rendered
+    # session-created hook (create-if-missing) and the live-apply below; [] for
+    # every target but gk, keeping both byte-identical there.
+    windows = cli_fleet.box_windows(u)
     alias = short_target_alias(u, box)
     safe_alias = bool(alias) and bool(_SAFE_STREAM_NAME_RE.match(alias))
     # #593: window naming is ONLY for single-session-per-account boxes (gk +
@@ -1563,7 +1677,7 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     spans = _clean_tmux_block_spans(
         existing, STREAM_TMUX_WINDOW_MARK_START, STREAM_TMUX_WINDOW_MARK_END)
     if should_have:
-        block = render_stream_tmux_window_block(alias)
+        block = render_stream_tmux_window_block(alias, windows=windows)
         if spans:
             out, cursor = [], 0
             for s, e in spans:
@@ -1594,11 +1708,11 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
         # -- the account's own session name may differ from the unix user (on gk
         # the owner session is zbynek-N, #562), so `list-windows -a` covers it.
         # #998: name each window by its DECLARED cwd (gk -> gk/gk-infra), else
-        # the box alias. box_windows is [] for every non-declaring target, so
-        # the live-apply stays byte-identical (all windows -> alias) there.
-        import cli_fleet
+        # the box alias, AND create each missing NON-primary declared window.
+        # box_windows is [] for every non-declaring target, so the live-apply
+        # stays byte-identical (all windows -> alias, no create) there.
         _live_apply_stream_window_name(
-            alias, windows=cli_fleet.box_windows(u), home=home, run=run)
+            alias, windows=windows, home=home, run=run)
     elif safe_alias and not single_session:
         # #593: a multi-project owner box (dev1/dev2) the pre-#593 code wrongly
         # provisioned -- self-heal any running server that still carries the bad
