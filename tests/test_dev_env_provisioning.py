@@ -1782,7 +1782,17 @@ class TestApplyStreamTmuxWindowName(TestCase):
         changed = airuleset.apply_stream_tmux_window_name(
             p, user="gatekeeper", host="gatekeeper-cx23", run=lambda argv: None)
         self.assertTrue(changed)
-        self.assertIn('set-hook -g session-created "rename-window gk"', p.read_text())
+        # #998: gk DECLARES a NON-primary window (gk-infra), so its
+        # session-created hook is legitimately EXTENDED from the bare
+        # `rename-window gk` to `rename-window gk ; run-shell '<create-if-
+        # missing>'`. The window-0 rename to `gk` is still the FIRST hook
+        # command (today's behaviour, unchanged); the assertion is updated
+        # (not weakened) to match the extended hook AND to confirm the create
+        # rides the SAME hook.
+        text = p.read_text()
+        self.assertIn('set-hook -g session-created "rename-window gk ', text)
+        self.assertIn("run-shell 'S=#{session_name}; ", text)
+        self.assertIn("-n gk-infra", text)
 
     def test_dev1_and_dev2_owner_boxes_get_NO_window_naming_block(self):
         # #593 REGRESSION FIX: dev1/dev2 (unix user `newlevel`) are MULTI-PROJECT
