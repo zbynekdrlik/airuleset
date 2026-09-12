@@ -2203,6 +2203,55 @@ class TestManagedWindowCreation998(TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_create_body_skips_a_cwd_with_shell_metachars(self):
+        # #998 review F1 (security): the cwd is baked into a double-quoted shell
+        # context. A (mis)declared cwd carrying a shell metachar must be SKIPPED
+        # at the render boundary so it can never break the quoting / inject —
+        # defense-in-depth over validate_windows. A window with a clean cwd in
+        # the SAME declaration still renders.
+        windows = [
+            {"name": "gk", "cwd": "~/devel/odoo/odoo-erp"},
+            {"name": "gk-evil1", "cwd": "~/$(touch PWNED)"},
+            {"name": "gk-evil2", "cwd": '~/x"; touch PWNED2; "'},
+            {"name": "gk-ok", "cwd": "~/devel/odoo/odoo-erp-infra"},
+        ]
+        body = cli_tmux_provisioning._managed_windows_create_body(windows)
+        self.assertNotIn("touch PWNED", body)
+        self.assertNotIn("$(", body)
+        self.assertNotIn("gk-evil1", body)
+        self.assertNotIn("gk-evil2", body)
+        # the clean window is unaffected
+        self.assertIn("-n gk-ok", body)
+        self.assertIn("odoo-erp-infra", body)
+
+    def test_provisioning_skips_a_session_name_with_shell_metachars(self):
+        # #998 review F1b (security): `sname` comes from `tmux list-sessions`
+        # and is NOT covered by validate_windows; a session named with a shell
+        # metachar must be skipped before it is interpolated into the run-shell
+        # command string. A token-safe session still gets the create snippet.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout=(
+                    "@0\t/home/gatekeeper/devel/odoo/odoo-erp\n"))
+            if argv[:3] == ["tmux", "list-sessions", "-F"]:
+                return _FakeCP(returncode=0,
+                               stdout="zbynek\nevil; touch PWNED\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# x\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="gatekeeper", host="gatekeeper-cx23",
+            home="/home/gatekeeper", run=run)
+        run_shell_args = [a[2] for a in seen if a[:2] == ["tmux", "run-shell"]]
+        # exactly one run-shell, for the token-safe session only
+        self.assertEqual(len(run_shell_args), 1, run_shell_args)
+        self.assertTrue(run_shell_args[0].startswith("S=zbynek; "),
+                        run_shell_args[0])
+        self.assertNotIn("touch PWNED", " ".join(run_shell_args))
+
     # -- provisioning-time application: fire the snippet per session ---------
 
     def test_provisioning_fires_create_snippet_per_session_for_gk(self):
