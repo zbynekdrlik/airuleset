@@ -14,9 +14,12 @@ set -euo pipefail
 # on dev2 (the build+emulator lane), NEVER on a shared-stream box.
 #
 # BOX-CLASS GATE (first): this hook is a TOTAL NO-OP unless
-# `~/.claude/airuleset-box-class` reads exactly `shared-stream`. On a
-# workstation (dev1/dev2/gk) or a box with no marker it exits 0 immediately —
-# the heavy build is the WORK there, never blocked.
+# `~/.claude/airuleset-box-class` reads a CLAUDE-ONLY class: `shared-stream`
+# (subdev), `controller`, or `gk` (#998 — the gatekeeper box is Claude-only:
+# odoo docker + heavy builds belong on the erp-test box / dev2, never local).
+# On a workstation (dev1/dev2) or a box with no marker it exits 0 immediately —
+# the heavy build is the WORK there, never blocked. On a Claude-only class it
+# ALSO blocks a local `docker pull|run odoo*` (#998).
 #
 # Reads `.tool_input.command` on STDIN (the SAME contract every sibling
 # Bash-payload hook uses). Exit 2 = block (reason on STDERR — stdout is
@@ -43,14 +46,14 @@ set -euo pipefail
 # --- BOX-CLASS GATE: no-op off a shared-stream box -------------------------
 BOX_CLASS_FILE="${HOME:-/nonexistent}/.claude/airuleset-box-class"
 CLASS="$(cat "$BOX_CLASS_FILE" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
-[ "$CLASS" = "shared-stream" ] || [ "$CLASS" = "controller" ] || exit 0
+[ "$CLASS" = "shared-stream" ] || [ "$CLASS" = "controller" ] || [ "$CLASS" = "gk" ] || exit 0
 
 INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
 [ -z "$CMD" ] && exit 0
 
 RC=0
-python3 - "$CMD" <<'PYEOF' >/dev/null 2>&1 || RC=$?
+REASON=$(python3 - "$CMD" 2>/dev/null <<'PYEOF'
 import os
 import re
 import shlex
@@ -234,23 +237,52 @@ def _is_indirect_android_build(tk):
     return False
 
 
+def _is_docker_odoo(tk):
+    """#998 — True if tk is a local `docker`/`podman` `pull`/`run`/`create` of an
+    ODOO image (image ref whose final repository component starts with `odoo`,
+    honoring the ticket's `odoo*`). A Claude-only box never runs odoo locally —
+    it belongs on the erp-test box / prod. Accepted residual: a `--name odoo-x`
+    VALUE on a non-odoo image can false-positive (rare on a Claude-only box,
+    bypassable via `# airuleset:heavy-build-ok`)."""
+    if not tk:
+        return False
+    if os.path.basename(tk[0]) not in ("docker", "podman"):
+        return False
+    rest = tk[1:]
+    sub = next((t for t in rest if not t.startswith("-")), None)
+    if sub not in ("pull", "run", "create"):
+        return False
+    for t in rest:
+        if t.startswith("-"):
+            continue
+        # strip an @digest / :tag, take the final path component of the ref.
+        comp = t.split("@", 1)[0].split(":", 1)[0]
+        last = comp.rsplit("/", 1)[-1]
+        if last.lower().startswith("odoo"):
+            return True
+    return False
+
+
 def cmd_is_heavy_build(tk):
-    """tk is one command's tokens (prefix already stripped). Return True if it
-    launches a blocked heavy build/VM toolchain.
+    """tk is one command's tokens (prefix already stripped). Return a REASON
+    string ("" = allow, "heavy-build" = a JVM/Android/VM toolchain, "docker-odoo"
+    = a local odoo container, #998) — the caller picks the block message.
     #965: extended with indirect launches (npx expo, react-native, npm run android,
     eas build --local)."""
     if not tk:
-        return False
+        return ""
     base = os.path.basename(tk[0])
     if base in BLOCKED_BASENAMES:
-        return True
+        return "heavy-build"
     if base.startswith(QEMU_PREFIX):
-        return True
+        return "heavy-build"
     if base == "java":
-        return _java_is_build_daemon(tk)
+        return "heavy-build" if _java_is_build_daemon(tk) else ""
     if _is_indirect_android_build(tk):
-        return True
-    return False
+        return "heavy-build"
+    if _is_docker_odoo(tk):
+        return "docker-odoo"
+    return ""
 
 
 def _bypassed(seg):
@@ -262,19 +294,22 @@ def _bypassed(seg):
 
 
 def classify(script):
-    """True iff any command segment launches a blocked heavy build toolchain."""
+    """The REASON string of the FIRST blocked segment ("" = nothing blocked):
+    "heavy-build" or "docker-odoo" (#998)."""
     for seg in _split_segments(script):
         if _bypassed(seg):
             continue
         tk = strip_prefix(tokens_of(seg))
         inner = shell_dash_c_script(tk)
         if inner is not None:
-            if classify(inner):
-                return True
+            reason = classify(inner)
+            if reason:
+                return reason
             continue
-        if cmd_is_heavy_build(tk):
-            return True
-    return False
+        reason = cmd_is_heavy_build(tk)
+        if reason:
+            return reason
+    return ""
 
 
 # strip heredoc BODIES (documentation payload — a ticket comment / commit body
@@ -300,10 +335,33 @@ while i < nlines:
             break
 cmd = "\n".join(out)
 
-sys.exit(2 if classify(cmd) else 0)
+_reason = classify(cmd)
+if _reason:
+    sys.stdout.write(_reason)
+    sys.exit(2)
+sys.exit(0)
 PYEOF
+) || RC=$?
 
 [ "$RC" -eq 2 ] || exit 0
+
+if printf '%s' "$REASON" | grep -q "docker-odoo"; then
+    cat >&2 <<'MSG'
+BLOCKED: a local `docker`/`podman` pull/run of an ODOO image on a Claude-only
+box (#998). The gatekeeper / subdev / controller boxes exist ONLY to run Claude
+sessions + git + light scripts; a local odoo container (odoo + postgres) belongs
+on the erp-test box or prod, never here.
+
+Do this instead:
+
+  • Run/verify odoo on the erp-test box or prod (the odoo lane), not locally.
+  • Read-only checks against a running instance are fine; a LOCAL container is not.
+
+Genuine one-off exception: append `# airuleset:heavy-build-ok <reason>` to the
+offending command as a trailing COMMENT.
+MSG
+    exit 2
+fi
 
 cat >&2 <<'MSG'
 BLOCKED: a heavy build-toolchain / VM launch (gradle / gradlew / kotlinc /

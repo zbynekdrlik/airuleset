@@ -28,6 +28,7 @@ Thumbs.db
 .claude/*
 !.claude/rules/
 !.claude/rules-reference/
+!.claude/lane-resources.json
 
 # Environment
 .env

@@ -2040,7 +2040,8 @@ from watchdog.reaper import (  # noqa: E402
     default_kill_fn as default_kill_fn,
     REAPER_MIN_AGE_S as REAPER_MIN_AGE_S,
     SHADOW_UGREP_SIGNATURE as SHADOW_UGREP_SIGNATURE,
-    # #778 — Job 38, the heavy-build-toolchain reaper (shared-stream box only).
+    # #778 — Job 38, the heavy-build-toolchain reaper (Claude-only box classes:
+    # shared-stream / controller / gk, #998).
     heavy_build_reaper as heavy_build_reaper,
     default_box_class as default_box_class,
     is_shared_stream_box as is_shared_stream_box,
@@ -2715,19 +2716,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           orphaned; #775 (resource caps) is Layer 3. See `shadow_ugrep_reaper`
           in `watchdog/reaper.py`.
       (38) (only when `reaper_ps_fetch` is given) HEAVY-BUILD-TOOLCHAIN
-          OS-PROCESS REAPER (#778), SHARED-STREAM BOX ONLY — a SIBLING of Job
-          37 with the OPPOSITE gating: kill-on-sight, NO age/CPU gate, because a
-          JVM/Android build daemon is BANNED OUTRIGHT on a shared-stream box
-          (subdev). Root cause: the subdev VPS runs N isolated Claude stream
+          OS-PROCESS REAPER (#778), CLAUDE-ONLY BOX CLASSES ONLY (shared-stream
+          / controller / gk, #998) — a SIBLING of Job 37 with the OPPOSITE
+          gating: kill-on-sight, NO age/CPU gate, because a JVM/Android build
+          daemon is BANNED OUTRIGHT on a Claude-only box (subdev / controller /
+          the gatekeeper box). Root cause: the subdev VPS runs N isolated Claude stream
           users and exists ONLY for Claude sessions + git + light scripts; two
           streams self-installed a JDK/Android toolchain and ran Gradle/Kotlin
           daemons (`-Xmx3072m` × 2 = 13.3 GB RAM), collapsing the box (#774).
           The owner's standing rule: Android/JVM/RN builds run on dev2, never on
-          a shared-stream box. Each cycle, ONLY on a box whose class marker
-          (`~/.claude/airuleset-box-class`) reads `shared-stream`, it SIGKILLs
-          processes whose argv[0] is a Gradle/Kotlin daemon, `aapt2`, or a
-          `qemu-system*` VM/emulator, and logs the kill. FAIL-SAFE: off a
-          shared-stream box (or on any box-class read error) it kills NOTHING;
+          a Claude-only box. Each cycle, ONLY on a box whose class marker
+          (`~/.claude/airuleset-box-class`) reads a Claude-only class
+          (`shared-stream`/`controller`/`gk`, #998), it SIGKILLs processes whose
+          argv[0] is a Gradle/Kotlin daemon, `aapt2`, or a `qemu-system*`
+          VM/emulator, and logs the kill. FAIL-SAFE: off a Claude-only box
+          (or on any box-class read error) it kills NOTHING;
           argv[0]-anchored signatures only (a process merely quoting one never
           matches); NODE is never matched (it runs Claude Code/MCP/webterm); a
           pre-kill TOCTOU re-verify; any ps/parse/kill error kills NOTHING;

@@ -58,6 +58,10 @@ class TestGatherLiveLanesHasNoIssuesKey(TestCase):
         if "worktree" in j and "list" in j:
             return _CP("branch refs/heads/main\n"
                        "\nbranch refs/heads/worktree-agent-x\n")
+        if "--is-ancestor" in j:
+            # #998 liveness check: this lane is UNMERGED (still live), so its
+            # tip is NOT an ancestor of the base -> rc 1.
+            return _CP("", 1)
         if "merge-base" in j:
             return _CP("basesha\n")
         if "diff" in j:

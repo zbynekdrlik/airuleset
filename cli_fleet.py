@@ -61,6 +61,22 @@ REMOTE_HOSTS = [
         "user": "gatekeeper",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # #998 — DECLARED managed tmux windows (owner directive 2026-09-12).
+        # ONE declaration drives everything: role+mode resolution
+        # (cli_concurrency.resolve_concurrency), idempotent window creation
+        # (cli_bashrc_appliers.render_managed_windows_block), resurrect
+        # relaunch (watchdog/resurrect), the infra clone as a managed checkout
+        # (session-start-fetch.sh). The infra window runs SEQUENTIAL (one unit
+        # at a time — a sensitive box-maintenance / architecture-rework lane);
+        # the review window keeps today's PARALLEL behaviour. Every OTHER
+        # target declares NO windows and is byte-identical to today (one
+        # default window, parallel).
+        "windows": [
+            {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
+             "role": "review", "mode": "parallel"},
+            {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
+             "role": "infra", "mode": "sequential"},
+        ],
     },
     {
         # montalu2/montalu3/montalu4 — three MORE full parallel montalu
@@ -451,6 +467,89 @@ def paused_reason(remote):
     not paused -- never `None`, so a caller can always format it safely
     (e.g. an f-string SKIPPED line) without an extra None-check."""
     return remote.get("paused") or ""
+
+
+# ---------------------------------------------------------------------------
+# #998 — DECLARED managed windows (owner directive 2026-09-12)
+# ---------------------------------------------------------------------------
+
+#: The valid values for a declared window's ``role`` / ``mode`` (``None`` =
+#: unset, resolved to the default). ``resolve_concurrency`` (cli_concurrency)
+#: is the single consumer; kept here next to the data it validates.
+WINDOW_ROLES = ("review", "infra")
+WINDOW_MODES = ("parallel", "sequential")
+
+
+def _window_name_ok(name):
+    """Token-safe window name: ASCII alnum start, then ASCII alnum / . _ -
+    only (the tmux argv-injection guard the #656 owner-VPS block applies). No
+    regex / no char-literal table — this leaf is pure-data, zero-imports by
+    design, so a per-char ``isascii()``/``isalnum()`` check keeps it so."""
+    s = str(name)
+    if not s or not (s[0].isascii() and s[0].isalnum()):
+        return False
+    return all((c.isascii() and c.isalnum()) or c in "._-" for c in s)
+
+
+def managed_windows(remote):
+    """The DECLARED managed tmux windows for a REMOTE_HOSTS entry (#998), or
+    ``[]`` when the entry declares none — an empty list means "one default
+    window, today's behaviour, byte-identical", the state of every target but
+    gk. Each window is ``{"name", "cwd", "role", "mode"}``; ``role``/``mode``
+    may be ``None`` (unset → default). Pure accessor, no logic, kept next to
+    the table it reads (the ``is_paused``/``paused_reason`` shape)."""
+    return list(remote.get("windows") or [])
+
+
+def validate_windows(windows):
+    """Return a list of human-readable error strings for a ``windows``
+    declaration (``[]`` == valid). A shape check only — name/cwd must be
+    present + token-safe (the tmux argv-injection guard the #656 owner-VPS
+    block already applies), ``role`` ∈ WINDOW_ROLES or None, ``mode`` ∈
+    WINDOW_MODES or None. Used by the fleet-symmetry test + any provisioning
+    that bakes a window name/cwd into a tmux command."""
+    errs = []
+    if not isinstance(windows, list):
+        return ["windows is %s, not a list" % type(windows).__name__]
+    seen = set()
+    for i, w in enumerate(windows):
+        if not isinstance(w, dict):
+            errs.append("window[%d] is %s, not a dict" % (i, type(w).__name__))
+            continue
+        name = w.get("name")
+        if not name or not _window_name_ok(name):
+            errs.append("window[%d] name %r is missing or not token-safe" % (i, name))
+        elif name in seen:
+            errs.append("window[%d] duplicate name %r" % (i, name))
+        else:
+            seen.add(name)
+        cwd = w.get("cwd")
+        if not cwd or not isinstance(cwd, str) or cwd.startswith("/") or ".." in cwd:
+            errs.append("window[%d] cwd %r is missing, absolute, or contains .." % (i, cwd))
+        role = w.get("role")
+        if role is not None and role not in WINDOW_ROLES:
+            errs.append("window[%d] role %r not in %s" % (i, role, WINDOW_ROLES))
+        mode = w.get("mode")
+        if mode is not None and mode not in WINDOW_MODES:
+            errs.append("window[%d] mode %r not in %s" % (i, mode, WINDOW_MODES))
+    return errs
+
+
+def box_windows(user):
+    """The declared managed windows for the box whose unix account is
+    ``user`` (#998) — the FIRST REMOTE_HOSTS entry with ``user == <user>``
+    that declares ``windows``, else ``[]``. This is how a box finds its OWN
+    window declaration (role/mode resolution scopes to the box's own entry, so
+    a montalu box at ``~/devel/odoo/odoo-erp`` is never mis-classified as the
+    gk review window). Pure lookup over the facade table."""
+    if not user:
+        return []
+    for remote in REMOTE_HOSTS:
+        if remote.get("user") == user:
+            w = managed_windows(remote)
+            if w:
+                return w
+    return []
 
 
 # Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a

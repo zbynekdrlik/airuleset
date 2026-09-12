@@ -907,7 +907,7 @@ def _slice_quals_runner(root):
 # never the hot `--count` path (which never calls them).
 # --------------------------------------------------------------------------- #
 
-def _apply_role_filter(rows, root, role):
+def _apply_role_filter(rows, root, role, slug=None):
     """#993 r2b — slice `rows` by work class for `--role`. `review` keeps rows
     whose class is NOT infra; `infra` keeps rows whose class IS infra; None (no
     flag) returns `rows` unchanged (today's behaviour). This is the ROUTING that
@@ -915,6 +915,11 @@ def _apply_role_filter(rows, root, role):
     the whole airuleset repo, and `architecture-rework`) sends a ticket into the
     infra role/target (the per-role sequential mode is PENDING round 3, #993 —
     today this is the routing slice only).
+
+    `slug` (#998): a PRE-RESOLVED `owner/repo` — pass it to reuse ONE
+    `_repo_slug` (a network `gh repo view`) across several calls on the same
+    repo (the footer applies the role filter to workable/waiting/ops_wait — 3×);
+    None resolves it internally (every existing caller, byte-identical).
 
     Fail-CLOSED (#993 r2b review 🔴): `work_class` decides the airuleset repo
     infra by SLUG, so an unresolvable slug (`_repo_slug` returns "" on any gh
@@ -926,7 +931,8 @@ def _apply_role_filter(rows, root, role):
     if role not in ("review", "infra"):
         return rows
     import airuleset
-    slug = airuleset._repo_slug(cwd=root)
+    if slug is None:
+        slug = airuleset._repo_slug(cwd=root)
     if not slug:
         print("role-slice: repo slug unavailable (a gh query failed) — cannot "
               "classify rows for --role; refusing rather than mis-slicing",

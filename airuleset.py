@@ -958,7 +958,9 @@ def _write_box_class_marker():
     """Write ~/.claude/airuleset-box-class for this box (#778). A SHARED-STREAM
     box (subdev) — one running N isolated reduced-authority Claude stream users
     — is Claude-only: heavy JVM/Android/RN build toolchains are banned there and
-    run on dev2. Any OTHER box (dev1/dev2/gatekeeper) is a `workstation`.
+    run on dev2. The `gk` (gatekeeper) box is ALSO Claude-only (#998): heavy
+    builds + local odoo docker belong on the erp-test box / dev2, never local.
+    Any OTHER box (dev1/dev2) is a `workstation`.
 
     The class is derived from the install-user against the maintained
     `AUTHORITY_BY_USER` registry (the reduced-authority stream accounts —
@@ -974,7 +976,9 @@ def _write_box_class_marker():
         # `controller` — the push-origin guard, hook RULE C and the heavy-build
         # gates all read this file, and a writer without this branch demoted it
         # to `workstation` on the first in-process install (Fable review RED-1).
+        # "gatekeeper" = the gk box (#998): Claude-only class `gk`.
         box_class = ("controller" if u == "airuleset"
+                     else "gk" if u == "gatekeeper"
                      else "shared-stream" if u in AUTHORITY_BY_USER
                      else "workstation")
         marker = CLAUDE_DIR / "airuleset-box-class"
@@ -2169,6 +2173,13 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nswap: error ({e})", file=sys.stderr)
 
+    # --- Concurrency mode/role (#998) ---
+    try:
+        import cli_concurrency
+        print("\n" + cli_concurrency.concurrency_status_row(os.getcwd()))
+    except Exception as e:
+        print(f"\nconcurrency: error ({e})", file=sys.stderr)
+
     # --- Break-glass (#982/#985): ignoreip + key + sshd password + DNS ---
     try:
         from cli_disk_guard_root import (check_owner_ignoreip_status,
@@ -3219,6 +3230,48 @@ def _count_deploy_wait(ops_wait):
     return dw
 
 
+def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
+    """#998 — apply the pane's RESOLVED role (a declared managed window → role)
+    to the footer partition so the two gk windows show DIFFERENT `I`: the review
+    window counts core MINUS infra/architecture-rework, the infra window ONLY
+    those. Role is resolved from `cwd` via the single resolver
+    (`cli_concurrency.resolve_role`); when it is None (every box but the gk
+    windows) all three are returned unchanged — byte-identical to today.
+    Fail-SAFE: any resolver / slug error leaves all three UNFILTERED (the safe
+    over-count direction, #589/#636) and is LOGGED, never a footer crash."""
+    try:
+        import cli_concurrency
+        import cli_quals_cmd
+        role = cli_concurrency.resolve_role(cwd)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("tickets-status: role resolve skipped (%s)\n" % e)
+        return workable, waiting, ops_wait
+    if role not in ("review", "infra"):
+        return workable, waiting, ops_wait
+    # #998 review — resolve the slug ONCE (a network `gh repo view`) and reuse it
+    # across the three filter calls, instead of one `gh` per bucket. An empty
+    # slug (a gh failure) degrades the footer to UNFILTERED (fail-safe over-count,
+    # #589/#636) — never the fail-CLOSED sys.exit `_apply_role_filter` uses on the
+    # CLI stop-proof path.
+    try:
+        slug = _repo_slug(cwd=root)
+        if not slug:
+            sys.stderr.write("tickets-status: role filter unavailable "
+                             "(slug unresolved) — unfiltered\n")
+            return workable, waiting, ops_wait
+        workable = cli_quals_cmd._apply_role_filter(workable, root, role, slug=slug)
+        waiting = cli_quals_cmd._apply_role_filter(waiting, root, role, slug=slug)
+        ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role, slug=slug)
+    except SystemExit as e:
+        # defensive: _apply_role_filter fail-CLOSES on an empty slug; we already
+        # short-circuit that above, but never let it escape the footer.
+        sys.stderr.write("tickets-status: role filter unavailable (%s) — "
+                         "unfiltered\n" % e)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("tickets-status: role filter skipped (%s)\n" % e)
+    return workable, waiting, ops_wait
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -3366,6 +3419,9 @@ def cmd_tickets_status(args):
                 # `--waiting` path, never this hot footer refresh. #654:
                 # own_stream keeps THIS box's OWN stream rows in its own U.
                 workable_rows, waiting, ops_wait = _partition_workable(rows, own_stream=_current_user())
+                # #998: slice by the pane's resolved role (no-op off a role window).
+                workable_rows, waiting, ops_wait = _role_filter_footer(
+                    workable_rows, waiting, ops_wait, root, cwd)
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
@@ -3450,6 +3506,10 @@ def cmd_tickets_status(args):
                 # #622: bare needs-acceptance → U unconditionally (queued for owner
                 # approval, never dispatchable-now I).
                 workable, waiting, ops_wait = _partition_workable(seen)
+                # #998: slice by the pane's resolved role — the two gk windows
+                # (review vs infra) show DIFFERENT I (no-op off a role window).
+                workable, waiting, ops_wait = _role_filter_footer(
+                    workable, waiting, ops_wait, root, cwd)
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
@@ -6833,7 +6893,11 @@ def cmd_goal_arm(args):
               "recorded", file=sys.stderr)
         sys.exit(1)
     authority = (getattr(args, "template", "") or "").strip() or resolve_authority(cwd)
-    text = _goal_mod.goal_template_for_authority(authority)
+    # #998 — resolve the pane's (mode, role) from cwd so a sequential window
+    # (gk-infra) / a sequential project (airuleset) arms the SEQUENTIAL variant,
+    # via the SAME renderer the SKILL.md lines are generated from. A
+    # parallel/no-role pane is byte-identical to the prior SKILL.md read.
+    text = _goal_mod.goal_template_for(authority, cwd)
     if not text:
         print("goal-arm --self: could not resolve a /goal template for "
               "authority=%r (unreadable SKILL.md, no matching block, or "
@@ -8893,14 +8957,24 @@ def cmd_goal_inventory(args):
         except FileNotFoundError:
             print("goal-inventory: SKILL.md not found at %s" % path)
             sys.exit(1)
-        if d:
-            print("goal-inventory: DRIFT — SKILL.md /goal lines differ from the "
-                  "registry (run: airuleset.py goal-inventory --write):")
-            for profile, _got, _exp in d:
-                print("  %-14s shipped != render(registry)" % profile)
+        # #998 — lock every (authority, role, mode) variant too, not just the
+        # 3 shipped default lines: renders, under budget, NO turn cap, required
+        # clauses present, sequential/infra clauses correct.
+        variant_errs = gr.variant_check()
+        if d or variant_errs:
+            if d:
+                print("goal-inventory: DRIFT — SKILL.md /goal lines differ from "
+                      "the registry (run: airuleset.py goal-inventory --write):")
+                for profile, _got, _exp in d:
+                    print("  %-14s shipped != render(registry)" % profile)
+            if variant_errs:
+                print("goal-inventory: VARIANT check failed (#998):")
+                for e in variant_errs:
+                    print("  %s" % e)
             sys.exit(1)
-        print("goal-inventory: SKILL.md matches the registry (%d profiles)"
-              % len(gr.PROFILES))
+        print("goal-inventory: SKILL.md matches the registry (%d profiles) + "
+              "%d (authority,mode,role) variants locked"
+              % (len(gr.PROFILES), len(gr.variant_specs())))
         return
 
     profiles = [args.profile] if args.profile else list(gr.PROFILES)
