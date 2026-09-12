@@ -241,7 +241,7 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
 
     # ---- behavioral lock: a box with room IS nudged to refill ----
 
-    def _drive(self, workers, backlog, now=100000):
+    def _drive(self, workers, backlog, now=100000, dispatchable=None):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
         proj = Path(d.name)
@@ -251,6 +251,9 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
+        disp_fetch = None
+        if dispatchable is not None:
+            disp_fetch = lambda cwd: [dispatchable]  # noqa: E731
         with m.patch("airuleset.resolve_authority", return_value="full"), \
              m.patch.object(wd, "count_live_workers",
                             return_value=(workers, [])):
@@ -258,8 +261,26 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
                 now, tmux, {}, self.SID, self.CWD, "111", GOAL_ARMED_CAP,
                 tpath, tmtime, "loc", None, False, None, proj,
                 backlog_fetch=lambda cwd: backlog, state={},
-                sleep_fn=lambda s: None)
+                sleep_fn=lambda s: None, dispatchable_fetch=disp_fetch)
         return logs, tmux
+
+    def test_infra_only_free_slot_skips_no_keystroke(self):
+        # #993 item 3/6a: a free slot but 0 dispatchable candidates (infra-only +
+        # a live infra lane) -> skip:infra-serial, NO keystroke.
+        logs, tmux = self._drive(
+            workers=1, backlog=37,
+            dispatchable={"count": 0, "reason": "infra-serial"})
+        self.assertTrue(any("skip:infra-serial" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [], tmux.sent)
+
+    def test_dispatchable_candidates_nudge_names_count(self):
+        # #993 item 3/6b: with dispatchable candidates the nudge fires and the
+        # text names ONLY the candidate count.
+        logs, tmux = self._drive(
+            workers=0, backlog=37, dispatchable={"count": 4, "reason": None})
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertIn("4 DISPATCHOVATEĽNÝCH", "".join(tmux.typed_texts()))
 
     def test_partially_full_box_is_nudged_to_refill(self):
         # #848 FLIP (was test_running_batch_is_skipped_never_refilled): 2 live
