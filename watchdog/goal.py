@@ -5058,7 +5058,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # clears it on its own verified success.
         elif not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
                                              logs=logs, sleep_fn=sleep_fn,
-                                             state=state, nudge_kind="goal"):
+                                             state=state):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
