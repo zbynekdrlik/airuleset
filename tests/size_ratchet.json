@@ -593,7 +593,7 @@
     "watchdog/compact.py": 1894,
     "watchdog/conformance.py": 438,
     "watchdog/conformance_heartbeat.py": 409,
-    "watchdog/cross_stream.py": 2058,
+    "watchdog/cross_stream.py": 2057,
     "watchdog/decide.py": 791,
     "watchdog/deploy_state.py": 452,
     "watchdog/discord_api.py": 187,
