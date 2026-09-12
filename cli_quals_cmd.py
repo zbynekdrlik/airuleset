@@ -913,11 +913,25 @@ def _apply_role_filter(rows, root, role):
     flag) returns `rows` unchanged (today's behaviour). This is the ROUTING that
     replaces the removed class-based live-infra-lane gate: the `infra` label (and
     the whole airuleset repo, and `architecture-rework`) sends a ticket into the
-    infra role/target (round-3 sequential mode)."""
+    infra role/target (the per-role sequential mode is PENDING round 3, #993 —
+    today this is the routing slice only).
+
+    Fail-CLOSED (#993 r2b review 🔴): `work_class` decides the airuleset repo
+    infra by SLUG, so an unresolvable slug (`_repo_slug` returns "" on any gh
+    failure) would mis-classify EVERY airuleset row as independent — leaking
+    infra into a `--role review` slice and printing `0` for `--role infra
+    --count` (a false stop-proof). When `--role` is set and the slug cannot be
+    resolved, REFUSE (exit 1) instead of silently mis-slicing — the same
+    unmeasurable→refuse contract `_dep_wait_map_for` uses."""
     if role not in ("review", "infra"):
         return rows
     import airuleset
     slug = airuleset._repo_slug(cwd=root)
+    if not slug:
+        print("role-slice: repo slug unavailable (a gh query failed) — cannot "
+              "classify rows for --role; refusing rather than mis-slicing",
+              file=sys.stderr)
+        sys.exit(1)
     out = {}
     for n, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None

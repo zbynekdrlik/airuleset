@@ -226,6 +226,6 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
         "PRIORITU (ČO riešiť a v akom poradí) ani POČET lán NEURČUJE tento nudge "
         "— platí priorita dohodnutá v tejto session: architektúra > "
         "architecture-rework > prio:bounce > backlog (#993). "
-        "NErefillni dep-wait jednotku (otvorené Depends-on); infra prácu smeruj "
-        "cez --role do infra roly (#993 r2b)."
+        "NErefillni dep-wait jednotku (otvorené Depends-on); infra tikety rieš "
+        "po jednom (sériová infra rola je v návrhu, kolo 3 #993)."
     ) % (backlog_n, live_workers, waiters, resource_snippet)

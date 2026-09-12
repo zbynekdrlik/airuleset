@@ -1,8 +1,9 @@
 """#993 round 2 — the PURE orchestration-classification module `cli_work_class`.
 
 work_class(repo, labels), Depends-on: parsing + resolution, the dep-wait
-predicate, the dispatchable predicate and the lane-class-from-issue-classes
-fail-safe. All pure + dependency-injected; the gh/git IO lives in the callers.
+predicate and the dispatchable predicate (deps-only since round 2b — the
+class-based lane-serialisation helpers were removed). All pure +
+dependency-injected; the gh/git IO lives in the callers.
 
 Covers item 1 (work_class), item 6 (c) airuleset serial regardless of labels,
 (d) missing labels → infra, (g) work_class unit table, and item 7's pure

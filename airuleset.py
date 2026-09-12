@@ -5486,7 +5486,7 @@ def _watchdog_dispatchable_fetch(cwd):
     (per-cwd TTL) so the O(workable) `--count-dispatchable` subprocess fires at
     most once per repo per window, never every sweep. Wired HERE, like every
     network call in this file, so run_once unit tests stay network-free
-    (dispatchable_fetch None → the lane nudge does NOT class-gate)."""
+    (dispatchable_fetch None → the lane nudge does NOT dep-gate)."""
     import subprocess
     try:
         root = _repo_root(cwd=cwd) or cwd
@@ -7794,7 +7794,8 @@ def _add_dispatch_flags(parser):
         help="Slice the rows by work class (#993 r2b): 'review' = rows whose "
              "class is NOT infra; 'infra' = rows whose class IS infra; omitted "
              "= no filter. This is how the `infra` label ROUTES a ticket into "
-             "the infra role/target (round-3 sequential mode).")
+             "the infra role/target (the per-role sequential mode is PENDING "
+             "round 3, #993 — today this is the routing slice only).")
 
 
 def main():

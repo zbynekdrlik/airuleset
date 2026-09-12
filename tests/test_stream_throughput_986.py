@@ -191,12 +191,16 @@ def _seed_overlap_receipt(tmpdir, cwd, issues=(1,)):
     independence gate (#992/#993, which runs BEFORE the wdrain-ceiling check)
     passes — letting these tests actually exercise the W-drain ceiling they
     claim to test, not the independence gate that would otherwise block the
-    receipt-less autopilot-worker payload (#993 r2b)."""
-    d = pathlib.Path(tmpdir) / ".claude" / "lane-overlap"
-    d.mkdir(parents=True, exist_ok=True)
-    rec = {"checked_issues": [int(i) for i in issues], "ts": time.time(),
-           "verdict": "clear", "overlaps": []}
-    (d / (_cwd_key(cwd) + ".json")).write_text(json.dumps(rec))
+    receipt-less autopilot-worker payload (#993 r2b). Seeds via the REAL
+    producer `cli_lane_overlap.write_receipt` (#993 r2b review 🔵 — no
+    hand-crafted schema that could drift from what the hook reads)."""
+    sys.path.insert(0, str(REPO))
+    try:
+        import cli_lane_overlap as lo
+        lo.write_receipt(tmpdir, _cwd_key(cwd), [int(i) for i in issues],
+                         "clear", [])
+    finally:
+        sys.path.pop(0)
 
 
 def _run_wdrain_hook(payload, env_extra=None):
@@ -238,6 +242,10 @@ class TestWdrainStaleOnly(unittest.TestCase):
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
                              "High stale W was not blocked")
+            # #993 r2b review 🟡: prove it is the W-drain ceiling that blocked,
+            # not the (seeded-past) independence gate.
+            self.assertIn("W-drain gate", stderr)
+            self.assertNotIn("independence check", stderr)
 
     def test_missing_stale_field_falls_back_to_total(self):
         """A legacy cache without ops_wait_stale falls back to ops_wait."""
@@ -251,6 +259,8 @@ class TestWdrainStaleOnly(unittest.TestCase):
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
                              "Missing stale field did not fall back to total W")
+            self.assertIn("W-drain gate", stderr)          # #993 r2b review 🟡
+            self.assertNotIn("independence check", stderr)
 
     def test_stale_at_threshold_passes(self):
         """stale=3 exactly — threshold is > 3, so 3 passes."""
@@ -289,6 +299,8 @@ class TestWdrainStaleOnly(unittest.TestCase):
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
                              "Legacy hard ceiling did not block")
+            self.assertIn("W-drain gate", stderr)          # #993 r2b review 🟡
+            self.assertNotIn("independence check", stderr)
 
 
 # ---------- Item 5: Closes-finding sha validation -------------------------

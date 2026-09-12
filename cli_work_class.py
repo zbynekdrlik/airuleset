@@ -375,6 +375,13 @@ def classify_number(number, slug, runner, root):
     dispatchable unless a dependency is still open (the class-based infra-serial
     gate was removed in round 2b)."""
     body, comments = _issue_body_comments(number, runner, root)
+    # #993 r2b review 🟡: `_issue_body_comments` returns (None, []) when the gh
+    # read FAILED (vs ("", []) for a genuinely empty body). An unreadable body →
+    # we cannot know whether it carries a Depends-on:, so fail-safe to dep-wait
+    # (HOLD) rather than a spurious dispatch. Before r2b the class-based
+    # infra-serial HOLD masked this on airuleset; that net is gone.
+    if body is None and not comments:
+        return "dep-wait"
     refs = depends_on_refs(body, comments) if (body is not None or comments) else []
     deps = [d for d in (normalize_ref(r, slug) for r in refs) if d is not None]
     ni = _as_int(number)

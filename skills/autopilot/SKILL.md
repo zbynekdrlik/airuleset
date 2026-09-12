@@ -483,14 +483,15 @@ issue is not lost — it fills a LATER free lane, exactly like any issue that fa
 2026-09-12).** CI workflows, hooks/gates, the release chain, deploy tooling, the runner pool, and
 airuleset modules/skills/agents are `infra`. Infra serialisation is achieved by ROUTING the `infra`
 label into the infra role/target — `core-quals`/`slice-quals --role infra` slices the infra rows;
-`--role review` slices the non-infra rows — and that infra role/target runs in the round-3 sequential
-CONCURRENCY MODE (one lane, main design + main review, no saturation nudges). The class-based
-"live-infra-lane" gate inside a parallel target was REMOVED in round 2b (it was a second, redundant
-mechanism for the same goal — the owner's "uz mam dost patchworkov"). A parallel target therefore
-never needs to detect a live infra lane: infra tickets simply do not reach it (they are routed to the
-infra role). An `architecture-rework` ticket is infra class (and sorts first). The
-parallelism-without-context treadmill (odoo-erp#6883: ~64% of gk lanes repairing gk's own infra
-breakage) is what routing prevents.
+`--role review` slices the non-infra rows. The class-based "live-infra-lane" gate inside a parallel
+target was REMOVED in round 2b (it was a second, redundant mechanism for the same goal — the owner's
+"uz mam dost patchworkov"). **PENDING (round 3, #993, designed in the directive-3/4 comments, not yet
+shipped): the per-role/target sequential CONCURRENCY MODE (one lane, main design + main review, no
+saturation nudges) that the infra role runs in. UNTIL round 3 lands, `--role` is the routing SLICE
+only and the main works infra units ONE AT A TIME itself** (there is no separate infra target yet, so
+nothing else serialises infra between r2b and r3). An `architecture-rework` ticket is infra class (and
+sorts first). The parallelism-without-context treadmill (odoo-erp#6883: ~64% of gk lanes repairing
+gk's own infra breakage) is what routing prevents.
 
 **Dependency ordering — NEVER dispatch a `dep-wait` unit (#993, owner directive 2026-09-12: "niektore
 ulohy musia ist po vyhodnoteni predchadzajucitch").** A ticket carrying a `Depends-on: #N[, #M]` line
