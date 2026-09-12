@@ -417,6 +417,20 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         logs.append("queue-arrival %s -> skip:not-full-authority (%s)"
                     % (loc, authority))
         return logs
+    # #998 — a SEQUENTIAL-mode pane never gets a refill/queue-arrival nudge:
+    # ONE unit at a time, no refill (subagents/consults are NOT gated). Cheap,
+    # before any fetch. Fail-safe: a resolver error is treated as
+    # non-sequential (today's behaviour), and LOGGED (never a silent swallow).
+    try:
+        import cli_concurrency
+        _seq_mode = cli_concurrency.resolve_mode(cwd)
+    except Exception as e:  # noqa: BLE001
+        _seq_mode = None
+        logs.append("queue-arrival %s -> concurrency-resolve-error (%r) — "
+                    "treating as non-sequential" % (loc, e))
+    if _seq_mode == "sequential":
+        logs.append("queue-arrival %s -> skip:sequential-mode" % loc)
+        return logs
     # CACHED per-repo: the union fires at most once per repo per TTL. A
     # cache/fetch error reads as None -> skip.
     try:

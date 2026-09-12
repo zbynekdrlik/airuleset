@@ -121,6 +121,32 @@ def resolve_role(cwd, window_name=None, user=None, home=None, windows=None):
     return resolve_concurrency(cwd, window_name, user, home, windows)[1]
 
 
+def dispatch_gate_line(cwd, repo_root=None, run=None, live_count=None):
+    """One-line verdict for ``block-dispatch-over-wdrain.sh``'s #998
+    sequential gate: ``"<verdict>|<mode>|<live>"`` (verdict ∈ allow/block).
+
+    ``block`` ONLY when the pane's mode is ``sequential`` AND at least one live
+    worktree lane already exists for the repo containing ``cwd`` (the total cap
+    is 1, so the 2nd concurrent ``autopilot-worker`` is refused). ``parallel``
+    (and any resolver error) always allows — fail-safe toward today's
+    behaviour, never a false block. ``live_count``/``run`` are test seams."""
+    try:
+        mode = resolve_mode(cwd)
+    except Exception:  # noqa: BLE001
+        return "allow|unknown|0"
+    if mode != "sequential":
+        return "allow|%s|0" % mode
+    if live_count is None:
+        try:
+            import cli_lane_overlap
+            root = repo_root or cwd
+            live_count = len(cli_lane_overlap.gather_live_lanes(root, run=run))
+        except Exception:  # noqa: BLE001 — cannot count => fail-safe allow
+            return "allow|sequential|0"
+    verdict = "block" if live_count >= 1 else "allow"
+    return "%s|sequential|%d" % (verdict, live_count)
+
+
 def concurrency_status_row(cwd, window_name=None, user=None, home=None,
                            windows=None):
     """The ``airuleset.py status`` row (#998 item 4):

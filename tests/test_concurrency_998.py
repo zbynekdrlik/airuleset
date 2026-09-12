@@ -148,5 +148,74 @@ class TestResolveConcurrency(TestCase):
             self.assertIn("concurrency: parallel (source: default)", row)
 
 
+class TestSequentialCaps(TestCase):
+    """#998 item 2 — sequential mode forces the lane total to 1; parallel is
+    byte-identical to the pre-#998 file-only cap."""
+
+    def _write(self, d, obj):
+        claude = Path(d) / ".claude"
+        claude.mkdir(exist_ok=True)
+        (claude / "lane-resources.json").write_text(json.dumps(obj))
+
+    def test_sequential_project_forces_total_1(self):
+        from watchdog import lane_resources as lr
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, {"mode": "sequential"})
+            caps, reason = lr.lane_resource_caps(d)
+            self.assertEqual(caps, {"total": 1})
+            self.assertEqual(reason, "sequential-mode")
+
+    def test_sequential_overrides_max_lanes(self):
+        from watchdog import lane_resources as lr
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, {"max_lanes": 5, "mode": "sequential"})
+            caps, _ = lr.lane_resource_caps(d)
+            self.assertEqual(caps, {"total": 1})
+
+    def test_parallel_is_byte_identical_to_file_caps(self):
+        from watchdog import lane_resources as lr
+        with tempfile.TemporaryDirectory() as d:
+            self._write(d, {"max_lanes": 3})
+            self.assertEqual(lr.lane_resource_caps(d), lr._file_caps(d))
+            self.assertEqual(lr.lane_resource_caps(d)[0], {"total": 3})
+
+    def test_no_file_default_parallel_unchanged(self):
+        from watchdog import lane_resources as lr
+        with tempfile.TemporaryDirectory() as d:
+            caps, reason = lr.lane_resource_caps(d)
+            self.assertEqual(caps, {"total": lr.GOAL_LANE_SATURATION_WORKERS})
+            self.assertIsNone(reason)
+
+
+class TestDispatchGateLine(TestCase):
+    """#998 item 2 — the block-dispatch-over-wdrain.sh sequential verdict."""
+
+    def _seq_dir(self):
+        d = tempfile.mkdtemp()
+        claude = Path(d) / ".claude"
+        claude.mkdir()
+        (claude / "lane-resources.json").write_text(json.dumps({"mode": "sequential"}))
+        return d
+
+    def test_parallel_always_allows(self):
+        with tempfile.TemporaryDirectory() as d:
+            line = cc.dispatch_gate_line(d, live_count=99)
+            self.assertTrue(line.startswith("allow|"))
+
+    def test_sequential_with_zero_live_allows_first(self):
+        d = self._seq_dir()
+        self.assertEqual(cc.dispatch_gate_line(d, live_count=0),
+                         "allow|sequential|0")
+
+    def test_sequential_with_one_live_blocks_second(self):
+        d = self._seq_dir()
+        self.assertEqual(cc.dispatch_gate_line(d, live_count=1),
+                         "block|sequential|1")
+
+    def test_sequential_with_many_live_blocks(self):
+        d = self._seq_dir()
+        self.assertTrue(cc.dispatch_gate_line(d, live_count=3).startswith("block|"))
+
+
 if __name__ == "__main__":
     main()

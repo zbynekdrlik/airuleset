@@ -4719,6 +4719,23 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # worktree lanes under /autopilot (SKILL fleet default), so it gets the
         # nudge like full authority (was `!= "full"`, a stale full-only assumption).
         return logs, False
+    # #998 -- a SEQUENTIAL-mode pane is ONE unit at a time, NO refill: the
+    # lane-occupancy refill nudge NEVER fires for it (subagents/consults are
+    # NOT gated -- only the refill push). Resolved by the single resolver; a
+    # resolver error is treated as non-sequential (today's behaviour), logged
+    # (never a silent swallow). Placed after the authority gate, before any
+    # count/keystroke work.
+    try:
+        import cli_concurrency
+        _seq_mode = cli_concurrency.resolve_mode(cwd)
+    except Exception as e:  # noqa: BLE001
+        _seq_mode = None
+        _lane_skip(logs, loc, "concurrency-resolve-error (%r) -- treating as "
+                              "non-sequential" % e)
+    if _seq_mode == "sequential":
+        _lane_skip(logs, loc, "skip:sequential-mode (one unit at a time, no "
+                              "refill -- the sequential target caps lanes at 1)")
+        return logs, False
     idle = now - (tmtime or now)
     # #442 THIRD GAP / #619 -- the old top-of-function idle gate returned HERE
     # with EMPTY logs whenever the transcript was fresh -- which a BUSY

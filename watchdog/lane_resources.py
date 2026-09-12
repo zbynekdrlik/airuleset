@@ -45,20 +45,37 @@ _LANE_NEEDS_FILE = "lane-needs"
 
 
 def lane_resource_caps(cwd):
-    """Read ``.claude/lane-resources.json`` and return ``(caps, reason)``.
+    """Read ``.claude/lane-resources.json`` + apply the #998 sequential-mode
+    cap, returning ``(caps, reason)``.
 
     ``caps`` is a dict: ``{"total": N}`` (flat cap, backward compat) or
     ``{"total": N, "box": M}`` (per-resource).  ``reason`` is ``None`` on
     success or a short diagnostic string when the default is returned.
 
-    File format::
-
-        {"max_lanes": 5, "resources": {"box": 1}}
-
-    ``max_lanes`` is the TOTAL ceiling (1..GOAL_LANE_SATURATION_WORKERS).
-    ``resources`` maps resource names to their concurrency caps (optional;
-    absent = flat cap, today's behavior).
+    #998: when the pane's EFFECTIVE mode is ``sequential`` (a declared
+    sequential window, or a project ``{"mode":"sequential"}``), the total cap
+    is forced to **1** regardless of ``max_lanes`` — ONE worker lane at a
+    time. The mode is resolved by the SINGLE resolver
+    (``cli_concurrency.resolve_mode``) so a declared window and a project file
+    collapse to one lane through the same source of truth. ``parallel`` is
+    byte-identical to the pre-#998 behaviour.
     """
+    caps, reason = _file_caps(cwd)
+    try:
+        import cli_concurrency
+        mode = cli_concurrency.resolve_mode(cwd)
+    except Exception:  # noqa: BLE001 — resolver unavailable => today's caps
+        mode = None
+    if mode == "sequential":
+        # ONE lane, authoritative over max_lanes/resources — the file caps (and
+        # any file diagnostic) are moot once the total is forced to 1.
+        return {"total": 1}, "sequential-mode"
+    return caps, reason
+
+
+def _file_caps(cwd):
+    """The pre-#998 file-only cap read (max_lanes / resources). Split out so
+    ``lane_resource_caps`` can layer the sequential-mode override on top."""
     default_caps = {"total": GOAL_LANE_SATURATION_WORKERS}
     p = os.path.join(cwd, _LANE_RESOURCE_FILE) if cwd else None
     if not p:

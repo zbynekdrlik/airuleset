@@ -125,6 +125,40 @@ if [ -n "$ISSUES" ]; then
 fi
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# #998 — SEQUENTIAL-MODE dispatch gate. When the pane's resolved concurrency
+# mode is `sequential` (a declared sequential window like gk-infra, or a
+# project `.claude/lane-resources.json` `{"mode":"sequential"}` like airuleset),
+# the lane cap is total=1 — so a 2nd LIVE autopilot-worker dispatch is REFUSED,
+# with a message naming the mode. `parallel` (and any resolver error) is
+# fail-OPEN: today's behaviour, never a false block. The verdict is computed in
+# python (cli_concurrency.dispatch_gate_line) — the single resolver + the
+# post-#998 live-lane count (merged lanes excluded).
+REPO_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "")
+if [ -n "$REPO_DIR" ]; then
+    SEQ_LINE=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -c \
+'import os, cli_concurrency; print(cli_concurrency.dispatch_gate_line(os.environ.get("AIRULESET_GATE_CWD","")))' \
+        2>/dev/null || echo "allow|error|0")
+    SEQ_VERDICT=${SEQ_LINE%%|*}
+    SEQ_MODE=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f2)
+    if [ "$SEQ_VERDICT" = "block" ]; then
+        {
+            echo "BLOCKED: sequential-mode gate — this target runs in '$SEQ_MODE' mode (lane cap = 1)."
+            echo ""
+            echo "  A live autopilot-worker lane is already running for this box, and"
+            echo "  '$SEQ_MODE' mode means ONE unit at a time: dispatch -> main review ->"
+            echo "  integrate -> verify -> next, with NO refill. Wait for the live lane to"
+            echo "  return and integrate before dispatching the next unit."
+            echo ""
+            echo "  (Mode is set by the declared window / project .claude/lane-resources.json;"
+            echo "  see cli_concurrency.resolve_concurrency. Subagents/consults are NOT gated —"
+            echo "  only a 2nd concurrent autopilot-worker.)"
+        } >&2
+        exit 2
+    fi
+fi
+# ---------------------------------------------------------------------------
+
 # Read ops_wait from tickets-status cache
 CACHE_DIR="$HOME/.claude/tickets-status"
 CACHE_FILE="$CACHE_DIR/$CWD_KEY.json"
