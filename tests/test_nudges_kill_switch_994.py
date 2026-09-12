@@ -26,8 +26,12 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd  # noqa: E402
+import watchdog.goal as goal  # noqa: E402
 import statusbar  # noqa: E402
 import airuleset  # noqa: E402
+from _goal_arm_helpers import (  # noqa: E402
+    DeliverGoalFakeTmux, GOAL_DRAFT_CAP, _write_marker_transcript,
+    _isolate_goal_state)
 
 PID = "%9"
 
@@ -89,11 +93,21 @@ class TestHelpersSuppressWhenOff(unittest.TestCase):
             "expected a `nudges OFF: suppressed ...` journal line, got %r" % logs)
 
     def test_send_verified_suppressed(self):
+        # #994 REOPEN — suppression is now observed at the `_type_literal_verified`
+        # PRIMITIVE, so the helper must actually REACH it: a real (readable) tpath
+        # and a bare box (the _Recorder returns "" for every capture).
         rec = _Recorder()
         logs = []
-        with self._off():
-            ok = wd.send_verified(PID, "lane-check: backlog=5", rec,
-                                  tpath="/x", logs=logs)
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            # A BARE idle box so the pre-send bare/raced checks pass and the
+            # ladder reaches the `_type_literal_verified` primitive (the same
+            # `_input_line_text == ""` shim the compact test uses).
+            with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                    self._off():
+                ok = wd.send_verified(PID, "lane-check: backlog=5", rec,
+                                      tpath=tp, logs=logs)
         self.assertFalse(ok)
         self.assertEqual(rec.sent_keys(), [])
         self._assert_journaled(logs)
@@ -108,11 +122,17 @@ class TestHelpersSuppressWhenOff(unittest.TestCase):
         self._assert_journaled(logs)
 
     def test_send_subagent_nudge_suppressed(self):
+        # #994 REOPEN — delegates to `send_verified`, whose primitive suppresses;
+        # a real tpath lets it reach that primitive (journal kind is "send").
         rec = _Recorder()
         logs = []
-        with self._off():
-            ok = wd.send_subagent_nudge(PID, "wid-1", "api-error", rec,
-                                        tpath="/x", logs=logs)
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                    self._off():
+                ok = wd.send_subagent_nudge(PID, "wid-1", "api-error", rec,
+                                            tpath=tp, logs=logs)
         self.assertFalse(ok)
         self.assertEqual(rec.sent_keys(), [])
         self._assert_journaled(logs)
@@ -339,19 +359,22 @@ class TestNudgeTextPhraseLock(unittest.TestCase):
 # Source lock: the owner-reply bypass may be granted from ONE place only.
 # --------------------------------------------------------------------------- #
 class TestUserAuthoredCallSiteLock(unittest.TestCase):
-    """`user_authored=True` bypasses the kill switch, so the set of production
-    call sites that grant it is a security boundary: it must stay exactly
-    {watchdog/discord_replies.py}. `watchdog/tmux_io.py` only DEFINES the kwarg
-    (default `user_authored=False`) and is not a grant site. A new grant added
-    anywhere else (a machine nudge that quietly opts itself back in at OFF)
-    fails this test."""
+    """A HARD-CODED truthy `user_authored=True` bypasses the kill switch, so the
+    set of production call sites that GRANT it is a security boundary: it must
+    stay exactly {watchdog/discord_replies.py}. #994 REOPEN — the primitive gate
+    now lives in `stash.py`, so `deliver_with_stash`/`_type_literal_verified`
+    FORWARD the caller's own `user_authored` down as a plumbing kwarg
+    (`user_authored=user_authored`, a variable). A forward plumbs the caller's
+    EXISTING authorization; it is NOT a new grant. Only a hard-coded truthy
+    literal is a grant. A new literal opt-in anywhere but discord_replies.py (a
+    machine nudge quietly opting itself back in at OFF) fails this test."""
 
     @staticmethod
     def _grants_bypass(src):
-        """True if any call in `src` passes `user_authored=<not-literal-False>`.
-        AST-based (not a substring match) so `user_authored=True`,
-        `user_authored = True`, and `user_authored=<expr>` are all caught, and a
-        mention in a comment/string is not."""
+        """True if any call in `src` HARD-CODES a truthy `user_authored` literal
+        (`user_authored=True`). AST-based (not a substring match). A variable /
+        attribute forward (`user_authored=user_authored`) is plumbing, not a
+        grant, and a `user_authored=False` deny is not a grant."""
         import ast
         try:
             tree = ast.parse(src)
@@ -364,8 +387,16 @@ class TestUserAuthoredCallSiteLock(unittest.TestCase):
                 if kw.arg != "user_authored":
                     continue
                 v = kw.value
-                if isinstance(v, ast.Constant) and v.value is False:
-                    continue  # the default/deny value — not a grant
+                if isinstance(v, ast.Constant):
+                    if v.value:            # a truthy literal (True) = a grant
+                        return True
+                    continue               # False / None / 0 = deny, not a grant
+                # Not a constant: ONLY the same-name plumbing forward
+                # (`user_authored=user_authored`) is allowed. Any OTHER value —
+                # a different Name, a call, an attribute, an expression — is a
+                # grant (a machine caller opting a keystroke past OFF).
+                if isinstance(v, ast.Name) and v.id == "user_authored":
+                    continue
                 return True
         return False
 
@@ -389,6 +420,232 @@ class TestUserAuthoredCallSiteLock(unittest.TestCase):
             "user_authored bypass (a truthy/non-False user_authored kwarg) may be "
             "granted from watchdog/discord_replies.py ONLY; found: %r" % sorted(grant_files),
         )
+
+
+# --------------------------------------------------------------------------- #
+# #994 REOPEN — the gate lives at the literal-typing PRIMITIVE, not five helpers.
+# The hole: `deliver_goal` -> `deliver_with_stash` -> `stash._type_literal`
+# (`tmux send-keys -l`) typed at OFF because the #994 checks were on the FIVE
+# tmux_io helpers only, and stash.py's `_type_literal` was misclassified as a
+# control-key site. These reproduce the hole (RED) and lock it shut.
+# --------------------------------------------------------------------------- #
+class TestTypeLiteralPrimitiveGate(unittest.TestCase):
+    def _off(self):
+        return m.patch.object(wd, "nudges_enabled", lambda *a, **k: False)
+
+    def test_type_literal_types_nothing_at_off(self):
+        # The ROOT of the reopen: the single literal-typing primitive itself
+        # must type nothing when nudges are OFF (default = machine caller).
+        rec = _Recorder()
+        with self._off():
+            wd._type_literal(PID, rec, "lane-check: backlog=5")
+        self.assertEqual(
+            rec.sent_keys(), [],
+            "the literal-typing primitive TYPED while nudges were OFF: %r"
+            % rec.sent_keys())
+
+    def test_type_literal_user_authored_types_at_off(self):
+        # The owner's OWN reply (user_authored=True, forwarded from
+        # deliver_with_stash/send_verified) BYPASSES the switch: it TYPES at OFF
+        # and is never journalled as suppressed.
+        rec = _Recorder()
+        logs = []
+        with self._off():
+            r = wd._type_literal(PID, rec, "owner reply text",
+                                 user_authored=True, logs=logs)
+        self.assertTrue(r)
+        self.assertTrue(
+            any("-l" in a for a in rec.sent_keys()),
+            "user_authored must TYPE at OFF: %r" % rec.sent_keys())
+        self.assertFalse(any("nudges OFF: suppressed" in ln for ln in logs))
+
+
+class TestGoalSweepHoleClosed(unittest.TestCase):
+    """The reopen incident end-to-end: goal-sweep's `deliver_goal` draft path
+    (-> `deliver_with_stash`) must reach the pane with ZERO keystrokes at OFF and
+    journal `nudges OFF: suppressed goal`. Against the pre-fix tree the stash
+    `C-s` fires before the abort, so `keys()` is non-empty (RED)."""
+
+    SID = "sess-994-goalsweep"
+    CWD = "/home/newlevel/devel/kill994"
+
+    def setUp(self):
+        _isolate_goal_state(self)
+
+    def test_deliver_goal_draft_path_suppressed_at_off(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        proj = Path(d.name)
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_DRAFT_CAP, model_type=True)
+        logs = []
+        with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False):
+            word = goal.deliver_goal(
+                self.SID, self.CWD, "/goal STOP CONDITIONS x", "full",
+                run=tmux, projects_dir=proj, sleep_fn=lambda s: None, logs=logs)
+        self.assertEqual(
+            tmux.keys(), [],
+            "keystrokes reached the pane while nudges were OFF: %r" % tmux.keys())
+        self.assertTrue(
+            any("nudges OFF: suppressed goal" in ln for ln in logs),
+            "expected a `nudges OFF: suppressed goal` journal line: %r" % logs)
+        self.assertNotEqual(word, "sent")
+
+
+class TestNoStrayKeystrokeAtOff(unittest.TestCase):
+    """#994 REOPEN review finding (correctness): even the PRE-TYPE strip-deselect
+    Escape must not reach the pane at OFF. The Escape only exists to make the
+    following (now-suppressed) submit land, so at OFF a machine caller must fire
+    ZERO keystrokes — 'OFF -> type NOTHING' covers the control keystroke too."""
+
+    def _off(self):
+        return m.patch.object(wd, "nudges_enabled", lambda *a, **k: False)
+
+    def test_send_continue_no_escape_at_off_when_strip_selected(self):
+        # send_continue reads its OWN module-local `_strip_selected`, so drive it
+        # with a REAL strip-selected capture (`❯ ● main`), not a facade patch.
+        class _StripRec(_Recorder):
+            def __call__(self, argv, timeout=8):
+                self.calls.append(argv)
+                return "❯ ● main\n❯ \n" if "capture-pane" in " ".join(argv) else ""
+        rec = _StripRec()
+        logs = []
+        with self._off():
+            r = wd.send_continue(PID, "/compact", rec, logs=logs)
+        self.assertFalse(r)
+        self.assertEqual(rec.sent_keys(), [],
+                         "a stray keystroke reached the pane at OFF: %r"
+                         % rec.sent_keys())
+
+    def test_send_verified_no_escape_at_off_when_strip_selected(self):
+        rec = _Recorder()
+        logs = []
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                    m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
+                    self._off():
+                ok = wd.send_verified(PID, "lane-check: x", rec, tpath=tp,
+                                      logs=logs)
+        self.assertFalse(ok)
+        self.assertEqual(rec.sent_keys(), [],
+                         "a stray keystroke reached the pane at OFF: %r"
+                         % rec.sent_keys())
+
+    def test_send_verified_user_authored_still_escapes_at_off(self):
+        # The owner's own reply must STILL deselect + deliver at OFF.
+        rec = _Recorder()
+        logs = []
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                    m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
+                    self._off():
+                wd.send_verified(PID, "owner reply", rec, tpath=tp, logs=logs,
+                                 user_authored=True)
+        # user_authored bypass -> the strip-Escape DOES fire (delivery proceeds).
+        self.assertTrue(any(a[-1] == "Escape" for a in rec.sent_keys()),
+                        "owner reply must still deselect the strip at OFF: %r"
+                        % rec.sent_keys())
+
+    def test_send_goal_verified_no_escape_at_off_when_strip_selected(self):
+        rec = _Recorder()
+        logs = []
+        with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""), \
+                m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
+                self._off():
+            ok = goal._send_goal_verified(PID, "/goal x", rec,
+                                          sleep_fn=lambda *_a: None, logs=logs)
+        self.assertFalse(ok)
+        self.assertEqual(rec.sent_keys(), [],
+                         "a stray keystroke reached the pane at OFF: %r"
+                         % rec.sent_keys())
+
+
+class TestDeliverWithStashPrimitiveGate(unittest.TestCase):
+    def _off(self):
+        return m.patch.object(wd, "nudges_enabled", lambda *a, **k: False)
+
+    def test_deliver_with_stash_suppressed_at_off(self):
+        # (b) — the stash-around delivery primitive gates at the TOP (before the
+        # C-s toggle), so an OFF box receives ZERO keystrokes.
+        rec = _Recorder()
+        logs = []
+        with self._off():
+            ok = wd.deliver_with_stash(PID, "/goal test", rec,
+                                       nudge_kind="goal", logs=logs)
+        self.assertFalse(ok)
+        self.assertEqual(rec.sent_keys(), [])
+        self.assertTrue(
+            any("nudges OFF: suppressed goal" in ln for ln in logs),
+            "expected `nudges OFF: suppressed goal`: %r" % logs)
+
+    def test_deliver_with_stash_user_authored_bypasses_at_off(self):
+        # (c) — the owner's OWN reply (user_authored=True, the discord_replies
+        # grant) is NOT suppressed at OFF: it runs past the gate into the body
+        # (which then aborts on the empty fake's missing free prompt — proof the
+        # gate was bypassed, not the suppression short-circuit).
+        rec = _Recorder()
+        logs = []
+        with self._off():
+            ok = wd.deliver_with_stash(PID, "owner reply text", rec,
+                                       user_authored=True, logs=logs)
+        self.assertFalse(ok)
+        self.assertFalse(
+            any("nudges OFF: suppressed" in ln for ln in logs),
+            "user_authored must NOT be suppressed: %r" % logs)
+        self.assertTrue(
+            any("stash-abort: no free prompt" in ln for ln in logs),
+            "expected the body to run past the gate: %r" % logs)
+
+
+class TestLiteralTypingPrimitiveLock(unittest.TestCase):
+    """Repo-wide structural lock: EVERY `tmux send-keys ... -l` (literal-typing)
+    emission in `watchdog/` must live inside the ONE function `_type_literal`, so
+    no seventh literal-typing primitive can silently reappear and reopen the hole
+    (the #994 root cause). AST-based, not a substring grep."""
+
+    @staticmethod
+    def _funcs_emitting_literal_send_keys(path):
+        import ast
+        names = set()
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+
+        def _is_literal_send_keys(node):
+            # a list literal whose Constant elements include both "send-keys"
+            # and the literal-typing flag "-l"
+            if not isinstance(node, ast.List):
+                return False
+            consts = {e.value for e in node.elts
+                      if isinstance(e, ast.Constant)}
+            return "send-keys" in consts and "-l" in consts
+
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for sub in ast.walk(fn):
+                if _is_literal_send_keys(sub):
+                    names.add(fn.name)
+                    break
+        return names
+
+    def test_only_type_literal_emits_literal_send_keys(self):
+        wd_dir = REPO / "watchdog"
+        offenders = {}
+        for path in wd_dir.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            fns = self._funcs_emitting_literal_send_keys(path)
+            for fn in fns:
+                offenders.setdefault(fn, []).append(
+                    path.relative_to(REPO).as_posix())
+        self.assertEqual(
+            set(offenders), {"_type_literal"},
+            "every `send-keys ... -l` emission in watchdog/ must live in "
+            "`_type_literal`; found emitters: %r" % offenders)
 
 
 if __name__ == "__main__":

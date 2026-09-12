@@ -151,7 +151,8 @@ def _pane_shows_collapsed_paste(itext):
     return bool(itext) and bool(_PASTE_EXPAND_HINT_RX.search(itext))
 
 
-def _type_literal(pid, run, text, sleep_fn=None):
+def _type_literal(pid, run, text, sleep_fn=None, kind="type",
+                  user_authored=False, logs=None):
     """Send `text` into the pane's input box literally — in ONE burst below
     `GOAL_TYPE_CHUNK_THRESHOLD` chars (unchanged from before this ticket),
     or in small CHUNKS at/above it (#322) so CC never treats the whole
@@ -177,16 +178,30 @@ def _type_literal(pid, run, text, sleep_fn=None):
     '-DASH-OK'` lands the literal text, `send-keys -l '-DASH-OK'` (no `--`)
     fails exactly as above. Applied to BOTH the single-burst and the
     chunked path — a single-burst payload can equally start with `-` (job
-    7's arbitrary `prompt` argument is not `/goal`-prefixed)."""
+    7's arbitrary `prompt` argument is not `/goal`-prefixed).
+
+    #994 REOPEN -- this is the ONE literal-typing primitive in `watchdog/`, so
+    it carries the owner's nudge kill switch (moved here from the five tmux_io
+    helpers, which misclassified this stash.py `send-keys -l` site as a control
+    key and left the goal-sweep -> `deliver_with_stash` -> here path un-gated).
+    OFF (`watchdog.nudges_enabled()` False) -> type NOTHING, journal one line,
+    return False. `user_authored` (the owner's OWN Discord reply, forwarded from
+    `deliver_with_stash`/`send_verified`) is the SOLE bypass. Returns True on an
+    attempted type, so a caller with no post-type verify (`send_continue`) reads
+    the return and leaves its request pending when suppressed."""
+    if not user_authored and not watchdog.nudges_enabled():
+        watchdog._suppress_nudge(kind, text, logs)
+        return False
     sleep_fn = sleep_fn or time.sleep
     if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
         run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
-        return
+        return True
     for i in range(0, len(text), GOAL_TYPE_CHUNK_SIZE):
         run(["tmux", "send-keys", "-t", pid, "-l", "--",
             text[i:i + GOAL_TYPE_CHUNK_SIZE]])
         if i + GOAL_TYPE_CHUNK_SIZE < len(text):
             sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
+    return True
 
 
 GOAL_TYPE_VERIFY_RETRIES = 2         # #670: first-byte-race undo+retype budget
@@ -332,7 +347,8 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
     return cls
 
 
-def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn):
+def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
+                                    user_authored=False):
     """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
     the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
     box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
@@ -357,7 +373,10 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn):
     Only ever called for a scroll-length payload (`len >= GOAL_TYPE_SCROLL_
     CHECKPOINT_THRESHOLD`); a short payload never reaches here."""
     head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
-    _type_literal(pid, run, head_chunk, sleep_fn)
+    # #994 -- forward `user_authored` so an owner reply delivered via the stash
+    # two-phase path types even if nudges flip OFF mid-delivery; a machine caller
+    # (user_authored=False) is already gated at its delivery entry point.
+    _type_literal(pid, run, head_chunk, sleep_fn, user_authored=user_authored)
     # #763 -- the verify REFERENCE is the chunk sans trailing whitespace: an
     # arbitrary [:120] slice can end mid-whitespace (ALL three real templates
     # do -- '...MY '), and `_input_line_text` STRIPS the box read, so verifying
@@ -374,11 +393,13 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn):
     hc = _settle_type_verify(pid, run, head_chunk.rstrip(), sleep_fn)
     if hc != _TV_LANDED:
         return hc
-    _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn)
+    _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
+                  user_authored=user_authored)
     return _TV_LANDED
 
 
-def _type_literal_verified(pid, run, text, sleep_fn=None):
+def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
+                           user_authored=False, logs=None):
     """#670 -- type `text` into a BARE box and VERIFY the box holds it head+tail,
     retrying (undo + re-type) ONLY on a genuine first-byte swallow. This is
     `send_verified`'s verified typed path (all nudge kinds -- lane-check, job-1
@@ -412,7 +433,16 @@ def _type_literal_verified(pid, run, text, sleep_fn=None):
     identical own-substring) can never slip through to a junk submit (#720). A
     short payload skips the checkpoint entirely (`allow_scrolled` stays False,
     its head stays visible) -> byte-identical to pre-#746.
-    Returns True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries."""
+    Returns True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries.
+
+    #994 REOPEN -- `send_verified` / `_send_goal_verified` type through here, so
+    the kill switch is checked at the TOP (before any keystroke or the wasteful
+    settle/undo loop): OFF -> journal one line, return False (the not-delivered
+    shape). `user_authored` (the owner's own Discord reply) bypasses and is
+    forwarded to `_type_literal` for the mid-delivery race."""
+    if not user_authored and not watchdog.nudges_enabled():
+        watchdog._suppress_nudge(kind, text, logs)
+        return False
     sleep_fn = sleep_fn or time.sleep
     two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
@@ -421,7 +451,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None):
             # #746/#747 -- the two-phase type + head-checkpoint is SHARED with
             # deliver_with_stash (`_type_two_phase_head_checkpoint`); only the
             # RECOVERY differs, and here it is undo-the-chunk + RETRY.
-            hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn)
+            hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
+                                                 user_authored=user_authored)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed -> NO keystrokes
             if hc == _TV_CORRUPT:                # head swallowed -> undo the chunk + retry
@@ -429,7 +460,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None):
                     return False
                 continue
         else:
-            _type_literal(pid, run, text, sleep_fn)
+            _type_literal(pid, run, text, sleep_fn,
+                          user_authored=user_authored)
         cls = _settle_type_verify(pid, run, text, sleep_fn,
                                   allow_scrolled=two_phase)
         if cls == _TV_LANDED:
@@ -981,7 +1013,7 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
 
 
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
-                       state=None):
+                       state=None, user_authored=False, nudge_kind="stash"):
     """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
     #189 — STASH UNCONDITIONALLY. This helper used to require a NON-EMPTY
@@ -1056,6 +1088,14 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
+    # #994 REOPEN -- the goal-sweep incident path (`deliver_goal` -> here ->
+    # `_type_literal`). Gate at the TOP, alongside the other early aborts and
+    # BEFORE the `C-s` stash toggle, so an OFF box receives ZERO keystrokes (not
+    # a park+undo dance). `user_authored` (the owner's OWN Discord reply, set by
+    # `discord_replies`) bypasses and is forwarded to the type primitives below.
+    if not user_authored and not watchdog.nudges_enabled():
+        watchdog._suppress_nudge(nudge_kind, text, logs)
+        return False
     cap = captured if captured is not None else watchdog.capture_pane(pid, run, lines=30)
     if cap and STASH_MARKER in cap:
         _log("stash-abort: slot occupied")
@@ -1128,7 +1168,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # `pre_text` is always "": every character typed below is provably our own.
     two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     if two_phase:
-        hc = watchdog._type_two_phase_head_checkpoint(pid, run, text, sleep_fn)
+        hc = watchdog._type_two_phase_head_checkpoint(
+            pid, run, text, sleep_fn, user_authored=user_authored)
         if hc != _TV_LANDED:
             _log("stash-abort: head-checkpoint-%s" % hc)
             if hc == _TV_CORRUPT:
@@ -1148,7 +1189,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                     "stash-abort: head-checkpoint-%s" % hc)
             return False
     else:
-        watchdog._type_literal(pid, run, text, sleep_fn)
+        watchdog._type_literal(pid, run, text, sleep_fn,
+                               user_authored=user_authored)
     cap = watchdog.capture_pane(pid, run, lines=30)
     itext = watchdog._input_line_text(cap)
     if watchdog._pane_shows_collapsed_paste(itext):

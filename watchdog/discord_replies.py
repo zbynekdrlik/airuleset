@@ -730,8 +730,13 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                 # through to the pre-#35 pending/fallback path, unchanged.
                 if not dry_run and not watchdog.pane_in_mode(pid, run):
                     _record_dreply_typed(state, pid, prompt, now)
+                    # #994 REOPEN -- the owner's OWN reply is not a machine nudge,
+                    # so it BYPASSES the kill switch even via the stash-around
+                    # path (deliver_with_stash now gates at the primitive). The
+                    # machine POINTER fallback below stays suppressed.
                     if watchdog.deliver_with_stash(pid, prompt, run, captured=captured,
-                                          logs=logs, state=state):  # #852-review 🟡-5
+                                          logs=logs, state=state,  # #852-review 🟡-5
+                                          user_authored=True):
                         idead = state.get("inputdead")
                         if isinstance(idead, dict):
                             idead.pop(r["session"], None)

@@ -474,24 +474,24 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None):
     submit) already Escape-and-retry on a swallowed submit. NEVER send a
     second Escape here — a rapid double-Escape into a pane holding a draft
     PERMANENTLY DELETES it (empirically confirmed, issue #35)."""
-    if not watchdog.nudges_enabled():
-        _suppress_nudge("continue", text, logs)
-        return False
     run = run or watchdog._default_run
     captured = watchdog.capture_pane(pane_id, run, lines=10)
-    if _strip_selected(captured):
+    # #994 REOPEN -- the strip-deselect Escape is the control-key sibling of the
+    # type gate: it exists ONLY to make the following (now-suppressed) submit
+    # land, so at OFF a machine caller fires ZERO keystrokes (not even a stray
+    # Escape into the owner's pane). The type below is gated at `_type_literal`.
+    if _strip_selected(captured) and watchdog.nudges_enabled():
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
-    # #372 round-2 adversarial-review MINOR-2 -- `--` (end-of-options) is
-    # required for the SAME reason `_type_literal` already carries it
-    # (#322): real tmux parses a literal argument via getopt, so text
-    # whose first character is `-` (an arbitrary Discord-reply prompt,
-    # never /goal-prefixed, is exactly such a case) is read as an unknown
-    # FLAG and the whole send silently fails -- `_default_run` swallows a
-    # non-zero exit as "" with no exception and no log, leaving the box
-    # bare and every caller's own post-send verify reading a FALSE
-    # "delivered" (the box genuinely is empty, just never received the
-    # text at all).
-    run(["tmux", "send-keys", "-t", pane_id, "-l", "--", text])
+    # #994 REOPEN -- the literal type goes through the ONE gated primitive
+    # `_type_literal` (never an inline `send-keys -l` here -- that was a second,
+    # un-gated literal-typing site). `_type_literal` carries both the `--`
+    # end-of-options `-` safety (#322/#372) and the nudge kill switch: when the
+    # owner has nudges OFF it types NOTHING and returns False, so this helper
+    # presses no Enter and returns False -- the caller
+    # (`compact._compact_submit_verified`) then leaves its /compact request
+    # PENDING (`nudges-off`), never booked delivered.
+    if not watchdog._type_literal(pane_id, run, text, kind="continue", logs=logs):
+        return False
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
     return True
 
@@ -526,9 +526,9 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
     (returns False) rather than the old raw-`send_continue` book-as-delivered:
     an unverifiable send left a swallowed stuck-check stranded in the composer.
     A refused send is retried next sweep once a transcript is resolvable."""
-    if not watchdog.nudges_enabled():
-        _suppress_nudge("subagent", "%s (%s)" % (worker_id, kind), logs)
-        return False
+    # #994 REOPEN -- no own gate: this helper delegates to `send_verified`, whose
+    # `_type_literal_verified` primitive carries the kill switch. At OFF that
+    # returns False and this helper returns False (its swallowed-nudge shape).
     text = ("stuck-check: %s (%s v subagents/%s.jsonl) "
             "— over jeho transcript a zasiahni (dispatchni znova alebo naň nadviaž), "
             "nič nerob naslepo." % (_subagent_nudge_signature(worker_id), kind, worker_id))
@@ -815,10 +815,9 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     `user_authored` (#994): True ONLY for the owner's OWN Discord reply (set
     solely by `discord_replies`). It BYPASSES the nudge kill switch -- the owner
     speaking is never a machine nudge -- so an OFF box still delivers the owner's
-    answer. Every machine caller leaves it False and is suppressed when OFF."""
-    if not user_authored and not watchdog.nudges_enabled():
-        _suppress_nudge("send", text, logs)
-        return False
+    answer. Every machine caller leaves it False and is suppressed when OFF. The
+    switch is enforced (and journalled) at the `_type_literal_verified` primitive
+    below (#994 REOPEN), forwarding this `user_authored`; no own gate here."""
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -837,7 +836,10 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
         _log("send-verified abort: box not bare pre-send")
         return False
-    if watchdog._strip_selected(cap):
+    # #994 REOPEN -- the strip-deselect Escape only enables the following submit;
+    # at OFF a machine caller fires ZERO keystrokes. The owner's OWN reply
+    # (`user_authored`) still deselects + delivers.
+    if watchdog._strip_selected(cap) and (user_authored or watchdog.nudges_enabled()):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
     # Re-verify bare AFTER the strip-Escape and immediately before the type
     # keystroke — a draft racing into that gap would otherwise be typed over
@@ -865,7 +867,9 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # box withholds every keystroke (#670-review R2) -- so a head-corrupted
     # prompt is NEVER submitted, and no keystroke is fired into a box we cannot
     # safely backspace.
-    if not watchdog._type_literal_verified(pane_id, run, text, sleep_fn):
+    if not watchdog._type_literal_verified(pane_id, run, text, sleep_fn,
+                                           kind="send", user_authored=user_authored,
+                                           logs=logs):
         if watchdog._pane_shows_collapsed_paste(watchdog._input_line_text(
                 watchdog.capture_pane(pane_id, run, lines=40))):
             _log("send-verified abort: collapsed-paste, not submitted")
