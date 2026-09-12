@@ -18,9 +18,17 @@ from watchdog import goal  # noqa: E402
 
 
 class TestRenderGoalLine(TestCase):
-    def test_default_is_byte_identical_to_render(self):
+    def test_default_variant_equals_the_shipped_skill_line(self):
+        # #998-review: NOT tautological (render delegates to render_goal_line, so
+        # comparing the two proves nothing) — assert the DEFAULT (parallel,
+        # no-role) variant byte-equals the line SHIPPED in SKILL.md, the real
+        # drift target: if render_goal_line's default path ever diverges from the
+        # shipped artifact the watchdog arms, this fails.
+        with open(gr.skill_path(), encoding="utf-8") as fh:
+            shipped = gr.shipped_lines(fh.read())
+        self.assertEqual(set(shipped), set(gr.PROFILES))
         for p in gr.PROFILES:
-            self.assertEqual(gr.render(p), gr.render_goal_line(p, "parallel", None))
+            self.assertEqual(gr.render_goal_line(p, "parallel", None), shipped[p])
 
     def test_sequential_substitutes_refill(self):
         for p in gr.PROFILES:

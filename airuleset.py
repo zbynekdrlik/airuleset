@@ -3248,15 +3248,25 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
         return workable, waiting, ops_wait
     if role not in ("review", "infra"):
         return workable, waiting, ops_wait
+    # #998 review — resolve the slug ONCE (a network `gh repo view`) and reuse it
+    # across the three filter calls, instead of one `gh` per bucket. An empty
+    # slug (a gh failure) degrades the footer to UNFILTERED (fail-safe over-count,
+    # #589/#636) — never the fail-CLOSED sys.exit `_apply_role_filter` uses on the
+    # CLI stop-proof path.
     try:
-        workable = cli_quals_cmd._apply_role_filter(workable, root, role)
-        waiting = cli_quals_cmd._apply_role_filter(waiting, root, role)
-        ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role)
+        slug = _repo_slug(cwd=root)
+        if not slug:
+            sys.stderr.write("tickets-status: role filter unavailable "
+                             "(slug unresolved) — unfiltered\n")
+            return workable, waiting, ops_wait
+        workable = cli_quals_cmd._apply_role_filter(workable, root, role, slug=slug)
+        waiting = cli_quals_cmd._apply_role_filter(waiting, root, role, slug=slug)
+        ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role, slug=slug)
     except SystemExit as e:
-        # _apply_role_filter fail-CLOSES (sys.exit 1) on an unresolvable slug;
-        # the footer must never die on it — degrade to unfiltered + log.
-        sys.stderr.write("tickets-status: role filter unavailable "
-                         "(slug unresolved, %s) — unfiltered\n" % e)
+        # defensive: _apply_role_filter fail-CLOSES on an empty slug; we already
+        # short-circuit that above, but never let it escape the footer.
+        sys.stderr.write("tickets-status: role filter unavailable (%s) — "
+                         "unfiltered\n" % e)
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("tickets-status: role filter skipped (%s)\n" % e)
     return workable, waiting, ops_wait
