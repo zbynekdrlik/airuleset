@@ -94,6 +94,27 @@ class TestResolveConcurrency(TestCase):
             home=self.HOME)
         self.assertEqual((mode, role, src), ("sequential", "infra", "role"))
 
+    def test_cwd_wins_over_a_conflicting_window_name(self):
+        # #998 addendum (owner 2026-09-12, "prečo mám dva gk"): a window
+        # mis-named `gk` sitting in the infra cwd must resolve to role infra
+        # (CWD wins), never review by name — else the install's rename-all
+        # (which clobbered the infra window to `gk`) would make it dispatch as
+        # the parallel review lane.
+        mode, role, src = cc.resolve_concurrency(
+            self.HOME + "/devel/odoo/odoo-erp-infra", window_name="gk",
+            windows=GK_WINDOWS, home=self.HOME)
+        self.assertEqual((mode, role, src), ("sequential", "infra", "role"))
+
+    def test_subdir_of_a_declared_cwd_resolves_to_that_window(self):
+        # Containment: a pane cd'd into a subdirectory of a declared window's
+        # cwd (routine odoo-erp-infra work) still resolves to that window's
+        # role — the exact-match-only resolver missed this, so a push while the
+        # owner was deep in a subdir would re-clobber the name.
+        mode, role, src = cc.resolve_concurrency(
+            self.HOME + "/devel/odoo/odoo-erp-infra/addons/x",
+            windows=GK_WINDOWS, home=self.HOME)
+        self.assertEqual((mode, role, src), ("sequential", "infra", "role"))
+
     def test_project_mode_when_no_window_matches(self):
         with tempfile.TemporaryDirectory() as d:
             claude = Path(d) / ".claude"

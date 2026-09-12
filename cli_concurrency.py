@@ -9,9 +9,11 @@ lane caps all read the SAME resolver — never a parallel narrower one, the
 
 Resolution order (owner directive 2026-09-12, item 1c):
 
-  1. a DECLARED managed window of the box's OWN fleet entry (matched by window
-     NAME when given, else by CWD) -> ``(window.mode or "parallel",
-     window.role, "role")``
+  1. a DECLARED managed window of the box's OWN fleet entry (matched by CWD
+     first — by containment, the LONGEST declared cwd the pane is in wins —
+     else by exact window NAME; #998 addendum: cwd wins so a mis-named window
+     in the infra cwd still resolves to role infra) -> ``(window.mode or
+     "parallel", window.role, "role")``
   2. the project's ``.claude/lane-resources.json`` ``mode`` ->
      ``(mode, None, "project")``
   3. default -> ``("parallel", None, "default")``
@@ -77,19 +79,37 @@ def _expand(cwd_spec, home):
 
 
 def _match_window(cwd, window_name, windows, home):
-    """The declared window matching ``window_name`` (exact) or ``cwd``
-    (expanded, realpath-compared), else ``None``. Name wins over cwd."""
-    if window_name:
-        for w in windows:
-            if w.get("name") == window_name:
-                return w
+    """The declared window matching ``cwd`` FIRST (expanded, realpath, by
+    containment — the pane cwd equals or is a subdirectory of a declared
+    window's cwd; the LONGEST such declared cwd wins), else the one matching
+    ``window_name`` exactly. ``None`` when neither matches.
+
+    CWD wins over name (#998 addendum, owner 2026-09-12 "prečo mám dva gk"):
+    the install's window-namer renamed EVERY window to the box alias, so the
+    infra window is live-named ``gk`` too — resolving by name would then
+    classify it as the parallel review lane. Matching by cwd first pins it to
+    role ``infra`` regardless of the (mis-)name, and the same matcher gives the
+    namer each window's DECLARED name from its cwd. Containment (not bare
+    equality) keeps a pane cd'd into a subdirectory of the checkout resolving
+    to its window; sibling dirs (``odoo-erp`` vs ``odoo-erp-infra``) never
+    cross-match thanks to the ``os.sep`` boundary."""
     if cwd:
         try:
             cwd_real = os.path.realpath(cwd)
         except OSError:
             cwd_real = cwd
+        best = None
+        best_len = -1
         for w in windows:
-            if _expand(w.get("cwd"), home) == cwd_real:
+            dreal = _expand(w.get("cwd"), home).rstrip("/")
+            if cwd_real == dreal or cwd_real.startswith(dreal + os.sep):
+                if len(dreal) > best_len:
+                    best, best_len = w, len(dreal)
+        if best is not None:
+            return best
+    if window_name:
+        for w in windows:
+            if w.get("name") == window_name:
                 return w
     return None
 
