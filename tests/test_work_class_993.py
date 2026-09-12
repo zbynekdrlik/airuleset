@@ -234,31 +234,13 @@ class TestDepWait(TestCase):
 
 
 class TestDispatchable(TestCase):
-    def test_independent_always_dispatchable_when_no_dep_wait(self):
-        self.assertTrue(wc.dispatchable("independent", False, True))
-        self.assertTrue(wc.dispatchable("independent", False, False))
-
-    def test_infra_blocked_only_when_infra_lane_live(self):
-        self.assertFalse(wc.dispatchable("infra", False, True))
-        self.assertTrue(wc.dispatchable("infra", False, False))
+    # #993 r2b: dispatchable = workable ∧ deps satisfied (deps-only; the
+    # class-based infra-lane arg was removed).
+    def test_deps_satisfied_is_dispatchable(self):
+        self.assertTrue(wc.dispatchable(False))
 
     def test_dep_wait_never_dispatchable(self):
-        self.assertFalse(wc.dispatchable("independent", True, False))
-        self.assertFalse(wc.dispatchable("infra", True, False))
-
-
-class TestLaneClassFromIssueClasses(TestCase):
-    def test_empty_is_infra_failsafe(self):
-        # (item 2) unresolvable lane (no issue/labels) → infra (fail-safe serial)
-        self.assertEqual(wc.lane_class_from_issue_classes([]), "infra")
-
-    def test_any_infra_is_infra(self):
-        self.assertEqual(
-            wc.lane_class_from_issue_classes(["independent", "infra"]), "infra")
-
-    def test_all_independent_is_independent(self):
-        self.assertEqual(
-            wc.lane_class_from_issue_classes(["independent"]), "independent")
+        self.assertFalse(wc.dispatchable(True))
 
 
 if __name__ == "__main__":

@@ -1,10 +1,9 @@
-"""#992 req 1 / #993 item 2 — the lane-occupancy + queue-arrival nudges must
-state that refill applies ONLY to independent units: infra work is SERIAL, so
-when the only workable tickets are infra and one infra lane is live, NO refill.
-The nudges must SAY this instead of unconditionally pushing dispatch.
-
-Phrase-locked (the nudge is FACTS + doctrine, never a count/priority prescription
-— #994): a partial revert of the clause fails these.
+"""#993 item 3/4 (+ round 2b) — the lane-occupancy + queue-arrival nudge
+DECISIONS are DEPENDENCY aware: a free slot with no dispatchable candidate (all
+dep-wait) is a journaled skip, NOT a nudge; a dep-wait arrival is HELD, not
+nudged. The class-based infra-serial half was removed in round 2b (infra
+serialisation is ROUTING via `--role`, not a live-lane gate), so this file no
+longer tests any infra-serial nudge behaviour.
 """
 
 import sys
@@ -18,34 +17,13 @@ import watchdog.queue_arrival_recheck as qa  # noqa: E402
 import watchdog.goal as goal  # noqa: E402
 
 
-class TestLaneNudgeInfraSerial(TestCase):
-    def test_lane_nudge_states_infra_serial_no_refill(self):
-        t = lr._lane_nudge_text(4, 1, {"total": 5}).lower()
-        self.assertIn("infra", t)
-        self.assertIn("sériov", t)          # SÉRIOVÉ (serial)
-        self.assertIn("nerefill", t)        # no refill for infra-only + live infra lane
-
-
-class TestQueueNudgeInfraSerial(TestCase):
-    def test_queue_nudge_states_infra_serial_no_refill(self):
-        t = qa._nudge_text([5177, 5310], 8).lower()
-        self.assertIn("infra", t)
-        self.assertIn("sériov", t)
-        self.assertIn("nerefill", t)
-
-    def test_queue_nudge_stays_within_cap(self):
-        # #978: a folded clause must not push the nudge past NUDGE_MAX_CHARS.
-        t = qa._nudge_text([5177, 5310], 8)
-        self.assertLessEqual(len(t), qa.NUDGE_MAX_CHARS)
-
-
 NOW = 1_000_000
 
 
-class TestQueueDecisionClassAware(TestCase):
+class TestQueueDecisionDepAware(TestCase):
     """#993 item 4 — the queue-arrival DECISION filters arrivals by dispatch
-    class: an arrival that is infra-while-infra-lane-live or dep-wait is HELD
-    (no nudge); the nudge fires only for dispatchable arrivals."""
+    class: a dep-wait arrival is HELD (no nudge); the nudge fires only for
+    dispatchable arrivals."""
 
     def _base(self, base):
         return {"base": base, "first_seen": NOW - 100, "last_nudge": None}
@@ -55,37 +33,22 @@ class TestQueueDecisionClassAware(TestCase):
         self.assertEqual(action, "nudge")
         self.assertEqual(arr, [9])
 
-    def test_all_infra_serial_arrivals_hold(self):
-        action, out, reason, arr = qa._queue_decision(
-            self._base([1]), [1, 9], NOW,
-            classify_fn=lambda n: "infra-serial")
-        self.assertEqual(action, "hold")
-        self.assertEqual(reason, "infra-serial")
-        self.assertEqual(out["base"], [1])   # base kept OLD → re-detect later
-        self.assertEqual(arr, [9])
-
     def test_all_dep_wait_arrivals_hold_with_dep_wait_reason(self):
-        action, _out, reason, _arr = qa._queue_decision(
+        action, out, reason, arr = qa._queue_decision(
             self._base([1]), [1, 9], NOW,
             classify_fn=lambda n: "dep-wait")
         self.assertEqual(action, "hold")
         self.assertEqual(reason, "dep-wait")
+        self.assertEqual(out["base"], [1])   # base kept OLD → re-detect later
+        self.assertEqual(arr, [9])
 
     def test_mixed_nudges_only_dispatchable_arrivals(self):
-        cls = {8: "dispatchable", 9: "infra-serial"}
+        cls = {8: "dispatchable", 9: "dep-wait"}
         action, _out, _r, arr = qa._queue_decision(
             self._base([1]), [1, 8, 9], NOW,
             classify_fn=lambda n: cls[n])
         self.assertEqual(action, "nudge")
         self.assertEqual(arr, [8])          # only the dispatchable arrival named
-
-    def test_mixed_infra_and_dep_holds_infra_serial(self):
-        cls = {8: "dep-wait", 9: "infra-serial"}
-        action, _out, reason, _arr = qa._queue_decision(
-            self._base([1]), [1, 8, 9], NOW,
-            classify_fn=lambda n: cls[n])
-        self.assertEqual(action, "hold")
-        self.assertEqual(reason, "infra-serial")   # any infra held → infra-serial
 
 
 class TestLaneDispatchableDecision(TestCase):
@@ -102,18 +65,19 @@ class TestLaneDispatchableDecision(TestCase):
         self.assertIsNone(log)
         self.assertIsNone(cand)
 
-    def test_zero_candidates_infra_serial_skips(self):
-        skip, log, cand = goal._lane_dispatchable_decision(
-            self._fetch(0, "infra-serial"), "/c", {}, 100, "loc", 1, 0, 5)
-        self.assertTrue(skip)
-        self.assertIn("skip:infra-serial", log)
-        self.assertEqual(cand, 0)
-
     def test_zero_candidates_dep_wait_skips(self):
         skip, log, _c = goal._lane_dispatchable_decision(
             self._fetch(0, "dep-wait"), "/c", {}, 100, "loc", 0, 0, 3)
         self.assertTrue(skip)
         self.assertIn("skip:dep-wait", log)
+
+    def test_zero_candidates_no_reason_is_no_candidate(self):
+        # #993 r2b: a 0 count with no reason (e.g. empty rows) is skip:no-candidate,
+        # never mis-attributed to a removed infra reason.
+        skip, log, _c = goal._lane_dispatchable_decision(
+            self._fetch(0, None), "/c", {}, 100, "loc", 1, 0, 5)
+        self.assertTrue(skip)
+        self.assertIn("skip:no-candidate", log)
 
     def test_positive_candidates_proceeds(self):
         skip, log, cand = goal._lane_dispatchable_decision(

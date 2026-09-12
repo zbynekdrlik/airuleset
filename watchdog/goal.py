@@ -4658,11 +4658,11 @@ def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
     """#993 item 3 — `(skip, logline, candidate_n)`. `dispatchable_fetch` None
     (unwired / legacy tests) → `(False, None, None)`: NO gating, the nudge fires
     as before. A wired fetch returns the dispatchable-candidate count + reason:
-    count 0 → `skip:infra-serial` (or `skip:dep-wait` when only deps hold it back),
-    NO keystroke; an UNMEASURABLE count (fetch None / malformed) →
-    `skip:dispatchable-unknown` (safe: never push dispatch we cannot justify);
-    count > 0 → `(False, None, count)` and the caller names `candidate_n` in the
-    nudge text."""
+    count 0 → `skip:dep-wait` (deps hold everything back — the class-based
+    infra-serial reason was removed in round 2b), NO keystroke; an UNMEASURABLE
+    count (fetch None / malformed) → `skip:dispatchable-unknown` (safe: never
+    push dispatch we cannot justify); count > 0 → `(False, None, count)` and the
+    caller names `candidate_n` in the nudge text."""
     if dispatchable_fetch is None:
         return False, None, None
     res = _cached_dispatchable(cwd, dispatchable_fetch, state, now)
@@ -4677,8 +4677,6 @@ def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
         # cache-disagreement) is `skip:no-candidate`, never mis-attributed.
         if reason == "dep-wait":
             word = "skip:dep-wait"
-        elif reason == "infra-serial":
-            word = "skip:infra-serial"
         else:
             word = "skip:no-candidate"
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
@@ -4850,10 +4848,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "skip:covered (live+integration covers all workable)"
                     % (loc, live_workers, finished_workers, backlog_n))
         return logs, False
-    # #993 item 3: a free slot with NO dispatchable candidate (infra-while-lane-
-    # live / dep-wait) is the DAMAGE (#992) — skip, never nudge (helper extracted
-    # to keep this capped function small; unwired → no gating; candidate_n names
-    # the count in the text when it fires).
+    # #993 item 3: a free slot with NO dispatchable candidate (dep-wait) is the
+    # DAMAGE (#992) — skip, never nudge (helper extracted to keep this capped
+    # function small; unwired → no gating; candidate_n names the count in the
+    # text when it fires).
     disp_skip, disp_log, candidate_n = _lane_dispatchable_decision(
         dispatchable_fetch, cwd, state, now, loc, live_workers, waiters, backlog_n)
     if disp_log:

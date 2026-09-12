@@ -61,11 +61,13 @@ class TestRegistryClausesAreContinuous(TestCase):
 
     def test_saturation_core_is_continuous_refill(self):
         core = self._clause("saturation-core")
-        # #993 r2: refill is work-class + dependency aware (dispatchable-only,
-        # infra serial); the blanket "IMMEDIATELY while backlog remains" is gone.
+        # #993 r2b: refill is DEPENDENCY aware (dispatchable-only, deps closed);
+        # the class-based infra-serial half was removed (routing replaces it), and
+        # the blanket "IMMEDIATELY while backlog remains" is gone.
         for tok in ("CONTINUOUS REFILL", "isolation:worktree",
-                    "autopilot-worker", "DISPATCHABLE", "SERIAL"):
+                    "autopilot-worker", "DISPATCHABLE", "dependencies closed"):
             self.assertIn(tok, core)
+        self.assertNotIn("infra units are SERIAL", core)
         # #991: the fixed lane cap wording is gone (count = box + backlog).
         self.assertNotIn("up to 5", core)
         # the batch directive it replaced must be gone
@@ -264,13 +266,13 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
                 sleep_fn=lambda s: None, dispatchable_fetch=disp_fetch)
         return logs, tmux
 
-    def test_infra_only_free_slot_skips_no_keystroke(self):
-        # #993 item 3/6a: a free slot but 0 dispatchable candidates (infra-only +
-        # a live infra lane) -> skip:infra-serial, NO keystroke.
+    def test_dep_wait_only_free_slot_skips_no_keystroke(self):
+        # #993 item 3/6a (r2b): a free slot but 0 dispatchable candidates (all
+        # dep-wait) -> skip:dep-wait, NO keystroke.
         logs, tmux = self._drive(
             workers=1, backlog=37,
-            dispatchable={"count": 0, "reason": "infra-serial"})
-        self.assertTrue(any("skip:infra-serial" in ln for ln in logs), logs)
+            dispatchable={"count": 0, "reason": "dep-wait"})
+        self.assertTrue(any("skip:dep-wait" in ln for ln in logs), logs)
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [], tmux.sent)
 

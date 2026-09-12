@@ -1,23 +1,27 @@
 """cli_work_class — the ONE home for autopilot orchestration classification (#993).
 
 Owner directives 2026-09-12 (#992/#993): autopilot acceleration must respect that
-NOT everything is safe to run in parallel — two axes bound parallelism:
+NOT everything is safe to run in parallel. Round 2b (owner directive 4 + MAIN
+REVIEW kolo 2) SIMPLIFIED this to TWO orthogonal concerns:
 
-  1. WORK CLASS — `infra` work (the fleet harness: CI/gates/release/deploy tooling,
-     and the WHOLE `zbynekdrlik/airuleset` repo) is STRICTLY SERIAL: at most one
-     live infra lane. `independent` work refills freely.
-  2. DEPENDENCY — a unit that must follow the EVALUATION of a previous one
+  1. DEPENDENCY — a unit that must follow the EVALUATION of a previous one
      (`Depends-on: #N`) is not dispatchable until that predecessor is CLOSED
-     (closing with evidence IS the evaluation in this harness).
+     (closing with evidence IS the evaluation in this harness). This is the
+     mechanism that bounds parallelism.
+  2. WORK CLASS (`work_class`) — used ONLY to ROUTE a ticket to a role slice
+     (`core-quals`/`slice-quals --role review|infra`). Infra serialisation is
+     achieved by ROUTING the `infra` label into the infra role/target (which
+     runs in the round-3 sequential mode), NEVER by class-gating a live infra
+     lane inside a parallel target — that class-based mechanism was removed in
+     round 2b (it was a second, redundant path for the same goal).
 
 This module is PURE + stdlib-only + dependency-injected for IO (a `state_fn` for
 gh issue state; the callers own the gh/git calls). It is the single source of
 truth for `work_class`, `Depends-on:` parsing/resolution, the dep-wait predicate,
-the dispatchable predicate, and the fail-safe lane classification — reused by the
-picker (`cli_quals_cmd`), both watchdog nudges (`watchdog/goal.py`,
-`watchdog/queue_arrival_recheck.py`), and the lane-overlap receipt
-(`cli_lane_overlap.py`). No shim, no duplicate derivation (the #367 one-derivation
-invariant).
+and the dispatchable predicate — reused by the picker (`cli_quals_cmd`), both
+watchdog nudges (`watchdog/goal.py`, `watchdog/queue_arrival_recheck.py`), and
+the lane-overlap receipt (`cli_lane_overlap.py`). No shim, no duplicate
+derivation (the #367 one-derivation invariant).
 """
 import json
 import re
@@ -169,32 +173,18 @@ def dep_wait(deps, state_fn, self_ref=None):
     return (bool(unsatisfied), unsatisfied)
 
 
-def dispatchable(work_cls, is_dep_wait, infra_lane_live):
-    """A ticket is dispatchable iff its deps are satisfied AND it is either
-    ``independent`` OR (``infra`` with NO live infra lane). The combined set the
-    picker and both nudges use: ``workable ∧ deps-satisfied ∧
-    (independent ∨ ¬live-infra-lane)`` (#993 items 3/4/7)."""
-    if is_dep_wait:
-        return False
-    if work_cls == INFRA and infra_lane_live:
-        return False
-    return True
-
-
-def lane_class_from_issue_classes(classes):
-    """A LIVE lane's class from the work-classes of the issue(s) it is working.
-    An EMPTY list — an unresolvable lane (no issue number / no labels) — is
-    ``infra`` (fail-safe serial, #993 item 2). Otherwise ``infra`` iff ANY of
-    its issues is infra."""
-    if not classes:
-        return INFRA
-    return INFRA if any(c == INFRA for c in classes) else INDEPENDENT
+def dispatchable(is_dep_wait):
+    """A ticket is dispatchable iff its deps are satisfied
+    (``workable ∧ deps-satisfied``) — the combined set the picker and both
+    nudges use (#993 item 7; the class-based live-infra-lane gate was removed in
+    round 2b — infra serialisation is now ROUTING via ``--role``, not gating)."""
+    return not is_dep_wait
 
 
 # --------------------------------------------------------------------------- #
-# Resolution glue — the gh/git IO half. Still dependency-injected: `runner(argv,
-# cwd)` and `gather_fn`/`labels_fn`/`state_fn` are passed in, so this stays
-# offline-testable and carries NO hard gh/git import. Runs ONLY on the on-demand
+# Resolution glue — the gh IO half. Still dependency-injected: `runner(argv,
+# cwd)` and `state_fn` are passed in, so this stays
+# offline-testable and carries NO hard gh import. Runs ONLY on the on-demand
 # dep paths (`--list`/`--audit`/`--dep-wait`/`--count-dispatchable`), NEVER on
 # the hot `--count`/footer path — a per-row `gh issue view` for `Depends-on:` is
 # O(workable). Kept in THIS module (the one orchestration-classification home)
@@ -365,82 +355,25 @@ def _sorted_row_keys(rows):
     return sorted(rows, key=key)
 
 
-def labels_of(number, runner, root):
-    """A live lane's issue labels (gh `--json labels`), or None on failure."""
-    try:
-        obj = json.loads(runner(["gh", "issue", "view", str(number),
-                                 "--json", "labels"], root))
-    except Exception:
-        return None
-    if isinstance(obj, dict):
-        return obj.get("labels")
-    return None
-
-
-def _gather_live_lanes(root):
-    """Live worktree/wip lanes WITH their issue numbers — delegates to
-    `cli_lane_overlap.gather_live_lanes` (the single lane-enumeration home)."""
-    import cli_lane_overlap as lo
-    return lo.gather_live_lanes(root)
-
-
-def live_infra_lane(slug, runner, root, gather_fn=None, labels_fn=None):
-    """True iff ANY live lane is infra-class. A lane with no resolvable issue
-    (empty `issues`) is `infra` (fail-safe serial, #993 item 2); on the
-    airuleset repo EVERY lane is infra (no label fetch needed). A gather failure
-    fails safe to True (can't tell → serial)."""
-    gather_fn = gather_fn or _gather_live_lanes
-    labels_fn = labels_fn or labels_of
-    try:
-        lanes = gather_fn(root)
-    except Exception:
-        return True
-    if not lanes:
-        return False
-    airuleset = (slug or "").strip().lower() == AIRULESET_REPO
-    for lane in lanes:
-        issues = lane.get("issues") if isinstance(lane, dict) else None
-        classes = []
-        for n in (issues or []):
-            labels = None if airuleset else labels_fn(n, runner, root)
-            classes.append(work_class(slug, labels))
-        if lane_class_from_issue_classes(classes) == INFRA:
-            return True
-    return False
-
-
-def dispatchable_numbers(rows, slug, dep_map, infra_lane_live):
+def dispatchable_numbers(rows, slug, dep_map):
     """PURE: `(dispatchable_keys:set, reason)`. dispatchable = workable ∧
-    ¬dep-wait ∧ (independent ∨ ¬live-infra-lane). `reason` (when the set is
-    empty and rows non-empty) is `dep-wait` iff ONLY deps hold everything back,
-    else `infra-serial`."""
+    ¬dep-wait. `reason` (when the set is empty and rows non-empty) is `dep-wait`
+    (deps are now the only thing that holds a workable row back — the class-based
+    infra-serial gate was removed in round 2b)."""
     dispatchable_set = set()
-    held_infra = held_dep = False
     for number in rows:
-        row = rows[number]
-        labels = row.get("labels") if isinstance(row, dict) else None
-        cls = work_class(slug, labels)
-        is_dw = number in dep_map
-        if dispatchable(cls, is_dw, infra_lane_live):
+        if number not in dep_map:
             dispatchable_set.add(number)
-        elif is_dw:
-            held_dep = True
-        elif cls == INFRA and infra_lane_live:
-            held_infra = True
-    reason = None
-    if rows and not dispatchable_set:
-        reason = "dep-wait" if (held_dep and not held_infra) else "infra-serial"
+    reason = "dep-wait" if (rows and not dispatchable_set) else None
     return dispatchable_set, reason
 
 
-def classify_number(number, slug, runner, root, infra_lane_live):
-    """The dispatch class of ONE issue: ``"dispatchable"`` | ``"infra-serial"``
-    | ``"dep-wait"`` (the queue-arrival nudge's per-arrival gate, #993 item 4).
-    Fetches the issue's labels + ``Depends-on:`` via ``runner`` (gh). ``infra_
-    lane_live`` is resolved ONCE by the caller (via ``live_infra_lane``) and
-    passed in so a wave of arrivals shares one live-lane read."""
-    labels = labels_of(number, runner, root)
-    cls = work_class(slug, labels)
+def classify_number(number, slug, runner, root):
+    """The dispatch class of ONE issue: ``"dispatchable"`` | ``"dep-wait"`` (the
+    queue-arrival nudge's per-arrival gate, #993 item 4). Fetches the issue's
+    ``Depends-on:`` via ``runner`` (gh) and resolves it; a workable issue is
+    dispatchable unless a dependency is still open (the class-based infra-serial
+    gate was removed in round 2b)."""
     body, comments = _issue_body_comments(number, runner, root)
     refs = depends_on_refs(body, comments) if (body is not None or comments) else []
     deps = [d for d in (normalize_ref(r, slug) for r in refs) if d is not None]
@@ -449,9 +382,7 @@ def classify_number(number, slug, runner, root, infra_lane_live):
     is_dw = bool(deps) and dep_wait(
         deps, lambda rp, nu: issue_state(rp, nu, runner, root),
         self_ref=self_ref)[0]
-    if dispatchable(cls, is_dw, infra_lane_live):
-        return "dispatchable"
-    return "dep-wait" if is_dw else "infra-serial"
+    return "dispatchable" if dispatchable(is_dw) else "dep-wait"
 
 
 def resolve_issue_deps(issues, slug, runner, root):

@@ -16,7 +16,8 @@ import sys
 # #993 -- the top lane-priority label. A row carrying it sorts BEFORE every
 # other row in every seed listing (rank 0), so the /goal loop's oldest-picks-
 # first selection takes an architecture-rework ticket ahead of any other lane
-# (lane order: architecture-rework -> prio:bounce -> infra -> independent).
+# (lane order: architecture-rework -> prio:bounce -> the rest, oldest-first;
+# infra work is ROUTED to the infra role via --role, #993 r2b).
 ARCHITECTURE_REWORK_LABEL = "architecture-rework"
 
 
@@ -800,6 +801,7 @@ def cmd_slice_quals(args):
         # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
         workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
+    unhandled = _apply_role_filter(unhandled, root, getattr(args, "role", None))  # #993 r2b (default None = byte-identical)
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
         # (external event/evidence) so they are distinguishable in the listing.
@@ -864,8 +866,8 @@ def cmd_slice_quals(args):
         return
     if want_count_dispatchable:
         # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait
-        # and infra-while-lane-live STAY in --count/I, only their dispatchability
-        # differs). The lane nudge shells this (cached).
+        # rows STAY in --count/I, only their dispatchability differs). The lane
+        # nudge shells this (cached).
         _emit_count_dispatchable(unhandled, root)
         return
     if want_dep_wait:
@@ -905,6 +907,26 @@ def _slice_quals_runner(root):
 # never the hot `--count` path (which never calls them).
 # --------------------------------------------------------------------------- #
 
+def _apply_role_filter(rows, root, role):
+    """#993 r2b — slice `rows` by work class for `--role`. `review` keeps rows
+    whose class is NOT infra; `infra` keeps rows whose class IS infra; None (no
+    flag) returns `rows` unchanged (today's behaviour). This is the ROUTING that
+    replaces the removed class-based live-infra-lane gate: the `infra` label (and
+    the whole airuleset repo, and `architecture-rework`) sends a ticket into the
+    infra role/target (round-3 sequential mode)."""
+    if role not in ("review", "infra"):
+        return rows
+    import airuleset
+    slug = airuleset._repo_slug(cwd=root)
+    out = {}
+    for n, row in rows.items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        is_infra = airuleset.work_class(slug, labels) == "infra"
+        if is_infra == (role == "infra"):
+            out[n] = row
+    return out
+
+
 def _dep_wait_map_for(rows, root):
     """`(dep_wait_map, slug, ok)` — on-demand `Depends-on:` resolution via ONE
     batched `gh issue list` (#993 review 2: not a per-row storm). `ok` is False
@@ -923,9 +945,9 @@ def _dep_wait_map_for(rows, root):
 
 def _emit_count_dispatchable(rows, root):
     """`--count-dispatchable`: the dispatchable-candidate count + a `reason:`
-    line when it is 0 (#993 item 3). dispatchable = workable ∧ ¬dep-wait ∧
-    (independent ∨ ¬live-infra-lane) — the SAME set the picker and both nudges
-    use. A `reason:infra-serial`/`reason:dep-wait` line follows a 0 count so the
+    line when it is 0 (#993 item 3). dispatchable = workable ∧ ¬dep-wait — the
+    SAME set the picker and both nudges use (the class-based infra-serial gate
+    was removed in round 2b). A `reason:dep-wait` line follows a 0 count so the
     lane nudge journals WHY it will not refill. When dep resolution is UNMEASURABLE
     (batched read failed) print `unmeasurable` so the watchdog fetch reads None →
     `skip:dispatchable-unknown` (fail-safe, #993 review 5)."""
@@ -934,9 +956,7 @@ def _emit_count_dispatchable(rows, root):
     if not ok:
         print("unmeasurable")
         return
-    infra_live = airuleset.live_infra_lane(slug, _slice_quals_runner(root), root)
-    dispatchable_set, reason = airuleset.dispatchable_numbers(
-        rows, slug, dep_map, infra_live)
+    dispatchable_set, reason = airuleset.dispatchable_numbers(rows, slug, dep_map)
     print(len(dispatchable_set))
     if not dispatchable_set and rows and reason:
         print("reason:" + reason)
@@ -1085,6 +1105,7 @@ def cmd_core_quals(args):
         # approval, never dispatchable-now I). Pure label partition; the question
         # map is read only on the on-demand `--waiting` display path (#370).
         workable, waiting, ops_wait = airuleset._partition_workable(seen)
+    workable = _apply_role_filter(workable, root, getattr(args, "role", None))  # #993 r2b (default None = byte-identical)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -1169,7 +1190,7 @@ def cmd_core_quals(args):
         return
     if want_count_dispatchable:
         # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait
-        # and infra-while-lane-live STAY in --count/I). The lane nudge shells it.
+        # rows STAY in --count/I). The lane nudge shells it.
         _emit_count_dispatchable(workable, root)
         return
     if want_dep_wait:

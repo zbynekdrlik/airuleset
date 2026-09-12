@@ -59,9 +59,9 @@ class Clause:
 # in prose (#848, 2026-09-02, retiring the #723/#724 batch doctrine after the
 # STEP-0 live experiment proved a compact over live lanes is safe on CC 2.1.258):
 # `saturation-core` keeps parallel worktree lanes live and refills a returned
-# slot ONLY with a DISPATCHABLE unit (independent + deps closed; infra is SERIAL
-# — one live infra lane, #993 r2, tightening the #848 continuous-refill shape;
-# the live lane count is sized to what the box and backlog bear, #991);
+# slot ONLY with a DISPATCHABLE unit (dependencies closed, #993 r2b — the
+# class-based infra-serial half was removed: infra serialisation is ROUTING via
+# --role, not a live-lane gate; the count is sized to box+backlog, #991);
 # `saturation-delivery` integrates each returned
 # branch SERIALLY under the mutex as it returns; `compact-boundary` fires the
 # compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not
@@ -152,7 +152,7 @@ CLAUSES = [
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
     Clause("saturation-core", PROFILES,
-        "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` autopilot-worker lanes live — refill ONLY with a DISPATCHABLE unit (independent, dependencies closed); infra units are SERIAL — one live infra lane at a time;"),
+        "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` autopilot-worker lanes live — refill ONLY with a DISPATCHABLE unit (dependencies closed);"),
     Clause("saturation-delivery", PROFILES, {
         "full": "integrate returned branches SERIALLY under the integration mutex as they return;",
         "branch-merge": "merge returned branches into the integration branch SERIALLY under the mutex as they return;",

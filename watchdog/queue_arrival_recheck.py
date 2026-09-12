@@ -242,23 +242,20 @@ def _queue_decision(rec, cur, now, floor=0, classify_fn=None):
     # last_nudge=now) on a confirmed delivery.
     new_rec = {"base": sorted(base_set), "first_seen": first_seen,
                "last_nudge": last_nudge}
-    # #993 item 4: WORK-CLASS + DEPENDENCY AWARE. `classify_fn(number)` returns
-    # "dispatchable" | "infra-serial" | "dep-wait". An arrival that is infra while
-    # an infra lane is live, or dep-wait, is NOT dispatchable — nudge ONLY for
-    # dispatchable arrivals. When EVERY arrival is non-dispatchable → HOLD (keep
-    # base OLD so they re-detect once they become dispatchable), reason `dep-wait`
-    # iff ALL held arrivals are dep-wait, else `infra-serial`. None = legacy
-    # (every arrival dispatchable). A nudge names only the dispatchable arrivals;
-    # base still advances to `cur` on delivery (the session is woken and its own
-    # /goal loop picks up the held infra/dep members when they become workable).
+    # #993 item 4: DEPENDENCY AWARE. `classify_fn(number)` returns
+    # "dispatchable" | "dep-wait" (the class-based infra branch was removed in
+    # round 2b — infra serialisation is ROUTING, not a live-lane gate). A dep-wait
+    # arrival is NOT dispatchable — nudge ONLY for dispatchable arrivals. When
+    # EVERY arrival is non-dispatchable → HOLD (keep base OLD so they re-detect
+    # once their deps close), reason `dep-wait`. None = legacy (every arrival
+    # dispatchable). A nudge names only the dispatchable arrivals; base still
+    # advances to `cur` on delivery (the session is woken and its own /goal loop
+    # picks up the held dep members when they become workable).
     if classify_fn is not None:
         classes = {a: classify_fn(a) for a in arrivals}
         dispatchable = [a for a in arrivals if classes.get(a) == "dispatchable"]
         if not dispatchable:
-            reason = ("dep-wait"
-                      if all(classes.get(a) == "dep-wait" for a in arrivals)
-                      else "infra-serial")
-            return ("hold", new_rec, reason, arrivals)
+            return ("hold", new_rec, "dep-wait", arrivals)
         arrivals = dispatchable
     # #780 FLOOR: a delivered nudge still inside the floor window -> HOLD the
     # keystroke (the new members join the next post-floor nudge). The floor gates
@@ -308,8 +305,8 @@ def _nudge_text(arrivals, cur_count):
         "tickety: reviewni ready-for-review, konaj needs-gatekeeper, vezmi späť "
         "prio:bounce. Poradie riešenia riadi priorita dohodnutá v tejto session "
         "(architektúra > architecture-rework > prio:bounce > backlog, #993), nie "
-        "tento nudge. Infra jednotky sú SÉRIOVÉ — ak sú workable len infra a jedna "
-        "infra lane žije, NErefillni (#992). Ak už na nich robíš, potvrď."
+        "tento nudge. NEdispatchni dep-wait jednotku (otvorené Depends-on). "
+        "Ak už na nich robíš, potvrď."
         % (_fmt_arrivals(arrivals), cur_count))
     if len(text) <= NUDGE_MAX_CHARS:
         return text
@@ -432,10 +429,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     rec = qrecs.get(sid)
     if not isinstance(rec, dict):
         rec = {}
-    # #993 item 4: build the WORK-CLASS + DEPENDENCY classify_fn for this cwd
-    # (labels + Depends-on + one live-infra-lane read). `classify_builder(cwd)`
-    # is the injected seam (network kept out of run_once unit tests, exactly like
-    # `queue_fetch`); None (unwired / legacy tests) = every arrival dispatchable.
+    # #993 item 4: build the DEPENDENCY classify_fn for this cwd (per-issue
+    # Depends-on read). `classify_builder(cwd)` is the injected seam (network
+    # kept out of run_once unit tests, exactly like `queue_fetch`); None
+    # (unwired / legacy tests) = every arrival dispatchable.
     classify_fn = classify_builder(cwd) if classify_builder is not None else None
     action, new_rec, reason, arrivals = _queue_decision(rec, cur, now,
                                                         _nudge_floor(),
@@ -452,10 +449,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
             # seed/track means the wave (if any) is resolved/baseline-known, and
             # a #780 `hold` follows a delivered nudge (send_fails already 0).
             qrecs[sid] = new_rec
-        if action == "hold" and reason in ("infra-serial", "dep-wait"):
-            # #993 item 4: EVERY new arrival is non-dispatchable (infra while an
-            # infra lane is live, or dep-wait) -> HELD (base kept OLD so they
-            # re-detect once dispatchable), no keystroke this sweep.
+        if action == "hold" and reason == "dep-wait":
+            # #993 item 4: EVERY new arrival is non-dispatchable (dep-wait) ->
+            # HELD (base kept OLD so they re-detect once their deps close), no
+            # keystroke this sweep.
             logs.append("queue-arrival %s -> hold:%s (%d new, all non-dispatchable; "
                         "keep waiting, %d in union)"
                         % (loc, reason, len(arrivals), len(cur)))

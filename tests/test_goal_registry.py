@@ -131,21 +131,23 @@ class TestSaturationDirectiveIsReal(TestCase):
     must NOT read as batch mode."""
 
     def test_saturation_core_states_the_full_directive(self):
-        # #993 r2: the refill directive is now WORK-CLASS + DEPENDENCY AWARE —
-        # refill ONLY with a dispatchable unit; infra is SERIAL (the "refill
-        # IMMEDIATELY while backlog remains" blanket-pressure phrase is retired).
+        # #993 r2b: the refill directive is DEPENDENCY AWARE — refill ONLY with a
+        # DISPATCHABLE unit (dependencies closed). The class-based infra-serial
+        # half was REMOVED (infra serialisation is ROUTING via --role).
         core = next(c for c in gr.CLAUSES if c.id == "saturation-core").text
         for token in ("CONTINUOUS REFILL", "isolation:worktree",
-                      "autopilot-worker", "DISPATCHABLE", "SERIAL",
-                      "one live infra lane"):
+                      "autopilot-worker", "DISPATCHABLE", "dependencies closed"):
             self.assertIn(token, core)
         # TEETH: the retired batch wording must be GONE, and #991 dropped the
         # fixed lane cap wording (count = box + backlog). #993 r2: the retired
-        # blanket-refill pressure phrase is GONE too.
+        # blanket-refill pressure phrase is GONE too. #993 r2b: the infra-serial
+        # half is GONE (routing replaces it).
         self.assertNotIn("up to 5", core)
         self.assertNotIn("BATCH MODE", core)
         self.assertNotIn("NO refill", core)
         self.assertNotIn("IMMEDIATELY while backlog remains", core)
+        self.assertNotIn("infra units are SERIAL", core)
+        self.assertNotIn("one live infra lane", core)
 
     def test_saturation_delivery_integrates_serially(self):
         for p in gr.PROFILES:
@@ -308,10 +310,11 @@ class TestShippedSkillMatchesRegistry(TestCase):
         for line in lines:
             self.assertIn("CONTINUOUS REFILL", line)
             self.assertIn("isolation:worktree", line)
-            # #993 r2: refill is dispatchable-only, infra serial (the retired
-            # blanket "refill a returned lane's slot IMMEDIATELY" is gone).
+            # #993 r2b: refill is dispatchable-only (deps closed); the infra-serial
+            # half was removed (routing replaces it). The retired blanket "refill a
+            # returned lane's slot IMMEDIATELY" is gone.
             self.assertIn("refill ONLY with a DISPATCHABLE unit", line)
-            self.assertIn("infra units are SERIAL", line)
+            self.assertNotIn("infra units are SERIAL", line)
             self.assertNotIn("returned lane's slot IMMEDIATELY", line)
             # TEETH: no batch wording survives in the shipped lines.
             self.assertNotIn("BATCH MODE", line)

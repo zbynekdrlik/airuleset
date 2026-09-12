@@ -186,6 +186,19 @@ def _wdrain_payload(cwd, subagent_type="autopilot-worker"):
     }
 
 
+def _seed_overlap_receipt(tmpdir, cwd, issues=(1,)):
+    """Seed a FRESH lane-overlap receipt so `block-dispatch-over-wdrain.sh`'s
+    independence gate (#992/#993, which runs BEFORE the wdrain-ceiling check)
+    passes — letting these tests actually exercise the W-drain ceiling they
+    claim to test, not the independence gate that would otherwise block the
+    receipt-less autopilot-worker payload (#993 r2b)."""
+    d = pathlib.Path(tmpdir) / ".claude" / "lane-overlap"
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {"checked_issues": [int(i) for i in issues], "ts": time.time(),
+           "verdict": "clear", "overlaps": []}
+    (d / (_cwd_key(cwd) + ".json")).write_text(json.dumps(rec))
+
+
 def _run_wdrain_hook(payload, env_extra=None):
     env = dict(os.environ)
     if env_extra:
@@ -208,6 +221,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=2)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -219,6 +233,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=5)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
@@ -231,6 +246,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd.mkdir()
             # No ops_wait_stale → fall back to ops_wait=10 > threshold=8
             _make_wdrain_cache(td, cwd, ops_wait=10)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
@@ -242,6 +258,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=3)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -255,6 +272,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=0)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -266,6 +284,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=20)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,

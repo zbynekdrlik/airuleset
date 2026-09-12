@@ -176,7 +176,7 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
     resource snippet.
 
     ``candidate_n`` (#993 item 3): the DISPATCHABLE-candidate count (workable ∧
-    deps satisfied ∧ (independent ∨ no live infra lane)). When given, the action
+    deps satisfied). When given, the action
     sentence names it — "dispatchni N DISPATCHOVATEĽNÝCH jednotiek" — instead of
     the old unconditional "sú voľné sloty — workable tikety dispatchni" pressure
     (the DECISION already refused to fire when candidate_n was 0). None keeps the
@@ -184,7 +184,7 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
     compat GOAL_LANE_NUDGE_TEXT_FN).
     """
     if isinstance(candidate_n, int) and not isinstance(candidate_n, bool):
-        _action = ("Je %d DISPATCHOVATEĽNÝCH jednotiek (nezávislé + so zavretými "
+        _action = ("Je %d DISPATCHOVATEĽNÝCH jednotiek (so zavretými "
                    "závislosťami) — dispatchni ich" % candidate_n)
     else:
         _action = "Sú VOĽNÉ sloty — workable tikety dispatchni"
@@ -226,7 +226,6 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
         "PRIORITU (ČO riešiť a v akom poradí) ani POČET lán NEURČUJE tento nudge "
         "— platí priorita dohodnutá v tejto session: architektúra > "
         "architecture-rework > prio:bounce > backlog (#993). "
-        "Infra jednotky (CI/hooks/gates/release/deploy/airuleset moduly-skills-agents) "
-        "sú SÉRIOVÉ — refill platí LEN pre nezávislé jednotky; ak sú workable len "
-        "infra tikety a jedna infra lane žije, NErefillni ďalšiu (#992/#993)."
+        "NErefillni dep-wait jednotku (otvorené Depends-on); infra prácu smeruj "
+        "cez --role do infra roly (#993 r2b)."
     ) % (backlog_n, live_workers, waiters, resource_snippet)

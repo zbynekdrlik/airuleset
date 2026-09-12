@@ -167,35 +167,8 @@ def gather_live_lanes(repo_root, run=None):
     for branch in branches:
         lanes.append({"ref": branch,
                       "files": _lane_files(repo_root, branch, run, base_branch),
-                      "topic": _lane_topic(repo_root, branch, run),
-                      "issues": _lane_issues(repo_root, branch, run, base_branch)})
+                      "topic": _lane_topic(repo_root, branch, run)})
     return lanes
-
-
-_ISSUE_REF_RE = re.compile(r"#(\d+)")
-
-
-def _lane_issues(repo_root, branch, run, base_branch):
-    """The issue NUMBERS a live lane is working — the `#N` tokens in its commit
-    subjects+bodies since the integration base (the design/RED/green/LANE-RETURN
-    commits all carry `#N`). #993 item 2: `cli_work_class.live_infra_lane` maps
-    these → labels → work_class; an EMPTY list (a lane with no resolvable issue)
-    is classed `infra` (fail-safe serial). Best-effort — [] on any git error."""
-    try:
-        base = run(["git", "-C", repo_root, "merge-base", base_branch, branch])
-        if base.returncode != 0:
-            return []
-        b = (base.stdout or "").strip()
-        rng = ("%s..%s" % (b, branch)) if b else branch
-        r = run(["git", "-C", repo_root, "log", "--format=%s%n%b", rng])
-        if r.returncode != 0:
-            return []
-        nums = {int(m) for m in _ISSUE_REF_RE.findall(r.stdout or "")}
-        return sorted(nums)
-    except Exception as e:
-        print("lane-overlap: issue-scan for %s failed (%s)" % (branch, e),
-              file=sys.stderr)
-        return []
 
 
 def _lane_files(repo_root, branch, run, base_branch):

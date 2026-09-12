@@ -363,14 +363,14 @@ class TestOrchestrator(_OrchBase):
         self.assertEqual(tmux.typed_texts(), [])
         self.assertEqual(qrecs[self.sid]["base"], [1])   # not advanced -> retry
 
-    def test_infra_only_arrival_held_no_keystroke(self):
-        # #993 item 4: a non-dispatchable (infra-while-lane-live) arrival is HELD
-        # via the injected classify_builder — no keystroke, base kept OLD.
+    def test_dep_wait_only_arrival_held_no_keystroke(self):
+        # #993 item 4 (r2b): a non-dispatchable (dep-wait) arrival is HELD via
+        # the injected classify_builder — no keystroke, base kept OLD.
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         tmux = self._tmux()
         logs = self._run(qrecs, lambda cwd: [1, 9], tmux, handled=set(),
-                         classify_builder=lambda cwd: (lambda n: "infra-serial"))
-        self.assertTrue(any("hold:infra-serial" in ln for ln in logs), logs)
+                         classify_builder=lambda cwd: (lambda n: "dep-wait"))
+        self.assertTrue(any("hold:dep-wait" in ln for ln in logs), logs)
         self.assertEqual(tmux.typed_texts(), [])
         self.assertEqual(qrecs[self.sid]["base"], [1])   # kept OLD -> re-detect
 
@@ -385,10 +385,10 @@ class TestOrchestrator(_OrchBase):
 
     def test_mixed_wave_nudges_dispatchable_and_excludes_held_from_base(self):
         # #993 review 3: a MIXED wave nudges only the dispatchable arrival (#8)
-        # and the held infra member (#9) is NOT baked into base -> re-detects.
+        # and the held dep-wait member (#9) is NOT baked into base -> re-detects.
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         tmux = self._tmux()
-        cls = {8: "dispatchable", 9: "infra-serial"}
+        cls = {8: "dispatchable", 9: "dep-wait"}
         logs = self._run(qrecs, lambda cwd: [1, 8, 9], tmux, handled=set(),
                          state={},
                          classify_builder=lambda cwd: (lambda n: cls[n]))

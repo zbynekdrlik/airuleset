@@ -3,9 +3,9 @@ dispatchable-count derivation.
 
 `cli_work_class.dep_wait_map` resolves each workable row's `Depends-on:` (batched
 `fetch_meta` or per-row, injected runner) and returns the dep-wait rows + their
-blocking refs; `dispatchable_numbers` (pure) applies `workable ∧ ¬dep-wait ∧
-(independent ∨ ¬live-infra-lane)`; `live_infra_lane` maps live lanes → issue
-classes. `_print_issue_rows` stamps the `dep-wait:#N` action column.
+blocking refs; `dispatchable_numbers` (pure) applies `workable ∧ ¬dep-wait`
+(deps-only — the class-based infra-lane gate was removed in round 2b).
+`_print_issue_rows` stamps the `dep-wait:#N` action column.
 
 Covers item 7 (open dep → excluded, closed dep → dispatchable, chain A→B→C only
 A, cross-repo form, cycle → wait + printed) and item 3's count/reason.
@@ -123,69 +123,25 @@ class TestDepWaitMap(TestCase):
 
 
 class TestDispatchableNumbers(TestCase):
+    # #993 r2b: dispatchable = workable ∧ ¬dep-wait (deps-only; the class-based
+    # infra-lane gate was removed).
     def test_dep_wait_excluded_from_candidates(self):
         rows = {"1": _row(), "2": _row()}
-        d, reason = wc.dispatchable_numbers(
-            rows, SLUG, {"2": ["#1"]}, infra_lane_live=False)
+        d, reason = wc.dispatchable_numbers(rows, SLUG, {"2": ["#1"]})
         self.assertEqual(d, {"1"})
         self.assertIsNone(reason)
 
-    def test_infra_excluded_when_lane_live(self):
+    def test_no_dep_wait_all_dispatchable(self):
         rows = {"1": _row(labels=["infra"]), "2": _row(labels=["bug"])}
-        d, reason = wc.dispatchable_numbers(
-            rows, SLUG, {}, infra_lane_live=True)
-        self.assertEqual(d, {"2"})     # independent stays; infra held
+        d, reason = wc.dispatchable_numbers(rows, SLUG, {})
+        self.assertEqual(d, {"1", "2"})   # class no longer gates dispatchability
         self.assertIsNone(reason)
-
-    def test_infra_dispatchable_when_no_lane(self):
-        rows = {"1": _row(labels=["infra"])}
-        d, reason = wc.dispatchable_numbers(
-            rows, SLUG, {}, infra_lane_live=False)
-        self.assertEqual(d, {"1"})
-
-    def test_airuleset_repo_serial_reason(self):
-        rows = {"1": _row(labels=["bug"])}
-        d, reason = wc.dispatchable_numbers(
-            rows, "zbynekdrlik/airuleset", {}, infra_lane_live=True)
-        self.assertEqual(d, set())
-        self.assertEqual(reason, "infra-serial")
 
     def test_dep_wait_only_reason(self):
         rows = {"1": _row(labels=["bug"])}
-        d, reason = wc.dispatchable_numbers(
-            rows, SLUG, {"1": ["#9"]}, infra_lane_live=False)
+        d, reason = wc.dispatchable_numbers(rows, SLUG, {"1": ["#9"]})
         self.assertEqual(d, set())
         self.assertEqual(reason, "dep-wait")
-
-
-class TestLiveInfraLane(TestCase):
-    def test_no_lanes_is_false(self):
-        self.assertFalse(
-            wc.live_infra_lane(SLUG, None, "/root",
-                                       gather_fn=lambda root: []))
-
-    def test_airuleset_any_lane_is_infra(self):
-        lanes = [{"ref": "worktree-x", "issues": [42]}]
-        self.assertTrue(
-            wc.live_infra_lane("zbynekdrlik/airuleset", None, "/root",
-                                       gather_fn=lambda root: lanes))
-
-    def test_unresolvable_lane_is_infra_failsafe(self):
-        lanes = [{"ref": "worktree-x", "issues": []}]
-        self.assertTrue(
-            wc.live_infra_lane(SLUG, None, "/root",
-                                       gather_fn=lambda root: lanes))
-
-    def test_independent_lane_only_is_not_infra(self):
-        lanes = [{"ref": "worktree-x", "issues": [7]}]
-        runner = _FakeRunner()
-        # #7 has no infra label → independent
-        def labels_fn(n, runner_, root):
-            return [{"name": "bug"}]
-        self.assertFalse(
-            wc.live_infra_lane(SLUG, runner, "/root",
-                                       gather_fn=lambda root: lanes,
-                                       labels_fn=labels_fn))
 
 
 class TestListActionColumn(TestCase):
@@ -228,8 +184,8 @@ class TestWatchdogSeams(TestCase):
             return airuleset._watchdog_dispatchable_fetch("/root")
 
     def test_count_and_reason_parsed(self):
-        self.assertEqual(self._fetch("0\nreason:infra-serial\n"),
-                         [{"count": 0, "reason": "infra-serial"}])
+        self.assertEqual(self._fetch("0\nreason:dep-wait\n"),
+                         [{"count": 0, "reason": "dep-wait"}])
         self.assertEqual(self._fetch("3\n"), [{"count": 3, "reason": None}])
 
     def test_unmeasurable_is_none(self):
@@ -251,13 +207,12 @@ class TestWatchdogSeams(TestCase):
         with mk.patch("airuleset._repo_root", return_value="/root"), \
              mk.patch("airuleset.resolve_authority", return_value="full"), \
              mk.patch("airuleset._repo_slug", return_value="o/r"), \
-             mk.patch("cli_work_class.live_infra_lane", return_value=False), \
              mk.patch("cli_work_class.classify_number", side_effect=RuntimeError):
             fn = airuleset._watchdog_queue_classify("/root")
             self.assertTrue(callable(fn))
-            # a classify error → fail-safe infra-serial (HOLD, never a spurious
-            # parallel infra dispatch).
-            self.assertEqual(fn(5), "infra-serial")
+            # #993 r2b: a classify error → fail-safe dep-wait (HOLD, never a
+            # spurious dispatch we cannot justify).
+            self.assertEqual(fn(5), "dep-wait")
 
     def test_queue_classify_full_dispatchable_passthrough(self):
         import unittest.mock as mk
@@ -265,7 +220,6 @@ class TestWatchdogSeams(TestCase):
         with mk.patch("airuleset._repo_root", return_value="/root"), \
              mk.patch("airuleset.resolve_authority", return_value="full"), \
              mk.patch("airuleset._repo_slug", return_value="o/r"), \
-             mk.patch("cli_work_class.live_infra_lane", return_value=False), \
              mk.patch("cli_work_class.classify_number", return_value="dispatchable"):
             fn = airuleset._watchdog_queue_classify("/root")
             self.assertEqual(fn(7), "dispatchable")

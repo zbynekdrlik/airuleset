@@ -5476,13 +5476,13 @@ def _watchdog_backlog_fetch(cwd):
 
 def _watchdog_dispatchable_fetch(cwd):
     """#993 item 3 — the DISPATCHABLE-candidate signal (`workable ∧ deps
-    satisfied ∧ (independent ∨ no live infra lane)`) for the repo at `cwd`, as a
+    satisfied`) for the repo at `cwd`, as a
     ONE-element list `[{"count": N, "reason": r}]` (never `[]`), or None on any
     failure/refusal. Sibling of `_watchdog_backlog_fetch`: same authority-aware
     command choice (`core-quals`/`slice-quals`) + `_repo_root(cwd=cwd)` resolution
     + refuse→None contract — only the flag differs (`--count-dispatchable`, which
-    prints the count on line 1 and, when the count is 0, a `reason:<infra-serial|
-    dep-wait>` line). The lane nudge reads it through `goal._cached_dispatchable`
+    prints the count on line 1 and, when the count is 0, a `reason:dep-wait`
+    line). The lane nudge reads it through `goal._cached_dispatchable`
     (per-cwd TTL) so the O(workable) `--count-dispatchable` subprocess fires at
     most once per repo per window, never every sweep. Wired HERE, like every
     network call in this file, so run_once unit tests stay network-free
@@ -5699,14 +5699,14 @@ def _watchdog_queue_fetch(cwd):
 def _watchdog_queue_classify(cwd):
     """#993 item 4 — a per-arrival dispatch-class FACTORY for the queue-arrival
     rider, or None. Returns `classify_fn(number)` → `"dispatchable"` /
-    `"infra-serial"` / `"dep-wait"` (the combined `workable ∧ deps satisfied ∧
-    (independent ∨ no live infra lane)` gate). FULL-authority only (a reduced box
-    returns None; the rider also gates). The repo slug + the ONE live-infra-lane
-    read (git worktree/wip-ref scan) are computed LAZILY on the first arrival and
-    memoized in the closure, so a no-arrival sweep (the common case) costs
-    nothing beyond the cheap authority check; each classify call then does a
-    bounded per-issue labels + `Depends-on:` gh fetch. Any error fails safe to
-    `infra-serial` (HOLD — never a spurious infra parallel dispatch). Wired HERE
+    `"dep-wait"` (the `workable ∧ deps satisfied` gate; the class-based infra
+    branch was removed in round 2b — infra serialisation is ROUTING via
+    `--role`, not a live-lane gate). FULL-authority only (a reduced box returns
+    None; the rider also gates). The repo slug is computed LAZILY on the first
+    arrival and memoized in the closure, so a no-arrival sweep (the common case)
+    costs nothing beyond the cheap authority check; each classify call then does
+    a bounded per-issue `Depends-on:` gh fetch. Any error fails safe to
+    `dep-wait` (HOLD — never a spurious dispatch we cannot justify). Wired HERE
     like every other network seam so run_once unit tests stay network-free (they
     leave `queue_classify` None → the rider treats every arrival dispatchable)."""
     try:
@@ -5726,15 +5726,10 @@ def _watchdog_queue_classify(cwd):
     def classify_fn(number):
         if "slug" not in ctx:
             ctx["slug"] = _repo_slug(cwd=root)
-            try:
-                ctx["infra"] = _wc.live_infra_lane(ctx["slug"], _runner, root)
-            except Exception:
-                ctx["infra"] = True   # fail-safe serial
         try:
-            return _wc.classify_number(number, ctx["slug"], _runner, root,
-                                       ctx["infra"])
+            return _wc.classify_number(number, ctx["slug"], _runner, root)
         except Exception:
-            return "infra-serial"     # fail-safe: HOLD on any classify error
+            return "dep-wait"         # fail-safe: HOLD on any classify error
 
     return classify_fn
 
@@ -6461,15 +6456,13 @@ def cmd_watchdog(args):
                     # only. Wired on EVERY box; the rider self-gates authority.
                     queue_fetch=_watchdog_queue_fetch,
                     # #993 item 4 — the queue-arrival rider's per-arrival
-                    # dispatch-class factory (work-class + Depends-on + live
-                    # infra lane), so an infra-while-infra-lane-live or dep-wait
+                    # dispatch-class factory (Depends-on), so a dep-wait
                     # arrival is HELD, not nudged. FULL-authority only, lazy.
                     queue_classify=_watchdog_queue_classify,
                     # #993 item 3 — job 20's lane-occupancy nudge reads the
-                    # DISPATCHABLE-candidate count (work-class + Depends-on +
-                    # live infra lane) so a free slot with no dispatchable unit
-                    # (infra-serial / dep-wait) is journaled skip, not nudged.
-                    # Cached per-cwd; full-authority resolves core-quals.
+                    # DISPATCHABLE-candidate count (Depends-on) so a free slot
+                    # with no dispatchable unit (dep-wait) is journaled skip,
+                    # not nudged. Cached per-cwd; full-authority resolves core-quals.
                     dispatchable_fetch=_watchdog_dispatchable_fetch,
                     # #797 — job 20's U-freshness reconcile rider reads the
                     # footer `user_waiting` count from the SAME machine-local
@@ -7494,12 +7487,9 @@ from cli_work_class import (  # noqa: E402  (#993 — orchestration classificati
     normalize_ref as normalize_ref,
     dep_wait as dep_wait,
     dispatchable as dispatchable,
-    lane_class_from_issue_classes as lane_class_from_issue_classes,
     dep_wait_map as dep_wait_map,
-    live_infra_lane as live_infra_lane,
     dispatchable_numbers as dispatchable_numbers,
     issue_state as issue_state,
-    labels_of as labels_of,
     classify_number as classify_number,
     resolve_issue_deps as resolve_issue_deps,
     fetch_meta as fetch_meta,
@@ -7786,9 +7776,9 @@ from cli_wdrain import (  # noqa: E402
 
 
 def _add_dispatch_flags(parser):
-    """#993 items 3/7 — the shared `--dep-wait` / `--count-dispatchable` flags for
-    BOTH `core-quals` and `slice-quals` (factored so `main()` carries one copy,
-    #993 review 10)."""
+    """#993 items 3/7 + 2b — the shared `--dep-wait` / `--count-dispatchable` /
+    `--role` flags for BOTH `core-quals` and `slice-quals` (factored so `main()`
+    carries one copy, #993 review 10)."""
     parser.add_argument(
         "--dep-wait", action="store_true",
         help="List ONLY the dep-wait members (open Depends-on:), each with its "
@@ -7797,8 +7787,14 @@ def _add_dispatch_flags(parser):
     parser.add_argument(
         "--count-dispatchable", action="store_true",
         help="Print the dispatchable-candidate count = workable and deps-"
-             "satisfied and (independent or no live infra lane); a reason: line "
-             "(infra-serial/dep-wait) follows a 0 (#993 item 3)")
+             "satisfied; a reason:dep-wait line "
+             "follows a 0 (#993 item 3)")
+    parser.add_argument(
+        "--role", choices=("review", "infra"), default=None,
+        help="Slice the rows by work class (#993 r2b): 'review' = rows whose "
+             "class is NOT infra; 'infra' = rows whose class IS infra; omitted "
+             "= no filter. This is how the `infra` label ROUTES a ticket into "
+             "the infra role/target (round-3 sequential mode).")
 
 
 def main():
