@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 import cli_remote  # noqa: E402  (#433 L-E seam re-target)
 import cli_tmux_provisioning  # noqa: E402  (#998: create-body unit under test)
+import cli_fleet  # noqa: E402  (#998 finisher: box_windows for the hook value)
 # #433 cluster L: the installers moved here; a leaf→leaf internal call
 # (ensure_claude_cli_installed → _claude_cli_installed → _claude_cli_env)
 # resolves in this leaf, so those helpers are patched via cli_binary_installers.
@@ -1946,6 +1947,93 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertNotIn(["tmux", "rename-window", "-t", "@3", "gk"], seen)
         # a window matching no declaration keeps the box alias (legacy)
         self.assertIn(["tmux", "rename-window", "-t", "@9", "gk"], seen)
+
+    def test_live_apply_installs_the_extended_session_created_hook_for_gk(self):
+        # #998 finisher (owner "spravne sa o to starat aj po restarte"): the
+        # live-apply used to hardcode the bare `rename-window gk` set-hook, so a
+        # RUNNING gk server kept the OLD hook until a full tmux server restart --
+        # a re-created `zbynek` session (webterm reconnect BEFORE a reboot) would
+        # then run `rename-window gk` only and NOT create `gk-infra`. The running
+        # server's session-created hook must carry the SAME extended create-if-
+        # missing value the conf line renders (single source), exactly as the
+        # owner-audit path live-applies its own hook.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@0\t/home/gatekeeper\n")
+            if argv[:2] == ["tmux", "list-sessions"]:
+                return _FakeCP(returncode=0, stdout="zbynek\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="gatekeeper", host="gatekeeper-cx23",
+            home="/home/gatekeeper", run=run)
+        hooks = [a for a in seen
+                 if a[:4] == ["tmux", "set-hook", "-g", "session-created"]]
+        self.assertTrue(hooks, "no live session-created hook was set")
+        value = hooks[-1][4]
+        # the finisher's exact defect: the running server was left on the bare hook
+        self.assertNotEqual(value, "rename-window gk")
+        # it must be the create-if-missing extended hook (creates gk-infra), with
+        # window 0 still renamed FIRST (today's behaviour, unchanged)
+        self.assertIn("rename-window gk", value)
+        self.assertIn("run-shell", value)
+        self.assertIn("gk-infra", value)
+        # and it is EXACTLY the value the conf line carries -- ONE source, never a
+        # second hand-written string
+        windows = cli_fleet.box_windows("gatekeeper")
+        self.assertEqual(
+            value,
+            cli_tmux_provisioning._session_created_hook_value("gk", windows))
+
+    def test_conf_line_and_live_hook_share_one_value_source(self):
+        # #998 finisher ("no second string"): both the ~/.tmux.conf line
+        # (`_render_session_created_hook_line`) and the live `set-hook` route
+        # through the SINGLE `_session_created_hook_value`. Patch it to a sentinel
+        # and prove BOTH callers use it (never a parallel string).
+        with m.patch.object(cli_tmux_provisioning,
+                            "_session_created_hook_value",
+                            return_value="SENTINEL_HOOK") as spy:
+            line = cli_tmux_provisioning._render_session_created_hook_line(
+                "gk", [])
+        self.assertTrue(spy.called)
+        self.assertIn("SENTINEL_HOOK", line)
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            return _FakeCP(returncode=0, stdout="")
+
+        with m.patch.object(cli_tmux_provisioning,
+                            "_session_created_hook_value",
+                            return_value="SENTINEL_HOOK"):
+            cli_tmux_provisioning._live_apply_stream_window_name(
+                "gk", windows=[], run=run)
+        self.assertIn(
+            ["tmux", "set-hook", "-g", "session-created", "SENTINEL_HOOK"],
+            seen)
+
+    def test_undeclared_target_live_hook_is_byte_identical_bare_rename(self):
+        # #998 finisher: an undeclared target (subdev stream, box_windows == [])
+        # must live-apply EXACTLY today's bare `rename-window <alias>` -- the
+        # refactor changes nothing for the 99% path.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@0\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=run)
+        self.assertIn(
+            ["tmux", "set-hook", "-g", "session-created", "rename-window m2"],
+            seen)
 
     def test_newlevel_owner_box_does_NO_window_naming_live_apply(self):
         # #593 REGRESSION FIX: a newlevel multi-project owner box must NOT

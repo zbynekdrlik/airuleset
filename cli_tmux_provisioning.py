@@ -1196,26 +1196,44 @@ def render_stream_tmux_window_block(name, windows=None):
     )
 
 
-def _render_session_created_hook_line(name, windows):
-    """#998: the ``set-hook -g session-created "..."`` line. Undeclared / ≤1
-    declared window -> exactly today's ``rename-window <name>`` (byte-identical).
-    A box with NON-primary declared windows (gk) extends the SAME hook: rename
-    window 0 FIRST (today's behaviour — a run-shell exec failure can never
-    affect it), THEN a single ``run-shell`` of the reusable create-if-missing
-    snippet. Combined via tmux's core ``;`` command separator (no ``-ga``
-    dependency). The run-shell arg is single-quoted; the snippet's own
-    double-quotes are escaped for the OUTER set-hook double-quoted value;
-    ``#{session_name}`` binds the created session at fire time (kept a single
-    ``#`` so run-shell expands it), while the snippet's inner ``##{...}`` formats
-    survive to the inner ``list-windows``."""
+def _session_created_hook_value(name, windows):
+    """#998: the RAW ``session-created`` hook command tmux stores — the SINGLE
+    source consumed by BOTH the ~/.tmux.conf line (``_render_session_created_
+    hook_line``, which wraps + escapes it for the conf's double-quoted value)
+    AND the live ``tmux set-hook`` argv in ``_live_apply_stream_window_name``
+    (which passes it VERBATIM, exactly as the owner-audit path passes
+    ``_owner_audit_hook_command``). Never a second hand-written string, so the
+    persisted conf and the running server can never drift (the #998 finisher: a
+    running gk server was left on the bare ``rename-window gk`` while the conf
+    carried the extended create-if-missing hook, so a re-created ``zbynek``
+    session before a reboot would not create ``gk-infra``).
+
+    Undeclared / ≤1 declared window -> exactly today's ``rename-window <name>``
+    (byte-identical). A box with NON-primary declared windows (gk) extends the
+    SAME hook: rename window 0 FIRST (today's behaviour — a run-shell exec
+    failure can never affect it), THEN a single ``run-shell`` of the reusable
+    create-if-missing snippet, combined via tmux's core ``;`` command separator
+    (no ``-ga`` dependency). The run-shell arg is single-quoted; ``#{session_
+    name}`` binds the created session at fire time (kept a single ``#`` so
+    run-shell expands it), while the snippet's inner ``##{...}`` formats survive
+    to the inner ``list-windows``. The value carries UNescaped double-quotes —
+    the conf wrapper escapes them for its own double-quoted context; the live
+    argv path stores them as-is (tmux stores the argv verbatim)."""
     body = _managed_windows_create_body(windows)
     if not body:
-        return f'set-hook -g session-created "rename-window {name}"\n'
-    body_conf = body.replace('"', '\\"')
-    return (
-        'set-hook -g session-created "rename-window ' + name
-        + " ; run-shell 'S=#{session_name}; " + body_conf + "'\"\n"
-    )
+        return "rename-window %s" % name
+    return "rename-window %s ; run-shell 'S=#{session_name}; %s'" % (name, body)
+
+
+def _render_session_created_hook_line(name, windows):
+    """#998: the ``set-hook -g session-created "..."`` ~/.tmux.conf LINE. Wraps
+    the shared raw hook value from ``_session_created_hook_value`` in the conf's
+    double-quoted value, escaping the value's own double-quotes for that outer
+    context (the ONLY difference between the persisted conf and the live-applied
+    argv). ≤1 declared window -> byte-identical to today's bare ``rename-window``
+    hook line."""
+    value = _session_created_hook_value(name, windows)
+    return 'set-hook -g session-created "%s"\n' % value.replace('"', '\\"')
 
 
 def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
@@ -1257,9 +1275,17 @@ def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
     option / a window's own name label, not any window's geometry, and does
     not read or rewrite anything CC's renderer has drawn."""
     runner = run or _default_tmux_run
+    # #998 finisher: the live session-created hook is the SAME value the conf
+    # line carries (`_session_created_hook_value` — the single source), so an
+    # ALREADY-running server re-creating a session (a webterm reconnect BEFORE a
+    # reboot restarts the tmux server) also creates the declared `gk-infra`.
+    # Passed VERBATIM as the set-hook argv (tmux stores it as-is, expands
+    # `#{...}` at fire time) — exactly as `_live_apply_owner_session_audit`
+    # passes its hook. `windows` is [] for every non-declaring target => the
+    # value is `rename-window <alias>`, byte-identical to the pre-#998 hook.
     for argv in (["tmux", "set-option", "-gw", "automatic-rename", "off"],
                  ["tmux", "set-hook", "-g", "session-created",
-                  "rename-window %s" % new_name]):
+                  _session_created_hook_value(new_name, windows)]):
         try:
             runner(argv)
         except Exception as e:
