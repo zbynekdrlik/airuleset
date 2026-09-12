@@ -118,7 +118,7 @@ def _drive(cmd, gh, authority="full", user="newlevel", login="zbynekdrlik",
     import unittest.mock as mk
 
     out, err, exc = io.StringIO(), io.StringIO(), None
-    args = dict(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None)
+    args = dict(count=True, list=False, waiting=False, ops_wait=False, audit=False, dep_wait=False, count_dispatchable=False, extra=None)
     args.update(flags)
     with mk.patch.object(airuleset, "resolve_authority", return_value=authority):
         with mk.patch.object(airuleset, "_current_user", return_value=user):

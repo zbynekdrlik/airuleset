@@ -7382,6 +7382,18 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _last_origin_owner as _last_origin_owner,
     _slice_mine_and_handed as _slice_mine_and_handed,
 )
+from cli_work_class import (  # noqa: E402  (#993 — orchestration classification)
+    work_class as work_class,
+    depends_on_refs as depends_on_refs,
+    normalize_ref as normalize_ref,
+    dep_wait as dep_wait,
+    dispatchable as dispatchable,
+    lane_class_from_issue_classes as lane_class_from_issue_classes,
+    dep_wait_map as dep_wait_map,
+    live_infra_lane as live_infra_lane,
+    dispatchable_numbers as dispatchable_numbers,
+    issue_state as issue_state,
+)
 from cli_quals_cmd import (  # noqa: E402  (#433 cluster I facade — leaf re-export)
     _row_action as _row_action,
     _print_issue_rows as _print_issue_rows,
@@ -8419,6 +8431,16 @@ def main():
              "member (the --list set + a labels column) — the job-20 named "
              "partition-audit nudge reads this to name each I member (#578)")
     p_slice.add_argument(
+        "--dep-wait", action="store_true",
+        help="List ONLY the dep-wait members (open Depends-on:), each with its "
+             "blocking refs in the action column — they STAY in --count/I but "
+             "are excluded from dispatchable candidates (#993 item 7)")
+    p_slice.add_argument(
+        "--count-dispatchable", action="store_true",
+        help="Print the dispatchable-candidate count = workable and deps-"
+             "satisfied and (independent or no live infra lane); a reason: line "
+             "(infra-serial/dep-wait) follows a 0 (#993 item 3)")
+    p_slice.add_argument(
         "--bounces", action="store_true",
         help="Print bounce rounds for open prio:bounce/ready-for-review "
              "tickets in this slice (#843) — tags round >= 3 as round3!")
@@ -8452,6 +8474,16 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "obligation member (the --list set + a labels column) — the job-20 "
              "named partition-audit nudge reads this to name each I member (#578)")
+    p_core.add_argument(
+        "--dep-wait", action="store_true",
+        help="List ONLY the dep-wait members (open Depends-on:), each with its "
+             "blocking refs in the action column — they STAY in --count/I but "
+             "are excluded from dispatchable candidates (#993 item 7)")
+    p_core.add_argument(
+        "--count-dispatchable", action="store_true",
+        help="Print the dispatchable-candidate count = workable and deps-"
+             "satisfied and (independent or no live infra lane); a reason: line "
+             "(infra-serial/dep-wait) follows a 0 (#993 item 3)")
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")

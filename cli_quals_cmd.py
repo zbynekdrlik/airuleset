@@ -83,7 +83,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       gk_handoff_numbers=None, recheck_numbers=None,
                       unpark_numbers=None, tacit_wait_numbers=None,
                       tacit_close_numbers=None, converge_numbers=None,
-                      no_target_numbers=None, deploy_target_numbers=None):
+                      no_target_numbers=None, deploy_target_numbers=None,
+                      dep_wait_map=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -164,9 +165,16 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     converge_numbers = converge_numbers or set()
     no_target_numbers = no_target_numbers or set()
     deploy_target_numbers = deploy_target_numbers or set()
+    dep_wait_map = dep_wait_map or {}
     for n in sorted(rows, key=lambda k: _row_sort_key(rows, k)):
         row = rows[n]
-        action = _row_action(row, own_stream)
+        # #993 item 7: a dep-wait row reads `dep-wait:<blocking refs>` in the
+        # action column — the picker's mechanical dependency-awareness (it STAYS
+        # in the I count, but is excluded from dispatchable candidates).
+        if n in dep_wait_map:
+            action = "dep-wait:" + ",".join(dep_wait_map[n])
+        else:
+            action = _row_action(row, own_stream)
         if reason_fn is None:
             print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                       action, row.get("title") or ""))
@@ -257,7 +265,7 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
                 len(no_target_numbers or set()), marker))
 
 
-def _print_audit_rows(rows, own_stream=None):
+def _print_audit_rows(rows, own_stream=None, dep_wait_map=None):
     """`number<TAB>createdAt<TAB>action<TAB>labels` per WORKABLE (I) member,
     OLDEST first — the `--audit` output the job-20 named partition-audit nudge
     reads (#578). `labels` is the COMMA-joined label-name list (empty for a
@@ -274,10 +282,18 @@ def _print_audit_rows(rows, own_stream=None):
     nudge's SHAPE detection keys on exact membership in `_REVIEW_LANE_LABELS`
     (`ready-for-review`/`needs-gatekeeper`, no commas) and the real vocabulary
     (`stream:*`, `ops-wait`, `bug`, …) carries none, so a mis-split only garbles
-    the cosmetic label display, never a routing/labelling decision."""
+    the cosmetic label display, never a routing/labelling decision.
+
+    #993 item 7: a dep-wait member reads `dep-wait:<blocking refs>` in the action
+    column (it STAYS in the I/audit set but is excluded from dispatchable
+    candidates), so the session naming its I members sees which are dep-blocked."""
+    dep_wait_map = dep_wait_map or {}
     for n in sorted(rows, key=lambda k: _row_sort_key(rows, k)):
         row = rows[n]
-        action = _row_action(row, own_stream)
+        if n in dep_wait_map:
+            action = "dep-wait:" + ",".join(dep_wait_map[n])
+        else:
+            action = _row_action(row, own_stream)
         names = ",".join(
             (lb or {}).get("name") or "" for lb in (row.get("labels") or [])
             if isinstance(lb, dict) and (lb or {}).get("name"))
@@ -714,8 +730,11 @@ def cmd_slice_quals(args):
     want_ops_wait = getattr(args, "ops_wait", False)
     want_audit = getattr(args, "audit", False)   # #578
     want_bounces = getattr(args, "bounces", False) is True   # #843
+    want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
+    want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     if not (want_count or want_list or want_waiting or want_ops_wait
-            or want_audit or want_bounces):
+            or want_audit or want_bounces or want_dep_wait
+            or want_count_dispatchable):
         for q in quals:
             print(q)
         return
@@ -843,12 +862,25 @@ def cmd_slice_quals(args):
     if want_count:
         print(len(unhandled))
         return
+    if want_count_dispatchable:
+        # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait
+        # and infra-while-lane-live STAY in --count/I, only their dispatchability
+        # differs). The lane nudge shells this (cached).
+        _emit_count_dispatchable(unhandled, root)
+        return
+    if want_dep_wait:
+        _emit_dep_wait(unhandled, user, root)
+        return
     if want_audit:
         # #578: the WORKABLE set with a labels column, for the job-20 named
-        # partition-audit nudge (same set as --list, plus labels).
-        _print_audit_rows(unhandled, own_stream=user)
+        # partition-audit nudge (same set as --list, plus labels). #993 item 7:
+        # dep-aware action column.
+        _dep_map, _ = _dep_wait_map_for(unhandled, root)
+        _print_audit_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
         return
-    _print_issue_rows(unhandled, own_stream=user)
+    # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7).
+    _dep_map, _ = _dep_wait_map_for(unhandled, root)
+    _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
 
 
 def _slice_quals_runner(root):
@@ -863,6 +895,46 @@ def _slice_quals_runner(root):
         return _a._gh_out(*argv[1:], cwd=cd, timeout=20)
 
     return _runner
+
+
+# --------------------------------------------------------------------------- #
+# #993 round 2 — dep-aware picker output + the dispatchable count. The gh/git IO
+# lives in `cli_quals` (re-exported via the airuleset facade); these thin glue
+# helpers keep the size-ratcheted `cmd_slice_quals`/`cmd_core_quals` from growing
+# (the established "extract the new branch" mechanic). On-demand paths ONLY —
+# never the hot `--count` path (which never calls them).
+# --------------------------------------------------------------------------- #
+
+def _dep_wait_map_for(rows, root):
+    """`(dep_wait_map, slug)` — on-demand per-row `Depends-on:` resolution."""
+    import airuleset
+    slug = airuleset._repo_slug(cwd=root)
+    dep_map = airuleset.dep_wait_map(rows, slug, _slice_quals_runner(root), root)
+    return dep_map, slug
+
+
+def _emit_count_dispatchable(rows, root):
+    """`--count-dispatchable`: the dispatchable-candidate count + a `reason:`
+    line when it is 0 (#993 item 3). dispatchable = workable ∧ ¬dep-wait ∧
+    (independent ∨ ¬live-infra-lane) — the SAME set the picker and both nudges
+    use. A `reason:infra-serial`/`reason:dep-wait` line follows a 0 count so the
+    lane nudge journals WHY it will not refill."""
+    import airuleset
+    dep_map, slug = _dep_wait_map_for(rows, root)
+    infra_live = airuleset.live_infra_lane(slug, _slice_quals_runner(root), root)
+    dispatchable_set, reason = airuleset.dispatchable_numbers(
+        rows, slug, dep_map, infra_live)
+    print(len(dispatchable_set))
+    if not dispatchable_set and rows and reason:
+        print("reason:" + reason)
+
+
+def _emit_dep_wait(rows, own_stream, root):
+    """`--dep-wait`: ONLY the dep-wait rows, each with its blocking refs in the
+    action column (#993 item 7)."""
+    dep_map, _slug = _dep_wait_map_for(rows, root)
+    dw = {n: rows[n] for n in rows if n in dep_map}
+    _print_issue_rows(dw, own_stream=own_stream, dep_wait_map=dep_map)
 
 
 def cmd_core_quals(args):
@@ -942,7 +1014,10 @@ def cmd_core_quals(args):
     want_waiting = getattr(args, "waiting", False)
     want_ops_wait = getattr(args, "ops_wait", False)
     want_audit = getattr(args, "audit", False)   # #578
-    if not (want_count or want_list or want_waiting or want_ops_wait or want_audit):
+    want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
+    want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
+    if not (want_count or want_list or want_waiting or want_ops_wait or want_audit
+            or want_dep_wait or want_count_dispatchable):
         for q in quals:
             print(q)
         return
@@ -1079,12 +1154,24 @@ def cmd_core_quals(args):
     if want_count:
         print(len(workable))
         return
+    if want_count_dispatchable:
+        # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait
+        # and infra-while-lane-live STAY in --count/I). The lane nudge shells it.
+        _emit_count_dispatchable(workable, root)
+        return
+    if want_dep_wait:
+        _emit_dep_wait(workable, None, root)
+        return
     if want_audit:
         # #578: the WORKABLE obligation set with a labels column, for the job-20
         # named partition-audit nudge. own_stream=None: a full-authority box owns
-        # no stream, so every stream-labelled row is action-only.
-        _print_audit_rows(workable, own_stream=None)
+        # no stream, so every stream-labelled row is action-only. #993 item 7:
+        # dep-aware action column.
+        _dep_map, _ = _dep_wait_map_for(workable, root)
+        _print_audit_rows(workable, own_stream=None, dep_wait_map=_dep_map)
         return
     # own_stream=None: a full-authority box owns no stream, so EVERY
-    # stream-labelled row in its obligation set is action-only.
-    _print_issue_rows(workable, own_stream=None)
+    # stream-labelled row in its obligation set is action-only. #993 item 7:
+    # dep-aware action column (--list).
+    _dep_map, _ = _dep_wait_map_for(workable, root)
+    _print_issue_rows(workable, own_stream=None, dep_wait_map=_dep_map)

@@ -19,6 +19,7 @@ picker (`cli_quals_cmd`), both watchdog nudges (`watchdog/goal.py`,
 (`cli_lane_overlap.py`). No shim, no duplicate derivation (the #367 one-derivation
 invariant).
 """
+import json
 import re
 
 #: The `infra` work-class label (created in airuleset + odoo-erp, idempotent).
@@ -159,3 +160,172 @@ def lane_class_from_issue_classes(classes):
     if not classes:
         return INFRA
     return INFRA if any(c == INFRA for c in classes) else INDEPENDENT
+
+
+# --------------------------------------------------------------------------- #
+# Resolution glue — the gh/git IO half. Still dependency-injected: `runner(argv,
+# cwd)` and `gather_fn`/`labels_fn`/`state_fn` are passed in, so this stays
+# offline-testable and carries NO hard gh/git import. Runs ONLY on the on-demand
+# dep paths (`--list`/`--audit`/`--dep-wait`/`--count-dispatchable`), NEVER on
+# the hot `--count`/footer path — a per-row `gh issue view` for `Depends-on:` is
+# O(workable). Kept in THIS module (the one orchestration-classification home)
+# so `cli_quals` does not grow (#993 owner: "uz mam dost patchworkov").
+# --------------------------------------------------------------------------- #
+
+#: Cap on per-row body/comment fetches per dep-resolution call — a pathological
+#: backlog must not spawn hundreds of gh reads. A realistic workable set is well
+#: under this; a row beyond the cap is left un-annotated (dispatchable), the
+#: non-disruptive default (an UNFETCHED body is "unknown deps", not a known
+#: blocker — unlike an unresolvable DEP, which dep_wait() blocks).
+_DEP_RESOLVE_CAP = 60
+
+
+def _as_int(number):
+    try:
+        return int(number)
+    except (TypeError, ValueError):
+        return None
+
+
+def _issue_body_comments(number, runner, root):
+    """`(body, [comment bodies])` for `number`, or `(None, [])` on failure."""
+    try:
+        obj = json.loads(runner(["gh", "issue", "view", str(number),
+                                 "--json", "body,comments"], root))
+    except Exception:
+        return None, []
+    if not isinstance(obj, dict):
+        return None, []
+    body = obj.get("body")
+    body = body if isinstance(body, str) else ""
+    comments = []
+    for c in (obj.get("comments") or []):
+        if isinstance(c, dict) and isinstance(c.get("body"), str):
+            comments.append(c["body"])
+    return body, comments
+
+
+def issue_state(repo, num, runner, root):
+    """`'OPEN'`/`'CLOSED'`/None for `repo#num` (cross-repo via `-R`)."""
+    argv = ["gh", "issue", "view", str(num), "--json", "state"]
+    if repo:
+        argv += ["-R", repo]
+    try:
+        obj = json.loads(runner(argv, root))
+    except Exception:
+        return None
+    if isinstance(obj, dict):
+        st = obj.get("state")
+        if isinstance(st, str):
+            return st.upper()
+    return None
+
+
+def _ref_str(repo, num, slug):
+    """`#N` when `repo` is this repo (`slug`), else `owner/repo#N`."""
+    return ("#%d" % num) if repo == slug else ("%s#%d" % (repo, num))
+
+
+def dep_wait_map(rows, slug, runner, root):
+    """`{row-key: [blocking ref strings]}` for the workable rows that are
+    dep-wait (any `Depends-on:` referent OPEN/unresolvable/cyclic). Rows with no
+    `Depends-on:` or all-closed deps are ABSENT. Capped; a shared dep is
+    resolved once (state cache)."""
+    out = {}
+    checked = 0
+    state_cache = {}
+
+    def state_fn(repo, num):
+        key = (repo, num)
+        if key not in state_cache:
+            state_cache[key] = issue_state(repo, num, runner, root)
+        return state_cache[key]
+
+    for number in rows:
+        if checked >= _DEP_RESOLVE_CAP:
+            break
+        checked += 1
+        body, comments = _issue_body_comments(number, runner, root)
+        if body is None and not comments:
+            continue
+        refs = depends_on_refs(body, comments)
+        if not refs:
+            continue
+        deps = [normalize_ref(r, slug) for r in refs]
+        deps = [d for d in deps if d is not None]
+        if not deps:
+            continue
+        ni = _as_int(number)
+        self_ref = (slug, ni) if (slug and ni is not None) else None
+        blocked, unsat = dep_wait(deps, state_fn, self_ref=self_ref)
+        if blocked:
+            out[number] = [_ref_str(r[0], r[1], slug) for r in unsat]
+    return out
+
+
+def labels_of(number, runner, root):
+    """A live lane's issue labels (gh `--json labels`), or None on failure."""
+    try:
+        obj = json.loads(runner(["gh", "issue", "view", str(number),
+                                 "--json", "labels"], root))
+    except Exception:
+        return None
+    if isinstance(obj, dict):
+        return obj.get("labels")
+    return None
+
+
+def _gather_live_lanes(root):
+    """Live worktree/wip lanes WITH their issue numbers — delegates to
+    `cli_lane_overlap.gather_live_lanes` (the single lane-enumeration home)."""
+    import cli_lane_overlap as lo
+    return lo.gather_live_lanes(root)
+
+
+def live_infra_lane(slug, runner, root, gather_fn=None, labels_fn=None):
+    """True iff ANY live lane is infra-class. A lane with no resolvable issue
+    (empty `issues`) is `infra` (fail-safe serial, #993 item 2); on the
+    airuleset repo EVERY lane is infra (no label fetch needed). A gather failure
+    fails safe to True (can't tell → serial)."""
+    gather_fn = gather_fn or _gather_live_lanes
+    labels_fn = labels_fn or labels_of
+    try:
+        lanes = gather_fn(root)
+    except Exception:
+        return True
+    if not lanes:
+        return False
+    airuleset = (slug or "").strip().lower() == AIRULESET_REPO
+    for lane in lanes:
+        issues = lane.get("issues") if isinstance(lane, dict) else None
+        classes = []
+        for n in (issues or []):
+            labels = None if airuleset else labels_fn(n, runner, root)
+            classes.append(work_class(slug, labels))
+        if lane_class_from_issue_classes(classes) == INFRA:
+            return True
+    return False
+
+
+def dispatchable_numbers(rows, slug, dep_map, infra_lane_live):
+    """PURE: `(dispatchable_keys:set, reason)`. dispatchable = workable ∧
+    ¬dep-wait ∧ (independent ∨ ¬live-infra-lane). `reason` (when the set is
+    empty and rows non-empty) is `dep-wait` iff ONLY deps hold everything back,
+    else `infra-serial`."""
+    dispatchable_set = set()
+    held_infra = held_dep = False
+    for number in rows:
+        row = rows[number]
+        labels = row.get("labels") if isinstance(row, dict) else None
+        cls = work_class(slug, labels)
+        is_dw = number in dep_map
+        if dispatchable(cls, is_dw, infra_lane_live):
+            dispatchable_set.add(number)
+        elif is_dw:
+            held_dep = True
+        elif cls == INFRA and infra_lane_live:
+            held_infra = True
+    reason = None
+    if rows and not dispatchable_set:
+        reason = "dep-wait" if (held_dep and not held_infra) else "infra-serial"
+    return dispatchable_set, reason
