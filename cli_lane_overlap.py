@@ -82,9 +82,12 @@ def compute_overlap(paths, topics, *, live_lanes, open_prs):
     return ("overlap" if overlaps else "clear"), overlaps
 
 
-def write_receipt(home, cwd_key, issues, verdict, overlaps):
+def write_receipt(home, cwd_key, issues, verdict, overlaps, deps="satisfied"):
     """Write the per-cwd receipt and return its path. The hook keys on
-    ``checked_issues`` + ``ts`` (freshness)."""
+    ``checked_issues`` + ``ts`` (freshness). ``deps`` (#993 item 7) records the
+    dispatched unit's dependency state — ``"satisfied"`` (every ``Depends-on:``
+    ref closed / none) or the list of unsatisfied blocking refs — so the receipt
+    proves the deps were resolved before dispatch, not only the file overlap."""
     d = os.path.join(home, ".claude", "lane-overlap")
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, cwd_key + ".json")
@@ -93,6 +96,7 @@ def write_receipt(home, cwd_key, issues, verdict, overlaps):
         "ts": time.time(),
         "verdict": verdict,
         "overlaps": overlaps,
+        "deps": deps,
     }
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -103,6 +107,32 @@ def write_receipt(home, cwd_key, issues, verdict, overlaps):
 
 def _run_default(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+
+def gather_issue_deps(repo_root, issues, run=None):
+    """#993 item 7 — resolve the dispatched issues' ``Depends-on:`` state for the
+    receipt: ``"satisfied"`` (all closed / none) or a list of unsatisfied blocking
+    refs. Best-effort — a resolution-machinery failure returns ``"satisfied"``
+    (the receipt's deps field is INFORMATIONAL; the dispatchable gate itself lives
+    in the picker/`--count-dispatchable`), while a per-dep gh error counts that
+    dep unsatisfied via ``cli_work_class.dep_wait``'s own fail-safe."""
+    run = run or _run_default
+    try:
+        import cli_work_class as wc
+        import airuleset
+        slug = airuleset._repo_slug(cwd=repo_root)
+    except Exception as e:
+        print("lane-overlap: dep resolution unavailable (%s)" % e, file=sys.stderr)
+        return "satisfied"
+
+    def wc_runner(argv, _cwd):
+        try:
+            r = run(argv)
+        except Exception:
+            return ""
+        return (r.stdout or "") if getattr(r, "returncode", 1) == 0 else ""
+
+    return wc.resolve_issue_deps(issues, slug, wc_runner, repo_root)
 
 
 def gather_live_lanes(repo_root, run=None):
@@ -226,8 +256,10 @@ def cmd_lane_overlap(args):
     verdict, overlaps = compute_overlap(paths, topics,
                                         live_lanes=live_lanes, open_prs=open_prs)
 
+    deps = gather_issue_deps(repo_root, issues)   # #993 item 7
     home = os.path.expanduser("~")
-    write_receipt(home, _cwd_key(os.getcwd()), issues, verdict, overlaps)
+    write_receipt(home, _cwd_key(os.getcwd()), issues, verdict, overlaps,
+                  deps=deps)
 
     if verdict == "clear":
         print("CLEAR: issues %s — no path/topic overlap with %d live lane(s) "
@@ -238,4 +270,10 @@ def cmd_lane_overlap(args):
             print("  %s %s: %s" % (kind, ref, ", ".join(str(d) for d in detail)))
         print("  (an overlapping lane WAITS — dispatch it into a later free "
               "slot, or merge it into the live lane; see skills/autopilot/SKILL.md)")
+    if deps == "satisfied":
+        print("  deps: satisfied")
+    else:
+        print("  deps: WAITING on %s — a dep-wait unit is NOT dispatchable "
+              "until its Depends-on refs close (#993 item 7)"
+              % ", ".join(str(d) for d in deps))
     return 0

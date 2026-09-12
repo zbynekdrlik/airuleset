@@ -350,3 +350,32 @@ def classify_number(number, slug, runner, root, infra_lane_live):
     if dispatchable(cls, is_dw, infra_lane_live):
         return "dispatchable"
     return "dep-wait" if is_dw else "infra-serial"
+
+
+def resolve_issue_deps(issues, slug, runner, root):
+    """The lane-overlap receipt's deps field (#993 item 7): ``"satisfied"`` when
+    EVERY issue's ``Depends-on:`` refs are closed (or none), else the list of
+    unsatisfied blocking ref strings. Same fail-safe as ``dep_wait`` (an
+    OPEN/unresolvable/cyclic dep is unsatisfied). Dep states are resolved once
+    (shared cache across the dispatched issues)."""
+    unsatisfied = []
+    state_cache = {}
+
+    def state_fn(repo, num):
+        key = (repo, num)
+        if key not in state_cache:
+            state_cache[key] = issue_state(repo, num, runner, root)
+        return state_cache[key]
+
+    for n in issues:
+        body, comments = _issue_body_comments(n, runner, root)
+        refs = depends_on_refs(body, comments) if (body is not None or comments) else []
+        deps = [d for d in (normalize_ref(r, slug) for r in refs) if d is not None]
+        if not deps:
+            continue
+        ni = _as_int(n)
+        self_ref = (slug, ni) if (slug and ni is not None) else None
+        blocked, unsat = dep_wait(deps, state_fn, self_ref=self_ref)
+        if blocked:
+            unsatisfied += [_ref_str(r[0], r[1], slug) for r in unsat]
+    return "satisfied" if not unsatisfied else unsatisfied
