@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 import cli_remote  # noqa: E402  (#433 L-E seam re-target)
+import cli_tmux_provisioning  # noqa: E402  (#998: create-body unit under test)
 # #433 cluster L: the installers moved here; a leaf→leaf internal call
 # (ensure_claude_cli_installed → _claude_cli_installed → _claude_cli_env)
 # resolves in this leaf, so those helpers are patched via cli_binary_installers.
@@ -2058,6 +2059,185 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertIn("set -g mouse on", after)
         self.assertIn("set-option -g history-limit", after)
         self.assertIn('rename-window m2', after)  # #592: alias, not full username
+
+
+# ---------------------------------------------------------------------------
+# #998 item 1(a): reboot-safe VYTVORENIE of DECLARED managed windows. The
+# EXISTING #592 session-created hook is extended (rendered from the fleet
+# declaration) to CREATE each NON-primary declared window if missing (dedup
+# by NAME and by pane CWD), starting the managed claude launcher. The SAME
+# create-if-missing snippet is also fired at provisioning time per running
+# session, so gk gets `gk-infra` without waiting for a reboot. Undeclared
+# targets stay byte-identical to today's single `rename-window <alias>`.
+# Validated live on tmux 3.7b (controller + dev2); gk's own tmux is
+# UNVERIFIED from a LOCAL-MERGE lane (supervisor verifies after install).
+# ---------------------------------------------------------------------------
+
+
+class TestManagedWindowCreation998(TestCase):
+    _GK_WINDOWS = [
+        {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
+         "role": "review", "mode": "parallel"},
+        {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
+         "role": "infra", "mode": "sequential"},
+    ]
+
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    # -- render_stream_tmux_window_block: undeclared stays byte-identical ----
+
+    def test_undeclared_block_is_byte_identical_to_today(self):
+        expected = (
+            "# >>> airuleset tmux stream-window >>>\n"
+            "# #554/#592: window name = this box's short target alias so the owner\n"
+            "# sees WHERE they are (gk/mN/dN/...). automatic-rename off makes it\n"
+            "# STICK (a command-tracking 'node'/'bash' name hides the identity).\n"
+            "# #593: rendered ONLY on single-session-per-account boxes (gk + subdev\n"
+            "# streams), never an owner multi-project box; the alias is the SAME\n"
+            "# source the webterm tabs use (cli_aliases.short_target_alias).\n"
+            "set-option -gw automatic-rename off\n"
+            'set-hook -g session-created "rename-window dev1"\n'
+            "# <<< airuleset tmux stream-window <<<"
+        )
+        self.assertEqual(airuleset.render_stream_tmux_window_block("dev1"),
+                         expected)
+        # no create machinery leaks for an undeclared box (windows None or [])
+        for name in ("dev1", "m2", "montalu1"):
+            for windows in (None, []):
+                b = airuleset.render_stream_tmux_window_block(name, windows=windows)
+                self.assertNotIn("run-shell", b)
+                self.assertNotIn("new-window", b)
+
+    def test_empty_windows_equals_no_windows(self):
+        self.assertEqual(
+            airuleset.render_stream_tmux_window_block("gk", windows=[]),
+            airuleset.render_stream_tmux_window_block("gk"),
+        )
+
+    def test_single_declared_window_renders_no_create(self):
+        # A declaration with ONLY the primary window has no NON-primary window
+        # to create -> byte-identical to the undeclared render.
+        one = [{"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
+                "role": "review", "mode": "parallel"}]
+        self.assertEqual(
+            airuleset.render_stream_tmux_window_block("gk", windows=one),
+            airuleset.render_stream_tmux_window_block("gk"),
+        )
+
+    # -- render_stream_tmux_window_block: gk renders create-if-missing -------
+
+    def test_gk_block_extends_the_session_created_hook_with_create(self):
+        block = airuleset.render_stream_tmux_window_block(
+            "gk", windows=self._GK_WINDOWS)
+        # window 0 rename kept (the primary keeps today's behaviour)
+        self.assertIn('rename-window gk', block)
+        # create-if-missing rides the SAME session-created hook via run-shell,
+        # session bound from the hook's own format
+        self.assertIn("session-created", block)
+        self.assertIn("run-shell", block)
+        self.assertIn("S=#{session_name}", block)
+        # new-window for gk-infra with its cwd + the managed launcher (+ default)
+        self.assertIn("new-window -d -t", block)
+        self.assertIn("-n gk-infra", block)
+        self.assertIn("devel/odoo/odoo-erp-infra", block)
+        self.assertIn("airuleset-claude-launch.sh", block)
+        self.assertRegex(block, r"airuleset-claude-launch\.sh[^ ]* default")
+        # dedup by NAME and by pane CWD; inner formats escaped ##{...} so the
+        # OUTER run-shell format-expansion leaves them literal for the inner
+        # tmux (not the created session's own name)
+        self.assertIn("##{window_name}", block)
+        self.assertIn("##{pane_current_path}", block)
+        self.assertIn("grep -Fxq gk-infra", block)
+        # the PRIMARY review window is NEVER (re)created by the snippet
+        self.assertNotIn("-n gk ", block)
+
+    # -- _managed_windows_create_body: the reusable snippet -----------------
+
+    def test_create_body_empty_without_extra_windows(self):
+        self.assertEqual(
+            cli_tmux_provisioning._managed_windows_create_body([]), "")
+        self.assertEqual(
+            cli_tmux_provisioning._managed_windows_create_body(None), "")
+        one = [{"name": "gk", "cwd": "~/devel/odoo/odoo-erp"}]
+        self.assertEqual(
+            cli_tmux_provisioning._managed_windows_create_body(one), "")
+
+    def test_create_body_content_for_gk(self):
+        body = cli_tmux_provisioning._managed_windows_create_body(
+            self._GK_WINDOWS)
+        self.assertIn('-n gk-infra', body)
+        self.assertIn('-c "$HOME/devel/odoo/odoo-erp-infra"', body)
+        self.assertIn('"$HOME/.claude/airuleset-claude-launch.sh" default', body)
+        self.assertIn('grep -Fxq gk-infra', body)
+        self.assertIn('grep -Fxq "$HOME/devel/odoo/odoo-erp-infra"', body)
+        # the reusable body carries the escaped inner formats (goes through a
+        # run-shell format-expansion on BOTH the hook and provisioning paths)
+        self.assertIn('##{window_name}', body)
+        self.assertIn('##{pane_current_path}', body)
+        # never (re)creates the primary review window
+        self.assertNotIn('-n gk ', body)
+
+    def test_create_body_is_valid_shell(self):
+        # bash -n on the rendered snippet (the fragile part: quoting + if/fi).
+        body = cli_tmux_provisioning._managed_windows_create_body(
+            self._GK_WINDOWS)
+        d = tempfile.mkdtemp()
+        script = Path(d) / "snip.sh"
+        script.write_text("S=x\n" + body + "\n")
+        r = subprocess.run(["bash", "-n", str(script)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # -- provisioning-time application: fire the snippet per session ---------
+
+    def test_provisioning_fires_create_snippet_per_session_for_gk(self):
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout=(
+                    "@0\t/home/gatekeeper/devel/odoo/odoo-erp\n"))
+            if argv[:3] == ["tmux", "list-sessions", "-F"]:
+                return _FakeCP(returncode=0, stdout="zbynek\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# x\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="gatekeeper", host="gatekeeper-cx23",
+            home="/home/gatekeeper", run=run)
+        run_shells = [a for a in seen
+                      if a[:2] == ["tmux", "run-shell"]]
+        # exactly one run-shell (one session), bound to that session, carrying
+        # the create-if-missing for gk-infra
+        self.assertEqual(len(run_shells), 1, seen)
+        arg = run_shells[0][2]
+        self.assertTrue(arg.startswith("S=zbynek; "), arg)
+        self.assertIn("-n gk-infra", arg)
+        self.assertIn("new-window -d -t", arg)
+
+    def test_provisioning_no_create_snippet_for_undeclared_box(self):
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@0\t/home/montalu2\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# x\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", home="/home/montalu2", run=run)
+        # an undeclared box never lists sessions nor fires a create run-shell
+        self.assertNotIn(["tmux", "run-shell"],
+                         [a[:2] for a in seen])
+        self.assertNotIn(["tmux", "list-sessions"],
+                         [a[:2] for a in seen])
 
 
 # ---------------------------------------------------------------------------
