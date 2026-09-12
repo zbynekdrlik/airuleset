@@ -446,7 +446,6 @@ class TestDoctrineContentLock843(unittest.TestCase):
     def test_worker_names_handoff_flags(self):
         t = self._read(self._WORKER)
         self.assertIn("--self-review-file", t)
-        self.assertIn("--reviewed-by-tier", t)
         self.assertIn("--root-cause", t)
         self.assertIn("--prevencia-read", t)
 
@@ -462,10 +461,9 @@ class TestDoctrineContentLock843(unittest.TestCase):
         t = self._read(self._SKILL)
         self.assertIn("round3!", t)
 
-    def test_skill_names_fable_advisor_design_consult(self):
+    def test_skill_names_round3_design_consult(self):
         t = self._read(self._SKILL)
-        self.assertIn("fable-advisor", t)
-        # The round3! clause must mention the design consult
+        # The round3! clause must mention a design consult (#991: no tier agent)
         idx = t.find("round3!")
         self.assertGreater(idx, -1)
         window = t[idx:idx + 500]
@@ -495,7 +493,7 @@ class TestSignOnly919(unittest.TestCase):
         defaults = dict(
             repo="zbynekdrlik/odoo-erp", issue=42, branch=None,
             self_review_file=None, root_cause=None, closes_finding=None,
-            prevencia_read=None, reviewed_by_tier=None, sign_only=None)
+            prevencia_read=None, self_review_model=None, sign_only=None)
         defaults.update(kw)
         return argparse.Namespace(**defaults)
 
@@ -520,6 +518,7 @@ class TestSignOnly919(unittest.TestCase):
         import unittest.mock as m
         body = (
             "READY-FOR-REVIEW: branch worktree-agent-test\n\n"
+            "Self-review-model: claude-opus-4-8\n"
             "Stack: airuleset\n"
             "Harness: claude-code\n"
             "Verified-at-UTC: 2026-09-07T01:00:00Z\n"
@@ -592,12 +591,13 @@ class TestSignOnly919(unittest.TestCase):
 
     def test_sign_only_round2_missing_fields_blocked(self):
         """RED-1 review finding: at bounce round >= 2, sign-only must
-        require Root-cause-of-previous-bounce, Prevencia-read, and
-        Reviewed-by-tier lines in the body."""
+        require Root-cause-of-previous-bounce and Prevencia-read lines in
+        the body."""
         import unittest.mock as m
         import io
         body = (
             "READY-FOR-REVIEW: branch test\n\n"
+            "Self-review-model: claude-opus-4-8\n"
             "Ready for gatekeeper cross-fork review.\n"
         )
         with tempfile.TemporaryDirectory() as td:
@@ -623,6 +623,156 @@ class TestSignOnly919(unittest.TestCase):
                        os.path.abspath(__file__))))
         self.assertIn("--sign-only", r.stdout,
                        "handoff --help must list --sign-only")
+
+
+class TestSelfReviewModel991(unittest.TestCase):
+    """#991 round 3: the handoff CLI requires + validates --self-review-model
+    as an exact model id (single source: airuleset.MODEL_TIERS / BANNED_MODELS).
+    These checks run BEFORE any git/gh call, so no mocking is needed beyond
+    stdout capture."""
+
+    def _args(self, **kw):
+        import argparse
+        defaults = dict(
+            repo="zbynekdrlik/airuleset", issue=991,
+            branch="worktree-x", self_review_file="/nonexistent/tbl.md",
+            root_cause=None, closes_finding=None, prevencia_read=None,
+            sign_only=None, self_review_model="claude-opus-4-8",
+            stack=None, harness=None, shared_benefit=None,
+            tenant_scope=None, source_verified=None, tested_tree=None,
+            evidence_head=None)
+        defaults.update(kw)
+        return argparse.Namespace(**defaults)
+
+    def test_missing_self_review_model_blocked(self):
+        import io
+        import unittest.mock as m
+        args = self._args(self_review_model=None)
+        with m.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = airuleset.cmd_handoff(args)
+        self.assertEqual(1, rc)
+        self.assertIn("--self-review-model", out.getvalue())
+
+    def test_alias_or_banned_value_rejected(self):
+        import io
+        import unittest.mock as m
+        for bad in ("fable", "opus", "claude-opus-5", "claude-opus-4-6"):
+            args = self._args(self_review_model=bad)
+            with m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(args)
+            self.assertEqual(1, rc, "%r must be rejected" % bad)
+            txt = out.getvalue()
+            self.assertIn("not an allowed", txt)
+            # message names the allowed exact ids (single source of truth)
+            self.assertIn("claude-opus-4-8", txt)
+
+    def test_valid_exact_id_passes_model_validation(self):
+        """A valid exact id gets PAST model validation -- proven by the
+        next-stage error being the (nonexistent) self-review FILE, not the
+        model rejection."""
+        import io
+        import unittest.mock as m
+        args = self._args(self_review_model="claude-opus-4-8")
+        with m.patch("sys.stdout", new_callable=io.StringIO) as out:
+            rc = airuleset.cmd_handoff(args)
+        self.assertEqual(1, rc)
+        txt = out.getvalue()
+        self.assertIn("self-review file", txt)
+        self.assertNotIn("not an allowed", txt)
+
+    def test_argparse_flag_present(self):
+        import subprocess as sp
+        r = sp.run([sys.executable, "airuleset.py", "handoff", "--help"],
+                   capture_output=True, text=True, timeout=10,
+                   cwd=os.path.dirname(os.path.dirname(
+                       os.path.abspath(__file__))))
+        self.assertIn("--self-review-model", r.stdout)
+
+
+class TestCanonicalSelfReviewModel991(unittest.TestCase):
+    """#991 review finding 1: the emitted Self-review-model id is the
+    CANONICAL MODEL_TIERS value, so a case/[1m]-tag variant the tolerant
+    predicate accepts never breaks a line-exact gate match."""
+
+    def test_canonicalizes_tag_and_case(self):
+        self.assertEqual(
+            airuleset._canonical_self_review_model("claude-fable-5-1[1m]"),
+            "claude-fable-5-1")
+        self.assertEqual(
+            airuleset._canonical_self_review_model("Claude-Opus-4-8"),
+            "claude-opus-4-8")
+        self.assertEqual(
+            airuleset._canonical_self_review_model("claude-opus-4-8"),
+            "claude-opus-4-8")
+
+    def test_rejects_alias_banned_and_empty(self):
+        for bad in ("fable", "opus", "claude-opus-5", "claude-opus-4-6",
+                    "", None):
+            self.assertIsNone(
+                airuleset._canonical_self_review_model(bad),
+                "%r must not canonicalize" % (bad,))
+
+
+class TestSignOnlyRequiresSelfReviewModel991(unittest.TestCase):
+    """#991 review finding 2: the sign-only path must ALSO require a
+    Self-review-model: line in the body (the odoo-erp gate needs it on every
+    readiness comment) -- otherwise a stream gets a receipt here and a bounce
+    there (#957 friction)."""
+
+    def _gate_patches(self, td):
+        import unittest.mock as m
+        gate_dir = os.path.join(td, "gate")
+        os.makedirs(gate_dir, exist_ok=True)
+        home = os.path.expanduser("~")
+        return (
+            gate_dir,
+            m.patch.object(airuleset, "HANDOFF_GATE_DIR",
+                           os.path.relpath(gate_dir, home)),
+            m.patch.object(airuleset, "HANDOFF_GATE_LOG",
+                           os.path.relpath(
+                               os.path.join(td, "gate.log"), home)),
+        )
+
+    def _args(self, sign_only):
+        import argparse
+        return argparse.Namespace(
+            repo="zbynekdrlik/odoo-erp", issue=42, branch=None,
+            self_review_file=None, root_cause=None, closes_finding=None,
+            prevencia_read=None, self_review_model=None, sign_only=sign_only)
+
+    def test_sign_only_missing_self_review_model_blocked(self):
+        import io
+        import unittest.mock as m
+        body = ("READY-FOR-REVIEW: branch test\n\n"
+                "Verified-at-UTC: 2026-09-11T00:00:00Z\nHEAD: abc123\n")
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "b.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            _, p1, p2 = self._gate_patches(td)
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", new_callable=io.StringIO) as out:
+                rc = airuleset.cmd_handoff(self._args(bp))
+            self.assertEqual(1, rc)
+            self.assertIn("Self-review-model", out.getvalue())
+
+    def test_sign_only_with_self_review_model_ok(self):
+        import io
+        import unittest.mock as m
+        body = ("READY-FOR-REVIEW: branch test\n\n"
+                "Self-review-model: claude-opus-4-8\n"
+                "Verified-at-UTC: 2026-09-11T00:00:00Z\nHEAD: abc123\n")
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "b.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            gate_dir, p1, p2 = self._gate_patches(td)
+            with p1, p2, \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", new_callable=io.StringIO):
+                rc = airuleset.cmd_handoff(self._args(bp))
+            self.assertEqual(0, rc)
 
 
 if __name__ == "__main__":

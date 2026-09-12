@@ -3816,8 +3816,10 @@ GOAL_LANE_STARVED_INTERVAL_S = 15 * 60
 GOAL_LANE_STARVED_MAX_CONSECUTIVE = 2
 # #937-review C1 -- agent_type values that represent IMPLEMENTATION workers
 # whose finished state means "ticket in integration" (coverage). Non-worker
-# subagents (advisor/validator/mechanical/Explore) review/validate, not implement.
-_LANE_WORKER_AGENT_TYPES = frozenset({"autopilot-worker", "sonnet-implementer"})
+# subagents (validator/Explore/an ad-hoc review consult) review/validate, not
+# implement. (#991: the pinned tier-agent types are gone — the lane worker is
+# the single autopilot-worker type; the working model chooses its model.)
+_LANE_WORKER_AGENT_TYPES = frozenset({"autopilot-worker"})
 GOAL_LANE_MAX_NUDGES = 2
 # #804 mode-1 -- the count give-up is a BACKOFF, not a permanent LATCH. Pre-#804
 # a 0-worker box that ignored 2 nudges latched `skip:gave-up` FOREVER (its only
@@ -4615,9 +4617,9 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
         log = ("lane-occupancy %s waiters=%d workers=%d -> %s"
                % (loc, waiters, live_workers, wnt.log))
     # #937 -- count recently-finished IMPLEMENTATION workers (in integration)
-    # from evidence. Non-worker subagents (fable-advisor, ticket-validator,
-    # sonnet-mechanical, Explore) are excluded — they review/validate, not
-    # implement tickets, so their presence is not coverage (#937-review C1).
+    # from evidence. Non-worker subagents (ticket-validator, Explore, an ad-hoc
+    # review consult) are excluded — they review/validate, not implement
+    # tickets, so their presence is not coverage (#937-review C1).
     finished_workers = sum(1 for w in ev if w.state == "finished"
                           and w.agent_type in _LANE_WORKER_AGENT_TYPES)
     return wnt.defer, log, live_workers, backlog_n, finished_workers, ev
@@ -4632,10 +4634,63 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
 # until the session's rec is eventually orphan-reaped, #531).
 
 
+def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
+    """#993 item 3 — the per-cwd TTL cache over the dispatchable-candidate fetch.
+    `dispatchable_fetch(cwd)` returns a ONE-element list `[{"count": N, "reason":
+    r}]` (never `[]`) or None; cached via the SAME generic `_cached_member_fetch`
+    the backlog/ops-wait/queue caches use (a per-cwd, per-TTL bound so the
+    O(workable) `--count-dispatchable` subprocess fires at most once per repo per
+    window, never every sweep). Returns the inner dict, or None (unmeasurable)."""
+    # #993 review 2: explicit 5-min TTL for BOTH success and failure — the
+    # default fail TTL (60s) would re-run the O(deps) subprocess every sweep on a
+    # slow/failed read (a gh-call storm); 5 min matches the queue-arrival cache's
+    # cadence and the refill nudge's own hourly cap makes a 5-min-stale count fine.
+    lst = _ops_wait_recheck._cached_member_fetch(
+        cwd, dispatchable_fetch, state, now, "dispatchable_cache",
+        ttl=300, fail_ttl=300)
+    if isinstance(lst, list) and lst and isinstance(lst[0], dict):
+        return lst[0]
+    return None
+
+
+def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
+                                live_workers, waiters, backlog_n):
+    """#993 item 3 — `(skip, logline, candidate_n)`. `dispatchable_fetch` None
+    (unwired / legacy tests) → `(False, None, None)`: NO gating, the nudge fires
+    as before. A wired fetch returns the dispatchable-candidate count + reason:
+    count 0 → `skip:dep-wait` (deps hold everything back — the class-based
+    infra-serial reason was removed in round 2b), NO keystroke; an UNMEASURABLE
+    count (fetch None / malformed) → `skip:dispatchable-unknown` (safe: never
+    push dispatch we cannot justify); count > 0 → `(False, None, count)` and the
+    caller names `candidate_n` in the nudge text."""
+    if dispatchable_fetch is None:
+        return False, None, None
+    res = _cached_dispatchable(cwd, dispatchable_fetch, state, now)
+    count = res.get("count") if isinstance(res, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool):
+        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                      "skip:dispatchable-unknown (candidate count unmeasurable)"
+                      % (loc, live_workers, waiters, backlog_n)), None
+    if count <= 0:
+        reason = res.get("reason") if isinstance(res, dict) else None
+        # #993 review 12: only label the KNOWN reason; a missing reason (a rare
+        # cache-disagreement) is `skip:no-candidate`, never mis-attributed.
+        if reason == "dep-wait":
+            word = "skip:dep-wait"
+        else:
+            word = "skip:no-candidate"
+        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                      "%s (free slot but NO dispatchable candidate; %s)"
+                      % (loc, live_workers, waiters, backlog_n, word,
+                         reason or "reason-unknown")), 0
+    return False, None, count
+
+
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
                               projects_dir, backlog_fetch=None, state=None,
-                              sleep_fn=None, batch_collect=None):
+                              sleep_fn=None, batch_collect=None,
+                              dispatchable_fetch=None):
     """The lane-occupancy branch (#365). Mutates `rec` (the caller
     persists it); returns `(logs, owns)` -- `owns` is the explicit
     ownership signal set from the moment `live_workers`/`backlog_n` are
@@ -4793,6 +4848,16 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "skip:covered (live+integration covers all workable)"
                     % (loc, live_workers, finished_workers, backlog_n))
         return logs, False
+    # #993 item 3: a free slot with NO dispatchable candidate (dep-wait) is the
+    # DAMAGE (#992) — skip, never nudge (helper extracted to keep this capped
+    # function small; unwired → no gating; candidate_n names the count in the
+    # text when it fires).
+    disp_skip, disp_log, candidate_n = _lane_dispatchable_decision(
+        dispatchable_fetch, cwd, state, now, loc, live_workers, waiters, backlog_n)
+    if disp_log:
+        logs.append(disp_log)
+    if disp_skip:
+        return logs, True
     # #848 CONTINUOUS REFILL (retiring #726/#723 batch mode): any
     # live_workers < min(5, backlog) means there is ROOM to refill, so the nudge
     # fires for BOTH an empty box (live_workers==0) AND a partially-full box
@@ -4931,7 +4996,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # only a SATURATED box (>= floor lanes) returned at the saturated skip above.
     # #970 fix-forward: resource-aware nudge text with per-resource usage.
     text = _lane_nudge_text(backlog_n, waiters, caps,
-                            usage=resource_usage, live_workers=live_workers)
+                            usage=resource_usage, live_workers=live_workers,
+                            candidate_n=candidate_n)   # #993 item 3
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_rec=rec, _lw=live_workers, _bn=backlog_n, _n_=n, _now=now):
@@ -5185,6 +5251,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
                     release_state_fetch=None, queue_fetch=None,
+                    queue_classify=None, dispatchable_fetch=None,
                     u_fetch=None, reconcile_fetch=None,
                     deploy_state_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
@@ -5360,6 +5427,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
             send_fn, dry_run, handled, projects_dir,
             backlog_fetch=backlog_fetch, state=state, sleep_fn=sleep_fn,
+            dispatchable_fetch=dispatchable_fetch,   # #993 item 3
             batch_collect=(_batch_collect if _batch_collect is not None
                            and "lane-occupancy" in _eligible else None))
         rec["lts"] = now   # #531 -- write-time age anchor for the orphan reaper
@@ -5401,7 +5469,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 queue_fetch=queue_fetch, state=state, sleep_fn=sleep_fn,
-                captured=captured,
+                captured=captured, classify_builder=queue_classify,   # #993 item 4
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "queue-arrival" in _eligible else None))
         # #797 -- U-freshness reconcile for this armed pane.

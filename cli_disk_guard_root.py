@@ -796,6 +796,137 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
     return failed
 
 
+# ---------------------------------------------------------------------------
+# #992/#993 item 9 — managed `swap` install step. The controller (4 GB, zero
+# swap) OOM-killed the watchdog + a push's Pass B; a managed box with no swap
+# gets a /swapfile sized = RAM (clamped [2 GB, 8 GB]). Idempotent (a box that
+# already has swap is a no-op), needs `sudo -n` (clear skip line otherwise),
+# LOCAL-only, non-fatal — the same shape as the other provisioning leaves.
+# ---------------------------------------------------------------------------
+SWAP_MIN_GB = 2
+SWAP_MAX_GB = 8
+SWAPFILE_PATH = "/swapfile"
+
+
+def swap_size_gb(mem_total_kb):
+    """RAM in GB, rounded, clamped to [SWAP_MIN_GB, SWAP_MAX_GB]."""
+    try:
+        ram_gb = int(round(int(mem_total_kb) / (1024 * 1024)))
+    except (TypeError, ValueError):
+        ram_gb = SWAP_MIN_GB
+    return max(SWAP_MIN_GB, min(SWAP_MAX_GB, ram_gb or SWAP_MIN_GB))
+
+
+def render_swap_setup_script(size_gb):
+    """Idempotent bash creating a size_gb /swapfile: re-checks swap + the fstab
+    line so a second run is a no-op. Uses fallocate, falling back to dd.
+
+    #993-review hardening: (a) a FREE-SPACE check (need size + 2 GB headroom)
+    before allocating — these boxes are drained at >=80% (#834); (b) a
+    trailing-newline guard before the fstab append (an fstab whose last line
+    lacks \\n would otherwise get the entry glued onto that mount line); (c) a
+    blkid guard so mkswap never runs over a pre-existing NON-swap file at the
+    path."""
+    p = SWAPFILE_PATH
+    need_kb = (size_gb + 2) * 1024 * 1024   # size + 2 GB headroom, in KB
+    return (
+        "set -euo pipefail\n"
+        "if [ \"$(swapon --show=NAME --noheadings 2>/dev/null | wc -l)\" -gt 0 ]; then\n"
+        "  echo 'swap already active — skip'; exit 0\n"
+        "fi\n"
+        "avail=$(df --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')\n"
+        "if [ -n \"$avail\" ] && [ \"$avail\" -lt %(need)d ]; then\n"
+        "  echo 'swap: skipped — insufficient free space on / (need %(needg)dG incl. headroom)'; exit 0\n"
+        "fi\n"
+        "if [ ! -f %(p)s ]; then\n"
+        "  fallocate -l %(n)dG %(p)s || dd if=/dev/zero of=%(p)s bs=1M count=%(mb)d\n"
+        "fi\n"
+        "chmod 600 %(p)s\n"
+        "ftype=$(blkid -o value -s TYPE %(p)s 2>/dev/null || true)\n"
+        "if [ -n \"$ftype\" ] && [ \"$ftype\" != swap ]; then\n"
+        "  echo \"swap: refusing — %(p)s already holds a $ftype filesystem\"; exit 1\n"
+        "fi\n"
+        "if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx %(p)s; then\n"
+        "  mkswap %(p)s\n"
+        "  swapon %(p)s\n"
+        "fi\n"
+        "if ! grep -qE '^%(p)s[[:space:]]' /etc/fstab; then\n"
+        "  [ -z \"$(tail -c1 /etc/fstab 2>/dev/null)\" ] || printf '\\n' >> /etc/fstab\n"
+        "  echo '%(p)s none swap sw 0 0' >> /etc/fstab\n"
+        "fi\n"
+        "echo 'swap: created %(n)dG at %(p)s'\n"
+        % {"p": p, "n": size_gb, "mb": size_gb * 1024,
+           "need": need_kb, "needg": size_gb + 2}
+    )
+
+
+def _read_meminfo(meminfo_text=None):
+    """Return (mem_total_kb, swap_total_kb, swap_free_kb) from meminfo text
+    (or /proc/meminfo). Missing/unreadable → all zero."""
+    text = meminfo_text
+    if text is None:
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as e:
+            print("  swap: cannot read /proc/meminfo (%s)" % e, file=sys.stderr)
+            return (0, 0, 0)
+    vals = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].endswith(":"):
+            key = parts[0][:-1]
+            try:
+                vals[key] = int(parts[1])
+            except ValueError:
+                continue
+    return (vals.get("MemTotal", 0), vals.get("SwapTotal", 0),
+            vals.get("SwapFree", 0))
+
+
+def _fmt_mb(kb):
+    return "%dMB" % (kb // 1024)
+
+
+def swap_status(meminfo_text=None):
+    """`swap: <total>/<used>` line for `airuleset.py status` (0 when none)."""
+    _mem, swap_total, swap_free = _read_meminfo(meminfo_text)
+    if swap_total <= 0:
+        return "swap: 0 (none)"
+    used = max(0, swap_total - swap_free)
+    return "swap: %s/%s" % (_fmt_mb(swap_total), _fmt_mb(used))
+
+
+def provision_swap(run=None, meminfo_text=None):
+    """Create a managed /swapfile on a box with no swap. Idempotent (present
+    swap → no-op), sudo-`-n`-gated (clear skip line otherwise), non-fatal.
+    Returns a status string for logging."""
+    run = run or subprocess.run
+    mem_total, swap_total, _free = _read_meminfo(meminfo_text)
+    if swap_total > 0:
+        return "swap: present (%s) — skip" % _fmt_mb(swap_total)
+    # sudo gate — never prompt.
+    try:
+        probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
+                    timeout=10)
+    except Exception as e:  # noqa: BLE001
+        return "swap: skipped — sudo probe error (%r)" % e
+    if getattr(probe, "returncode", 1) != 0:
+        return ("swap: skipped — sudo -n unavailable (create %s manually: "
+                "fallocate/mkswap/swapon + /etc/fstab)" % SWAPFILE_PATH)
+    size = swap_size_gb(mem_total)
+    script = render_swap_setup_script(size)
+    try:
+        r = run(["sudo", "-n", "bash", "-c", script],
+                capture_output=True, text=True, timeout=120)
+    except Exception as e:  # noqa: BLE001
+        return "swap: FAILED (error: %r)" % e
+    if getattr(r, "returncode", 1) != 0:
+        return "swap: FAILED (rc=%s: %s)" % (
+            r.returncode, (getattr(r, "stderr", "") or "").strip()[:200])
+    return "swap: applied (%dG %s)" % (size, SWAPFILE_PATH)
+
+
 def provision_owner_ignoreip(run=None, dest=None):
     """Install the owner break-glass ``ignoreip`` drop-in on the controller
     (#982). LOCAL-only via ``sudo`` — follows the ``_provision_shared_fleet_dir``

@@ -111,21 +111,14 @@ set -euo pipefail
 # or len=N, and the first ~120 chars of the command/file) — same
 # append-only style as the bypass log, via `log_block()`.
 #
-# #73 ALSO closed three classifier holes where the command's first token
-# was neither allow- nor block-listed, so it fell into "ambiguous -> allow"
-# even though it was really a bulk read/search wrapped or hidden one level
-# down: a for/while LOOP BODY (`for f in a b; do cat $f; done` — the `do`/
-# `then`/`else`/`elif` leader is stripped so the body classifies exactly
-# like a standalone command; the loop HEADER segment stays ambiguous on
-# purpose), a `timeout N` / `nice [-n N]` PREFIX WRAPPER (its own flags and
-# duration/niceness argument are skipped in `strip_prefix()`), and a
-# `bash -c '...'` / `sh -c '...'` (also zsh/dash) SUB-SHELL (`classify()` is
-# now recursive: it finds the wrapper's `-c`/`-Xc` flag and reclassifies the
-# QUOTED script string itself). The non-negotiable regression guard is the
-# CI-poll shape from ci-monitoring.md — `for i in $(seq 1 18); do gh run
-# view <id> ...; sleep 30; done` — which must NEVER block just for being a
-# loop; its body (`gh run view ...`) is already allow-listed once `do` is
-# stripped.
+# #73 ALSO closed three "ambiguous -> allow" classifier holes where a bulk
+# read/search was wrapped one level down: a for/while LOOP BODY (the
+# `do`/`then`/`else`/`elif` leader is stripped; the loop HEADER stays
+# ambiguous), a `timeout N`/`nice [-n N]` PREFIX WRAPPER (skipped in
+# `strip_prefix()`), and a `bash -c '...'`/`sh -c` SUB-SHELL (`classify()`
+# recurses into the quoted script). Regression guard: the ci-monitoring.md
+# CI-poll loop (`for i in $(seq 1 18); do gh run view …; sleep 30; done`)
+# must NEVER block just for being a loop — its body is allow-listed.
 #
 # #80 (gatekeeper measurement, 2026-07-26) — the classifier's own FALSE
 # POSITIVE is what disabled all of #66. `cat > body.md <<'EOF' ... EOF` (the
@@ -151,52 +144,31 @@ set -euo pipefail
 # `gh issue view` costs the same as a `grep`, and gk's ratio after #66 was
 # UNCHANGED (main Bash 687 : Agent 22 = 31:1 on 2026-07-26, ten hours with
 # zero dispatches, runs of up to 119 Bash calls between two dispatches).
-# The lever is the COUNT of main-agent Bash turns. So on top of the
-# classification above there is now a per-dispatch COUNTER
-# (/tmp/airuleset-main-bash-run-<session_id>): every allow-listed/ambiguous
-# main Bash call in a goal-armed/Fable session increments it, a DISPATCH
-# (PreToolUse Agent/Task/Workflow — the hook is wired on those matchers too,
-# exact tool names, never a regex that could silently never match) deletes
-# it, and passing AIRULESET_MAIN_BASH_PER_DISPATCH (default 20, 0 = off)
-# blocks ONCE with batching/dispatch instructions.
+# The lever is the COUNT of main-agent Bash turns, so a per-dispatch COUNTER
+# (/tmp/airuleset-main-bash-run-<session_id>) increments on every allow-listed/
+# ambiguous main Bash call in a goal-armed/Fable session, is DELETED by a
+# DISPATCH (PreToolUse Agent/Task/Workflow, exact tool names), and
+# AIRULESET_MAIN_BASH_PER_DISPATCH (default 20, 0 = off) blocks ONCE with
+# batching instructions. The block RESETS the counter (never two in a row —
+# #80 forbids stopping the loop); arming the bypass marker is never counted.
 #
-# That nudge RESETS the counter on purpose: #80's acceptance forbids any
-# block that could genuinely stop the loop, so this is at most one block per
-# N calls and NEVER two in a row — re-running the same command immediately
-# after a nudge passes. Arming the bypass marker (`touch ...-exec-ok-<sid>`)
-# is never counted and never blocked, or the cap would sit in front of the
-# only documented way out of it.
-#
-# #80 also RE-TUNED the block-list itself, by replaying ALL 687 of gk's real
-# main-agent Bash commands from 2026-07-26 through this hook and reading
-# every block. Three false-positive classes were found that way and are now
-# guarded by tests: an output REDUCER after a pipe (`gh pr merge ... 2>&1 |
-# tail -2` — only a statement's FIRST pipe stage is classified now), a
-# BOUNDED peek (`head -5 /tmp/out`, `tail -3 SKILL.md`, `sed -n '250,260p'`
-# — judge the SIZE that comes back, not the head token; the bound is
-# AIRULESET_PEEK_MAX_LINES, default 50), and an ASSERTION (`grep -c`,
-# `grep -q` return one number / nothing). Block rate on that corpus went
-# 18.6% -> 14.1%, and what remains is genuinely main reading source files
-# and logs into its own context — exactly what should be dispatched.
-#
-# The ticket's direction 1 (">N gh calls per TURN → batch them") was
-# REFUTED by the same measurement and deliberately NOT built: 687 of 687
-# main turns carried exactly ONE Bash call, so a per-turn counter could
-# never fire. Batching pressure lives in the nudge's message instead.
+# #80 also RE-TUNED the block-list (measured on gk's real corpus): three
+# false-positive classes are now test-guarded — an output REDUCER after a pipe
+# (only a statement's FIRST pipe stage is classified), a BOUNDED peek (judge
+# the SIZE returned, not the head token; AIRULESET_PEEK_MAX_LINES, default 50),
+# and an ASSERTION (`grep -c`/`-q`). A per-TURN gh-call counter was REFUTED
+# (every main turn carried exactly ONE Bash call); batching pressure lives in
+# the nudge message instead.
 #
 # #178 (user decision, 2026-07-31, option 1): the classifier above judges
 # an operation by its CLASS (bulk read/search/build/test vs. coordination),
 # but a genuinely SMALL, bounded operation is cheap regardless of class —
 # and the user's standing directive is that small bounded operations run
 # on MAIN regardless of model; only genuinely large sweeps and repo
-# implementation stay blocked. Production evidence, all same day: five
-# false blocks in one session — a `cat` of a 20-line config file, a
-# 7-pattern `grep` sweep over `tests/`, and two ~1KB scratchpad writes —
-# each one a bounded, harmless read/write that had no business being
-# gated. This also matches Anthropic's own Opus 5 prompting guidance,
-# which advises against delegating small, cheap operations to a subagent
-# when the calling agent can just do them directly — dispatch overhead is
-# for genuinely bulk or unbounded work, not for reading one small file.
+# implementation stay blocked (production evidence: five false blocks in one
+# session — a small `cat`, a 7-pattern `grep` over `tests/`, two ~1KB
+# scratchpad writes). This matches Anthropic's Opus 5 prompting guidance:
+# dispatch overhead is for genuinely bulk/unbounded work, not one small file.
 #
 # Two additions, both size-based rather than class-based:
 #   1. Edit/Write to a `/tmp/` scratchpad path, or a path matching
@@ -219,34 +191,15 @@ set -euo pipefail
 #      `-c` byte-dump/redirect-to-file form. Narrower on file COUNT,
 #      broader on command set — the two allowances are independent checks.
 #
-# FIXED (fresh-context adversarial review of the #178 diff, same day): three
-# real holes in the first cut, all closed here.
-#   a) PATH TRAVERSAL defeated bullet 1 entirely — a `file_path` of
-#      `/tmp/../home/.../PWNED.py` string-matches `/tmp/*` and a 5000-char
-#      Write exited 0 straight into the repo tree (reproduced live). Any
-#      `file_path` containing `..` now gets NO bookkeeping exemption at
-#      all — it falls through to the ordinary AIRULESET_FABLE_EDIT_MAX
-#      threshold, fail-closed. A legitimate scratchpad/memory path never
-#      contains `..`, so nothing real is lost.
-#   b) UNBOUNDED bookkeeping writes let a main session stage an arbitrarily
-#      large implementation to `/tmp` and `cp` it into the repo (`cp` is
-#      ambiguous -> allow in the Bash classifier, and this fix deliberately
-#      does NOT add `cp` gating — that is a materially different, more
-#      invasive change than the ticket asked for, and would false-block
-#      routine copies). So bullet 1's exemption is now SIZE-CAPPED at
-#      AIRULESET_MAIN_READ_MAX_BYTES too (same env as bullet 2, default
-#      131072 — ~100x the production false blocks this was built for,
-#      ~1 KB scratchpad notes) — a non-numeric length gets NO exemption,
-#      fail-closed. The residual — staging up to that cap in `/tmp` then
-#      `cp`-ing it in — is accepted, bounded by the same 128 KB cap.
-#   c) AGGREGATE-SIZE bypass in bullet 2 — N `cat`/`grep` segments chained
-#      with `;`/`&&`, each just under the per-file cap, summed to 1.2 MB in
-#      one command (10 x 120000-byte `cat`s, reproduced live). The
-#      exemption now draws from ONE shared per-command budget
-#      (`READ_BUDGET`, seeded at AIRULESET_MAIN_READ_MAX_BYTES and consumed,
-#      never refunded, by every segment that draws from it) — the WHOLE
-#      command's aggregate small-file exemption is bounded to the same cap,
-#      not each segment independently.
+# FIXED (fresh-context review of the #178 diff): three holes closed — (a) PATH
+# TRAVERSAL (`..` in a scratchpad/memory file_path gets NO bookkeeping
+# exemption → the ordinary AIRULESET_FABLE_EDIT_MAX threshold, fail-closed);
+# (b) UNBOUNDED bookkeeping writes (bullet 1's exemption is SIZE-CAPPED at
+# AIRULESET_MAIN_READ_MAX_BYTES, default 131072; the stage-to-/tmp-then-`cp`
+# residual is accepted, bounded by that cap; `cp` itself is deliberately not
+# gated); (c) AGGREGATE-SIZE bypass (N chained cat/grep segments now draw from
+# ONE shared per-command `READ_BUDGET`, consumed never refunded, so the whole
+# command's small-file exemption is bounded to the same cap, not per-segment).
 
 command -v jq &>/dev/null || exit 0
 
@@ -293,31 +246,22 @@ RAW_SID="${RAW_SID//[!A-Za-z0-9_-]/}"   # #835: fork-free sanitize (was `tr -cd`
 RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 
 # #492: per-USER audit/bypass log paths. A FIXED /tmp name is owned by the
-# FIRST user to create it on a shared box (subdev: montalu2-8, david, marek,
-# simap, miva1); every OTHER user's `>>` append then fails EACCES, and (see
-# the brace-group at each write site) that error LEAKS to stderr as a
-# `PreToolUse hook error` on every block. The ${EUID} suffix gives each user
-# its own file, which still ACCUMULATES across that user's sessions — what
-# these "did it fire, on what" logs want; a per-SESSION suffix would fragment
-# them. ${EUID} is a bash builtin, always set; id -u is the fallback for a
-# non-bash re-exec. Same class as odoo-erp #115 (the shared upload-log). The
-# per-uid name is still predictable in sticky /tmp, so a hostile local user
-# could pre-create it unwritable — but that only silences a victim's own
-# telemetry (the brace-group below keeps it leak-free either way), never a
-# concern on these trusted dev boxes and no worse than the old fixed name.
+# FIRST user to create it on a shared box; every OTHER user's `>>` then fails
+# EACCES and (see the brace-group at each write site) LEAKS to stderr as a
+# `PreToolUse hook error`. The ${EUID} suffix gives each user its own file
+# (accumulating across that user's sessions — what these "did it fire" logs
+# want); ${EUID} is a bash builtin (id -u fallback for a non-bash re-exec).
+# Residual: the per-uid name is predictable in sticky /tmp, but a pre-created
+# unwritable file only silences the victim's own telemetry (leak-free either
+# way) — no concern on trusted dev boxes.
 # #732: the block/bypass logs are the ONLY cross-SESSION-shared artifacts this
-# hook writes — everything else (bypass markers, run counter, presence marker)
-# is SID-keyed and thus unique per session. During the airuleset push gate the
-# fail-closed test suite runs on the LIVE dev box, where concurrent worker lanes
-# + the supervisor session (all the SAME uid) genuinely arm/consume bypass
-# markers, appending to these SAME per-uid logs mid-suite — so a test that
-# counts WHOLE-FILE log lines miscounts (the v0.1.88 gate "2 != 1" false
-# push-block, 2026-08-26). AIRULESET_MAIN_EXEC_LOG_DIR lets a test redirect BOTH
-# logs into an isolated dir it owns (the per-uid suffix is preserved), so no
-# concurrent real fleet session — which never sets this var — can touch the file
-# the test reads. FAIL-SAFE: unset / empty / not-a-directory / not-WRITABLE /
-# root-`/` (its trailing slash strips to the empty string) ALL fall back to the
-# current /tmp path BYTE-FOR-BYTE, so real (non-test) invocations are unchanged
+# hook writes (everything else is SID-keyed). During the push gate the suite
+# runs on the LIVE box where concurrent same-uid sessions append to these SAME
+# per-uid logs mid-suite, so a whole-file line-count test miscounts (the
+# v0.1.88 "2 != 1" false push-block). AIRULESET_MAIN_EXEC_LOG_DIR lets a test
+# redirect BOTH logs into an isolated dir it owns (per-uid suffix preserved).
+# FAIL-SAFE: unset / empty / non-dir / non-writable / root-`/` ALL fall back to
+# the /tmp path BYTE-FOR-BYTE, so real (non-test) invocations are unchanged
 # and a bad override never silently sends the audit trail to an unwritable dir.
 # An `if` condition's failure never trips `set -e`; the `:-` handles `set -u`.
 _EXEC_LOG_DIR="/tmp"
@@ -1308,6 +1252,74 @@ def _is_coordination_write(tk):
     return False
 
 
+# #993 item 5 — a coordinator design/review READ of an INFRA unit's files is
+# the coordinator's job (#992 req 4): allowed by ONE allowlist rule (no per-read
+# marker). Read-only command names only, EVERY path arg under an infra area, no
+# write (`sed -i`, `>`). git diff/show are not gated by this hook at all.
+_INFRA_DIRS = ("hooks", ".github", "modules", "skills", "agents", "watchdog",
+               "scripts", "tests", "profiles", "rules", "notify", "burn",
+               "filedrop", ".claude")
+
+def _under_infra(p, cwd=None):
+    p = (p or "").strip()
+    if not p:
+        return False
+    p = re.sub(r'^(?:\./)+', '', p)   # strip literal ./ ONLY (never lstrip chars)
+    if p == ".." or p.startswith("../") or "/../" in p or p.endswith("/.."):
+        return False                  # #993-review: reject traversal
+    if os.path.isabs(p):              # #993-review: resolve absolute → relative to cwd
+        base = cwd or os.getcwd()
+        try:
+            rel = os.path.relpath(os.path.realpath(p), os.path.realpath(base))
+        except (OSError, ValueError):
+            return False
+        if rel.startswith(".."):
+            return False
+        p = rel
+    if any(p == d or p.startswith(d + "/") for d in _INFRA_DIRS):
+        return True
+    return "/" not in p and (
+        p == "airuleset.py" or p.startswith("cli_") or p.endswith(
+            ("_gate.py", "_guard.py", "_classify.py", "_registry.py",
+             "_trigger.py", "_counts.py")) or p in ("statusbar.py", "goal.py"))
+
+def _is_infra_review_read(tk, cwd=None):
+    if not tk or tk[0] not in ("cat", "head", "tail", "nl", "wc", "ls",
+                               "sed", "grep"):
+        return False
+    h = tk[0]
+    # ANY output redirect in the tokens is a WRITE, never a review read (the
+    # caller ALSO refuses the exception when the raw statement carries a
+    # redirect — `&>` is split off by STATEMENTS_RE, #993-review 🔴).
+    if any(t.startswith(">") or t.startswith("1>") or t.startswith("&>")
+           for t in tk):
+        return False
+    if h == "sed":
+        # a review sed is ONLY `-n` + a pure print-range script — never an
+        # in-place edit (`-i`/`-ni`/`-Ei`/`--in-place`) and never a `w`/`e`/`r`
+        # script command (all WRITES/exec), #993-review 🔴.
+        if not any(t == "-n" for t in tk[1:]):
+            return False
+        for t in tk[1:]:
+            if re.match(r'^-[A-Za-z]*i', t) or t.startswith("--in-place"):
+                return False
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        if not nf or not (_SED_RANGE_RE.match(nf[0]) or _SED_SINGLE_RE.match(nf[0])):
+            return False
+        fls = nf[1:]
+    elif h == "grep":
+        nf = [t for t in tk[1:] if not t.startswith("-")]
+        he = any(t == "-e" or t.startswith("--regexp") for t in tk[1:])
+        fls = nf if he else nf[1:]
+    elif h == "cat":
+        fls = cat_files(tk)
+    else:
+        fls = [t for t in tk[1:] if not t.startswith("-")]
+    if not fls or any(any(c in p for c in "*?$") for p in fls):
+        return False
+    return all(_under_infra(p, cwd) for p in fls)
+
+
 def is_blocked_segment(tk):
     if not tk:
         return False
@@ -1419,6 +1431,12 @@ def classify(text):
     # readonly) — if so, the command is pure coordination and should be
     # exempt from the per-dispatch counter.
     all_coordination = True
+    # #993-review 🔴: the infra-review-read exemption NEVER fires when the raw
+    # command carries ANY output redirect (`>`, `&>`, `2>…`) — `&>` is split off
+    # by STATEMENTS_RE so the read segment alone looks redirect-free, and a
+    # redirect means a WRITE, not a review read. A conservative whole-text check
+    # (a legit review read never redirects) closes that hole.
+    _infra_read_ok = ">" not in text
     for statement in STATEMENTS_RE.split(text):
         seg = first_pipe_stage(statement)
         # #988 review: a multi-stage pipe is NOT pure coordination — the
@@ -1440,6 +1458,8 @@ def classify(text):
         if is_allowed_segment(tk):
             continue
         if _is_narrow_readonly_953(tk):
+            continue
+        if _infra_read_ok and _is_infra_review_read(tk, cwd):   # #993 item 5
             continue
         if _is_coordination_write(tk):
             continue
@@ -1513,9 +1533,8 @@ Do ONE of these, then continue:
 
   • DISPATCH the state-gathering. Anything that is not a single fact — "what
     is the state of these five tickets", "why did that run fail", "read this
-    file/log" — goes to the pinned sonnet-mechanical agent (subagent_type:
-    sonnet-mechanical, no model param, effort low/medium for a mechanical
-    read; #871 -- a model param is banned outright now). It brings back
+    file/log" — goes to a read-only worker subagent (its model is the native
+    subagent default; a banned model is refused, #991). It brings back
     a CONCLUSION; you keep coordinating (main-context-hygiene.md). A
     dispatch resets this counter immediately.
   • BATCH the remaining reads into ONE call. Five \`gh issue view\` calls are
@@ -1544,10 +1563,8 @@ takes its own context with it (model-awareness.md ADVISOR shape; measured
 2026-07-26: gatekeeper's main ran 1222 Bash calls vs 97 dispatches in one
 hour, each re-sending the whole context — #66):
 
-  • dispatch the pinned sonnet-mechanical agent (subagent_type:
-    sonnet-mechanical, no model param, low/medium effort for a mechanical
-    read; #871) and take back its CONCLUSION, not the raw
-    dump — main-context-hygiene.md.
+  • dispatch a read-only worker subagent and take back its CONCLUSION, not
+    the raw dump — main-context-hygiene.md.
   • then act on the conclusion here — that is the coordinator's job.
 
 Deliberate exception (one-shot — consumed when the command actually RUNS, not
@@ -1567,9 +1584,8 @@ short surgical edits (under ${MAX} chars) — a dispatched WORKER types settled
 code (model-awareness.md ADVISOR shape; the /goal generalization is #54,
 david@subdev inline-354-edits incident):
 
-  • dispatch the implementation to a worker NOW — the pinned
-    sonnet-implementer agent (subagent_type: sonnet-implementer, no model
-    param, effort: high; #871) whose
+  • dispatch the implementation to a worker NOW — a worker subagent (its
+    model is the native subagent default) whose
     prompt carries the FULL context you hold (files, decisions, exact
     diffs to make, test expectations) — "I have it in my head" is not a
     reason; the prompt is how the head is handed over. For issue-shaped

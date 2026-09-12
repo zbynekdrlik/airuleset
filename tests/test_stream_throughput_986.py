@@ -138,17 +138,6 @@ class TestWorkerLongForegroundWait(unittest.TestCase):
         self.assertEqual(r2.returncode, 2,
                          "Non-worker subagent loop 2 was not blocked")
 
-    def test_sonnet_implementer_also_gets_extra_loop(self):
-        """sonnet-implementer gets the same extra loop as autopilot-worker."""
-        r1 = self._run_ci_hook(
-            _short_poll_loop(RUN_A),
-            agent_id="agent-789", agent_type="sonnet-implementer")
-        self.assertEqual(r1.returncode, 0, r1.stderr)
-        r2 = self._run_ci_hook(
-            _long_foreground_loop(RUN_A),
-            agent_id="agent-789", agent_type="sonnet-implementer")
-        self.assertEqual(r2.returncode, 0,
-                         "sonnet-implementer loop 2 was blocked: " + r2.stderr)
 
     def test_bg_waiter_still_allowed_through_this_hook(self):
         """A background CI poll passes this hook (block-subagent-bg-ci-poll.sh
@@ -197,6 +186,23 @@ def _wdrain_payload(cwd, subagent_type="autopilot-worker"):
     }
 
 
+def _seed_overlap_receipt(tmpdir, cwd, issues=(1,)):
+    """Seed a FRESH lane-overlap receipt so `block-dispatch-over-wdrain.sh`'s
+    independence gate (#992/#993, which runs BEFORE the wdrain-ceiling check)
+    passes — letting these tests actually exercise the W-drain ceiling they
+    claim to test, not the independence gate that would otherwise block the
+    receipt-less autopilot-worker payload (#993 r2b). Seeds via the REAL
+    producer `cli_lane_overlap.write_receipt` (#993 r2b review 🔵 — no
+    hand-crafted schema that could drift from what the hook reads)."""
+    sys.path.insert(0, str(REPO))
+    try:
+        import cli_lane_overlap as lo
+        lo.write_receipt(tmpdir, _cwd_key(cwd), [int(i) for i in issues],
+                         "clear", [])
+    finally:
+        sys.path.pop(0)
+
+
 def _run_wdrain_hook(payload, env_extra=None):
     env = dict(os.environ)
     if env_extra:
@@ -219,6 +225,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=2)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -230,10 +237,15 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=5)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
                              "High stale W was not blocked")
+            # #993 r2b review 🟡: prove it is the W-drain ceiling that blocked,
+            # not the (seeded-past) independence gate.
+            self.assertIn("W-drain gate", stderr)
+            self.assertNotIn("independence check", stderr)
 
     def test_missing_stale_field_falls_back_to_total(self):
         """A legacy cache without ops_wait_stale falls back to ops_wait."""
@@ -242,10 +254,13 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd.mkdir()
             # No ops_wait_stale → fall back to ops_wait=10 > threshold=8
             _make_wdrain_cache(td, cwd, ops_wait=10)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
                              "Missing stale field did not fall back to total W")
+            self.assertIn("W-drain gate", stderr)          # #993 r2b review 🟡
+            self.assertNotIn("independence check", stderr)
 
     def test_stale_at_threshold_passes(self):
         """stale=3 exactly — threshold is > 3, so 3 passes."""
@@ -253,6 +268,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=15, ops_wait_stale=3)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -266,6 +282,7 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=20, ops_wait_stale=0)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 0,
@@ -277,10 +294,13 @@ class TestWdrainStaleOnly(unittest.TestCase):
             cwd = pathlib.Path(td) / "repo"
             cwd.mkdir()
             _make_wdrain_cache(td, cwd, ops_wait=20)
+            _seed_overlap_receipt(td, cwd)
             p = _wdrain_payload(cwd)
             rc, stderr = _run_wdrain_hook(p, {"HOME": td})
             self.assertEqual(rc, 2,
                              "Legacy hard ceiling did not block")
+            self.assertIn("W-drain gate", stderr)          # #993 r2b review 🟡
+            self.assertNotIn("independence check", stderr)
 
 
 # ---------- Item 5: Closes-finding sha validation -------------------------

@@ -92,6 +92,17 @@ first: merged-but-unreleased slices and open `prio:bounce` tickets of this strea
 STILL this pipeline's work (see step 7 — the /goal holds until released, not until the
 queue is empty).
 
+### 1b. Cross-stream overlap at hand-off (#992/#993)
+
+Before spending review effort, check the OTHER streams' open tickets for the SAME
+addon/model this hand-off touches (gk reads across all streams' queues — the same
+independence discipline the dispatch-time `lane-overlap` check applies, now at the
+hand-off point). Two open stream tickets touching the same addon/model → FLAG BOTH
+before review, never let both proceed blind: comment the overlap on each, and either
+stop one or coordinate them so two forks do not land conflicting changes to the same
+module. This is the cross-stream sibling of the dispatch independence check — same goal
+(no parallelism without change-context), applied where two SEPARATE streams converge.
+
 ### 2. Get the work in front of you
 
 - **fork-no-merge stream:** fetch the fork branch, push it upstream, open the PR into
@@ -141,26 +152,16 @@ repo's own CLAUDE.md / playbook is what names the command.
 1. **Cold read:** review the full diff BEFORE reading tickets/readiness comments. Form
    your own conclusion, module by module. For a multi-PR slice, fan the cold review out
    (Workflow) and adversarially verify findings.
-1b. **Model tiering — the review VERDICT is a named HARD judgment (user directive
-   2026-07-24: maximum scrutiny on sub-dev submissions before anything approaches
-   prod).** Run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE per processing
-   run: OPEN → the cold-review/verdict stages dispatch the `fable-advisor` agent (NO
-   `model` param — its frontmatter pins `claude-fable-5-1`) at `effort:
-   xhigh`; CLOSED → `claude-opus-4-8` (agent-definition frontmatter / Workflow
-   `opts.model: 'claude-opus-4-8'` / inheritance — a dispatch NEVER carries a `model`
-   alias param, #871; Opus 5 and every bare alias are BANNED) — never a cheaper tier for the
-   judgment. ADVISOR shape adapted for review: cheap grounding stages GROUND (collect the
-   pinned diff, ticket claims, CI evidence into digests — the pinned `sonnet-mechanical`
-   agent, or `claude-opus-4-8` at low effort); the Fable stage receives the digest + THE DIFF
-   ITSELF (the diff is the review object — reading it is not self-grounding) and
-   returns findings/verdict; a routine or implementation follow-up runs the worker on its tier
-   (Sonnet 5 for a settled-design follow-up, the pinned Opus 4.8 for complexity — #721),
-   while a further REVIEW-phase pass (a deeper adversarial verify) runs the gated `fable-advisor` agent
-   (`model-awareness.md` 2026-08-26 — the gatekeeper's cold-review IS the REVIEW phase). Finding
-   VERIFIERS may run `claude-opus-4-8`; the final clean-verdict pass is the gated
-   top-tier call.
-   The tier never degrades across iterations — a re-handoff's re-review runs the SAME
-   tier as the first pass (mirror of the depth rule).
+1b. **Review at HIGH effort — maximum scrutiny on sub-dev submissions before anything
+   approaches prod (user directive 2026-07-24).** The review runs at high/xhigh effort;
+   the model is the working model's native choice (the subagent default is `claude-opus-4-8`,
+   a per-dispatch `model` may override it, only Opus 5 is banned — `model-awareness.md`).
+   ADVISOR shape adapted for review: cheap grounding stages GROUND (collect the pinned diff,
+   ticket claims, CI evidence into digests); the review stage receives the digest + THE DIFF
+   ITSELF (the diff is the review object — reading it is not self-grounding) and returns
+   findings/verdict; a routine or implementation follow-up runs a worker afterward. The review
+   depth never degrades across iterations — a re-handoff's re-review runs at the SAME effort as
+   the first pass.
 2. **Mandatory frame** (repo CLAUDE.md adds instance specifics):
    - **Native-first gate** — proper framework idioms, no quirky custom constructs where
      a native mechanism exists (repo names its framework rules).

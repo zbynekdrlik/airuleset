@@ -87,7 +87,7 @@ class TestTriggerTable(TestCase):
 
     def test_topics_are_unique_per_tool(self):
         # #859 batch 4a: a topic may appear on MULTIPLE tool surfaces
-        # (e.g. model-awareness-deep on Agent + Workflow + Bash) for shared
+        # (e.g. claude-code-workflows on Workflow + Bash) for shared
         # dedup — but the same topic+tool pair must not be duplicated.
         rows = load_conf()
         seen = set()
@@ -119,7 +119,6 @@ class TestTriggerTable(TestCase):
             "batch-issue-development",
             "regression-test-first",
             "verify-launched-work-liveness",
-            "subagent-type-discipline",
             "investigate-existing-first",
             "windows-remote-gui",
             "comprehensive-logging",
@@ -148,18 +147,6 @@ class TestInjection(TestCase):
         self.assertIn("airuleset:autopilot=auto-merge", ctx)
         self.assertIn("pr-merge-policy", ctx)
 
-    def test_fable_gate_injects_the_tier_reference(self):
-        # #92 item 2 moved the tier/pricing/policy-history layer OUT of the
-        # always-on model-awareness module and INTO the fable-advisor skill.
-        # Running the budget gate IS the action that means "I am deciding a
-        # tier right now" — the moved content must load on it, or the move
-        # repeats the silent-delete failure #91 exists to prevent.
-        ctx = injected(run({"command": "python3 ~/devel/airuleset/airuleset.py fable-gate"},
-                           tmpdir=self.tmpdir))
-        self.assertIsNotNone(ctx, "fable-gate must load the tier reference")
-        # strings that now exist ONLY in the skill body, in no always-on module
-        self.assertIn("Fable 5 $10/$50", ctx)
-        self.assertIn("Dormant — the Fable-everywhere MAX-PERFORMANCE mode", ctx)
 
     def test_unrelated_command_injects_nothing(self):
         r = run({"command": "ls -la && echo hello"}, tmpdir=self.tmpdir)
@@ -222,24 +209,6 @@ class TestInjection(TestCase):
         self.assertIsNotNone(b)
         self.assertNotEqual(a, b)
 
-    def test_tool_scoping_an_agent_rule_does_not_fire_on_bash(self):
-        """subagent-type-discipline is wired to the Agent tool, not to Bash."""
-        ctx = injected(
-            run({"command": "echo subagent_type general-purpose"}, tmpdir=self.tmpdir)
-        )
-        if ctx is not None:
-            self.assertNotIn("subagent-type-discipline", ctx)
-
-    def test_agent_dispatch_injects_the_subagent_type_rule(self):
-        ctx = injected(
-            run(
-                {"subagent_type": "general-purpose", "prompt": "do a thing"},
-                tool_name="Agent",
-                tmpdir=self.tmpdir,
-            )
-        )
-        self.assertIsNotNone(ctx, "an Agent dispatch must load the subagent-type rule")
-        self.assertIn("subagent_type", ctx)
 
     def test_background_bash_injects_the_liveness_rule(self):
         ctx = injected(

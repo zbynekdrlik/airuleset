@@ -1,6 +1,6 @@
-"""#433 cluster J — the burn/fable-gate/delegation CLI cluster, extracted from
+"""#433 cluster J — the burn/delegation CLI cluster, extracted from
 airuleset.py (verbatim move + facade, the same shape as cli_vault.py (H) /
-cli_autopilot_lock.py (K)). Holds `airuleset.py burn`/`delegation`/`fable-gate`
+cli_autopilot_lock.py (K)). Holds `airuleset.py burn`/`delegation`
 and watchdog job-16's fleet-fetch collector — user-facing/injected code, no
 watchdog jobs of its own.
 
@@ -26,22 +26,6 @@ mid-init.
 import json
 import os
 import sys
-
-def cmd_fable_gate(args):
-    """Budget gate guarding EVERY automatic Fable dispatch (model-tiering
-    policy 2026-08-25, #690 — the judgment-content tier + the airuleset
-    Fable-majority; Opus 5 stays banned): exit 0 + `OPEN ...` when the Fable
-    weekly + shared weekly windows have headroom (< threshold, default 90% /
-    AIRULESET_FABLE_GATE_PCT — raised from 80 by #690), exit 1 + `CLOSED ...`
-    otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn).
-    The orchestrator / autopilot supervisor runs this ONCE per qualifying
-    task/batch before dispatching `model: fable`; CLOSED → the same work runs
-    on claude-opus-4-8 (agent-definition frontmatter / Workflow opts.model
-    full id / inheritance — never the banned bare alias)."""
-    from watchdog import fable_gate
-    ok, reason = fable_gate(threshold=getattr(args, "threshold", None))
-    print(("OPEN " if ok else "CLOSED ") + reason)
-    sys.exit(0 if ok else 1)
 
 
 def _burn_remote_cmd(remote, days):

@@ -23,9 +23,12 @@ set -euo pipefail
 # bundling gate's own established exemptions:
 #   >300-loc | schema-migration | api-break | security-boundary |
 #   cross-cutting | needs-user-decision
-# plus the two legitimate NON-discovery filing modes:
-#   planned-work   — converged-plan decomposition (durable-decisions-to-tickets.md)
-#   user-request   — the user explicitly asked for this ticket
+# plus the legitimate NON-discovery filing modes:
+#   planned-work        — converged-plan decomposition (durable-decisions-to-tickets.md)
+#   user-request        — the user explicitly asked for this ticket
+#   architecture-rework — a mechanical REWORK verdict from the integration-time
+#                         area-review gate (#993): requires an `Area:` line, is
+#                         exempt from caps/net-drain, and is NOT presence-gated
 #
 # CHAIN-DEPTH CAP (#311, added after odoo-erp's #3035→#3220→#3224→#3250→
 # #3251→#3252→#3258 seven-ticket review-finding chain — each hop honestly
@@ -316,15 +319,26 @@ if repo_dir and repo_dir not in sys.path:
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
     "cross-cutting", "needs-user-decision", "planned-work", "user-request",
+    # #993 -- a REWORK verdict from the integration-time area-review gate files
+    # an architecture-rework ticket AUTONOMOUSLY (the supervisor, same turn); it
+    # must be able to file even on a non-draining repo, and it requires an
+    # `Area:` line (one open rework ticket per area) rather than an owner quote.
+    "architecture-rework",
 }
 
-# #329 -- these two criteria are the only ones exempt from the NEW soft caps
-# below (daily filing cap, chain-width cap) -- they never COUNT toward
-# either cap and never GET capped by either. A user directive or a
+# #329 -- these criteria are exempt from the NEW soft caps below (daily filing
+# cap, chain-width cap) AND (#842) the net-drain ratchet -- they never COUNT
+# toward either cap and never GET capped/ratchet-blocked. A user directive or a
 # converged-plan decomposition must always be able to file
 # (durable-decisions-to-tickets.md); a discovered review-finding/cleanup
-# must not.
-EXEMPT_FROM_CAP = {"planned-work", "user-request"}
+# must not. #993 -- architecture-rework joins them: a genuine area-rework
+# verdict is a mandated autonomous action, never a discovery to be rate-limited.
+EXEMPT_FROM_CAP = {"planned-work", "user-request", "architecture-rework"}
+
+# #993 -- the `Area:` line every architecture-rework body must carry (the
+# dedup-by-area discipline: one open rework ticket per area). A newline-anchored
+# match, same shape as CRITERION_RE / DEDUP_RE.
+AREA_RE = re.compile(r'(?m)^\s*Area:\s*(\S.*)$')
 
 # #329 -- soft per-day, per-repo cap on NON-EXEMPT agent-authored filings.
 # Measured worst days on the ticket's own real corpus: 19/16/14 filings in
@@ -1409,6 +1423,31 @@ for seg in split_top_level(skeleton):
                          target_repo, ""))
     else:
         crit_l = crit.lower()
+        # #993 -- an architecture-rework ticket is deduped BY AREA (one open
+        # rework ticket per area), so its body MUST carry an `Area:` line naming
+        # the reworked area. Unconditional (attended or not) -- it is this
+        # criterion's structural discipline, the same tier as the >300-loc
+        # self-contradiction check, and BLOCKS before the presence/cap gates.
+        if crit_l == "architecture-rework" and not AREA_RE.search(body or ""):
+            results.append(("BLOCK", clean_title,
+                             "architecture-rework-missing-area (body must carry "
+                             "an `Area:` line naming the reworked area -- one open "
+                             "rework ticket per area)",
+                             parents_str, target_repo, ""))
+            continue
+        # #993-review: an architecture-rework filing MUST also carry the
+        # `-l architecture-rework` LABEL (mirrors #962's -l needs-gatekeeper
+        # requirement) -- the picker (`_row_label_rank`) promotes ONLY labeled
+        # rework tickets, and requiring the label as a deliberate act raises the
+        # bar against relabelling an ordinary discovery as this exempt criterion.
+        if crit_l == "architecture-rework" \
+                and "architecture-rework" not in _all_labels(tk, api_call):
+            results.append(("BLOCK", clean_title,
+                             "architecture-rework-missing-label (add "
+                             "`-l architecture-rework` -- the picker promotes only "
+                             "labeled rework tickets)",
+                             parents_str, target_repo, ""))
+            continue
         # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
         # pre-#842 flow untouched, so these never touch the owner). presence-gate
         # (req 3): an unattended loop cannot claim the owner asked for a
@@ -1419,7 +1458,14 @@ for seg in split_top_level(skeleton):
         # near-dup/ratchet checks (cheapest first) and `continue` this segment.
         if unattended:
             unattended_reason = None
-            if crit_l in EXEMPT_FROM_CAP:
+            # #993 -- architecture-rework is a MECHANICAL area-review verdict, not
+            # an owner-asked ticket, so it is gated by NEITHER the presence gate
+            # (its Area: + dedup discipline stand in for the owner-quote) NOR the
+            # dismissal-word gate. It stays in EXEMPT_FROM_CAP for the cap/ratchet
+            # exemption below.
+            if crit_l == "architecture-rework":
+                pass
+            elif crit_l in EXEMPT_FROM_CAP:
                 # #962: exempt when the body quotes an owner message with
                 # 'verbatim' + a date from the last 24h — evidence the
                 # owner WAS present and explicitly asked.
@@ -1625,9 +1671,12 @@ Fix NOW — one of:
        Scope-gate: <criterion>
      where <criterion> is one of:
        >300-loc | schema-migration | api-break | security-boundary |
-       cross-cutting | needs-user-decision | planned-work | user-request
-     (only `planned-work`/`user-request` are exempt from the daily and
-     chain-width caps), OR
+       cross-cutting | needs-user-decision | planned-work | user-request |
+       architecture-rework
+     (only `planned-work`/`user-request`/`architecture-rework` are exempt
+     from the daily/chain-width caps and net-drain ratchet; an
+     `architecture-rework` filing additionally requires an `Area:` line and
+     is NOT presence-gated — it is a mechanical area-review verdict), OR
   5. Add an explicit `-l stream:<your-own-stream>` label matching YOUR OWN
      stream (#390) -- or, when this ticket genuinely belongs to a
      DIFFERENT stream (or is a core/shared-infra ticket), keep that

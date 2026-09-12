@@ -1,42 +1,35 @@
-"""watchdog/usage.py -- weekly token-usage tracking + the fable-gate budget
-check (#404 point 3, module split).
+"""watchdog/usage.py -- weekly token-usage tracking (#404 point 3, module split).
+
+The automatic-Fable budget gate that once lived here was REMOVED in #991
+(the tiering doctrine is gone — the working model chooses subagent models
+natively). Weekly-usage tracking stays: reading Anthropic's oauth/usage
+window state, writing the usage cache the statusline reads, and evaluating
+the weekly alert threshold.
 
 #546 (owner directive 2026-08-18): the weekly-usage-LIMIT Discord ping below
 (`send_fn(..., dedup_key="usage:...")`) is a limit/subscription alert another
 project now owns -- airuleset does not Discord-alert on it. `notify.send()`
 suppresses the `usage:` alert class (SUPPRESSED_ALERT_PREFIXES): the POST is
 dropped (returns "suppressed", logged to the machine channel), while the
-threshold evaluation + the `fable_gate()` budget check are UNCHANGED.
+threshold evaluation is UNCHANGED.
 
-WHY THIS FILE EXISTS. Extracted VERBATIM (a MOVE, not a rewrite -- unlike
-#402/#403's compact.py/goal.py, which collapsed genuinely obsolete
-machinery, this cluster's behavior is unchanged) from `watchdog/__init__.py`
-as part of #404's per-service module split: the "usage/fable-gate tracking"
-concern -- reading Anthropic's oauth/usage window state, pinging Discord once
-a weekly window reaches its alert threshold, and the `fable_gate()` budget
-check that gates every automatic Fable-5 escalation fleet-wide
-(`model-awareness.md`) -- was one of several self-contained clusters inside
-the 15k+-line watchdog module with low fan-in from the rest of the file.
+WHY THIS FILE EXISTS. Extracted VERBATIM from `watchdog/__init__.py` as part
+of #404's per-service module split: the "usage tracking" concern was one of
+several self-contained clusters inside the 15k+-line watchdog module with low
+fan-in from the rest of the file.
 
 Re-exported from `watchdog/__init__.py` (`from watchdog.usage import ...`,
 placed after every symbol this module depends on is already defined --
-`watchdog.check_usage`/`watchdog.fable_gate`/etc. keep resolving via
-attribute access exactly as before) so every existing caller (`run_once()`'s
-job 3, `airuleset.py`'s `cmd_fable_gate`/`cmd_watchdog`, `burn/__init__.py`,
-and the test suite) needs zero changes beyond import path updates where a
-caller imported these names directly rather than via the `watchdog` package
-attribute. This is the FIRST facade-re-export split in this repo -- the
-prior #402/#403 extractions (`watchdog/compact.py`, `watchdog/goal.py`) are
-consumed via plain `watchdog.compact`/`watchdog.goal` attribute access with
-no re-export block at all, since neither one had a pre-existing bare-name
-consumer inside `watchdog/__init__.py` to preserve; this cluster's own
-`check_usage()` call inside `run_once()` did, hence the facade.
+`watchdog.check_usage`/etc. keep resolving via attribute access exactly as
+before) so every existing caller (`run_once()`'s job 3, `cmd_watchdog`,
+`burn/__init__.py`, and the test suite) needs zero changes beyond import path
+updates where a caller imported these names directly rather than via the
+`watchdog` package attribute.
 """
 
 import json
 import os
 import re
-import time
 
 USAGE_THRESHOLD = 98              # alert when a weekly window reaches this %
 USAGE_INTERVAL = 15 * 60         # min seconds between usage polls (429s hard)
@@ -246,97 +239,6 @@ def _human_reset(iso):
         return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d.%m. %H:%M")
     except Exception:
         return str(iso)[:16]
-
-
-# --------------------------------------------------------------------------- #
-# Fable budget gate — `airuleset.py fable-gate`. Under the 2026-08-25
-# model-tiering policy (#690; Opus 5 stays banned, #440) the gate guards
-# EVERY automatic Fable dispatch — the fleet-wide judgment-content tier plus
-# the airuleset Fable-majority — so the 2026-07-01 Fable-everywhere incident
-# (limits tripped mid-work, user's work stopped) can never repeat: Fable
-# fires only while its weekly window (and the shared weekly) has headroom.
-# Reads the same usage cache the watchdog writes every ~15 min (never hits
-# the 429-prone endpoint). FAIL-SAFE: missing/stale/empty cache → CLOSED
-# (the work runs on Opus 4.8, claude-opus-4-8), never a blind Fable burn.
-# --------------------------------------------------------------------------- #
-
-FABLE_GATE_PCT = 90            # default: dispatch Fable only below 90% used.
-                               # Raised 80→90 by #690 (2026-08-25): the 43%-fable
-                               # baseline was main-session-only usage, so the new
-                               # judgment-content + airuleset-majority dispatch
-                               # load projects the fable weekly into the 60–90%
-                               # band, where an 80% gate would flip CLOSED
-                               # mid-week and silently re-create the zero-Fable
-                               # dead letter. The last 10% stays reserved for the
-                               # user's own manual /model Fable main.
-FABLE_GATE_MAX_AGE = 6 * 3600  # cache older than this = unknown → CLOSED (same
-                               # staleness bound the statusline uses)
-
-
-def fable_gate(now=None, path=None, threshold=None):
-    """(open, reason) — may an automatic Fable dispatch fire NOW? (#690: guards EVERY
-    automatic Fable dispatch — judgment-content tier + airuleset Fable-majority.)
-
-    OPEN  ⇔ the cache is fresh AND every gating window is below `threshold`%:
-      - the Fable-scoped weekly window (the binding one under heavy Fable use), and
-      - the shared account weekly (Fable burn counts there too).
-    The 5h session window deliberately does NOT gate (it resets within hours and
-    would keep the gate closed exactly when the user works most; the incident
-    being prevented was the WEEKLY trip). A fresh cache with NO Fable-scoped
-    window gates on the shared weekly alone; a fresh cache with NO weekly windows
-    at all is unknown → CLOSED."""
-    now = now if now is not None else time.time()
-    if threshold is None:
-        try:
-            threshold = int(os.environ.get("AIRULESET_FABLE_GATE_PCT", FABLE_GATE_PCT))
-        except ValueError:
-            threshold = FABLE_GATE_PCT
-    path = path or _USAGE_CACHE_PATH
-    # The ENTIRE evaluation is fail-safe: any unexpected shape/type in the cache
-    # (list top-level, string ts, bool/str percents, garbage windows) must return
-    # CLOSED, never raise — a caller unpacking (ok, reason) on a corrupt cache
-    # crashing IS a gate failure (review finding F3).
-    try:
-        with open(path) as f:
-            cache = json.load(f)
-        # Clock-skew guard (F1): a FUTURE ts makes age negative, which a plain
-        # `age > MAX` check calls "fresh" FOREVER — fail-open on frozen numbers.
-        # Any age outside [0, MAX] is unknown → stale.
-        age = now - float(cache.get("ts") or 0)
-        if not (0 <= age <= FABLE_GATE_MAX_AGE):
-            return False, "usage cache stale (ts %dh off) — fail-safe CLOSED, use claude-opus-4-8" % (
-                abs(age) // 3600)
-        # Window selection (F2): gate ONLY on WEEKLY windows (a per-model session/
-        # surface window must neither gate nor mask), and across MULTIPLE matching
-        # windows take the MAX percent — the binding one decides.
-        fable_pct = shared_pct = None
-        for w in cache.get("windows") or []:
-            pct = w.get("percent")
-            if isinstance(pct, bool) or not isinstance(pct, (int, float)):
-                continue                    # bool/str/None percent = unknown, never 0%
-            if w.get("group") != "weekly":
-                continue
-            model = w.get("model") or ""
-            if "fable" in str(model).lower():
-                fable_pct = pct if fable_pct is None else max(fable_pct, pct)
-            elif not model:
-                shared_pct = pct if shared_pct is None else max(shared_pct, pct)
-        if fable_pct is None and shared_pct is None:
-            return False, "no weekly window in cache — fail-safe CLOSED, use claude-opus-4-8"
-        parts = []
-        for label, pct in (("fable", fable_pct), ("weekly", shared_pct)):
-            if pct is None:
-                continue
-            parts.append("%s=%d%%" % (label, pct))
-            if pct >= threshold:
-                return False, ("%s window at %d%% (>= %d%% gate) — CLOSED, use claude-opus-4-8"
-                               % (label, pct, threshold))
-        return True, " ".join(parts) + " (< %d%% gate)" % threshold
-    except FileNotFoundError:
-        return False, "no usage cache (%s) — fail-safe CLOSED, use claude-opus-4-8" % path
-    except Exception as e:
-        return False, "unreadable/corrupt usage cache (%s: %s) — fail-safe CLOSED, use claude-opus-4-8" % (
-            type(e).__name__, e)
 
 
 def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,

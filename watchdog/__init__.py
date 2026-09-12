@@ -1726,7 +1726,7 @@ def _owner_disabled(kind):
 # succeed even if it needed to reach back into `watchdog` (it currently does
 # not -- it imports only stdlib), and (b) every existing consumer that
 # resolves these names via `watchdog.<name>` dotted access or via
-# `from watchdog import <name>` (airuleset.py's cmd_watchdog/cmd_fable_gate)
+# `from watchdog import <name>` (airuleset.py's cmd_watchdog)
 # keeps working with ZERO changes, since the names still live in watchdog's
 # own top-level namespace -- just re-exported instead of defined in this
 # file directly. This is the FIRST facade-re-export split in this repo
@@ -1742,7 +1742,6 @@ from watchdog.usage import (  # noqa: E402
     weekly_percent as weekly_percent,
     usage_windows as usage_windows,
     write_usage_cache as write_usage_cache,
-    fable_gate as fable_gate,
     check_usage as check_usage,
     _account_email as _account_email,
     _local_account as _local_account,
@@ -2083,7 +2082,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
              gkorphan_fetch=None, gkorphan_handoff_fetch=None,
-             release_state_fetch=None, queue_fetch=None,
+             release_state_fetch=None, queue_fetch=None, queue_classify=None,
+             dispatchable_fetch=None,
              reaper_ps_fetch=None, reaper_kill_fn=None,
              resource_guard_gk_request=None,
              u_fetch=None, reconcile_fetch=None, disk_guard_enabled=False,
@@ -4370,6 +4370,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
             release_state_fetch=release_state_fetch,     # #616
             queue_fetch=queue_fetch,                     # #733
+            queue_classify=queue_classify,               # #993 item 4
+            dispatchable_fetch=dispatchable_fetch,       # #993 item 3
             u_fetch=u_fetch,                             # #797
             reconcile_fetch=reconcile_fetch,             # #844
             deploy_state_fetch=deploy_state_fetch)       # #944

@@ -283,7 +283,15 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # line grew again, the mutation target vault_purge=None is
                # untouched.
                "             gkorphan_fetch=None, gkorphan_handoff_fetch=None,\n"
-               "             release_state_fetch=None, queue_fetch=None,\n"
+               # #993 item 4 re-pin: queue_classify=None (the queue-arrival
+               # dispatch-class factory seam) inserted right after queue_fetch,
+               # on its own trailing line; the mutation target vault_purge=None
+               # is untouched.
+               "             release_state_fetch=None, queue_fetch=None, queue_classify=None,\n"
+               # #993 item 3 re-pin: dispatchable_fetch=None (the lane-occupancy
+               # candidate-count seam) inserted on its own trailing line after
+               # queue_classify; the mutation target vault_purge=None is untouched.
+               "             dispatchable_fetch=None,\n"
                "             reaper_ps_fetch=None, reaper_kill_fn=None,\n"
                "             resource_guard_gk_request=None,\n"
                # #866 re-pin: nice_check_enabled=False (job 42's nice-check

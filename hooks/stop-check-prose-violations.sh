@@ -1643,6 +1643,27 @@ if [ "$IS_COMPLETION" = "1" ]; then
     # pattern carries a diacritic ('Výstup' — the '-i' fold next to a
     # multibyte char is locale-dependent under a bare C locale, the same
     # lesson the Slovak detectors above already encode).
+    # #993 — the mandatory '🏛 Architektúra:' area-review verdict line. Every
+    # integrated change passes a main-session (Fable) AREA review (SKILL.md bod
+    # f) with a binary verdict, and it must be VISIBLE in the report. Same
+    # UNCONDITIONAL / fail-OPEN discipline as the Výstup line: the presence probe
+    # is a REQUIRED-FIELD msg_has (an unevaluable grep never becomes an
+    # accusation). LC_ALL forced (the pattern carries the 🏛 multibyte glyph +
+    # the 'á' diacritic — the same locale lesson as Výstup).
+    # #993-review 🟡: U+1F3DB is TEXT-default, so models/terminals routinely emit
+    # it with the VS16 emoji-presentation selector (U+FE0F) — `🏛️`. Accept an
+    # OPTIONAL VS16 after the glyph so a correct report is never false-blocked.
+    _ARCH_VS16=$'\xef\xb8\x8f'
+    ARCH_RX='🏛('"$_ARCH_VS16"')?[[:space:]]*\**[[:space:]]*(architekt[uú]ra|architecture)[[:space:]]*\**[[:space:]]*:'
+    HAS_ARCH=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$ARCH_RX" && echo 1 || echo 0)
+    if [ "$HAS_ARCH" = "0" ]; then
+        echo "VIOLATION: Work Complete report missing the '🏛 Architektúra:' area-review verdict line — required on EVERY report (#993). Each integrated change passes a main-session (Fable) review of the whole AREA the change lands in (not just the diff), with a binary verdict; the verdict is visible in the report. Add one of:" >&2
+        echo "  Required line (one of):" >&2
+        echo "    🏛 Architektúra: <oblasť> — OK" >&2
+        echo "    🏛 Architektúra: <oblasť> — REWORK #N (<názov>)" >&2
+        echo "  See completion-report.md and skills/autopilot/SKILL.md (Main review gate, bod f)." >&2
+        add_hard "Missing 🏛 Architektúra: line — state the area-review verdict (OK, or REWORK #N with the rework ticket)"
+    fi
     VYSTUP_RX='✅[[:space:]]*\**[[:space:]]*(v[ýy]stup|output)[[:space:]]*\**[[:space:]]*:'
     HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$VYSTUP_RX" && echo 1 || echo 0)
     if [ "$HAS_VYSTUP" = "0" ]; then

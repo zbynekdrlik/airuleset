@@ -1,7 +1,7 @@
 """Per-resource lane cap (#970 fix-forward).
 
 Extracted from ``watchdog/goal.py`` to keep that module under its size ratchet
-(LOW finding #3 of the fable-advisor review: 5604 lines, ceiling raised
+(LOW finding #3 of an adversarial review: 5604 lines, ceiling raised
 instead of split).  The module owns:
 
 - ``_LANE_RESOURCE_FILE`` / ``_LANE_NEEDS_FILE`` — file-path constants
@@ -166,14 +166,28 @@ def count_resource_usage(cwd, evidence):
 # Nudge text -- resource-aware
 # ---------------------------------------------------------------------------
 
-def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
+def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
+                     candidate_n=None):
     """Build the lane-check nudge text with resource-aware info (#970).
 
     ``caps`` is the dict from ``lane_resource_caps`` (``{"total": N, "box": M}``
     or ``{"total": N}``).  ``usage`` is from ``count_resource_usage`` or
     ``None``.  ``live_workers`` is the total live lane count for the
     resource snippet.
+
+    ``candidate_n`` (#993 item 3): the DISPATCHABLE-candidate count (workable ∧
+    deps satisfied). When given, the action
+    sentence names it — "dispatchni N DISPATCHOVATEĽNÝCH jednotiek" — instead of
+    the old unconditional "sú voľné sloty — workable tikety dispatchni" pressure
+    (the DECISION already refused to fire when candidate_n was 0). None keeps the
+    legacy wording (a caller that has no dispatchable count, e.g. the backward-
+    compat GOAL_LANE_NUDGE_TEXT_FN).
     """
+    if isinstance(candidate_n, int) and not isinstance(candidate_n, bool):
+        _action = ("Je %d DISPATCHOVATEĽNÝCH jednotiek (so zavretými "
+                   "závislosťami) — dispatchni ich" % candidate_n)
+    else:
+        _action = "Sú VOĽNÉ sloty — workable tikety dispatchni"
     total = caps.get("total", GOAL_LANE_SATURATION_WORKERS)
     resource_keys = sorted(k for k in caps if k != "total")
     resource_snippet = ""
@@ -203,7 +217,7 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
         "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
         "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
         "NErátaj; dispatchni len naozaj workable), BEŽÍ %d živých lán "
-        "(waiterov beží: %d)%s. Sú VOĽNÉ sloty — workable tikety dispatchni "
+        "(waiterov beží: %d)%s. " + _action + " "
         "PARALELNÝMI isolation:\"worktree\" autopilot-worker lánmi "
         "(run_in_background), refill (doplň) vrátený slot po jeho návrate, "
         "integruj SÉRIOVO pod integračným mutexom a po každom integračnom cykle "
@@ -211,5 +225,7 @@ def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0):
         "(server-side rate-limit, memory pressure boxu, CC max-subagents strop). "
         "PRIORITU (ČO riešiť a v akom poradí) ani POČET lán NEURČUJE tento nudge "
         "— platí priorita dohodnutá v tejto session: architektúra > "
-        "architecture-rework > prio:bounce > backlog (#993)."
+        "architecture-rework > prio:bounce > backlog (#993). "
+        "NErefillni dep-wait jednotku (otvorené Depends-on); infra tikety rieš "
+        "po jednom (sériová infra rola je v návrhu, kolo 3 #993)."
     ) % (backlog_n, live_workers, waiters, resource_snippet)

@@ -52,7 +52,7 @@ EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")
 # accepts only low|medium|high|xhigh (docs: `max`/`ultracode` session-only);
 # the launch script (CLAUDE_LAUNCH_SCRIPT_CONTENT) no longer bakes
 # `--settings '{"ultracode":true}'` into any mode. Only the LAUNCH FLAGS
-# reversed — max-acceleration doctrine + per-phase model tiering UNCHANGED.
+# reversed — max-acceleration doctrine UNCHANGED.
 # User can still raise per session with `/effort`, or opt into ultracode by hand.
 MANAGED_EFFORT_LEVEL = "high"
 
@@ -61,17 +61,13 @@ MANAGED_EFFORT_LEVEL = "high"
 # directive 2026-09-04, #871: "chcem pouzivat by default vzdy sonnet-5,
 # opus-4.6, fable-5.0"). The float vector this closes: a bare alias
 # (`fable`/`opus`/`sonnet`/`haiku`) resolves to the LATEST model of that
-# family, so `fable` silently became the BANNED Fable 5.1 the day 5.1 shipped
-# (and `sonnet` would jump to the next Sonnet the day it ships). An exact id
-# never floats. A dispatch therefore NEVER carries a `model` param — the model
-# choice is carried by a PINNED agent definition (frontmatter `model: <exact
-# id>`) or a Workflow `opts.model: '<exact id>'`. A new model version joins the
-# fleet ONLY by an owner-approved edit of this table, never by an alias float.
+# family, so an exact id never floats. A new model version joins the fleet
+# ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
-    "fable": "claude-fable-5-1",        # main default + design/review phases (5.1 @ medium)
-    "opus": "claude-opus-4-8",        # implementation escalation / gate-CLOSED fallback
-    "sonnet": "claude-sonnet-5",      # settled-design implementation + mechanical
-    "haiku": "claude-haiku-4-5",      # trivial reads
+    "fable": "claude-fable-5-1",      # main session model (MANAGED_MODEL)
+    "opus": "claude-opus-4-8",        # fleet subagent default (CLAUDE_CODE_SUBAGENT_MODEL)
+    "sonnet": "claude-sonnet-5",      # allowed dispatch choice
+    "haiku": "claude-haiku-4-5",      # allowed dispatch choice (trivial reads)
 }
 
 # Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is
@@ -84,14 +80,22 @@ MODEL_TIERS = {
 # treatment (cli_config.apply_managed_settings_defaults) is what makes the
 # lineup self-healing: any settings.json `model` != MANAGED_MODEL is overwritten
 # on the next install/push. burn.tier("claude-fable-5-1[1m]") → "fable", so the
-# statusline highlight keeps working. Full policy history: the fable-advisor skill.
+# statusline highlight keeps working. Full policy history:
+# .claude/rules-reference/model-awareness-history.md.
 MANAGED_MODEL = MODEL_TIERS["fable"] + "[1m]"
 
-# Valid reviewed-by-tier values — the TWO review-capable tiers (Fable = gate
-# OPEN, Opus = gate CLOSED / trivial-diff), derived from MODEL_TIERS so there
-# is ONE source.  Used by cmd_handoff validation AND the SubagentStop
-# review-tier gate (hooks/subagent-stop-check-review-tier.sh).  #876.
-REVIEWED_BY_TIER_VALUES = {MODEL_TIERS["fable"], MODEL_TIERS["opus"]}
+# Models BANNED as a DISPATCH value fleet-wide (owner directive 2026-08-13,
+# reaffirmed #991 2026-09-11): Opus 5 is off-lineup. The bare `opus`/`opusplan`
+# alias resolves to the LATEST Opus (= Opus 5), so it is banned too. This is the
+# ban-list source of truth for the DISPATCH surface (hooks/block-banned-model.sh)
+# AND the read-only Job-41 model-float AUDIT — the ONLY thing airuleset forbids
+# on a subagent's model now that the working model chooses its subagents' models
+# natively (env CLAUDE_CODE_SUBAGENT_MODEL default + native precedence). Every
+# other family alias (sonnet/haiku/fable) and every allowlisted tier id is a
+# LEGITIMATE dispatch value. NB: the MAIN-session model is a SEPARATE, stricter
+# surface — it is pinned to MANAGED_MODEL and self-heals against the exact-id
+# allowlist via is_banned_model() below, not this ban-list.
+BANNED_MODELS = frozenset({"claude-opus-5", "opus", "opusplan"})
 
 
 def _normalize_model(value):
@@ -141,48 +145,39 @@ def is_banned_model(value):
     return not is_allowed_model(value)
 
 
-# #871 adversarial review 🔴3a: `cli_model_audit.py` / `watchdog/model_audit_job.py`
-# (Job 41) compared a served transcript model id against `is_banned_model`
-# EXACTLY, so a legitimately-served DATED snapshot id for an allowlisted tier
-# (Anthropic sometimes serves `claude-haiku-4-5-20251001` for the `claude-
-# haiku-4-5` tier) flagged as a FALSE `BANNED` violation. Dispatch SURFACES
-# (the Agent-tool hook, settings self-heal) stay on the exact predicates
-# above — this tolerant pair is for READ-ONLY audit comparisons only.
+# READ-ONLY Job-41 model-float AUDIT predicate (#991: BAN-LIST, not allowlist).
+# The audit journals a live pane/subagent only if its served model is on the
+# ban-list (Opus 5) — the working model may legitimately float onto sonnet /
+# haiku / another allowlisted tier, so those are no longer flagged. A served
+# transcript id may carry a trailing Anthropic `-YYYYMMDD` date-stamp and/or a
+# Bedrock/Vertex provider prefix (`us.anthropic.` / `anthropic.`), so both are
+# tolerated before the ban-list comparison. The DISPATCH hook (block-banned-
+# model.sh) enforces the SAME ban-list on the outgoing dispatch value.
 _SERVED_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+_PROVIDER_PREFIX_RE = re.compile(r"^(?:us|eu|apac)?\.?anthropic\.")
 
 
 def _strip_served_date_suffix(value):
     """Strip a trailing `-YYYYMMDD` (exactly 8 digits) date-stamp suffix from
     a served model id after the shared normalizer, e.g.
-    `claude-haiku-4-5-20251001` -> `claude-haiku-4-5`. A `-1`/`-11` suffix
-    (the BANNED `claude-fable-5-1`) is NOT 8 digits and is never stripped —
-    the alias-float ban survives this tolerance untouched."""
+    `claude-opus-5-20260514` -> `claude-opus-5`. A `-1`/`-11` suffix (e.g.
+    `claude-fable-5-1`) is NOT 8 digits and is never stripped."""
     return _SERVED_DATE_SUFFIX_RE.sub("", _normalize_model(value))
 
 
-def is_allowed_model_for_audit(value):
-    """AUDIT-surface tolerance (#871): like `is_allowed_model`, but ALSO
-    allows a served model id carrying a trailing `-YYYYMMDD` date-stamp
-    suffix for an otherwise-allowlisted tier. Use ONLY for a READ-ONLY audit
-    comparison (`cli_model_audit.py`, `watchdog/model_audit_job.py`) — never
-    for a dispatch-surface check, which stays exact (`is_allowed_model`)."""
-    if is_allowed_model(value):
-        return True
-    stripped = _strip_served_date_suffix(value)
-    return bool(stripped) and stripped in {m.lower() for m in MODEL_TIERS.values()}
-
-
 def is_banned_model_for_audit(value):
-    """AUDIT-surface counterpart to `is_banned_model` — see
-    `is_allowed_model_for_audit`. A bare alias stays banned (an alias never
-    carries a date suffix, so this tolerance never weakens the alias-float
-    ban); an empty value stays not-banned."""
+    """True iff a served model id corresponds to a BANNED model (Opus 5 /
+    the `opus`/`opusplan` alias, `BANNED_MODELS`). AUDIT surface only —
+    tolerates the `[Nm]` tag (dropped by `_normalize_model`), a served
+    `-YYYYMMDD` date-stamp, and a Bedrock/Vertex provider prefix. An empty
+    value is never banned."""
     v = _normalize_model(value)
     if not v:
         return False
-    if v in _BARE_ALIASES:
+    if v in BANNED_MODELS:
         return True
-    return not is_allowed_model_for_audit(value)
+    core = _strip_served_date_suffix(_PROVIDER_PREFIX_RE.sub("", v))
+    return core in BANNED_MODELS
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC
@@ -347,11 +342,13 @@ from cli_webterm_only import (  # noqa: E402, F401
 
 
 # Skills directories in the repo that should be symlinked
-SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
+SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master",
                # Ruleset trim wave 2 (#37, 2026-07-25) — situational always-on
                # modules moved VERBATIM to hidden (user-invocable: false)
                # on-demand skills. See test_ruleset_conversion_wave2.py.
-               "subagent-type-discipline", "verify-issue-still-valid", "investigate-existing-first",
+               # (subagent-type-discipline removed #991 — native subagent_type
+               # validation replaces it.)
+               "verify-issue-still-valid", "investigate-existing-first",
                "post-deploy-verification", "regression-test-first", "ci-push-discipline",
                "comprehensive-logging", "verify-launched-work-liveness", "pr-merge-policy",
                "deliver-files-as-urls", "notification-mechanics", "cloudflare-api-tokens",
@@ -479,9 +476,11 @@ from cli_deployer_glue import (  # noqa: E402
 )
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
-# Subagent definitions (single .md files) symlinked into ~/.claude/agents/
-AGENT_NAMES = ["autopilot-worker", "ticket-validator", "fable-advisor",
-               "sonnet-mechanical", "sonnet-implementer"]
+# Subagent definitions (single .md files) symlinked into ~/.claude/agents/.
+# Only the two worker agents survive (#991): the subagent MODEL default is the
+# native env CLAUDE_CODE_SUBAGENT_MODEL (claude-opus-4-8), and the working model
+# chooses TYPE/MODEL/COUNT natively — the old pinned tier-agent types are removed.
+AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"
 
@@ -1377,6 +1376,16 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ufw ssh error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
+    # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
+    # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
+    # provisioning step rather than a manual intervention. ---
+    try:
+        from cli_disk_guard_root import provision_swap
+        print(f"  {provision_swap()}")
+    except Exception as e:
+        print(f"  swap provisioning error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque-ter. Managed DNS records (#983): controller-only,
     # idempotent upsert of the proxied CNAME for claudy.newlevel.media and
     # the unproxied A record for ar.newlevel.media (#982). Non-fatal (a
@@ -2058,6 +2067,13 @@ def cmd_status(args):
         print(f"  {ver_str} [{ver_status}]")
     except Exception as e:
         print(f"  error: {e}", file=sys.stderr)
+
+    # --- Managed swap (#992/#993 item 9) ---
+    try:
+        from cli_disk_guard_root import swap_status
+        print("\n" + swap_status())
+    except Exception as e:
+        print(f"\nswap: error ({e})", file=sys.stderr)
 
     # --- Break-glass (#982/#985): ignoreip + key + sshd password + DNS ---
     try:
@@ -3795,7 +3811,7 @@ def cmd_handoff(args):
     root_cause = getattr(args, "root_cause", None)
     closes_finding = getattr(args, "closes_finding", None) or []
     prevencia_read = getattr(args, "prevencia_read", None)
-    reviewed_by_tier = getattr(args, "reviewed_by_tier", None)
+    self_review_model = getattr(args, "self_review_model", None)
     sign_only = getattr(args, "sign_only", None)
     # Extended template fields (#969).
     stack = getattr(args, "stack", None)
@@ -3834,9 +3850,16 @@ def cmd_handoff(args):
             print("handoff BLOCK: sign-only file has no "
                   "READY-FOR-REVIEW marker")
             return 1
+        # Self-review-model: is a FACT the odoo-erp gate requires on EVERY
+        # readiness comment (#991 review finding 2). A sign-only body that
+        # omits it would get a receipt here and a bounce at the gate (#957
+        # friction), so require it in the body directly (all rounds).
+        if not _re.compile(r'^Self-review-model:', _re.MULTILINE).search(body):
+            print("handoff BLOCK: sign-only body missing Self-review-model: "
+                  "line (required on every readiness comment)")
+            return 1
         # Round >= 2 validation (#919 review RED-1): airuleset's OWN
-        # cross-repo fields must be present even in sign-only mode,
-        # because subagent-stop-check-review-tier.sh trusts the CLI.
+        # cross-repo fields must be present even in sign-only mode.
         self_login = _stream_self_login()
         rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
         if rnd >= 2:
@@ -3844,8 +3867,6 @@ def cmd_handoff(args):
                 r'^Root-cause-of-previous-bounce:', _re.MULTILINE)
             _prev_re = _re.compile(
                 r'^Prevencia-read:', _re.MULTILINE)
-            _tier_re = _re.compile(
-                r'^Reviewed-by-tier:\s*(\S+)', _re.MULTILINE)
             if not _rc_re.search(body):
                 print("handoff BLOCK: sign-only round %d body missing "
                       "Root-cause-of-previous-bounce:" % rnd)
@@ -3853,18 +3874,6 @@ def cmd_handoff(args):
             if not _prev_re.search(body):
                 print("handoff BLOCK: sign-only round %d body missing "
                       "Prevencia-read:" % rnd)
-                return 1
-            _tier_m = _tier_re.search(body)
-            if not _tier_m:
-                print("handoff BLOCK: sign-only round %d body missing "
-                      "Reviewed-by-tier:" % rnd)
-                return 1
-            _tier_val = _tier_m.group(1).split()[0]
-            if _tier_val not in REVIEWED_BY_TIER_VALUES:
-                print("handoff BLOCK: sign-only Reviewed-by-tier '%s' "
-                      "must be one of: %s"
-                      % (_tier_val, ", ".join(sorted(
-                          REVIEWED_BY_TIER_VALUES))))
                 return 1
         body_hash = hashlib.sha256(body.encode()).hexdigest()
         gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
@@ -3898,6 +3907,24 @@ def cmd_handoff(args):
         print("handoff: --repo, --issue, --branch, --self-review-file required")
         return 1
 
+    # --self-review-model is REQUIRED and must be an EXACT model id (#991).
+    # This is a FACT (which model performed the fresh-context self-review),
+    # the evidence line the odoo-erp gate consumes — NOT tiering doctrine.
+    # Single source of truth: MODEL_TIERS.values() / BANNED_MODELS, via the
+    # shared is_allowed_model / is_banned_model predicates.
+    if not (self_review_model or "").strip():
+        print("handoff BLOCK: --self-review-model (Self-review-model) required")
+        return 1
+    canonical_srm = _canonical_self_review_model(self_review_model)
+    if canonical_srm is None:
+        allowed = ", ".join(sorted(MODEL_TIERS.values()))
+        print("handoff BLOCK: --self-review-model %r is not an allowed exact "
+              "model id — use one of: %s" % (self_review_model, allowed))
+        return 1
+    # Emit the canonical id (#991 review finding 1) so a line-exact gate
+    # match never fails on a case/[1m]-tag variant.
+    self_review_model = canonical_srm
+
     # Read self-review table.
     try:
         with open(self_review_file) as f:
@@ -3930,17 +3957,6 @@ def cmd_handoff(args):
         if not prevencia_read:
             print("handoff BLOCK: bounce round %d requires "
                   "--prevencia-read" % rnd)
-            return 1
-        if not reviewed_by_tier:
-            print("handoff BLOCK: bounce round %d requires "
-                  "--reviewed-by-tier" % rnd)
-            return 1
-        # Validate reviewed-by-tier value — shared constant (#876).
-        parts = reviewed_by_tier.split() if reviewed_by_tier else []
-        tier_val = parts[0] if parts else ""
-        if tier_val not in REVIEWED_BY_TIER_VALUES:
-            print("handoff BLOCK: --reviewed-by-tier must be one of: %s"
-                  % ", ".join(sorted(REVIEWED_BY_TIER_VALUES)))
             return 1
 
     # #986: validate Closes-finding shas exist in the branch.
@@ -3997,8 +4013,9 @@ def cmd_handoff(args):
         shared_benefit=shared_benefit, tenant_scope=tenant_scope,
         source_verified=source_verified, tested_tree=tested_tree,
         evidence_head=evidence_head, root_cause=root_cause,
-        prevencia_read=prevencia_read, reviewed_by_tier=reviewed_by_tier,
+        prevencia_read=prevencia_read,
         closes_finding=closes_finding,
+        self_review_model=self_review_model,
     )
     if err:
         print(err)
@@ -4049,6 +4066,37 @@ def cmd_handoff(args):
 
     print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
           % (issue, rnd, head_sha[:12]))
+    return 0
+
+
+def _canonical_self_review_model(value):
+    """Return the CANONICAL MODEL_TIERS id for a --self-review-model value,
+    or None if it is not an allowed exact model id (#991 review finding 1).
+
+    Tolerates case + the ``[Nm]`` context tag via ``_normalize_model`` (a
+    Fable main reports ``claude-fable-5-1[1m]``), then maps back to the
+    literal MODEL_TIERS constant so the emitted ``Self-review-model:`` line
+    is always gate-EXACT. Banned/alias/unknown/empty -> None. Single source
+    of truth: MODEL_TIERS / BANNED_MODELS via is_allowed_model/is_banned_model.
+    """
+    if not (value or "").strip():
+        return None
+    if is_banned_model(value) or not is_allowed_model(value):
+        return None
+    norm = _normalize_model(value)
+    for canonical in MODEL_TIERS.values():
+        if _normalize_model(canonical) == norm:
+            return canonical
+    return None
+
+
+def cmd_model_tiers(args):
+    """#991: expose the model allowlist as JSON for an external gate to
+    consume (odoo-erp #6935 reads it instead of hard-coding the ids), so the
+    two repos share ONE source of truth. MODEL_TIERS + BANNED_MODELS are that
+    source; this just serialises them. No other output modes."""
+    print(json.dumps({"tiers": dict(MODEL_TIERS),
+                      "banned": sorted(BANNED_MODELS)}))
     return 0
 
 
@@ -5307,6 +5355,14 @@ _BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
 # is rare (cache-first), and the warmed cache serves the next sweep, so the wider
 # overshoot window is an accepted tradeoff for a reliable backlog read.
 _BACKLOG_LIVE_COUNT_TIMEOUT_S = 30
+# #993 review 2 — `--count-dispatchable` is heavier than `--count`: even with the
+# batched `fetch_meta` (ONE `gh issue list`), it still resolves each Depends-on
+# ref's state (per-dep `gh issue view`) + a live-infra-lane git scan. A generous
+# ceiling so it COMPLETES on a big shared backlog (a timeout → None →
+# skip:dispatchable-unknown, suppressing the refill nudge) rather than being cut
+# off. It is cached per-cwd (5-min TTL, `_cached_dispatchable`), so this cost is
+# paid at most once per repo per window, never every sweep.
+_DISPATCHABLE_COUNT_TIMEOUT_S = 90
 
 
 def _watchdog_backlog_fetch(cwd):
@@ -5416,6 +5472,50 @@ def _watchdog_backlog_fetch(cwd):
         return int((r.stdout or "").strip())
     except ValueError:
         return None
+
+
+def _watchdog_dispatchable_fetch(cwd):
+    """#993 item 3 — the DISPATCHABLE-candidate signal (`workable ∧ deps
+    satisfied`) for the repo at `cwd`, as a
+    ONE-element list `[{"count": N, "reason": r}]` (never `[]`), or None on any
+    failure/refusal. Sibling of `_watchdog_backlog_fetch`: same authority-aware
+    command choice (`core-quals`/`slice-quals`) + `_repo_root(cwd=cwd)` resolution
+    + refuse→None contract — only the flag differs (`--count-dispatchable`, which
+    prints the count on line 1 and, when the count is 0, a `reason:dep-wait`
+    line). The lane nudge reads it through `goal._cached_dispatchable`
+    (per-cwd TTL) so the O(workable) `--count-dispatchable` subprocess fires at
+    most once per repo per window, never every sweep. Wired HERE, like every
+    network call in this file, so run_once unit tests stay network-free
+    (dispatchable_fetch None → the lane nudge does NOT dep-gate)."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    cmd_name = "core-quals" if authority == "full" else "slice-quals"
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), cmd_name,
+             "--count-dispatchable"],
+            cwd=cwd, capture_output=True, text=True,
+            timeout=_DISPATCHABLE_COUNT_TIMEOUT_S)   # #993 review 2: batched but O(deps)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        count = int(lines[0])          # `unmeasurable` (dep read failed) → None
+    except ValueError:
+        return None
+    reason = None
+    for ln in lines[1:]:
+        if ln.startswith("reason:"):
+            reason = ln.split(":", 1)[1].strip() or None
+    return [{"count": count, "reason": reason}]
 
 
 def _watchdog_ops_wait_fetch(cwd):
@@ -5594,6 +5694,44 @@ def _watchdog_queue_fetch(cwd):
         except (ValueError, KeyError, TypeError):
             return None
     return sorted(nums)
+
+
+def _watchdog_queue_classify(cwd):
+    """#993 item 4 — a per-arrival dispatch-class FACTORY for the queue-arrival
+    rider, or None. Returns `classify_fn(number)` → `"dispatchable"` /
+    `"dep-wait"` (the `workable ∧ deps satisfied` gate; the class-based infra
+    branch was removed in round 2b — infra serialisation is ROUTING via
+    `--role`, not a live-lane gate). FULL-authority only (a reduced box returns
+    None; the rider also gates). The repo slug is computed LAZILY on the first
+    arrival and memoized in the closure, so a no-arrival sweep (the common case)
+    costs nothing beyond the cheap authority check; each classify call then does
+    a bounded per-issue `Depends-on:` gh fetch. Any error fails safe to
+    `dep-wait` (HOLD — never a spurious dispatch we cannot justify). Wired HERE
+    like every other network seam so run_once unit tests stay network-free (they
+    leave `queue_classify` None → the rider treats every arrival dispatchable)."""
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    if authority != "full":
+        return None
+    import cli_work_class as _wc
+
+    def _runner(argv, cd):
+        return _gh_out(*argv[1:], cwd=cd, timeout=15)
+
+    ctx = {}
+
+    def classify_fn(number):
+        if "slug" not in ctx:
+            ctx["slug"] = _repo_slug(cwd=root)
+        try:
+            return _wc.classify_number(number, ctx["slug"], _runner, root)
+        except Exception:
+            return "dep-wait"         # fail-safe: HOLD on any classify error
+
+    return classify_fn
 
 
 def _watchdog_u_fetch(cwd):
@@ -6317,6 +6455,15 @@ def cmd_watchdog(args):
                     # repo per TTL (~5 min) inside the module, FULL-authority
                     # only. Wired on EVERY box; the rider self-gates authority.
                     queue_fetch=_watchdog_queue_fetch,
+                    # #993 item 4 — the queue-arrival rider's per-arrival
+                    # dispatch-class factory (Depends-on), so a dep-wait
+                    # arrival is HELD, not nudged. FULL-authority only, lazy.
+                    queue_classify=_watchdog_queue_classify,
+                    # #993 item 3 — job 20's lane-occupancy nudge reads the
+                    # DISPATCHABLE-candidate count (Depends-on) so a free slot
+                    # with no dispatchable unit (dep-wait) is journaled skip,
+                    # not nudged. Cached per-cwd; full-authority resolves core-quals.
+                    dispatchable_fetch=_watchdog_dispatchable_fetch,
                     # #797 — job 20's U-freshness reconcile rider reads the
                     # footer `user_waiting` count from the SAME machine-local
                     # tickets-status cache the footer renders (a LOCAL file read,
@@ -7334,6 +7481,19 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _last_origin_owner as _last_origin_owner,
     _slice_mine_and_handed as _slice_mine_and_handed,
 )
+from cli_work_class import (  # noqa: E402  (#993 — orchestration classification)
+    work_class as work_class,
+    depends_on_refs as depends_on_refs,
+    normalize_ref as normalize_ref,
+    dep_wait as dep_wait,
+    dispatchable as dispatchable,
+    dep_wait_map as dep_wait_map,
+    dispatchable_numbers as dispatchable_numbers,
+    issue_state as issue_state,
+    classify_number as classify_number,
+    resolve_issue_deps as resolve_issue_deps,
+    fetch_meta as fetch_meta,
+)
 from cli_quals_cmd import (  # noqa: E402  (#433 cluster I facade — leaf re-export)
     _row_action as _row_action,
     _print_issue_rows as _print_issue_rows,
@@ -7512,8 +7672,8 @@ from cli_vault import (  # noqa: E402
 )
 
 
-# --- #433 cluster J: the whole burn/fable-gate/delegation CLI cluster
-# (cmd_fable_gate, the burn/fleet/delegation remote helpers + _FLEET_CACHE_MARKER,
+# --- #433 cluster J: the whole burn/delegation CLI cluster
+# (the burn/fleet/delegation remote helpers + _FLEET_CACHE_MARKER,
 # cmd_burn, cmd_delegation, and the #131/#130 delegation-meter helpers) lives in
 # cli_burn.py now — re-exported here so every existing reference (SUBCOMMANDS,
 # main()'s argparse wiring, cmd_watchdog's `fleet_fetch = _watchdog_fleet_fetch`,
@@ -7523,7 +7683,6 @@ from cli_vault import (  # noqa: E402
 # airuleset` (C/D technique), never a module-top back-import.
 from cli_model_audit import cmd_model_audit as cmd_model_audit  # noqa: E402
 from cli_burn import (  # noqa: E402
-    cmd_fable_gate as cmd_fable_gate,
     _burn_remote_cmd as _burn_remote_cmd,
     _remote_ssh_prefix as _remote_ssh_prefix,
     _burn_remote as _burn_remote,
@@ -7579,6 +7738,9 @@ from cli_onboard import (  # noqa: E402
     cmd_onboard_project as cmd_onboard_project,
 )
 
+# --- #993: lane-overlap independence-check CLI leaf ---
+from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402, F401
+
 # --- #857: context-baseline + skill-usage CLI leaves ---
 from cli_context_baseline import (  # noqa: E402, F401
     cmd_context_baseline as cmd_context_baseline,
@@ -7611,6 +7773,29 @@ from cli_wdrain import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+def _add_dispatch_flags(parser):
+    """#993 items 3/7 + 2b — the shared `--dep-wait` / `--count-dispatchable` /
+    `--role` flags for BOTH `core-quals` and `slice-quals` (factored so `main()`
+    carries one copy, #993 review 10)."""
+    parser.add_argument(
+        "--dep-wait", action="store_true",
+        help="List ONLY the dep-wait members (open Depends-on:), each with its "
+             "blocking refs in the action column — they STAY in --count/I but "
+             "are excluded from dispatchable candidates (#993 item 7)")
+    parser.add_argument(
+        "--count-dispatchable", action="store_true",
+        help="Print the dispatchable-candidate count = workable and deps-"
+             "satisfied; a reason:dep-wait line "
+             "follows a 0 (#993 item 3)")
+    parser.add_argument(
+        "--role", choices=("review", "infra"), default=None,
+        help="Slice the rows by work class (#993 r2b): 'review' = rows whose "
+             "class is NOT infra; 'infra' = rows whose class IS infra; omitted "
+             "= no filter. This is how the `infra` label ROUTES a ticket into "
+             "the infra role/target (the per-role sequential mode is PENDING "
+             "round 3, #993 — today this is the routing slice only).")
 
 
 def main():
@@ -8039,9 +8224,12 @@ def main():
                       help="Closes-finding: <id> — <evidence> (repeatable)")
     p_ho.add_argument("--prevencia-read",
                       help="Prevencia-read: <path> (required round >= 2)")
-    p_ho.add_argument("--reviewed-by-tier",
-                      help="Reviewed-by-tier: claude-fable-5-1 | claude-opus-4-8 "
-                           "(required round >= 2)")
+    p_ho.add_argument("--self-review-model", dest="self_review_model",
+                      help="Self-review-model: the EXACT model id that "
+                           "performed the fresh-context self-review "
+                           "(e.g. claude-opus-4-8). Required; must be an "
+                           "exact MODEL_TIERS id, never an alias — a FACT "
+                           "the gate reads, not tiering doctrine.")
     p_ho.add_argument("--sign-only", dest="sign_only",
                       help="Sign-only mode (#919): create a receipt for an "
                            "existing body file without posting it. The stream "
@@ -8068,16 +8256,18 @@ def main():
                       help="Evidence-HEAD: commit evidence was captured at "
                            "(optional)")
 
-    p_gate = sub.add_parser(
-        "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
-                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-8)")
-    p_gate.add_argument("--threshold", type=int, default=None,
-                        help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
+    p_mt = sub.add_parser(
+        "model-tiers",
+        help="#991: print the model allowlist (MODEL_TIERS) + BANNED_MODELS "
+             "as JSON, for an external gate (odoo-erp #6935) to read from "
+             "one source of truth")
+    p_mt.add_argument("--json", action="store_true",
+                      help="machine-readable output (JSON is the only mode)")
 
     p_maudit = sub.add_parser(
         "model-audit",
-        help="#871 READ-ONLY: list every live pane's (and its subagents') newest "
-             "served model, flag any outside the exact-id allowlist (MODEL_TIERS). "
+        help="#871/#991 READ-ONLY: list every live pane's (and its subagents') "
+             "newest served model, flag any BANNED model (BANNED_MODELS). "
              "Never keystrokes, never writes. Exit 1 if any banned model is live.")
     p_maudit.add_argument("--json", action="store_true",
                           help="machine-readable output")
@@ -8363,6 +8553,7 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "member (the --list set + a labels column) — the job-20 named "
              "partition-audit nudge reads this to name each I member (#578)")
+    _add_dispatch_flags(p_slice)   # #993 items 3/7
     p_slice.add_argument(
         "--bounces", action="store_true",
         help="Print bounce rounds for open prio:bounce/ready-for-review "
@@ -8397,6 +8588,7 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "obligation member (the --list set + a labels column) — the job-20 "
              "named partition-audit nudge reads this to name each I member (#578)")
+    _add_dispatch_flags(p_core)   # #993 items 3/7
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")
@@ -8460,6 +8652,18 @@ def main():
         help="Re-render SKILL.md's /goal lines from the registry (regeneration)")
     p_goalinv.add_argument(
         "--json", action="store_true", help="Print the inventory as JSON")
+
+    # --- #993: lane-overlap independence check ---
+    p_lo = sub.add_parser(
+        "lane-overlap",
+        help="Independence check: candidate unit's paths/topics vs live lanes "
+             "+ open PRs; writes the dispatch-gate receipt (#992/#993)")
+    p_lo.add_argument("--paths", default=None,
+                      help="Comma-separated touched paths of the candidate unit")
+    p_lo.add_argument("--topics", default=None,
+                      help="Comma-separated topic keywords of the candidate unit")
+    p_lo.add_argument("--issue", action="append", default=None,
+                      help="Issue number(s) the check covers (repeatable)")
 
     # --- #857: context-baseline + skill-usage ---
     p_cb = sub.add_parser(
@@ -8750,7 +8954,6 @@ SUBCOMMANDS = {
     "compact-request": cmd_compact_request,
     "goal-arm": cmd_goal_arm,
     "goal-roster": cmd_goal_roster,
-    "fable-gate": cmd_fable_gate,
     "privileges": cmd_privileges,
     "webterm-access": cmd_webterm_access,
     "webterm-only": cmd_webterm_only,
@@ -8770,6 +8973,8 @@ SUBCOMMANDS = {
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
     "model-audit": cmd_model_audit,
+    "model-tiers": cmd_model_tiers,
+    "lane-overlap": cmd_lane_overlap,
     "context-baseline": cmd_context_baseline,
     "skill-usage": cmd_skill_usage,
     "wdrain-pass": cmd_wdrain_pass,

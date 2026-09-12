@@ -25,16 +25,16 @@ class TestModelFloatAuditJob(TestCase):
     def test_flags_floated_main_and_sub(self):
         panes = [("%p", "/repo")]
         find = _find({"/repo": 1})
-        models = {"/t/repo.jsonl": "claude-fable-5",          # main on retired 5.0
-                  "/t/repo.jsonl.sub": "claude-opus-4-6"}    # sub on off-lineup opus
+        models = {"/t/repo.jsonl": "claude-opus-5",           # main on banned Opus 5
+                  "/t/repo.jsonl.sub": "claude-opus-5"}      # sub on banned Opus 5
         read = lambda p: models.get(str(p), "")  # noqa: E731
         subs = lambda main, now: [str(main) + ".sub"]  # noqa: E731
         state = {}
         out = model_float_audit_job(0.0, state, panes, "/proj", read, find,
                                     subs, due_fn=lambda *a, **k: True)
         self.assertEqual(len(out), 2, out)
-        self.assertTrue(any("claude-fable-5" in ln and "main" in ln for ln in out))
-        self.assertTrue(any("claude-opus-4-6" in ln and "sub" in ln for ln in out))
+        self.assertTrue(any("claude-opus-5" in ln and "main" in ln for ln in out))
+        self.assertTrue(any("claude-opus-5" in ln and "sub" in ln for ln in out))
         self.assertIn("model_audit_last_ts", state)
 
     def test_allowlisted_models_silent(self):

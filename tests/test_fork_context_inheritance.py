@@ -29,44 +29,16 @@ shape is a fork dispatched LATE in a long session, by which time the hook's
 once-per-session injection was spent hours earlier.
 """
 
-import json
-import os
-import subprocess
-import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 
 MODULE = "modules/core/subagent-continuation.md"
-SKILL = "skills/subagent-type-discipline/SKILL.md"
 
 
 def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
-
-
-class TestSkillCarriesTheForkSelectionRule(TestCase):
-    """The skill body is what an Agent dispatch injects -- the decision point."""
-
-    def test_states_what_fork_inherits(self):
-        t = read(SKILL)
-        self.assertIn("fork", t)
-        self.assertIn("inherits", t)
-
-    def test_names_the_unexecuted_instruction_risk(self):
-        """The specific hazard, not a vague "shares context"."""
-        t = read(SKILL).lower()
-        self.assertIn("not executed yet", t)
-
-    def test_gives_the_selection_rule_in_both_directions(self):
-        """fork = continue the WHOLE task; fresh dispatch = ONE bounded task."""
-        t = read(SKILL)
-        self.assertIn("WHOLE remaining task", t)
-        self.assertIn("bounded side-task", t)
-
-    def test_cites_the_incident_it_came_from(self):
-        self.assertIn("#50", read(SKILL))
 
 
 class TestAlwaysOnModuleCarriesTheRule(TestCase):
@@ -80,29 +52,6 @@ class TestAlwaysOnModuleCarriesTheRule(TestCase):
     def test_module_stays_short(self):
         """One paragraph, not a second copy of the skill."""
         self.assertLess(len(read(MODULE).splitlines()), 24)
-
-
-class TestDeliverySurfaceIsWired(TestCase):
-    def test_injected_body_at_an_agent_dispatch_contains_the_rule(self):
-        """Behavioural: run the real hook with a real fork-dispatch payload."""
-        payload = json.dumps({
-            "session_id": "fork-inheritance-test",
-            "tool_name": "Agent",
-            "tool_input": {
-                "subagent_type": "fork",
-                "prompt": "run the post-deploy DOM check",
-            },
-        })
-        with tempfile.TemporaryDirectory() as tmp:
-            r = subprocess.run(
-                ["bash", str(ROOT / "hooks" / "inject-situational-rule.sh")],
-                input=payload, capture_output=True, text=True,
-                env=dict(os.environ, TMPDIR=tmp),
-            )
-        self.assertEqual(r.returncode, 0)
-        ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("not executed yet", ctx.lower())
-        self.assertIn("bounded side-task", ctx)
 
 
 if __name__ == "__main__":

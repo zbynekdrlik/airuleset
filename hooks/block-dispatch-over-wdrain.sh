@@ -10,10 +10,10 @@ set -euo pipefail
 # dispatch action the montalu3 W=34 incident abused — dispatching new I-lanes
 # for days while finished W tickets rotted.
 #
-# Gate ONLY for `subagent_type` in {autopilot-worker, sonnet-implementer} —
-# never ticket-validator / fable-advisor / sonnet-mechanical / Explore /
-# general-purpose (those are read-only / judgment / mechanical, not I-lane
-# dispatches).
+# Gate ONLY for `subagent_type` == autopilot-worker — never ticket-validator /
+# Explore / general-purpose / an ad-hoc review consult (those are read-only /
+# judgment, not I-lane dispatches). (#991: the pinned tier-agent types are gone;
+# the single I-lane worker type is autopilot-worker.)
 #
 # Fail-OPEN on missing jq, missing/unparseable cache, stale cache (>30 min),
 # non-int ops_wait (#539/#570 "never a false accusation").
@@ -40,7 +40,7 @@ esac
 # Only gate implementation-worker types
 SUBAGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
 case "$SUBAGENT_TYPE" in
-    autopilot-worker|sonnet-implementer) ;;
+    autopilot-worker) ;;
     *) exit 0 ;;
 esac
 
@@ -50,6 +50,80 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 
 # Compute cwd-key (sha1[:12]) — must match statusbar.cwd_key
 CWD_KEY=$(printf '%s' "$CWD" | sha1sum | cut -c1-12)
+
+# ---------------------------------------------------------------------------
+# #992/#993 — INDEPENDENCE-CHECK GATE (runs for EVERY autopilot-worker dispatch,
+# independent of the W-drain gate below). Before dispatching a lane the
+# supervisor must run `airuleset.py lane-overlap … --issue <N>`, which writes a
+# per-cwd receipt (~/.claude/lane-overlap/<cwd-key>.json). This gate BLOCKS the
+# dispatch unless a FRESH receipt covers every issue named in the prompt — the
+# mechanical half of #992 req 2 (no new hook). Fail-OPEN when the prompt carries
+# no parseable issue number (can't verify → allow; the `Independence:` ticket
+# record is the durable authority). `OVERLAP-BYPASS: <reason>` in the prompt
+# allows + logs, exactly like WDRAIN-BYPASS below.
+OVERLAP_TTL=1800
+PROMPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // empty' 2>/dev/null || echo "")
+# Extract EVERY issue number on the "issue(s) #…" line (the autopilot dispatch
+# shape "Work issue #N" / "Work issues #A #B #C" / "#A, #B and #C") — the whole
+# line, not a space-only run, so a comma/"and"-separated batch is fully covered
+# (#993-review: a truncated span left later members independence-unchecked).
+ISSUE_LINE=$(printf '%s' "$PROMPT" | grep -oiE '(work[[:space:]]+)?issues?[[:space:]]+#[0-9].*' | head -1 || true)
+ISSUES=$(printf '%s' "$ISSUE_LINE" | grep -oE '#[0-9]+' | tr -d '#' || true)
+if [ -n "$ISSUES" ]; then
+    # OVERLAP-BYPASS escape (line-anchored, logged)
+    if printf '%s' "$PROMPT" | grep -qE '^OVERLAP-BYPASS:'; then
+        OV_DIR="$HOME/.claude/lane-overlap"
+        mkdir -p "$OV_DIR" 2>/dev/null || true
+        OV_REASON=$(printf '%s' "$PROMPT" | grep -oiE '^OVERLAP-BYPASS:[[:space:]]*.*' | head -1 || true)
+        printf '%s\t%s\t%s\n' "$(date -Iseconds)" "$CWD_KEY" "$OV_REASON" \
+            >> "$OV_DIR/bypass.log" 2>/dev/null || true
+        exit 0
+    fi
+    OV_RECEIPT="$HOME/.claude/lane-overlap/$CWD_KEY.json"
+    OV_BLOCK=""
+    if [ ! -f "$OV_RECEIPT" ]; then
+        OV_BLOCK="no overlap-check receipt for this box"
+    else
+        OV_TS=$(jq -r '.ts // empty' "$OV_RECEIPT" 2>/dev/null || echo "")
+        OV_TS_INT=${OV_TS%%.*}
+        case "$OV_TS_INT" in
+            ''|*[!0-9]*) OV_BLOCK="unreadable receipt timestamp" ;;
+            *)
+                NOW_OV=$(date +%s)
+                if [ $(( NOW_OV - OV_TS_INT )) -gt "$OVERLAP_TTL" ]; then
+                    OV_BLOCK="overlap-check receipt is stale (> ${OVERLAP_TTL}s)"
+                fi
+                ;;
+        esac
+        if [ -z "$OV_BLOCK" ]; then
+            for _iss in $ISSUES; do
+                COVERED=$(jq -e --argjson n "$_iss" \
+                    '(.checked_issues // []) | index($n) != null' \
+                    "$OV_RECEIPT" >/dev/null 2>&1 && echo 1 || echo 0)
+                if [ "$COVERED" != "1" ]; then
+                    OV_BLOCK="receipt does not cover issue #$_iss"
+                    break
+                fi
+            done
+        fi
+    fi
+    if [ -n "$OV_BLOCK" ]; then
+        {
+            echo "BLOCKED: independence check not run for this dispatch — $OV_BLOCK."
+            echo ""
+            echo "  Before dispatching a lane, run the overlap check so the supervisor"
+            echo "  records the unit's touched paths + topic vs every live lane + open PR"
+            echo "  (#992/#993 — an overlapping lane must WAIT, not race):"
+            echo ""
+            echo "    python3 ~/devel/airuleset/airuleset.py lane-overlap \\"
+            echo "      --paths <p1,p2> --topics <topic> --issue $(printf '%s' "$ISSUES" | tr '\n' ' ')"
+            echo ""
+            echo "  Then re-dispatch. Or bypass with OVERLAP-BYPASS: <reason> in the prompt (logged)."
+        } >&2
+        exit 2
+    fi
+fi
+# ---------------------------------------------------------------------------
 
 # Read ops_wait from tickets-status cache
 CACHE_DIR="$HOME/.claude/tickets-status"

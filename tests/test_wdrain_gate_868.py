@@ -1,7 +1,7 @@
 """Tests for the W-drain gate (#868).
 
 Hook: block-dispatch-over-wdrain.sh (PreToolUse Agent) — blocks autopilot-worker
-and sonnet-implementer dispatches when |W| > OPS_WAIT_WDRAIN_THRESHOLD and no
+dispatches when |W| > OPS_WAIT_WDRAIN_THRESHOLD and no
 valid receipt exists.
 
 CLI: wdrain-pass --record — validates per-member verdicts and writes a receipt.
@@ -76,13 +76,13 @@ class TestHookBasics(unittest.TestCase):
         self.assertEqual(0, rc)
 
     def test_excluded_types_pass_at_w20(self):
-        """ticket-validator, fable-advisor, etc. pass even at W=20."""
+        """ticket-validator, Explore, general-purpose, etc. pass even at W=20."""
         with tempfile.TemporaryDirectory() as td:
             cwd = os.path.join(td, "repo")
             os.makedirs(cwd, exist_ok=True)
             _make_cache(td, cwd, 20)
-            for stype in ("ticket-validator", "fable-advisor",
-                          "sonnet-mechanical", "Explore", "general-purpose"):
+            for stype in ("ticket-validator",
+                          "Explore", "general-purpose"):
                 rc, stderr = _run_hook(
                     {"tool_name": "Agent",
                      "tool_input": {"subagent_type": stype, "prompt": "test"},
@@ -109,20 +109,6 @@ class TestHookBlocking(unittest.TestCase):
             )
             self.assertEqual(2, rc)
             self.assertIn("wdrain-pass", stderr)
-
-    def test_blocks_sonnet_implementer_at_w20(self):
-        with tempfile.TemporaryDirectory() as td:
-            cwd = os.path.join(td, "repo")
-            os.makedirs(cwd, exist_ok=True)
-            _make_cache(td, cwd, 20)
-            rc, stderr = _run_hook(
-                {"tool_name": "Agent",
-                 "tool_input": {"subagent_type": "sonnet-implementer",
-                                "prompt": "Implement"},
-                 "cwd": cwd},
-                env_extra={"HOME": td},
-            )
-            self.assertEqual(2, rc)
 
 
 class TestHookFailOpen(unittest.TestCase):
