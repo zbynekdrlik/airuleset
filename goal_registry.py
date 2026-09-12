@@ -187,12 +187,111 @@ CLAUSES = [
 ]
 
 
-def render(profile):
-    """The exact `/goal ...` line for `profile`, composed from the registry."""
-    if profile not in PROFILES:
-        raise ValueError("unknown profile: %r" % (profile,))
-    parts = [c.text_for(profile) for c in CLAUSES if profile in c.profiles]
+# --------------------------------------------------------------------------- #
+# #998 — per (authority, role, mode) rendering. The DEFAULT (parallel, no role)
+# is byte-identical to the historical `render(profile)`; a SEQUENTIAL mode
+# SUBSTITUTES the refill clause (`saturation-core`) with a one-unit-at-a-time
+# clause, and an `infra` ROLE APPENDS an infra-scope clause after the delivery
+# clause. NO variant ever carries a turn cap ("stop after N turns" is banned in
+# operational goals, owner directive 2026-09-12, #993 comment) — the renderer
+# never inserts one, and `no_turn_cap_ok` locks it.
+# --------------------------------------------------------------------------- #
+
+MODES = ("parallel", "sequential")
+ROLES = (None, "review", "infra")
+
+# The sequential clause that REPLACES `saturation-core` (the refill clause).
+_SEQUENTIAL_SATURATION = (
+    "SEQUENTIAL — ONE unit at a time: dispatch → main review → integrate → "
+    "verify → next; no refill;")
+
+# The infra-role clause, APPENDED after `saturation-delivery` when role==infra.
+_INFRA_ROLE = (
+    "INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release "
+    "ops / PROD data; never touch the review window's checkout; coordinate with "
+    "the review window via tickets only; box-maintenance steps stop with `❓ "
+    "NEEDS YOU` between steps.")
+
+# A turn cap in an OPERATIONAL goal is banned (#993 comment 2026-09-12). Matches
+# "stop after N turns" / "stop after 30 turns" / "…or stop after …".
+_TURN_CAP_RE = _re.compile(r"stop\s+after\s+(?:\d+|N)\s+turns?", _re.IGNORECASE)
+
+
+def render_goal_line(authority, mode="parallel", role=None):
+    """The exact `/goal ...` line for `(authority, mode, role)` (#998).
+
+    `mode="parallel", role=None` reproduces `render(authority)` byte-for-byte
+    (so the SKILL.md drift lock is unchanged). `mode="sequential"` substitutes
+    the refill clause; `role="infra"` appends the infra-scope clause. Never
+    inserts a turn cap."""
+    if authority not in PROFILES:
+        raise ValueError("unknown authority: %r" % (authority,))
+    if mode not in MODES:
+        raise ValueError("unknown mode: %r" % (mode,))
+    if role not in ROLES:
+        raise ValueError("unknown role: %r" % (role,))
+    parts = []
+    for c in CLAUSES:
+        if authority not in c.profiles:
+            continue
+        text = c.text_for(authority)
+        if mode == "sequential" and c.id == "saturation-core":
+            text = _SEQUENTIAL_SATURATION
+        parts.append(text)
+        if role == "infra" and c.id == "saturation-delivery":
+            parts.append(_INFRA_ROLE)
     return "/goal " + " ".join(parts)
+
+
+def render(profile):
+    """The exact `/goal ...` line for `profile` — the DEFAULT (parallel, no
+    role) variant. Kept as the SKILL.md-drift-lock anchor; delegates to
+    `render_goal_line` so the two can never diverge."""
+    return render_goal_line(profile, "parallel", None)
+
+
+def variant_specs():
+    """Every (authority, mode, role) variant `goal-inventory --check` locks: all
+    authority × mode with no role, PLUS the infra-role variant per authority
+    (the gk-infra window is inherently sequential-infra). Enumerated so a new
+    clause that breaks any variant (over budget, a stray turn cap, a dropped
+    required clause) is caught mechanically."""
+    specs = []
+    for a in PROFILES:
+        for m in MODES:
+            specs.append((a, m, None))
+        specs.append((a, "sequential", "infra"))
+    return specs
+
+
+def variant_check():
+    """Return a list of error strings ([] == every variant is valid). Locks, per
+    variant: renders, ≤ GOAL_ARM_CHAR_CAP, NO turn cap, carries every required
+    clause, and — for sequential — the sequential phrase present + the refill
+    phrase absent; for infra — the infra phrase present."""
+    errs = []
+    for authority, mode, role in variant_specs():
+        try:
+            line = render_goal_line(authority, mode, role)
+        except Exception as exc:  # noqa: BLE001
+            errs.append("render(%s,%s,%s) raised: %r" % (authority, mode, role, exc))
+            continue
+        tag = "%s/%s/%s" % (authority, mode, role)
+        if len(line) > GOAL_ARM_CHAR_CAP:
+            errs.append("%s over budget: %d > %d" % (tag, len(line), GOAL_ARM_CHAR_CAP))
+        if _TURN_CAP_RE.search(line):
+            errs.append("%s carries a TURN CAP (banned in operational goals)" % tag)
+        for cid in REQUIRED_BY_PROFILE.get(authority, REQUIRED_CLAUSES):
+            if cid not in clause_ids(authority):
+                errs.append("%s missing required clause %s" % (tag, cid))
+        if mode == "sequential":
+            if "ONE unit at a time" not in line:
+                errs.append("%s sequential missing the one-unit clause" % tag)
+            if "CONTINUOUS REFILL" in line:
+                errs.append("%s sequential still carries the refill clause" % tag)
+        if role == "infra" and "INFRA ROLE" not in line:
+            errs.append("%s infra missing the infra-role clause" % tag)
+    return errs
 
 
 def clause_ids(profile):

@@ -6833,7 +6833,11 @@ def cmd_goal_arm(args):
               "recorded", file=sys.stderr)
         sys.exit(1)
     authority = (getattr(args, "template", "") or "").strip() or resolve_authority(cwd)
-    text = _goal_mod.goal_template_for_authority(authority)
+    # #998 — resolve the pane's (mode, role) from cwd so a sequential window
+    # (gk-infra) / a sequential project (airuleset) arms the SEQUENTIAL variant,
+    # via the SAME renderer the SKILL.md lines are generated from. A
+    # parallel/no-role pane is byte-identical to the prior SKILL.md read.
+    text = _goal_mod.goal_template_for(authority, cwd)
     if not text:
         print("goal-arm --self: could not resolve a /goal template for "
               "authority=%r (unreadable SKILL.md, no matching block, or "
@@ -8893,14 +8897,24 @@ def cmd_goal_inventory(args):
         except FileNotFoundError:
             print("goal-inventory: SKILL.md not found at %s" % path)
             sys.exit(1)
-        if d:
-            print("goal-inventory: DRIFT — SKILL.md /goal lines differ from the "
-                  "registry (run: airuleset.py goal-inventory --write):")
-            for profile, _got, _exp in d:
-                print("  %-14s shipped != render(registry)" % profile)
+        # #998 — lock every (authority, role, mode) variant too, not just the
+        # 3 shipped default lines: renders, under budget, NO turn cap, required
+        # clauses present, sequential/infra clauses correct.
+        variant_errs = gr.variant_check()
+        if d or variant_errs:
+            if d:
+                print("goal-inventory: DRIFT — SKILL.md /goal lines differ from "
+                      "the registry (run: airuleset.py goal-inventory --write):")
+                for profile, _got, _exp in d:
+                    print("  %-14s shipped != render(registry)" % profile)
+            if variant_errs:
+                print("goal-inventory: VARIANT check failed (#998):")
+                for e in variant_errs:
+                    print("  %s" % e)
             sys.exit(1)
-        print("goal-inventory: SKILL.md matches the registry (%d profiles)"
-              % len(gr.PROFILES))
+        print("goal-inventory: SKILL.md matches the registry (%d profiles) + "
+              "%d (authority,mode,role) variants locked"
+              % (len(gr.PROFILES), len(gr.variant_specs())))
         return
 
     profiles = [args.profile] if args.profile else list(gr.PROFILES)

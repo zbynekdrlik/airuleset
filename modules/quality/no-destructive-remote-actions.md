@@ -6,7 +6,7 @@
 
 - `shutdown`, `restart`, `reboot` of the HOST machine — **NEVER** without asking first
 - `rm -rf`, `del /S`, `Remove-Item -Recurse` on remote paths — **NEVER** without asking first
-- Remote disk/memory drain (`rm -rf /tmp/claude-*`, `find … -delete/-exec rm`, `swapoff`, container `prune`, `pkill` of another user) — use `airuleset.py disk-guard --drain --once` on the box instead. Hook: `block-manual-remote-drain.sh` (gk scratchpad incident 2026-09-10).
+- Remote disk/memory drain (`rm -rf /tmp/claude-*`, `find … -delete/-exec rm`, `swapoff`, container `prune`, `pkill` of another user) — use `airuleset.py sweep-claude-scratch` / `sweep-stray-tmp` (or the watchdog Job 40 disk-guard drain) on the box instead. Hook: `block-manual-remote-drain.sh` (gk scratchpad incident 2026-09-10).
 - Database `DROP`, `DELETE`, `TRUNCATE` — **NEVER** without asking first
 - Stopping / killing (`Stop-Service`, `sc stop`, `taskkill /F`, `systemctl stop`) a prod service or process **UNRELATED to the work in hand** — **NEVER** without asking first
 - Rollbacks that overwrite newer production state with older bytes — **NEVER** without asking first

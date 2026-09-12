@@ -554,6 +554,50 @@ def goal_template_for_authority(authority, path=None, logs=None):
     return None
 
 
+def goal_template_for(authority, cwd, role=None, mode=None, path=None,
+                      logs=None):
+    """#998 — the `/goal` line for `authority` in the pane's resolved
+    (mode, role). When `mode`/`role` are None they are resolved from `cwd`
+    via `cli_concurrency.resolve_concurrency` (the SINGLE resolver every
+    consumer reads). The DEFAULT (parallel, no role) delegates to
+    `goal_template_for_authority` (fresh SKILL.md read, drift-locked ==
+    the renderer's default); a VARIANT (sequential mode or infra role) is
+    composed via the SAME `goal_registry.render_goal_line` the SKILL.md
+    lines are generated from. None on any failure OR over the cap (never a
+    wrong-authority / oversize arm), logged LOUD like the sibling."""
+    authority = str(authority or "").strip()
+    if not authority:
+        return None
+    if mode is None or role is None:
+        try:
+            import cli_concurrency
+            r_mode, r_role, _src = cli_concurrency.resolve_concurrency(cwd)
+        except Exception as e:  # noqa: BLE001
+            if isinstance(logs, list):
+                logs.append("goal-template concurrency-resolve-error (%r) — "
+                            "falling back to default (parallel)" % e)
+            r_mode, r_role = "parallel", None
+        mode = r_mode if mode is None else mode
+        role = r_role if role is None else role
+    if mode == "parallel" and not role:
+        return goal_template_for_authority(authority, path=path, logs=logs)
+    try:
+        import goal_registry
+        line = goal_registry.render_goal_line(authority, mode, role)
+    except Exception as e:  # noqa: BLE001
+        if isinstance(logs, list):
+            logs.append("goal-template render_goal_line(%s,%s,%s) failed: %r"
+                        % (authority, mode, role, e))
+        return None
+    if len(line) > GOAL_ARM_CHAR_CAP:
+        if isinstance(logs, list):
+            logs.append("goal-template REFUSED oversize authority=%s mode=%s "
+                        "role=%s len=%d cap=%d (never typed)"
+                        % (authority, mode, role, len(line), GOAL_ARM_CHAR_CAP))
+        return None
+    return line
+
+
 # --------------------------------------------------------------------------- #
 # #623 -- STALE-ARMED-CONDITION classifier. A pure COMPARISON (never a
 # heuristic): the stored marker `payload` vs the currently-shipped template
@@ -2570,7 +2614,10 @@ def _default_rearm_fn(cwd):
         # `_log_goal_sync` collapses identical repeats, so a persistently
         # over-cap template logs one line, not a per-sweep flood.
         _logs = []
-        text = goal_template_for_authority(authority, logs=_logs)
+        # #998 — resolve the pane's (mode, role) from cwd via the SAME renderer
+        # (goal_template_for delegates to the default SKILL.md read for a
+        # parallel/no-role pane, byte-identical to before).
+        text = goal_template_for(authority, cwd, logs=_logs)
         for _ln in _logs:
             _log_goal_sync(_ln)
     except Exception:

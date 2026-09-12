@@ -26,8 +26,9 @@ set -euo pipefail
 # NOT blocked: local deletes in the repo/worktree/own scratchpad; ssh read-only
 # (du/ls/df/find -print); airuleset.py push/install; git worktree remove.
 #
-# Standing durable path: `python3 ~/devel/airuleset/airuleset.py disk-guard
-# --drain --once` on the box (or a disk-guard rung ticket).
+# Standing durable path: `python3 ~/devel/airuleset/airuleset.py
+# sweep-claude-scratch` / `sweep-stray-tmp` on the box (or the watchdog Job 40
+# disk-guard drain / a disk-guard rung ticket).
 #
 # Bypass: '# airuleset:manual-drain-ok <owner order ref>' (ref required, logged).
 # Exit code 2 = block the tool call.
@@ -285,8 +286,9 @@ if [ "$RC" -eq 2 ]; then
     echo "  a liveness proof), never as a one-off manual delete/kill/swapoff over ssh." >&2
     echo "" >&2
     echo "  Standing durable path:" >&2
-    echo "    python3 ~/devel/airuleset/airuleset.py disk-guard --drain --once" >&2
-    echo "  (run ON the box, or file a disk-guard rung ticket)." >&2
+    echo "    python3 ~/devel/airuleset/airuleset.py sweep-claude-scratch" >&2
+    echo "    python3 ~/devel/airuleset/airuleset.py sweep-stray-tmp" >&2
+    echo "  (or the watchdog Job 40 disk-guard drain; run ON the box, or file a disk-guard rung ticket)." >&2
     echo "" >&2
     echo "  Bypass (owner order only, logged):" >&2
     echo "    # airuleset:manual-drain-ok <owner order ref>" >&2
