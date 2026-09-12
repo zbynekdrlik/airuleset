@@ -63,6 +63,53 @@ class TestComputeOverlap(TestCase):
         self.assertTrue(any("topic" in o[0] for o in overlaps))
 
 
+class _CP:
+    def __init__(self, out="", rc=0):
+        self.stdout = out
+        self.returncode = rc
+
+
+class TestGatherLiveLanesIssues(TestCase):
+    """#993 item 2 (blocker): gather_live_lanes must POPULATE `issues` from the
+    lane's commit subjects, or live_infra_lane classifies EVERY lane infra
+    (fail-safe over-suppression). Contract test through the REAL gather_live_lanes
+    with a fake git `run`."""
+
+    def _run(self, cmd):
+        j = " ".join(cmd)
+        if "worktree" in j and "list" in j:
+            return _CP("branch refs/heads/main\n"
+                       "\nbranch refs/heads/worktree-agent-x\n")
+        if "merge-base" in j:
+            return _CP("basesha\n")
+        if "log" in j and "%s%n%b" in j:
+            return _CP("green(#42): fix the thing\nbody mentions #43 too\n")
+        if "diff" in j:
+            return _CP("some/file.py\n")
+        if "log" in j:  # topic (-1 --format=%s)
+            return _CP("green(#42): fix the thing\n")
+        return _CP("", 1)
+
+    def test_gather_live_lanes_emits_issues(self):
+        lanes = lo.gather_live_lanes("/root", run=self._run)
+        self.assertEqual(len(lanes), 1)
+        self.assertEqual(lanes[0]["issues"], [42, 43])
+
+    def test_live_infra_lane_uses_the_real_gather_output(self):
+        import cli_work_class as wc
+        lanes = lo.gather_live_lanes("/root", run=self._run)
+        # a lane working an infra-labelled issue #42 → live infra lane
+        labels_fn = lambda n, r, root: [{"name": "infra"}]  # noqa: E731
+        self.assertTrue(
+            wc.live_infra_lane("zbynekdrlik/odoo-erp", None, "/root",
+                               gather_fn=lambda root: lanes, labels_fn=labels_fn))
+        # all-independent lane issues → NOT a live infra lane
+        labels_fn2 = lambda n, r, root: [{"name": "bug"}]  # noqa: E731
+        self.assertFalse(
+            wc.live_infra_lane("zbynekdrlik/odoo-erp", None, "/root",
+                               gather_fn=lambda root: lanes, labels_fn=labels_fn2))
+
+
 class TestReceipt(TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="lo-home-")

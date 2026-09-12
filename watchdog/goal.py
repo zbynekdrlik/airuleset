@@ -4641,8 +4641,13 @@ def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
     the backlog/ops-wait/queue caches use (a per-cwd, per-TTL bound so the
     O(workable) `--count-dispatchable` subprocess fires at most once per repo per
     window, never every sweep). Returns the inner dict, or None (unmeasurable)."""
+    # #993 review 2: explicit 5-min TTL for BOTH success and failure — the
+    # default fail TTL (60s) would re-run the O(deps) subprocess every sweep on a
+    # slow/failed read (a gh-call storm); 5 min matches the queue-arrival cache's
+    # cadence and the refill nudge's own hourly cap makes a 5-min-stale count fine.
     lst = _ops_wait_recheck._cached_member_fetch(
-        cwd, dispatchable_fetch, state, now, "dispatchable_cache")
+        cwd, dispatchable_fetch, state, now, "dispatchable_cache",
+        ttl=300, fail_ttl=300)
     if isinstance(lst, list) and lst and isinstance(lst[0], dict):
         return lst[0]
     return None
@@ -4668,11 +4673,18 @@ def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
                       % (loc, live_workers, waiters, backlog_n)), None
     if count <= 0:
         reason = res.get("reason") if isinstance(res, dict) else None
-        word = "skip:dep-wait" if reason == "dep-wait" else "skip:infra-serial"
+        # #993 review 12: only label the KNOWN reason; a missing reason (a rare
+        # cache-disagreement) is `skip:no-candidate`, never mis-attributed.
+        if reason == "dep-wait":
+            word = "skip:dep-wait"
+        elif reason == "infra-serial":
+            word = "skip:infra-serial"
+        else:
+            word = "skip:no-candidate"
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                       "%s (free slot but NO dispatchable candidate; %s)"
                       % (loc, live_workers, waiters, backlog_n, word,
-                         reason or "infra-serial")), 0
+                         reason or "reason-unknown")), 0
     return False, None, count
 
 

@@ -58,10 +58,11 @@ class Clause:
 # The reconciliation the owner asked to be VISIBLE in the registry, not buried
 # in prose (#848, 2026-09-02, retiring the #723/#724 batch doctrine after the
 # STEP-0 live experiment proved a compact over live lanes is safe on CC 2.1.258):
-# `saturation-core` keeps parallel worktree lanes live and refills a
-# returned lane's slot IMMEDIATELY (continuous refill, reversing the #723 batch
-# mode back to #456's shape; the live lane count is sized to what the box and
-# backlog bear, #991); `saturation-delivery` integrates each returned
+# `saturation-core` keeps parallel worktree lanes live and refills a returned
+# slot ONLY with a DISPATCHABLE unit (independent + deps closed; infra is SERIAL
+# — one live infra lane, #993 r2, tightening the #848 continuous-refill shape;
+# the live lane count is sized to what the box and backlog bear, #991);
+# `saturation-delivery` integrates each returned
 # branch SERIALLY under the mutex as it returns; `compact-boundary` fires the
 # compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not
 # (the lanes reconcile from durable state after the compaction, #844's LANE-RETURN

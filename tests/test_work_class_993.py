@@ -110,6 +110,71 @@ class TestDependsOnRefs(TestCase):
         self.assertEqual(wc.depends_on_refs("", []), [])
         self.assertEqual(wc.depends_on_refs(None, None), [])
 
+    def test_trusted_dict_comment_override_wins(self):
+        # #993 review 6: a SUPERVISOR (trusted association) comment overrides.
+        refs = wc.depends_on_refs(
+            "Depends-on: #5",
+            [{"body": "Depends-on: #7", "authorAssociation": "OWNER"}])
+        self.assertEqual(refs, ["#7"])
+
+    def test_low_trust_dict_comment_override_ignored(self):
+        # a NONE/low-trust commenter must NOT be able to unblock a dep-wait
+        # ticket — the body's Depends-on stands.
+        refs = wc.depends_on_refs(
+            "Depends-on: #5",
+            [{"body": "Depends-on: #99999", "authorAssociation": "NONE"}])
+        self.assertEqual(refs, ["#5"])
+
+    def test_bare_string_comment_is_trusted_backcompat(self):
+        refs = wc.depends_on_refs(
+            "Depends-on: #5", ["Depends-on: #6"])
+        self.assertEqual(refs, ["#6"])
+
+
+class TestFetchMeta(TestCase):
+    """#993 review 2 — the batched meta read (ONE gh issue list) that replaces
+    per-row gh issue view for the workable set."""
+
+    def _runner(self, payload):
+        return lambda argv, _cwd: __import__("json").dumps(payload)
+
+    def test_batched_meta_filters_to_wanted(self):
+        payload = [
+            {"number": 5, "body": "Depends-on: #4",
+             "comments": [{"body": "hi", "authorAssociation": "OWNER"}]},
+            {"number": 99, "body": "unrelated", "comments": []},
+        ]
+        m = wc.fetch_meta(["5"], self._runner(payload), "/root")
+        self.assertIn(5, m)
+        self.assertNotIn(99, m)
+        self.assertEqual(m[5]["body"], "Depends-on: #4")
+        self.assertEqual(m[5]["comments"][0]["authorAssociation"], "OWNER")
+
+    def test_fetch_meta_none_on_failure(self):
+        def boom(argv, _cwd):
+            raise RuntimeError("gh down")
+        self.assertIsNone(wc.fetch_meta(["5"], boom, "/root"))
+
+    def test_fetch_meta_empty_numbers(self):
+        self.assertEqual(wc.fetch_meta([], self._runner([]), "/root"), {})
+
+    def test_dep_wait_map_uses_meta_no_per_row_gh(self):
+        calls = []
+
+        def runner(argv, _cwd):
+            calls.append(argv)
+            import json as _j
+            # only the dep STATE view is allowed via runner when meta is used
+            if "state" in " ".join(argv):
+                return _j.dumps({"state": "OPEN"})
+            return "{}"
+        rows = {"5": {"createdAt": "2026-01-01T00:00:00Z", "labels": []}}
+        meta = {5: {"body": "Depends-on: #4", "comments": []}}
+        m = wc.dep_wait_map(rows, "o/r", runner, "/root", meta=meta)
+        self.assertEqual(m, {"5": ["#4"]})
+        # NO `gh issue view <n> --json body,comments` was made (meta provided)
+        self.assertFalse(any("body,comments" in " ".join(a) for a in calls))
+
 
 class TestNormalizeRef(TestCase):
     def test_bare_ref_uses_default_repo(self):

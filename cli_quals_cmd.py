@@ -875,11 +875,11 @@ def cmd_slice_quals(args):
         # #578: the WORKABLE set with a labels column, for the job-20 named
         # partition-audit nudge (same set as --list, plus labels). #993 item 7:
         # dep-aware action column.
-        _dep_map, _ = _dep_wait_map_for(unhandled, root)
+        _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
         _print_audit_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
         return
     # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7).
-    _dep_map, _ = _dep_wait_map_for(unhandled, root)
+    _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
 
 
@@ -906,11 +906,19 @@ def _slice_quals_runner(root):
 # --------------------------------------------------------------------------- #
 
 def _dep_wait_map_for(rows, root):
-    """`(dep_wait_map, slug)` — on-demand per-row `Depends-on:` resolution."""
+    """`(dep_wait_map, slug, ok)` — on-demand `Depends-on:` resolution via ONE
+    batched `gh issue list` (#993 review 2: not a per-row storm). `ok` is False
+    when the batched meta read FAILED (dep state unmeasurable → the caller fails
+    safe: no dep annotations on `--list`, unmeasurable on `--count-dispatchable`,
+    never a silent 'no deps' that would dispatch a real dep-wait unit)."""
     import airuleset
     slug = airuleset._repo_slug(cwd=root)
-    dep_map = airuleset.dep_wait_map(rows, slug, _slice_quals_runner(root), root)
-    return dep_map, slug
+    runner = _slice_quals_runner(root)
+    meta = airuleset.fetch_meta(rows, runner, root)
+    if meta is None:
+        return {}, slug, False
+    dep_map = airuleset.dep_wait_map(rows, slug, runner, root, meta=meta)
+    return dep_map, slug, True
 
 
 def _emit_count_dispatchable(rows, root):
@@ -918,9 +926,14 @@ def _emit_count_dispatchable(rows, root):
     line when it is 0 (#993 item 3). dispatchable = workable ∧ ¬dep-wait ∧
     (independent ∨ ¬live-infra-lane) — the SAME set the picker and both nudges
     use. A `reason:infra-serial`/`reason:dep-wait` line follows a 0 count so the
-    lane nudge journals WHY it will not refill."""
+    lane nudge journals WHY it will not refill. When dep resolution is UNMEASURABLE
+    (batched read failed) print `unmeasurable` so the watchdog fetch reads None →
+    `skip:dispatchable-unknown` (fail-safe, #993 review 5)."""
     import airuleset
-    dep_map, slug = _dep_wait_map_for(rows, root)
+    dep_map, slug, ok = _dep_wait_map_for(rows, root)
+    if not ok:
+        print("unmeasurable")
+        return
     infra_live = airuleset.live_infra_lane(slug, _slice_quals_runner(root), root)
     dispatchable_set, reason = airuleset.dispatchable_numbers(
         rows, slug, dep_map, infra_live)
@@ -932,7 +945,7 @@ def _emit_count_dispatchable(rows, root):
 def _emit_dep_wait(rows, own_stream, root):
     """`--dep-wait`: ONLY the dep-wait rows, each with its blocking refs in the
     action column (#993 item 7)."""
-    dep_map, _slug = _dep_wait_map_for(rows, root)
+    dep_map, _slug, _ok = _dep_wait_map_for(rows, root)
     dw = {n: rows[n] for n in rows if n in dep_map}
     _print_issue_rows(dw, own_stream=own_stream, dep_wait_map=dep_map)
 
@@ -1167,11 +1180,11 @@ def cmd_core_quals(args):
         # named partition-audit nudge. own_stream=None: a full-authority box owns
         # no stream, so every stream-labelled row is action-only. #993 item 7:
         # dep-aware action column.
-        _dep_map, _ = _dep_wait_map_for(workable, root)
+        _dep_map, _slug, _ok = _dep_wait_map_for(workable, root)
         _print_audit_rows(workable, own_stream=None, dep_wait_map=_dep_map)
         return
     # own_stream=None: a full-authority box owns no stream, so EVERY
     # stream-labelled row in its obligation set is action-only. #993 item 7:
     # dep-aware action column (--list).
-    _dep_map, _ = _dep_wait_map_for(workable, root)
+    _dep_map, _slug, _ok = _dep_wait_map_for(workable, root)
     _print_issue_rows(workable, own_stream=None, dep_wait_map=_dep_map)

@@ -383,6 +383,20 @@ class TestOrchestrator(_OrchBase):
         self.assertTrue(any("queue-arrival nudge" in ln for ln in logs), logs)
         self.assertIn("#9", "".join(tmux.typed_texts()))
 
+    def test_mixed_wave_nudges_dispatchable_and_excludes_held_from_base(self):
+        # #993 review 3: a MIXED wave nudges only the dispatchable arrival (#8)
+        # and the held infra member (#9) is NOT baked into base -> re-detects.
+        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
+        tmux = self._tmux()
+        cls = {8: "dispatchable", 9: "infra-serial"}
+        logs = self._run(qrecs, lambda cwd: [1, 8, 9], tmux, handled=set(),
+                         state={},
+                         classify_builder=lambda cwd: (lambda n: cls[n]))
+        # only the ONE dispatchable arrival (#8) is nudged, not both
+        self.assertTrue(any("nudge" in ln and "1 new" in ln for ln in logs), logs)
+        self.assertIn("#8", "".join(tmux.typed_texts()))
+        self.assertEqual(qrecs[self.sid]["base"], [1, 8])   # 9 held, excluded
+
     def test_swallowed_submit_does_not_advance_base(self):
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         tmux = self._tmux(enters_swallowed=5)

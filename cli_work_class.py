@@ -32,6 +32,13 @@ AIRULESET_REPO = "zbynekdrlik/airuleset"
 INFRA = "infra"
 INDEPENDENT = "independent"
 
+#: Only a SUPERVISOR/maintainer comment may OVERRIDE the body's Depends-on
+#: (#993 review 6): a low-trust commenter (external/webterm dev) must never be
+#: able to unblock a dep-wait ticket. A bare-string comment (legacy / test) is
+#: treated as trusted; a dict comment is honoured only when its authorAssociation
+#: is in this set.
+_TRUSTED_ASSOCIATIONS = frozenset(("OWNER", "MEMBER", "COLLABORATOR"))
+
 
 def _label_names(labels):
     """The set of label names from a gh `--json labels` value (a list of
@@ -87,22 +94,44 @@ def parse_depends_on(text):
     lines = _DEPENDS_ON_RE.findall(text)
     if not lines:
         return []
-    refs = []
-    for m in _REF_RE.finditer(lines[-1]):
-        repo = m.group("repo")
-        num = m.group("num")
-        refs.append((repo + "#" + num) if repo else ("#" + num))
-    return refs
+    # #993 review 9: the LAST `Depends-on:` line that yields >=1 parseable ref
+    # wins — a trailing quoted example that parses to nothing must not override a
+    # real declaration above it with an empty (fail-open) result.
+    for line in reversed(lines):
+        refs = []
+        for m in _REF_RE.finditer(line):
+            repo = m.group("repo")
+            num = m.group("num")
+            refs.append((repo + "#" + num) if repo else ("#" + num))
+        if refs:
+            return refs
+    return []
+
+
+def _comment_body_if_trusted(c):
+    """The body of a comment ONLY if it may provide a Depends-on OVERRIDE: a bare
+    string (legacy/test → trusted) or a dict whose authorAssociation is trusted
+    (#993 review 6). None otherwise (a low-trust comment is ignored for override)."""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, dict) and isinstance(c.get("body"), str):
+        if c.get("trusted") or c.get("authorAssociation") in _TRUSTED_ASSOCIATIONS:
+            return c["body"]
+    return None
 
 
 def depends_on_refs(body, comments):
-    """The EFFECTIVE dep-refs for a ticket: the LAST supervisor comment STARTING
+    """The EFFECTIVE dep-refs for a ticket: the LAST SUPERVISOR comment STARTING
     with ``Depends-on:`` wins (a later ruling supersedes the body); else the
     body's ``Depends-on:`` line. ``comments`` is a list of comment-body strings
-    in chronological order."""
-    comment_lines = [c for c in (comments or [])
-                     if isinstance(c, str)
-                     and c.lstrip().lower().startswith("depends-on:")]
+    (legacy, all trusted) or dicts (``{"body", "trusted"|"authorAssociation"}``);
+    a low-trust comment is IGNORED for the override (#993 review 6) so it can
+    never unblock a dep-wait ticket."""
+    comment_lines = []
+    for c in (comments or []):
+        b = _comment_body_if_trusted(c)
+        if b is not None and b.lstrip().lower().startswith("depends-on:"):
+            comment_lines.append(b)
     if comment_lines:
         return parse_depends_on(comment_lines[-1])
     return parse_depends_on(body or "")
@@ -187,8 +216,21 @@ def _as_int(number):
         return None
 
 
+def _comments_from_json(raw_comments):
+    """Normalise a gh `--json comments` value to a list of
+    ``{"body", "authorAssociation"}`` dicts (the trusted-override shape)."""
+    out = []
+    for c in (raw_comments or []):
+        if isinstance(c, dict) and isinstance(c.get("body"), str):
+            out.append({"body": c["body"],
+                        "authorAssociation": c.get("authorAssociation")})
+    return out
+
+
 def _issue_body_comments(number, runner, root):
-    """`(body, [comment bodies])` for `number`, or `(None, [])` on failure."""
+    """`(body, [ {body, authorAssociation} ])` for `number`, or `(None, [])` on
+    failure. Comments carry authorAssociation so `depends_on_refs` can honour a
+    Depends-on OVERRIDE only from a trusted supervisor comment (#993 review 6)."""
     try:
         obj = json.loads(runner(["gh", "issue", "view", str(number),
                                  "--json", "body,comments"], root))
@@ -198,11 +240,43 @@ def _issue_body_comments(number, runner, root):
         return None, []
     body = obj.get("body")
     body = body if isinstance(body, str) else ""
-    comments = []
-    for c in (obj.get("comments") or []):
-        if isinstance(c, dict) and isinstance(c.get("body"), str):
-            comments.append(c["body"])
-    return body, comments
+    return body, _comments_from_json(obj.get("comments"))
+
+
+#: Batched-read cap — the whole open-issue list in one gh call.
+_META_LIST_LIMIT = 1000
+
+
+def fetch_meta(numbers, runner, root=None):
+    """ONE batched read of ``{int number: {"body", "comments"}}`` for the OPEN
+    issues in ``numbers`` — a single ``gh issue list --state open --json
+    number,body,comments`` instead of a per-row ``gh issue view`` for every
+    workable row (#993 review 2: the O(workable) storm). None on any failure/
+    non-list (the caller treats None as UNMEASURABLE → fail-safe skip, never a
+    silent 'no deps'). Comments carry authorAssociation via ``_comments_from_json``
+    so the trusted-override filter applies."""
+    want = {ni for ni in (_as_int(n) for n in numbers) if ni is not None}
+    if not want:
+        return {}
+    try:
+        rows = json.loads(runner(
+            ["gh", "issue", "list", "--state", "open", "--json",
+             "number,body,comments", "-L", str(_META_LIST_LIMIT)], root))
+    except Exception:
+        return None
+    if not isinstance(rows, list):
+        return None
+    out = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        num = r.get("number")
+        if num not in want:
+            continue
+        body = r.get("body")
+        out[num] = {"body": body if isinstance(body, str) else "",
+                    "comments": _comments_from_json(r.get("comments"))}
+    return out
 
 
 def issue_state(repo, num, runner, root):
@@ -226,11 +300,18 @@ def _ref_str(repo, num, slug):
     return ("#%d" % num) if repo == slug else ("%s#%d" % (repo, num))
 
 
-def dep_wait_map(rows, slug, runner, root):
+def dep_wait_map(rows, slug, runner, root, meta=None):
     """`{row-key: [blocking ref strings]}` for the workable rows that are
     dep-wait (any `Depends-on:` referent OPEN/unresolvable/cyclic). Rows with no
-    `Depends-on:` or all-closed deps are ABSENT. Capped; a shared dep is
-    resolved once (state cache)."""
+    `Depends-on:` or all-closed deps are ABSENT.
+
+    `meta` (#993 review 2): the batched `{int: {"body","comments"}}` map from
+    `fetch_meta` — when given, bodies/comments come from it (ONE gh call for the
+    whole set) with NO per-row `gh issue view`; when None (legacy/test), each row
+    is fetched per-row (capped at `_DEP_RESOLVE_CAP`). A shared dep's STATE is
+    resolved once (state cache). Rows iterate in `_row_sort_key` order (oldest /
+    architecture-rework first, #993 review 5) so the cap, when it bites, keeps
+    the picker's earliest rows."""
     out = {}
     checked = 0
     state_cache = {}
@@ -241,13 +322,19 @@ def dep_wait_map(rows, slug, runner, root):
             state_cache[key] = issue_state(repo, num, runner, root)
         return state_cache[key]
 
-    for number in rows:
-        if checked >= _DEP_RESOLVE_CAP:
-            break
-        checked += 1
-        body, comments = _issue_body_comments(number, runner, root)
-        if body is None and not comments:
-            continue
+    for number in _sorted_row_keys(rows):
+        if meta is not None:
+            m = meta.get(_as_int(number))
+            if m is None:
+                continue                    # not in the open batch → no deps
+            body, comments = m.get("body"), m.get("comments") or []
+        else:
+            if checked >= _DEP_RESOLVE_CAP:
+                break
+            checked += 1
+            body, comments = _issue_body_comments(number, runner, root)
+            if body is None and not comments:
+                continue
         refs = depends_on_refs(body, comments)
         if not refs:
             continue
@@ -261,6 +348,21 @@ def dep_wait_map(rows, slug, runner, root):
         if blocked:
             out[number] = [_ref_str(r[0], r[1], slug) for r in unsat]
     return out
+
+
+def _sorted_row_keys(rows):
+    """Row keys oldest-first with architecture-rework leading — the picker order
+    (mirrors `cli_quals_cmd._row_sort_key`), so `dep_wait_map`'s cap keeps the
+    earliest rows. Falls back to insertion order if a row lacks createdAt."""
+    def key(k):
+        row = rows.get(k) if isinstance(rows, dict) else None
+        labels = row.get("labels") if isinstance(row, dict) else None
+        names = {(lb or {}).get("name") for lb in (labels or [])
+                 if isinstance(lb, dict)}
+        rank = 0 if ARCHITECTURE_REWORK_LABEL in names else 1
+        created = row.get("createdAt") if isinstance(row, dict) else ""
+        return (rank, created or "")
+    return sorted(rows, key=key)
 
 
 def labels_of(number, runner, root):

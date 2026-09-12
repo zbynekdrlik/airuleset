@@ -5355,6 +5355,14 @@ _BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
 # is rare (cache-first), and the warmed cache serves the next sweep, so the wider
 # overshoot window is an accepted tradeoff for a reliable backlog read.
 _BACKLOG_LIVE_COUNT_TIMEOUT_S = 30
+# #993 review 2 — `--count-dispatchable` is heavier than `--count`: even with the
+# batched `fetch_meta` (ONE `gh issue list`), it still resolves each Depends-on
+# ref's state (per-dep `gh issue view`) + a live-infra-lane git scan. A generous
+# ceiling so it COMPLETES on a big shared backlog (a timeout → None →
+# skip:dispatchable-unknown, suppressing the refill nudge) rather than being cut
+# off. It is cached per-cwd (5-min TTL, `_cached_dispatchable`), so this cost is
+# paid at most once per repo per window, never every sweep.
+_DISPATCHABLE_COUNT_TIMEOUT_S = 90
 
 
 def _watchdog_backlog_fetch(cwd):
@@ -5491,7 +5499,7 @@ def _watchdog_dispatchable_fetch(cwd):
             [sys.executable, os.path.abspath(__file__), cmd_name,
              "--count-dispatchable"],
             cwd=cwd, capture_output=True, text=True,
-            timeout=_BACKLOG_LIVE_COUNT_TIMEOUT_S)
+            timeout=_DISPATCHABLE_COUNT_TIMEOUT_S)   # #993 review 2: batched but O(deps)
     except Exception:
         return None
     if r.returncode != 0:
@@ -5500,7 +5508,7 @@ def _watchdog_dispatchable_fetch(cwd):
     if not lines:
         return None
     try:
-        count = int(lines[0])
+        count = int(lines[0])          # `unmeasurable` (dep read failed) → None
     except ValueError:
         return None
     reason = None
@@ -7493,6 +7501,8 @@ from cli_work_class import (  # noqa: E402  (#993 — orchestration classificati
     issue_state as issue_state,
     labels_of as labels_of,
     classify_number as classify_number,
+    resolve_issue_deps as resolve_issue_deps,
+    fetch_meta as fetch_meta,
 )
 from cli_quals_cmd import (  # noqa: E402  (#433 cluster I facade — leaf re-export)
     _row_action as _row_action,
@@ -7773,6 +7783,22 @@ from cli_wdrain import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+def _add_dispatch_flags(parser):
+    """#993 items 3/7 — the shared `--dep-wait` / `--count-dispatchable` flags for
+    BOTH `core-quals` and `slice-quals` (factored so `main()` carries one copy,
+    #993 review 10)."""
+    parser.add_argument(
+        "--dep-wait", action="store_true",
+        help="List ONLY the dep-wait members (open Depends-on:), each with its "
+             "blocking refs in the action column — they STAY in --count/I but "
+             "are excluded from dispatchable candidates (#993 item 7)")
+    parser.add_argument(
+        "--count-dispatchable", action="store_true",
+        help="Print the dispatchable-candidate count = workable and deps-"
+             "satisfied and (independent or no live infra lane); a reason: line "
+             "(infra-serial/dep-wait) follows a 0 (#993 item 3)")
 
 
 def main():
@@ -8530,16 +8556,7 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "member (the --list set + a labels column) — the job-20 named "
              "partition-audit nudge reads this to name each I member (#578)")
-    p_slice.add_argument(
-        "--dep-wait", action="store_true",
-        help="List ONLY the dep-wait members (open Depends-on:), each with its "
-             "blocking refs in the action column — they STAY in --count/I but "
-             "are excluded from dispatchable candidates (#993 item 7)")
-    p_slice.add_argument(
-        "--count-dispatchable", action="store_true",
-        help="Print the dispatchable-candidate count = workable and deps-"
-             "satisfied and (independent or no live infra lane); a reason: line "
-             "(infra-serial/dep-wait) follows a 0 (#993 item 3)")
+    _add_dispatch_flags(p_slice)   # #993 items 3/7
     p_slice.add_argument(
         "--bounces", action="store_true",
         help="Print bounce rounds for open prio:bounce/ready-for-review "
@@ -8574,16 +8591,7 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
              "obligation member (the --list set + a labels column) — the job-20 "
              "named partition-audit nudge reads this to name each I member (#578)")
-    p_core.add_argument(
-        "--dep-wait", action="store_true",
-        help="List ONLY the dep-wait members (open Depends-on:), each with its "
-             "blocking refs in the action column — they STAY in --count/I but "
-             "are excluded from dispatchable candidates (#993 item 7)")
-    p_core.add_argument(
-        "--count-dispatchable", action="store_true",
-        help="Print the dispatchable-candidate count = workable and deps-"
-             "satisfied and (independent or no live infra lane); a reason: line "
-             "(infra-serial/dep-wait) follows a 0 (#993 item 3)")
+    _add_dispatch_flags(p_core)   # #993 items 3/7
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")

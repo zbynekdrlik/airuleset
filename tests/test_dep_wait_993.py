@@ -1,11 +1,11 @@
 """#993 round 2 item 7 — dependency ordering in the quals CLI + item 3's
 dispatchable-count derivation.
 
-`cli_quals._dep_wait_map` resolves each workable row's `Depends-on:` (per-row gh
-fetch, injected runner) and returns the dep-wait rows + their blocking refs;
-`_dispatchable_numbers` (pure) applies `workable ∧ ¬dep-wait ∧ (independent ∨
-¬live-infra-lane)`; `_live_infra_lane` maps live lanes → issue classes.
-`_print_issue_rows` stamps the `dep-wait:#N` action column.
+`cli_work_class.dep_wait_map` resolves each workable row's `Depends-on:` (batched
+`fetch_meta` or per-row, injected runner) and returns the dep-wait rows + their
+blocking refs; `dispatchable_numbers` (pure) applies `workable ∧ ¬dep-wait ∧
+(independent ∨ ¬live-infra-lane)`; `live_infra_lane` maps live lanes → issue
+classes. `_print_issue_rows` stamps the `dep-wait:#N` action column.
 
 Covers item 7 (open dep → excluded, closed dep → dispatchable, chain A→B→C only
 A, cross-repo form, cycle → wait + printed) and item 3's count/reason.
@@ -208,6 +208,67 @@ class TestListActionColumn(TestCase):
         lines = self._emit(rows, {})
         fields = lines[0].split("\t")
         self.assertIn(fields[2], ("implement", "action-only"))
+
+
+class TestWatchdogSeams(TestCase):
+    """#993 review 8 — the two production watchdog seams: the dispatchable-count
+    fetch (protocol + fail-safe) and the queue-classify factory (fail-safe)."""
+
+    def _fetch(self, stdout, rc=0):
+        import unittest.mock as mk
+        import airuleset
+
+        class _CP:
+            returncode = rc
+            def __init__(s):
+                s.stdout = stdout
+        with mk.patch("airuleset._repo_root", return_value="/root"), \
+             mk.patch("airuleset.resolve_authority", return_value="full"), \
+             mk.patch("subprocess.run", return_value=_CP()):
+            return airuleset._watchdog_dispatchable_fetch("/root")
+
+    def test_count_and_reason_parsed(self):
+        self.assertEqual(self._fetch("0\nreason:infra-serial\n"),
+                         [{"count": 0, "reason": "infra-serial"}])
+        self.assertEqual(self._fetch("3\n"), [{"count": 3, "reason": None}])
+
+    def test_unmeasurable_is_none(self):
+        self.assertIsNone(self._fetch("unmeasurable\n"))
+
+    def test_nonzero_rc_is_none(self):
+        self.assertIsNone(self._fetch("5\n", rc=1))
+
+    def test_queue_classify_non_full_is_none(self):
+        import unittest.mock as mk
+        import airuleset
+        with mk.patch("airuleset._repo_root", return_value="/root"), \
+             mk.patch("airuleset.resolve_authority", return_value="fork-no-merge"):
+            self.assertIsNone(airuleset._watchdog_queue_classify("/root"))
+
+    def test_queue_classify_full_returns_callable_failsafe(self):
+        import unittest.mock as mk
+        import airuleset
+        with mk.patch("airuleset._repo_root", return_value="/root"), \
+             mk.patch("airuleset.resolve_authority", return_value="full"), \
+             mk.patch("airuleset._repo_slug", return_value="o/r"), \
+             mk.patch("cli_work_class.live_infra_lane", return_value=False), \
+             mk.patch("cli_work_class.classify_number", side_effect=RuntimeError):
+            fn = airuleset._watchdog_queue_classify("/root")
+            self.assertTrue(callable(fn))
+            # a classify error → fail-safe infra-serial (HOLD, never a spurious
+            # parallel infra dispatch).
+            self.assertEqual(fn(5), "infra-serial")
+
+    def test_queue_classify_full_dispatchable_passthrough(self):
+        import unittest.mock as mk
+        import airuleset
+        with mk.patch("airuleset._repo_root", return_value="/root"), \
+             mk.patch("airuleset.resolve_authority", return_value="full"), \
+             mk.patch("airuleset._repo_slug", return_value="o/r"), \
+             mk.patch("cli_work_class.live_infra_lane", return_value=False), \
+             mk.patch("cli_work_class.classify_number", return_value="dispatchable"):
+            fn = airuleset._watchdog_queue_classify("/root")
+            self.assertEqual(fn(7), "dispatchable")
 
 
 if __name__ == "__main__":

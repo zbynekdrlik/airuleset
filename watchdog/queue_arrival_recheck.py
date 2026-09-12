@@ -269,6 +269,17 @@ def _queue_decision(rec, cur, now, floor=0, classify_fn=None):
     return ("nudge", new_rec, "arrival", arrivals)
 
 
+def _advanced_base(old_base, cur_sorted, arrivals):
+    """#993 review 3: the base to advance to on a CONFIRMED nudge — `(old_base ∩
+    cur) ∪ nudged_arrivals`. When the wave was ALL dispatchable (no classify
+    filter) this equals `cur` (legacy behaviour, byte-identical). For a MIXED
+    wave it EXCLUDES the held (non-dispatchable) members so they RE-DETECT next
+    sweep once they become dispatchable, instead of being silently baked in."""
+    cur_set = {int(x) for x in cur_sorted}
+    keep = {int(x) for x in old_base} & cur_set
+    return sorted(keep | {int(a) for a in arrivals})
+
+
 def _fmt_arrivals(arrivals):
     """`#5177 #5310 #3073 (+2 ďalších)` — names up to MAX_NAMED_ARRIVALS, then
     summarizes the rest so a huge wave never blows the char cap."""
@@ -520,9 +531,9 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_nr=new_rec, _q=qrecs, _s=sid, _n=now, _h=handled,
-                        _st=state, _p=pid, _cs=cur_sorted):
+                        _st=state, _p=pid, _cs=cur_sorted, _ar=arrivals):
             watchdog._janitor_clear_watch(_st, _p)
-            _nr["base"] = _cs
+            _nr["base"] = _advanced_base(_nr["base"], _cs, _ar)  # #993 review 3
             _nr["last_nudge"] = _n
             _nr["send_fails"] = 0
             _q[_s] = _nr
@@ -550,7 +561,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                                           len(arrivals)))
         return logs
     watchdog._janitor_clear_watch(state, pid)
-    new_rec["base"] = cur_sorted
+    new_rec["base"] = _advanced_base(new_rec["base"], cur_sorted, arrivals)  # #993 review 3
     new_rec["last_nudge"] = now   # #780 — start the floor window on a delivered nudge
     new_rec["send_fails"] = 0
     qrecs[sid] = new_rec
