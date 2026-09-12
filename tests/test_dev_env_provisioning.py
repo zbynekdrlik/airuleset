@@ -1906,6 +1906,36 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertIn(["tmux", "rename-window", "-t", "@0", "m2"], seen)
         self.assertIn(["tmux", "rename-window", "-t", "@3", "m2"], seen)
 
+    def test_live_apply_names_declared_windows_by_their_cwd_not_the_alias(self):
+        # #998 (owner 2026-09-12, "prečo mám dva gk"): gk DECLARES windows
+        # `gk` (cwd ~/devel/odoo/odoo-erp) + `gk-infra` (cwd
+        # ~/devel/odoo/odoo-erp-infra). The live-apply must give EACH window
+        # its DECLARED name, matched by cwd — never rename every window to the
+        # box alias `gk`, which turned the owner's infra window into a second
+        # `gk`. A window whose cwd matches no declaration keeps today's alias.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout=(
+                    "@0\t/home/gatekeeper/devel/odoo/odoo-erp\n"
+                    "@3\t/home/gatekeeper/devel/odoo/odoo-erp-infra\n"
+                    "@9\t/home/gatekeeper\n"))
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="gatekeeper", host="gatekeeper-cx23",
+            home="/home/gatekeeper", run=run)
+        # each declared window named by its cwd
+        self.assertIn(["tmux", "rename-window", "-t", "@0", "gk"], seen)
+        self.assertIn(["tmux", "rename-window", "-t", "@3", "gk-infra"], seen)
+        # the infra window is NEVER clobbered to the box alias (the incident)
+        self.assertNotIn(["tmux", "rename-window", "-t", "@3", "gk"], seen)
+        # a window matching no declaration keeps the box alias (legacy)
+        self.assertIn(["tmux", "rename-window", "-t", "@9", "gk"], seen)
+
     def test_newlevel_owner_box_does_NO_window_naming_live_apply(self):
         # #593 REGRESSION FIX: a newlevel multi-project owner box must NOT
         # live-apply the window naming -- no automatic-rename off, no
