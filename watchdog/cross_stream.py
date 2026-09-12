@@ -249,7 +249,8 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None):
     make `--dry-run` accuse a repo whose real sweep would have succeeded."""
     if dry_run:
         return False
-    return watchdog.deliver_with_stash(pid, text, run, captured=captured, logs=logs)
+    return watchdog.deliver_with_stash(pid, text, run, captured=captured,
+                                       logs=logs, nudge_kind="cross-stream")
 
 
 def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,

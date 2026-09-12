@@ -3469,7 +3469,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
                             pid, resume_text, run, captured=fresh, logs=logs,
-                            state=state)  # #852-review 🟡-5
+                            state=state, nudge_kind="resume")  # #852-review 🟡-5
                         if not delivered:
                             # #176 F1: the shipped fix RELOCATED the silent unbounded
                             # skip from the busy branch to HERE instead of eliminating

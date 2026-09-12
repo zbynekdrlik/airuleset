@@ -848,7 +848,8 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
     # #670-review R2). This REPLACES the head-BLIND tail-only `_await_typed`
     # check that passed a head-swallowed /goal to Enter -- CC then read the text
     # as a plain prompt and the goal never armed (#720). Never a submit on False.
-    if not watchdog._type_literal_verified(pid, run, text, sleep_fn):
+    if not watchdog._type_literal_verified(pid, run, text, sleep_fn,
+                                           kind="goal", logs=logs):
         _log("goal-verify-abort: type-not-verified")
         return False                       # not byte-exact -- never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
@@ -1698,7 +1699,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # and deliver_with_stash clears it on its own verified success.
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
                                          logs=logs, sleep_fn=sleep_fn,
-                                         state=state)
+                                         state=state, nudge_kind="goal")
         if ok:
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
@@ -5057,7 +5058,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # clears it on its own verified success.
         elif not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
                                              logs=logs, sleep_fn=sleep_fn,
-                                             state=state):
+                                             state=state, nudge_kind="goal"):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
