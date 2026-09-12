@@ -151,7 +151,7 @@ CLAUSES = [
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
     Clause("saturation-core", PROFILES,
-        "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` autopilot-worker lanes live — refill a returned lane's slot IMMEDIATELY while backlog remains;"),
+        "CONTINUOUS REFILL, never one ticket per turn: keep `isolation:worktree` autopilot-worker lanes live — refill ONLY with a DISPATCHABLE unit (independent, dependencies closed); infra units are SERIAL — one live infra lane at a time;"),
     Clause("saturation-delivery", PROFILES, {
         "full": "integrate returned branches SERIALLY under the integration mutex as they return;",
         "branch-merge": "merge returned branches into the integration branch SERIALLY under the mutex as they return;",
