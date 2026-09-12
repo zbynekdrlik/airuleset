@@ -357,6 +357,7 @@ def shadow_ugrep_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
 BOX_CLASS_PATH = "~/.claude/airuleset-box-class"
 SHARED_STREAM = "shared-stream"
 CONTROLLER = "controller"  # #870 F3: resource-gated box class (4 GB cx23)
+GK = "gk"  # #998: the gatekeeper box is Claude-only — heavy builds reaped here too
 
 # argv[0]-anchored heavy build/VM daemon signatures. Anchored EXACTLY like the
 # #776 SHADOW_UGREP_SIGNATURE (argv[0] basename), so a process merely QUOTING a
@@ -467,15 +468,16 @@ def heavy_build_reaper(ps_fetch=None, kill_fn=None, verify_fn=None,
     `ps_fetch` reuses the Job-37 read shape (pid, etimes, cputimes, args) — the
     heavy reaper reads only pid + args (a build daemon is banned at ANY age, so
     etimes/cputimes are ignored). Returns the journal log lines; NEVER pings."""
-    # The box-class gate is FIRST — a non-gated box (dev1/dev2/gk) never even
-    # reads its process table here.
+    # The box-class gate is FIRST — a non-gated box (dev1/dev2) never even
+    # reads its process table here. #998: the `gk` (gatekeeper) class is
+    # Claude-only, so the heavy-build reaper applies there too.
     if box_class_fn is None:
         box_class_fn = default_box_class
     try:
         bc = box_class_fn()
     except Exception:
         bc = None
-    if bc not in (SHARED_STREAM, CONTROLLER):
+    if bc not in (SHARED_STREAM, CONTROLLER, GK):
         return []
     if ps_fetch is None:
         ps_fetch = default_ps_fetch

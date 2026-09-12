@@ -958,7 +958,9 @@ def _write_box_class_marker():
     """Write ~/.claude/airuleset-box-class for this box (#778). A SHARED-STREAM
     box (subdev) — one running N isolated reduced-authority Claude stream users
     — is Claude-only: heavy JVM/Android/RN build toolchains are banned there and
-    run on dev2. Any OTHER box (dev1/dev2/gatekeeper) is a `workstation`.
+    run on dev2. The `gk` (gatekeeper) box is ALSO Claude-only (#998): heavy
+    builds + local odoo docker belong on the erp-test box / dev2, never local.
+    Any OTHER box (dev1/dev2) is a `workstation`.
 
     The class is derived from the install-user against the maintained
     `AUTHORITY_BY_USER` registry (the reduced-authority stream accounts —
@@ -974,7 +976,9 @@ def _write_box_class_marker():
         # `controller` — the push-origin guard, hook RULE C and the heavy-build
         # gates all read this file, and a writer without this branch demoted it
         # to `workstation` on the first in-process install (Fable review RED-1).
+        # "gatekeeper" = the gk box (#998): Claude-only class `gk`.
         box_class = ("controller" if u == "airuleset"
+                     else "gk" if u == "gatekeeper"
                      else "shared-stream" if u in AUTHORITY_BY_USER
                      else "workstation")
         marker = CLAUDE_DIR / "airuleset-box-class"
