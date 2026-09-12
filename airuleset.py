@@ -1047,17 +1047,100 @@ def _check_symlink_health(link, expected_target, label):
     return f"  {label}: OK (symlinked to airuleset)"
 
 
-def _check_agent_symlinks():
-    """Print status of agent symlinks (#972).
+def _stale_managed_symlinks(target_dir, repo_subdir, valid_names, suffix=""):
+    """Yield airuleset-OWNED symlinks under ``target_dir`` that are dangling or
+    whose agent/skill was dropped from ``valid_names`` (#991).
 
-    This was entirely missing from cmd_status — agents were silent when their
-    symlinks dangled after the worktree cleanup incident.
+    An entry qualifies iff it is a SYMLINK whose target lies under this repo's
+    ``<repo_subdir>/`` dir (airuleset-owned) AND is EITHER dangling
+    (``not entry.exists()``) OR named outside ``valid_names`` (an agent name is
+    the file stem sans ``suffix``). A regular file, a symlink pointing ELSEWHERE
+    (a foreign-project skill like ``win-mcp`` — the Skill Ownership rule), and a
+    real directory NEVER qualify. A worktree-target symlink is out of scope here
+    (its target is under ``.claude/worktrees/…``, not ``REPO_DIR/<repo_subdir>``)
+    — that is handled by the #972 worktree guard + status rows.
+
+    Root cause it exists for: ``cmd_install`` LINKS ``AGENT_NAMES``/``SKILL_NAMES``
+    but the pre-existing prune only removed a skill that is IN ``SKILL_NAMES`` but
+    not this box's set; it never removed a symlink whose agent/skill was DELETED
+    from the repo (name dropped from the lists), and agents had no prune at all —
+    so #991's removals left dangling managed symlinks on every install.
+    """
+    if not target_dir.exists():
+        return
+    owned_root = str(REPO_DIR / repo_subdir)
+    for entry in sorted(target_dir.iterdir()):
+        if not entry.is_symlink():
+            continue  # regular file or real directory — never touched
+        try:
+            target = str(Path(os.readlink(entry)))
+        except OSError:
+            continue
+        # (a) airuleset-owned: target under this repo's agents/ or skills/ dir
+        if target != owned_root and not target.startswith(owned_root + os.sep):
+            continue  # foreign symlink (win-mcp etc.) — never touched
+        # (b) dangling OR name dropped from the canonical names list
+        name = entry.name
+        if suffix and name.endswith(suffix):
+            name = name[: -len(suffix)]
+        if (not entry.exists()) or (name not in valid_names):
+            yield entry
+
+
+def _prune_stale_managed_symlinks(target_dir, repo_subdir, valid_names,
+                                  suffix=""):
+    """Unlink every stale managed symlink ``_stale_managed_symlinks`` finds under
+    ``target_dir``, printing one ``Removed:`` line per prune (#991)."""
+    for entry in _stale_managed_symlinks(
+            target_dir, repo_subdir, valid_names, suffix):
+        entry.unlink()
+        print(f"  Removed:  {entry}")
+
+
+def _check_agent_symlinks():
+    """Print status of agent symlinks (#972 + #991).
+
+    #972: agents were silent when their symlinks dangled after the worktree
+    cleanup incident. #991: also report a managed agent symlink whose source was
+    REMOVED from the repo (name dropped from AGENT_NAMES) — it dangles until the
+    next install prune, so it must show as a row rather than stay silent.
     """
     print("\n~/.claude/agents/:")
     for name in AGENT_NAMES:
         link = AGENTS_DIR / f"{name}.md"
         expected = REPO_DIR / "agents" / f"{name}.md"
         print(_check_symlink_health(link, expected, name))
+    for entry in _stale_managed_symlinks(
+            AGENTS_DIR, "agents", AGENT_NAMES, suffix=".md"):
+        if entry.stem in AGENT_NAMES:
+            continue  # a dangling in-list agent is already reported above
+        expected = REPO_DIR / "agents" / entry.name
+        print(_check_symlink_health(entry, expected, entry.stem))
+
+
+def _check_skill_symlinks(box_skills):
+    """Print status of this box's skill symlinks + any REMOVED-skill dangling
+    managed symlink still present, and RETURN the set of owned-stale names so the
+    caller can exclude them from the foreign "Unmanaged skills" list (#991).
+
+    Symmetric with ``_check_agent_symlinks``: the box set drives the "should be
+    installed" rows; ``_stale_managed_symlinks`` (keyed on the full SKILL_NAMES)
+    adds a row for a removed skill whose symlink still dangles.
+    """
+    print("\n~/.claude/skills/:")
+    box = set(box_skills)
+    for skill in box_skills:
+        link = SKILLS_DIR / skill
+        expected_target = REPO_DIR / "skills" / skill
+        print(_check_symlink_health(link, expected_target, skill))
+    stale_owned = set()
+    for entry in _stale_managed_symlinks(SKILLS_DIR, "skills", SKILL_NAMES):
+        if entry.name in box:
+            continue  # a dangling box skill is already reported above
+        expected_target = REPO_DIR / "skills" / entry.name
+        print(_check_symlink_health(entry, expected_target, entry.name))
+        stale_owned.add(entry.name)
+    return stale_owned
 
 
 def _check_worktree_repo_dir(cmd_name):
@@ -1260,6 +1343,18 @@ def cmd_install(args):
 
         link.symlink_to(source)
         print(f"  Linked:    {link} -> {source}")
+
+    # --- 2d. Prune managed agent/skill symlinks whose agent/skill was REMOVED
+    # from the repo (dangling target) or dropped from AGENT_NAMES/SKILL_NAMES
+    # (#991). Step 2a above only prunes the box-scoping case (in SKILL_NAMES but
+    # not this box's set); it never removed a symlink for a deleted agent/skill,
+    # and agents had no prune at all — so #991's removals left dangling managed
+    # symlinks fleet-wide. Only airuleset-OWNED symlinks are touched: a regular
+    # file, a foreign symlink (win-mcp — Skill Ownership), and a real directory
+    # are never removed (see _stale_managed_symlinks).
+    _prune_stale_managed_symlinks(SKILLS_DIR, "skills", SKILL_NAMES)
+    _prune_stale_managed_symlinks(AGENTS_DIR, "agents", AGENT_NAMES,
+                                  suffix=".md")
 
     # --- 2c. Symlink global path-scoped rules (rules/*.md referenced by the
     # universal profile) into ~/.claude/rules/ -- Claude Code's native
@@ -2023,17 +2118,16 @@ def cmd_status(args):
         print("  Does not exist")
 
     # --- Skills (this box's set — scoped per skill_names_for_user) ---
-    print("\n~/.claude/skills/:")
-    for skill in skill_names_for_user():
-        link = SKILLS_DIR / skill
-        expected_target = REPO_DIR / "skills" / skill
-        print(_check_symlink_health(link, expected_target, skill))
+    # #991: _check_skill_symlinks also reports a REMOVED-skill dangling managed
+    # symlink as a row and returns its name, so it is excluded from the foreign
+    # "Unmanaged skills" list below (it is airuleset-owned, not foreign).
+    stale_owned = _check_skill_symlinks(skill_names_for_user())
 
     # Other skills present
     if SKILLS_DIR.exists():
         all_skills = {p.name for p in SKILLS_DIR.iterdir()}
         managed = set(SKILL_NAMES)
-        unmanaged = all_skills - managed
+        unmanaged = all_skills - managed - stale_owned
         if unmanaged:
             print(f"\n  Unmanaged skills: {', '.join(sorted(unmanaged))}")
 

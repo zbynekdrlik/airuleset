@@ -22,7 +22,6 @@ Tests (fake home dir + fake REPO_DIR):
 
 import contextlib
 import io
-import os
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
