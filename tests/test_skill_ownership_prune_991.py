@@ -95,9 +95,9 @@ class TestPruneDangling(_Base):
     def test_dangling_owned_agent_and_skill_symlinks_are_pruned(self):
         # removed agents/skills: source does NOT exist under the repo -> dangling
         dead_agent = self._link_agent(
-            "fable-advisor", self.repo / "agents" / "fable-advisor.md")
+            "retired-agent-a", self.repo / "agents" / "retired-agent-a.md")
         dead_skill = self._link_skill(
-            "fable-advisor", self.repo / "skills" / "fable-advisor")
+            "retired-agent-a", self.repo / "skills" / "retired-agent-a")
         # a currently-valid linked agent/skill (in the names list, target real)
         self._repo_agent("autopilot-worker")
         live_agent = self._link_agent(
@@ -170,13 +170,13 @@ class TestPruneDangling(_Base):
 
     def test_removed_line_shape(self):
         self._link_agent(
-            "fable-advisor", self.repo / "agents" / "fable-advisor.md")
+            "retired-agent-a", self.repo / "agents" / "retired-agent-a.md")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             airuleset._prune_stale_managed_symlinks(
                 self.agents_dir, "agents", airuleset.AGENT_NAMES, suffix=".md")
         out = buf.getvalue()
-        expected = f"  Removed:  {self.agents_dir / 'fable-advisor.md'}"
+        expected = f"  Removed:  {self.agents_dir / 'retired-agent-a.md'}"
         self.assertIn(expected, out.splitlines(),
                       f"exact 'Removed:  <path>' line missing; got: {out!r}")
 
@@ -185,7 +185,7 @@ class TestStatusRows(_Base):
     def test_check_agent_symlinks_reports_removed_agent_row(self):
         # removed agent still linked (dangling) — must be reported as a row
         self._link_agent(
-            "fable-advisor", self.repo / "agents" / "fable-advisor.md")
+            "retired-agent-a", self.repo / "agents" / "retired-agent-a.md")
         # a valid in-list agent, so the base loop has something normal too
         self._repo_agent("autopilot-worker")
         self._link_agent(
@@ -195,7 +195,7 @@ class TestStatusRows(_Base):
         with contextlib.redirect_stdout(buf):
             airuleset._check_agent_symlinks()
         out = buf.getvalue()
-        self.assertIn("fable-advisor", out,
+        self.assertIn("retired-agent-a", out,
                       "removed agent not reported as a status row")
         self.assertIn("MISMATCH", out)
         self.assertIn("dangling", out.lower())
@@ -203,7 +203,7 @@ class TestStatusRows(_Base):
     def test_check_skill_symlinks_reports_removed_skill_and_returns_it(self):
         # removed skill still linked (dangling) — reported + returned as stale
         self._link_skill(
-            "fable-advisor", self.repo / "skills" / "fable-advisor")
+            "retired-agent-a", self.repo / "skills" / "retired-agent-a")
         # a valid box skill (in the box set)
         self._repo_skill("ci-monitor")
         self._link_skill("ci-monitor", self.repo / "skills" / "ci-monitor")
@@ -215,10 +215,10 @@ class TestStatusRows(_Base):
         with contextlib.redirect_stdout(buf):
             stale = airuleset._check_skill_symlinks(["ci-monitor"])
         out = buf.getvalue()
-        self.assertIn("fable-advisor", out,
+        self.assertIn("retired-agent-a", out,
                       "removed skill not reported as a status row")
         self.assertIn("MISMATCH", out)
-        self.assertEqual(stale, {"fable-advisor"},
+        self.assertEqual(stale, {"retired-agent-a"},
                          "stale-owned set must carry the removed skill only")
         self.assertNotIn("win-mcp", stale,
                          "foreign skill wrongly classified as owned-stale")
