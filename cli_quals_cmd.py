@@ -85,7 +85,7 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       unpark_numbers=None, tacit_wait_numbers=None,
                       tacit_close_numbers=None, converge_numbers=None,
                       no_target_numbers=None, deploy_target_numbers=None,
-                      dep_wait_map=None):
+                      dep_wait_map=None, released_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -167,12 +167,21 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     no_target_numbers = no_target_numbers or set()
     deploy_target_numbers = deploy_target_numbers or set()
     dep_wait_map = dep_wait_map or {}
+    released_numbers = released_numbers or set()
     for n in sorted(rows, key=lambda k: _row_sort_key(rows, k)):
         row = rows[n]
-        # #993 item 7: a dep-wait row reads `dep-wait:<blocking refs>` in the
-        # action column — the picker's mechanical dependency-awareness (it STAYS
-        # in the I count, but is excluded from dispatchable candidates).
-        if n in dep_wait_map:
+        # #1009: a merged+released row reads `released` in the action column —
+        # DONE for the stream (release/close are the gk's), surfaced so a stream
+        # misroute is visible; it is NEVER in the workable/dispatchable set (it
+        # left `unhandled` via the truthy `handed=="released"`), so the picker,
+        # which gates on `--count-dispatchable` (workable ∧ ¬dep-wait), can never
+        # select it. Consistent with the action-column convention core-quals uses
+        # (action-only / implement / dep-wait:). Checked FIRST so it wins over a
+        # dep annotation. #993 item 7: a dep-wait row reads `dep-wait:<refs>` —
+        # in the I count but excluded from dispatchable candidates.
+        if n in released_numbers:
+            action = "released"
+        elif n in dep_wait_map:
             action = "dep-wait:" + ",".join(dep_wait_map[n])
         else:
             action = _row_action(row, own_stream)
@@ -892,9 +901,22 @@ def cmd_slice_quals(args):
         _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
         _print_audit_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
         return
-    # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7).
+    # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7),
+    # THEN the merged+released rows tagged `released` (#1009) — DONE for the
+    # stream (release/close are the gk's), out of the workable `--count`/I but
+    # surfaced so a stream misroute is visible. They left `unhandled` via the
+    # truthy `handed=="released"`, and the picker gates on `--count-dispatchable`
+    # (workable ∧ ¬dep-wait), so a released row can never be selected. Printed as
+    # a trailing block, not interleaved, so the workable candidates read first.
     _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
+    released_rows = {n: workable_rows[n] for n in workable_rows
+                     if handed.get(n) == "released"}
+    if released_rows and role in ("review", "infra"):
+        released_rows = _apply_role_filter(released_rows, root, role, slug=slug)
+    if released_rows:
+        _print_issue_rows(released_rows, own_stream=user,
+                          released_numbers=set(released_rows))
 
 
 def _slice_quals_runner(root):

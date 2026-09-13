@@ -129,5 +129,55 @@ class HandoffStatesUntouched(unittest.TestCase):
         self.assertFalse(handed.get(6800))
 
 
+class ListTagsReleasedRows(unittest.TestCase):
+    """`slice-quals --list` surfaces a merged+released row tagged `released`
+    (out of the workable count, visible so a misroute shows) while `--count`
+    excludes it."""
+
+    def _drive_list(self, count=False):
+        import cli_quals_cmd
+        rows = {
+            700: {"number": 700, "title": "workable one",
+                  "createdAt": "2026-09-01T00:00:00Z", "labels": []},
+            701: {"number": 701, "title": "released one",
+                  "createdAt": "2026-09-02T00:00:00Z", "labels": []},
+        }
+        handed = {701: "released"}   # 700 workable, 701 released
+        args = dict(count=count, list=not count, waiting=False, ops_wait=False,
+                    audit=False, dep_wait=False, count_dispatchable=False,
+                    bounces=False, extra=None, role=None)
+        buf = __import__("io").StringIO()
+        import contextlib
+        with m.patch.object(airuleset, "resolve_authority", return_value="branch-merge"), \
+             m.patch.object(airuleset, "_current_user", return_value=STREAM), \
+             m.patch.object(airuleset, "_slice_quals", return_value=["label:stream:montalu"]), \
+             m.patch.object(airuleset, "_repo_slug", return_value=SLUG), \
+             m.patch.object(airuleset, "_repo_root", return_value=ROOT), \
+             m.patch.object(airuleset, "_slice_mine_and_handed",
+                            return_value=(rows, handed, False)), \
+             m.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                            return_value=({}, SLUG, True)):
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_slice_quals(m.Mock(**args))
+        return buf.getvalue()
+
+    def test_list_shows_released_row_with_released_action(self):
+        out = self._drive_list()
+        rel = [ln for ln in out.splitlines() if ln.split("\t", 1)[0] == "701"]
+        self.assertEqual(len(rel), 1)
+        # number<TAB>createdAt<TAB>action<TAB>title
+        self.assertEqual(rel[0].split("\t")[2], "released")
+
+    def test_list_still_shows_workable_row(self):
+        out = self._drive_list()
+        work = [ln for ln in out.splitlines() if ln.split("\t", 1)[0] == "700"]
+        self.assertEqual(len(work), 1)
+        self.assertNotEqual(work[0].split("\t")[2], "released")
+
+    def test_count_excludes_the_released_row(self):
+        out = self._drive_list(count=True)
+        self.assertEqual(out.strip(), "1")   # only 700, released 701 excluded
+
+
 if __name__ == "__main__":
     unittest.main()
