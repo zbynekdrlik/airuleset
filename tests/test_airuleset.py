@@ -16194,3 +16194,92 @@ class TestPrePushDocsOnlyFix1003(TestCase):
         g("commit", "-qm", "fix: parser crash + note")
         r = self._run("git push origin dev", root)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+
+class TestBlockTestSkipsMergeIn1003(TestCase):
+    """#1003 — after `git merge origin/develop` on a branch BEHIND develop,
+    the #909 origin/<branch> range base makes develop's already-merged
+    sanctioned `test.skip(notApplicable(), …)` read as ADDED by this push,
+    re-blocking it (odoo-erp PR #7099, montalu6). Fix: keep origin/<branch>
+    as the RANGE base but capture the DESTINATION (origin/develop) as
+    DEST_REF and exclude any added line already present on DEST_REF (it rode
+    in via the merge, not this push). A genuinely NEW skip the branch adds
+    (not on develop) still blocks."""
+
+    HOOK = "block-test-skips.sh"
+    _SKIP = "test.skip(notApplicable(), 'sanctioned e2e#2942');"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True,
+            cwd=cwd, timeout=60, env=env)
+
+    def _mk_merge_in_repo(self):
+        """A branch behind develop, already pushed (origin/feat-x exists),
+        merges develop which carries a sanctioned skip in a spec file the
+        branch never touched. Real git so the diffs are genuine."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        os.makedirs(os.path.join(root, "tests", "e2e"), exist_ok=True)
+        open(os.path.join(root, "src.ts"), "w").write("export const x = 1;\n")
+        open(os.path.join(root, "tests", "e2e", "board.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            "test('board', async () => {});\n")
+        g("add", "src.ts", "tests/e2e/board.spec.ts")
+        g("commit", "-qm", "base")
+        base = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base)
+
+        # develop: add the sanctioned skip to board.spec.ts (merged, pre-existing)
+        g("checkout", "-qb", "develop")
+        open(os.path.join(root, "tests", "e2e", "board.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            + self._SKIP + "\n"
+            "test('board', async () => {});\n")
+        g("add", "tests/e2e/board.spec.ts")
+        g("commit", "-qm", "test: sanctioned skip on develop")
+        g("update-ref", "refs/remotes/origin/develop",
+          g("rev-parse", "HEAD").stdout.strip())
+
+        # feat-x off base (behind develop), own change, already pushed
+        g("checkout", "-qb", "feat-x", base)
+        open(os.path.join(root, "src.ts"), "a").write("export const y = 2;\n")
+        g("add", "src.ts")
+        g("commit", "-qm", "feat: add y")
+        g("update-ref", "refs/remotes/origin/feat-x",
+          g("rev-parse", "HEAD").stdout.strip())
+        return root, g
+
+    def test_merged_in_sanctioned_skip_does_not_reblock(self):
+        root, g = self._mk_merge_in_repo()
+        g("merge", "--no-edit", "origin/develop")
+        r = self._run("git push origin feat-x", root)
+        self.assertEqual(r.returncode, 0,
+                         "merged-in sanctioned skip re-flagged: "
+                         + r.stdout + r.stderr)
+
+    def test_genuinely_new_skip_still_blocks_after_merge(self):
+        # The branch adds its OWN new skip (not on develop) AND merges develop.
+        # The merged-in one is excluded, but the branch's own skip still blocks.
+        root, g = self._mk_merge_in_repo()
+        open(os.path.join(root, "tests", "e2e", "own.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            "test.skip('brand new own skip', async () => {});\n")
+        g("add", "tests/e2e/own.spec.ts")
+        g("commit", "-qm", "test: add own e2e")
+        g("merge", "--no-edit", "origin/develop")
+        r = self._run("git push origin feat-x", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("own.spec.ts", r.stdout + r.stderr)
