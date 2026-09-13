@@ -9185,7 +9185,13 @@ def cmd_volume(args, run=None, decl=None):
               % (mount, ", ".join(decl.get("relocate", [])) or "(none)"))
         msg = provision_volume(run=run, decl=decl)
         print(f"  {msg}")
-        return 1 if "FAILED" in msg else 0
+        # Truthful exit status (script-failure-policy; same #664 precedent as
+        # drop-gateway --apply, ~30 lines up): --apply exits 0 ONLY when it
+        # actually applied. A "skipped" result (no passwordless sudo, sudo
+        # probe error) or a "FAILED" result exits non-zero, so a scripted
+        # gk-infra-window go-live keying on $? never reads "did nothing" as
+        # "applied" (review F1).
+        return 0 if msg.startswith("volume: applied") else 1
     # --plan (default): declaration + state + rendered script; execute NOTHING.
     print("volume --plan (dry run — executes NOTHING; to apply run "
           "`python3 airuleset.py volume --apply`)")

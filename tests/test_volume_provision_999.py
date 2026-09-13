@@ -527,7 +527,12 @@ class TestInstallStatusWiring(TestCase):
                         "volume status line must precede the swap step")
 
     def test_status_row_wired(self):
-        self.assertIn("volume_status", self.SRC)
+        # the `airuleset.py status` row calls volume_status() specifically.
+        # `volume_status()` (empty parens) is the cmd_status call — distinct
+        # from volume_install_status() and from the arg'd volume_status(...)
+        # calls in cmd_volume/volume_install_status — so this does NOT falsely
+        # pass on the install-line function alone (review F3 / reviewer 2 🔵).
+        self.assertIn("volume_status()", self.SRC)
 
 
 # --------------------------------------------------------------------------- #
@@ -641,6 +646,23 @@ class TestVolumeCommand(TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("no declaration", out.lower())
         self.assertFalse(rec.ran("bash"))
+
+    def test_real_run_path_reaches_subprocess(self):
+        # review F3 / regression guard for the missing-import class: the REAL
+        # CLI path (run=None, no injected decl) must reach `run or
+        # subprocess.run` without a NameError. With no declaration resolved it
+        # returns cleanly right after that line executes, proving `import
+        # subprocess` is in place inside cmd_volume.
+        orig = dg._local_volume_decl
+        dg._local_volume_decl = lambda *a, **k: None
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = airuleset.cmd_volume(SimpleNamespace(apply=False))
+        finally:
+            dg._local_volume_decl = orig
+        self.assertIn(rc, (0, None))
+        self.assertIn("no declaration", buf.getvalue().lower())
 
     def test_plan_no_declaration_is_clean_noop(self):
         orig = dg._local_volume_decl

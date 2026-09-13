@@ -1199,8 +1199,16 @@ def volume_install_status(decl=None, run=None, islink=None, isdir=None,
         return "volume: none (no declaration)"
     relocate = decl.get("relocate", [])
     done = _count_relocated(decl, islink=islink, isdir=isdir, home=home)
+    # "Fully applied" is a BEST-EFFORT signal, not a guarantee (review F2):
+    # _count_relocated proves a generic dir relocated via a real symlink
+    # (robust), but for docker/gh-runner it only checks the target dir exists,
+    # which the render script `mkdir -p`s before moving data — so a partial,
+    # in-progress apply could over-count. That window is transient and happens
+    # in the observed gk-infra window; the only effect here is WHICH status
+    # line install prints (never relocation), and `airuleset.py volume --plan`
+    # renders the authoritative state (findmnt + the full script). An empty
+    # `relocate` (mount-only decl) is `0 >= 0` → status row by design.
     if done >= len(relocate):
-        # fully applied (or a mount-only decl with nothing to relocate).
         return volume_status(decl=decl, run=run)
     return ("volume: declared, not applied — run: "
             "python3 airuleset.py volume --apply")
