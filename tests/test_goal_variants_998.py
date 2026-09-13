@@ -185,15 +185,15 @@ class TestReviewRoleVariant1000(TestCase):
     # scanner never mistakes it for a secret). Regenerate ONLY on a DELIBERATE
     # clause edit (a shared clause change moves every hash).
     _GOLDEN = {
-        "full/parallel/None": "3fb80f455c69c95da9d05c59",
-        "full/sequential/None": "d498ea9ea47ede6ce968d070",
-        "full/sequential/infra": "c024f5053086ac5740260d84",
-        "branch-merge/parallel/None": "3c568c9d0e7c2c57087a9406",
-        "branch-merge/sequential/None": "0397b076cebbcc4217903cb0",
-        "branch-merge/sequential/infra": "b720170fa797db008850fba8",
-        "fork-no-merge/parallel/None": "415e8d85face3086306a6355",
-        "fork-no-merge/sequential/None": "370aa8543ab2a8de916d8870",
-        "fork-no-merge/sequential/infra": "7d7d4dca7cecc67fb832151f",
+        "full/parallel/None": "459dee3f682b3819a975fc1f",
+        "full/sequential/None": "8e974d6e821a896c75a61ebf",
+        "full/sequential/infra": "7560982b4accad2b7bea9155",
+        "branch-merge/parallel/None": "a031b9eeaf283fc59d88a2b9",
+        "branch-merge/sequential/None": "c079a31a6513f5e0a9a5e0ab",
+        "branch-merge/sequential/infra": "db3f26aa105edd3d7cf94ec7",
+        "fork-no-merge/parallel/None": "f14dbf490b5a5eab9cc3607d",
+        "fork-no-merge/sequential/None": "cad96fb05510db0570d0578e",
+        "fork-no-merge/sequential/infra": "0ad2db1a459f94fe98fc76f8",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):

@@ -69,7 +69,7 @@
     "filedrop/upload_server.py": 309,
     "filedrop/vault.py": 1071,
     "filedrop/vault_server.py": 580,
-    "goal_registry.py": 469,
+    "goal_registry.py": 485,
     "notify/__init__.py": 3311,
     "ratchet_counts.py": 198,
     "statusbar.py": 975,

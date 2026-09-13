@@ -141,6 +141,42 @@ if [ -z "$N" ]; then
     exit 0                       # not a question turn — nothing to gate
 fi
 
+# --- #1007 (miva1 ×5, 2026-09-12): live-lane NEEDS YOU + degenerate decision --
+# Both run BEFORE the #740 verbatim-repeat bypass below, on purpose: that bypass
+# exits 0 for a bare `❓ NEEDS YOU:` line matching LASTQF regardless of live
+# lanes or decision quality — which is exactly what waved the miva1 spam through.
+#
+# (A) A turn ending on `❓ NEEDS YOU:` while the harness lists a RUNNING
+# background lane is a state lie — `❓ NEEDS YOU` means "I stopped, nothing else
+# workable", which a running agent contradicts; the correct form is
+# ASK-AND-CONTINUE (`❓ ASKED` + `⏳ WORKING`). background_tasks is read EXACTLY
+# as stop-check-working-liveness.sh reads it (#120): the KEY may be absent on an
+# older harness (nothing to check → skip), and only a status=="running" entry
+# counts (the list holds only in-flight tasks; a lingering completed entry is not
+# a live lane). Keys on the LAST non-blank line being a NEEDS YOU marker, so an
+# ASK-AND-CONTINUE turn (ends on `⏳ WORKING`) is never touched.
+NEEDS_YOU_RX='❓[[:space:]]*\**[[:space:]]*NEEDS[[:space:]]+YOU[[:space:]]*\**[[:space:]]*:'
+if grep -qiE "$NEEDS_YOU_RX" <<<"$LAST_LINE" && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    if [ "$(echo "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo false)" = "true" ]; then
+        RUNNING_BT=$(echo "$INPUT" | jq -r \
+            '[.background_tasks[]? | select(.status == "running")] | length' \
+            2>/dev/null || echo 0)
+        [ -n "$RUNNING_BT" ] || RUNNING_BT=0
+        if [ "$RUNNING_BT" -gt 0 ] 2>/dev/null; then
+            echo "$((RETRIES+1))" > "$RETRY_FILE"
+            printf '%s\n' "Tvoj ťah končí na \`❓ NEEDS YOU:\`, ale harness eviduje ${RUNNING_BT} bežiacu(e) background lane/agenta — \`❓ NEEDS YOU\` znamená „zastavil som sa, nič iné sa nedá robiť\", čo pri živých agentoch NEPLATÍ. Použi ASK-AND-CONTINUE: otázku napíš ako \`❓ ASKED: <otázka>\` v TELE správy (celý \`**Otázka — projekt …:**\` blok) a ťah ukonči POSLEDNÝM riadkom \`⏳ WORKING: <čo pokračuje>\`. Otázku polož RAZ; ďalej ju nesie footer U N + label needs-answer (#1007)." >&2
+            exit 2
+        fi
+    fi
+fi
+
+# (C) The ❓ marker must NAME the decision — enforced INSIDE the #740 bare
+# re-poke bypass below (the ONE place a bare marker reaches an exit-0 PASS): a
+# first-time bare marker with no briefing is already blocked by Check 1, so
+# gating it here too would only change that block's shape (stdout→exit 2) and
+# regress test_question_gate_pipeline_race; the degenerate `voľba 1/2/3?` line
+# only slips through as a bare RE-POKE, which is exactly the miva1 case.
+
 # VERBATIM REPEAT of the already-delivered question → PASS without shape
 # checks. A /goal re-poke while still blocked replies with EXACTLY the one
 # previous ❓ line (message-status-marker.md) — the device path dedups it, and
@@ -211,6 +247,26 @@ if [ -n "$MARKER_RAW" ]; then
             if grep -qiE '⏳[[:space:]]*WORKING' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
             if grep -qiE '✅[[:space:]]*(DONE|Work[[:space:]]+Complete)' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
             if [ "$IS_BARE_REPOKE" = 1 ]; then
+                # #1007 (C) — even the ONE allowed bare re-poke must NAME the
+                # decision. KEYLINE (derived above, minus the NEEDS YOU: prefix)
+                # is the decision text; a line < 25 codepoints, or one that
+                # STARTS with a bare voľba/option/choice/<digit>, names nothing —
+                # the footer U N carries the ticket, so `voľba 1/2/3?` is refused
+                # (the miva1 spam line). Rolling pushback like the repeat-block.
+                _DEC_LEN=$(printf '%s' "$KEYLINE" | jq -Rrs 'rtrimstr("\n") | length' 2>/dev/null || echo 0)
+                [ -n "$_DEC_LEN" ] || _DEC_LEN=0
+                _DEGEN=0
+                if [ "$_DEC_LEN" -lt 25 ] 2>/dev/null; then _DEGEN=1; fi
+                if LC_ALL=C.UTF-8 grep -qiE '^(voľba|volba|option|choice)\b|^[0-9]' <<<"$KEYLINE"; then _DEGEN=1; fi
+                if [ "$_DEGEN" = 1 ]; then
+                    if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+                        echo "$((RETRIES+1))" > "$RETRY_FILE"
+                        printf '%s\n' "Riadok \`❓ NEEDS YOU: ${KEYLINE}\` nepomenúva rozhodnutie — „${KEYLINE}\" sa nedá prečítať samostatne. Footer U N nesie ticket, NIE samotný riadok, tak napíš rozhodnutie zrozumiteľne bez kontextu (≥ 25 znakov, nie holé „voľba 1/2/3\"): napr. \`❓ NEEDS YOU: schváliš nasadenie verzie X na PROD?\`. Ak je to výber z možností, pomenuj ČOHO sa výber týka (#1007)." >&2
+                        exit 2
+                    fi
+                    rm -f "$RETRY_FILE" 2>/dev/null || true
+                    exit 0
+                fi
                 rm -f "$RETRY_FILE" 2>/dev/null || true
                 exit 0
             fi
