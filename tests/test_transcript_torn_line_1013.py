@@ -10,8 +10,13 @@ every other line still contributes; the GENUINE jq-failure fail-closed path is
 preserved.
 
 `subagent-stop-check-bg-work.sh` reads the transcript in PYTHON per line
-(`json.loads` in try/except), so it is ALREADY torn-line tolerant — a lock test
-pins that, no code change (STEP-0 re-scope, see #1013 design comment).
+(`json.loads` in try/except), so it NEVER had the whole-file-jq-abort bug: a torn
+record ELSEWHERE in the file is skipped and every other line still contributes
+(the lock test pins exactly that). The residual — a torn line that itself CARRIES
+the launch record is missed — is NOT a #1013 regression (it predates this fix and
+is inherent to per-line parsing) and is covered in production by the synchronous
+LEDGER, the primary torn-immune ownership source (the transcript is secondary).
+So no code change is warranted there (STEP-0 re-scope, see #1013 design comment).
 
 RED (fails before the fix): a torn line makes block-main fail closed.
 """
@@ -120,9 +125,12 @@ class TornTranscriptBlockMain1013(unittest.TestCase):
 class TornTranscriptBgWork1013(unittest.TestCase):
     def test_bg_work_scan_survives_a_torn_line(self):
         # LOCK (already-tolerant, no code change — STEP-0 re-scope): the bg-work
-        # hook reads the transcript in PYTHON per line, so a torn record is
-        # skipped and a launched-but-unterminated task is still detected -> the
-        # subagent stop is still blocked.
+        # hook reads the transcript in PYTHON per line, so a torn record
+        # ELSEWHERE is skipped and a launched-but-unterminated task on a healthy
+        # line is still detected -> the subagent stop is still blocked. (A torn
+        # line that itself carries the launch record would be missed, but that
+        # is inherent to per-line parsing, not a #1013 regression, and the
+        # synchronous ledger is the primary torn-immune ownership source.)
         launch = json.dumps({"type": "user", "message": {"content": [
             {"type": "tool_result",
              "content": "Command running in background with ID: task-XYZ1013"}]}})

@@ -88,6 +88,9 @@ set -euo pipefail
 # never strands the one-shot; and since #128 the marker must CARRY the
 # reason, which is logged, an empty one being refused and cleared):
 #   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-<session_id>
+# (the /tmp above is the default; the marker family lives under
+# AIRULESET_MAIN_EXEC_STATE_DIR when set — #1012, so tests + the Job 22 sweeper
+# agree by construction; the live block message prints the EFFECTIVE path.)
 # Accepted residuals of the deferred consume (all bounded, fail-safe toward
 # CONSUME): (a) N PARALLEL guarded calls in one turn all see the marker before
 # the first one's PostToolUse fires, so one marker exempts that whole parallel

@@ -2411,9 +2411,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           breaking a running turn is the user's call.
       (22) STALE EXEC-MARKER CLEANUP (#97) — always on. block-main-
           implementation.sh's one-shot bypass markers
-          (/tmp/airuleset-main-exec-ok-<sid>, legacy -fable- form too) plus,
+          (<state-dir>/airuleset-main-exec-ok-<sid>, legacy -fable- form too;
+          <state-dir> = AIRULESET_MAIN_EXEC_STATE_DIR, default /tmp, #1012) plus,
           since #819, their deferred-consume pending flag
-          (/tmp/airuleset-main-exec-pending-<sid>) are consumed when the
+          (<state-dir>/airuleset-main-exec-pending-<sid>) are consumed when the
           exempted command actually RUNS (a PostToolUse consumer,
           post-consume-main-exec-marker.sh), but a session that ends without
           another guarded call never consumes its own marker/pending — it
