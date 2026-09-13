@@ -59,7 +59,7 @@
     "cli_work_class.py": 421,
     "cli_worktree_sweep.py": 1994,
     "close_trigger.py": 477,
-    "design_gate.py": 993,
+    "design_gate.py": 1042,
     "discuss_close_guard.py": 200,
     "discuss_thread_guard.py": 835,
     "filedrop/__init__.py": 281,

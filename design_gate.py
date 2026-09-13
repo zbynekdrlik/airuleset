@@ -411,20 +411,15 @@ def issue_refs(text):
     return seen
 
 
-# --------------------------------------------------------------------------- #
-# #1003 -- merge-commit awareness. A resync merge (`git merge origin/develop`)
-# produces a commit whose auto-generated message can carry a `#N` from the
-# integration branch's history (`Merge branch 'develop' into feat-3 (#6981)`),
-# but a merge introduces NO NEW DESIGN of its own -- so the design-before-code
-# gate must exempt it (the reported false block on odoo-erp #6981). PRIMARY,
-# un-forgeable signal: MERGE_HEAD exists (a real merge is in progress; the
-# `git commit` completes it). BELT signals (for the single-call
-# `git merge ... && git commit -m "Merge ..."` shape, where MERGE_HEAD is not
-# yet set when the PreToolUse hook fires on the whole compound): a `git merge`
-# subcommand in the command, or a canonical git merge-message. The message
-# belt is a documented forgery residual (a trusted-worker quality gate, not an
-# adversarial boundary); MERGE_HEAD is the load-bearing signal.
-# --------------------------------------------------------------------------- #
+# #1003 -- merge-commit awareness. A resync `git merge origin/develop` makes a
+# commit whose auto-generated message can carry a `#N` from the integration
+# branch's history (`Merge branch 'develop' into feat-3 (#6981)`), but a merge
+# introduces NO new design -- so the gate must exempt it. PRIMARY, un-forgeable:
+# MERGE_HEAD exists (a real merge is in progress). BELT (for the single-call
+# `git merge ... && git commit -m "Merge ..."` shape, MERGE_HEAD not yet set at
+# PreToolUse): a `git merge` in the command, or a canonical merge-message. The
+# message belt is a documented forgery residual (trusted-worker gate, not an
+# adversarial boundary); MERGE_HEAD is load-bearing.
 
 _MERGE_MSG_RE = re.compile(
     r"Merge\s+(?:branch|remote-tracking\s+branch|commit|tag)\b"
