@@ -91,6 +91,10 @@ A ticket is expected to pass stream→gk→PROD on the FIRST hand-off. This is n
 
 **Cross-ref:** odoo-erp issue 6630 (gate dry-run + CHANGELOG mechanics, odoo-erp-side); odoo-erp issue 6377 (gate batches); airuleset issue 962 (hook defect fixes, parallel lane).
 
+#### A bypass token is a FINDING against the RULE, not an approval (#1003, 2026-09-14)
+
+A push/commit hook that forces a bypass token (`# airuleset:<kebab>-ok <reason>`) on a LEGITIMATE change is lowering quality, not enforcing it (owner ruling, odoo-erp gk 12.9.2026). When a lane has to add a bypass token to land a change the rule should never have flagged, that token is a FINDING against the hook — fix the CAUSE of the false positive (narrow the detection so the legitimate change is no longer flagged, keeping every real-violation shape blocked), never a wider bypass and never a softer block message alone. The daily count of `airuleset:[a-z-]*-ok` tokens in merged commit messages therefore belongs in the flow metric and must trend to 0 as each false-positive class is fixed: `scripts/audit_bounce_rule_updates.py --bypasses --repo owner/name` counts them per day (per repo, from the commits API), alongside the `--rounds` bounce trend. A day with bypass tokens is a day with unfixed hook false positives, the same class of integration friction as a bounce.
+
 #### Banned phrases (intent, not just exact wording)
 
 Do NOT shift a decision back to the user when the goals already determine the answer. Representative: "Your call", "You decide" / "Your decision" / "Up to you", "Realistic options: 1) admin-merge 2) close PR", "Cheaper / quicker / easier" paired with a shortcut, "Functionally ready" / "I won't claim it's clean but…", "Want me to investigate … or merge despite …?".

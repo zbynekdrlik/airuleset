@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -215,6 +216,74 @@ def first_pass_rate(trends, issues_with_events):
 
 
 # ---------------------------------------------------------------------------
+# Bypass-token metric (#1003)
+# ---------------------------------------------------------------------------
+# A bypass token (`# airuleset:<kebab>-ok <reason>`) used by a lane is a
+# FINDING against the RULE, not an approval (owner ruling, odoo-erp gk
+# 12.9.2026): the hook forced a token on a LEGITIMATE change, so the daily
+# count of these tokens in MERGED commit messages must trend to 0 as each
+# false-positive class is fixed at its cause. This view surfaces that count,
+# per day per repo, alongside the existing #957/#963 flow metric. NO new
+# script -- it lives in this one.
+
+BYPASS_TOKEN_RE = re.compile(r"airuleset:[a-z-]*-ok")
+
+
+def fetch_bypass_commits(repo, window_days=7, runner=None):
+    """Fetch merged commits (default branch) in the last `window_days` via the
+    GitHub commits API. Returns the parsed list (the API shape), or [] on any
+    failure. `runner` is injectable for tests (defaults to airuleset._gh_out)."""
+    run = runner or airuleset._gh_out
+    since = (datetime.now(timezone.utc) - timedelta(days=window_days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    raw = run("api", "repos/%s/commits?since=%s&per_page=100" % (repo, since),
+              "--paginate", timeout=60)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def count_bypass_tokens(commits):
+    """Pure: count airuleset bypass tokens (airuleset:<kebab>-ok) in merged
+    commit messages. `commits` is the GitHub commits-API list shape. Returns
+    ``{"per_day": {YYYY-MM-DD: n}, "per_kind": {token: n}, "total": n}`` --
+    days/kinds with zero hits are simply absent."""
+    per_day, per_kind, total = {}, {}, 0
+    for c in commits or []:
+        if not isinstance(c, dict):
+            continue
+        cm = c.get("commit") or {}
+        msg = cm.get("message", "") or ""
+        date = ((cm.get("committer") or {}).get("date")
+                or (cm.get("author") or {}).get("date") or "")
+        day = date[:10] if date else "unknown"
+        toks = BYPASS_TOKEN_RE.findall(msg)
+        if not toks:
+            continue
+        per_day[day] = per_day.get(day, 0) + len(toks)
+        for t in toks:
+            per_kind[t] = per_kind.get(t, 0) + 1
+        total += len(toks)
+    return {"per_day": per_day, "per_kind": per_kind, "total": total}
+
+
+def print_bypasses_text(counts):
+    """TSV: day  bypass_tokens, then a total row and a per-token breakdown."""
+    print("day\tbypass_tokens")
+    for day in sorted(counts["per_day"]):
+        print("%s\t%d" % (day, counts["per_day"][day]))
+    print("total\t%d" % counts["total"])
+    if counts["per_kind"]:
+        print("# by token (trend each to 0 by fixing its false-positive class):")
+        for kind in sorted(counts["per_kind"]):
+            print("#   %s\t%d" % (kind, counts["per_kind"][kind]))
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
@@ -272,6 +341,9 @@ def main(argv=None):
         description="Audit bounce trends per stream.")
     p.add_argument("--rounds", action="store_true",
                    help="Print per-stream bounce trend")
+    p.add_argument("--bypasses", action="store_true",
+                   help="Count airuleset bypass tokens (airuleset:...-ok) in "
+                        "merged commit messages, per day (must trend to 0)")
     p.add_argument("--repo", required=True,
                    help="GitHub repo (owner/name)")
     p.add_argument("--window", type=int, default=7,
@@ -284,6 +356,16 @@ def main(argv=None):
                             help="Print a compact markdown table with "
                                  "first-pass rate")
     args = p.parse_args(argv)
+
+    if args.bypasses:
+        commits = fetch_bypass_commits(args.repo, window_days=args.window)
+        counts = count_bypass_tokens(commits)
+        if args.json_out:
+            json.dump(counts, sys.stdout, indent=2)
+            print()
+        else:
+            print_bypasses_text(counts)
+        return
 
     if not args.rounds:
         p.print_help()
