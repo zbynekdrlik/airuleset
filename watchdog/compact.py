@@ -1331,9 +1331,11 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective
     # Escape+Enter. The box holds ONLY our own `/compact` (verified bare above),
     # and a single Escape never deletes a CC draft (#35), so this only deselects
-    # the strip / closes a menu, leaving the text for the Enter.
-    run(["tmux", "send-keys", "-t", pid, "Escape"])
-    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    # the strip / closes a menu, leaving the text for the Enter. #1002 -- reached
+    # only when ON (`send_continue` above already typed + submitted, so the #994
+    # gate passed); the corrective goes through the ONE `keys` primitive too.
+    watchdog.keys(pid, "Escape", kind="continue", run=run)
+    watchdog.keys(pid, "Enter", kind="continue", run=run)
     if not _compact_still_in_box(pid, run, sleep_fn):
         return _compact_post_send_classify(pid, run, sleep_fn)  # #822/#833: sent vs queued
     # Still stuck. Backspace our own text off the bare-verified box so the next

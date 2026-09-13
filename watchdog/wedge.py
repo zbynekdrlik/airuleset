@@ -210,8 +210,12 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                 # as ESC[201~ at all (could parse as an Alt-modified CSI
                 # instead). Send EXACTLY the sequence that was proven to
                 # work, nothing more.
-                run(["tmux", "send-keys", "-t", pid, "-H",
-                     "1b", "5b", "32", "30", "31", "7e"])
+                # #1002 -- the prompt-wedge submit forwards the OWNER's OWN wedged
+                # draft (not a machine nudge), so kind="wedge" is RECOVERY
+                # (ungated): it runs regardless of the #994 switch. Routed through
+                # the ONE `keys` primitive (the `-H` hex form) like every key.
+                watchdog.keys(pid, "-H", "1b", "5b", "32", "30", "31", "7e",
+                              kind="wedge", run=run)
                 unstick_note = " (paste-end unstick)"
                 if attempts > watchdog.PWEDGE_SUBMIT_GIVEUP_AFTER and not state.get(giveup_key):
                     # #255 (adversarial review MINOR finding): the paste-end
@@ -239,8 +243,8 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                 # agent-strip selector holds focus makes a bare Enter
                 # navigate instead of submit; never a SECOND Escape (issue
                 # #35: deletes a draft permanently).
-                run(["tmux", "send-keys", "-t", pid, "Escape"])
-            run(["tmux", "send-keys", "-t", pid, "Enter"])
+                watchdog.keys(pid, "Escape", kind="wedge", run=run)
+            watchdog.keys(pid, "Enter", kind="wedge", run=run)
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
         return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
     # #238-review-style finding 🔴F3 (this ticket's own review): resolved

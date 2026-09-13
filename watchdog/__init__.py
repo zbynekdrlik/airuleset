@@ -503,6 +503,10 @@ from watchdog.tmux_io import (  # noqa: E402
     read_nudges_marker as read_nudges_marker,
     nudges_enabled as nudges_enabled,
     _suppress_nudge as _suppress_nudge,
+    GATED_KINDS as GATED_KINDS,
+    RECOVERY_KINDS as RECOVERY_KINDS,
+    _keystroke_suppressed as _keystroke_suppressed,
+    keys as keys,
     send_continue as send_continue,
     send_verified as send_verified,
     submit_own_draft_verified as submit_own_draft_verified,
@@ -3158,8 +3162,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             draft_hash = hashlib.sha1(draft.encode()).hexdigest()[:12]
                             if s.get("draft_hash") == draft_hash:
                                 if not dry_run:
-                                    run(["tmux", "send-keys", "-t", pid, "Escape"])
-                                    run(["tmux", "send-keys", "-t", pid, "Enter"])
+                                    # #1002 -- submitting the USER's OWN stable
+                                    # post-reset draft (not a machine nudge), so
+                                    # kind="user-draft" is RECOVERY (ungated) and
+                                    # goes through the ONE `keys` primitive.
+                                    keys(pid, "Escape", kind="user-draft", run=run)
+                                    keys(pid, "Enter", kind="user-draft", run=run)
                                 attempts += 1
                                 s["attempts"] = attempts
                                 s["last_try"] = now
