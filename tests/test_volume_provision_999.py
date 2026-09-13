@@ -16,15 +16,19 @@ Tests execute the RENDERED bash under a temp root with STUB commands
 (findmnt/mount/systemctl/rsync/docker) — no real fs/systemd is touched.
 """
 
+import io
 import os
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+import airuleset  # noqa: E402
 import cli_disk_guard_root as dg  # noqa: E402
 import cli_fleet  # noqa: E402
 
@@ -493,23 +497,152 @@ class TestFleetDeclaration(TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Install / status wiring in airuleset.py — the step is actually invoked.
+# Install / status wiring in airuleset.py — install PRINTS state, never relocates.
+#
+# MAIN REVIEW blocker (2026-09-13): cmd_install used to call provision_volume()
+# UNCONDITIONALLY, so a fleet install on gk would EXECUTE the relocation (stop
+# runners one at a time, move the docker data-root, mount) with no owner
+# present. ROZHODNUTÉ on #999: install is idempotent CONFIGURATION and NEVER
+# moves data or stops services — it prints a status/plan line; the relocation
+# is the EXPLICIT operator command `airuleset.py volume --apply`. These tests
+# replace the old ones (which asserted the forbidden unconditional call).
 # --------------------------------------------------------------------------- #
 class TestInstallStatusWiring(TestCase):
     SRC = (REPO / "airuleset.py").read_text()
 
-    def test_cmd_install_invokes_provision_volume(self):
-        self.assertIn("provision_volume", self.SRC)
+    def test_cmd_install_does_not_execute_relocation(self):
+        # the forbidden unconditional `provision_volume()` call must be gone;
+        # install prints the pure status line instead.
+        self.assertNotIn("provision_volume()", self.SRC,
+                         "install must NOT call provision_volume() — it would "
+                         "relocate unattended")
+        self.assertIn("volume_install_status", self.SRC,
+                      "install must print the volume status/plan line")
 
-    def test_volume_runs_before_swap_in_install(self):
-        # relocation must free space BEFORE the swap step computes its target
-        vol = self.SRC.index("provision_volume()")
+    def test_volume_status_line_before_swap(self):
+        # the volume status line stays ahead of the swap step for readability
+        vol = self.SRC.index("volume_install_status")
         swap = self.SRC.index("provision_swap()")
         self.assertLess(vol, swap,
-                        "volume step must be wired BEFORE the swap step")
+                        "volume status line must precede the swap step")
 
     def test_status_row_wired(self):
         self.assertIn("volume_status", self.SRC)
+
+
+# --------------------------------------------------------------------------- #
+# volume_install_status — the install-time line. PURE: it never shells out to
+# relocate (no bash/sudo/mount/rsync/systemctl-stop), only reads state.
+# --------------------------------------------------------------------------- #
+class TestVolumeInstallStatus(TestCase):
+    def _mutating(self, rec):
+        return (rec.ran("bash") or rec.ran("sudo") or rec.ran("mount ")
+                or rec.ran("rsync") or rec.ran("systemctl stop"))
+
+    def test_no_declaration_line(self):
+        rec = _Rec()
+        line = dg.volume_install_status(decl=None, run=rec)
+        self.assertIn("volume", line.lower())
+        self.assertIn("none", line.lower())
+        self.assertFalse(self._mutating(rec))
+
+    def test_declared_not_applied_line(self):
+        # nothing relocated yet (islink/isdir always False) -> plan line
+        rec = _Rec([("df", 0, "Used  Size\n0   20G\n")])
+        line = dg.volume_install_status(
+            decl=dict(GK_DECL), run=rec,
+            islink=lambda p: False, isdir=lambda p: False,
+            home="/home/gatekeeper")
+        self.assertIn("declared, not applied", line.lower())
+        self.assertIn("volume --apply", line)
+        self.assertFalse(self._mutating(rec),
+                         "the install line must never shell out to relocate")
+
+    def test_fully_applied_returns_status_row(self):
+        # all 3 relocate entries already on the volume -> normal status row
+        target_dirs = {"/mnt/gk-vol1/gh-runner", "/mnt/gk-vol1/docker",
+                       "/mnt/gk-vol1/.cache"}
+        links = {"/home/gatekeeper/.cache"}
+        rec = _Rec([("df", 0, "Used  Size\n3.1G   20G\n")])
+        line = dg.volume_install_status(
+            decl=dict(GK_DECL), run=rec,
+            islink=lambda p: p in links,
+            isdir=lambda p: p in target_dirs,
+            home="/home/gatekeeper")
+        self.assertIn("/mnt/gk-vol1", line)
+        self.assertIn("relocated", line.lower())
+        self.assertNotIn("not applied", line.lower())
+        self.assertFalse(self._mutating(rec))
+
+
+# --------------------------------------------------------------------------- #
+# cmd_volume — the EXPLICIT operator command. --plan renders + reads only;
+# --apply is the ONLY path that executes the relocation (via sudo -n).
+# --------------------------------------------------------------------------- #
+class TestVolumeCommand(TestCase):
+    def _run_cmd(self, apply, run, decl):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = airuleset.cmd_volume(SimpleNamespace(apply=apply),
+                                      run=run, decl=decl)
+        return rc, buf.getvalue()
+
+    def test_dispatch_registered(self):
+        self.assertIn("volume", airuleset.SUBCOMMANDS)
+        self.assertIs(airuleset.SUBCOMMANDS["volume"], airuleset.cmd_volume)
+
+    def test_plan_prints_declaration_and_script_executes_nothing(self):
+        rec = _Rec([("findmnt", 1, ""), ("df", 0, "Used Size\n0 20G\n")])
+        rc, out = self._run_cmd(False, rec, dict(GK_DECL))
+        self.assertIn(rc, (0, None))
+        # declaration + rendered script are shown
+        self.assertIn("/mnt/gk-vol1", out)
+        self.assertIn("scsi-0HC_Volume_106853757", out)
+        self.assertIn("set -euo pipefail", out)   # the rendered script
+        # NOTHING mutating ran
+        self.assertFalse(rec.ran("bash"))
+        self.assertFalse(rec.ran("sudo"))
+        self.assertFalse(rec.ran("systemctl stop"))
+        self.assertFalse(rec.ran("rsync"))
+
+    def test_apply_executes_via_runner(self):
+        rec = _Rec([("sudo -n true", 0, "")])
+        rc, out = self._run_cmd(True, rec, dict(GK_DECL))
+        self.assertIn(rc, (0, None))
+        self.assertIn("applied", out.lower())
+        self.assertTrue(rec.ran("bash"),
+                        "--apply must execute the rendered script")
+        self.assertTrue(rec.ran("sudo"))
+
+    def test_apply_failure_is_nonzero(self):
+        rec = _Rec([("sudo -n true", 0, ""), ("bash", 1, "")])
+        rc, out = self._run_cmd(True, rec, dict(GK_DECL))
+        self.assertEqual(rc, 1)
+        self.assertIn("fail", out.lower())
+
+    def test_apply_no_declaration_refuses(self):
+        orig = dg._local_volume_decl
+        dg._local_volume_decl = lambda *a, **k: None
+        try:
+            rec = _Rec()
+            rc, out = self._run_cmd(True, rec, None)
+        finally:
+            dg._local_volume_decl = orig
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no declaration", out.lower())
+        self.assertFalse(rec.ran("bash"))
+
+    def test_plan_no_declaration_is_clean_noop(self):
+        orig = dg._local_volume_decl
+        dg._local_volume_decl = lambda *a, **k: None
+        try:
+            rec = _Rec()
+            rc, out = self._run_cmd(False, rec, None)
+        finally:
+            dg._local_volume_decl = orig
+        self.assertIn(rc, (0, None))
+        self.assertIn("no declaration", out.lower())
+        self.assertFalse(rec.ran("bash"))
 
 
 if __name__ == "__main__":
