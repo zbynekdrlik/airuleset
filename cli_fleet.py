@@ -79,6 +79,19 @@ REMOTE_HOSTS = [
             {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
              "role": "infra", "mode": "sequential"},
         ],
+        # #999 — attached-but-unmounted 20 GB Hetzner volume gk-vol1 (id
+        # 106853757, ext4, /dev/disk/by-id/scsi-0HC_Volume_106853757). The
+        # managed `volume` provisioning step (cli_disk_guard_root.provision_
+        # volume) mounts it and RELOCATES the near-full 38 GB root disk's big
+        # tenants onto it to free space (owner 2026-09-12, instead of paying
+        # for a bigger VPS). Applied on gk by the gk-infra window
+        # (odoo-erp#6989, owner present). Any box without a `volume` key is a
+        # no-op — reproducible for the next box by adding one key.
+        "volume": {
+            "by_id": "scsi-0HC_Volume_106853757",
+            "mount": "/mnt/gk-vol1",
+            "relocate": ["/home/gh-runner", "/var/lib/docker", "~/.cache"],
+        },
     },
     {
         # montalu2/montalu3/montalu4 — three MORE full parallel montalu

@@ -250,8 +250,13 @@ class TestRenderExecution(TestCase):
         self.assertEqual(r2.returncode, 0, r2.stderr)
         # every phase reports "already relocated / already ... skip"
         self.assertIn("already relocated", r2.stdout)
-        # no NEW relocation happened (no fresh "relocated ->" beyond skips)
-        self.assertNotIn("relocated -> ", r2.stdout)
+        # no NEW relocation happened: any "relocated -> " line must be an
+        # "already ... skip" no-op, and docker never freshly writes data-root
+        for line in r2.stdout.splitlines():
+            if "relocated -> " in line:
+                self.assertIn("already", line,
+                              "fresh relocation on 2nd run: " + line)
+            self.assertNotIn("data-root ->", line)
 
     def test_runner_aborts_one_at_a_time_on_isactive_fail(self):
         # runner r2's service fails is-active -> abort before r3, before cache

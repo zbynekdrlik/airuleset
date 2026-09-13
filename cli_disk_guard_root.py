@@ -927,6 +927,272 @@ def provision_swap(run=None, meminfo_text=None):
     return "swap: applied (%dG %s)" % (size, SWAPFILE_PATH)
 
 
+# --------------------------------------------------------------------------- #
+# #999 -- managed `volume` provisioning step. The gk box (38 GB disk) runs 7
+# self-hosted runners, docker, and ~/.cache on a permanently-near-full root
+# disk, so the #993 swap step keeps hitting its free-space guard. Owner
+# (2026-09-12): use the attached-but-UNMOUNTED 20 GB Hetzner volume gk-vol1
+# instead of paying for a bigger VPS -- mount it and RELOCATE those dirs onto
+# it to free the root disk. Same layer/shape as `provision_swap`: a per-box
+# `volume` declaration in cli_fleet.REMOTE_HOSTS drives an idempotent render ->
+# `sudo -n` apply -> status row; a box with no `volume` key is a no-op line.
+#
+# Safety (owner: "NIKDY NESMIE MAINTENANCE POSKODIT beziacu robotu"): NEVER
+# swapoff; NEVER delete an original (moved aside as `<orig>.relocated-<date>`,
+# removed later by the OWNER, never by the script); runners ONE AT A TIME (at
+# most one down at any instant, abort the whole loop on a failed is-active);
+# docker only when 0 containers run; fstab `nofail` so a missing volume never
+# blocks boot; idempotent (a second apply is all no-op lines). This module
+# only RENDERS + applies via injected `run`; the gk box itself is provisioned
+# by the gk-infra window (odoo-erp#6989, owner present), never by this code
+# path in a worktree lane.
+# ---------------------------------------------------------------------------
+
+
+def render_volume_setup_script(decl, home=None, root=""):
+    """Idempotent bash (`set -euo pipefail`) that (1) adds an fstab entry for
+    the by-id device with `defaults,nofail,discard` if absent, (2) mounts the
+    volume if it is not already a mountpoint (aborting relocation if it still
+    is not mounted -- never relocate onto the root disk), and (3) relocates
+    each `relocate` entry onto the volume ONLY IF not already relocated.
+
+    Relocation is dispatched by kind:
+      * `/var/lib/docker` -> rewrite docker `data-root` in daemon.json + restart
+        docker, but ONLY when 0 containers run (never restart under load);
+      * `/home/gh-runner` -> per `actions-runner*` subdir, ONE AT A TIME:
+        stop its unit, rsync, mv aside, symlink, start, verify is-active
+        (abort the whole loop on failure);
+      * any other dir -> rsync to `<mount>/<basename>`, mv aside, symlink.
+
+    `home` expands a leading `~/` (the invoking user's home; injectable for
+    tests). `root` prefixes the system paths -- "" in production, a temp dir
+    in tests so the rendered script runs hermetically with stub commands. Pure
+    renderer: no side effects."""
+    by_id = decl["by_id"]
+    mount = decl["mount"]
+    relocate = decl.get("relocate", [])
+    if home is None:
+        home = os.path.expanduser("~")
+    dev = "/dev/disk/by-id/" + by_id
+    r = root
+    fstab = r + "/etc/fstab"
+    mnt = r + mount
+    lines = []
+    a = lines.append
+    a("set -euo pipefail")
+    a("_vol_date=$(date +%Y%m%d-%H%M%S)")
+    # 1. fstab entry (nofail so a missing volume never blocks boot).
+    a("if ! grep -qE '^%s[[:space:]]' %s 2>/dev/null; then" % (dev, fstab))
+    a("  [ -z \"$(tail -c1 %s 2>/dev/null)\" ] || printf '\\n' >> %s" % (fstab, fstab))
+    a("  echo '%s %s ext4 defaults,nofail,discard 0 2' >> %s" % (dev, mnt, fstab))
+    a("  echo 'volume: added fstab entry for %s'" % mount)
+    a("fi")
+    # 2. mkdir + mount (only if not already a mountpoint); abort if unmounted.
+    a("mkdir -p %s" % mnt)
+    a("if ! findmnt %s >/dev/null 2>&1; then" % mnt)
+    a("  mount %s || true" % mnt)
+    a("fi")
+    a("if ! findmnt %s >/dev/null 2>&1; then" % mnt)
+    a("  echo 'volume: %s not mounted — skipping relocation'; exit 0" % mount)
+    a("fi")
+    a("echo 'volume: %s mounted'" % mount)
+    # 3. relocations, one entry at a time, idempotent.
+    for entry in relocate:
+        if entry.startswith("~/"):
+            expanded = home + entry[1:]
+        elif entry == "~":
+            expanded = home
+        else:
+            expanded = entry
+        orig = r + expanded
+        base = os.path.basename(expanded.rstrip("/"))
+        target = mnt + "/" + base
+        if expanded == "/var/lib/docker":
+            a("# relocate docker data-root (only with 0 running containers)")
+            a("if [ -d '%s' ] && [ ! -e '%s' ]; then" % (target, orig))
+            a("  echo 'volume: docker already relocated -> %s — skip'" % target)
+            a("elif ! command -v docker >/dev/null 2>&1; then")
+            a("  echo 'volume: docker absent — skip'")
+            a("else")
+            a("  _droot=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)")
+            a("  _running=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ' || true)")
+            a("  if [ \"$_droot\" = '%s' ]; then" % target)
+            a("    echo 'volume: docker already at %s — skip'" % target)
+            a("  elif [ \"${_running:-0}\" != '0' ]; then")
+            a("    echo \"volume: docker relocation SKIPPED — ${_running} container(s) running\"")
+            a("  else")
+            a("    systemctl stop docker || true")
+            a("    mkdir -p '%s'" % target)
+            a("    rsync -aHAX '%s/' '%s/'" % (orig, target))
+            a("    mkdir -p '%s/etc/docker'" % r)
+            a("    python3 - '%s/etc/docker/daemon.json' '%s' <<'PYEOF'" % (r, target))
+            a("import json, os, sys")
+            a("p, dataroot = sys.argv[1], sys.argv[2]")
+            a("try:")
+            a("    with open(p) as f: d = json.load(f)")
+            a("    if not isinstance(d, dict): d = {}")
+            a("except Exception: d = {}")
+            a("d['data-root'] = dataroot")
+            a("os.makedirs(os.path.dirname(p), exist_ok=True)")
+            a("with open(p, 'w') as f: json.dump(d, f, indent=2)")
+            a("PYEOF")
+            a("    mv '%s' '%s.relocated-'\"$_vol_date\"" % (orig, orig))
+            a("    systemctl restart docker")
+            a("    echo 'volume: docker data-root -> %s'" % target)
+            a("  fi")
+            a("fi")
+        elif expanded == "/home/gh-runner":
+            a("# relocate self-hosted runners — ONE AT A TIME (never all down)")
+            a("mkdir -p '%s'" % target)
+            a("for _rd in '%s'/actions-runner*/; do" % orig)
+            a("  [ -e \"$_rd\" ] || continue")
+            a("  _rd=\"${_rd%/}\"")
+            a("  _rbase=$(basename \"$_rd\")")
+            a("  case \"$_rbase\" in *.relocated-*) continue;; esac")
+            a("  _rtarget='%s'/\"$_rbase\"" % target)
+            a("  if [ -L \"$_rd\" ] && [ -d \"$_rtarget\" ]; then")
+            a("    echo \"volume: runner $_rbase already relocated — skip\"; continue")
+            a("  fi")
+            a("  _unit=''")
+            a("  [ -f \"$_rd/.service\" ] && _unit=$(cat \"$_rd/.service\")")
+            a("  if [ -n \"$_unit\" ]; then systemctl stop \"$_unit\" || true; fi")
+            a("  rsync -aHAX \"$_rd/\" \"$_rtarget/\"")
+            a("  mv \"$_rd\" \"$_rd.relocated-$_vol_date\"")
+            a("  ln -s \"$_rtarget\" \"$_rd\"")
+            a("  if [ -n \"$_unit\" ]; then")
+            a("    systemctl start \"$_unit\"")
+            a("    if ! systemctl is-active --quiet \"$_unit\"; then")
+            a("      echo \"volume: runner $_rbase FAILED is-active after start — aborting\"; exit 1")
+            a("    fi")
+            a("  fi")
+            a("  echo \"volume: runner $_rbase relocated -> $_rtarget\"")
+            a("done")
+        else:
+            a("# relocate %s" % base)
+            a("if [ -L '%s' ] && [ -d '%s' ]; then" % (orig, target))
+            a("  echo 'volume: %s already relocated — skip'" % base)
+            a("elif [ -e '%s' ]; then" % orig)
+            a("  mkdir -p '%s'" % target)
+            a("  rsync -aHAX '%s/' '%s/'" % (orig, target))
+            a("  mv '%s' '%s.relocated-'\"$_vol_date\"" % (orig, orig))
+            a("  ln -s '%s' '%s'" % (target, orig))
+            a("  echo 'volume: %s relocated -> %s'" % (base, target))
+            a("else")
+            a("  echo 'volume: %s absent — skip'" % base)
+            a("fi")
+    return "\n".join(lines) + "\n"
+
+
+def _local_volume_decl(hosts=None, user=None):
+    """This box's `volume` declaration from cli_fleet.REMOTE_HOSTS, matched by
+    the invoking UNIX account (`user` == entry `user`; pw_name from the uid,
+    unspoofable — the #839 identity source), or None. Local `import cli_fleet`
+    keeps this module a pure leaf (no module-level coupling)."""
+    if hosts is None:
+        try:
+            import cli_fleet
+            hosts = cli_fleet.REMOTE_HOSTS
+        except Exception as e:  # noqa: BLE001
+            print("  volume: cli_fleet import failed (%r)" % e, file=sys.stderr)
+            return None
+    if user is None:
+        try:
+            import pwd
+            user = pwd.getpwuid(os.getuid()).pw_name
+        except Exception as e:  # noqa: BLE001
+            print("  volume: cannot resolve pw_name (%r)" % e, file=sys.stderr)
+            return None
+    for h in hosts:
+        if h.get("user") == user and isinstance(h.get("volume"), dict):
+            return h["volume"]
+    return None
+
+
+def _count_relocated(decl, islink=None, isdir=None, home=None):
+    """How many of `decl`'s relocate entries are already on the volume — a
+    symlinked generic dir (orig is a symlink AND its target dir exists), or a
+    gh-runner/docker whose target dir exists. Best-effort, for the status
+    row; `islink`/`isdir`/`home` are injectable for tests."""
+    islink = islink or os.path.islink
+    isdir = isdir or os.path.isdir
+    if home is None:
+        home = os.path.expanduser("~")
+    mount = decl.get("mount", "")
+    n = 0
+    for entry in decl.get("relocate", []):
+        if entry.startswith("~/"):
+            expanded = home + entry[1:]
+        elif entry == "~":
+            expanded = home
+        else:
+            expanded = entry
+        base = os.path.basename(expanded.rstrip("/"))
+        target = os.path.join(mount, base)
+        if expanded in ("/var/lib/docker", "/home/gh-runner"):
+            if isdir(target):
+                n += 1
+        elif islink(expanded) and isdir(target):
+            n += 1
+    return n
+
+
+def volume_status(decl=None, run=None):
+    """`volume: <mount> <used>/<size> (<n> relocated)` line for
+    `airuleset.py status` (or `volume: none (no declaration)` off a
+    volume box). Reads used/size via `df -h` on the mount."""
+    run = run or subprocess.run
+    if decl is None:
+        decl = _local_volume_decl()
+    if not decl:
+        return "volume: none (no declaration)"
+    mount = decl.get("mount", "?")
+    used = size = "?"
+    try:
+        r = run(["df", "-h", "--output=used,size", mount],
+                capture_output=True, text=True, timeout=10)
+        if getattr(r, "returncode", 1) == 0:
+            body = (getattr(r, "stdout", "") or "").strip().splitlines()
+            if len(body) >= 2:
+                parts = body[1].split()
+                if len(parts) >= 2:
+                    used, size = parts[0], parts[1]
+    except Exception as e:  # noqa: BLE001
+        print("  volume: df read failed (%r)" % e, file=sys.stderr)
+    n = _count_relocated(decl)
+    return "volume: %s %s/%s (%d relocated)" % (mount, used, size, n)
+
+
+def provision_volume(run=None, decl=None):
+    """Mount + relocate onto this box's declared volume. Idempotent (a
+    fully-relocated box → all no-op lines), sudo-`-n`-gated (a clear skip
+    line otherwise), non-fatal. No declaration → no-op skip. Returns a
+    status string for logging."""
+    run = run or subprocess.run
+    if decl is None:
+        decl = _local_volume_decl()
+    if not decl:
+        return "volume: no declaration — skip"
+    # sudo gate — never prompt.
+    try:
+        probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
+                    timeout=10)
+    except Exception as e:  # noqa: BLE001
+        return "volume: skipped — sudo probe error (%r)" % e
+    if getattr(probe, "returncode", 1) != 0:
+        return ("volume: skipped — sudo -n unavailable (mount %s + relocate "
+                "manually)" % decl.get("mount", "?"))
+    script = render_volume_setup_script(decl)
+    try:
+        r = run(["sudo", "-n", "bash", "-c", script],
+                capture_output=True, text=True, timeout=1800)
+    except Exception as e:  # noqa: BLE001
+        return "volume: FAILED (error: %r)" % e
+    if getattr(r, "returncode", 1) != 0:
+        return "volume: FAILED (rc=%s: %s)" % (
+            r.returncode, (getattr(r, "stderr", "") or "").strip()[:200])
+    return "volume: applied (%s)" % decl.get("mount", "?")
+
+
 def provision_owner_ignoreip(run=None, dest=None):
     """Install the owner break-glass ``ignoreip`` drop-in on the controller
     (#982). LOCAL-only via ``sudo`` — follows the ``_provision_shared_fleet_dir``
