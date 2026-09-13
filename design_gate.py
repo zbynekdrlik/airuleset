@@ -412,6 +412,60 @@ def issue_refs(text):
 
 
 # --------------------------------------------------------------------------- #
+# #1003 -- merge-commit awareness. A resync merge (`git merge origin/develop`)
+# produces a commit whose auto-generated message can carry a `#N` from the
+# integration branch's history (`Merge branch 'develop' into feat-3 (#6981)`),
+# but a merge introduces NO NEW DESIGN of its own -- so the design-before-code
+# gate must exempt it (the reported false block on odoo-erp #6981). PRIMARY,
+# un-forgeable signal: MERGE_HEAD exists (a real merge is in progress; the
+# `git commit` completes it). BELT signals (for the single-call
+# `git merge ... && git commit -m "Merge ..."` shape, where MERGE_HEAD is not
+# yet set when the PreToolUse hook fires on the whole compound): a `git merge`
+# subcommand in the command, or a canonical git merge-message. The message
+# belt is a documented forgery residual (a trusted-worker quality gate, not an
+# adversarial boundary); MERGE_HEAD is the load-bearing signal.
+# --------------------------------------------------------------------------- #
+
+_MERGE_MSG_RE = re.compile(
+    r"Merge\s+(?:branch|remote-tracking\s+branch|commit|tag)\b"
+    r"|Merge\s+origin/",
+    re.IGNORECASE)
+_GIT_MERGE_CMD_RE = re.compile(
+    r"(?:^|[;&|]|&&)\s*(?:sudo\s+|env\s+)?git\s+merge\b")
+
+
+def _merge_head_present(cwd):
+    """True iff a merge is in progress in `cwd` (`.git/MERGE_HEAD` exists).
+    Never raises; False on any failure (git missing, not a repo, no cwd)."""
+    if not cwd:
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            capture_output=True, text=True, timeout=8)
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
+def is_merge_commit_context(cmd, cwd):
+    """Heuristic: is this `git commit` completing a MERGE (which introduces no
+    new design)? Returns `(ok: bool, reason: str)`. PRIMARY = MERGE_HEAD in
+    `cwd`; BELT = a `git merge` invocation in the command, or a canonical
+    merge-message shape. A SHAPE/state check, same documented limitation as the
+    rest of this module: the message belt is forgeable (accepted residual, a
+    trusted-worker gate) -- MERGE_HEAD is the robust primary."""
+    text = cmd or ""
+    if _merge_head_present(cwd):
+        return True, "MERGE_HEAD present (merge in progress)"
+    if _GIT_MERGE_CMD_RE.search(text):
+        return True, "git merge invocation in the command"
+    if _MERGE_MSG_RE.search(text):
+        return True, "canonical git merge-message shape"
+    return False, "not a merge commit"
+
+
+# --------------------------------------------------------------------------- #
 # #206 -- an already-CLOSED issue reference no longer requires a design
 # marker. The same syntactic shapes (`#N`, `(#N)`, comma/slash-separated
 # lists) are used BOTH for "the ticket this commit is for" AND for a
