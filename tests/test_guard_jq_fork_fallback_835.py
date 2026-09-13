@@ -22,10 +22,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _exec_marker_helpers as em     # noqa: E402  (#1012 marker-path seam)
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "block-main-implementation.sh"
@@ -74,10 +78,10 @@ class GuardJqForkFallback835(unittest.TestCase):
         fj.chmod(0o755)
 
     def _marker(self, sid):
-        return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
+        return em.marker_ok(sid)
 
     def _pending(self, sid):
-        return Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+        return em.marker_pending(sid)
 
     def _run(self, fail_on):
         sid = "t-mg-jqfb-" + uuid.uuid4().hex[:10]
@@ -164,8 +168,7 @@ class ConsumerJqForkFallback835(unittest.TestCase):
         return env
 
     def _paths(self, sid):
-        return (Path("/tmp/airuleset-main-exec-ok-%s" % sid),
-                Path("/tmp/airuleset-main-exec-pending-%s" % sid))
+        return (em.marker_ok(sid), em.marker_pending(sid))
 
     def _arm(self, sid):
         m, p = self._paths(sid)

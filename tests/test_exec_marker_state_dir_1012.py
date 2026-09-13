@@ -29,7 +29,6 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "tests"))
 
 import watchdog as wd                       # noqa: E402
-import cli_remote                           # noqa: E402
 import _exec_marker_helpers as em           # noqa: E402
 
 BLOCK_HOOK = REPO / "hooks" / "block-main-implementation.sh"
@@ -69,6 +68,29 @@ class SweeperHonoursStateDir1012(unittest.TestCase):
                 named,
                 "the default (no tmp_dir) must sweep AIRULESET_MAIN_EXEC_STATE_DIR, "
                 "not the literal /tmp; logs=%r" % logs)
+
+    def test_662_style_run_never_sweeps_the_live_tmp(self):
+        # The incident probe as a REAL test: with the suite's seam active
+        # (conftest / push-gate test_env point it at a per-run dir), a
+        # synthetic-far-future `run_once`-style sweep must target the seam dir,
+        # NOT the LIVE /tmp — so a marker sitting in the real /tmp (a live
+        # session's granted one-shot) SURVIVES. RED before the fix: the default
+        # /tmp sweep deletes it. Safe: the non-dry sweep only touches the
+        # isolated seam dir; the /tmp probe is fresh (age 0) so the real 60s
+        # watchdog never reaps it either, and we remove it ourselves.
+        self.assertNotEqual(
+            em.exec_state_dir().rstrip("/"), "/tmp",
+            "the suite must isolate the marker dir off the live /tmp first")
+        probe = Path("/tmp") / ("airuleset-main-exec-ok-t-1012-probe-%s"
+                                % uuid.uuid4().hex[:10])
+        probe.write_text("a live session's deliberately granted one-shot")
+        self.addCleanup(lambda: probe.unlink(missing_ok=True))
+        wd.cleanup_stale_exec_markers(
+            time.time() + 10 * 86400, run=_no_panes, dry_run=False)
+        self.assertTrue(
+            probe.exists(),
+            "a synthetic-clock run_once sweep must NOT reach the live /tmp "
+            "marker family (the #1012 incident)")
 
     def test_explicit_tmp_dir_still_wins(self):
         # an explicit tmp_dir= caller (the Job 22 watchdog tests) is unaffected.
