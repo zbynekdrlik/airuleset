@@ -757,10 +757,20 @@ if airuleset_presence_is_away "${SESSION_ID:-unknown}"; then AWAY=1; fi
 # capturing jq's output on its own line first, only THEN piping it
 # through grep/tail (which is allowed to find nothing).
 GOAL_JQ_RC=0
-GOAL_JQ_OUT=$(jq -r '
-    if .type == "user" and (.message.content | type) == "string" then .message.content
-    elif .type == "system" and (.content | type) == "string" then .content
-    else empty end
+# #1013: read the transcript PER LINE (raw-input mode) with `fromjson? //
+# empty`, so ONE torn record — two JSON objects glued onto a single physical
+# line (the live controller line 78272; a Claude Code write torn by a cancel) —
+# is SKIPPED while every other line still contributes. In whole-value mode jq
+# aborts at the first unparsable record (rc 5), which made GOAL_JQ_RC != 0 ->
+# GOAL_UNKNOWN=1 -> the session failed CLOSED ("transcript read failed") for the
+# rest of its life. `fromjson?` swallows the torn record and keeps rc 0, so the
+# fail-closed path below fires ONLY for a genuinely unreadable file or a jq that
+# cannot run (unchanged) — the Python readers already parse per line this way.
+GOAL_JQ_OUT=$(jq -R -r '
+    fromjson? // empty
+    | if .type == "user" and (.message.content | type) == "string" then .message.content
+      elif .type == "system" and (.content | type) == "string" then .content
+      else empty end
 ' "$TRANSCRIPT" 2>/dev/null) || GOAL_JQ_RC=$?
 GOAL_MARK=$(printf '%s\n' "$GOAL_JQ_OUT" \
     | grep -oE '<local-command-stdout>Goal (set|cleared):' | tail -1 || true)
