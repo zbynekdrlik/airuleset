@@ -173,6 +173,33 @@ HEX_PAT = re.compile(r"[0-9a-fA-F]{40,}")
 # "TestProseViolationsAutoMergeSignals") — both tuned against this repo's
 # OWN doc/skill/test corpus (zero false positives at authoring time).
 B64_PAT = re.compile(r"(?=[A-Za-z0-9+]*[0-9])[A-Za-z0-9+]{32,}={0,2}")
+# #1003 -- high-confidence PREFIXED secret shapes. Checked FIRST in scan_line
+# so a real token stays blocked even on a line that also carries a git object
+# SHA (which HEX_PAT/B64_PAT below no longer flag). Every shape the owner
+# enumerated: GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_ + fine-grained
+# github_pat_), OpenAI/Anthropic sk-, AWS AKIA…, Slack xox[baprs]-, and a PEM
+# private-key header. These are unambiguous — a bare 40/64-hex SHA is not.
+SECRET_PREFIX_PAT = re.compile(
+    r"gh[oprsu]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|sk-[A-Za-z0-9_-]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+)
+# #1003 -- a bare hex RUN of exactly a git object-id length (40 = SHA-1,
+# 64 = SHA-256) is a commit/tree/blob SHA shape, not a credential (the
+# reported false positive: a fixture `head_sha` value). Only a BARE,
+# unassigned run of this exact length is treated as inert — an ASSIGNED
+# value (`key=<hex>`, caught by KV_PAT) and a prefixed real token (caught by
+# SECRET_PREFIX_PAT) still block. Accepted residual (owner's stated
+# trade-off): a genuine unassigned 40/64-hex secret reads as a SHA.
+_GIT_OBJECT_HEX_LENS = (40, 64)
+_ALL_HEX_RE = re.compile(r"[0-9a-fA-F]+$")
+
+
+def _is_git_object_sha(run):
+    return len(run) in _GIT_OBJECT_HEX_LENS and bool(_ALL_HEX_RE.match(run))
 
 PLACEHOLDER_RE = re.compile(
     r"^\$|^<|^\{\{|^YOUR_|EXAMPLE|CHANGEME|PLACEHOLDER|^TODO$|^FIXME$|^REDACTED$",
@@ -193,6 +220,11 @@ def is_placeholder(val):
 
 def scan_line(text):
     """Return a short violation description for one line, or None."""
+    # #1003 -- a prefixed real token is high-confidence; check it FIRST so it
+    # blocks even on a line that also carries a git object SHA below.
+    m = SECRET_PREFIX_PAT.search(text)
+    if m and not is_placeholder(m.group(0)):
+        return "high-confidence secret token prefix"
     m = SSHPASS_PAT.search(text)
     if m and not is_placeholder(m.group(2)):
         return "sshpass literal password"
@@ -202,11 +234,20 @@ def scan_line(text):
         val = val_m.group(2) if val_m else ""
         if not is_placeholder(val):
             return "literal " + m.group(1).lower() + " value"
-    m = HEX_PAT.search(text)
-    if m and not is_placeholder(m.group(0)):
+    # #1003 -- iterate every hex run (not just the first) so a git object SHA
+    # is skipped WITHOUT masking a genuine hex blob later on the same line.
+    for m in HEX_PAT.finditer(text):
+        run = m.group(0)
+        if is_placeholder(run) or _is_git_object_sha(run):
+            continue
         return "40+ char hex blob (possible key/token)"
-    m = B64_PAT.search(text)
-    if m and not is_placeholder(m.group(0)):
+    # #1003 -- a bare hex run reaches B64_PAT too (hex ⊂ base64 chars); skip a
+    # git object-id-length hex run here for the same reason, but keep scanning
+    # so a real base64 secret elsewhere on the line still blocks.
+    for m in B64_PAT.finditer(text):
+        run = m.group(0)
+        if is_placeholder(run) or _is_git_object_sha(run):
+            continue
         return "32+ char high-entropy blob (possible secret)"
     return None
 
