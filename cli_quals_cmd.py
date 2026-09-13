@@ -85,7 +85,7 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       unpark_numbers=None, tacit_wait_numbers=None,
                       tacit_close_numbers=None, converge_numbers=None,
                       no_target_numbers=None, deploy_target_numbers=None,
-                      dep_wait_map=None):
+                      dep_wait_map=None, released_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -167,12 +167,21 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     no_target_numbers = no_target_numbers or set()
     deploy_target_numbers = deploy_target_numbers or set()
     dep_wait_map = dep_wait_map or {}
+    released_numbers = released_numbers or set()
     for n in sorted(rows, key=lambda k: _row_sort_key(rows, k)):
         row = rows[n]
-        # #993 item 7: a dep-wait row reads `dep-wait:<blocking refs>` in the
-        # action column — the picker's mechanical dependency-awareness (it STAYS
-        # in the I count, but is excluded from dispatchable candidates).
-        if n in dep_wait_map:
+        # #1009: a merged+released row reads `released` in the action column —
+        # DONE for the stream (release/close are the gk's), surfaced so a stream
+        # misroute is visible; it is NEVER in the workable/dispatchable set (it
+        # left `unhandled` via the truthy `handed=="released"`), so the picker,
+        # which gates on `--count-dispatchable` (workable ∧ ¬dep-wait), can never
+        # select it. Consistent with the action-column convention core-quals uses
+        # (action-only / implement / dep-wait:). Checked FIRST so it wins over a
+        # dep annotation. #993 item 7: a dep-wait row reads `dep-wait:<refs>` —
+        # in the I count but excluded from dispatchable candidates.
+        if n in released_numbers:
+            action = "released"
+        elif n in dep_wait_map:
             action = "dep-wait:" + ",".join(dep_wait_map[n])
         else:
             action = _row_action(row, own_stream)
@@ -801,7 +810,19 @@ def cmd_slice_quals(args):
         # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
         workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
-    unhandled = _apply_role_filter(unhandled, root, getattr(args, "role", None))  # #993 r2b (default None = byte-identical)
+    # #1008: role-filter the WHOLE partition (I/U/W), not just the workable
+    # `unhandled` — `--waiting` (U) and `--ops-wait` (W) must obey the window
+    # role exactly like the footer's `_role_filter_footer` already does, so the
+    # gk review window's `slice-quals --ops-wait` stops showing infra members.
+    # ONE filter (`_apply_role_filter`), the `slug` already resolved above
+    # reused ×3 (#998 optimisation). role None = no-op (byte-identical to
+    # before, no slug touch); an empty slug fail-CLOSES on the first call (the
+    # #993 r2b stop-proof contract), never a silent mis-slice.
+    role = getattr(args, "role", None)  # #993 r2b / #1008
+    if role in ("review", "infra"):
+        unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
+        waiting = _apply_role_filter(waiting, root, role, slug=slug)
+        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
         # (external event/evidence) so they are distinguishable in the listing.
@@ -880,9 +901,22 @@ def cmd_slice_quals(args):
         _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
         _print_audit_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
         return
-    # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7).
+    # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7),
+    # THEN the merged+released rows tagged `released` (#1009) — DONE for the
+    # stream (release/close are the gk's), out of the workable `--count`/I but
+    # surfaced so a stream misroute is visible. They left `unhandled` via the
+    # truthy `handed=="released"`, and the picker gates on `--count-dispatchable`
+    # (workable ∧ ¬dep-wait), so a released row can never be selected. Printed as
+    # a trailing block, not interleaved, so the workable candidates read first.
     _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
+    released_rows = {n: workable_rows[n] for n in workable_rows
+                     if handed.get(n) == "released"}
+    if released_rows and role in ("review", "infra"):
+        released_rows = _apply_role_filter(released_rows, root, role, slug=slug)
+    if released_rows:
+        _print_issue_rows(released_rows, own_stream=user,
+                          released_numbers=set(released_rows))
 
 
 def _slice_quals_runner(root):
@@ -1125,7 +1159,18 @@ def cmd_core_quals(args):
         # approval, never dispatchable-now I). Pure label partition; the question
         # map is read only on the on-demand `--waiting` display path (#370).
         workable, waiting, ops_wait = airuleset._partition_workable(seen)
-    workable = _apply_role_filter(workable, root, getattr(args, "role", None))  # #993 r2b (default None = byte-identical)
+    # #1008: role-filter the WHOLE partition (I/U/W), not just workable — so
+    # `--waiting` (U) and `--ops-wait` (W) obey the window role like the footer's
+    # `_role_filter_footer` already does (the gk review window's `core-quals
+    # --ops-wait` was showing infra members). ONE filter, ONE slug resolved once
+    # and reused ×3 (#998 optimisation). role None = no-op (byte-identical, no
+    # slug touch); an empty slug fail-CLOSES on the first call (#993 r2b).
+    role = getattr(args, "role", None)  # #993 r2b / #1008
+    if role in ("review", "infra"):
+        slug = airuleset._repo_slug(cwd=root)   # resolved once, reused ×3
+        workable = _apply_role_filter(workable, root, role, slug=slug)
+        waiting = _apply_role_filter(waiting, root, role, slug=slug)
+        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:

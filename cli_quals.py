@@ -20,6 +20,7 @@ re-exports every name here via its facade.
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -2342,6 +2343,99 @@ def _last_origin_owner(numbers, cwd=None):
     return owners
 
 
+# --------------------------------------------------------------------------- #
+# #1009 — the merged+released END STATE. After a stream PR merges into develop,
+# the odoo-erp Sub-dev Handoff Gate re-runs from `main` on the `issues` event
+# and STRIPS `ready-for-review`; GitHub does NOT auto-close (merge went to
+# develop, not the default branch), so the ticket stays OPEN with no hand-off
+# label and `_slice_mine_and_handed`'s label/timeline logic returns it to the
+# stream's workable `I` — although the stream's authority ended at the develop
+# merge (release + close are the gk's). These two helpers detect the DONE state
+# at the cause: the ticket's stream PR is MERGED and its merge commit is an
+# ancestor of `origin/main` — the SAME `git merge-base --is-ancestor <merge>
+# origin/main` predicate goal_registry's /goal release proof uses. The result
+# folds into `handed` as the distinct truthy state `"released"` (never a new
+# label — the ticket forbids it, and depending on a foreign workflow's labels is
+# what caused this bug). Fail-safe: any gh/git error, missing slug/stream, or an
+# unfetched merge commit → NOT released → the ticket simply stays in `I` (the
+# never-falsely-done direction).
+# --------------------------------------------------------------------------- #
+
+def _commit_is_released(oid, root):
+    """True IFF commit `oid` is an ancestor of `origin/main` in the repo at
+    `root` — the /goal release proof's own predicate. Fail-safe False (a git
+    error, an unfetched/unknown commit, or a missing origin/main → 'not
+    released')."""
+    if not oid or not root:
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor",
+             str(oid), "origin/main"],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
+def _released_stream_numbers(candidates, root, slug, stream):
+    """The subset of `candidates` (ticket numbers) whose stream PR is MERGED and
+    RELEASED. A batched `gh pr list --state merged --search head:<stream>/` per
+    stream-name equivalent (NOT one gh call per candidate — `_slice_mine_and_
+    handed` runs on the footer's hot refresh path) that returns every recent
+    merged stream-branch PR + its merge commit, then a LOCAL `git merge-base
+    --is-ancestor` per matched candidate. A PR is matched to a candidate by its
+    head branch prefix `<eq>/<N>-` (re-checked in Python, since a `head:` search
+    may over-match).
+
+    `stream` is EXPANDED via `_stream_rename_equivalents()` (#537) — the SAME
+    alias primitive every other stream-identity consumer uses (`_slice_quals`,
+    `_ticket_is_stream_labeled`) — because the in-progress base-stream rename
+    means a ticket's immutable PR branch may carry EITHER the old or the new
+    stream name (montalu↔montalu1, david↔david1, simap↔simap1 — exactly the
+    incident streams). A non-renamed stream expands to just `[stream]`, so its
+    cost is unchanged (ONE gh call). Fail-safe EMPTY set (gh/git error, missing
+    slug/stream, or no candidate → nothing marked released → every candidate
+    stays in `I`)."""
+    import airuleset
+    want = {n for n in (candidates or [])}
+    if not slug or not stream or not want:
+        return set()
+    equivs = _stream_rename_equivalents(stream)
+    prs = []
+    for eq in equivs:
+        raw = airuleset._gh_out(
+            "pr", "list", "--state", "merged",
+            "--search", "head:%s/" % eq,
+            "--json", "number,mergeCommit,headRefName", "-L", "100",
+            cwd=root, timeout=20)
+        try:
+            part = json.loads(raw)
+        except (ValueError, TypeError):
+            part = []
+        if isinstance(part, list):
+            prs.extend(part)
+    num_res = [re.compile(re.escape(eq + "/") + r"(\d+)(?:-|$)") for eq in equivs]
+    released = set()
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        head = str(pr.get("headRefName") or "")
+        n_num = None
+        for rx in num_res:
+            mm = rx.match(head)
+            if mm:
+                n_num = int(mm.group(1))
+                break
+        if n_num is None or n_num not in want or n_num in released:
+            continue
+        mc = pr.get("mergeCommit")
+        oid = mc.get("oid") if isinstance(mc, dict) else None
+        if oid and _commit_is_released(oid, root):
+            released.add(n_num)
+    return released
+
+
 def _slice_mine_and_handed(quals, root, slug, extra=None):
     """`(rows, handed, failed)` for a reduced-authority stream's OWN ticket
     slice — the ONE shared derivation `cmd_tickets_status`'s footer AND
@@ -2536,7 +2630,25 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
             (n_num for n_num in rows
              if not handed.get(n_num) and n_num not in processed_numbers),
             reverse=True)
-        for n_num in unhandled_candidates[:airuleset._HANDOFF_COMMENT_CHECK_LIMIT]:
+        walk = unhandled_candidates[:airuleset._HANDOFF_COMMENT_CHECK_LIMIT]
+        # #1009: FIRST detect the merged+released DONE state for the same
+        # candidate set (excluding a bounce — gk returned it for rework, the
+        # stream's own court, so hand-off states stay untouched). ONE batched
+        # `gh pr list` for the whole set (never per-candidate on this hot path).
+        # A released ticket is folded into `handed` as the distinct truthy state
+        # "released" so it leaves `I` in BOTH the footer and slice-quals (every
+        # consumer uses a truthy `handed` check) and counts in `gk`; the
+        # `continue` below also SAVES its timeline fetch.
+        try:
+            stream = airuleset._current_user()
+        except Exception:
+            stream = ""
+        released = _released_stream_numbers(
+            [n for n in walk if n not in bounce_numbers], root, slug, stream)
+        for n_num in walk:
+            if n_num in released:
+                handed[n_num] = "released"
+                continue
             raw = airuleset._gh_out("api",
                           "repos/%s/issues/%d/timeline?per_page=100" % (slug, n_num),
                           cwd=root, timeout=20)
