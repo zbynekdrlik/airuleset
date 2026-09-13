@@ -1177,6 +1177,35 @@ def volume_status(decl=None, run=None):
     return "volume: %s %s/%s (%d relocated)" % (mount, used, size, n)
 
 
+def volume_install_status(decl=None, run=None, islink=None, isdir=None,
+                          home=None):
+    """The install-time volume line (#999 MAIN REVIEW blocker). `install` is
+    idempotent CONFIGURATION and NEVER moves data or stops services — this
+    PRINTS state/plan, it NEVER runs the relocation. Cases:
+
+      * no declaration           -> `volume: none (no declaration)`
+      * declared, not yet applied -> `volume: declared, not applied — run:
+                                      python3 airuleset.py volume --apply`
+      * fully applied            -> the normal `volume_status` row.
+
+    PURE: only READS state (a `df` via `run` for the applied row, path stat via
+    islink/isdir for the relocated count) — never `sudo`/`bash`/`mount`/`rsync`/
+    `systemctl stop`. The actual mount + relocation is the EXPLICIT operator
+    command `airuleset.py volume --apply` (see cmd_volume / provision_volume),
+    run by the gk-infra window with the owner present (odoo-erp#6989)."""
+    if decl is None:
+        decl = _local_volume_decl()
+    if not decl:
+        return "volume: none (no declaration)"
+    relocate = decl.get("relocate", [])
+    done = _count_relocated(decl, islink=islink, isdir=isdir, home=home)
+    if done >= len(relocate):
+        # fully applied (or a mount-only decl with nothing to relocate).
+        return volume_status(decl=decl, run=run)
+    return ("volume: declared, not applied — run: "
+            "python3 airuleset.py volume --apply")
+
+
 def provision_volume(run=None, decl=None):
     """Mount + relocate onto this box's declared volume. Idempotent (a
     fully-relocated box → all no-op lines), sudo-`-n`-gated (a clear skip

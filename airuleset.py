@@ -1475,25 +1475,32 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ufw ssh error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3b-quinque-quater-pre. Managed volume (#999): a box with a `volume`
-    # declaration (gk-vol1 on the gatekeeper box) mounts the attached Hetzner
-    # volume by-id (fstab `nofail`) and RELOCATES the near-full root disk's big
-    # tenants (runners, docker data-root, ~/.cache) onto it to FREE local
-    # space. Runs BEFORE the swap step so the freed space is available when
-    # swap computes its target. Idempotent, sudo-`-n`-gated, non-fatal; a box
-    # with no `volume` key is a no-op skip line. ---
+    # --- 3b-quinque-quater-pre. Managed volume (#999): install is idempotent
+    # CONFIGURATION and NEVER moves data or stops services — it PRINTS a
+    # status/plan line only. A box with a `volume` declaration (gk-vol1 on the
+    # gatekeeper box) that is not yet applied prints the explicit-command
+    # pointer; a fully-applied box prints the normal status row; a box with no
+    # `volume` key prints a no-op line. The actual mount + relocation (which
+    # stops runners one at a time and moves the docker data-root) is the
+    # EXPLICIT operator command `python3 airuleset.py volume --apply`, run by
+    # the gk-infra window with the owner present (odoo-erp#6989). MAIN REVIEW
+    # blocker 2026-09-13: calling provision_volume unconditionally here would
+    # relocate unattended on a fleet install — forbidden ("NIKDY NESMIE
+    # MAINTENANCE POSKODIT beziacu robotu"). ---
     try:
-        from cli_disk_guard_root import provision_volume
-        print(f"  {provision_volume()}")
+        from cli_disk_guard_root import volume_install_status
+        print(f"  {volume_install_status()}")
     except Exception as e:
-        print(f"  volume provisioning error (non-fatal): {e}", file=sys.stderr)
+        print(f"  volume status error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
     # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
     # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
     # provisioning step rather than a manual intervention. Runs AFTER the
-    # volume step (#999) so its free-space guard sees the space relocation
-    # freed. ---
+    # volume STATUS line (#999); the actual relocation that frees space is the
+    # explicit `volume --apply` operator step, so once that has been run swap's
+    # free-space guard sees the freed space when it computes its target. The
+    # swap step stops NO service, so it stays in install. ---
     try:
         from cli_disk_guard_root import provision_swap
         print(f"  {provision_swap()}")
@@ -8913,6 +8920,24 @@ def main():
     p_nudges.add_argument("--fleet", action="store_true",
                           help="Run the verb on every non-paused box via ssh")
 
+    # #999: the EXPLICIT operator command for the managed volume step. install
+    # NEVER relocates (idempotent config only); this is the only path that
+    # mounts + relocates. --plan (default) is a dry-run; --apply executes.
+    p_vol = sub.add_parser(
+        "volume",
+        help="#999: EXPLICIT operator command for the managed volume step "
+             "(mount by-id + relocate runners/docker/cache onto the volume). "
+             "install NEVER relocates; this is the only path that does. "
+             "--plan (default) = dry-run plan; --apply = execute via sudo -n.")
+    vol_mode = p_vol.add_mutually_exclusive_group()
+    vol_mode.add_argument("--plan", dest="apply", action="store_false",
+                          help="print declaration + state + rendered script; "
+                               "execute NOTHING (default)")
+    vol_mode.add_argument("--apply", dest="apply", action="store_true",
+                          help="run the mount + relocation via sudo -n "
+                               "(gk-infra window, owner present)")
+    p_vol.set_defaults(apply=False)
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -9122,6 +9147,73 @@ def cmd_nudges(args):
     return 0
 
 
+def cmd_volume(args, run=None, decl=None):
+    """#999 — the EXPLICIT operator command for the managed `volume` step.
+    `install` NEVER relocates (idempotent configuration only — MAIN REVIEW
+    blocker 2026-09-13); the mount + relocation (which stops runners ONE AT A
+    TIME and moves the docker data-root) runs ONLY here, deliberately, by the
+    gk-infra window with the owner present (odoo-erp#6989).
+
+    `--plan` (default): print this box's declaration, current state (findmnt +
+    which relocate entries are already on the volume) and the rendered script —
+    executes NOTHING. `--apply`: run provision_volume (sudo -n; refuses
+    without a declaration; the rendered script prints each phase line).
+
+    `run`/`decl` are injectable for tests (dispatch passes neither, so decl is
+    resolved from cli_fleet.REMOTE_HOSTS for the invoking UNIX account)."""
+    import subprocess
+    from cli_disk_guard_root import (
+        _count_relocated, _local_volume_decl, provision_volume,
+        render_volume_setup_script, volume_status)
+    run = run or subprocess.run
+    if decl is None:
+        decl = _local_volume_decl()
+    apply = getattr(args, "apply", False)
+    if not decl:
+        print("volume: no declaration for this box — nothing to plan or apply.")
+        print("  (a `volume` key in cli_fleet.REMOTE_HOSTS for this UNIX "
+              "account declares one; only the gatekeeper box carries gk-vol1.)")
+        # --apply with no declaration is a REFUSAL (non-zero); --plan is a
+        # clean no-op.
+        return 1 if apply else 0
+    mount = decl.get("mount", "?")
+    if apply:
+        # EXPLICIT relocation — stops runners ONE AT A TIME, moves the docker
+        # data-root. provision_volume is sudo-`-n`-gated and the rendered
+        # script prints its own per-phase result lines.
+        print("volume --apply: relocating onto %s (declared relocate: %s)"
+              % (mount, ", ".join(decl.get("relocate", [])) or "(none)"))
+        msg = provision_volume(run=run, decl=decl)
+        print(f"  {msg}")
+        return 1 if "FAILED" in msg else 0
+    # --plan (default): declaration + state + rendered script; execute NOTHING.
+    print("volume --plan (dry run — executes NOTHING; to apply run "
+          "`python3 airuleset.py volume --apply`)")
+    print(f"  device  : /dev/disk/by-id/{decl.get('by_id', '?')}")
+    print(f"  mount   : {mount}")
+    print("  relocate:")
+    for e in decl.get("relocate", []) or ["(none)"]:
+        print(f"    - {e}")
+    # findmnt state of the mount (read-only).
+    mounted = False
+    try:
+        fm = run(["findmnt", "-n", mount], capture_output=True, text=True,
+                 timeout=10)
+        mounted = getattr(fm, "returncode", 1) == 0
+    except Exception as e:  # noqa: BLE001
+        print(f"  (findmnt read failed: {e!r})")
+    print("  mounted : %s" % ("yes" if mounted
+                              else "no (fstab nofail — apply will mount)"))
+    done = _count_relocated(decl)
+    total = len(decl.get("relocate", []))
+    print(f"  state   : {volume_status(decl=decl, run=run)} "
+          f"({done}/{total} relocate entries already on the volume)")
+    print("--- rendered script (would run under `sudo -n bash -c` on --apply) "
+          "---")
+    print(render_volume_setup_script(decl))
+    return 0
+
+
 # Command dispatch table (module-level so tests can assert registration).
 SUBCOMMANDS = {
     "install": cmd_install,
@@ -9172,6 +9264,7 @@ SUBCOMMANDS = {
     "mdreview-audit": cmd_mdreview_audit,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
+    "volume": cmd_volume,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
