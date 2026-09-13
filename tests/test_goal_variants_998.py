@@ -165,9 +165,12 @@ class TestReviewRoleVariant1000(TestCase):
         # `core-quals --role review --count`, not the bare `core-quals --count`)
         self.assertNotIn("core-quals --count`", line)
 
-    def test_review_variant_keeps_other_clauses_byte_identical(self):
+    def test_review_variant_keeps_other_clauses_present_verbatim(self):
         # every NON-(B) clause the full/parallel template carries appears
-        # VERBATIM in the review render (proving I reworded none of them).
+        # VERBATIM in the review render — this catches a DROPPED clause; a
+        # REWORD (which moves both the live clause text and the render together)
+        # is caught instead by the 9-variant sha snapshot + goal-inventory
+        # --check drift lock (#1000 F6: honest about what this test proves).
         line = self._review()
         for cid in ("header", "stop-a", "irreversible", "work-intro",
                     "saturation-core", "saturation-delivery", "prod-gate",
@@ -211,6 +214,23 @@ class TestReviewRoleVariant1000(TestCase):
                                      "%s/%s leaked review marker %r" % (a, m, tok))
             self.assertNotIn("REVIEW ROLE",
                              gr.render_goal_line(a, "sequential", "infra"))
+
+    def test_review_role_is_gk_full_only(self):
+        # #1000 F5 — the review block hardcodes full-authority gk semantics, so
+        # a reduced-authority review render is refused (never silently emits gk
+        # clauses into a branch-merge/fork-no-merge goal).
+        for a in ("branch-merge", "fork-no-merge"):
+            with self.assertRaises(ValueError):
+                gr.render_goal_line(a, "parallel", "review")
+
+    def test_variant_check_locks_the_review_variant_budget(self):
+        # #1000 F1 — goal-inventory --check / variant_check must guard the
+        # tightest-arming (review) variant's budget + no-turn-cap even though it
+        # is not in variant_specs. variant_check renders it; a clean run proves
+        # it is under the cap and carries no turn cap.
+        self.assertEqual(gr.variant_check(), [])
+        line = gr.render_goal_line("full", "parallel", "review")
+        self.assertLessEqual(len(line), gr.GOAL_ARM_CHAR_CAP)
 
     def test_goal_template_for_review_window_uses_the_variant(self):
         # a pane resolved to (parallel, review) arms the RENDERED review variant.
