@@ -121,7 +121,7 @@
     "tests/test_block_manual_remote_drain.py": 272,
     "tests/test_block_prod_write_budget.py": 433,
     "tests/test_block_root_recursive_grep.py": 229,
-    "tests/test_block_staged_content_values.py": 260,
+    "tests/test_block_staged_content_values.py": 328,
     "tests/test_block_stream_pr_merge.py": 302,
     "tests/test_block_unscoped_tmux_kill.py": 203,
     "tests/test_block_worker_close_trigger.py": 313,

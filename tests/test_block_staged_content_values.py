@@ -258,3 +258,71 @@ class TestBlockReasonOnStderr(SecretScanTestCase):
         r = self._run('git commit -m "add playbook notes"')
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("SKILL.md", r.stderr)
+
+
+# The secret-shaped literals below are built by concatenation so no single
+# physical line of THIS test file carries a 40+/32+ contiguous run — the
+# scanner never trips on committing this test file itself, and no bypass
+# token is needed (the #1003 principle: a bypass is a finding, not a path).
+_SHA1 = "71266e05aa11bb22cc33" + "dd44ee55ff6600778899"                       # 40 hex (SHA-1)
+_SHA256 = ("71266e05aa11bb22" + "cc33dd44ee55ff66"
+           + "0011223344556677" + "8899aabbccddeeff")                        # 64 hex (SHA-256)
+_HEX50 = "71266e05aa11bb22cc33" + "dd44ee55ff6600778899" + "aabbccddee"       # 50 hex (not a SHA len)
+_GHP = "ghp_" + "A1b2C3d4E5f6G7h8I9j0" + "K1l2M3n4o5"                         # GitHub token shape
+_PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
+
+
+class TestShaNotSecret1003(SecretScanTestCase):
+    """#1003 — a bare 40/64-hex git object SHA (a fixture `head_sha`) is a
+    hash shape, not a credential; it must NOT be flagged. Every real secret
+    shape the owner named (ghp_/sk-/AWS/Slack/PEM, and any assigned `key=`
+    value) still blocks, even in the SAME fixture file."""
+
+    def test_bare_sha1_in_json_fixture_is_allowed(self):
+        self._write("scripts/gk/tests/fixtures/head.json",
+                    '{\n  "head_sha": "' + _SHA1 + '"\n}\n')
+        r = self._run("git add scripts/gk/tests/fixtures/head.json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_bare_sha256_in_json_fixture_is_allowed(self):
+        self._write("tests/data/fixtures/tree.json",
+                    '{\n  "tree_sha": "' + _SHA256 + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/tree.json")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_real_ghp_token_still_blocked(self):
+        self._write("tests/data/fixtures/creds.json",
+                    '{\n  "pat": "' + _GHP + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/creds.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_pem_private_key_still_blocked(self):
+        self._write("tests/data/fixtures/id.json",
+                    '{\n  "key": "' + _PEM + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/id.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_sha_and_real_token_in_same_file_still_blocked(self):
+        # The exact #1003 lock: the SHA no longer trips, but a real token on
+        # another line of the SAME file must still block the commit.
+        self._write("tests/data/fixtures/mixed.json",
+                    '{\n  "head_sha": "' + _SHA1 + '",\n'
+                    '  "pat": "' + _GHP + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/mixed.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_non_sha_length_hex_still_blocked(self):
+        # A hex run that is NOT a git object-id length (40/64) is not a SHA
+        # shape — it stays flagged, so the exemption is not over-wide.
+        self._write("tests/data/fixtures/blob.json",
+                    '{\n  "blob": "' + _HEX50 + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/blob.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_assigned_sha_length_value_still_blocks_via_kv(self):
+        # A SHA-LENGTH value ASSIGNED to a secret key (api_key=) is still a
+        # credential shape and blocks via the KV gate, which runs first.
+        self._write("tests/data/fixtures/assigned.txt",
+                    'api_key="' + _SHA1 + '"\n')
+        r = self._run("git add tests/data/fixtures/assigned.txt")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
