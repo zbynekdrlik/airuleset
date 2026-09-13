@@ -326,3 +326,24 @@ class TestShaNotSecret1003(SecretScanTestCase):
                     'api_key="' + _SHA1 + '"\n')
         r = self._run("git add tests/data/fixtures/assigned.txt")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_json_token_key_40hex_still_blocks(self):
+        # review F1: a classic 40-hex GitHub PAT under a JSON `"token":` key —
+        # KV_PAT misses the JSON-key shape (quote before the colon), so the
+        # context-aware SHA check must still block it (a secret-context key).
+        self._write("tests/data/fixtures/tok.json",
+                    '{\n  "token": "' + _SHA1 + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/tok.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_json_api_key_64hex_still_blocks(self):
+        self._write("tests/data/fixtures/apk.json",
+                    '{\n  "api_key": "' + _SHA256 + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/apk.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_json_pat_key_40hex_still_blocks(self):
+        self._write("tests/data/fixtures/p.json",
+                    '{\n  "pat": "' + _SHA1 + '"\n}\n')
+        r = self._run("git add tests/data/fixtures/p.json")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)

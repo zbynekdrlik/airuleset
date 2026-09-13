@@ -251,7 +251,13 @@ def count_bypass_tokens(commits):
     """Pure: count airuleset bypass tokens (airuleset:<kebab>-ok) in merged
     commit messages. `commits` is the GitHub commits-API list shape. Returns
     ``{"per_day": {YYYY-MM-DD: n}, "per_kind": {token: n}, "total": n}`` --
-    days/kinds with zero hits are simply absent."""
+    days/kinds with zero hits are simply absent.
+
+    Accepted caveat (review F4): a commit that merely DOCUMENTS the token
+    syntax (a doctrine/hook-comment edit mentioning `airuleset:secret-ok`) is
+    counted too. Over-counting is the CONSERVATIVE direction for a trend metric
+    -- it surfaces more for human review and never HIDES a real bypass -- and
+    this view is observability only, never a gate."""
     per_day, per_kind, total = {}, {}, 0
     for c in commits or []:
         if not isinstance(c, dict):

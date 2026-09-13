@@ -310,6 +310,11 @@ for tf in test_files:
         # (it rode in via `git merge origin/develop`, not this push), so a
         # sanctioned merged-in test.skip() is not re-flagged. A line the
         # branch GENUINELY introduces is not on the destination, so it stays.
+        # Accepted residual (review F3): `dest` is EVERY stripped line of the
+        # destination file, so a genuinely-new banned line the branch adds that
+        # is BYTE-IDENTICAL to some existing destination line is also dropped --
+        # only reachable when the new skip is a verbatim copy of an already-
+        # sanctioned one, which is itself already blessed on the destination.
         kept = []
         for ln in added_lines:
             if dest and ln.strip() in dest:

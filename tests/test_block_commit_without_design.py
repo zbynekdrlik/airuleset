@@ -720,6 +720,32 @@ class TestMergeCommitExempt1003(_Base):
             'git commit -m "docs: how the merge branch logic works (#123)"')
         self.assertEqual(r2.returncode, 2, r2.stderr)
 
+    def test_fix_message_naming_merge_origin_still_blocks(self):
+        # review F2: an ordinary fix message that mid-sentence names
+        # "merge origin/main" is NOT a merge context (no -m "Merge …", no real
+        # `git merge` command, no MERGE_HEAD) and must still block.
+        r = self.run_hook(
+            'git commit -m "fix: correctly merge origin/main into feature (#456)"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("456", r.stderr)
+
+    def test_git_merge_only_inside_a_quoted_message_still_blocks(self):
+        # review F2: a `git merge` / `&& git merge` appearing ONLY inside the
+        # quoted -m message body is not a real command and must not exempt.
+        r = self.run_hook(
+            'git commit -m "fix: handle a && git merge b in the script (#123)"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        r2 = self.run_hook(
+            'git commit -m "fix bug; git merge helper doc (#99)"')
+        self.assertEqual(r2.returncode, 2, r2.stderr)
+
+    def test_fix_message_quoting_merge_branch_still_blocks(self):
+        # review F2: a fix message that quotes "merge branch 'develop'" mid-text
+        # (not at the -m message start) is not the canonical auto-merge message.
+        r = self.run_hook(
+            "git commit -m \"fix: resolve merge branch 'develop' note (#88)\"")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
 
 if __name__ == "__main__":
     main()
