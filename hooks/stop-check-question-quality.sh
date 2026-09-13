@@ -388,6 +388,30 @@ BLOCK=$(printf '%s\n' "$MSG" | LC_ALL=C awk -v m="$N" '
         print blk
     }')
 
+# --- #1006 (montalu, repeated escalation 2026-09-12): ONE ❓ block = ONE
+# client text. A ❓ approval block that bundled TWO client-message drafts
+# (Text úloha 638 + Text úloha 881, each signed `ZbynekAI`) with ONE decision
+# line passed the gate — Check 2 catches a (1)/(2) multi-QUESTION pile, never
+# multiple client TEXTS. Owner rule: JEDNA otázka = JEDEN klientsky text —
+# queue the rest. Deterministic detectors on the delivered BLOCK (any signal
+# >= 2 ⇒ bundle): >=2 `ZbynekAI` signatures (each proposed reply is signed
+# once — the client's own quoted message is never signed ZbynekAI), >=2
+# `Text úloha`/`Text pre`-style draft headers, or >=2 `❓ (NEEDS YOU|ASKED)`
+# decision markers. Runs BEFORE the present-user bypass (like the #740
+# repeat-block) so a bundled block is caught even when the owner is present in
+# the webterm — the exact montalu shape that slipped through. exit 2 + the
+# split instruction; RETRY_FILE cap like the shape checks so it never wedges.
+if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    N_SIG=$(grep -cE 'ZbynekAI' <<<"$BLOCK" || true)
+    N_TEXTHDR=$(LC_ALL=C.UTF-8 grep -cE '^[[:space:]]*\**[[:space:]]*Text[[:space:]]+([úu]loh|pre[[:space:]]|pro[[:space:]]|[0-9])' <<<"$BLOCK" || true)
+    N_DEC=$(grep -cE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)' <<<"$BLOCK" || true)
+    if [ "${N_SIG:-0}" -ge 2 ] || [ "${N_TEXTHDR:-0}" -ge 2 ] || [ "${N_DEC:-0}" -ge 2 ]; then
+        echo "$((RETRIES+1))" > "$RETRY_FILE"
+        printf '%s\n' "Tvoj ❓ blok bundluje VIAC než jeden klientsky text / rozhodnutie (podpisy ZbynekAI: ${N_SIG:-0}, „Text …\" hlavičky: ${N_TEXTHDR:-0}, ❓ rozhodnutia: ${N_DEC:-0}). Owner pravidlo: JEDNA otázka = JEDEN klientsky text — pošli PRVÝ teraz vo vlastnom bloku, zvyšné ZARAĎ DO FRONTY (na ich ticketoch, label needs-answer) a spýtaj sa až po odpovedi. Rodinné batchovanie (#755) zoskupuje TIKETY deklaratívne, NIKDY viac klientskych textov v jednom bloku (#1006)." >&2
+        exit 2
+    fi
+fi
+
 # PRESENT USER → no shape enforcement. The template exists for the AWAY
 # user's phone ping (zero context, cold read). When the user typed a REAL
 # prompt within the last 10 min they are AT the terminal, mid-conversation —
