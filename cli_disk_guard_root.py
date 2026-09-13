@@ -1021,6 +1021,10 @@ def render_volume_setup_script(decl, home=None, root=""):
             a("  elif [ \"${_running:-0}\" != '0' ]; then")
             a("    echo \"volume: docker relocation SKIPPED — ${_running} container(s) running\"")
             a("  else")
+            # recovery trap: if the migration dies after stopping docker but
+            # before the restart, bring docker back so running work is never
+            # left down (cleared once the restart has completed).
+            a("    trap 'echo \"volume: docker relocation FAILED mid-flight — restarting docker to protect running work\"; systemctl start docker.socket docker.service 2>/dev/null || true' EXIT")
             # stop docker.socket BEFORE docker.service — a listening socket
             # socket-activates (restarts) docker mid-rsync if any client
             # touches it, corrupting the copy.
@@ -1042,12 +1046,17 @@ def render_volume_setup_script(decl, home=None, root=""):
             a("PYEOF")
             a("    mv '%s' '%s.relocated-'\"$_vol_date\"" % (orig, orig))
             a("    systemctl restart docker.socket docker.service")
+            a("    trap - EXIT")
             a("    echo 'volume: docker data-root -> %s'" % target)
             a("  fi")
             a("fi")
         elif expanded == "/home/gh-runner":
             a("# relocate self-hosted runners — ONE AT A TIME (never all down)")
             a("mkdir -p '%s'" % target)
+            # recovery trap: if a runner is stopped and the copy/start then
+            # fails, restart that runner so it is never left down.
+            a("_stopped_unit=''")
+            a("trap 'if [ -n \"${_stopped_unit:-}\" ]; then echo \"volume: runner relocation FAILED mid-flight — restarting $_stopped_unit to protect running work\"; systemctl start \"$_stopped_unit\" 2>/dev/null || true; fi' EXIT")
             a("for _rd in '%s'/actions-runner*/; do" % orig)
             a("  [ -e \"$_rd\" ] || continue")
             a("  _rd=\"${_rd%/}\"")
@@ -1059,7 +1068,7 @@ def render_volume_setup_script(decl, home=None, root=""):
             a("  fi")
             a("  _unit=''")
             a("  [ -f \"$_rd/.service\" ] && _unit=$(cat \"$_rd/.service\")")
-            a("  if [ -n \"$_unit\" ]; then systemctl stop \"$_unit\" || true; fi")
+            a("  if [ -n \"$_unit\" ]; then systemctl stop \"$_unit\" || true; _stopped_unit=\"$_unit\"; fi")
             a("  rsync -aHAX \"$_rd/\" \"$_rtarget/\"")
             a("  mv \"$_rd\" \"$_rd.relocated-$_vol_date\"")
             a("  ln -s \"$_rtarget\" \"$_rd\"")
@@ -1069,8 +1078,10 @@ def render_volume_setup_script(decl, home=None, root=""):
             a("      echo \"volume: runner $_rbase FAILED is-active after start — aborting\"; exit 1")
             a("    fi")
             a("  fi")
+            a("  _stopped_unit=''")   # this runner is safely back up
             a("  echo \"volume: runner $_rbase relocated -> $_rtarget\"")
             a("done")
+            a("trap - EXIT")
         else:
             a("# relocate %s" % base)
             a("if [ -L '%s' ] && [ -d '%s' ]; then" % (orig, target))
