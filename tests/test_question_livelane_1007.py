@@ -162,6 +162,24 @@ class CheckC_DecisionLineMustNameTheDecision(_GateBase):
         r = self._run(BARE_GOOD, sid, background_tasks=[])
         self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
 
+    def test_bare_digit_start_descriptive_decision_passes(self):
+        # #1007 review 🟡: a decision that merely STARTS with a digit but names
+        # the decision ("3 verzie … ktorú nasadiť?") must NOT be blocked — only
+        # a bare numeric enumeration ("1/2/3?") is degenerate.
+        sid = self._sid()
+        q = "3 verzie sú hotové — ktorú nasadiť na produkčný OBS teraz?"
+        self._seed_lastq(sid, q)
+        r = self._run("❓ NEEDS YOU: " + q, sid, background_tasks=[])
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
+
+    def test_bare_2fa_style_decision_passes(self):
+        # "2FA chceš zapnúť…?" starts with a digit but is a real question.
+        sid = self._sid()
+        q = "2FA chceš zapnúť na produkčnom serveri ešte dnes?"
+        self._seed_lastq(sid, q)
+        r = self._run("❓ NEEDS YOU: " + q, sid, background_tasks=[])
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
+
 
 if __name__ == "__main__":
     unittest.main()

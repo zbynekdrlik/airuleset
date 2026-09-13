@@ -116,6 +116,19 @@ class SingleTextBlockPasses(_GateBase):
         self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
         self.assertNotIn('"block"', r.stdout, r.stdout)
 
+    def test_single_text_prose_mentioning_signature_passes(self):
+        # #1006 review 🔵: a SINGLE-text approval that MENTIONS ZbynekAI in prose
+        # AND signs the one draft must NOT be counted as two texts — only a
+        # signature LINE (ends with ZbynekAI) counts, not a mid-line mention.
+        msg = (BRIEF +
+               "Text úloha 638 (podpíšem ho ako ZbynekAI podľa dohody):\n"
+               "> Dobrý deň, dokončili sme fakturačný modul podľa zadania.\n"
+               "> ZbynekAI\n\n"
+               "❓ NEEDS YOU: schváliš odoslanie tohto textu klientovi?")
+        r = self._run(msg, self._sid())
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stdout, r.stderr))
+        self.assertNotIn('"block"', r.stdout, r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
