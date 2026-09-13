@@ -95,7 +95,7 @@
     "tests/test_ask_before_assuming.py": 52,
     "tests/test_ask_before_assuming_dropped_rows.py": 576,
     "tests/test_attempts_delivered_only_921.py": 283,
-    "tests/test_audit_bounce_trend.py": 421,
+    "tests/test_audit_bounce_trend.py": 484,
     "tests/test_authority_cli_829.py": 177,
     "tests/test_authority_core_quals.py": 680,
     "tests/test_authority_gh_auth.py": 513,
