@@ -129,6 +129,71 @@ def _suppress_nudge(kind, text, logs):
         logs.append("nudges OFF: suppressed %s %s" % (kind, (text or "")[:60]))
 
 
+# --------------------------------------------------------------------------- #
+# #1002 -- the ONE keystroke primitive. `keys` is the ONLY function in
+# `watchdog/` that builds a `tmux send-keys` argv (control keys, the `-l --`
+# literal-type form via `_type_literal`, and the `-H` hex form). The #994 kill
+# switch -- and every future owner keystroke switch (a per-role mode #998, a
+# `watchdog-disable-<kind>`) -- is evaluated ONCE here, via
+# `_keystroke_suppressed(kind, user_authored)`, and the `nudges OFF: suppressed`
+# journal line is written here and nowhere else. This retires the pre-#1002
+# patchwork of 9 gate sites (each new owner switch needed N edits): a helper now
+# fires its FIRST gated keystroke through `keys`, reads the return, and bails on
+# False -- so a suppressed delivery types NOTHING and journals exactly one line.
+#
+# `kind` classifies the keystroke. GATED_KINDS are the machine-nudge DELIVERY
+# kinds (a control key that is PART of such a delivery carries the delivery's
+# kind, so the whole delivery gates as a unit). RECOVERY_KINDS are NOT machine
+# nudges -- janitor cleanup, undo backspaces, the session-limit user-draft
+# submit, the prompt-wedge submit of the OWNER's own wedged draft, and the
+# resurrect relaunch (its own `AIRULESET_RESURRECT_ACTION` opt-in + recent-human
+# veto is its gate, per its docstring) -- and they run regardless of the switch.
+# A new machine-nudge kind = ONE line added to GATED_KINDS.
+# --------------------------------------------------------------------------- #
+GATED_KINDS = frozenset({"continue", "send", "goal", "draft", "stash", "type"})
+RECOVERY_KINDS = frozenset({"janitor", "undo", "user-draft", "wedge", "resurrect"})
+
+
+def _keystroke_suppressed(kind, user_authored):
+    """True iff a keystroke of `kind` must be WITHHELD now -- the SINGLE gate
+    (#1002). The owner's OWN reply (`user_authored`, granted solely by
+    `discord_replies`) always passes. A RECOVERY_KINDS keystroke (not a machine
+    nudge) always passes. Only a GATED (machine-nudge delivery) keystroke is
+    withheld, and only when the owner has turned nudges OFF (#994). A future
+    owner switch (per-role mute, `watchdog-disable-<kind>`) is ONE added clause
+    here -- never a new gate site. Goes through `watchdog.nudges_enabled()` (the
+    package facade) so the monkeypatch seam stays effective."""
+    if user_authored or kind not in GATED_KINDS:
+        return False
+    return not watchdog.nudges_enabled()
+
+
+def keys(pane_id, *keystrokes, kind, user_authored=False, run=None, logs=None,
+         journal_text=None):
+    """Send `keystrokes` to `pane_id` via `tmux send-keys` -- the ONE place in
+    `watchdog/` that builds a send-keys argv (#1002). `keystrokes` are passed
+    verbatim after `-t <pane_id>`: control keys (`"Enter"`, `"Escape"`, `"C-s"`,
+    `"BSpace"`), the literal-type form (`"-l", "--", text`), or the hex form
+    (`"-H", "1b", ...`). Returns True on a sent keystroke, False when the #994
+    gate suppressed it (nothing sent, ONE journal line written).
+
+    `kind` classifies the keystroke for the gate (see GATED_KINDS /
+    RECOVERY_KINDS). `user_authored` (the owner's OWN Discord reply, forwarded
+    from `discord_replies`) BYPASSES the gate. `journal_text` overrides the
+    suppression-journal snippet (a literal-type caller passes its full text so
+    the journal reads the payload, not `-l -- ...`); default derives a snippet
+    from the non-flag keystrokes."""
+    if watchdog._keystroke_suppressed(kind, user_authored):
+        snippet = (journal_text if journal_text is not None
+                   else " ".join(str(k) for k in keystrokes
+                                 if not str(k).startswith("-")))
+        watchdog._suppress_nudge(kind, snippet, logs)
+        return False
+    run = run or watchdog._default_run
+    run(["tmux", "send-keys", "-t", pane_id, *keystrokes])
+    return True
+
+
 def _default_run(argv, timeout=8):
     import subprocess
     try:
@@ -476,23 +541,21 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None):
     PERMANENTLY DELETES it (empirically confirmed, issue #35)."""
     run = run or watchdog._default_run
     captured = watchdog.capture_pane(pane_id, run, lines=10)
-    # #994 REOPEN -- the strip-deselect Escape is the control-key sibling of the
-    # type gate: it exists ONLY to make the following (now-suppressed) submit
-    # land, so at OFF a machine caller fires ZERO keystrokes (not even a stray
-    # Escape into the owner's pane). The type below is gated at `_type_literal`.
-    if _strip_selected(captured) and watchdog.nudges_enabled():
-        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
-    # #994 REOPEN -- the literal type goes through the ONE gated primitive
-    # `_type_literal` (never an inline `send-keys -l` here -- that was a second,
-    # un-gated literal-typing site). `_type_literal` carries both the `--`
-    # end-of-options `-` safety (#322/#372) and the nudge kill switch: when the
-    # owner has nudges OFF it types NOTHING and returns False, so this helper
-    # presses no Enter and returns False -- the caller
-    # (`compact._compact_submit_verified`) then leaves its /compact request
-    # PENDING (`nudges-off`), never booked delivered.
+    # #1002 -- every keystroke goes through the ONE `keys`/`_type_literal`
+    # primitive, so the #994 kill switch is evaluated there, not here. The
+    # strip-deselect Escape carries the delivery's "continue" kind: at OFF `keys`
+    # suppresses it (ZERO stray keystrokes into the owner's pane) and returns
+    # False, and this helper bails -- exactly one journal line, no type, no
+    # Enter. `_type_literal` carries the `--` end-of-options `-` safety
+    # (#322/#372) and the same kind, so at OFF it types NOTHING and returns False
+    # -- the caller (`compact._compact_submit_verified`) then leaves its /compact
+    # request PENDING (`nudges-off`), never booked delivered.
+    if _strip_selected(captured):
+        if not watchdog.keys(pane_id, "Escape", kind="continue", run=run, logs=logs):
+            return False
     if not watchdog._type_literal(pane_id, run, text, kind="continue", logs=logs):
         return False
-    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    watchdog.keys(pane_id, "Enter", kind="continue", run=run, logs=logs)
     return True
 
 
@@ -836,11 +899,14 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
         _log("send-verified abort: box not bare pre-send")
         return False
-    # #994 REOPEN -- the strip-deselect Escape only enables the following submit;
-    # at OFF a machine caller fires ZERO keystrokes. The owner's OWN reply
-    # (`user_authored`) still deselects + delivers.
-    if watchdog._strip_selected(cap) and (user_authored or watchdog.nudges_enabled()):
-        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+    # #1002 -- the strip-deselect Escape carries the delivery's "send" kind, so
+    # the ONE `keys` primitive gates it: at OFF a machine caller fires ZERO
+    # keystrokes (keys suppresses + returns False, this helper bails), while the
+    # owner's OWN reply (`user_authored`) bypasses and still deselects + delivers.
+    if watchdog._strip_selected(cap):
+        if not watchdog.keys(pane_id, "Escape", kind="send",
+                             user_authored=user_authored, run=run, logs=logs):
+            return False
     # Re-verify bare AFTER the strip-Escape and immediately before the type
     # keystroke — a draft racing into that gap would otherwise be typed over
     # (the same second bare-check `_send_goal_verified` does, #176-F3).
@@ -876,15 +942,19 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         else:
             _log("send-verified abort: type not head+tail-verified, not submitted")
         return False
-    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    watchdog.keys(pane_id, "Enter", kind="send", user_authored=user_authored,
+                  run=run, logs=logs)
     if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
         return True
     # Unconfirmed. Only act further when our text is PROVABLY still in the box.
     if watchdog._typed_landed(text, watchdog._input_line_text(
             watchdog.capture_pane(pane_id, run, lines=40))):
-        # A swallowed Enter (#36 class) — ONE corrective Escape+Enter.
-        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
-        run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+        # A swallowed Enter (#36 class) — ONE corrective Escape+Enter (reached
+        # only when ON: a suppressed type bailed above).
+        watchdog.keys(pane_id, "Escape", kind="send", user_authored=user_authored,
+                      run=run, logs=logs)
+        watchdog.keys(pane_id, "Enter", kind="send", user_authored=user_authored,
+                      run=run, logs=logs)
         if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
             return True
         if watchdog._typed_landed(text, watchdog._input_line_text(
@@ -999,10 +1069,10 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     `user_authored` (#994): True ONLY for the owner's OWN Discord reply (set
     solely by `discord_replies`). It BYPASSES the nudge kill switch so an OFF
     box still submits the owner's own answer draft; every machine caller leaves
-    it False and is suppressed when OFF."""
-    if not user_authored and not watchdog.nudges_enabled():
-        _suppress_nudge("draft", draft, logs)
-        return False
+    it False and is suppressed when OFF -- enforced at the ONE `keys` primitive
+    (#1002): the FIRST keystroke of the submit (the strip-deselect Escape, else
+    the submit Enter) carries kind="draft", so at OFF it is suppressed +
+    journalled once and this helper bails, replacing the deleted helper-top gate."""
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1048,8 +1118,12 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # A SELECTED agent-strip row (#36) steals the Enter — ONE Escape returns
     # focus to the input box (the draft survives ONE Escape; two would delete
     # it, #35), then re-confirm the draft is still there before submitting.
+    # #1002 -- the Escape carries kind="draft": at OFF `keys` suppresses it (the
+    # deleted helper-top gate) and this helper bails keystroke-free.
     if watchdog._strip_selected(cap):
-        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        if not watchdog.keys(pane_id, "Escape", kind="draft",
+                             user_authored=user_authored, run=run, logs=logs):
+            return False
         cap = watchdog.capture_pane(pane_id, run, lines=40)
         head = watchdog._input_box_head_text(cap)
         if not _still_own(head):
@@ -1067,18 +1141,27 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # ~170-char line, not just `lane-check: `). Its only failure mode is a
     # benign non-confirm -> retry, never a false positive nor a destroyed draft.
     token = head
-    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    # #1002 -- the submit Enter carries kind="draft": for a machine caller at
+    # OFF (not strip-selected, so this is the FIRST keystroke) `keys` suppresses
+    # it, journals once, returns False, and this helper bails -- the deleted
+    # helper-top gate, now enforced at the primitive. The owner's own reply
+    # (`user_authored`) bypasses.
+    if not watchdog.keys(pane_id, "Enter", kind="draft",
+                         user_authored=user_authored, run=run, logs=logs):
+        return False
     if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
         _log("submit-own delivered")
         return True
     # Unconfirmed. Only send a corrective Escape+Enter when our OWN draft is
     # PROVABLY still in the box (a swallowed Enter, #36) — never a second
     # Escape (#35), never an Escape into a box that already went bare (a turn
-    # may have started, #233).
+    # may have started, #233). Reached only when ON (a suppressed submit bailed).
     still = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
     if _still_own(still):
-        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
-        run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+        watchdog.keys(pane_id, "Escape", kind="draft",
+                      user_authored=user_authored, run=run, logs=logs)
+        watchdog.keys(pane_id, "Enter", kind="draft",
+                      user_authored=user_authored, run=run, logs=logs)
         if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
             _log("submit-own delivered (after corrective Escape+Enter)")
             return True
@@ -1143,11 +1226,12 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
     complete payload; it is a legit pending arm), logged honestly, return False;
     the caller's escalation fires.
 
-    #994: goal auto-arm is machine-composed, so an OFF box suppresses it (type
-    NOTHING, journal one line, return False -- the caller retries when back ON)."""
-    if not watchdog.nudges_enabled():
-        _suppress_nudge("goal", text, logs)
-        return False
+    #994/#1002: goal auto-arm is machine-composed, so an OFF box suppresses it
+    (type NOTHING, journal one line, return False -- the caller retries when back
+    ON). Enforced at the ONE `keys` primitive: the FIRST keystroke of the submit
+    (the strip-deselect Escape, else the submit Enter) carries kind="goal", so at
+    OFF `keys` suppresses it + journals once and this helper bails -- the deleted
+    helper-top gate, now at the primitive."""
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1180,19 +1264,22 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
     # focus (the draft survives ONE Escape; two would delete it, #35), then
     # re-confirm the complete own /goal is still there before submitting.
     if watchdog._strip_selected(cap):
-        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        if not watchdog.keys(pane_id, "Escape", kind="goal", run=run, logs=logs):
+            return False
         cap = watchdog.capture_pane(pane_id, run, lines=40)
         if not _complete_own_goal(cap):
             _log("submit-own-goal abort: own /goal gone after strip Escape")
             return False
-    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    if not watchdog.keys(pane_id, "Enter", kind="goal", run=run, logs=logs):
+        return False
     # PANE proof: the box no longer holds our `/goal` (`want=False`) => submitted.
     if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
         _log("submit-own-goal delivered")
         return True
-    # STILL in the box -- a swallowed Enter (#36). ONE corrective Escape+Enter.
-    run(["tmux", "send-keys", "-t", pane_id, "Escape"])
-    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    # STILL in the box -- a swallowed Enter (#36). ONE corrective Escape+Enter
+    # (reached only when ON: a suppressed submit bailed above).
+    watchdog.keys(pane_id, "Escape", kind="goal", run=run, logs=logs)
+    watchdog.keys(pane_id, "Enter", kind="goal", run=run, logs=logs)
     if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
         _log("submit-own-goal delivered (after corrective Escape+Enter)")
         return True

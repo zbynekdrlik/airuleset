@@ -65,7 +65,11 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
     Bounded by `JANITOR_CLEAR_MAX_ITER`; returns True only once a fresh
     capture confirms bare."""
     sleep_fn = sleep_fn or time.sleep
-    run(["tmux", "send-keys", "-t", pid, "Escape"])
+    # #1002 -- janitor cleanup is RECOVERY (kind="janitor", ungated): it CLEANS UP
+    # a stranded machine nudge / closes a menu overlay, so it must run regardless
+    # of the #994 switch (a nudge stranded BEFORE the owner turned nudges OFF must
+    # still be reclaimed). Routed through the ONE `keys` primitive like every key.
+    watchdog.keys(pid, "Escape", kind="janitor", run=run)
     for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
         cap = watchdog.capture_pane(pid, run, lines=30)
         cur = watchdog._input_line_text(cap)
@@ -85,7 +89,7 @@ def _janitor_clear_box(pid, run, sleep_fn, log_fn):
             log_fn("janitor: box unreadable mid-clear")
             return False
         batch = min(len(cur), watchdog.JANITOR_CLEAR_BATCH_MAX)
-        run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * batch)
+        watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
     log_fn("janitor: clear did not converge within %d iterations"
            % watchdog.JANITOR_CLEAR_MAX_ITER)
@@ -115,7 +119,7 @@ def _janitor_clear_own_suffix(pid, run, own_typed, sleep_fn, log_fn):
         # already cleared) -> NEVER backspace a blind length into it.
         log_fn("janitor: own-suffix box no longer matches record -> declined")
         return False
-    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(own_typed))
+    watchdog.keys(pid, *(["BSpace"] * len(own_typed)), kind="janitor", run=run)
     for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
         cap = watchdog.capture_pane(pid, run, lines=30)
         if watchdog._input_line_text(cap) is None:
@@ -135,7 +139,7 @@ def _janitor_pop_stash(pid, run, log_fn):
     performs). Returns True only once a fresh capture shows non-empty
     content (the restored draft) — READ BACK, never asserted (the #134
     "a log line that claims a delivery it never checked" lesson)."""
-    run(["tmux", "send-keys", "-t", pid, "C-s"])
+    watchdog.keys(pid, "C-s", kind="janitor", run=run)
     cap = watchdog.capture_pane(pid, run, lines=30)
     if watchdog._input_line_text(cap):
         return True

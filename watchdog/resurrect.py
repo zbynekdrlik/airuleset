@@ -232,11 +232,20 @@ def relaunch(pane, cmd, run):
     shell) to relaunch the managed Claude session. Returns True iff the send
     command returned without raising. The CALLER gates this on `action_enabled()`
     + not dry_run + the recent-human veto + a found bare-shell pane -- this
-    function itself only types. Never raises."""
+    function itself only types. Never raises.
+
+    #1002 -- the relaunch keystroke goes through the ONE `keys` primitive (the
+    sole `send-keys` argv builder) with kind="resurrect". Per this module's
+    doctrine the relaunch's own gate is the CALLER's `action_enabled()`
+    (`AIRULESET_RESURRECT_ACTION`) + recent-human veto + bare-shell pane, NOT the
+    #994 nudge kill switch -- so kind="resurrect" is a RECOVERY (ungated) kind and
+    the relaunch is never suppressed by nudges-off. `watchdog` is imported
+    deferred (this module stays cycle-free at top level, mirroring disk_guard)."""
     if run is None or not pane or not cmd:
         return False
     try:
-        run(["tmux", "send-keys", "-t", pane, cmd, "Enter"])
+        import watchdog
+        watchdog.keys(pane, cmd, "Enter", kind="resurrect", run=run)
         return True
     except Exception:
         return False

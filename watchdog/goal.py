@@ -877,10 +877,13 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pid, cap, logs=logs)
         _log("goal-verify-abort: not-bare")
         return False                       # not a bare box -- caller's problem
-    # #994 REOPEN -- goal-arm is machine text; at OFF fire ZERO keystrokes, not
-    # even the pre-type strip-deselect Escape (the type below is gated).
-    if watchdog._strip_selected(cap) and watchdog.nudges_enabled():
-        run(["tmux", "send-keys", "-t", pid, "Escape"])
+    # #1002 -- goal-arm is machine text; the strip-deselect Escape carries the
+    # "goal" kind, so the ONE `keys` primitive gates it: at OFF it fires ZERO
+    # keystrokes (keys suppresses + returns False) and this helper bails
+    # keystroke-free, exactly as the type below (routed through `keys`) does.
+    if watchdog._strip_selected(cap):
+        if not watchdog.keys(pid, "Escape", kind="goal", run=run, logs=logs):
+            return False
     fresh = watchdog.capture_pane(pid, run, lines=40)
     if watchdog._input_line_text(fresh) != "":
         watchdog._draft_rescue_persist(pid, fresh, logs=logs)
@@ -898,13 +901,15 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
                                            kind="goal", logs=logs):
         _log("goal-verify-abort: type-not-verified")
         return False                       # not byte-exact -- never submit it
-    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    # #1002 -- reached only when ON (a suppressed type returned False above); the
+    # submit Enter + corrective go through the ONE `keys` primitive.
+    watchdog.keys(pid, "Enter", kind="goal", run=run, logs=logs)
     if _await_typed(pid, text, run, sleep_fn, want=False):
         # STILL in the box after the same bounded settle window -- a
         # genuinely swallowed submit. ONE corrective Escape+Enter, never a
         # second bare Enter, never two Escapes.
-        run(["tmux", "send-keys", "-t", pid, "Escape"])
-        run(["tmux", "send-keys", "-t", pid, "Enter"])
+        watchdog.keys(pid, "Escape", kind="goal", run=run, logs=logs)
+        watchdog.keys(pid, "Enter", kind="goal", run=run, logs=logs)
         if _await_typed(pid, text, run, sleep_fn, want=False):
             watchdog._undo_and_release_slot(pid, run, text, False, _log,
                                             "goal-verify-abort: "
