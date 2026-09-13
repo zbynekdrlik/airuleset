@@ -113,7 +113,7 @@
     "tests/test_batch_orchestration.py": 316,
     "tests/test_bg_bash_staleness_defer_604.py": 55,
     "tests/test_block_banned_model.py": 113,
-    "tests/test_block_commit_without_design.py": 661,
+    "tests/test_block_commit_without_design.py": 713,
     "tests/test_block_discuss_archive_853.py": 223,
     "tests/test_block_discuss_thread_name.py": 960,
     "tests/test_block_foreign_airuleset_write.py": 300,

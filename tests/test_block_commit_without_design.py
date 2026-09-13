@@ -657,5 +657,57 @@ class TestRejectReasonSurfacedInBlockMessage(_Base):
         self.assertIn("Architekt", r.stderr)
 
 
+class TestMergeCommitExempt1003(_Base):
+    """#1003 — a resync `git merge origin/develop` produces a commit whose
+    auto-generated message can carry a `#N` from the integration branch's
+    history (`Merge branch 'develop' into feat-3 (#6981)`). A merge
+    introduces NO new design, so the design gate must exempt it. PRIMARY =
+    MERGE_HEAD present; belts = a `git merge` in the command, or a canonical
+    merge message. An ordinary `fix(#N)` commit with no marker still blocks."""
+
+    def test_merge_message_commit_is_exempt(self):
+        # belt 2: the message alone matches the canonical merge shape.
+        r = self.run_hook(
+            'git commit -m "Merge branch \'develop\' into feat-3 (#6981)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_git_merge_compound_is_exempt(self):
+        # belt 1: a `git merge` invocation in the same compound command, with
+        # a NON-merge-shaped message carrying a #N.
+        r = self.run_hook(
+            'git merge --no-ff --no-edit origin/develop && '
+            'git commit -m "resync develop (#6981)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_merge_head_present_is_exempt(self):
+        # PRIMARY: a real merge is in progress (MERGE_HEAD set), completed by
+        # a plain `git commit` whose message carries a #N.
+        _git(self.repo, "config", "user.email", "t@example.invalid")
+        _git(self.repo, "config", "user.name", "t")
+        (self.repo / "app.py").write_text("x = 1\n")
+        _git(self.repo, "add", "app.py")
+        _git(self.repo, "commit", "-qm", "base")
+        _git(self.repo, "checkout", "-qb", "develop")
+        (self.repo / "app.py").write_text("x = 1\ny = 2\n")
+        _git(self.repo, "add", "app.py")
+        _git(self.repo, "commit", "-qm", "develop change")
+        _git(self.repo, "checkout", "-q", "main")
+        (self.repo / "other.py").write_text("z = 3\n")
+        _git(self.repo, "add", "other.py")
+        _git(self.repo, "commit", "-qm", "main change")
+        # Start a merge but do NOT commit it -> MERGE_HEAD is set.
+        subprocess.run(["git", "-C", str(self.repo), "merge", "--no-commit",
+                        "--no-ff", "develop"], capture_output=True, text=True)
+        r = self.run_hook('git commit -m "resolve merge (#6981)"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_ordinary_fix_commit_still_blocks(self):
+        # LOCK: a normal fix commit with no marker and no merge context is
+        # still blocked — the merge exemption is not a blanket pass.
+        r = self.run_hook('git commit -m "fix(hook): real fix (#123)"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("123", r.stderr)
+
+
 if __name__ == "__main__":
     main()
