@@ -16112,3 +16112,85 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
                 if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
         self.assertTrue(any("nudge-poll-loop-timeout.sh" in c for c in cmds))
+
+
+class TestPrePushDocsOnlyFix1003(TestCase):
+    """#1003 — pre-push-test-check.sh Gate 2 set IS_BUGFIX purely from the
+    `^fix:`/`Closes #N` SIGNAL, so a DOCS/prose-only `fix:` commit (nothing
+    testable) demanded a RED-before-GREEN test and blocked the push. The fix
+    classifies by DIFF CONTENT: a commit whose EVERY changed file is a
+    docs/prose/image path is exempt; a commit touching any code keeps the
+    requirement."""
+
+    def _run(self, command, cwd):
+        import subprocess
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / "pre-push-test-check.sh")],
+            input=payload, text=True, capture_output=True, cwd=cwd, timeout=60,
+            env=env)
+
+    def _mkrepo(self):
+        import subprocess
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        open(os.path.join(root, "README.md"), "w").write("# app\n")
+        g("add", "app.py", "README.md")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "dev")
+        return root, g
+
+    def test_docs_only_fix_commit_passes(self):
+        # A `fix:` commit changing ONLY a docs file has nothing testable —
+        # it must NOT be forced to have a preceding RED test.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "README.md"), "a").write("clarified wording\n")
+        g("add", "README.md")
+        g("commit", "-qm", "fix: clarify README wording")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_docs_only_fix_with_closes_still_passes(self):
+        # Even with a `Closes #N` body signal, a docs-only diff is exempt —
+        # the classification is by content, not by the signal.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "docs.md"), "w").write("# new docs\n")
+        g("add", "docs.md")
+        g("commit", "-qm", "fix: document the flag\n\nCloses #42")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_code_fix_still_requires_test(self):
+        # A `fix:` commit touching CODE with no preceding test still blocks —
+        # the RED-before-GREEN requirement is unchanged for real bug fixes.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "app.py"), "a").write("# patched\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser\n\nCloses #7")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+    def test_mixed_docs_and_code_fix_still_requires_test(self):
+        # A commit touching docs AND code is NOT docs-only — the requirement
+        # stays (a code change rode along with the docs).
+        root, g = self._mkrepo()
+        open(os.path.join(root, "README.md"), "a").write("note\n")
+        open(os.path.join(root, "app.py"), "a").write("# patched\n")
+        g("add", "README.md", "app.py")
+        g("commit", "-qm", "fix: parser crash + note")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
