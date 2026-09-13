@@ -138,21 +138,36 @@ class TestHelpersSuppressWhenOff(unittest.TestCase):
         self._assert_journaled(logs)
 
     def test_submit_own_goal_verified_suppressed(self):
+        # #1002 -- the helper-top gate MOVED to the ONE `keys` primitive (the
+        # submit Enter carries kind="goal"), so the helper must REACH that
+        # keystroke to suppress+journal: give it a box that holds the complete
+        # own /goal (head+tail both the payload), exactly as the #994 REOPEN gave
+        # send_verified a bare box to reach `_type_literal_verified`.
         rec = _Recorder()
         logs = []
-        with self._off():
-            ok = wd.submit_own_goal_verified(PID, "/goal drive CI green", rec,
-                                             logs=logs)
+        text = "/goal drive CI green"
+        with m.patch.object(wd, "_input_box_head_text", lambda *a, **k: text), \
+                m.patch.object(wd, "_input_line_text", lambda *a, **k: text), \
+                self._off():
+            ok = wd.submit_own_goal_verified(PID, text, rec, logs=logs)
         self.assertFalse(ok)
         self.assertEqual(rec.sent_keys(), [])
         self._assert_journaled(logs)
 
     def test_submit_own_draft_verified_suppressed(self):
+        # #1002 -- as above: the submit Enter (kind="draft") is the gated
+        # keystroke, so the box must hold the recognized own draft AND the tpath
+        # must be readable for the helper to reach it and suppress+journal.
         rec = _Recorder()
         logs = []
-        with self._off():
-            ok = wd.submit_own_draft_verified(PID, "lane-check: backlog=5", rec,
-                                              tpath="/x", logs=logs)
+        draft = "lane-check: backlog=5"
+        with TemporaryDirectory() as d:
+            tp = os.path.join(d, "sess.jsonl")
+            open(tp, "w", encoding="utf-8").close()
+            with m.patch.object(wd, "_input_box_head_text", lambda *a, **k: draft), \
+                    self._off():
+                ok = wd.submit_own_draft_verified(PID, draft, rec, tpath=tp,
+                                                  logs=logs)
         self.assertFalse(ok)
         self.assertEqual(rec.sent_keys(), [])
         self._assert_journaled(logs)
@@ -570,11 +585,14 @@ class TestDeliverWithStashPrimitiveGate(unittest.TestCase):
         return m.patch.object(wd, "nudges_enabled", lambda *a, **k: False)
 
     def test_deliver_with_stash_suppressed_at_off(self):
-        # (b) — the stash-around delivery primitive gates at the TOP (before the
-        # C-s toggle), so an OFF box receives ZERO keystrokes.
+        # (b) #1002 -- the top gate MOVED to the ONE `keys` primitive: the FIRST
+        # stash keystroke (the C-s toggle, kind=nudge_kind) is what suppresses, so
+        # the box must be an idle free prompt for the helper to reach it. An OFF
+        # box then receives ZERO keystrokes + one journal line.
         rec = _Recorder()
         logs = []
-        with self._off():
+        with m.patch.object(wd, "_has_free_prompt", lambda *a, **k: True), \
+                self._off():
             ok = wd.deliver_with_stash(PID, "/goal test", rec,
                                        nudge_kind="goal", logs=logs)
         self.assertFalse(ok)
@@ -603,31 +621,39 @@ class TestDeliverWithStashPrimitiveGate(unittest.TestCase):
 
 
 class TestLiteralTypingPrimitiveLock(unittest.TestCase):
-    """Repo-wide structural lock: EVERY `tmux send-keys ... -l` (literal-typing)
-    emission in `watchdog/` must live inside the ONE function `_type_literal`, so
-    no seventh literal-typing primitive can silently reappear and reopen the hole
-    (the #994 root cause). AST-based, not a substring grep."""
+    """Repo-wide structural lock: literal-typing (`-l`) is emitted by exactly ONE
+    function, so no seventh literal-typing primitive can silently reappear and
+    reopen the hole (the #994 root cause). #1002 MOVED the raw `send-keys` argv
+    (incl. the `-l --` literal form) INTO `watchdog.keys`, so the emission is no
+    longer a `["tmux","send-keys",...,"-l",...]` LIST literal — it is now a `-l`
+    CONSTANT positional passed to a `keys(...)` CALL. The ONLY function that may
+    pass `-l` to `keys` is `_type_literal` (`keys` itself is the sole argv
+    builder, verified by `test_keystroke_primitive_1002`'s repo-lock). AST-based,
+    not a substring grep."""
 
     @staticmethod
-    def _funcs_emitting_literal_send_keys(path):
+    def _funcs_passing_dash_l_to_keys(path):
         import ast
         names = set()
         tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
 
-        def _is_literal_send_keys(node):
-            # a list literal whose Constant elements include both "send-keys"
-            # and the literal-typing flag "-l"
-            if not isinstance(node, ast.List):
+        def _is_keys_call_with_dash_l(node):
+            # a call to `keys(...)` / `watchdog.keys(...)` whose positional args
+            # include the literal-typing flag "-l" as a Constant
+            if not isinstance(node, ast.Call):
                 return False
-            consts = {e.value for e in node.elts
-                      if isinstance(e, ast.Constant)}
-            return "send-keys" in consts and "-l" in consts
+            fn = node.func
+            name = getattr(fn, "attr", getattr(fn, "id", None))
+            if name != "keys":
+                return False
+            return any(isinstance(a, ast.Constant) and a.value == "-l"
+                       for a in node.args)
 
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             for sub in ast.walk(fn):
-                if _is_literal_send_keys(sub):
+                if _is_keys_call_with_dash_l(sub):
                     names.add(fn.name)
                     break
         return names
@@ -638,14 +664,14 @@ class TestLiteralTypingPrimitiveLock(unittest.TestCase):
         for path in wd_dir.rglob("*.py"):
             if "__pycache__" in path.parts:
                 continue
-            fns = self._funcs_emitting_literal_send_keys(path)
+            fns = self._funcs_passing_dash_l_to_keys(path)
             for fn in fns:
                 offenders.setdefault(fn, []).append(
                     path.relative_to(REPO).as_posix())
         self.assertEqual(
             set(offenders), {"_type_literal"},
-            "every `send-keys ... -l` emission in watchdog/ must live in "
-            "`_type_literal`; found emitters: %r" % offenders)
+            "literal typing (`-l` to keys) must live ONLY in `_type_literal`; "
+            "found emitters: %r" % offenders)
 
 
 if __name__ == "__main__":
