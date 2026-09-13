@@ -431,9 +431,17 @@ def issue_refs(text):
 #    match (the replay-corpus / F2 false positives).
 
 # A `git merge` command at a statement boundary (checked on the quote-stripped
-# command, so an in-message occurrence never counts).
+# command, so an in-message occurrence never counts). Review-2 F1: `merge`
+# must be TERMINAL — `(?![-\w])` excludes the read-only plumbing subcommands
+# `git merge-base`/`merge-file`/`merge-tree`/`merge-index` (a `git merge-base
+# --is-ancestor` "am I behind?" idiom is not a merge), and the trailing
+# lookahead excludes the merge CANCELS `--abort`/`--quit` (they end a merge,
+# they do not make one). `git merge origin/x` / `git merge --no-ff` /
+# `git merge --continue` still match (a `--continue` completes a real merge,
+# and MERGE_HEAD is present for it anyway).
 _GIT_MERGE_CMD_RE = re.compile(
-    r"(?:^|[;&|]|&&)\s*(?:sudo\s+|env\s+)?git\s+merge\b")
+    r"(?:^|[;&|]|&&)\s*(?:sudo\s+|env\s+)?git\s+merge(?![-\w])"
+    r"(?!\s+--(?:abort|quit)\b)")
 # A canonical auto-merge message immediately after the -m/--message flag:
 # `-m "Merge branch '…"` / `-m 'Merge commit "…'`. The kind + a following quote
 # (the ref) is required, and it must sit right after the flag's opening quote,

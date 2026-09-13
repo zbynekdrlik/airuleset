@@ -182,7 +182,13 @@ B64_PAT = re.compile(r"(?=[A-Za-z0-9+]*[0-9])[A-Za-z0-9+]{32,}={0,2}")
 SECRET_PREFIX_PAT = re.compile(
     r"gh[oprsu]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
-    r"|sk-[A-Za-z0-9_-]{20,}"
+    # OpenAI/Anthropic sk- keys. Review-2 F2: the tail must be CONTIGUOUS
+    # base62 (no interior hyphen) so a `sk-`-prefixed kebab CSS/BEM class or
+    # markdown slug (`sk-loading-indicator-wrapper`) is NOT flagged; the known
+    # structured prefixes (`sk-ant-api03-…`, `sk-proj-…`) are matched explicitly.
+    r"|sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}"
+    r"|sk-proj-[A-Za-z0-9]{20,}"
+    r"|sk-[A-Za-z0-9]{20,}"
     r"|AKIA[0-9A-Z]{16}"
     r"|xox[baprs]-[A-Za-z0-9-]{10,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
@@ -195,8 +201,14 @@ SECRET_PREFIX_PAT = re.compile(
 # still block. KV_PAT alone does not catch the JSON `"token": "<v>"` shape (the
 # key's closing quote sits between the word and the `:`), so the discrimination
 # is done HERE: exempt only a BARE run, or one under a SHA-context key that is
-# not itself a credential key. Accepted residual: a genuine BARE unassigned
-# 40/64-hex secret reads as a SHA (owner's stated trade-off).
+# not itself a credential key. Accepted residual (owner's stated trade-off,
+# review-2 F3 breadth stated honestly): a genuine BARE unassigned 40/64-hex
+# secret reads as a SHA — "bare" is broader than a fixture head_sha and
+# includes a legacy 40-hex GitHub PAT in an `Authorization: token <hex>`
+# header, a token in a remote URL (`https://<hex>@github.com/…`), and a
+# hex-encoded key as a YAML/list/positional value with no adjacent `key:`/`=`.
+# An ASSIGNED credential (`API_KEY=`, `"token":`, `token:`) and every prefixed
+# real token (SECRET_PREFIX_PAT) still block.
 _GIT_OBJECT_HEX_LENS = (40, 64)
 _ALL_HEX_RE = re.compile(r"[0-9a-fA-F]+$")
 # The key a hex run is assigned to, if any: the identifier right before a

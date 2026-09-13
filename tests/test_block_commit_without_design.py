@@ -746,6 +746,25 @@ class TestMergeCommitExempt1003(_Base):
             "git commit -m \"fix: resolve merge branch 'develop' note (#88)\"")
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_git_merge_base_plumbing_is_not_a_merge_context(self):
+        # review-2 F1: `git merge-base`/`merge-file`/`merge-tree` are read-only
+        # plumbing, NOT a merge — a fix commit alongside them still blocks.
+        r = self.run_hook(
+            'git merge-base --is-ancestor origin/main HEAD && '
+            'git commit -m "fix: guard against stale base (#123)"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("123", r.stderr)
+        r2 = self.run_hook(
+            'git merge-tree main feature && git commit -m "fix: x (#123)"')
+        self.assertEqual(r2.returncode, 2, r2.stderr)
+
+    def test_git_merge_abort_is_not_a_merge_context(self):
+        # review-2 F1: `git merge --abort` CANCELS a merge — a fix committed
+        # after aborting is not a merge and still blocks.
+        r = self.run_hook(
+            'git merge --abort && git commit -m "fix: back out (#123)"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+
 
 if __name__ == "__main__":
     main()

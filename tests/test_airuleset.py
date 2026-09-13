@@ -16283,3 +16283,22 @@ class TestBlockTestSkipsMergeIn1003(TestCase):
         r = self._run("git push origin feat-x", root)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("own.spec.ts", r.stdout + r.stderr)
+
+    def test_new_skip_in_a_develop_shared_file_still_blocks(self):
+        # review-2 F7 (crux): the branch adds its OWN new, UNIQUE skip to the
+        # SAME spec file develop carries a (different) sanctioned skip in, then
+        # merges develop. The merged-in sanctioned skip is excluded, but the
+        # branch's own new skip line (not present on develop) must still block.
+        root, g = self._mk_merge_in_repo()
+        # feat-x adds a unique skip to board.spec.ts (the file develop's skip
+        # lives in) BEFORE the merge, so its own line is genuinely introduced.
+        open(os.path.join(root, "tests", "e2e", "board.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            "test.skip('feat-x own unique skip', async () => {});\n"
+            "test('board', async () => {});\n")
+        g("add", "tests/e2e/board.spec.ts")
+        g("commit", "-qm", "test: add own skip to board")
+        g("merge", "--no-edit", "origin/develop")
+        r = self._run("git push origin feat-x", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("board.spec.ts", r.stdout + r.stderr)

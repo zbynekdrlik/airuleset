@@ -253,11 +253,18 @@ def count_bypass_tokens(commits):
     ``{"per_day": {YYYY-MM-DD: n}, "per_kind": {token: n}, "total": n}`` --
     days/kinds with zero hits are simply absent.
 
-    Accepted caveat (review F4): a commit that merely DOCUMENTS the token
-    syntax (a doctrine/hook-comment edit mentioning `airuleset:secret-ok`) is
-    counted too. Over-counting is the CONSERVATIVE direction for a trend metric
-    -- it surfaces more for human review and never HIDES a real bypass -- and
-    this view is observability only, never a gate."""
+    Accepted caveats (observability only, never a gate):
+    - (review-1 F4) a commit that merely DOCUMENTS the token syntax (a
+      doctrine/hook-comment edit mentioning `airuleset:secret-ok`) is counted
+      too — over-counting is the CONSERVATIVE direction (surfaces more for
+      review, never HIDES a real bypass).
+    - (review-2 F4) this view sees only tokens IN COMMIT MESSAGES, so it covers
+      commit-message bypasses (`test-skip-ok` on an --allow-empty merge commit,
+      `no-design`/`no-test` in a message) but is BLIND to command-line-only
+      bypasses that never enter git history — `airuleset:secret-ok` (a trailing
+      `git add`/commit shell comment) and `airuleset:scope-gate-ok` (a
+      `gh issue create` comment). Those classes need their own audit-log view;
+      this one does not claim to count them."""
     per_day, per_kind, total = {}, {}, 0
     for c in commits or []:
         if not isinstance(c, dict):

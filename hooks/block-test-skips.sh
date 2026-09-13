@@ -146,7 +146,12 @@ fi
 # origin/develop` and is NOT genuinely introduced by this push, so the Python
 # scanner excludes it (fixes the montalu6 / odoo-erp #7099 re-flag of an
 # already-merged sanctioned test.skip()). Captured BEFORE the #909 range
-# override below so it stays the DESTINATION, never origin/<branch>.
+# override below, so on a real develop/staging repo it is the integration
+# branch (never origin/<branch>). Review-2 F5 residual: for a self-tracking
+# branch in a repo with NO integration branch, the (b) @{upstream} fallback
+# above can set DEST_REF=origin/<branch>; that is a near-no-op (it cannot
+# change the final RANGE base, only widens the byte-identical-duplicate
+# residual to the branch's own already-pushed history).
 DEST_REF="$BASE_REF"
 # #909: For block-test-skips.sh (per-added-line semantics), a tighter RANGE
 # base is always correct. Override with origin/<branch> for re-pushes (only

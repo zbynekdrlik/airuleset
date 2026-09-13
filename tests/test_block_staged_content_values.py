@@ -347,3 +347,26 @@ class TestShaNotSecret1003(SecretScanTestCase):
                     '{\n  "pat": "' + _SHA1 + '"\n}\n')
         r = self._run("git add tests/data/fixtures/p.json")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    # review-2 F2: the sk- prefix detector must NOT flag a hyphenated CSS/BEM
+    # class or markdown slug, while still blocking real OpenAI/Anthropic keys.
+    def test_sk_hyphenated_css_class_is_allowed(self):
+        self._write("app/spinner.css",
+                    ".sk-loading-indicator-wrapper-spinner-dot { opacity: 1; }\n")
+        r = self._run("git add app/spinner.css")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_real_openai_classic_key_still_blocks(self):
+        self._write("cfg.md", "OPENAI: " + ("sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2") + "\n")
+        r = self._run("git add cfg.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_real_openai_proj_key_still_blocks(self):
+        self._write("cfg.md", "OPENAI: " + ("sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2") + "\n")
+        r = self._run("git add cfg.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_real_anthropic_key_still_blocks(self):
+        self._write("cfg.md", "ANTHROPIC: " + ("sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0K1l2") + "\n")
+        r = self._run("git add cfg.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
