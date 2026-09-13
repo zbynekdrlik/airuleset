@@ -98,6 +98,17 @@ class TornTranscriptBlockMain1013(unittest.TestCase):
             "a non-armed non-Fable main must not be blocked by a torn line: %s"
             % out.stderr)
 
+    def test_trailing_non_object_line_does_not_fail_closed(self):
+        # review-2 🔵 lock: a top-level truthy NON-object valid-JSON line as the
+        # LAST line (a bare `true`) must be dropped by `| objects`, NOT error jq
+        # into fail-closed. The armed goal on the healthy lines is still read.
+        out = self._drive([_goal_set(), _assistant(), "true"],
+                          "grep -rn 'TODO' .")
+        self.assertNotIn("transcript read failed", out.stderr, out.stderr)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("ARMED /goal", out.stderr,
+                      "the goal must be read past a trailing non-object line")
+
     def test_genuine_jq_failure_still_fails_closed(self):
         # LOCK (passes before AND after): when jq genuinely CANNOT run the goal
         # read (a jq that fails on the .message.content filter), the hook must

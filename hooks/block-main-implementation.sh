@@ -769,8 +769,22 @@ GOAL_JQ_RC=0
 # rest of its life. `fromjson?` swallows the torn record and keeps rc 0, so the
 # fail-closed path below fires ONLY for a genuinely unreadable file or a jq that
 # cannot run (unchanged) — the Python readers already parse per line this way.
+# `| objects` mirrors those readers' `isinstance(d, dict)` guard: it drops a
+# top-level truthy non-object line (a bare number/array/string/true) so it never
+# reaches `.type` and errors jq (which would otherwise fail CLOSED on such a
+# LAST line — review-2 🔵). Real transcript lines are always objects, so this is
+# a no-op on live data and keeps the fail-CLOSED direction for a genuine failure.
+# HONESTY (review-2 🟡): the tradeoff is asymmetric — if the `Goal set:` record
+# ITSELF shares a torn physical line, that line is dropped too, so an armed goal
+# reads as NOT armed and a bulk read is ALLOWED (a narrow fail-OPEN) instead of
+# blocked. Accepted because (a) this guard is cost-discipline, not a security
+# boundary; (b) a FABLE main — the fleet default, hook-enforced — is still
+# blocked via the SEPARATE, already-robust Python IS_FABLE reader regardless of
+# the goal read; and (c) it replaces a strictly worse fail-CLOSED-FOREVER
+# availability bug (one torn line anywhere used to brick the session).
 GOAL_JQ_OUT=$(jq -R -r '
     fromjson? // empty
+    | objects
     | if .type == "user" and (.message.content | type) == "string" then .message.content
       elif .type == "system" and (.content | type) == "string" then .content
       else empty end
