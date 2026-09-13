@@ -44,11 +44,16 @@ def _row(number, labels=()):
 
 
 def _drive(number, labels=(), *, merged_oid=None, released=True,
-           timeline=None):
+           timeline=None, head_stream=None):
     """Drive `_slice_mine_and_handed` for a single-ticket slice with a mocked
     `gh pr list` (merged PR + mergeCommit oid, or none) and a mocked
-    `git merge-base --is-ancestor` (rc 0 = released, rc 1 = not)."""
+    `git merge-base --is-ancestor` (rc 0 = released, rc 1 = not).
+
+    `head_stream` (default STREAM): the stream name the merged PR's head branch
+    carries — set it to a RENAME ALIAS (e.g. montalu's branch under montalu1) to
+    exercise the #537 alias expansion."""
     timeline = timeline or []
+    branch_stream = head_stream or STREAM
 
     def gh(*args, **kw):
         a = [str(x) for x in args]
@@ -58,7 +63,7 @@ def _drive(number, labels=(), *, merged_oid=None, released=True,
             if merged_oid:
                 return json.dumps([{
                     "mergeCommit": {"oid": merged_oid},
-                    "headRefName": "%s/%d-fix" % (STREAM, number)}])
+                    "headRefName": "%s/%d-fix" % (branch_stream, number)}])
             return "[]"
         if a and a[0] == "api" and "/timeline" in a[1]:
             return json.dumps(timeline)
@@ -108,6 +113,23 @@ class MergedReleasedLeavesI(unittest.TestCase):
             7001, labels=[], merged_oid="def5678", released=False)
         self.assertIn(7001, unhandled, "merged-but-unreleased is not DONE yet")
         self.assertFalse(handed.get(7001))
+
+
+class RenamedStreamBranchStillDetected(unittest.TestCase):
+    """#537 rename: the stream box resolves to `montalu` but a ticket's immutable
+    merged PR branch may carry the renamed `montalu1` (or vice versa). The
+    released detection must expand via `_stream_rename_equivalents`, so a
+    merged+released PR on the OTHER alias name still marks the ticket done —
+    exactly the incident streams (montalu/david/simap are all renamed)."""
+
+    def test_pr_branch_on_rename_alias_is_still_released(self):
+        # box stream = "montalu"; merged PR head branch = "montalu1/6942-fix".
+        _rows, handed, _workable, unhandled, gk = _drive(
+            6942, labels=[], merged_oid="abc1234", head_stream="montalu1")
+        self.assertNotIn(6942, unhandled,
+                         "a released PR on the rename alias must leave I")
+        self.assertEqual(handed.get(6942), "released")
+        self.assertEqual(gk, 1)
 
 
 class HandoffStatesUntouched(unittest.TestCase):

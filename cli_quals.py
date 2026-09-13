@@ -2380,41 +2380,54 @@ def _commit_is_released(oid, root):
 
 def _released_stream_numbers(candidates, root, slug, stream):
     """The subset of `candidates` (ticket numbers) whose stream PR is MERGED and
-    RELEASED. ONE batched `gh pr list --state merged --search head:<stream>/`
-    (NOT one gh call per candidate — `_slice_mine_and_handed` runs on the
-    footer's hot refresh path) that returns every recent merged stream-branch PR
-    + its merge commit, then a LOCAL `git merge-base --is-ancestor` per matched
-    candidate. A PR is matched to a candidate by its head branch prefix
-    `<stream>/<N>-` (re-checked in Python, since a `head:` search may over-match).
-    Fail-safe EMPTY set (gh/git error, missing slug/stream, or no candidate →
-    nothing marked released → every candidate stays in `I`)."""
+    RELEASED. A batched `gh pr list --state merged --search head:<stream>/` per
+    stream-name equivalent (NOT one gh call per candidate — `_slice_mine_and_
+    handed` runs on the footer's hot refresh path) that returns every recent
+    merged stream-branch PR + its merge commit, then a LOCAL `git merge-base
+    --is-ancestor` per matched candidate. A PR is matched to a candidate by its
+    head branch prefix `<eq>/<N>-` (re-checked in Python, since a `head:` search
+    may over-match).
+
+    `stream` is EXPANDED via `_stream_rename_equivalents()` (#537) — the SAME
+    alias primitive every other stream-identity consumer uses (`_slice_quals`,
+    `_ticket_is_stream_labeled`) — because the in-progress base-stream rename
+    means a ticket's immutable PR branch may carry EITHER the old or the new
+    stream name (montalu↔montalu1, david↔david1, simap↔simap1 — exactly the
+    incident streams). A non-renamed stream expands to just `[stream]`, so its
+    cost is unchanged (ONE gh call). Fail-safe EMPTY set (gh/git error, missing
+    slug/stream, or no candidate → nothing marked released → every candidate
+    stays in `I`)."""
     import airuleset
     want = {n for n in (candidates or [])}
     if not slug or not stream or not want:
         return set()
-    raw = airuleset._gh_out(
-        "pr", "list", "--state", "merged",
-        "--search", "head:%s/" % stream,
-        "--json", "number,mergeCommit,headRefName", "-L", "100",
-        cwd=root, timeout=20)
-    try:
-        prs = json.loads(raw)
-    except (ValueError, TypeError):
-        return set()
-    if not isinstance(prs, list):
-        return set()
-    prefix = stream + "/"
-    num_re = re.compile(re.escape(prefix) + r"(\d+)(?:-|$)")
+    equivs = _stream_rename_equivalents(stream)
+    prs = []
+    for eq in equivs:
+        raw = airuleset._gh_out(
+            "pr", "list", "--state", "merged",
+            "--search", "head:%s/" % eq,
+            "--json", "number,mergeCommit,headRefName", "-L", "100",
+            cwd=root, timeout=20)
+        try:
+            part = json.loads(raw)
+        except (ValueError, TypeError):
+            part = []
+        if isinstance(part, list):
+            prs.extend(part)
+    num_res = [re.compile(re.escape(eq + "/") + r"(\d+)(?:-|$)") for eq in equivs]
     released = set()
     for pr in prs:
         if not isinstance(pr, dict):
             continue
         head = str(pr.get("headRefName") or "")
-        mnum = num_re.match(head)
-        if not mnum:
-            continue
-        n_num = int(mnum.group(1))
-        if n_num not in want or n_num in released:
+        n_num = None
+        for rx in num_res:
+            mm = rx.match(head)
+            if mm:
+                n_num = int(mm.group(1))
+                break
+        if n_num is None or n_num not in want or n_num in released:
             continue
         mc = pr.get("mergeCommit")
         oid = mc.get("oid") if isinstance(mc, dict) else None
