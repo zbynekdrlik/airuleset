@@ -19,11 +19,39 @@ W>0 (with stale members).
 """
 import sys
 import pathlib
-import time
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+
+# --------------------------------------------------------------------------- #
+# Deterministic clocks (#607 working-time coupling -- fix-forward for #999).
+#
+# ``cli_quals._compute_net_stale_w`` / ``_stale_ops_wait_flagged`` measure
+# staleness in WORKING time -- Saturday/Sunday in Europe/Bratislava do NOT count
+# toward the 24h window (``working_time.working_deadline_passed``, #607).
+# Anchoring ``now = time.time()`` on the REAL clock, with the stale member at
+# ``now - 200_000`` s (~2.3 real days), made two tests below fail on weekends:
+# the window is dominated by the excluded weekend, so the member falls UNDER the
+# 24h working window and is not flagged. Passing a FIXED ``now`` through the
+# existing ``now=`` seam removes the calendar coupling (the production code is
+# correct; only these tests were calendar-coupled).
+_TZ = ZoneInfo("Europe/Bratislava")
+
+# MID-WEEK ``now``: the whole ``now - 200_000`` s span is weekdays (Mon->Wed),
+# so the stale anchor is ~2.3 WORKING days old -> the member IS stale on every
+# run (probed: working_seconds_between = 200_000 s > 86_400 s window).
+_MIDWEEK_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=_TZ).timestamp()  # Wed 12:00
+
+# WEEKEND ``now`` where BOTH Sat and Sun fall inside the ``now - 200_000`` s
+# window, so working-time exclusion drops the SAME member BELOW the 24h window
+# -> NOT stale (probed: working_seconds_between = 48_800 s < 86_400 s). Must be
+# a SUNDAY, not a Saturday: for a Saturday ``now`` only ONE weekend day lies in
+# the window, leaving >24h of weekday -> still stale. This LOCKS the working-
+# time semantics against a future revert to wall-clock staleness.
+_WEEKEND_NOW = datetime(2026, 9, 13, 18, 0, tzinfo=_TZ).timestamp()  # Sun 18:00
 
 
 class TestStaleWTacitSubtraction(unittest.TestCase):
@@ -69,7 +97,7 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
     def test_compute_net_stale_w_with_stale_member(self):
         """W>0 with a stale member must count it."""
         import airuleset
-        now = time.time()
+        now = _MIDWEEK_NOW
 
         def ages_fn(n):
             if n == 10:
@@ -92,7 +120,7 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
     def test_compute_net_stale_w_none_stale(self):
         """W>0 with no stale members must produce 0."""
         import airuleset
-        now = time.time()
+        now = _MIDWEEK_NOW
 
         def ages_fn(n):
             return {"own": now, "any": now,
@@ -110,7 +138,7 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
         from cli_quals import (
             _stale_ops_wait_flagged, _tacit_window_flagged)
 
-        now = time.time()
+        now = _MIDWEEK_NOW
 
         def ages_fn(n):
             if n == 10:
@@ -133,6 +161,32 @@ class TestStaleWTacitSubtraction(unittest.TestCase):
         tacit = tacit_wait | tacit_close
         net_stale = stale - tacit
         self.assertEqual(net_stale, {10})
+
+    def test_working_time_semantics_weekend_now_not_stale(self):
+        """LOCK (#607): with a WEEKEND ``now`` where both Sat and Sun fall in
+        the ``now - 200_000`` s window, working-time exclusion drops the SAME
+        member BELOW the 24h window -> NOT stale. Guards against a future revert
+        to wall-clock staleness; the mid-week tests above prove it IS stale."""
+        import airuleset
+        from cli_quals import _stale_ops_wait_flagged
+        now = _WEEKEND_NOW
+
+        def ages_fn(n):
+            if n == 10:
+                return {"own": now - 200_000, "any": now - 200_000,
+                        "own_cited": now - 200_000, "own_oldest": now - 200_000,
+                        "own_final_reminder": None, "own_target": None,
+                        "own_target_event": None}
+            return {"own": now, "any": now,
+                    "own_cited": now, "own_oldest": now,
+                    "own_final_reminder": None, "own_target": None,
+                    "own_target_event": None}
+
+        rows = {10: {"labels": ["ops-wait"]}, 20: {"labels": ["ops-wait"]}}
+        self.assertNotIn(
+            10, _stale_ops_wait_flagged(rows, ages_fn=ages_fn, now=now))
+        self.assertEqual(
+            airuleset._compute_net_stale_w(rows, ages_fn=ages_fn, now=now), 0)
 
 
 if __name__ == "__main__":
