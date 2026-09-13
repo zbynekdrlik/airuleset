@@ -257,7 +257,11 @@ if [ -n "$MARKER_RAW" ]; then
                 [ -n "$_DEC_LEN" ] || _DEC_LEN=0
                 _DEGEN=0
                 if [ "$_DEC_LEN" -lt 25 ] 2>/dev/null; then _DEGEN=1; fi
-                if LC_ALL=C.UTF-8 grep -qiE '^(voľba|volba|option|choice)\b|^[0-9]' <<<"$KEYLINE"; then _DEGEN=1; fi
+                # #1007 review 🟡: the digit arm matches ONLY a bare numeric
+                # enumeration ("1/2/3?", "1 / 2 / 3"), never a decision that
+                # merely STARTS with a digit but names it ("3 verzie … ktorú
+                # nasadiť?", "2FA chceš zapnúť?"). `-` last in the class = literal.
+                if LC_ALL=C.UTF-8 grep -qiE '^(voľba|volba|option|choice)\b|^[0-9][0-9[:space:]/.,)?-]*$' <<<"$KEYLINE"; then _DEGEN=1; fi
                 if [ "$_DEGEN" = 1 ]; then
                     if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
                         echo "$((RETRIES+1))" > "$RETRY_FILE"
@@ -402,8 +406,13 @@ BLOCK=$(printf '%s\n' "$MSG" | LC_ALL=C awk -v m="$N" '
 # the webterm — the exact montalu shape that slipped through. exit 2 + the
 # split instruction; RETRY_FILE cap like the shape checks so it never wedges.
 if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
-    N_SIG=$(grep -cE 'ZbynekAI' <<<"$BLOCK" || true)
-    N_TEXTHDR=$(LC_ALL=C.UTF-8 grep -cE '^[[:space:]]*\**[[:space:]]*Text[[:space:]]+([úu]loh|pre[[:space:]]|pro[[:space:]]|[0-9])' <<<"$BLOCK" || true)
+    # #1006 review 🔵: count only signature LINES (ending with ZbynekAI), never
+    # a mid-line prose mention ("…podpíšem ho ako ZbynekAI podľa dohody):"), so a
+    # single draft that names its own signature is not miscounted as two texts.
+    N_SIG=$(grep -cE 'ZbynekAI[[:space:]]*$' <<<"$BLOCK" || true)
+    # #1006 review 🔵: alternation (ú|u), not a multibyte bracket class, so the
+    # "Text úloha" arm survives even on a box with no C.UTF-8 locale.
+    N_TEXTHDR=$(LC_ALL=C.UTF-8 grep -cE '^[[:space:]]*\**[[:space:]]*Text[[:space:]]+((ú|u)loh|pre[[:space:]]|pro[[:space:]]|[0-9])' <<<"$BLOCK" || true)
     N_DEC=$(grep -cE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)' <<<"$BLOCK" || true)
     if [ "${N_SIG:-0}" -ge 2 ] || [ "${N_TEXTHDR:-0}" -ge 2 ] || [ "${N_DEC:-0}" -ge 2 ]; then
         echo "$((RETRIES+1))" > "$RETRY_FILE"
