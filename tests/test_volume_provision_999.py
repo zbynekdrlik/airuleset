@@ -620,6 +620,16 @@ class TestVolumeCommand(TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("fail", out.lower())
 
+    def test_apply_skipped_no_sudo_is_nonzero(self):
+        # review F1: an --apply that could NOT run (no passwordless sudo) must
+        # exit NON-ZERO — a truthful exit status, so a runbook/wrapper keying
+        # on the code never reads "did nothing" as "applied".
+        rec = _Rec([("sudo -n true", 1, "")])
+        rc, out = self._run_cmd(True, rec, dict(GK_DECL))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("skip", out.lower())
+        self.assertFalse(rec.ran("bash"))
+
     def test_apply_no_declaration_refuses(self):
         orig = dg._local_volume_decl
         dg._local_volume_decl = lambda *a, **k: None
