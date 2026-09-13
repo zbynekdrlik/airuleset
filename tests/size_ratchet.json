@@ -457,7 +457,7 @@
     "tests/test_run_once_registry_labels.py": 184,
     "tests/test_runtime_deps.py": 254,
     "tests/test_schedule_wakeup_loop_only.py": 68,
-    "tests/test_scope_gate.py": 2012,
+    "tests/test_scope_gate.py": 2051,
     "tests/test_scoped_waiter_kill_701.py": 339,
     "tests/test_send_verified.py": 327,
     "tests/test_send_verified_adoption.py": 1017,
