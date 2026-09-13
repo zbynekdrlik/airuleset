@@ -639,14 +639,14 @@
     "watchdog/roster.py": 154,
     "watchdog/session_health_observe.py": 76,
     "watchdog/session_status.py": 400,
-    "watchdog/stash.py": 1583,
+    "watchdog/stash.py": 1596,
     "watchdog/sweep_jobs.py": 368,
     "watchdog/tmux_io.py": 1291,
     "watchdog/transcripts.py": 1652,
     "watchdog/u_freshness.py": 372,
     "watchdog/u_labels.py": 369,
     "watchdog/usage.py": 297,
-    "watchdog/wedge.py": 319,
+    "watchdog/wedge.py": 327,
     "watchdog/wip_ref_sweep.py": 347,
     "working_time.py": 78
   },
@@ -686,8 +686,8 @@
     "watchdog/ops_wait_recheck.py::goal_ops_wait_recheck": 277,
     "watchdog/queue_arrival_recheck.py::goal_queue_arrival_recheck": 221,
     "watchdog/release_gap.py::goal_release_gap_recheck": 228,
-    "watchdog/stash.py::deliver_with_stash": 290,
-    "watchdog/wedge.py::prompt_wedge_check": 254
+    "watchdog/stash.py::deliver_with_stash": 296,
+    "watchdog/wedge.py::prompt_wedge_check": 262
   },
   "rule_bytes": {
     ".claude/rules/airuleset-internals.md": 8192,

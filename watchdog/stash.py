@@ -401,6 +401,13 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     hc = _settle_type_verify(pid, run, head_chunk.rstrip(), sleep_fn)
     if hc != _TV_LANDED:
         return hc
+    # #1002 -- the REST chunk's return is intentionally NOT checked (unlike the
+    # FIRST chunk above, which bails _TV_HOLD keystroke-free): the head chunk is
+    # ALREADY typed, so a mid-delivery OFF-flip that suppresses the rest cannot be
+    # "bailed keystroke-free". We return _TV_LANDED so the caller's full-text
+    # settle-verify reads not-landed and runs its undo-and-recover path (backs the
+    # head chunk off + pops the parked draft) -- the correct response to a partial
+    # type. Bailing here would STRAND the typed head chunk instead.
     _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
                   kind=kind, user_authored=user_authored)
     return _TV_LANDED
@@ -1210,6 +1217,12 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
                     "stash-abort: head-checkpoint-%s" % hc)
             return False
     else:
+        # #1002 -- return intentionally unchecked: a mid-delivery OFF-flip that
+        # suppresses this type leaves a BARE box (the draft was already stashed by
+        # the gated C-s above). The verify below reads not-landed and the
+        # `_undo_and_release_slot` path pops the parked draft back -- the correct
+        # recovery. An explicit keystroke-free bail here would STRAND the parked
+        # draft in the stash slot until the janitor reclaims it.
         watchdog._type_literal(pid, run, text, sleep_fn,
                                kind=nudge_kind, user_authored=user_authored)
     cap = watchdog.capture_pane(pid, run, lines=30)

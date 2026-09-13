@@ -210,10 +210,18 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                 # as ESC[201~ at all (could parse as an Alt-modified CSI
                 # instead). Send EXACTLY the sequence that was proven to
                 # work, nothing more.
-                # #1002 -- the prompt-wedge submit forwards the OWNER's OWN wedged
-                # draft (not a machine nudge), so kind="wedge" is RECOVERY
-                # (ungated): it runs regardless of the #994 switch. Routed through
-                # the ONE `keys` primitive (the `-H` hex form) like every key.
+                # #1002 -- the `if machine:` gate above means this whole block
+                # SUBMITS a STRANDED, already-composed machine nudge / discord
+                # reply that wedged in the box: it FINISHES an in-flight stuck
+                # submit of text ALREADY in the composer, it never injects a NEW
+                # nudge. So kind="wedge" is RECOVERY (ungated) -- preserving the
+                # exact pre-#1002 ungated `send-keys` behavior of this path (it
+                # never carried the #994 gate). Routed through the ONE `keys`
+                # primitive (the `-H` hex form) like every key. OPEN (LANE-RETURN
+                # #1002): whether #994 SHOULD instead suppress a wedged machine
+                # nudge at OFF (janitor-clean it, as janitor does a stranded one)
+                # is a behavior decision left untouched by this behavior-preserving
+                # rework.
                 watchdog.keys(pid, "-H", "1b", "5b", "32", "30", "31", "7e",
                               kind="wedge", run=run)
                 unstick_note = " (paste-end unstick)"
