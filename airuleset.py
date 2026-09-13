@@ -1475,10 +1475,25 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ufw ssh error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-quater-pre. Managed volume (#999): a box with a `volume`
+    # declaration (gk-vol1 on the gatekeeper box) mounts the attached Hetzner
+    # volume by-id (fstab `nofail`) and RELOCATES the near-full root disk's big
+    # tenants (runners, docker data-root, ~/.cache) onto it to FREE local
+    # space. Runs BEFORE the swap step so the freed space is available when
+    # swap computes its target. Idempotent, sudo-`-n`-gated, non-fatal; a box
+    # with no `volume` key is a no-op skip line. ---
+    try:
+        from cli_disk_guard_root import provision_volume
+        print(f"  {provision_volume()}")
+    except Exception as e:
+        print(f"  volume provisioning error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
     # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
     # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
-    # provisioning step rather than a manual intervention. ---
+    # provisioning step rather than a manual intervention. Runs AFTER the
+    # volume step (#999) so its free-space guard sees the space relocation
+    # freed. ---
     try:
         from cli_disk_guard_root import provision_swap
         print(f"  {provision_swap()}")
@@ -2172,6 +2187,13 @@ def cmd_status(args):
         print("\n" + swap_status())
     except Exception as e:
         print(f"\nswap: error ({e})", file=sys.stderr)
+
+    # --- Managed volume (#999) ---
+    try:
+        from cli_disk_guard_root import volume_status
+        print("\n" + volume_status())
+    except Exception as e:
+        print(f"\nvolume: error ({e})", file=sys.stderr)
 
     # --- Concurrency mode/role (#998) ---
     try:
