@@ -212,6 +212,52 @@ _INFRA_ROLE = (
     "the review window via tickets only; box-maintenance steps stop with `❓ "
     "NEEDS YOU` between steps.")
 
+# The generic (B) proof + obligation block the review ROLE REPLACES (#1000).
+# Clause (h) of the review block IS the gk review window's own (B) done
+# condition, so these generic-backlog clauses are superseded. Replacing (not
+# appending) them is what fits the review clauses under the 4000 arm cap:
+# appending (a)-(h) to the full template renders 5081 chars (> 4000, never
+# arms); replacing this ~1383-char block with the ~1527-char review block
+# renders ~3765 (headroom ~235, matching montalu's proven-arming 3764). Every
+# OTHER clause stays byte-identical — see goal_registry drift/snapshot tests.
+_REVIEW_B_BLOCK = ("stop-b-header", "obligation", "proof", "how-to-tell",
+                   "done-never", "cannot-tell", "produce-proof", "stream-note")
+
+# The review-ROLE block (#1000, owner directive 2026-09-12 "subdevs never wait
+# on gk" + "uz mam dost tvojich patchworkov" = ONE renderer, no second text
+# source): clause (h) as the review window's (B) done condition, then the
+# operating directives (a)-(g). Slovak, in the template's terse style; carries
+# NO turn cap ("stop po"/"stop after" never appear — `no_turn_cap_ok` / the
+# #1000 tests lock it). Inserted at the `stop-b-header` position by
+# render_goal_line when role=="review".
+_REVIEW_ROLE = (
+    "(B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: "
+    "HOTOVO iba keď 0 hand-offov starších než 1 h bez akcie A 0 otvorených "
+    "stream PR bez skorého review ≤ 1 h A montalu/slovnormal/miva == main — inak "
+    "CONTINUE bez akéhokoľvek turn limitu; hlavný ďalší stop je (A) ❓ NEEDS YOU "
+    "na ownerovu odpoveď (per #1007 iba keď nebeží žiadna lane). "
+    "REVIEW ROLE — "
+    "(a) infra tickety (label infra) sa TU NEpracujú, iba zakladajú; "
+    "(b) SUBDEVS NIKDY NEČAKAJÚ NA GK: každý OTVORENÝ stream PR→develop "
+    "(montalu/*, david*/kvaskodev, miva*, simap*) dostane skoré advisory review "
+    "do 1 h od posledného pushu (koment „gk skoré review (advisory, pred "
+    "hand-offom)\", bez verdikt headingu) a znova po každom podstatnom pushi; "
+    "(c) každý hand-off (ready-for-review / needs-gatekeeper / prio:bounce / "
+    "GATEKEEPER-ACTION; stream:montalu prvé) dostane gk verdikt alebo akčný "
+    "komentár do 1 h; "
+    "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje workable "
+    "(review / fix-forward / resync / PROD akcia) — čakanie na CI nikdy nedrží "
+    "slot; "
+    "(e) každá akceptovaná vetva má merged PR do develop; červený/DIRTY gk PR "
+    "dostane fix lane v tom istom cykle; "
+    "(f) release train nikdy nestojí (develop pred main ≥ 2 h a nič in-flight → "
+    "existuje cut PR; shadow/main/deploy postup; každý STOP hlásený na "
+    "odoo-erp#6883); "
+    "(g) za cyklus vypíš `python3 ~/devel/airuleset/airuleset.py core-quals "
+    "--role review --count`, počet otvorených stream PR bez skorého review ≤ 1 "
+    "h, lanes N/cap, stav release (cut PR, shadow, main PR, posledné deploy runy "
+    "s DB verziou, montalu/slovnormal/miva vs main).")
+
 # A turn cap in an OPERATIONAL goal is banned (#993 comment 2026-09-12). Matches
 # "stop after N turns" / "stop after 30 turns" / "…or stop after …".
 _TURN_CAP_RE = _re.compile(r"stop\s+after\s+(?:\d+|N)\s+turns?", _re.IGNORECASE)
@@ -222,17 +268,33 @@ def render_goal_line(authority, mode="parallel", role=None):
 
     `mode="parallel", role=None` reproduces `render(authority)` byte-for-byte
     (so the SKILL.md drift lock is unchanged). `mode="sequential"` substitutes
-    the refill clause; `role="infra"` appends the infra-scope clause. Never
-    inserts a turn cap."""
+    the refill clause; `role="infra"` appends the infra-scope clause;
+    `role="review"` REPLACES the generic (B) proof + obligation block with the
+    gk review window's own (B) done condition + operating clauses (a)-(g)
+    (#1000). Never inserts a turn cap."""
     if authority not in PROFILES:
         raise ValueError("unknown authority: %r" % (authority,))
     if mode not in MODES:
         raise ValueError("unknown mode: %r" % (mode,))
     if role not in ROLES:
         raise ValueError("unknown role: %r" % (role,))
+    if role == "review" and authority != "full":
+        # #1000 F5 — the review block hardcodes full-authority gk semantics
+        # (montalu/slovnormal/miva, release train, core-quals); it is only ever
+        # paired with the full-authority gk review window. Refuse a nonsensical
+        # reduced-authority review render rather than emit gk clauses into it.
+        raise ValueError(
+            "review role is gk-full-only, not %r" % (authority,))
     parts = []
     for c in CLAUSES:
         if authority not in c.profiles:
+            continue
+        if role == "review" and c.id in _REVIEW_B_BLOCK:
+            # The generic (B) machinery is superseded by the review block's own
+            # (h) done condition; insert the review block ONCE at the (B)
+            # position and drop the rest of the generic block (see _REVIEW_ROLE).
+            if c.id == "stop-b-header":
+                parts.append(_REVIEW_ROLE)
             continue
         text = c.text_for(authority)
         if mode == "sequential" and c.id == "saturation-core":
@@ -268,7 +330,11 @@ def variant_check():
     """Return a list of error strings ([] == every variant is valid). Locks, per
     variant: renders, ≤ GOAL_ARM_CHAR_CAP, NO turn cap, carries every required
     clause, and — for sequential — the sequential phrase present + the refill
-    phrase absent; for infra — the infra phrase present."""
+    phrase absent; for infra — the infra phrase present. The gk-full-only
+    `review` variant (#1000) is checked SEPARATELY below for BUDGET + no-turn-cap
+    only — its required-clause leg is skipped because it legitimately SUBSTITUTES
+    the (B) proof/obligation clauses (clause (h) supersedes them), which the
+    profile-level `clause_ids()` coverage leg cannot model."""
     errs = []
     for authority, mode, role in variant_specs():
         try:
@@ -291,6 +357,21 @@ def variant_check():
                 errs.append("%s sequential still carries the refill clause" % tag)
         if role == "infra" and "INFRA ROLE" not in line:
             errs.append("%s infra missing the infra-role clause" % tag)
+    # #1000 F1 — the review variant is the TIGHTEST-arming variant and is NOT in
+    # variant_specs (its required-clause leg cannot model the (B) substitution),
+    # so lock its BUDGET + no-turn-cap here so `goal-inventory --check` is honest
+    # that it guards every ARMABLE variant. (Headroom is locked tighter by the
+    # dedicated #1000 test.)
+    try:
+        rline = render_goal_line("full", "parallel", "review")
+    except Exception as exc:  # noqa: BLE001
+        errs.append("render(full,parallel,review) raised: %r" % (exc,))
+    else:
+        if len(rline) > GOAL_ARM_CHAR_CAP:
+            errs.append("full/parallel/review over budget: %d > %d"
+                        % (len(rline), GOAL_ARM_CHAR_CAP))
+        if _TURN_CAP_RE.search(rline):
+            errs.append("full/parallel/review carries a TURN CAP (banned)")
     return errs
 
 
