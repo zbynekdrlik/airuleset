@@ -708,6 +708,18 @@ class TestMergeCommitExempt1003(_Base):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("123", r.stderr)
 
+    def test_prose_merge_commit_phrase_is_not_a_merge_context(self):
+        # #1003 regression (replay-corpus): a message that merely MENTIONS the
+        # noun phrase "merge commit"/"merge branch" (no quoted ref, no MERGE_HEAD,
+        # no `git merge` command) is NOT a merge context and still blocks.
+        r = self.run_hook(
+            'git commit -m "fix(gate): exempt a resync merge commit (#123)"')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("123", r.stderr)
+        r2 = self.run_hook(
+            'git commit -m "docs: how the merge branch logic works (#123)"')
+        self.assertEqual(r2.returncode, 2, r2.stderr)
+
 
 if __name__ == "__main__":
     main()

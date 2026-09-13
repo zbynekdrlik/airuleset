@@ -421,9 +421,13 @@ def issue_refs(text):
 # message belt is a documented forgery residual (trusted-worker gate, not an
 # adversarial boundary); MERGE_HEAD is load-bearing.
 
+# A canonical git merge message is `Merge <kind> '<quoted-ref>'` -- the quoted
+# ref is REQUIRED so the belt never fires on the ordinary PROSE noun phrase
+# "merge commit"/"merge branch" a normal commit message about merges carries
+# (the #1003 replay-corpus false positive: "exempt a resync merge commit …").
 _MERGE_MSG_RE = re.compile(
-    r"Merge\s+(?:branch|remote-tracking\s+branch|commit|tag)\b"
-    r"|Merge\s+origin/",
+    r"Merge\s+(?:branch|remote-tracking\s+branch|commit|tag)\s+['\"]"
+    r"|Merge\s+origin/\w",
     re.IGNORECASE)
 _GIT_MERGE_CMD_RE = re.compile(
     r"(?:^|[;&|]|&&)\s*(?:sudo\s+|env\s+)?git\s+merge\b")
