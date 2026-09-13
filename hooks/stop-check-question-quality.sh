@@ -141,6 +141,42 @@ if [ -z "$N" ]; then
     exit 0                       # not a question turn — nothing to gate
 fi
 
+# --- #1007 (miva1 ×5, 2026-09-12): live-lane NEEDS YOU + degenerate decision --
+# Both run BEFORE the #740 verbatim-repeat bypass below, on purpose: that bypass
+# exits 0 for a bare `❓ NEEDS YOU:` line matching LASTQF regardless of live
+# lanes or decision quality — which is exactly what waved the miva1 spam through.
+#
+# (A) A turn ending on `❓ NEEDS YOU:` while the harness lists a RUNNING
+# background lane is a state lie — `❓ NEEDS YOU` means "I stopped, nothing else
+# workable", which a running agent contradicts; the correct form is
+# ASK-AND-CONTINUE (`❓ ASKED` + `⏳ WORKING`). background_tasks is read EXACTLY
+# as stop-check-working-liveness.sh reads it (#120): the KEY may be absent on an
+# older harness (nothing to check → skip), and only a status=="running" entry
+# counts (the list holds only in-flight tasks; a lingering completed entry is not
+# a live lane). Keys on the LAST non-blank line being a NEEDS YOU marker, so an
+# ASK-AND-CONTINUE turn (ends on `⏳ WORKING`) is never touched.
+NEEDS_YOU_RX='❓[[:space:]]*\**[[:space:]]*NEEDS[[:space:]]+YOU[[:space:]]*\**[[:space:]]*:'
+if grep -qiE "$NEEDS_YOU_RX" <<<"$LAST_LINE" && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    if [ "$(echo "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo false)" = "true" ]; then
+        RUNNING_BT=$(echo "$INPUT" | jq -r \
+            '[.background_tasks[]? | select(.status == "running")] | length' \
+            2>/dev/null || echo 0)
+        [ -n "$RUNNING_BT" ] || RUNNING_BT=0
+        if [ "$RUNNING_BT" -gt 0 ] 2>/dev/null; then
+            echo "$((RETRIES+1))" > "$RETRY_FILE"
+            printf '%s\n' "Tvoj ťah končí na \`❓ NEEDS YOU:\`, ale harness eviduje ${RUNNING_BT} bežiacu(e) background lane/agenta — \`❓ NEEDS YOU\` znamená „zastavil som sa, nič iné sa nedá robiť\", čo pri živých agentoch NEPLATÍ. Použi ASK-AND-CONTINUE: otázku napíš ako \`❓ ASKED: <otázka>\` v TELE správy (celý \`**Otázka — projekt …:**\` blok) a ťah ukonči POSLEDNÝM riadkom \`⏳ WORKING: <čo pokračuje>\`. Otázku polož RAZ; ďalej ju nesie footer U N + label needs-answer (#1007)." >&2
+            exit 2
+        fi
+    fi
+fi
+
+# (C) The ❓ marker must NAME the decision — enforced INSIDE the #740 bare
+# re-poke bypass below (the ONE place a bare marker reaches an exit-0 PASS): a
+# first-time bare marker with no briefing is already blocked by Check 1, so
+# gating it here too would only change that block's shape (stdout→exit 2) and
+# regress test_question_gate_pipeline_race; the degenerate `voľba 1/2/3?` line
+# only slips through as a bare RE-POKE, which is exactly the miva1 case.
+
 # VERBATIM REPEAT of the already-delivered question → PASS without shape
 # checks. A /goal re-poke while still blocked replies with EXACTLY the one
 # previous ❓ line (message-status-marker.md) — the device path dedups it, and
@@ -211,6 +247,30 @@ if [ -n "$MARKER_RAW" ]; then
             if grep -qiE '⏳[[:space:]]*WORKING' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
             if grep -qiE '✅[[:space:]]*(DONE|Work[[:space:]]+Complete)' <<<"$MSG"; then IS_BARE_REPOKE=0; fi
             if [ "$IS_BARE_REPOKE" = 1 ]; then
+                # #1007 (C) — even the ONE allowed bare re-poke must NAME the
+                # decision. KEYLINE (derived above, minus the NEEDS YOU: prefix)
+                # is the decision text; a line < 25 codepoints, or one that
+                # STARTS with a bare voľba/option/choice/<digit>, names nothing —
+                # the footer U N carries the ticket, so `voľba 1/2/3?` is refused
+                # (the miva1 spam line). Rolling pushback like the repeat-block.
+                _DEC_LEN=$(printf '%s' "$KEYLINE" | jq -Rrs 'rtrimstr("\n") | length' 2>/dev/null || echo 0)
+                [ -n "$_DEC_LEN" ] || _DEC_LEN=0
+                _DEGEN=0
+                if [ "$_DEC_LEN" -lt 25 ] 2>/dev/null; then _DEGEN=1; fi
+                # #1007 review 🟡: the digit arm matches ONLY a bare numeric
+                # enumeration ("1/2/3?", "1 / 2 / 3"), never a decision that
+                # merely STARTS with a digit but names it ("3 verzie … ktorú
+                # nasadiť?", "2FA chceš zapnúť?"). `-` last in the class = literal.
+                if LC_ALL=C.UTF-8 grep -qiE '^(voľba|volba|option|choice)\b|^[0-9][0-9[:space:]/.,)?-]*$' <<<"$KEYLINE"; then _DEGEN=1; fi
+                if [ "$_DEGEN" = 1 ]; then
+                    if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+                        echo "$((RETRIES+1))" > "$RETRY_FILE"
+                        printf '%s\n' "Riadok \`❓ NEEDS YOU: ${KEYLINE}\` nepomenúva rozhodnutie — „${KEYLINE}\" sa nedá prečítať samostatne. Footer U N nesie ticket, NIE samotný riadok, tak napíš rozhodnutie zrozumiteľne bez kontextu (≥ 25 znakov, nie holé „voľba 1/2/3\"): napr. \`❓ NEEDS YOU: schváliš nasadenie verzie X na PROD?\`. Ak je to výber z možností, pomenuj ČOHO sa výber týka (#1007)." >&2
+                        exit 2
+                    fi
+                    rm -f "$RETRY_FILE" 2>/dev/null || true
+                    exit 0
+                fi
                 rm -f "$RETRY_FILE" 2>/dev/null || true
                 exit 0
             fi
@@ -331,6 +391,35 @@ BLOCK=$(printf '%s\n' "$MSG" | LC_ALL=C awk -v m="$N" '
         }
         print blk
     }')
+
+# --- #1006 (montalu, repeated escalation 2026-09-12): ONE ❓ block = ONE
+# client text. A ❓ approval block that bundled TWO client-message drafts
+# (Text úloha 638 + Text úloha 881, each signed `ZbynekAI`) with ONE decision
+# line passed the gate — Check 2 catches a (1)/(2) multi-QUESTION pile, never
+# multiple client TEXTS. Owner rule: JEDNA otázka = JEDEN klientsky text —
+# queue the rest. Deterministic detectors on the delivered BLOCK (any signal
+# >= 2 ⇒ bundle): >=2 `ZbynekAI` signatures (each proposed reply is signed
+# once — the client's own quoted message is never signed ZbynekAI), >=2
+# `Text úloha`/`Text pre`-style draft headers, or >=2 `❓ (NEEDS YOU|ASKED)`
+# decision markers. Runs BEFORE the present-user bypass (like the #740
+# repeat-block) so a bundled block is caught even when the owner is present in
+# the webterm — the exact montalu shape that slipped through. exit 2 + the
+# split instruction; RETRY_FILE cap like the shape checks so it never wedges.
+if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    # #1006 review 🔵: count only signature LINES (ending with ZbynekAI), never
+    # a mid-line prose mention ("…podpíšem ho ako ZbynekAI podľa dohody):"), so a
+    # single draft that names its own signature is not miscounted as two texts.
+    N_SIG=$(grep -cE 'ZbynekAI[[:space:]]*$' <<<"$BLOCK" || true)
+    # #1006 review 🔵: alternation (ú|u), not a multibyte bracket class, so the
+    # "Text úloha" arm survives even on a box with no C.UTF-8 locale.
+    N_TEXTHDR=$(LC_ALL=C.UTF-8 grep -cE '^[[:space:]]*\**[[:space:]]*Text[[:space:]]+((ú|u)loh|pre[[:space:]]|pro[[:space:]]|[0-9])' <<<"$BLOCK" || true)
+    N_DEC=$(grep -cE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)' <<<"$BLOCK" || true)
+    if [ "${N_SIG:-0}" -ge 2 ] || [ "${N_TEXTHDR:-0}" -ge 2 ] || [ "${N_DEC:-0}" -ge 2 ]; then
+        echo "$((RETRIES+1))" > "$RETRY_FILE"
+        printf '%s\n' "Tvoj ❓ blok bundluje VIAC než jeden klientsky text / rozhodnutie (podpisy ZbynekAI: ${N_SIG:-0}, „Text …\" hlavičky: ${N_TEXTHDR:-0}, ❓ rozhodnutia: ${N_DEC:-0}). Owner pravidlo: JEDNA otázka = JEDEN klientsky text — pošli PRVÝ teraz vo vlastnom bloku, zvyšné ZARAĎ DO FRONTY (na ich ticketoch, label needs-answer) a spýtaj sa až po odpovedi. Rodinné batchovanie (#755) zoskupuje TIKETY deklaratívne, NIKDY viac klientskych textov v jednom bloku (#1006)." >&2
+        exit 2
+    fi
+fi
 
 # PRESENT USER → no shape enforcement. The template exists for the AWAY
 # user's phone ping (zero context, cold read). When the user typed a REAL

@@ -81,7 +81,7 @@ SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
 # "never gate on events/prod" hardest rule; parked) or a reduced-only clause
 # (review-watch, authority-ends) can never be silently dropped either.
 REQUIRED_CLAUSES = (
-    "header", "stop-a", "stop-b-header", "obligation", "proof",
+    "header", "stop-a", "stop-a-livelane", "stop-b-header", "obligation", "proof",
     "how-to-tell", "done-never", "cannot-tell", "produce-proof",
     "irreversible", "work-intro", "saturation-core", "saturation-delivery",
     "ask", "night", "bounce", "verify-sources", "compact-boundary",
@@ -102,6 +102,15 @@ CLAUSES = [
         "branch-merge": "(A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`.",
         "fork-no-merge": "(A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`.",
     }),
+    # #1007 (miva1 ×5, 2026-09-12): (A) blocks the loop only when GENUINELY
+    # blocked — with a background agent/lane live the correct form is
+    # ASK-AND-CONTINUE, never a bare `❓ NEEDS YOU:` re-poke. A SEPARATE clause
+    # (not appended to stop-a's text) so the tightest-arming gk-review variant
+    # can DROP it — see _REVIEW_B_BLOCK — since the review block already carries
+    # the #1007 rule in its own (B) condition, and stop-a's text stays
+    # byte-identical for the review-variant verbatim-present lock.
+    Clause("stop-a-livelane", PROFILES,
+        "(A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question."),
     Clause("stop-b-header", PROFILES, {
         "full": "(B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED.",
         "branch-merge": "(B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED.",
@@ -220,8 +229,15 @@ _INFRA_ROLE = (
 # arms); replacing this ~1383-char block with the ~1527-char review block
 # renders ~3765 (headroom ~235, matching montalu's proven-arming 3764). Every
 # OTHER clause stays byte-identical — see goal_registry drift/snapshot tests.
-_REVIEW_B_BLOCK = ("stop-b-header", "obligation", "proof", "how-to-tell",
-                   "done-never", "cannot-tell", "produce-proof", "stream-note")
+# stop-a-livelane (#1007) rides in this drop set too: the review block's own
+# (B) condition already carries the #1007 "iba keď nebeží žiadna lane" rule, so
+# the shared (A) live-lane appendix is redundant in the review variant AND would
+# push it past its tight arm-cap (test_review_variant_arms_under_the_cap_with_
+# headroom, ≤ GOAL_ARM_CHAR_CAP-150) — so the review role DROPS it, keeping the
+# variant byte-identical. It is NOT a (B) clause; it is dropped, not replaced.
+_REVIEW_B_BLOCK = ("stop-a-livelane", "stop-b-header", "obligation", "proof",
+                   "how-to-tell", "done-never", "cannot-tell", "produce-proof",
+                   "stream-note")
 
 # The review-ROLE block (#1000, owner directive 2026-09-12 "subdevs never wait
 # on gk" + "uz mam dost tvojich patchworkov" = ONE renderer, no second text
