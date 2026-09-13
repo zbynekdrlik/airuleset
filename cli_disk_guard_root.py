@@ -1021,7 +1021,11 @@ def render_volume_setup_script(decl, home=None, root=""):
             a("  elif [ \"${_running:-0}\" != '0' ]; then")
             a("    echo \"volume: docker relocation SKIPPED — ${_running} container(s) running\"")
             a("  else")
-            a("    systemctl stop docker || true")
+            # stop docker.socket BEFORE docker.service — a listening socket
+            # socket-activates (restarts) docker mid-rsync if any client
+            # touches it, corrupting the copy.
+            a("    systemctl stop docker.socket || true")
+            a("    systemctl stop docker.service || true")
             a("    mkdir -p '%s'" % target)
             a("    rsync -aHAX '%s/' '%s/'" % (orig, target))
             a("    mkdir -p '%s/etc/docker'" % r)
@@ -1037,7 +1041,7 @@ def render_volume_setup_script(decl, home=None, root=""):
             a("with open(p, 'w') as f: json.dump(d, f, indent=2)")
             a("PYEOF")
             a("    mv '%s' '%s.relocated-'\"$_vol_date\"" % (orig, orig))
-            a("    systemctl restart docker")
+            a("    systemctl restart docker.socket docker.service")
             a("    echo 'volume: docker data-root -> %s'" % target)
             a("  fi")
             a("fi")
