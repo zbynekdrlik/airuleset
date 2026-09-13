@@ -68,11 +68,24 @@ def _per_run_tempdir(base=None):
     testable directly — the fixture below is a thin session-scoped wrapper."""
     orig_tempdir = tempfile.tempdir
     orig_env = os.environ.get("TMPDIR")
+    # #1012: isolate the exec-marker STATE family (ok/fable-ok/pending) off the
+    # LIVE /tmp for the whole suite, next to the TMPDIR redirect. Otherwise a
+    # `run_once`-driving test with a synthetic far-future clock sweeps the real
+    # /tmp markers (Job 22), deleting fresh test markers AND live sessions'
+    # granted one-shots. A dedicated subdir keeps the marker family off the
+    # general tempdir litter; both hooks + the Job 22 sweeper read this same
+    # AIRULESET_MAIN_EXEC_STATE_DIR seam, so they agree by construction. The
+    # push-gate `unittest discover` gate never reads conftest.py, so it gets the
+    # identical seam via `cmd_push`'s own test_env (#385 dual-coverage).
+    orig_exec_state = os.environ.get("AIRULESET_MAIN_EXEC_STATE_DIR")
     root = base if base is not None else tempfile.gettempdir()
     run_dir = Path(root) / ("airuleset-pytest-run-" + uuid.uuid4().hex)
     run_dir.mkdir(parents=True, exist_ok=True)
+    exec_state_dir = run_dir / "main-exec-state"
+    exec_state_dir.mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(run_dir)
     os.environ["TMPDIR"] = str(run_dir)
+    os.environ["AIRULESET_MAIN_EXEC_STATE_DIR"] = str(exec_state_dir)
     try:
         yield run_dir
     finally:
@@ -81,6 +94,10 @@ def _per_run_tempdir(base=None):
             os.environ.pop("TMPDIR", None)
         else:
             os.environ["TMPDIR"] = orig_env
+        if orig_exec_state is None:
+            os.environ.pop("AIRULESET_MAIN_EXEC_STATE_DIR", None)
+        else:
+            os.environ["AIRULESET_MAIN_EXEC_STATE_DIR"] = orig_exec_state
         shutil.rmtree(run_dir, ignore_errors=True)
 
 

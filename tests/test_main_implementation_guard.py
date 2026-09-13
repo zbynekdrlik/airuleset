@@ -42,8 +42,10 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
+import _exec_marker_helpers as em     # noqa: E402  (#1012 marker-path seam)
 
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "block-main-implementation.sh"
@@ -157,17 +159,17 @@ class MainImplementationGuard(unittest.TestCase):
                                 if transcript_text is not None
                                 else transcript(model))
             if bypass:
-                marker = ("/tmp/airuleset-main-exec-ok-%s" % sid if bypass == "new"
-                          else "/tmp/airuleset-fable-exec-ok-%s" % sid)
-                Path(marker).write_text(BYPASS_REASON if bypass_reason is None
-                                        else bypass_reason)
-                self.addCleanup(lambda: Path(marker).unlink(missing_ok=True))
+                marker = (em.marker_ok(sid) if bypass == "new"
+                          else em.marker_fable(sid))
+                marker.write_text(BYPASS_REASON if bypass_reason is None
+                                  else bypass_reason)
+                self.addCleanup(lambda: marker.unlink(missing_ok=True))
                 # #819: the PreToolUse allow now DEFERS consumption (writes a
                 # pending flag instead of deleting the marker), so a bypass
                 # run leaves this session-scoped pending file behind — clean
                 # it up too, or it litters /tmp across the suite.
-                pending = "/tmp/airuleset-main-exec-pending-%s" % sid
-                self.addCleanup(lambda: Path(pending).unlink(missing_ok=True))
+                pending = em.marker_pending(sid)
+                self.addCleanup(lambda: pending.unlink(missing_ok=True))
             # #128: the presence marker clear-question-dedup.sh stamps on
             # UserPromptSubmit. `presence_age` = seconds since the user last
             # typed a REAL prompt; None = no marker at all (unprovable).
@@ -974,11 +976,10 @@ class OneShotBypass80(unittest.TestCase):
     CONSUMER = REPO / "hooks" / "post-consume-main-exec-marker.sh"
 
     def _marker(self, sid, legacy=False):
-        name = "fable" if legacy else "main"
-        return Path("/tmp/airuleset-%s-exec-ok-%s" % (name, sid))
+        return em.marker_fable(sid) if legacy else em.marker_ok(sid)
 
     def _pending(self, sid):
-        return Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+        return em.marker_pending(sid)
 
     def _arm(self, sid, legacy=False):
         m = self._marker(sid, legacy=legacy)
@@ -1073,11 +1074,10 @@ class DeferredConsume819(unittest.TestCase):
     CONSUMER = REPO / "hooks" / "post-consume-main-exec-marker.sh"
 
     def _marker(self, sid, legacy=False):
-        name = "fable" if legacy else "main"
-        return Path("/tmp/airuleset-%s-exec-ok-%s" % (name, sid))
+        return em.marker_fable(sid) if legacy else em.marker_ok(sid)
 
     def _pending(self, sid):
-        return Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+        return em.marker_pending(sid)
 
     def _arm(self, sid, legacy=False):
         m = self._marker(sid, legacy=legacy)
@@ -1142,8 +1142,8 @@ class DeferredConsume819(unittest.TestCase):
         self._pending(sid).write_text("stale reason from a sibling-blocked call")
         out = self._pre(
             sid,
-            command="echo 'a fresh reason for the retry' "
-                    "> /tmp/airuleset-main-exec-ok-%s" % sid)
+            command="echo 'a fresh reason for the retry' > %s"
+                    % em.marker_ok(sid))
         self.assertEqual(out.returncode, 0, out.stderr)     # arming is allowed
         self.assertFalse(self._pending(sid).exists(),
                          "arming must clear a stale pending flag")
@@ -1349,9 +1349,8 @@ class DispatchRatioNudge80(unittest.TestCase):
         for _ in range(6):
             self._run(sid)
         out = self._run(sid,
-                        command="touch /tmp/airuleset-main-exec-ok-%s" % sid)
-        self.addCleanup(lambda: Path(
-            "/tmp/airuleset-main-exec-ok-%s" % sid).unlink(missing_ok=True))
+                        command="touch %s" % em.marker_ok(sid))
+        self.addCleanup(lambda: em.marker_ok(sid).unlink(missing_ok=True))
         self.assertEqual(out.returncode, 0,
                          "the escape hatch must never dead-end behind the cap")
 
@@ -1625,8 +1624,7 @@ class BypassCarriesAReason128(unittest.TestCase):
     MIN = 8          # a reason shorter than this is not a reason
 
     def _marker(self, sid, legacy=False):
-        return Path("/tmp/airuleset-%s-exec-ok-%s"
-                    % ("fable" if legacy else "main", sid))
+        return em.marker_fable(sid) if legacy else em.marker_ok(sid)
 
     def _run(self, sid, command="grep -rn 'TODO' .", logdir=None):
         # #732: `logdir` set -> redirect BOTH audit logs into a dir this test
@@ -1649,7 +1647,7 @@ class BypassCarriesAReason128(unittest.TestCase):
     def test_marker_with_a_reason_is_honored(self):
         sid = "t-mg-reason-ok-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
-        pending = Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+        pending = em.marker_pending(sid)
         m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         self.addCleanup(lambda: pending.unlink(missing_ok=True))
@@ -1779,14 +1777,14 @@ class BypassCarriesAReason128(unittest.TestCase):
     def test_arming_by_redirect_is_never_blocked(self):
         sid = "t-mg-arm-echo-" + uuid.uuid4().hex[:8]
         cmd = ('echo "reason: the content is the judgment itself" '
-               '> /tmp/airuleset-main-exec-ok-%s' % sid)
+               '> %s' % em.marker_ok(sid))
         out = self._run(sid, command=cmd)
         self.assertEqual(out.returncode, 0, out.stderr)
 
     def test_arming_by_redirect_is_logged_as_an_arm(self):
         sid = "t-mg-arm-echolog-" + uuid.uuid4().hex[:8]
         cmd = ('printf %%s "reason: policy authoring" '
-               '> /tmp/airuleset-main-exec-ok-%s' % sid)
+               '> %s' % em.marker_ok(sid))
         logdir, _block, byp = _isolated_exec_logs(self)   # #732
         self._run(sid, command=cmd, logdir=logdir)
         lines = self._bypass_lines(sid, byp)
@@ -1799,7 +1797,7 @@ class BypassCarriesAReason128(unittest.TestCase):
         # escape hatch (#80's acceptance constraint).
         sid = "t-mg-arm-touch-" + uuid.uuid4().hex[:8]
         out = self._run(sid,
-                        command="touch /tmp/airuleset-main-exec-ok-%s" % sid)
+                        command="touch %s" % em.marker_ok(sid))
         self.assertEqual(out.returncode, 0, out.stderr)
 
     # ---- degenerate marker shapes (found by the pre-push smoke pass) ----
@@ -1960,7 +1958,7 @@ class BypassReasonJqFails180(unittest.TestCase):
     finding) still holds via a `[ -r ]` guard (the second test)."""
 
     def _marker(self, sid):
-        return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
+        return em.marker_ok(sid)
 
     def _bypass_lines(self, sid, log=None):
         log = log if log is not None else BYPASS_LOG_PATH
@@ -1979,7 +1977,7 @@ class BypassReasonJqFails180(unittest.TestCase):
         # hiccup no longer refuses).
         sid = "t-mg-jqfail-bypass-" + uuid.uuid4().hex[:8]
         m = self._marker(sid)
-        pending = Path("/tmp/airuleset-main-exec-pending-%s" % sid)
+        pending = em.marker_pending(sid)
         m.write_text("authoring the policy text itself — the content IS the judgment")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         self.addCleanup(lambda: pending.unlink(missing_ok=True))
@@ -2435,7 +2433,7 @@ class ManualRevival174(unittest.TestCase):
         # this is a correctness/safety concern -- unlike the cost-control
         # conditions, there is no escape hatch.
         sid = "t-mg-174-nobypass-" + uuid.uuid4().hex[:8]
-        m = Path("/tmp/airuleset-main-exec-ok-%s" % sid)
+        m = em.marker_ok(sid)
         m.write_text("a perfectly good reason for something else entirely")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         helper = MainImplementationGuard()

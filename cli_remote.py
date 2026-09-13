@@ -1490,6 +1490,18 @@ def cmd_push(args):
         # suite (conftest is pytest-only), so the mode-5 test stays deterministic
         # even if the LIVE box running the gate has enabled it fleet-wide.
         test_env["AIRULESET_RESURRECT_ACTION"] = ""
+        # #1012 (dual-coverage): the exec-marker STATE dir seam. conftest.py's
+        # per-run redirect is pytest-only and NEVER read by `unittest discover`,
+        # so this is the single place the discover-gate run is isolated off the
+        # LIVE /tmp marker family — a synthetic-clock `run_once` test sweeps
+        # Job 22 markers, and without this it would delete real /tmp markers
+        # (fresh test markers AND live sessions' granted one-shots) mid-gate.
+        # The dir MUST EXIST: both hooks + the sweeper validate `-d`/`-w` and
+        # fall back to /tmp otherwise, which would re-open the bug during the
+        # gate.
+        _exec_state = Path(_lock_tmp) / "main-exec-state"
+        _exec_state.mkdir(parents=True, exist_ok=True)
+        test_env["AIRULESET_MAIN_EXEC_STATE_DIR"] = str(_exec_state)
         # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
         # redirect is pytest-only and is NEVER read by `unittest discover`, so
         # this is the single place the push gate's own ~459 raw

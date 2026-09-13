@@ -324,6 +324,22 @@ _EXEC_MARKER_PREFIXES = ("airuleset-main-exec-ok-", "airuleset-fable-exec-ok-",
                          "airuleset-main-exec-pending-")
 
 
+def exec_marker_dir():
+    """#1012: the directory the exec-marker STATE (ok/fable-ok/pending) lives
+    in, read from the ``AIRULESET_MAIN_EXEC_STATE_DIR`` env seam (default
+    ``/tmp``). Mirrors the SAME fail-safe validation both hooks apply to the
+    ``AIRULESET_MAIN_EXEC_LOG_DIR`` seam (#732), so the sweeper and the hooks
+    resolve the SAME directory BY CONSTRUCTION: an unset/empty/root-``/``/
+    non-dir/non-writable override falls back to ``/tmp``. In production the var
+    is unset -> ``/tmp`` (unchanged); the test suite sets it to a per-run dir
+    (conftest + the push-gate test_env) so a synthetic-clock ``run_once`` never
+    sweeps the LIVE ``/tmp`` marker family (the #1012 incident)."""
+    ovr = (os.environ.get("AIRULESET_MAIN_EXEC_STATE_DIR") or "").rstrip("/")
+    if ovr and os.path.isdir(ovr) and os.access(ovr, os.W_OK):
+        return ovr
+    return "/tmp"
+
+
 def _session_id_is_live(sid, run=None, projects_dir=None):
     """True when SOME currently-live claude pane's transcript stem is this
     exact session id — regardless of which cwd it runs in (unlike
@@ -340,10 +356,18 @@ def _session_id_is_live(sid, run=None, projects_dir=None):
 
 def cleanup_stale_exec_markers(now, run=None, projects_dir=None,
                                max_age_s=MAIN_EXEC_MARKER_MAX_AGE_S,
-                               tmp_dir="/tmp", dry_run=False):
+                               tmp_dir=None, dry_run=False):
     """Job 22 — see the section comment. Best-effort (never raises); returns
     log lines. Never removes a marker whose session id still resolves to a
-    live pane, no matter how old the file is."""
+    live pane, no matter how old the file is.
+
+    #1012: ``tmp_dir=None`` (the default) resolves to ``exec_marker_dir()`` —
+    the ``AIRULESET_MAIN_EXEC_STATE_DIR`` seam the hooks also read — so the
+    sweeper and the hooks agree by construction and a synthetic-clock test run
+    can no longer sweep the LIVE ``/tmp``. An explicit ``tmp_dir=`` caller (the
+    Job 22 watchdog tests) still wins, unchanged."""
+    if tmp_dir is None:
+        tmp_dir = exec_marker_dir()
     logs = []
     try:
         entries = os.listdir(tmp_dir)

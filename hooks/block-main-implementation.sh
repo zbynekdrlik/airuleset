@@ -88,6 +88,9 @@ set -euo pipefail
 # never strands the one-shot; and since #128 the marker must CARRY the
 # reason, which is logged, an empty one being refused and cleared):
 #   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-<session_id>
+# (the /tmp above is the default; the marker family lives under
+# AIRULESET_MAIN_EXEC_STATE_DIR when set — #1012, so tests + the Job 22 sweeper
+# agree by construction; the live block message prints the EFFECTIVE path.)
 # Accepted residuals of the deferred consume (all bounded, fail-safe toward
 # CONSUME): (a) N PARALLEL guarded calls in one turn all see the marker before
 # the first one's PostToolUse fires, so one marker exempts that whole parallel
@@ -274,6 +277,22 @@ fi
 BLOCK_LOG="${_EXEC_LOG_DIR}/airuleset-main-exec-block-${EUID:-$(id -u)}.log"
 BYPASS_LOG="${_EXEC_LOG_DIR}/airuleset-main-exec-bypass-${EUID:-$(id -u)}.log"
 
+# #1012: the exec-marker STATE dir (the ok/fable-ok/pending marker files, which
+# ARE cross-SESSION artifacts the watchdog Job 22 sweeper reads) gets the SAME
+# env seam + fail-safe validation as the #732 log-dir override above, so a
+# synthetic-clock test run can point BOTH this producer AND the sweeper at an
+# isolated per-run dir and never touch the LIVE /tmp marker family. Production
+# leaves AIRULESET_MAIN_EXEC_STATE_DIR unset -> /tmp, so hook and sweeper agree
+# by construction. FAIL-SAFE (identical to _EXEC_LOG_DIR): unset/empty/root-`/`/
+# non-dir/non-writable ALL fall back to the /tmp path BYTE-FOR-BYTE.
+_EXEC_STATE_DIR="/tmp"
+_EXEC_STATE_OVR="${AIRULESET_MAIN_EXEC_STATE_DIR:-}"
+_EXEC_STATE_OVR="${_EXEC_STATE_OVR%/}"      # strip a trailing slash ("/" -> "")
+if [ -n "$_EXEC_STATE_OVR" ] && [ -d "$_EXEC_STATE_OVR" ] \
+   && [ -w "$_EXEC_STATE_OVR" ]; then
+    _EXEC_STATE_DIR="$_EXEC_STATE_OVR"
+fi
+
 # ---- #80: a DISPATCH resets the per-dispatch Bash counter ----
 # This is the whole point of the counter: it measures main-agent Bash calls
 # since the main last delegated. Handled before ANY transcript work — a
@@ -388,7 +407,7 @@ PYEOF
             # unless we clear that stale pending here first. The arming echo
             # never reaches the marker block, so it never sets a pending of
             # its own — clearing here only removes a stranded one.
-            rm -f "/tmp/airuleset-main-exec-pending-${RAW_SID:-unknown}" \
+            rm -f "${_EXEC_STATE_DIR}/airuleset-main-exec-pending-${RAW_SID:-unknown}" \
                 2>/dev/null || true
             ARM_SNIP=$(printf '%s' "$NORM_CMD" | jq -Rr '.[0:120]' 2>/dev/null \
                 || echo "")
@@ -482,12 +501,12 @@ SESSION_ID="${RAW_SID:-unknown}"
 # survives one call. Both self-heal on the next executed guarded call.
 BYPASS_MARK=""
 BYPASS_FILE=""
-if [ -e "/tmp/airuleset-main-exec-ok-${SESSION_ID:-unknown}" ]; then
+if [ -e "${_EXEC_STATE_DIR}/airuleset-main-exec-ok-${SESSION_ID:-unknown}" ]; then
     BYPASS_MARK="main-exec-ok"
-    BYPASS_FILE="/tmp/airuleset-main-exec-ok-${SESSION_ID:-unknown}"
-elif [ -e "/tmp/airuleset-fable-exec-ok-${SESSION_ID:-unknown}" ]; then
+    BYPASS_FILE="${_EXEC_STATE_DIR}/airuleset-main-exec-ok-${SESSION_ID:-unknown}"
+elif [ -e "${_EXEC_STATE_DIR}/airuleset-fable-exec-ok-${SESSION_ID:-unknown}" ]; then
     BYPASS_MARK="fable-exec-ok(legacy)"
-    BYPASS_FILE="/tmp/airuleset-fable-exec-ok-${SESSION_ID:-unknown}"
+    BYPASS_FILE="${_EXEC_STATE_DIR}/airuleset-fable-exec-ok-${SESSION_ID:-unknown}"
 fi
 # #128: the marker must CARRY its reason. What the ticket read as abuse
 # ("187 bypasses in one session") is a PRE-#80 artifact — 186 of those 193
@@ -559,7 +578,7 @@ if [ -n "$BYPASS_MARK" ]; then
     # #819: the marker is NO LONGER deleted unconditionally here. The VALID-
     # reason path DEFERS to PostToolUse (writes a pending flag, keeps the
     # marker); only the REFUSE path clears the bad marker in PreToolUse.
-    BYPASS_PENDING="/tmp/airuleset-main-exec-pending-${SESSION_ID:-unknown}"
+    BYPASS_PENDING="${_EXEC_STATE_DIR}/airuleset-main-exec-pending-${SESSION_ID:-unknown}"
     if [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
         # DEFER consumption to PostToolUse: leave the marker, drop a pending
         # flag so post-consume-main-exec-marker.sh consumes it once the tool
@@ -741,10 +760,34 @@ if airuleset_presence_is_away "${SESSION_ID:-unknown}"; then AWAY=1; fi
 # capturing jq's output on its own line first, only THEN piping it
 # through grep/tail (which is allowed to find nothing).
 GOAL_JQ_RC=0
-GOAL_JQ_OUT=$(jq -r '
-    if .type == "user" and (.message.content | type) == "string" then .message.content
-    elif .type == "system" and (.content | type) == "string" then .content
-    else empty end
+# #1013: read the transcript PER LINE (raw-input mode) with `fromjson? //
+# empty`, so ONE torn record — two JSON objects glued onto a single physical
+# line (the live controller line 78272; a Claude Code write torn by a cancel) —
+# is SKIPPED while every other line still contributes. In whole-value mode jq
+# aborts at the first unparsable record (rc 5), which made GOAL_JQ_RC != 0 ->
+# GOAL_UNKNOWN=1 -> the session failed CLOSED ("transcript read failed") for the
+# rest of its life. `fromjson?` swallows the torn record and keeps rc 0, so the
+# fail-closed path below fires ONLY for a genuinely unreadable file or a jq that
+# cannot run (unchanged) — the Python readers already parse per line this way.
+# `| objects` mirrors those readers' `isinstance(d, dict)` guard: it drops a
+# top-level truthy non-object line (a bare number/array/string/true) so it never
+# reaches `.type` and errors jq (which would otherwise fail CLOSED on such a
+# LAST line — review-2 🔵). Real transcript lines are always objects, so this is
+# a no-op on live data and keeps the fail-CLOSED direction for a genuine failure.
+# HONESTY (review-2 🟡): the tradeoff is asymmetric — if the `Goal set:` record
+# ITSELF shares a torn physical line, that line is dropped too, so an armed goal
+# reads as NOT armed and a bulk read is ALLOWED (a narrow fail-OPEN) instead of
+# blocked. Accepted because (a) this guard is cost-discipline, not a security
+# boundary; (b) a FABLE main — the fleet default, hook-enforced — is still
+# blocked via the SEPARATE, already-robust Python IS_FABLE reader regardless of
+# the goal read; and (c) it replaces a strictly worse fail-CLOSED-FOREVER
+# availability bug (one torn line anywhere used to brick the session).
+GOAL_JQ_OUT=$(jq -R -r '
+    fromjson? // empty
+    | objects
+    | if .type == "user" and (.message.content | type) == "string" then .message.content
+      elif .type == "system" and (.content | type) == "string" then .content
+      else empty end
 ' "$TRANSCRIPT" 2>/dev/null) || GOAL_JQ_RC=$?
 GOAL_MARK=$(printf '%s\n' "$GOAL_JQ_OUT" \
     | grep -oE '<local-command-stdout>Goal (set|cleared):' | tail -1 || true)
@@ -1547,7 +1590,7 @@ measurement will show.
 
 Deliberate exception (one-shot — consumed when the command actually RUNS, not
 when this hook allows it; logged, and it must SAY WHY):
-  echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
+  echo "<why this one call must run here>" > ${_EXEC_STATE_DIR}/airuleset-main-exec-ok-${SESSION_ID}
 MSG
         exit 2
     fi
@@ -1569,7 +1612,7 @@ hour, each re-sending the whole context — #66):
 
 Deliberate exception (one-shot — consumed when the command actually RUNS, not
 when this hook allows it; logged, and it must SAY WHY):
-  echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
+  echo "<why this one call must run here>" > ${_EXEC_STATE_DIR}/airuleset-main-exec-ok-${SESSION_ID}
 MSG
     exit 2
 fi
@@ -1601,6 +1644,6 @@ david@subdev inline-354-edits incident):
 
 Deliberate exception (one-shot — consumed when the command actually RUNS, not
 when this hook allows it; logged, and it must SAY WHY):
-  echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}
+  echo "<why this one call must run here>" > ${_EXEC_STATE_DIR}/airuleset-main-exec-ok-${SESSION_ID}
 MSG
 exit 2

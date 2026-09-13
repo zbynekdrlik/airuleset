@@ -89,7 +89,21 @@ SESSION_ID=$(_ai_field '.session_id // empty' '' "$_AI_SID_RE")
 SESSION_ID="${SESSION_ID//[!A-Za-z0-9_-]/}"     # #835: fork-free sanitize (was `tr -cd`)
 [ -n "$SESSION_ID" ] || exit 0
 
-PENDING="/tmp/airuleset-main-exec-pending-${SESSION_ID}"
+# #1012: the marker STATE dir mirrors block-main-implementation.sh's env seam
+# (AIRULESET_MAIN_EXEC_STATE_DIR), same fail-safe validation as the #732 log-dir
+# seam below: default /tmp byte-for-byte when unset; strip a trailing slash
+# FIRST then require a NON-EMPTY, existing, WRITABLE dir; keep every check in an
+# `if` CONDITION so a failure never trips `set -e`. Producer + consumer + Job 22
+# sweeper all resolve the SAME dir this way, so a test can isolate the marker
+# family off the LIVE /tmp.
+_EXEC_STATE_DIR="/tmp"
+_EXEC_STATE_OVR="${AIRULESET_MAIN_EXEC_STATE_DIR:-}"
+_EXEC_STATE_OVR="${_EXEC_STATE_OVR%/}"
+if [ -n "$_EXEC_STATE_OVR" ] && [ -d "$_EXEC_STATE_OVR" ] && [ -w "$_EXEC_STATE_OVR" ]; then
+    _EXEC_STATE_DIR="$_EXEC_STATE_OVR"
+fi
+
+PENDING="${_EXEC_STATE_DIR}/airuleset-main-exec-pending-${SESSION_ID}"
 [ -e "$PENDING" ] || exit 0     # nothing deferred for this session — no-op
 
 # The audit log dir mirrors block-main-implementation.sh's #732 env seam so a
@@ -114,8 +128,8 @@ REASON=$(tr '\n\r\t' '   ' < "$PENDING" 2>/dev/null \
 
 # consume BOTH marker variants (only one is ever present; deleting both is
 # simpler than recording which validated) plus the pending flag.
-rm -f "/tmp/airuleset-main-exec-ok-${SESSION_ID}" \
-      "/tmp/airuleset-fable-exec-ok-${SESSION_ID}" \
+rm -f "${_EXEC_STATE_DIR}/airuleset-main-exec-ok-${SESSION_ID}" \
+      "${_EXEC_STATE_DIR}/airuleset-fable-exec-ok-${SESSION_ID}" \
       "$PENDING" 2>/dev/null || true
 
 { echo "$(date -Is) main-exec bypass session=$SESSION_ID (consumed, post-exec) reason=$REASON" \
