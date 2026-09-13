@@ -16112,3 +16112,193 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         cmds = [h.get("command", "") for blk in cfg["hooks"]["PreToolUse"]
                 if blk.get("matcher") == "Bash" for h in blk.get("hooks", [])]
         self.assertTrue(any("nudge-poll-loop-timeout.sh" in c for c in cmds))
+
+
+class TestPrePushDocsOnlyFix1003(TestCase):
+    """#1003 — pre-push-test-check.sh Gate 2 set IS_BUGFIX purely from the
+    `^fix:`/`Closes #N` SIGNAL, so a DOCS/prose-only `fix:` commit (nothing
+    testable) demanded a RED-before-GREEN test and blocked the push. The fix
+    classifies by DIFF CONTENT: a commit whose EVERY changed file is a
+    docs/prose/image path is exempt; a commit touching any code keeps the
+    requirement."""
+
+    def _run(self, command, cwd):
+        import subprocess
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / "pre-push-test-check.sh")],
+            input=payload, text=True, capture_output=True, cwd=cwd, timeout=60,
+            env=env)
+
+    def _mkrepo(self):
+        import subprocess
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        open(os.path.join(root, "app.py"), "w").write("def f():\n    return 1\n")
+        open(os.path.join(root, "README.md"), "w").write("# app\n")
+        g("add", "app.py", "README.md")
+        g("commit", "-qm", "base")
+        g("update-ref", "refs/remotes/origin/main",
+          g("rev-parse", "HEAD").stdout.strip())
+        g("checkout", "-qb", "dev")
+        return root, g
+
+    def test_docs_only_fix_commit_passes(self):
+        # A `fix:` commit changing ONLY a docs file has nothing testable —
+        # it must NOT be forced to have a preceding RED test.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "README.md"), "a").write("clarified wording\n")
+        g("add", "README.md")
+        g("commit", "-qm", "fix: clarify README wording")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_docs_only_fix_with_closes_still_passes(self):
+        # Even with a `Closes #N` body signal, a docs-only diff is exempt —
+        # the classification is by content, not by the signal.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "docs.md"), "w").write("# new docs\n")
+        g("add", "docs.md")
+        g("commit", "-qm", "fix: document the flag\n\nCloses #42")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_code_fix_still_requires_test(self):
+        # A `fix:` commit touching CODE with no preceding test still blocks —
+        # the RED-before-GREEN requirement is unchanged for real bug fixes.
+        root, g = self._mkrepo()
+        open(os.path.join(root, "app.py"), "a").write("# patched\n")
+        g("add", "app.py")
+        g("commit", "-qm", "fix: crash in parser\n\nCloses #7")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+    def test_mixed_docs_and_code_fix_still_requires_test(self):
+        # A commit touching docs AND code is NOT docs-only — the requirement
+        # stays (a code change rode along with the docs).
+        root, g = self._mkrepo()
+        open(os.path.join(root, "README.md"), "a").write("note\n")
+        open(os.path.join(root, "app.py"), "a").write("# patched\n")
+        g("add", "README.md", "app.py")
+        g("commit", "-qm", "fix: parser crash + note")
+        r = self._run("git push origin dev", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+
+class TestBlockTestSkipsMergeIn1003(TestCase):
+    """#1003 — after `git merge origin/develop` on a branch BEHIND develop,
+    the #909 origin/<branch> range base makes develop's already-merged
+    sanctioned `test.skip(notApplicable(), …)` read as ADDED by this push,
+    re-blocking it (odoo-erp PR #7099, montalu6). Fix: keep origin/<branch>
+    as the RANGE base but capture the DESTINATION (origin/develop) as
+    DEST_REF and exclude any added line already present on DEST_REF (it rode
+    in via the merge, not this push). A genuinely NEW skip the branch adds
+    (not on develop) still blocks."""
+
+    HOOK = "block-test-skips.sh"
+    _SKIP = "test.skip(notApplicable(), 'sanctioned e2e#2942');"
+
+    def _run(self, command, cwd):
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        env["HOME"] = tempfile.mkdtemp()
+        return subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True,
+            cwd=cwd, timeout=60, env=env)
+
+    def _mk_merge_in_repo(self):
+        """A branch behind develop, already pushed (origin/feat-x exists),
+        merges develop which carries a sanctioned skip in a spec file the
+        branch never touched. Real git so the diffs are genuine."""
+        import shutil
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        def g(*a):
+            return subprocess.run(["git", *a], cwd=root, capture_output=True,
+                                  text=True)
+        g("init", "-q", "-b", "main")
+        g("config", "user.email", "t@t")
+        g("config", "user.name", "t")
+        os.makedirs(os.path.join(root, "tests", "e2e"), exist_ok=True)
+        open(os.path.join(root, "src.ts"), "w").write("export const x = 1;\n")
+        open(os.path.join(root, "tests", "e2e", "board.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            "test('board', async () => {});\n")
+        g("add", "src.ts", "tests/e2e/board.spec.ts")
+        g("commit", "-qm", "base")
+        base = g("rev-parse", "HEAD").stdout.strip()
+        g("update-ref", "refs/remotes/origin/main", base)
+
+        # develop: add the sanctioned skip to board.spec.ts (merged, pre-existing)
+        g("checkout", "-qb", "develop")
+        open(os.path.join(root, "tests", "e2e", "board.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            + self._SKIP + "\n"
+            "test('board', async () => {});\n")
+        g("add", "tests/e2e/board.spec.ts")
+        g("commit", "-qm", "test: sanctioned skip on develop")
+        g("update-ref", "refs/remotes/origin/develop",
+          g("rev-parse", "HEAD").stdout.strip())
+
+        # feat-x off base (behind develop), own change, already pushed
+        g("checkout", "-qb", "feat-x", base)
+        open(os.path.join(root, "src.ts"), "a").write("export const y = 2;\n")
+        g("add", "src.ts")
+        g("commit", "-qm", "feat: add y")
+        g("update-ref", "refs/remotes/origin/feat-x",
+          g("rev-parse", "HEAD").stdout.strip())
+        return root, g
+
+    def test_merged_in_sanctioned_skip_does_not_reblock(self):
+        root, g = self._mk_merge_in_repo()
+        g("merge", "--no-edit", "origin/develop")
+        r = self._run("git push origin feat-x", root)
+        self.assertEqual(r.returncode, 0,
+                         "merged-in sanctioned skip re-flagged: "
+                         + r.stdout + r.stderr)
+
+    def test_genuinely_new_skip_still_blocks_after_merge(self):
+        # The branch adds its OWN new skip (not on develop) AND merges develop.
+        # The merged-in one is excluded, but the branch's own skip still blocks.
+        root, g = self._mk_merge_in_repo()
+        open(os.path.join(root, "tests", "e2e", "own.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            "test.skip('brand new own skip', async () => {});\n")
+        g("add", "tests/e2e/own.spec.ts")
+        g("commit", "-qm", "test: add own e2e")
+        g("merge", "--no-edit", "origin/develop")
+        r = self._run("git push origin feat-x", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("own.spec.ts", r.stdout + r.stderr)
+
+    def test_new_skip_in_a_develop_shared_file_still_blocks(self):
+        # review-2 F7 (crux): the branch adds its OWN new, UNIQUE skip to the
+        # SAME spec file develop carries a (different) sanctioned skip in, then
+        # merges develop. The merged-in sanctioned skip is excluded, but the
+        # branch's own new skip line (not present on develop) must still block.
+        root, g = self._mk_merge_in_repo()
+        # feat-x adds a unique skip to board.spec.ts (the file develop's skip
+        # lives in) BEFORE the merge, so its own line is genuinely introduced.
+        open(os.path.join(root, "tests", "e2e", "board.spec.ts"), "w").write(
+            "import { test } from '@playwright/test';\n"
+            "test.skip('feat-x own unique skip', async () => {});\n"
+            "test('board', async () => {});\n")
+        g("add", "tests/e2e/board.spec.ts")
+        g("commit", "-qm", "test: add own skip to board")
+        g("merge", "--no-edit", "origin/develop")
+        r = self._run("git push origin feat-x", root)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("board.spec.ts", r.stdout + r.stderr)

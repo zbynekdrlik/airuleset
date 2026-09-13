@@ -126,6 +126,30 @@ fi
 AUDIT_LOG="$HOME/devel/airuleset/audits/no-test-skips.log"
 mkdir -p "$(dirname "$AUDIT_LOG")"
 
+# #1003 -- a docs/prose-only commit has nothing testable, so Gate 2's
+# RED-before-GREEN requirement must not fire on it even when its subject
+# carries a `fix:`/`Closes #N` signal (the reported false positive: a
+# `fix: clarify README wording` docs-only commit forced to have a test).
+# Classify by DIFF CONTENT, via a POSITIVE docs/prose allowlist (never a
+# code denylist — an unknown source extension must fail toward "keep the
+# requirement", the safe direction). `_is_docs_only` reads newline-separated
+# paths on stdin and returns 0 iff there is >=1 file and EVERY file is a
+# docs/prose/image path.
+_DOCS_EXT_RE='\.(md|markdown|mdx|rst|txt|adoc|png|jpe?g|gif|svg|webp|ico)$'
+_DOCS_BASENAME_RE='^(LICENSE|LICENCE|COPYING|NOTICE|AUTHORS|CONTRIBUTORS?|CHANGELOG|CHANGES|README)([.][A-Za-z0-9]+)?$'
+_is_docs_only() {
+    local any=0 f base
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        any=1
+        if printf '%s' "$f" | grep -qiE "$_DOCS_EXT_RE"; then continue; fi
+        base=$(basename -- "$f")
+        if printf '%s' "$base" | grep -qiE "$_DOCS_BASENAME_RE"; then continue; fi
+        return 1   # a non-docs file -> not docs-only, keep the requirement
+    done
+    [ "$any" = "1" ]
+}
+
 # Check for [no-test: <reason>] bypass on latest commit
 LAST_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
 LAST_SHA=$(git log -1 --pretty=%h 2>/dev/null || echo "unknown")
@@ -289,6 +313,15 @@ if [ -n "$COMMITS" ]; then
         fi
         if echo "$BODY" | grep -qiE '(closes|fixes|resolves)\s+#[0-9]+'; then
             IS_BUGFIX=1
+        fi
+        # #1003 -- classify by DIFF CONTENT, not the subject/body signal alone:
+        # a commit whose EVERY changed file is docs/prose/image is not a real
+        # code bug fix, so it is exempt from the RED-order gate (logged). A
+        # commit touching any non-docs file keeps IS_BUGFIX.
+        if [ "$IS_BUGFIX" = "1" ] && printf '%s\n' "$FILES" | _is_docs_only; then
+            IS_BUGFIX=0
+            SHORT_SHA=$(git log -1 --pretty='%h' "$SHA" 2>/dev/null || echo "$SHA")
+            echo "$(date -Iseconds)  project=$PROJECT  sha=$SHORT_SHA  docs-only fix commit — exempt from RED-order gate (#1003)" >> "$AUDIT_LOG"
         fi
 
         # Bug-fix commit before any test commit = violation

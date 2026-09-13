@@ -417,5 +417,68 @@ class TestDoctrinePresence(TestCase):
         self.fail("autonomous-quality-discipline-deep Bash row not found")
 
 
+def _commit(msg, date):
+    """A GitHub commits-API-shaped dict carrying one commit message + date."""
+    return {"commit": {"message": msg,
+                       "committer": {"date": date},
+                       "author": {"date": date}}}
+
+
+class TestBypassTokenCount1003(TestCase):
+    """#1003 — a `--bypasses` view in the EXISTING audit script counts
+    airuleset bypass tokens (airuleset:...-ok) in merged commit messages, per
+    day per repo, so the daily count can be tracked toward 0. No new script."""
+
+    def test_counts_tokens_per_day_and_kind(self):
+        commits = [
+            _commit("fix: x\n\n# airuleset:test-skip-ok merge idiom",
+                    "2026-09-13T10:00:00Z"),
+            _commit("chore: y # airuleset:secret-ok fixture",
+                    "2026-09-13T12:00:00Z"),
+            _commit("feat: z # airuleset:scope-gate-ok owner asked",
+                    "2026-09-14T08:00:00Z"),
+        ]
+        c = abr.count_bypass_tokens(commits)
+        self.assertEqual(c["total"], 3)
+        self.assertEqual(c["per_day"]["2026-09-13"], 2)
+        self.assertEqual(c["per_day"]["2026-09-14"], 1)
+        self.assertEqual(c["per_kind"]["airuleset:test-skip-ok"], 1)
+        self.assertEqual(c["per_kind"]["airuleset:secret-ok"], 1)
+
+    def test_no_tokens_is_empty(self):
+        commits = [_commit("fix: ordinary change, no bypass", "2026-09-13T10:00:00Z")]
+        c = abr.count_bypass_tokens(commits)
+        self.assertEqual(c["total"], 0)
+        self.assertEqual(c["per_day"], {})
+
+    def test_multiple_tokens_in_one_message(self):
+        commits = [_commit(
+            "fix # airuleset:test-skip-ok a and also # airuleset:secret-ok b",
+            "2026-09-13T10:00:00Z")]
+        c = abr.count_bypass_tokens(commits)
+        self.assertEqual(c["total"], 2)
+        self.assertEqual(c["per_day"]["2026-09-13"], 2)
+
+    def test_ignores_non_bypass_tokens(self):
+        # `airuleset:merge=manual` (no -ok) and a bare "ok" must NOT count.
+        commits = [_commit("chore: airuleset:merge=manual marker, looks ok",
+                           "2026-09-13T10:00:00Z")]
+        c = abr.count_bypass_tokens(commits)
+        self.assertEqual(c["total"], 0)
+
+    def test_fetch_uses_injected_runner(self):
+        captured = {}
+
+        def fake(*args, **kwargs):
+            captured["args"] = args
+            return json.dumps([_commit("x # airuleset:build-ok reason",
+                                       "2026-09-13T09:00:00Z")])
+        commits = abr.fetch_bypass_commits("owner/repo", window_days=7,
+                                           runner=fake)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(captured["args"][0], "api")
+        self.assertIn("owner/repo", captured["args"][1])
+
+
 if __name__ == "__main__":
     main()

@@ -173,6 +173,76 @@ HEX_PAT = re.compile(r"[0-9a-fA-F]{40,}")
 # "TestProseViolationsAutoMergeSignals") — both tuned against this repo's
 # OWN doc/skill/test corpus (zero false positives at authoring time).
 B64_PAT = re.compile(r"(?=[A-Za-z0-9+]*[0-9])[A-Za-z0-9+]{32,}={0,2}")
+# #1003 -- high-confidence PREFIXED secret shapes. Checked FIRST in scan_line
+# so a real token stays blocked even on a line that also carries a git object
+# SHA (which HEX_PAT/B64_PAT below no longer flag). Every shape the owner
+# enumerated: GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_ + fine-grained
+# github_pat_), OpenAI/Anthropic sk-, AWS AKIA…, Slack xox[baprs]-, and a PEM
+# private-key header. These are unambiguous — a bare 40/64-hex SHA is not.
+SECRET_PREFIX_PAT = re.compile(
+    r"gh[oprsu]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    # OpenAI/Anthropic sk- keys. Review-2 F2: the tail must be CONTIGUOUS
+    # base62 (no interior hyphen) so a `sk-`-prefixed kebab CSS/BEM class or
+    # markdown slug (`sk-loading-indicator-wrapper`) is NOT flagged; the known
+    # structured prefixes (`sk-ant-api03-…`, `sk-proj-…`) are matched explicitly.
+    r"|sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}"
+    r"|sk-proj-[A-Za-z0-9]{20,}"
+    r"|sk-[A-Za-z0-9]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+)
+# #1003 -- a hex RUN of exactly a git object-id length (40 = SHA-1,
+# 64 = SHA-256) is a commit/tree/blob SHA shape, not a credential (the
+# reported false positive: a fixture `head_sha` value). But the exemption is
+# CONTEXT-AWARE (review F1): a same-length hex ASSIGNED to a secret key (e.g.
+# `"token": "<40hex>"`, a classic 40-hex GitHub PAT) is a CREDENTIAL and must
+# still block. KV_PAT alone does not catch the JSON `"token": "<v>"` shape (the
+# key's closing quote sits between the word and the `:`), so the discrimination
+# is done HERE: exempt only a BARE run, or one under a SHA-context key that is
+# not itself a credential key. Accepted residual (owner's stated trade-off,
+# review-2 F3 breadth stated honestly): a genuine BARE unassigned 40/64-hex
+# secret reads as a SHA — "bare" is broader than a fixture head_sha and
+# includes a legacy 40-hex GitHub PAT in an `Authorization: token <hex>`
+# header, a token in a remote URL (`https://<hex>@github.com/…`), and a
+# hex-encoded key as a YAML/list/positional value with no adjacent `key:`/`=`.
+# An ASSIGNED credential (`API_KEY=`, `"token":`, `token:`) and every prefixed
+# real token (SECRET_PREFIX_PAT) still block.
+_GIT_OBJECT_HEX_LENS = (40, 64)
+_ALL_HEX_RE = re.compile(r"[0-9a-fA-F]+$")
+# The key a hex run is assigned to, if any: the identifier right before a
+# `:`/`=`, tolerating a closing quote (`"head_sha": "<hex>"` / `sha=<hex>`).
+_ASSIGN_KEY_RE = re.compile(r"([A-Za-z_][\w.-]*)['\"]?[ \t]*[:=][ \t]*['\"]?[ \t]*$")
+# A key that denotes a git object id (a hash shape, not a credential).
+_SHA_CTX_KEY_RE = re.compile(
+    r"sha|commit|\boid\b|\btree\b|\bblob\b|parent|revision|checksum|digest|"
+    r"\bhash\b|\brev\b|\bref\b",
+    re.IGNORECASE)
+# A credential-ish key: OVERRIDES the SHA-context allow so e.g. `auth_hash`,
+# `secret`, `token`, `api_key`, `pat` never read as a SHA.
+_SECRET_CTX_KEY_RE = re.compile(
+    r"pass|secret|token|\bapi\b|api[_-]?key|auth|cred|bearer|private|\bpat\b|"
+    r"\bkey\b|access",
+    re.IGNORECASE)
+
+
+def _is_git_object_sha(text, start, run):
+    """True iff `run` (a hex substring of `text` at offset `start`) is a git
+    object-id SHA safe to treat as inert: exactly a git object length, all hex,
+    AND either BARE (no `key:`/`key=` before it) or under a SHA-context key that
+    is not a credential key. A run assigned to a secret-ish or UNKNOWN key is
+    NOT a SHA (block it) -- review F1: `"token"/"api_key"/"pat": "<40hex>"` is a
+    credential of git-object length and must still block."""
+    if len(run) not in _GIT_OBJECT_HEX_LENS or not _ALL_HEX_RE.match(run):
+        return False
+    m = _ASSIGN_KEY_RE.search(text[:start])
+    if not m:
+        return True                       # bare / unassigned -> SHA shape
+    key = m.group(1)
+    if _SECRET_CTX_KEY_RE.search(key):
+        return False                      # credential key -> never a SHA
+    return bool(_SHA_CTX_KEY_RE.search(key))
 
 PLACEHOLDER_RE = re.compile(
     r"^\$|^<|^\{\{|^YOUR_|EXAMPLE|CHANGEME|PLACEHOLDER|^TODO$|^FIXME$|^REDACTED$",
@@ -193,6 +263,11 @@ def is_placeholder(val):
 
 def scan_line(text):
     """Return a short violation description for one line, or None."""
+    # #1003 -- a prefixed real token is high-confidence; check it FIRST so it
+    # blocks even on a line that also carries a git object SHA below.
+    m = SECRET_PREFIX_PAT.search(text)
+    if m and not is_placeholder(m.group(0)):
+        return "high-confidence secret token prefix"
     m = SSHPASS_PAT.search(text)
     if m and not is_placeholder(m.group(2)):
         return "sshpass literal password"
@@ -202,11 +277,22 @@ def scan_line(text):
         val = val_m.group(2) if val_m else ""
         if not is_placeholder(val):
             return "literal " + m.group(1).lower() + " value"
-    m = HEX_PAT.search(text)
-    if m and not is_placeholder(m.group(0)):
+    # #1003 -- iterate every hex run (not just the first) so a git object SHA
+    # is skipped WITHOUT masking a genuine hex blob later on the same line.
+    # `_is_git_object_sha` is CONTEXT-AWARE (review F1): a same-length hex under
+    # a credential key still blocks.
+    for m in HEX_PAT.finditer(text):
+        run = m.group(0)
+        if is_placeholder(run) or _is_git_object_sha(text, m.start(), run):
+            continue
         return "40+ char hex blob (possible key/token)"
-    m = B64_PAT.search(text)
-    if m and not is_placeholder(m.group(0)):
+    # #1003 -- a bare hex run reaches B64_PAT too (hex ⊂ base64 chars); the same
+    # context-aware SHA check applies (it returns False for a non-hex base64
+    # run), but keep scanning so a real base64 secret elsewhere still blocks.
+    for m in B64_PAT.finditer(text):
+        run = m.group(0)
+        if is_placeholder(run) or _is_git_object_sha(text, m.start(), run):
+            continue
         return "32+ char high-entropy blob (possible secret)"
     return None
 

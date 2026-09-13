@@ -116,11 +116,13 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 
 # Data via ARGV, never a pipe into a `python3 -` heredoc (this repo's own
 # recurring trap — see subagent-stop-check-run-card.sh).
-OUT=$(python3 - "$REPO_ROOT" "$CMD" "$CWD" <<'PYEOF' 2>/dev/null || true
+OUT=$(python3 - "$REPO_ROOT" "$CMD" "$CWD" "$AUDIT_LOG" <<'PYEOF' 2>/dev/null || true
 import os
 import sys
+import time
 
 repo_root, cmd, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
+audit_log = sys.argv[4] if len(sys.argv) > 4 else ""
 sys.path.insert(0, repo_root)
 try:
     import design_gate as dg
@@ -142,6 +144,24 @@ if not refs:
 # the #206 gh issue-state check below, so both agree on which repo this
 # commit is actually landing in.
 work_cwd = notify.resolve_work_cwd(cmd, cwd)
+
+# #1003 -- a resync merge commit introduces NO new design; its message can
+# carry a `#N` from the integration branch's history (`Merge branch 'develop'
+# into feat-3 (#6981)`). Exempt a merge-commit context by construction
+# (MERGE_HEAD present, a `git merge` in the command, or a canonical
+# merge-message shape) BEFORE requiring any marker -- logged, never blocked.
+merge_ok, merge_reason = dg.is_merge_commit_context(cmd, work_cwd)
+if merge_ok:
+    if audit_log:
+        try:
+            os.makedirs(os.path.dirname(audit_log), exist_ok=True)
+            with open(audit_log, "a", encoding="utf-8") as fh:
+                fh.write("%s  merge-commit exempt from design gate: %s (#1003)\n"
+                         % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), merge_reason))
+        except Exception:
+            pass
+    sys.exit(0)
+
 repo_key = notify.repo_name_for(work_cwd)
 if not repo_key:
     sys.exit(0)          # unmeasurable (no origin) -> never guess, never block

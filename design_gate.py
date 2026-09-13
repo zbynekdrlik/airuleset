@@ -411,6 +411,88 @@ def issue_refs(text):
     return seen
 
 
+# #1003 -- merge-commit awareness. A resync `git merge origin/develop` makes a
+# commit whose auto-generated message can carry a `#N` from the integration
+# branch's history (`Merge branch 'develop' into feat-3 (#6981)`), but a merge
+# introduces NO new design -- so the gate must exempt it. PRIMARY, un-forgeable:
+# MERGE_HEAD exists (a real merge is in progress). BELTS (for the single-call
+# `git merge ... && git commit -m "Merge ..."` shape, MERGE_HEAD not yet set at
+# PreToolUse): a REAL `git merge` command, or a canonical `-m "Merge <kind> '..."
+# message. MERGE_HEAD is load-bearing; the belts are a trusted-worker
+# convenience, not an adversarial boundary.
+#
+# Review F2 (both belts hardened against ordinary fix commits):
+#  - the git-merge belt runs against the QUOTE-STRIPPED command, so a `git merge`
+#    that appears only INSIDE a quoted `-m` message ("handle 'a && git merge b'")
+#    is NOT a command and does not exempt;
+#  - the message belt is anchored to `-m "Merge <kind> '<ref>` (right after the
+#    -m flag, canonical auto-merge message start), so an ordinary fix message
+#    that merely MENTIONS "merge branch"/"merge origin/x" mid-sentence does not
+#    match (the replay-corpus / F2 false positives).
+
+# A `git merge` command at a statement boundary (checked on the quote-stripped
+# command, so an in-message occurrence never counts). Review-2 F1: `merge`
+# must be TERMINAL — `(?![-\w])` excludes the read-only plumbing subcommands
+# `git merge-base`/`merge-file`/`merge-tree`/`merge-index` (a `git merge-base
+# --is-ancestor` "am I behind?" idiom is not a merge), and the trailing
+# lookahead excludes the merge CANCELS `--abort`/`--quit` (they end a merge,
+# they do not make one). `git merge origin/x` / `git merge --no-ff` /
+# `git merge --continue` still match (a `--continue` completes a real merge,
+# and MERGE_HEAD is present for it anyway).
+_GIT_MERGE_CMD_RE = re.compile(
+    r"(?:^|[;&|]|&&)\s*(?:sudo\s+|env\s+)?git\s+merge(?![-\w])"
+    r"(?!\s+--(?:abort|quit)\b)")
+# A canonical auto-merge message immediately after the -m/--message flag:
+# `-m "Merge branch '…"` / `-m 'Merge commit "…'`. The kind + a following quote
+# (the ref) is required, and it must sit right after the flag's opening quote,
+# so a fix message like `-m "fix: resolve merge branch 'x' note"` never matches.
+_MERGE_MSG_RE = re.compile(
+    r"(?:-m|--message)\s*=?\s*(['\"])\s*"
+    r"Merge\s+(?:branch|remote-tracking\s+branch|commit|tag)\s+['\"]",
+    re.IGNORECASE)
+_QUOTED_SPAN_SQ_RE = re.compile(r"'[^']*'")
+_QUOTED_SPAN_DQ_RE = re.compile(r'"[^"]*"')
+
+
+def _strip_quoted(text):
+    """Remove single- and double-quoted spans so a `git merge` that lives only
+    inside a quoted `-m` message body is not mistaken for a real command
+    (review F2). Single quotes first, then double (same order as
+    block-sensitive-staging.sh's bypass parse)."""
+    return _QUOTED_SPAN_DQ_RE.sub("", _QUOTED_SPAN_SQ_RE.sub("", text or ""))
+
+
+def _merge_head_present(cwd):
+    """True iff a merge is in progress in `cwd` (`.git/MERGE_HEAD` exists).
+    Never raises; False on any failure (git missing, not a repo, no cwd)."""
+    if not cwd:
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            capture_output=True, text=True, timeout=8)
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
+def is_merge_commit_context(cmd, cwd):
+    """Heuristic: is this `git commit` completing a MERGE (which introduces no
+    new design)? Returns `(ok: bool, reason: str)`. PRIMARY = MERGE_HEAD in
+    `cwd`; BELTS = a real `git merge` command (quote-stripped) or a canonical
+    `-m "Merge <kind> '..."` message. A SHAPE/state check (same documented
+    limitation as the rest of this module) -- MERGE_HEAD is the robust primary,
+    the belts are hardened per review F2 against ordinary fix commits."""
+    text = cmd or ""
+    if _merge_head_present(cwd):
+        return True, "MERGE_HEAD present (merge in progress)"
+    if _GIT_MERGE_CMD_RE.search(_strip_quoted(text)):
+        return True, "git merge command in the compound"
+    if _MERGE_MSG_RE.search(text):
+        return True, "canonical -m merge-message"
+    return False, "not a merge commit"
+
+
 # --------------------------------------------------------------------------- #
 # #206 -- an already-CLOSED issue reference no longer requires a design
 # marker. The same syntactic shapes (`#N`, `(#N)`, comma/slash-separated

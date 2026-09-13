@@ -2008,5 +2008,44 @@ class TestPresenceExempt962(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
 
 
+class TestScopePreferAccepted1003(TestCase):
+    """#1003 — a `Scope-gate:` line inside a PROSE self-audit
+    (`Scope-gate: >300 LoC? nie; schema? nie; …`) parsed to `>300` and
+    rendered the opaque `invalid-scope-gate:>300`, blocking a body that ALSO
+    carried a proper single-token gate line. Fix: scan ALL `Scope-gate:`
+    lines and PREFER one whose token is an accepted criterion; when none is,
+    the block message names the offending token AND the accepted-criteria
+    list at the top."""
+
+    _PROSE = "This is out of scope.\nScope-gate: >300 LoC? nie; schema? nie; cross-cutting? nie; owner asked"
+
+    def test_prose_line_then_proper_line_passes(self):
+        # A proper `Scope-gate: cross-cutting` line following a prose
+        # self-audit line must WIN — the filing passes.
+        r = run(body_cmd("real cross-cut", self._PROSE, scope_gate="cross-cutting"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_proper_line_only_still_passes(self):
+        r = run(body_cmd("real cross-cut", "Two repos coordinate one rig.",
+                          scope_gate="cross-cutting"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_prose_line_only_blocks_and_names_cause(self):
+        # Only the prose self-audit line, no proper gate line -> BLOCK, and
+        # the block message must name the offending token AND the accepted
+        # criteria list at the top (not buried in the wall).
+        r = run(body_cmd("prose only", self._PROSE))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("invalid-scope-gate:>300", r.stderr)
+        self.assertIn("must be EXACTLY", r.stderr)
+        self.assertIn("cross-cutting", r.stderr)  # accepted-criteria list present
+
+    def test_prose_mention_is_not_treated_as_the_gate_line(self):
+        # A prose line whose first token is NOT an accepted criterion must
+        # NOT satisfy the gate on its own.
+        r = run(body_cmd("prose sneaks", "Scope-gate: maybe-300-ish? probably not"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     main()

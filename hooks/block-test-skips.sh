@@ -114,19 +114,12 @@ case "$CUR_BRANCH" in
             fi
         done ;;
 esac
-# #909: For block-test-skips.sh (per-added-line semantics), a tighter base
-# is always correct. Override with origin/<branch> for re-pushes (only new
-# commits since last push are diffed). This does NOT apply to
-# pre-push-test-check.sh whose PR-scoped gates need the full PR range.
-if [ "$CUR_BRANCH" != "HEAD" ] && \
-   git rev-parse -q --verify "origin/${CUR_BRANCH}" >/dev/null 2>&1; then
-    BASE_REF="origin/${CUR_BRANCH}"
-    _CASE_RESOLVED=true
-fi
 # #909: When the case block found NOTHING (no origin/develop, no
-# upstream/develop — the new-branch-push scenario), try fallbacks.
-# These run ONLY when the case block did not resolve, to avoid overriding
-# a correctly-resolved base (F2 from Fable review).
+# upstream/develop — the new-branch-push scenario), try fallbacks to resolve
+# the DESTINATION integration branch. These run ONLY when the case block did
+# not resolve, to avoid overriding a correctly-resolved base (F2 from Fable
+# review). #1003: moved ABOVE the #909 range override so DEST_REF (captured
+# next) is the true destination even in the new-branch scenario.
 if [ "$_CASE_RESOLVED" = false ]; then
     # (b) The tracking branch (@{upstream}) may point to the correct
     #     integration branch (e.g. upstream/develop when origin/develop is
@@ -148,8 +141,30 @@ if [ "$_CASE_RESOLVED" = false ]; then
         done
     fi
 fi
-# The base ref may not exist at all (fresh repo, no origin) — the diffs
-# below already fall back on error, so BASE_REF is used as-is.
+# #1003: DEST_REF = the resolved DESTINATION integration branch (the PR
+# target). A line already present on DEST_REF rode in via `git merge
+# origin/develop` and is NOT genuinely introduced by this push, so the Python
+# scanner excludes it (fixes the montalu6 / odoo-erp #7099 re-flag of an
+# already-merged sanctioned test.skip()). Captured BEFORE the #909 range
+# override below, so on a real develop/staging repo it is the integration
+# branch (never origin/<branch>). Review-2 F5 residual: for a self-tracking
+# branch in a repo with NO integration branch, the (b) @{upstream} fallback
+# above can set DEST_REF=origin/<branch>; that is a near-no-op (it cannot
+# change the final RANGE base, only widens the byte-identical-duplicate
+# residual to the branch's own already-pushed history).
+DEST_REF="$BASE_REF"
+# #909: For block-test-skips.sh (per-added-line semantics), a tighter RANGE
+# base is always correct. Override with origin/<branch> for re-pushes (only
+# new commits since last push are diffed). #1003: this now tightens ONLY the
+# RANGE (BASE_REF); the DESTINATION (DEST_REF) is unchanged, so a merged-in
+# destination line is still excluded by the scanner. This override does NOT
+# apply to pre-push-test-check.sh whose PR-scoped gates need the full PR range.
+if [ "$CUR_BRANCH" != "HEAD" ] && \
+   git rev-parse -q --verify "origin/${CUR_BRANCH}" >/dev/null 2>&1; then
+    BASE_REF="origin/${CUR_BRANCH}"
+fi
+# The base refs may not exist at all (fresh repo, no origin) — the diffs
+# below already fall back on error, so BASE_REF/DEST_REF are used as-is.
 
 AUDIT_LOG="$HOME/devel/airuleset/audits/test-skip-bypasses.log"
 mkdir -p "$(dirname "$AUDIT_LOG")"
@@ -220,13 +235,34 @@ mapfile -t TEST_FILES_ARR <<< "$TEST_CHANGES"
 # (before RC=$? can even run) — the `|| RC=$?` keeps this in a tested
 # context so set -e does not fire, and lets the block message print below.
 RC=0
-VIOLATIONS=$(python3 - "$BASE_REF" "${TEST_FILES_ARR[@]}" <<'PYEOF'
+VIOLATIONS=$(python3 - "$DEST_REF" "$BASE_REF" "$AUDIT_LOG" "$PROJECT" "${TEST_FILES_ARR[@]}" <<'PYEOF'
+import os
 import re
 import subprocess
 import sys
+import time
 
-base_ref = sys.argv[1]
-test_files = sys.argv[2:]
+dest_ref = sys.argv[1]
+base_ref = sys.argv[2]
+audit_log = sys.argv[3]
+project = sys.argv[4]
+test_files = sys.argv[5:]
+
+
+def _dest_line_set(tf):
+    """#1003 -- stripped, non-empty lines present in the DESTINATION version
+    of `tf`. A line already there rode in via `git merge origin/develop` and
+    is NOT introduced by this push. Empty set when tf/dest_ref cannot be read
+    (a new file, a fresh repo) -> nothing excluded, fail toward flagging (the
+    safe direction for a security-adjacent gate)."""
+    try:
+        r = subprocess.run(["git", "show", "%s:%s" % (dest_ref, tf)],
+                           capture_output=True, text=True)
+    except Exception:
+        return set()
+    if r.returncode != 0:
+        return set()
+    return set(l.strip() for l in r.stdout.splitlines() if l.strip())
 
 PATTERNS = [
     (re.compile(r'#\[ignore\]'), "#[ignore] — disables a Rust test"),
@@ -252,10 +288,12 @@ EMPTY_BODY = re.compile(
 HUNK_HEADER_RE = re.compile(r'(?m)^@@.*@@.*$')
 
 violations = []
+excluded_banned = False   # #1003 -- a merged-in banned line was excluded
 for tf in test_files:
     tf = tf.strip()
     if not tf:
         continue
+    dest = _dest_line_set(tf)   # #1003 -- lines already on the destination
     try:
         out = subprocess.run(
             ["git", "diff", "-U0", f"{base_ref}...HEAD", "--", tf],
@@ -273,7 +311,25 @@ for tf in test_files:
     for hunk in HUNK_HEADER_RE.split(out):
         added_lines = [ln[1:] for ln in hunk.splitlines()
                        if ln.startswith("+") and not ln.startswith("+++")]
-        added_content = "\n".join(added_lines)
+        # #1003 -- drop any added line already present on the DESTINATION
+        # (it rode in via `git merge origin/develop`, not this push), so a
+        # sanctioned merged-in test.skip() is not re-flagged. A line the
+        # branch GENUINELY introduces is not on the destination, so it stays.
+        # Accepted residual (review F3): `dest` is EVERY stripped line of the
+        # destination file, so a genuinely-new banned line the branch adds that
+        # is BYTE-IDENTICAL to some existing destination line is also dropped --
+        # only reachable when the new skip is a verbatim copy of an already-
+        # sanctioned one, which is itself already blessed on the destination.
+        kept = []
+        for ln in added_lines:
+            if dest and ln.strip() in dest:
+                for pat, _lbl in PATTERNS:
+                    if pat.search(ln):
+                        excluded_banned = True
+                        break
+                continue
+            kept.append(ln)
+        added_content = "\n".join(kept)
         if not added_content:
             continue
         for pat, label in PATTERNS:
@@ -281,6 +337,19 @@ for tf in test_files:
                 violations.append(f"  {tf}: {label}")
         if EMPTY_BODY.search(added_content):
             violations.append(f"  {tf}: empty test body — passes without exercising real code")
+
+# #1003 -- log ONE line per exemption event: a merged-in banned line was
+# excluded from the scan (the sanctioned already-on-develop skip). Best-effort;
+# never affects the block decision.
+if excluded_banned and audit_log:
+    try:
+        os.makedirs(os.path.dirname(audit_log), exist_ok=True)
+        with open(audit_log, "a", encoding="utf-8") as fh:
+            fh.write("%s  project=%s  merge-in banned line(s) excluded from scan "
+                     "(already on %s) (#1003)\n"
+                     % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), project, dest_ref))
+    except Exception:
+        pass
 
 if violations:
     print("\n".join(dict.fromkeys(violations)))

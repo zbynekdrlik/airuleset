@@ -1290,9 +1290,23 @@ for seg in split_top_level(skeleton):
     body, body_err = resolve_body(tk, seg, api_call, effective_cwd)
     crit = None
     if body:
-        m = CRITERION_RE.search(body)
-        if m:
-            crit = m.group(1)
+        # #1003 -- scan ALL `Scope-gate:` lines and PREFER one whose token is
+        # an accepted criterion. A prose self-audit line
+        # (`Scope-gate: >300 LoC? nie; schema? nie; …`) yields a non-criterion
+        # first token (`>300`); a proper `Scope-gate: <criterion>` line
+        # elsewhere in the body must win over it. Fall back to the FIRST token
+        # (for the `invalid-scope-gate:<token>` block reason) when none of the
+        # lines names an accepted criterion.
+        _first = None
+        for _m in CRITERION_RE.finditer(body):
+            _tok = _m.group(1)
+            if _first is None:
+                _first = _tok
+            if _tok.lower() in ALLOWED:
+                crit = _tok
+                break
+        if crit is None:
+            crit = _first
 
     repo_flag = flag_value(tk, ("-R", "--repo"))
     target_repo = _target_repo_for_segment(tk, api_call, cwd_repo)
@@ -1620,6 +1634,14 @@ if [ "$RC" -eq 2 ]; then
         printf '🚫 BLOCKED — per-item reason:\n%s\n' "$SUMMARY" >&2
     fi
     cat >&2 <<'MSG'
+A `Scope-gate:` line must be EXACTLY `Scope-gate: <criterion>` where <criterion>
+is ONE of: >300-loc | schema-migration | api-break | security-boundary |
+cross-cutting | needs-user-decision | planned-work | user-request |
+architecture-rework. A PROSE self-audit line (e.g. `Scope-gate: >300 LoC? nie;
+schema? nie; …`) is NOT the gate line — its first token is the one reported as
+the bad criterion above; put the single accepted criterion on its own line (a
+proper gate line elsewhere in the body wins over a prose mention).
+
 Either (a) no valid `Scope-gate:` line, (b) this issue's own PARENT (the
 "#N follow-up" it names) is ITSELF a review-finding follow-up -- a depth-2
 review-finding chain (#311: adversarial-review findings that keep spawning
