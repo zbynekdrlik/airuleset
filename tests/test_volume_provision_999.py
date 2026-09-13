@@ -283,6 +283,50 @@ class TestRenderExecution(TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# Finding 1 (🟡, #999 adversarial review): the docker data-root migration must
+# stop BOTH docker.socket and docker.service before the rsync. Stopping only
+# docker.service leaves docker.socket listening, so any client touching the
+# socket socket-activates (restarts) docker MID-rsync — corrupting the copy and
+# violating "maintenance must never harm running work". Both are stopped before
+# the copy and restarted after daemon.json is written; the "0 running
+# containers" precondition is unchanged.
+# --------------------------------------------------------------------------- #
+class TestDockerSocketStop(TestCase):
+    def test_render_stops_docker_socket_and_service(self):
+        s = dg.render_volume_setup_script(GK_DECL, home="/home/gatekeeper")
+        # both units stopped before the copy (socket, not just the service)
+        self.assertIn("systemctl stop docker.socket", s)
+        self.assertIn("systemctl stop docker.service", s)
+        # both brought back after the migration
+        self.assertIn("systemctl restart docker.socket docker.service", s)
+
+    def test_socket_stopped_before_rsync_and_restarted_after(self):
+        h = _Harness(self)                       # 0 containers -> docker migrates
+        r = h.run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = open(h.log).read().splitlines()
+
+        def idx(pred):
+            for i, ln in enumerate(lines):
+                if pred(ln):
+                    return i
+            return -1
+
+        rsync_i = idx(lambda ln: ln.startswith("rsync") and "/var/lib/docker/" in ln)
+        self.assertGreaterEqual(rsync_i, 0, "docker rsync never ran")
+        sock_stop_i = idx(lambda ln: "systemctl stop docker.socket" in ln)
+        svc_stop_i = idx(lambda ln: "systemctl stop docker.service" in ln)
+        self.assertGreaterEqual(sock_stop_i, 0, "docker.socket never stopped")
+        self.assertGreaterEqual(svc_stop_i, 0, "docker.service never stopped")
+        # both stopped BEFORE the copy (no socket-activation mid-rsync)
+        self.assertLess(sock_stop_i, rsync_i)
+        self.assertLess(svc_stop_i, rsync_i)
+        # both restarted AFTER the copy
+        restart_i = idx(lambda ln: "restart docker.socket docker.service" in ln)
+        self.assertGreater(restart_i, rsync_i, "docker not restarted after copy")
+
+
+# --------------------------------------------------------------------------- #
 # _local_volume_decl — resolve this box's declaration by user==pw_name.
 # --------------------------------------------------------------------------- #
 class TestLocalVolumeDecl(TestCase):
