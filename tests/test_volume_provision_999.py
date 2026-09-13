@@ -65,7 +65,7 @@ class _R:
 # --------------------------------------------------------------------------- #
 # Execution harness — run the rendered bash with stub commands under a root.
 # --------------------------------------------------------------------------- #
-def _stub_bin(d, *, isactive_fail="", docker_ps="", docker_root=""):
+def _stub_bin(d, *, isactive_fail="", docker_ps="", docker_root="", rsync_fail=""):
     b = os.path.join(d, "bin")
     os.makedirs(b, exist_ok=True)
     log = os.path.join(d, "calls.log")
@@ -78,7 +78,14 @@ def _stub_bin(d, *, isactive_fail="", docker_ps="", docker_root=""):
 
     w("findmnt", "exit 0\n")  # always "mounted" so relocation proceeds
     w("mount", 'echo "mount $*" >> "%s"\nexit 0\n' % log)
-    w("rsync", 'echo "rsync $*" >> "%s"\nmkdir -p "${@: -1}"\nexit 0\n' % log)
+    # rsync_fail: a substring; a matching rsync argv exits 23 (partial xfer)
+    # AFTER logging — to model a copy that dies mid-relocation.
+    w("rsync", (
+        'echo "rsync $*" >> "%s"\n'
+        'if [ -n "%s" ]; then case "$*" in *%s*) exit 23;; esac; fi\n'
+        'mkdir -p "${@: -1}"\n'
+        'exit 0\n' % (log, rsync_fail, rsync_fail)
+    ))
     w("systemctl", (
         'echo "systemctl $*" >> "%s"\n'
         'if [ "$1" = "is-active" ]; then\n'
@@ -123,7 +130,8 @@ class _Harness:
 
     HOME = "/home/gatekeeper"
 
-    def __init__(self, tc, *, isactive_fail="", docker_ps="", docker_root=""):
+    def __init__(self, tc, *, isactive_fail="", docker_ps="", docker_root="",
+                 rsync_fail=""):
         self.tc = tc
         self.d = tempfile.mkdtemp(prefix="voltest-")
         tc.addCleanup(lambda: __import__("shutil").rmtree(self.d, ignore_errors=True))
@@ -132,7 +140,7 @@ class _Harness:
         _seed_root(self.root, self.HOME)
         self.binp, self.log = _stub_bin(
             self.d, isactive_fail=isactive_fail, docker_ps=docker_ps,
-            docker_root=docker_root)
+            docker_root=docker_root, rsync_fail=rsync_fail)
         self.script = dg.render_volume_setup_script(
             GK_DECL, home=self.HOME, root=self.root)
         self.spath = os.path.join(self.d, "script.sh")
@@ -324,6 +332,52 @@ class TestDockerSocketStop(TestCase):
         # both restarted AFTER the copy
         restart_i = idx(lambda ln: "restart docker.socket docker.service" in ln)
         self.assertGreater(restart_i, rsync_i, "docker not restarted after copy")
+
+
+# --------------------------------------------------------------------------- #
+# Finding 2 (🔵, #999 adversarial review): a phase that stops a service and then
+# fails mid-flight (rsync error, is-active fail) must NOT leave that service
+# down — "maintenance must never harm running work". A per-phase ERR/EXIT trap
+# restarts what the phase stopped and prints a recovery line. Phases stay
+# independent: a failed later phase never undoes an already-completed earlier
+# one.
+# --------------------------------------------------------------------------- #
+class TestRelocationFailureRecovery(TestCase):
+    def test_docker_rsync_failure_restarts_docker(self):
+        h = _Harness(self, rsync_fail="/var/lib/docker/")   # docker copy dies
+        r = h.run()
+        self.assertNotEqual(r.returncode, 0, "docker phase should fail")
+        # loud recovery line printed
+        self.assertIn("restarting docker", r.stdout)
+        lines = open(h.log).read().splitlines()
+        rsync_i = next((i for i, ln in enumerate(lines)
+                        if ln.startswith("rsync") and "/var/lib/docker/" in ln), -1)
+        self.assertGreaterEqual(rsync_i, 0, "docker rsync never ran")
+        # after the failed copy, docker is started again (never left stopped)
+        start_after = [i for i, ln in enumerate(lines)
+                       if i > rsync_i and "systemctl start docker" in ln]
+        self.assertTrue(start_after, "docker not restarted after failed copy")
+        # the earlier runner phase completed — previous work is not blocked
+        self.assertTrue(os.path.islink(h.r("/home/gh-runner/actions-runner-1")))
+
+    def test_runner_rsync_failure_restarts_stopped_unit(self):
+        # runner r2's copy fails after its unit was stopped
+        h = _Harness(self, rsync_fail="actions-runner-2")
+        r = h.run()
+        self.assertNotEqual(r.returncode, 0, "runner phase should fail")
+        self.assertIn("restarting", r.stdout)
+        lines = open(h.log).read().splitlines()
+        unit = "actions.runner.acme-repo.r2.service"
+        stop_i = next((i for i, ln in enumerate(lines)
+                       if ("stop " + unit) in ln), -1)
+        self.assertGreaterEqual(stop_i, 0, "r2 unit never stopped")
+        # r2 restarted AFTER its stop (recovery) — never left down
+        start_after = [i for i, ln in enumerate(lines)
+                       if i > stop_i and ("start " + unit) in ln]
+        self.assertTrue(start_after, "r2 not restarted after failed copy")
+        # r1 completed first; r3 never reached (abort stops the script)
+        self.assertTrue(os.path.islink(h.r("/home/gh-runner/actions-runner-1")))
+        self.assertFalse(os.path.islink(h.r("/home/gh-runner/actions-runner-3")))
 
 
 # --------------------------------------------------------------------------- #
