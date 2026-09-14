@@ -528,7 +528,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # nothing seen) skips the floor and backs off via _book_unverified_send below.
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out, nudge="queue-arrival")
+                                logs=logs, out=send_out, nudge="queue-arrival",
+                                state=state)  # #1022: record for the wedge
     if not ok:
         if send_out.get("delivered_unconfirmed"):
             # NON-terminal for the baseline — leave base untouched + janitor

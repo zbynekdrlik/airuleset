@@ -848,6 +848,13 @@ from watchdog.stash import (  # noqa: E402
 
 
 _DREPLY_TYPED_TTL_S = 48 * 3600
+# #1022 — how long a recorded machine nudge (`state["nudge_typed"]`) stays
+# matchable by the wedge. 6h mirrors `JANITOR_WATCH_MAX_AGE_S` (the sibling
+# provenance bound): a nudge typed while nudges were ON can sit stranded a
+# while before the owner flips OFF and the wedge sees it, but a record older
+# than this is stale and must never license clearing a coincidentally-similar
+# later draft.
+_NUDGE_TYPED_TTL_S = 6 * 3600
 
 
 # --------------------------------------------------------------------------- #
@@ -1891,6 +1898,9 @@ from watchdog.janitor import (  # noqa: E402
     _janitor_clear_park as _janitor_clear_park,
     _janitor_prune_parks as _janitor_prune_parks,
     _janitor_recover as _janitor_recover,
+    _record_machine_nudge as _record_machine_nudge,
+    _wedged_machine_nudge as _wedged_machine_nudge,
+    _clear_machine_nudge as _clear_machine_nudge,
     _pane_location as _pane_location,
 )
 

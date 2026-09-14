@@ -5184,7 +5184,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # backoff -> IDENTICAL re-type -> duplicate nudge (live gk 2026-09-01).
         send_out = {}
         ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                    logs=logs, out=send_out, nudge="lane-occupancy")
+                                    logs=logs, out=send_out, nudge="lane-occupancy",
+                                    state=state)  # #1022: record for the wedge
         if not (ok or bool(send_out.get("delivered_unconfirmed"))):
             # GENUINE swallow -- transient, retried next sweep, and it must
             # NOT consume the ln/llast budget (a refused attempt is not a
@@ -5594,7 +5595,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 _bok = watchdog.send_verified(
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
                     logs=logs, out=send_out,
-                    nudge=(_incl[0] if _incl else None))
+                    nudge=(_incl[0] if _incl else None),
+                    state=state)  # #1022: record for the wedge
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
                     _incl_set = set(_incl)

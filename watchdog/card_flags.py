@@ -75,7 +75,7 @@ def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
     marks when absent (a direct caller/test that does not thread them)."""
     watchdog._janitor_mark_watch(state, pid, now)
     if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
-                              nudge="card"):
+                              nudge="card", state=state):  # #1022: record for the wedge
         watchdog._janitor_clear_watch(state, pid)
         return True
     return False

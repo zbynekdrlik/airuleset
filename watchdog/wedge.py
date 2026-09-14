@@ -130,6 +130,9 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                                        # escalation count so a LATER, unrelated
                                        # stuck draft starts counting from zero
         state.pop(giveup_key, None)    # ...and the give-up-ping dedup with it
+        watchdog._clear_machine_nudge(state, pid)  # #1022: box bare -> our
+                                       # recorded nudge (if any) is gone
+                                       # (submitted or cleared) -> drop the record
         return []
     # A machine nudge's PREFIX lives on the box's HEAD row. A wrapped draft's
     # boundary row is its TAIL and can never carry it, so testing `txt` alone
@@ -148,7 +151,18 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     # so a stranded own nudge is SUBMITTED in place here, never pinged. A FOREIGN
     # / human draft (no registered prefix -- e.g. a session's own `gk: ...` bounce
     # note) still takes the ping-only path below, untouched.
-    machine = (head_txt.startswith(watchdog.MACHINE_NUDGE_PREFIX)
+    # #1022 -- the primitive RECORDED every machine nudge it typed
+    # (`state["nudge_typed"]`, via `_type_literal`). A wedged draft matching that
+    # record is a nudge WE typed: it must be janitor-CLEARED, never submitted
+    # (submitting it is a nudge through the back door under the #994/#1023 kill
+    # switch -- `kind="wedge"` is RECOVERY, so it fires even at OFF). This takes
+    # PRECEDENCE over the prefix/dreply submit path below; the owner's own reply
+    # (`_is_dreply_machine_text`) and any draft with no record stay on the
+    # existing submit/ping paths. `nudge_kind` also counts as `machine` so a
+    # stale machine draft bypasses the at-rest guard exactly like a prefix nudge.
+    wedged_nudge = watchdog._wedged_machine_nudge(state, pid, head_txt, txt, now)
+    machine = (wedged_nudge is not None
+               or head_txt.startswith(watchdog.MACHINE_NUDGE_PREFIX)
                or watchdog._own_nudge_submit_prefix(head_txt) is not None
                or watchdog._is_dreply_machine_text(state, pid, head_txt, txt))
     if not machine and ("esc to interrupt" in (captured or "")
@@ -174,6 +188,24 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     state[key] = st
     if st["n"] < watchdog.PWEDGE_SWEEPS or st.get("pinged"):
         return []
+    if wedged_nudge is not None:
+        # #1022 -- a wedged draft that matches a machine nudge WE typed is NEVER
+        # submitted; janitor-CLEAR it (RECOVERY `kind="janitor"`, never Enter) and
+        # let the owning nudge job re-deliver on its own gated cadence. Holds
+        # regardless of the switch state (design point 2): under OFF a stranded
+        # machine nudge is a back-door submit; under ON a stale one must not be
+        # force-submitted by the wedge either. Never touch a scrolled/copy-mode
+        # pane (the janitor's own keystrokes would be swallowed/corrupt).
+        clr_logs = []
+        if not dry_run and run and not watchdog.pane_in_mode(pid, run):
+            cleared = watchdog._janitor_clear_box(
+                pid, run, None, clr_logs.append)
+            if cleared:
+                watchdog._clear_machine_nudge(state, pid)
+        state.pop(key, None)   # re-tracks + retries the clear in 2 sweeps if the
+                               # box did not converge to bare this sweep
+        return (["wedge: machine draft (%s) → janitor-clear %s (%s)"
+                 % (wedged_nudge, pid, project)] + clr_logs)
     if machine:
         unstick_note = ""
         if not dry_run and run and not watchdog.pane_in_mode(pid, run):

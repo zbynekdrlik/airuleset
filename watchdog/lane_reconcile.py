@@ -268,7 +268,8 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
     watchdog._janitor_mark_watch(state, pid, now)
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out, nudge=CATEGORY)
+                                logs=logs, out=send_out, nudge=CATEGORY,
+                                state=state)  # #1022: record for the wedge
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # A genuine swallow leaves the dedup anchor unadvanced -> retries next

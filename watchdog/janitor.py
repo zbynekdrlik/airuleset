@@ -202,10 +202,96 @@ def _janitor_clear_watch(state, pid):
     block) could satisfy the provenance gate purely by coincidence of
     timing. Never called for a FAILED/unverified delivery — that is
     exactly the case the mark must keep proving. A no-op when `state` is
-    `None`, mirroring `_janitor_mark_watch`."""
+    `None`, mirroring `_janitor_mark_watch`.
+
+    #1022 — a CONFIRMED submit also resolves the wedge machine-nudge record
+    (`_wedged_machine_nudge`'s read side): the nudge left the box, so job 10
+    must not later mistake fresh content for that same stranded nudge. This is
+    the CENTRAL removal point — every confirmed-delivery caller already calls
+    this, so the record is dropped for all of them here rather than at each
+    site."""
     if state is None:
         return
     state.get("janitor_watch", {}).pop(pid, None)
+    state.get("nudge_typed", {}).pop(pid, None)
+
+
+# --------------------------------------------------------------------------- #
+# #1022 — the wedge machine-draft record. The keystroke primitive (`_type_literal`)
+# already knows what it typed, so it RECORDS every machine nudge (a `nudge=`
+# identity in `ALL_NUDGE_KINDS`, not `user_authored`) per-pane in
+# `state["nudge_typed"]`. Job 10 (the wedge) CONSULTS that record: a wedged draft
+# matching a recorded machine nudge is janitor-CLEARED, never submitted (a submit
+# would be a nudge through the back door under the #994/#1023 kill switch, even
+# while OFF, since `kind="wedge"` is RECOVERY). A draft with NO record (the
+# owner's own Discord reply, a stash-slot owner draft) is user-authored and still
+# submitted. The record is dropped on a confirmed submit (`_janitor_clear_watch`,
+# above) and on a janitor clear (`_clear_machine_nudge`), and TTL-pruned on write
+# — a sibling of the per-pane provenance records (`dreply_typed`/`janitor_watch`/
+# `stash_parks`), same already-persisted watchdog `state`, no new file.
+# --------------------------------------------------------------------------- #
+def _record_machine_nudge(state, pid, text, nudge, now):
+    """#1022 WRITE side. Record what the type primitive just typed into `pid` as
+    a MACHINE nudge, so the wedge can recognize a stranded copy of it. Only a
+    GATED PRIORITY nudge identity (`MACHINE_NUDGE_KINDS`) is recorded — the set
+    the #994/#1023 kill switch actually governs, so a stranded one wedged and
+    submitted by the wedge would be the back-door nudge the switch forbids. A
+    keystroke with no identity, the owner's own reply (the caller passes
+    `user_authored`), and the always-on RECOVERY revivals (`resume`/`compact`)
+    are all NOT recorded: recovery nudges are never suppressed and carry their
+    OWN retry/veto cadence (jobs 1/6, compact's cooldown), so the wedge must not
+    interfere with them. Stores head+tail (the #193-proven robust match shape,
+    since the wedge reads a WRAPPED box's boundary TAIL row) + the nudge kind +
+    `now`. Pruned to `_NUDGE_TYPED_TTL_S` on every write so state stays bounded.
+    A no-op when `state` is `None` or `text`/`nudge` is unusable — mirroring
+    `_janitor_mark_watch`."""
+    if state is None or not text or nudge not in watchdog.MACHINE_NUDGE_KINDS:
+        return
+    rec = state.get("nudge_typed")
+    rec = ({k: v for k, v in rec.items()
+            if isinstance(v, dict)
+            and 0 <= now - (v.get("ts") or 0) < watchdog._NUDGE_TYPED_TTL_S}
+           if isinstance(rec, dict) else {})
+    rec[pid] = {"head": text[:160], "tail": text[-160:], "kind": nudge, "ts": now}
+    state["nudge_typed"] = rec
+
+
+def _wedged_machine_nudge(state, pid, head_txt, txt, now):
+    """#1022 READ side. The nudge KIND if the wedged box for `pid` (its HEAD row
+    `head_txt`, its tail-or-head `txt`) matches a recorded machine nudge within
+    `_NUDGE_TYPED_TTL_S`, else `None`. BOTH ends must agree — the exact
+    head+tail contract `_is_dreply_machine_text` uses (#193): a wrapped box's
+    boundary row can be a single char, so a tail-only test would misread a
+    genuine USER draft as ours and clear it. Type-checked like
+    `_janitor_watch_seen` so a corrupt entry never reads as a match; a
+    future-dated `ts` (clock skew) is refused by the same `0 <=` clamp."""
+    rec = (state or {}).get("nudge_typed", {}).get(pid)
+    if not isinstance(rec, dict):
+        return None
+    ts = rec.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    if not (0 <= now - ts < watchdog._NUDGE_TYPED_TTL_S):
+        return None
+    head = str(rec.get("head") or "")
+    tail = str(rec.get("tail") or "")
+    if not head or not tail or not txt or not head_txt:
+        return None
+    if not (tail.endswith(txt) or txt in tail):
+        return None
+    if not (head.startswith(head_txt) or head_txt.startswith(head)):
+        return None
+    return rec.get("kind")
+
+
+def _clear_machine_nudge(state, pid):
+    """#1022 — drop the machine-nudge record for `pid` (the wedge janitor-cleared
+    it, or the box went provably bare). A no-op when `state` is `None`, mirroring
+    `_janitor_clear_watch`. The confirmed-submit removal is centralised in
+    `_janitor_clear_watch`; this covers the wedge's own clear / bare-box paths."""
+    if state is None:
+        return
+    state.get("nudge_typed", {}).pop(pid, None)
 
 
 def _janitor_park_record(state, pid, now, text=None):

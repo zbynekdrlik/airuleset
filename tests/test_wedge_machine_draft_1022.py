@@ -110,9 +110,12 @@ class TestMachineDraftJanitorCleared(unittest.TestCase):
                          "the record must be dropped on a janitor clear")
 
     def test_recorded_generic_nudge_without_prefix_is_cleared(self):
+        # A GATED machine nudge whose text the prefix heuristics do NOT
+        # recognize ("stuck-check"-style, a subagent-stuck rider): ONLY the
+        # record identifies it as ours. It must be cleared, not left pinged.
         state = {}
         now = time.time()
-        _seed(state, PID, GENERIC_TEXT, "resume", now)
+        _seed(state, PID, GENERIC_TEXT, "subagent-stuck", now)
         run = _mkrun()
         logs = _sweep2(state, GENERIC_PANE, run, now)
         self.assertEqual(_enters(run), [], run.calls)
