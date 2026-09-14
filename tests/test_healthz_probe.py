@@ -129,6 +129,38 @@ class TestDedupStateMachine(unittest.TestCase):
         self.assertIn("err-B", send.calls[1]["body"])
         self.assertTrue(any("re-alert" in ln for ln in logs), logs)
 
+    def test_a_failed_send_is_retried_not_latched(self):
+        # #1005 review-2 finding: a transient send failure at the 2/2 transition
+        # must NOT latch "alerted" — the state-based dedup would then suppress
+        # every re-fire ("already alerted") until the error text changes or
+        # recovery, so the ONE outage alert this whole job exists to deliver
+        # would be silently lost. The next still-down sample must RETRY the send.
+        state = {}
+
+        class FailThenOk:
+            def __init__(self):
+                self.calls = []
+                self.queue = ["error", "sent"]   # 1st send fails, 2nd delivers
+
+            def __call__(self, body, owner=None, dedup_key=None,
+                         dry_run=False, **kw):
+                self.calls.append(body)
+                return self.queue[min(len(self.calls) - 1, len(self.queue) - 1)]
+
+        send = FailThenOk()
+        down = fetch_returning(200, ok_body(connected=False, error="e"))
+        run(state, down, send, now=NOW)                     # 1/2 arm, no send
+        logs2 = run(state, down, send, now=NOW + FIVE_MIN)  # 2/2 → send #1 = "error"
+        self.assertEqual(len(send.calls), 1, "2/2 attempts the send")
+        self.assertTrue(any("retry" in ln for ln in logs2), logs2)
+        # still down → the failed alert must be RETRIED, not suppressed.
+        run(state, down, send, now=NOW + 2 * FIVE_MIN)      # send #2 = "sent"
+        self.assertEqual(len(send.calls), 2,
+                         "a failed send must be retried, not latched")
+        # now delivered → latched → a further down sample stays silent.
+        run(state, down, send, now=NOW + 3 * FIVE_MIN)
+        self.assertEqual(len(send.calls), 2, "after delivery, no re-alert")
+
 
 class TestUnmeasurableNeverAlerts(unittest.TestCase):
     def test_timeout_is_unmeasurable_not_down(self):
