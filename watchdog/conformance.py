@@ -258,9 +258,9 @@ def classify_timer(status):
     firing on schedule). Every OTHER non-active word — a TRANSIENT state
     (``activating``/``reloading``/``deactivating`` — a sweep landing during a
     ``systemctl --user daemon-reload``/restart) or any unknown future state — falls to
-    the catch-all → UNDETERMINED, never a spurious ping (#535 review NIT-1); an
+    the catch-all → UNDETERMINED, never a spurious drift (#535 review NIT-1); an
     unreadable status = UNDETERMINED. Drift is an ALLOWLIST of known-bad states, so a
-    novel state is fail-safe (no alarm), never a guess."""
+    novel state is fail-safe (no drift), never a guess."""
     if status is None:
         return ("timer", None, "systemctl nedostupné — preskočené")
     if status == "active":
@@ -296,8 +296,9 @@ def classify_symlinks(drift_entries):
 
 def _sig_for(dim, facts):
     """Compact dedup signature per dimension from its raw facts — a CHANGED sig
-    re-pings immediately (the drift is materially different); an unchanged sig is
-    re-pinged only after ``reping`` elapses."""
+    re-surfaces immediately (the drift is materially different); an unchanged sig
+    is re-surfaced only after ``reping`` elapses (#1032: journal SURFACED lines,
+    never an owner ping)."""
     if dim == "head":
         return "head:%s:%s" % ((facts.get("local") or "")[:8],
                                (facts.get("origin") or "")[:8])

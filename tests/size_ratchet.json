@@ -600,7 +600,7 @@
     "watchdog/card_flags.py": 301,
     "watchdog/cards.py": 1045,
     "watchdog/compact.py": 1899,
-    "watchdog/conformance.py": 504,
+    "watchdog/conformance.py": 505,
     "watchdog/conformance_heartbeat.py": 409,
     "watchdog/cross_stream.py": 2064,
     "watchdog/decide.py": 791,
