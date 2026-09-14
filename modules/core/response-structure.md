@@ -21,16 +21,14 @@ If the response touches more than one distinct subject, structure it. If you're 
 
 When reporting on multiple subsystems, lead each section with a bold header on its own line, then bullets underneath. Inline bold inside a long bullet hides the section boundary.
 
-**WRONG — dense, no breathing room, headers buried inline:**
+**WRONG** — dense, headers buried inline, bullets that each wrap to multiple lines:
 
 ```
-- **Main:** PR #62 merged at 88e2586. Main CI deployed v0.27.0 to win-resolume; wall live, OBS connected, sp-fast playing.
-- **Race resolution:** Both main's deploy and dev's deploy ran on win-resolume sequentially within 4 seconds. Main ran 2s after dev, so main's v0.27.0 binary is the final state on disk — that's the correct outcome (release version on the wall).
+- **Main:** PR #62 merged at 88e2586. CI deployed v0.27.0 to win-resolume; wall live, OBS connected, sp-fast playing.
 - **Dev:** synced with main, bumped to 0.28.0-dev.1 (commit c44dc73), CI green.
-- **Main E2E:** cancellation requested (E2E currently mid-test on Resolume title step, ~2 min in). GitHub's cancel is propagating slowly; the deploy job was already ✅ before cancel so the rule's intent is satisfied.
 ```
 
-**RIGHT — headers on their own lines, blank lines between sections, short bullets:**
+**RIGHT** — header on its own line, blank lines between sections, one fact per short bullet:
 
 ```
 **Main:**
@@ -39,23 +37,10 @@ When reporting on multiple subsystems, lead each section with a bold header on i
 - CI deployed v0.27.0 to win-resolume
 - Wall live, OBS connected, sp-fast playing
 
-**Race resolution:**
-
-- Main's and dev's deploys ran on win-resolume 4s apart, sequentially
-- Main ran 2s after dev → main's v0.27.0 binary is the final state on disk
-- Correct outcome (release version on the wall)
-
 **Dev:**
 
-- Synced with main
-- Bumped to 0.28.0-dev.1 (commit c44dc73)
+- Synced with main, bumped to 0.28.0-dev.1 (commit c44dc73)
 - CI green
-
-**Main E2E:**
-
-- Cancellation requested mid-test (Resolume title step, ~2 min in)
-- GitHub's cancel propagating slowly
-- Deploy job was already ✅ before cancel — rule's intent satisfied
 ```
 
 Same content, half the cognitive load to parse.
