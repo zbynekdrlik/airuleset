@@ -251,6 +251,24 @@ class TestFleetDeclaration(unittest.TestCase):
         self.assertEqual(cli_fleet.box_health_probes("gatekeeper"), [])
         self.assertEqual(cli_fleet.box_health_probes(""), [])
 
+    def test_box_health_probes_is_hostname_scoped_for_shared_user(self):
+        # #1005 must-fix: the unix user "newlevel" is SHARED by dev2, dev1 AND
+        # spinbike-vps (all three are REMOTE_HOSTS entries with user newlevel),
+        # and every managed box runs the api-watchdog. The health_probes
+        # declaration lives on dev2 ONLY (the STEP-0 probe proved dev2 is the one
+        # box reaching both prods). A by-USER accessor returns dev2's probes on
+        # EVERY newlevel box → dev1 would double-alert the owner on a PP outage
+        # (PP is tailscale-reachable from dev1) and dev1+spinbike would issue
+        # needless 5-min prod GETs. So the declaration MUST be scoped to the
+        # declaring box's OWN hostname: dev2 gets the probes; dev1/spinbike get [].
+        self.assertTrue(cli_fleet.box_health_probes("newlevel", hostname="dev2"))
+        self.assertEqual(cli_fleet.box_health_probes("newlevel", hostname="dev1"), [])
+        self.assertEqual(
+            cli_fleet.box_health_probes("newlevel", hostname="spinbike-vps"), [])
+        # an FQDN / trailing domain still matches on the first label.
+        self.assertTrue(
+            cli_fleet.box_health_probes("newlevel", hostname="dev2.local"))
+
     def test_dev2_declaration_validates(self):
         self.assertEqual(
             cli_fleet.validate_health_probes(
