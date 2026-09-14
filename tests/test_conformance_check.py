@@ -64,24 +64,11 @@ def fake_timer(status="active"):
     return lambda unit=None: status
 
 
-def collect_send():
-    """A recording ``send_fn`` that HONORS ``dedup_key`` exactly like the real
-    ``notify.send`` (persistent per-key dedup with a TTL far longer than the job's
-    own reping): a second call with a dedup_key already seen returns ``"dedup"`` and
-    does NOT deliver. This is what makes the dedup tests genuine teeth — a fake that
-    ignored dedup_key would false-green a bucketed key that swallows real re-pings
-    (#535 review MAJOR-2). ``calls`` records only DELIVERED sends."""
-    calls = []
-    seen_keys = set()
-
-    def send(body, dedup_key=None, dry_run=False):
-        if dedup_key is not None and dedup_key in seen_keys:
-            return "dedup"
-        if dedup_key is not None:
-            seen_keys.add(dedup_key)
-        calls.append({"body": body, "dedup_key": dedup_key})
-        return "sent"
-    return calls, send
+def _surfaced(logs, dim):
+    """#1032: the job no longer pings — a genuine drift emits a `[<dim>] SURFACED`
+    JOURNAL escalation line (new / changed-sig / past-reping), deduped per
+    dimension exactly as the removed owner ping was. Count them for `dim`."""
+    return sum(1 for ln in logs if ("[%s] SURFACED" % dim) in ln)
 
 
 def _baseline(tmp, md5=None, head="aaaaaaaa1111"):
@@ -99,23 +86,24 @@ def _claude_md(tmp, content="managed content\n"):
     return p
 
 
-def _run(state, tmp, send=None, dry_run=False, git=None, timer=None,
+def _run(state, tmp, dry_run=False, git=None, timer=None,
          claude_content="managed content\n", baseline_md5="MATCH",
          baseline_head="aaaaaaaa1111", now=NOW, is_target=True, **git_kw):
     """Drive ``run_conformance_check`` with fully-controlled I/O seams. By default
     every dimension is CONFORMANT (uniform state): HEAD==origin, clean, timer
     active, and the baseline md5 is stamped to the on-disk file's real md5.
     ``is_target`` defaults True (a DEPLOY TARGET, where the dirty dimension runs);
-    pass False to model the deploy SOURCE box (dev1), where dirty is skipped."""
+    pass False to model the deploy SOURCE box (dev1), where dirty is skipped.
+
+    #1032: the job no longer takes a `send_fn` — it never pings. It SURFACES drift
+    to the returned `logs` (a `[<dim>] SURFACED` line) + the persisted
+    `state["conformance"]` snapshot. Tests assert on those, never a send."""
     cmd = _claude_md(tmp, claude_content)
     real_md5 = conf._md5_file(cmd)
     md5 = real_md5 if baseline_md5 == "MATCH" else baseline_md5
     base = _baseline(tmp, md5=md5, head=baseline_head)
-    calls = None
-    if send is None:
-        calls, send = collect_send()
-    logs = conf.run_conformance_check(
-        now, state, send_fn=send, dry_run=dry_run, repo_root=ROOT,
+    return conf.run_conformance_check(
+        now, state, dry_run=dry_run, repo_root=ROOT,
         claude_md_path=cmd, baseline_path=base,
         git_run=git or fake_git(**git_kw),
         timer_check=timer or fake_timer(),
@@ -125,7 +113,6 @@ def _run(state, tmp, send=None, dry_run=False, git=None, timer=None,
         # covered by tests/test_conformance_symlinks_972.py).
         symlink_scan=lambda: [],
         persist=lambda: None)
-    return logs, calls
 
 
 # --------------------------------------------------------------------------
@@ -234,123 +221,116 @@ class TestRecordBaseline(unittest.TestCase):
 # ORCHESTRATOR
 # --------------------------------------------------------------------------
 class TestRunConformance(unittest.TestCase):
-    def test_uniform_state_is_silent(self):
+    # #1032: the job never pings the owner. A genuine drift SURFACES to the
+    # journal (`[<dim>] SURFACED`) + the persisted `state["conformance"]`
+    # snapshot cmd_status reads; every fail-safe (undetermined) SURFACES nothing.
+    def test_uniform_state_surfaces_nothing(self):
         with TemporaryDirectory() as d:
-            logs, calls = _run({}, d)
-            self.assertEqual(calls, [], "conformant fleet must not ping")
+            logs = _run({}, d)
             self.assertTrue(any("[head] OK" in ln for ln in logs))
             self.assertTrue(any("[timer] OK" in ln for ln in logs))
+            self.assertFalse(any("SURFACED" in ln for ln in logs),
+                             "a conformant fleet surfaces no drift")
 
-    def test_head_behind_pings(self):
+    def test_head_behind_surfaces(self):
         with TemporaryDirectory() as d:
-            logs, calls = _run({}, d, head="aaa11111", origin="bbb22222",
-                               ancestor_rc=0)   # HEAD is ancestor of origin = behind
-            self.assertEqual(len(calls), 1)
-            self.assertIn("head", calls[0]["dedup_key"])
+            state = {}
+            logs = _run(state, d, head="aaa11111", origin="bbb22222",
+                        ancestor_rc=0)   # HEAD is ancestor of origin = behind
+            self.assertEqual(_surfaced(logs, "head"), 1)
+            self.assertIn("head", state.get("conformance", {}))
 
-    def test_head_ahead_does_not_ping(self):
+    def test_head_ahead_does_not_surface(self):
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, head="aaa11111", origin="bbb22222",
-                            ancestor_rc=1)       # HEAD NOT ancestor of origin = ahead/diverged
-            self.assertEqual(calls, [])
+            logs = _run({}, d, head="aaa11111", origin="bbb22222",
+                        ancestor_rc=1)   # HEAD NOT ancestor of origin = ahead/diverged
+            self.assertEqual(_surfaced(logs, "head"), 0)
 
-    def test_dirty_tree_pings(self):
+    def test_dirty_tree_surfaces(self):
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, status=" M airuleset.py\n")
-            self.assertEqual(len(calls), 1)
-            self.assertIn("dirty", calls[0]["dedup_key"])
+            logs = _run({}, d, status=" M airuleset.py\n")
+            self.assertEqual(_surfaced(logs, "dirty"), 1)
 
-    def test_dirty_tree_off_baseline_does_not_ping(self):
+    def test_dirty_tree_off_baseline_does_not_surface(self):
         # dev1 (HEAD ahead of origin = local dev) with a dirty tree must be SILENT
         # on the dirty dimension — the MAJOR-1 false-alarm the review caught.
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, status=" M airuleset.py\n",
-                            head="aaa11111", origin="bbb22222", ancestor_rc=1)
-            self.assertEqual(calls, [], "a dirty dev-box tree off baseline must not alarm")
+            logs = _run({}, d, status=" M airuleset.py\n",
+                        head="aaa11111", origin="bbb22222", ancestor_rc=1)
+            self.assertEqual(_surfaced(logs, "dirty"), 0,
+                             "a dirty dev-box tree off baseline must not surface")
 
-    def test_dirty_on_source_box_does_not_ping(self):
+    def test_dirty_on_source_box_does_not_surface(self):
         # MAJOR-A: the deploy SOURCE box (dev1, not a REMOTE_HOSTS target) sits at
         # HEAD==origin with a dirty main checkout during normal dev — is_target=False
         # must silence the dirty dimension even though it is at baseline and dirty.
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, status=" M airuleset.py\n", is_target=False)
-            self.assertEqual(calls, [],
-                             "a dirty deploy-SOURCE box at baseline must not alarm")
+            logs = _run({}, d, status=" M airuleset.py\n", is_target=False)
+            self.assertEqual(_surfaced(logs, "dirty"), 0,
+                             "a dirty deploy-SOURCE box at baseline must not surface")
 
-    def test_md5_mismatch_pings(self):
+    def test_md5_mismatch_surfaces(self):
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, baseline_md5="DIFFERENT_HASH")
-            self.assertEqual(len(calls), 1)
-            self.assertIn("claude_md", calls[0]["dedup_key"])
+            logs = _run({}, d, baseline_md5="DIFFERENT_HASH")
+            self.assertEqual(_surfaced(logs, "claude_md"), 1)
 
-    def test_md5_midpush_head_mismatch_does_not_ping(self):
+    def test_md5_midpush_head_mismatch_does_not_surface(self):
         # baseline recorded at a DIFFERENT head than HEAD -> install pending -> skip
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, baseline_md5="DIFFERENT_HASH",
-                            baseline_head="00000000ffff",
-                            head="aaaaaaaa1111", origin="aaaaaaaa1111")
-            self.assertEqual(calls, [], "mid-push md5 mismatch must be skipped, not pinged")
+            logs = _run({}, d, baseline_md5="DIFFERENT_HASH",
+                        baseline_head="00000000ffff",
+                        head="aaaaaaaa1111", origin="aaaaaaaa1111")
+            self.assertEqual(_surfaced(logs, "claude_md"), 0,
+                             "mid-push md5 mismatch must be skipped, not surfaced")
 
-    def test_timer_inactive_pings(self):
+    def test_timer_inactive_surfaces(self):
         with TemporaryDirectory() as d:
-            _, calls = _run({}, d, timer=fake_timer("inactive"))
-            self.assertEqual(len(calls), 1)
-            self.assertIn("timer", calls[0]["dedup_key"])
+            logs = _run({}, d, timer=fake_timer("inactive"))
+            self.assertEqual(_surfaced(logs, "timer"), 1)
 
     def test_fetch_failure_logs_no_alarm(self):
         with TemporaryDirectory() as d:
-            logs, calls = _run({}, d, fetch_rc=1, head="aaa", origin="aaa")
-            self.assertEqual(calls, [], "a fetch failure must never be a drift alarm")
+            logs = _run({}, d, fetch_rc=1, head="aaa", origin="aaa")
+            self.assertFalse(any("SURFACED" in ln for ln in logs),
+                             "a fetch failure must never surface a drift")
             self.assertTrue(any("fetch zlyhal" in ln for ln in logs))
 
-    def test_dedup_same_divergence_no_reping(self):
+    def test_dedup_same_divergence_no_resurface(self):
         with TemporaryDirectory() as d:
             state = {}
-            _, calls1 = _run(state, d, timer=fake_timer("inactive"), now=NOW)
-            self.assertEqual(len(calls1), 1)
-            # next daily check, unchanged divergence, within reping window -> silent
+            logs1 = _run(state, d, timer=fake_timer("inactive"), now=NOW)
+            self.assertEqual(_surfaced(logs1, "timer"), 1)
+            # next daily check, unchanged divergence, within reping window -> no
+            # NEW surface line, but the episode is kept (status still shows it)
             state["conformance_last_check"] = 0    # make it due again
-            _, calls2 = _run(state, d, timer=fake_timer("inactive"), now=NOW + DAY)
-            self.assertEqual(calls2, [], "unchanged divergence must not re-spam daily")
+            logs2 = _run(state, d, timer=fake_timer("inactive"), now=NOW + DAY)
+            self.assertEqual(_surfaced(logs2, "timer"), 0,
+                             "unchanged divergence must not re-surface daily")
+            self.assertIn("timer", state.get("conformance", {}))
 
-    def test_dedup_changed_divergence_repings(self):
+    def test_dedup_changed_divergence_resurfaces(self):
         with TemporaryDirectory() as d:
             state = {}
-            _, calls1 = _run(state, d, timer=fake_timer("inactive"), now=NOW)
-            self.assertEqual(len(calls1), 1)
+            logs1 = _run(state, d, timer=fake_timer("inactive"), now=NOW)
+            self.assertEqual(_surfaced(logs1, "timer"), 1)
             state["conformance_last_check"] = 0
-            # a DIFFERENT drift signature (failed vs inactive) re-pings immediately
-            _, calls2 = _run(state, d, timer=fake_timer("failed"), now=NOW + DAY)
-            self.assertEqual(len(calls2), 1, "a materially different drift must re-ping")
+            # a DIFFERENT drift signature (failed vs inactive) re-surfaces at once
+            logs2 = _run(state, d, timer=fake_timer("failed"), now=NOW + DAY)
+            self.assertEqual(_surfaced(logs2, "timer"), 1,
+                             "a materially different drift must re-surface")
 
-    def test_dedup_past_reping_repings(self):
+    def test_dedup_past_reping_resurfaces(self):
         with TemporaryDirectory() as d:
             state = {}
-            _, calls1 = _run(state, d, timer=fake_timer("inactive"), now=NOW)
-            self.assertEqual(len(calls1), 1)
+            logs1 = _run(state, d, timer=fake_timer("inactive"), now=NOW)
+            self.assertEqual(_surfaced(logs1, "timer"), 1)
             state["conformance_last_check"] = 0
-            _, calls2 = _run(state, d, timer=fake_timer("inactive"),
-                             now=NOW + 4 * DAY)   # past the 3-day reping
-            self.assertEqual(len(calls2), 1, "never permanently silent: re-remind past reping")
+            logs2 = _run(state, d, timer=fake_timer("inactive"),
+                         now=NOW + 4 * DAY)   # past the 3-day reping
+            self.assertEqual(_surfaced(logs2, "timer"), 1,
+                             "never permanently silent: re-surface past reping")
 
-    def test_send_layer_dedup_key_is_fresh_per_decision_not_bucketed(self):
-        # MAJOR-2: a changed-sig re-ping the primary `seen` ALLOWS must not be
-        # swallowed by the send-layer dedup_key. Share ONE send fake (persistent
-        # seen_keys, like real notify) across two divergences in the SAME reping
-        # bucket — both must DELIVER because the key is fresh per decision instant
-        # (int(now)); a bucketed int(now//reping) key would collide and swallow the
-        # second. This is the send-LAYER teeth the per-_run fresh fakes cannot give.
-        with TemporaryDirectory() as d:
-            state = {}
-            calls, send = collect_send()
-            _run(state, d, send=send, timer=fake_timer("inactive"), now=NOW)
-            state["conformance_last_check"] = 0
-            _run(state, d, send=send, timer=fake_timer("failed"), now=NOW + DAY)
-            self.assertEqual(len(calls), 2,
-                             "both drifts in one reping bucket must deliver — the send "
-                             "dedup_key must be fresh per decision, not bucketed")
-
-    def test_resolved_clears_dedup_so_redivergence_repings(self):
+    def test_resolved_clears_episode_so_redivergence_resurfaces(self):
         with TemporaryDirectory() as d:
             state = {}
             _run(state, d, timer=fake_timer("inactive"), now=NOW)
@@ -358,12 +338,13 @@ class TestRunConformance(unittest.TestCase):
             _run(state, d, timer=fake_timer("active"), now=NOW + DAY)   # resolved
             self.assertNotIn("timer", state.get("conformance", {}))
             state["conformance_last_check"] = 0
-            _, calls = _run(state, d, timer=fake_timer("inactive"), now=NOW + 2 * DAY)
-            self.assertEqual(len(calls), 1, "a re-divergence after a fix must re-ping immediately")
+            logs = _run(state, d, timer=fake_timer("inactive"), now=NOW + 2 * DAY)
+            self.assertEqual(_surfaced(logs, "timer"), 1,
+                             "a re-divergence after a fix must re-surface immediately")
 
     def test_undetermined_preserves_prior_episode(self):
-        # a real drift pings; a following UNDETERMINED sweep (systemctl unreadable)
-        # must NOT clear the dedup, so a fetch-flake style recovery can't re-spam.
+        # a real drift surfaces; a following UNDETERMINED sweep (systemctl
+        # unreadable) must NOT clear the episode, so a flake can't drop the status.
         with TemporaryDirectory() as d:
             state = {}
             _run(state, d, timer=fake_timer("inactive"), now=NOW)
@@ -373,26 +354,24 @@ class TestRunConformance(unittest.TestCase):
             self.assertIn("timer", state.get("conformance", {}),
                           "an UNDETERMINED sweep must not drop the prior episode (#486-G5)")
 
-    def test_dry_run_never_pings_or_mutates_state(self):
+    def test_dry_run_never_surfaces_or_mutates_state(self):
         with TemporaryDirectory() as d:
             state = {}
-            logs, calls = _run(state, d, timer=fake_timer("inactive"), dry_run=True)
-            self.assertEqual(calls, [], "dry-run never sends")
+            logs = _run(state, d, timer=fake_timer("inactive"), dry_run=True)
+            self.assertFalse(any("[timer] SURFACED" in ln for ln in logs),
+                             "dry-run never surfaces")
             self.assertNotIn("conformance", state, "dry-run mutates no state")
             self.assertNotIn("conformance_last_check", state, "dry-run never advances cadence")
-            self.assertTrue(any("WOULD-PING" in ln for ln in logs))
+            self.assertTrue(any("WOULD-SURFACE" in ln for ln in logs))
 
     def test_cadence_not_due_returns_early(self):
         with TemporaryDirectory() as d:
             state = {"conformance_last_check": NOW - 100}   # just checked
-            logs, calls = _run(state, d, timer=fake_timer("inactive"), now=NOW)
+            logs = _run(state, d, timer=fake_timer("inactive"), now=NOW)
             self.assertEqual(logs, [])
-            self.assertEqual(calls, [])
 
     def test_no_repo_root_is_noop(self):
-        self.assertEqual(
-            conf.run_conformance_check(NOW, {}, send_fn=lambda *a, **k: "sent",
-                                       repo_root=None), [])
+        self.assertEqual(conf.run_conformance_check(NOW, {}, repo_root=None), [])
 
 
 class TestRealGit(unittest.TestCase):

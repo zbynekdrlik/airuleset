@@ -2284,6 +2284,21 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nconcurrency: error ({e})", file=sys.stderr)
 
+    # --- Conformance drift + paused (#1032): the SUPERVISOR-facing surface that
+    # replaced the removed owner Discord ping. `conformance:` reads the persisted
+    # daily-sweep snapshot (DRIFT with reasons / OK / not-yet-checked); `paused:`
+    # shows this box's own freeze reason when its fleet entry carries `paused`. ---
+    try:
+        from watchdog.conformance import conformance_status_row
+        from watchdog.decide import load_state as _load_wd_state
+        from watchdog import STATE_PATH as _WD_STATE_PATH
+        print("\n" + conformance_status_row(_load_wd_state(_WD_STATE_PATH)))
+        _paused = box_paused_reason(_current_user())
+        if _paused:
+            print("paused: %s" % _paused)
+    except Exception as e:
+        print(f"\nconformance: error ({e})", file=sys.stderr)
+
     # --- Break-glass (#982/#985): ignoreip + key + sshd password + DNS ---
     try:
         from cli_disk_guard_root import (check_owner_ignoreip_status,
@@ -5259,6 +5274,8 @@ from cli_fleet import (  # noqa: E402, F401
     FLEET_CLAUDE_MIN_VERSION as FLEET_CLAUDE_MIN_VERSION,
     is_paused as is_paused,
     paused_reason as paused_reason,
+    box_is_paused as box_is_paused,           # #1032 — this box's own paused flag
+    box_paused_reason as box_paused_reason,    # #1032 — its reason for cmd_status
     box_health_probes as box_health_probes,   # #1005 — job 47 per-box declaration
 )
 
@@ -6847,6 +6864,12 @@ def cmd_watchdog(args):
                     # existing owner-routed send() path (#710 unchanged).
                     health_probes=box_health_probes(_current_user()),
                     health_probe_fetch=_watchdog_health_probe_fetch,
+                    # #1032 — resolve THIS box's paused flag ONCE per sweep (the
+                    # I/O boundary, like health_probes above). On a PAUSED box
+                    # (an owner-frozen stream, #851) run_once suppresses every
+                    # owner-ALERTING job — a frozen stream's expected drift is
+                    # never an owner Discord ping; recovery/hygiene run on.
+                    box_paused=box_is_paused(_current_user()),
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

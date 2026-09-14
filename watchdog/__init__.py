@@ -2085,7 +2085,48 @@ from watchdog.resource_guard import (  # noqa: E402
 )
 
 
-def run_once(now=None, dry_run=False, run=None, send_fn=None,
+# #1032 — the standalone-registry jobs SILENCED on a PAUSED box. When
+# `box_paused` (the box's own fleet entry carries `paused` — #851, resolved once
+# in `cmd_watchdog` via `cli_fleet.box_is_paused`), the registry loop skips every
+# job in this set (journalling `<label> -> skip:paused-box (#851)`) and nudges NO
+# human channel — a frozen stream's drift/leftover is EXPECTED and nobody can act
+# on it while it is paused. This is the ONE gate site (never a per-job-body
+# check). Membership = a full registry audit of every job whose invoke path
+# reaches `send_fn` toward a HUMAN channel AND can fire on a paused sub-dev box:
+# the owner-facing ALERTS, plus `bounce_backstop` whose send is project-thread-
+# routed (`project=`, cross-stream coordination) — a frozen stream must not nudge
+# the coordination channel about work it will never resume (#1032 review, review-1
+# 🟡).
+#
+# DELIBERATELY EXCLUDED: (a) recovery keeps running (#851) — the `/goal`-loop
+# machinery (`goal_sweep`/`goal_dark_watch`/`goal_lane_sweep`) is RECOVERY (re-arm
+# / lane-liveness), and its rare un-suppressed owner sub-pings (goalarm-attempt-
+# cap / acctblock) require an armed `/goal` pane a frozen box never has;
+# `goal_question_repoke_watch` sends NOTHING (a `/goal clear` keystroke only).
+# (b) NOT a human-channel nudge on a reduced-stream box: release-gap / u-freshness
+# (transcript-verified KEYSTROKE nudges via `send_verified`), `net_drift_alarm`
+# (owner sends removed #850), `gk_request_backstop`/`gk_selfservice_bounce`/
+# `gk_orphan_marker_sweep`/`resource_guard_verify` (supervisor-root-gated or
+# gh-issue-filing — they no-op / file no ping on a reduced-stream requester box),
+# the reapers / disk-guard / hygiene sweeps (log-only, #546), and the
+# session-delivery jobs (`deliver_pending_done` etc.).
+PAUSED_SUPPRESSED_JOBS = frozenset({
+    "check_usage",                  # weekly token-usage owner alert
+    "fleet_burn_job",               # fleet burn-budget owner alert
+    "burn_alert_job",               # per-box burn owner alert
+    "long_turn_watch",              # long-turn owner alert
+    "delivery_stall_watch",         # delivery-stall owner alert
+    "card_reconcile",               # report-owed / unreported-card owner nudge
+    "stuck_main_sweep",             # stuck-main owner alert
+    "conformance_check",            # job 34 drift (also never pings post-#1032)
+    "conformance_heartbeat_check",  # job 35 central dead-box owner alarm
+    "healthz_probe",                # job 47 external-outage owner alert
+    "bounce_backstop",              # cross-stream bounce nudge (project=-routed);
+                                    # fires on a reduced-stream box, so silence it
+})
+
+
+def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
              max_nudges=MAX_NUDGES, wait_grace=WAIT_GRACE_SECONDS,
@@ -2668,15 +2709,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           HEAD — install pending after a repo move, so immune to a mid-push false
           alarm), (4) `api-watchdog.timer` active. ANYTHING uncertain (a git/fetch
           error, a missing baseline, a systemctl gap) is None → logged, NEVER a
-          false alarm (#486). Drift → LOUD owner ping via `send_fn`, deduped
-          per-dimension (bounded set of 4, no leak): a re-remind cadence (3d)
-          surfaces an unchanged divergence without daily re-spam yet is never
+          false alarm (#486). #1032: drift is NEVER an owner Discord ping — it
+          SURFACES to the journal (a per-dim decision line + a `SURFACED`
+          escalation) and to the persisted `state["conformance"]` snapshot the
+          SUPERVISOR reads via `airuleset.py status` (`conformance_status_row`),
+          deduped per-dimension (bounded set, no leak): a re-remind cadence (3d)
+          re-surfaces an unchanged divergence without daily re-spam yet is never
           permanently silent (#134), an UNDETERMINED sweep never drops a prior
           episode (#486-G5), resolution clears the dedup. No ssh, no central
           fan-out (works even when the controller sleeps, #971 — was "dev1
-          sleeps"); the dead-box gap is a filed
-          central-heartbeat follow-up. See `run_conformance_check` in
-          `watchdog/conformance.py`.
+          sleeps"); the dead-box gap is job 35's central-heartbeat detector. See
+          `run_conformance_check` in `watchdog/conformance.py`.
 
       (35) (only on the controller — `conformance_hb_enabled`, #971) CENTRAL
           DEAD-BOX HEARTBEAT DETECTOR (#543) — closes job 34's structural gap:
@@ -2882,6 +2925,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the only managed box reaching both presenter prods (STEP-0 2026-09-14),
           so today it carries the declaration; another monitor is one more entry,
           no code change. `watchdog/healthz_probe.py`'s docstring is the SSOT.
+
+    PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
+    carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
+    via `cli_fleet.box_is_paused(_current_user())` — every human-channel-alerting
+    standalone job (`PAUSED_SUPPRESSED_JOBS`: the owner alerts + the project-routed
+    `bounce_backstop`) is skipped with a `<label> -> skip:paused-box (#851)`
+    journal line and nudges no human channel; recovery + hygiene jobs run
+    unchanged. A frozen stream's expected drift/leftover is never a ping. This is
+    the ONE gate site (the registry loop), never a per-job-body check.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4620,7 +4672,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # effort. Every dimension fails safe to UNDETERMINED, never a false alarm.
     _add("conformance_check", lambda: conformance_root is not None,
          lambda: run_conformance_check(
-             now, state, send_fn=send_fn, dry_run=dry_run,
+             now, state, dry_run=dry_run,
              repo_root=conformance_root, is_target_check=conformance_is_target,
              persist=lambda: save_state(state_path, state)),
          "conformance-check error")
@@ -4829,6 +4881,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # the job's custom prefix or (None) swallows it. Accumulation is verbatim.
     for _label, _gate, _invoke, _err in _standalone_registry:
         if _gate():
+            # #1032: ONE gate site — a PAUSED box suppresses every human-channel-
+            # alerting job (a frozen stream's drift/leftover is expected; nobody
+            # can act on it while paused), journalling the suppression; recovery +
+            # hygiene jobs run on.
+            if box_paused and _label in PAUSED_SUPPRESSED_JOBS:
+                logs.append("%s -> skip:paused-box (#851)" % _label)
+                continue
             try:
                 logs += _invoke()
             except Exception as e:

@@ -9,11 +9,14 @@ left behind ``origin/main``, or a dead ``api-watchdog.timer`` — stays invisibl
 until someone notices by accident.
 
 This job is the PER-BOX SELF-CHECK (design fork variant (a), #535): each box, in
-its OWN watchdog, on a DAILY cadence, compares four structured dimensions against
-their expected state and LOUD-pings the owner via the existing ``send_fn`` notify
-path on divergence, deduped. No ssh, no central fan-out — it works even when dev1
-is asleep. The one gap this variant cannot cover (a DEAD box's self-check sends
-nothing) is DEFERRED to a filed central "heartbeat-missing" follow-up, not
+its OWN watchdog, on a DAILY cadence, compares structured dimensions against their
+expected state and surfaces divergence, deduped. #1032: divergence is a FLEET-OPS
+signal — it goes to the JOURNAL (a decision line per dimension + a ``SURFACED``
+escalation) and to the persisted ``state["conformance"]`` snapshot the SUPERVISOR
+reads via ``airuleset.py status`` (``conformance_status_row``); it is NEVER a
+Discord owner ping (the daily paused-box owner spam that removal fixes). No ssh, no
+central fan-out. The one gap this variant cannot cover (a DEAD box's self-check
+runs nothing) is covered by the central "heartbeat-missing" detector (job 35), not
 silently dropped (see the #535 design comment).
 
 Idiom (cluster C, #433): ONE top-level ``import watchdog``; every reused package
@@ -255,9 +258,9 @@ def classify_timer(status):
     firing on schedule). Every OTHER non-active word — a TRANSIENT state
     (``activating``/``reloading``/``deactivating`` — a sweep landing during a
     ``systemctl --user daemon-reload``/restart) or any unknown future state — falls to
-    the catch-all → UNDETERMINED, never a spurious ping (#535 review NIT-1); an
+    the catch-all → UNDETERMINED, never a spurious drift (#535 review NIT-1); an
     unreadable status = UNDETERMINED. Drift is an ALLOWLIST of known-bad states, so a
-    novel state is fail-safe (no alarm), never a guess."""
+    novel state is fail-safe (no drift), never a guess."""
     if status is None:
         return ("timer", None, "systemctl nedostupné — preskočené")
     if status == "active":
@@ -293,8 +296,9 @@ def classify_symlinks(drift_entries):
 
 def _sig_for(dim, facts):
     """Compact dedup signature per dimension from its raw facts — a CHANGED sig
-    re-pings immediately (the drift is materially different); an unchanged sig is
-    re-pinged only after ``reping`` elapses."""
+    re-surfaces immediately (the drift is materially different); an unchanged sig
+    is re-surfaced only after ``reping`` elapses (#1032: journal SURFACED lines,
+    never an owner ping)."""
     if dim == "head":
         return "head:%s:%s" % ((facts.get("local") or "")[:8],
                                (facts.get("origin") or "")[:8])
@@ -311,7 +315,7 @@ def _sig_for(dim, facts):
     return dim
 
 
-def run_conformance_check(now, state, send_fn=None, dry_run=False,
+def run_conformance_check(now, state, dry_run=False,
                           repo_root=None, claude_md_path=None, baseline_path=None,
                           git_run=None, timer_check=None, is_target_check=None,
                           interval=None, reping=None, persist=None,
@@ -321,7 +325,14 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     persisted BEFORE any network op (#172 kill-safe). Best-effort — every dimension
     fails safe to UNDETERMINED, never a raise, never a false alarm. Returns a
     decision log line per dimension (#486). ``dry_run`` mutates no persistent state
-    and sends nothing (peek pattern)."""
+    (peek pattern).
+
+    #1032: this job NEVER pings the owner. Drift is a FLEET-OPS signal the
+    SUPERVISOR reads via ``airuleset.py status`` (``conformance_status_row``, from
+    the persisted ``state["conformance"]`` snapshot below) + the journal decision
+    lines — NOT a Discord owner alert (the daily paused-``simap1`` spam this
+    removes). The per-dimension dedup/re-surface bookkeeping is KEPT, repurposed to
+    gate the JOURNAL ``SURFACED`` escalation line only (never a send)."""
     git_run = git_run or _conf_git
     timer_check = timer_check or _timer_status
     persist = persist or (lambda: None)
@@ -438,41 +449,57 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
                     % (host, dim, {True: "OK", False: "DRIFT", None: "unknown"}[ok],
                        detail))
         if ok is True:
-            # resolved — a re-divergence re-pings immediately
+            # resolved — drop the persisted episode so `status` shows OK again;
+            # a re-divergence re-surfaces immediately.
             if dim in seen and not dry_run:
                 seen.pop(dim, None)
             continue
         if ok is None:
             # UNDETERMINED — a confidence gap must NOT drop a prior episode
-            # (#486-G5): neither ping nor clear the dedup entry.
+            # (#486-G5): neither re-surface nor clear the persisted entry.
             continue
-        # ok is False -> genuine drift
+        # ok is False -> genuine drift. #1032: NEVER ping the owner. Persist the
+        # episode (so `conformance_status_row` shows the DRIFT row) + emit a
+        # JOURNAL `SURFACED` escalation, deduped exactly as the old owner ping was
+        # (new / changed-sig / past-reping surfaces; an unchanged drift within
+        # `reping` keeps the episode with a refreshed detail, no new line).
         sig = _sig_for(dim, facts)
         prev = seen.get(dim) or {}
         same = (prev.get("sig") == sig)
-        pinged = prev.get("pinged_ts")
-        if send_fn is None or dry_run or (
-                same and pinged is not None and (now - float(pinged)) < reping):
-            if dry_run:
-                logs.append("conformance %s [%s] WOULD-PING -- %s" % (host, dim, detail))
+        surfaced = prev.get("surfaced_ts")
+        if dry_run:
+            logs.append("conformance %s [%s] WOULD-SURFACE -- %s" % (host, dim, detail))
             continue
-        seen[dim] = {"sig": sig, "pinged_ts": now}
-        if not dry_run:
-            persist()      # dedup memory BEFORE the ping (#172-F3)
-        status_word = send_fn(
-            "\U0001f527 **conformance drift** na boxe `%s` — airuleset sa rozišiel "
-            "s fleetom:\n> %s\n> Skontroluj deploy / hand-edit; na dev1 spusti "
-            "`python3 airuleset.py push` alebo over tento box." % (host, detail),
-            # FRESH per real decision INSTANT, never a `now // reping` BUCKET
-            # (#535 review MAJOR-2): the per-dimension `seen` dedup above is the
-            # authoritative gate — it already skips a same-sig ping within `reping`
-            # and allows a changed-sig / re-divergence ping immediately. A bucketed,
-            # sig-independent dedup_key would SWALLOW exactly those allowed re-pings
-            # inside notify's own (longer) dedup TTL. `int(now)` is unique per
-            # genuine decision (daily cadence + per-dim `seen` gate = never two in
-            # one second), so it only ever dedups an exact re-fire of the same
-            # decision (the gk_request_backstop "fresh per decision instant" lesson).
-            dedup_key="conformance:%s:%s:%d" % (host, dim, int(now)),
-            dry_run=dry_run)
-        logs.append("conformance %s [%s] PING -> %s" % (host, dim, status_word))
+        if same and surfaced is not None and (now - float(surfaced)) < reping:
+            # unchanged drift within the re-surface window: keep the episode (so
+            # `status` still shows the DRIFT row) with a refreshed detail; no new
+            # journal escalation line.
+            seen[dim] = {"sig": sig, "surfaced_ts": surfaced, "detail": detail}
+            persist()
+            continue
+        seen[dim] = {"sig": sig, "surfaced_ts": now, "detail": detail}
+        persist()      # persist the episode BEFORE the journal line (#172-F3 order)
+        logs.append("conformance %s [%s] SURFACED -- %s" % (host, dim, detail))
     return logs
+
+
+def conformance_status_row(state):
+    """A single ``cmd_status`` row summarising this box's last conformance sweep,
+    read from the persisted ``state["conformance"]`` snapshot the daily job keeps
+    (#1032). The SUPERVISOR-facing surface that replaces the removed owner Discord
+    ping: any drifting dimension → ``conformance: DRIFT — <dim>: <detail>; ...``;
+    a completed sweep with no drift → ``conformance: OK``; a box whose sweep never
+    ran → ``conformance: (not yet checked)``. Pure — no I/O, safe on any dict."""
+    if not isinstance(state, dict):
+        state = {}
+    episodes = state.get("conformance") or {}
+    if episodes:
+        parts = []
+        for dim in sorted(episodes):
+            ep = episodes.get(dim) or {}
+            detail = ep.get("detail") if isinstance(ep, dict) else None
+            parts.append("%s: %s" % (dim, detail or "drift"))
+        return "conformance: DRIFT — " + "; ".join(parts)
+    if state.get("conformance_last_check"):
+        return "conformance: OK"
+    return "conformance: (not yet checked)"
