@@ -56,28 +56,57 @@ HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
 _FAKE_GH = """#!/usr/bin/env bash
 # Hermetic gh stand-in for the close-guard tests.
 [ "${FAKE_GH_FAIL:-0}" = "1" ] && exit 1
+_CJSON="${FAKE_GH_COMMENTS_JSON:-}"
 case "$1 $2" in
   "api user")
     # An App installation token 403s structurally on /user (#463) — model it.
     [ "${FAKE_GH_API_USER_403:-0}" = "1" ] && \
       { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
     echo "${FAKE_GH_ME:-}";;
+  "api "*)
+    # #1010: the #756 verdict carve-out now reads the WHOLE comment thread via
+    # `gh api repos/<owner>/<repo>/issues/<N>/comments --paginate --jq
+    # '.[].body'` — page-complete, unlike `gh issue view --json comments`
+    # (first ~100 only). Emit EVERY comment body (models --paginate seeing all
+    # pages). FAKE_GH_VERDICT_FAIL=1 makes this read FAIL (unreadable/erroring
+    # thread → fail-CLOSED block); FAKE_GH_API_COMMENTS_BADJSON=1 models a
+    # non-JSON response (gh exits non-zero). FAKE_GH_COMMENTS_JSON (a JSON array
+    # file) is the multi-comment fixture; else the single FAKE_GH_COMMENTS body.
+    if printf '%s ' "$@" | grep -q -- '/comments'; then
+      [ "${FAKE_GH_VERDICT_FAIL:-0}" = "1" ] && exit 1
+      [ "${FAKE_GH_API_COMMENTS_BADJSON:-0}" = "1" ] && { echo "<!doctype html> not json"; exit 1; }
+      if [ -n "$_CJSON" ]; then
+        jq -r '.[].body' "$_CJSON"
+      elif [ -n "${FAKE_GH_COMMENTS:-}" ]; then
+        printf '%s\\n' "${FAKE_GH_COMMENTS}"
+      fi
+    else
+      exit 1
+    fi;;
   "issue view")
-    # #756: the verdict carve-out reads labels+comments in ONE `--json
-    # labels,comments` call (raw JSON, no -q) — must be checked BEFORE the
-    # `--json labels` substring branch (which it also matches). Emits a JSON
-    # object the hook parses with jq: labels from FAKE_GH_LABELS (space-sep),
-    # ONE comment whose body is FAKE_GH_COMMENTS. FAKE_GH_VERDICT_FAIL=1 makes
-    # this read fail (models an unreadable ticket → fail-SAFE block).
+    # #756 (pre-#1010 path, still exercised while the RED tests run against the
+    # OLD hook): labels+comments in ONE `--json labels,comments` call (raw JSON,
+    # no -q) — must be checked BEFORE the `--json labels` substring branch (which
+    # it also matches). With a FAKE_GH_COMMENTS_JSON fixture it returns only the
+    # FIRST 100 comments (models GitHub's single-page limit the old hook hits);
+    # else ONE comment whose body is FAKE_GH_COMMENTS. FAKE_GH_VERDICT_FAIL=1
+    # makes it fail (unreadable ticket → fail-SAFE block).
     if printf '%s ' "$@" | grep -q -- '--json labels,comments'; then
       [ "${FAKE_GH_VERDICT_FAIL:-0}" = "1" ] && exit 1
-      jq -n --arg labels "${FAKE_GH_LABELS:-}" --arg comments "${FAKE_GH_COMMENTS:-}" \
-        '{labels: ($labels|split(" ")|map(select(length>0)|{name:.})),
-          comments: (if ($comments|length)>0 then [{body:$comments}] else [] end)}'
+      if [ -n "$_CJSON" ]; then
+        jq --arg labels "${FAKE_GH_LABELS:-}" \
+           '{labels: ($labels|split(" ")|map(select(length>0)|{name:.})),
+             comments: (.[0:100])}' "$_CJSON"
+      else
+        jq -n --arg labels "${FAKE_GH_LABELS:-}" --arg comments "${FAKE_GH_COMMENTS:-}" \
+          '{labels: ($labels|split(" ")|map(select(length>0)|{name:.})),
+            comments: (if ($comments|length)>0 then [{body:$comments}] else [] end)}'
+      fi
     # #533: distinguish the labels read (`--json labels -q .labels[].name`) from
     # the author read (`--json author -q .author.login`). The labels read honors
     # FAKE_GH_LABELS_FAIL (an unreadable label set) and emits one name per line,
-    # exactly what gh's own -q '.labels[].name' produces.
+    # exactly what gh's own -q '.labels[].name' produces. #1010: the verdict
+    # carve-out's LABELS read now uses this `--json labels -q` form too.
     elif printf '%s ' "$@" | grep -q -- '--json labels'; then
       [ "${FAKE_GH_LABELS_FAIL:-0}" = "1" ] && exit 1
       for lbl in ${FAKE_GH_LABELS:-}; do echo "$lbl"; done
@@ -106,7 +135,8 @@ def _fake_gh_dir():
 
 def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
         app_token_dir=None, api_user_403=False, labels="", labels_fail=False,
-        comments="", verdict_fail=False):
+        comments="", verdict_fail=False, comments_json=None,
+        api_comments_badjson=False):
     # airuleset#839 dropped the `user=` param: `_current_user()` is now uid-based,
     # so LOGNAME/USER no longer set the subprocess's own identity (a stream can't
     # spoof another stream's `stream:<user>` ownership). Tests that need a
@@ -123,6 +153,16 @@ def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
     env["FAKE_GH_LABELS_FAIL"] = "1" if labels_fail else "0"
     env["FAKE_GH_COMMENTS"] = comments
     env["FAKE_GH_VERDICT_FAIL"] = "1" if verdict_fail else "0"
+    env["FAKE_GH_API_COMMENTS_BADJSON"] = "1" if api_comments_badjson else "0"
+    # #1010: a multi-comment PAGED fixture. `comments_json` is a list of body
+    # strings; write it as a `[{body:...}, ...]` array file the fake gh serves —
+    # first 100 via the OLD `--json labels,comments` path, ALL via the new
+    # `gh api .../comments --paginate` path.
+    env.pop("FAKE_GH_COMMENTS_JSON", None)
+    if comments_json is not None:
+        cj = Path(tempfile.mkdtemp()) / "comments.json"
+        cj.write_text(json.dumps([{"body": b} for b in comments_json]))
+        env["FAKE_GH_COMMENTS_JSON"] = str(cj)
     if app_token_dir is not None:
         # An existing dir here makes cli_quals._is_gh_app_token_box() true, so
         # `authority --self-login` returns STREAM_APP_BOT_LOGIN with no gh call
@@ -1206,6 +1246,114 @@ class TestGkVerdictArtifactClose(TestCase):
                 "--comment x`gh issue close 9999 -R zbynekdrlik/odoo-erp -c y`",
                 self.branch, me=self.M, author=self.M, labels="", comments=self.HEADING)
         self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class TestVerdictPaging1010(TestCase):
+    """#1010 — the #756 verdict carve-out must read the WHOLE comment thread,
+    not just the first ~100 comments. odoo-erp #6291 (5 rounds, long thread) and
+    #6493 carried a gk ACCEPT verdict PAST comment #100; `gh issue view --json
+    comments` returns only the first page, so the carve-out fell through to the
+    generic "you may close ONLY your OWN" block and the gatekeeper had to close
+    both by hand (#6630). The fix reads comments via `gh api …/comments
+    --paginate` (page-complete, like the odoo-erp reopen-guard) and, on a
+    near-miss, NAMES which carve-out condition failed on the block's first line.
+    Fail CLOSED throughout: a fetch error leaves the carve-out unsatisfied.
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.branch = _cwd_with_authority("branch-merge")
+        self.M = airuleset.MAINTAINER_GH_LOGIN
+        self.HEADING = "## Gatekeeper cross-fork review - CLEAN\n\nDiff read, CI green."
+
+    def _thread(self, verdict_index, total=120):
+        # A `total`-comment thread; the gk verdict heading at `verdict_index`
+        # (None = no verdict anywhere). The fake gh serves only the first 100 via
+        # the OLD `--json labels,comments` path and ALL via the new paginated
+        # `gh api …/comments` path — so an index >= 100 is the pagination case.
+        c = ["progress note %d: still working, tests green" % i for i in range(total)]
+        if verdict_index is not None:
+            c[verdict_index] = self.HEADING
+        return c
+
+    # --- (a) verdict beyond the first page now ALLOWS (RED→GREEN) ---
+
+    def test_allows_verdict_beyond_first_page(self):
+        # THE live #6291 case: verdict heading at comment #110 of 120 — invisible
+        # to the first-page `gh issue view --json comments`, visible to the
+        # paginated `gh api …/comments`. RED on current code (falls through to
+        # BLOCK); GREEN allows.
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp "
+                "--comment 'merged 6868, gk verdict CLEAN'",
+                self.branch, me=self.M, author=self.M, labels="",
+                comments_json=self._thread(110))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_verdict_beyond_first_page_fork_no_merge(self):
+        # #6493, the fork-no-merge sibling incident (stream david3).
+        r = run("gh issue close 6493 -R zbynekdrlik/odoo-erp "
+                "--comment 'gk CLEAN, merged 6871'",
+                self.fork, me=self.M, author=self.M, labels="",
+                comments_json=self._thread(115))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- (b) no verdict anywhere → BLOCK, first line NAMES "verdict not found" ---
+
+    def test_blocks_long_thread_without_verdict_and_names_reason(self):
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=self.M, author=self.M, labels="",
+                comments_json=self._thread(None))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        first = (r.stderr.splitlines() or [""])[0]
+        self.assertIn("verdict not found", first, "first line: %r" % first)
+
+    # --- (c) verdict present but a queue label present → BLOCK, first line NAMES it ---
+
+    def test_blocks_verdict_present_with_queue_label_and_names_it(self):
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="ready-for-review",
+                comments_json=self._thread(110))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        first = (r.stderr.splitlines() or [""])[0]
+        self.assertIn("ready-for-review", first, "first line: %r" % first)
+
+    def test_blocks_verdict_present_with_needs_gatekeeper_names_it(self):
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="needs-gatekeeper",
+                comments_json=self._thread(110))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        first = (r.stderr.splitlines() or [""])[0]
+        self.assertIn("needs-gatekeeper", first, "first line: %r" % first)
+
+    # --- (d) fail CLOSED on a paginated-fetch error ---
+
+    def test_paginated_comments_fetch_error_fails_closed(self):
+        # gh exits non-zero (unreadable thread) → carve-out unsatisfied → BLOCK,
+        # never "a page failed → assume the verdict is there".
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="",
+                comments_json=self._thread(110), verdict_fail=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_paginated_comments_non_json_fails_closed(self):
+        # A non-JSON response (gh --jq errors, gh exits non-zero) → fail CLOSED.
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp --comment ok",
+                self.branch, me=self.M, author=self.M, labels="",
+                comments_json=self._thread(110), api_comments_badjson=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- (e) the `_cmd_has_comment_flag` multi-line-value suspicion is FALSE ---
+
+    def test_multiline_comment_value_still_allows_reviewed_close(self):
+        # STEP 0 finding: the flag is always on the FIRST line before its value,
+        # so a here-string per-line grep detects it — a multi-line --comment
+        # value does NOT break the carve-out. (Verdict at #5, first page, so this
+        # isolates the multi-line concern from the pagination fix.)
+        r = run("gh issue close 6291 -R zbynekdrlik/odoo-erp "
+                "--comment 'merged 6868\ngk verdict CLEAN\nline three'",
+                self.branch, me=self.M, author=self.M, labels="",
+                comments_json=self._thread(5))
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class TestRepoFlagUnparseableHereString(TestCase):
