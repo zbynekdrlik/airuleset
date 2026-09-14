@@ -1,25 +1,18 @@
-"""#780 — TWO fixes on the job-20 riders, both bundle-safe (same area):
+"""#780 (RC2 kept) + #1023 (RC1 re-based): job-20 rider cadence + compact latch.
 
-RC1: `queue_arrival_recheck` had NO per-sid nudge floor (unlike its siblings
-`ops_wait_recheck`/`release_gap`), so during an active gk batch every landing
-hand-off was a fresh set-delta = a re-fire nearly every FETCH TTL (~5 min;
-measured 8 nudges in 2h on gk). FIX = a per-sid min-interval FLOOR + delta
-ACCUMULATION: a delta inside the floor window is HELD and its new members
-accumulate into the next post-floor nudge (which names ALL of them). Stays
-delta-triggered, just rate-limited.
+RC1 (#780 → #1023): `queue_arrival_recheck`'s per-JOB 30-min nudge floor sat BELOW
+the owner's 1 h rule; #1023 DELETES it (`QUEUE_ARRIVAL_NUDGE_FLOOR_S`, `_nudge_floor`,
+the `floor` param + `last_nudge` machinery) and moves the floor into the ONE shared
+per-pane-per-KIND 60-min `nudge_gate` floor consulted via `gate_ok`. Delta
+ACCUMULATION is preserved: `_queue_decision` returns a `nudge` verdict with `base`
+kept OLD, and when `gate_ok` holds the keystroke the orchestrator returns before
+advancing `base`, so members arriving inside the floor window accumulate into the
+next post-floor nudge. These RC1 tests now lock that behaviour through the shared
+gate (`TestPerJobFloorRemoved1023` + the `_QAOrch` accumulation tests).
 
-RC2: the #741 writer-side latch `compact.has_pending_request(sid)` was wired into
-only the 4 goal-family writers; the 3 job-20 riders (ops_wait / release_gap /
-queue_arrival) that ALSO push work into an armed loop bypassed it (0 grep hits).
-FIX = consult the latch in all 3 riders' nudge branch — pending → HOLD the
-keystroke, never push work through a pending compact.
-
-RED against the pre-fix tree:
-  * `_queue_decision(rec, cur, now, floor)` — the 4th `floor` arg + the `hold`
-    action do not exist (TypeError / wrong action);
-  * with a pending compact request each rider still TYPES its nudge (no latch),
-    so `typed_texts() != []`.
-GREEN once the floor + latch land.
+RC2 (#741, UNCHANGED): the writer-side compact latch `compact.pending_compact_hold`
+is consulted in all 3 job-20 riders' nudge branch — pending → HOLD the keystroke,
+never push work through a pending compact.
 """
 
 import os
@@ -37,6 +30,7 @@ from watchdog import queue_arrival_recheck as qa  # noqa: E402
 from watchdog import ops_wait_recheck as ow  # noqa: E402
 from watchdog import release_gap as rg  # noqa: E402
 from watchdog import compact as wd_compact  # noqa: E402
+from watchdog import nudge_gate as ng  # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
@@ -46,83 +40,31 @@ from _goal_arm_helpers import (  # noqa: E402
 
 NOW = 1_000_000
 DAY = 24 * 3600
-FLOOR = 30 * 60
+FLOOR = 60 * 60   # #1023: the per-pane-per-kind floor (replaces the deleted 30-min per-job floor)
 
 
 # =========================================================================== #
-# RC1 — the per-sid nudge FLOOR + accumulation, at the PURE decider level.
+# RC1 (#1023) — the per-JOB 30-min floor is DELETED; the shared per-pane-per-KIND
+# 60-min `nudge_gate` floor holds a same-kind repeat, and accumulation is
+# preserved (base kept OLD while the floor holds the keystroke). These orchestrator
+# tests lock that the floor + accumulation still work through the shared gate.
 # =========================================================================== #
 
-class TestQueueDecisionFloor(unittest.TestCase):
-    def test_arrival_within_floor_holds_and_keeps_old_base(self):
-        # last_nudge is RECENT (well inside the floor) -> a fresh delta is HELD,
-        # not nudged, and the baseline is NOT advanced (so members accumulate).
-        rec = {"base": [1], "first_seen": NOW - DAY, "last_nudge": NOW - 60}
-        action, out, reason, arr = qa._queue_decision(rec, [1, 2], NOW, FLOOR)
-        self.assertEqual(action, "hold")
-        self.assertEqual(reason, "floor")
-        self.assertEqual(arr, [2])
-        self.assertEqual(out["base"], [1])                 # NOT advanced
-        self.assertEqual(out["last_nudge"], NOW - 60)      # preserved
-
-    def test_two_deltas_in_one_window_accumulate_then_nudge_all(self):
-        # Establish a just-nudged baseline, then TWO deltas within the floor
-        # window -> both HOLD (accumulating), and the post-floor nudge names
-        # BOTH new members — ONE nudge for the whole window (acceptance #1).
-        rec = {"base": [1], "first_seen": NOW - DAY, "last_nudge": NOW}
-        # delta A inside the floor
-        a1, r1, _, arr1 = qa._queue_decision(rec, [1, 2], NOW + 100, FLOOR)
-        self.assertEqual(a1, "hold")
-        self.assertEqual(arr1, [2])
-        # delta B inside the floor — base is still OLD so BOTH accumulate
-        a2, r2, _, arr2 = qa._queue_decision(r1, [1, 2, 3], NOW + 200, FLOOR)
-        self.assertEqual(a2, "hold")
-        self.assertEqual(arr2, [2, 3])                     # ACCUMULATED
-        self.assertEqual(r2["base"], [1])                  # still not advanced
-        # floor elapsed -> ONE nudge naming both accumulated members
-        a3, r3, _, arr3 = qa._queue_decision(r2, [1, 2, 3], NOW + FLOOR + 5, FLOOR)
-        self.assertEqual(a3, "nudge")
-        self.assertEqual(arr3, [2, 3])
-
-    def test_first_arrival_no_last_nudge_nudges_immediately(self):
-        # #733 fast-wake preserved: the floor only rate-limits the 2nd+ nudge,
-        # so the FIRST arrival after a seed (no last_nudge) fires at once.
-        rec = {"base": [1], "first_seen": NOW - DAY}   # no last_nudge
-        action, out, reason, arr = qa._queue_decision(rec, [1, 2], NOW, FLOOR)
-        self.assertEqual(action, "nudge")
-        self.assertEqual(arr, [2])
-
-    def test_floor_default_zero_is_backward_compatible(self):
-        # 3-arg default floor=0 -> the pre-#780 behavior (a delta always nudges,
-        # even with a recent last_nudge). Keeps the existing decider tests green.
-        rec = {"base": [1], "first_seen": NOW - DAY, "last_nudge": NOW - 1}
+class TestPerJobFloorRemoved1023(unittest.TestCase):
+    def test_queue_decision_takes_no_floor_arg(self):
+        # the per-job floor param + the floor `hold`/`last_nudge` machinery are gone
+        rec = {"base": [1], "first_seen": NOW - DAY}
         action, out, reason, arr = qa._queue_decision(rec, [1, 2], NOW)
-        self.assertEqual(action, "nudge")
+        self.assertEqual(action, "nudge")   # a delta always yields a nudge verdict
+        self.assertEqual(arr, [2])
+        self.assertEqual(out["base"], [1])          # base kept OLD (accumulation)
+        self.assertNotIn("last_nudge", out)         # dead field removed
 
-    def test_seed_and_track_carry_last_nudge(self):
-        # A track (no arrival) must preserve last_nudge so the floor still
-        # applies to a future arrival.
-        rec = {"base": [1, 2], "first_seen": NOW - DAY, "last_nudge": NOW - 100}
-        action, out, _, _ = qa._queue_decision(rec, [1, 2], NOW, FLOOR)
-        self.assertEqual(action, "track")
-        self.assertEqual(out["last_nudge"], NOW - 100)
+    def test_per_job_floor_symbols_removed(self):
+        self.assertFalse(hasattr(qa, "QUEUE_ARRIVAL_NUDGE_FLOOR_S"))
+        self.assertFalse(hasattr(qa, "QUEUE_ARRIVAL_NUDGE_FLOOR_MIN_S"))
+        self.assertFalse(hasattr(qa, "_nudge_floor"))
 
-
-class TestNudgeFloorHelper(unittest.TestCase):
-    def test_floor_env_override(self):
-        with m.patch.dict(os.environ,
-                          {"AIRULESET_QUEUE_ARRIVAL_NUDGE_FLOOR_S": "1800"}):
-            self.assertEqual(qa._nudge_floor(), 1800)
-
-    def test_floor_clamped_to_min(self):
-        with m.patch.dict(os.environ,
-                          {"AIRULESET_QUEUE_ARRIVAL_NUDGE_FLOOR_S": "1"}):
-            self.assertEqual(qa._nudge_floor(), qa.QUEUE_ARRIVAL_NUDGE_FLOOR_MIN_S)
-
-
-# =========================================================================== #
-# RC1 — the FLOOR at the orchestrator level (hold vs post-floor nudge).
-# =========================================================================== #
 
 class _QAOrch(unittest.TestCase):
     CWD = "/home/newlevel/devel/qafloor"
@@ -131,14 +73,13 @@ class _QAOrch(unittest.TestCase):
         self._sdir = TemporaryDirectory()
         self.addCleanup(self._sdir.cleanup)
         p = m.patch.dict(os.environ,
-                         {"AIRULESET_SESSION_STATUS_DIR": self._sdir.name,
-                          "AIRULESET_QUEUE_ARRIVAL_NUDGE_FLOOR_S": str(FLOOR)})
+                         {"AIRULESET_SESSION_STATUS_DIR": self._sdir.name})
         p.start()
         self.addCleanup(p.stop)
         self._proj = TemporaryDirectory()
         self.addCleanup(self._proj.cleanup)
         self.tpath = _write_marker_transcript(self._proj.name, self.CWD,
-                                              "sess-780-qa")
+                                              "sess-1023-qa")
         self.sid = self.tpath.stem
 
     def _tmux(self, **kw):
@@ -156,27 +97,55 @@ class _QAOrch(unittest.TestCase):
                 sleep_fn=lambda *a, **k: None)
 
     def test_delta_within_floor_holds_no_keystroke(self):
-        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY,
-                            "last_nudge": NOW - 60}}
+        # a queue-arrival nudge was confirmed-delivered NOW-60 (nudge_cadence) —
+        # the shared per-kind floor holds a new arrival with hold:floor, base kept.
+        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
+        state = {}
+        ng.mark_sent(state, self.sid, "queue-arrival", NOW - 60)
         tmux = self._tmux()
-        logs = self._run(NOW, qrecs, lambda cwd: [1, 2], tmux)
+        logs = self._run(NOW, qrecs, lambda cwd: [1, 2], tmux, state=state)
         self.assertTrue(any("hold:floor" in ln for ln in logs), logs)
         self.assertEqual(tmux.typed_texts(), [])
         self.assertEqual(qrecs[self.sid]["base"], [1])   # accumulate — not advanced
 
     def test_delta_after_floor_nudges_accumulated_members(self):
-        # base [1], floor elapsed since last_nudge; two members accumulated ->
+        # floor elapsed (last confirmed > 60 min ago); two members accumulated ->
         # ONE nudge naming both, base promoted to the full union on delivery.
-        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY,
-                            "last_nudge": NOW - FLOOR - 100}}
+        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
+        state = {}
+        ng.mark_sent(state, self.sid, "queue-arrival", NOW - FLOOR - 100)
         tmux = self._tmux()
-        logs = self._run(NOW, qrecs, lambda cwd: [1, 2, 3], tmux, handled=set())
+        logs = self._run(NOW, qrecs, lambda cwd: [1, 2, 3], tmux,
+                         handled=set(), state=state)
         self.assertTrue(any("queue-arrival nudge" in ln for ln in logs), logs)
         typed = "".join(tmux.typed_texts())
         self.assertIn("#2", typed)
         self.assertIn("#3", typed)
         self.assertEqual(qrecs[self.sid]["base"], [1, 2, 3])
-        self.assertEqual(qrecs[self.sid]["last_nudge"], NOW)   # floor anchor set
+        # the shared floor clock is stamped on the confirmed delivery
+        self.assertEqual(state["nudge_cadence"][self.sid]["queue-arrival"], NOW)
+
+    def test_accumulation_across_the_floor_end_to_end(self):
+        # #1023 acceptance: deliver at t0 (no prior floor), a new arrival at
+        # t0+45min is HELD (hold:floor, base kept), and at t0+61min the single
+        # post-floor nudge names the accumulated member.
+        qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
+        state = {}
+        # t0: first arrival delivers (fast-wake) and stamps the floor.
+        self._run(NOW, qrecs, lambda cwd: [1, 2], self._tmux(),
+                  handled=set(), state=state)
+        self.assertEqual(qrecs[self.sid]["base"], [1, 2])
+        # t0+45min: a new arrival is within the 60-min floor -> hold, base kept.
+        logs = self._run(NOW + 45 * 60, qrecs, lambda cwd: [1, 2, 3],
+                         self._tmux(), handled=set(), state=state)
+        self.assertTrue(any("hold:floor" in ln for ln in logs), logs)
+        self.assertEqual(qrecs[self.sid]["base"], [1, 2])   # accumulating
+        # t0+61min: floor elapsed -> the post-floor nudge names #3.
+        tmux = self._tmux()
+        logs = self._run(NOW + 61 * 60, qrecs, lambda cwd: [1, 2, 3],
+                         tmux, handled=set(), state=state)
+        self.assertIn("#3", "".join(tmux.typed_texts()))
+        self.assertEqual(qrecs[self.sid]["base"], [1, 2, 3])
 
 
 # =========================================================================== #

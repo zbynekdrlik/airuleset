@@ -74,7 +74,8 @@ def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
     makes `send_verified` refuse (never types blind); `state`/`now` are no-op
     marks when absent (a direct caller/test that does not thread them)."""
     watchdog._janitor_mark_watch(state, pid, now)
-    if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs):
+    if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
+                              nudge="card"):
         watchdog._janitor_clear_watch(state, pid)
         return True
     return False
@@ -101,7 +102,7 @@ def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None,
     if not watchdog._safe_to_bounce_nudge(captured, cwd, projects_dir):
         return False
     if not watchdog.pane_at_idle_prompt(captured):
-        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs)
+        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs, nudge="card")
     if not dry_run:
         return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
     return True
@@ -280,7 +281,7 @@ def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None,
     if watchdog.pane_in_mode(pid, run):
         return False
     if not watchdog.pane_at_idle_prompt(captured):
-        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs)
+        return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs, nudge="card")
     if not dry_run:
         return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
     return True

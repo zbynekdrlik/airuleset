@@ -187,6 +187,9 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
 
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled(CATEGORY):   # #1023 per-kind switch
+            logs.append("lane-reconcile %s -> skip:kind-off (%s)" % (loc, CATEGORY))
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("lane-reconcile %s -> hold:compact-pending "
@@ -198,17 +201,15 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                         "(another sweep job typed this pane; retry next sweep)" % loc)
             return logs
         from watchdog import ops_wait_recheck as _ops
-        _lr_kind, _lr_draft = watchdog._classify_boundary(captured)
-        _lr_busy, _lr_aged = _ops._busy_waiting_with_age(
-            captured, state, sid, now, _lr_kind)
-        if _lr_busy and not _lr_aged:
-            logs.append("lane-reconcile %s -> skip:busy-bg-agent "
-                        "(pane waiting on a background agent — retry next sweep)"
-                        % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _ops._pane_busy_waiting(captured):
+            logs.append("lane-reconcile %s -> hold:busy (waiting on background "
+                        "agents — retry next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("lane-reconcile %s -> hold:cadence-gate "
-                        "(shared family gap; retry next sweep)" % loc)
+            logs.append("lane-reconcile %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, CATEGORY, now)))
             return logs
 
     # This compaction is now the one we ACT on. Fetch the returned lanes.
@@ -267,7 +268,7 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
     watchdog._janitor_mark_watch(state, pid, now)
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out)
+                                logs=logs, out=send_out, nudge=CATEGORY)
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # A genuine swallow leaves the dedup anchor unadvanced -> retries next

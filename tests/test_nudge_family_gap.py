@@ -1,15 +1,15 @@
-"""#797 — the shared `nudge_gate` FAMILY-SPACING floor, wired into the four
-EXISTING job-20 keystroke riders (partition-audit / release-gap / queue-arrival /
-lane-occupancy). Each rider now consults `nudge_gate.gate_ok(state, sid,
-category, now)` right before its send: when a DIFFERENT gated-family category
-nudged this session within NUDGE_FAMILY_GAP_S, the rider DEFERS (no keystroke,
-own tracking state preserved, retries a later sweep) — never cancels. This kills
-the cross-sweep bursts ("chodia jak besne po sebe") without touching any rider's
-own cadence semantics (the family gap ignores the SAME category, so a rider's own
-repeat is governed only by its own cadence).
+"""#1023 — the shared `nudge_gate` per-pane-per-KIND floor, wired into the
+job-20 keystroke riders (partition-audit / release-gap / queue-arrival /
+lane-occupancy). Each rider consults `nudge_gate.gate_ok(state, sid, category,
+now)` right before its send: when THIS kind was delivered to this session within
+`_min_interval()` (60 min), the rider DEFERS with `hold:floor` (no keystroke, own
+tracking state preserved, retries a later sweep) — never cancels. A DIFFERENT
+kind's recent delivery NEVER defers this rider (the pre-#1023 cross-kind family
+gap is removed; per-kind staging bounds the total).
 
-RED against the pre-implementation tree: the gate is not wired, so a rider with a
-closed family gate STILL types. GREEN once each rider consults `gate_ok`.
+Originally #797 (the shared cadence gate) — the family-spacing half was removed
+in #1023, so these tests now lock the per-kind floor at the rider level: a recent
+SAME kind defers, a recent DIFFERENT kind delivers.
 """
 
 import os
@@ -38,9 +38,9 @@ DAY = 24 * 3600
 CAD = 6 * 3600
 
 
-def _closed_gate(sid, category="u-freshness", ago=60):
-    """A gate state with a RECENT nudge of `category` — closes the family gap for
-    any OTHER category on `sid`."""
+def _recent(sid, category, ago=60):
+    """A gate state with a RECENT delivery of `category` — floors THAT kind on
+    `sid` for the next hour (#1023). It NEVER blocks a different kind."""
     return {"nudge_cadence": {sid: {category: NOW - ago}}}
 
 
@@ -74,13 +74,19 @@ class TestOpsWaitGate(_Base):
             ops_wait_fetch=lambda cwd: [41], state=state,
             sleep_fn=lambda *a, **k: None, cadence=CAD, i_count=0)
 
-    def test_closed_family_gate_defers(self):
+    def test_recent_same_kind_defers(self):
+        # #1023: a partition-audit delivery within the hour floors the next one.
         tmux = self._tmux()
-        logs = self._run(tmux, _closed_gate(self.sid))
+        logs = self._run(tmux, _recent(self.sid, "partition-audit"))
         self.assertEqual(tmux.typed_texts(), [],
-                         "a closed family gate must DEFER the partition-audit "
-                         "nudge (RED before the gate is wired)")
-        self.assertTrue(any("cadence-gate" in ln for ln in logs))
+                         "a recent SAME-kind delivery must DEFER with hold:floor")
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
+
+    def test_recent_different_kind_delivers(self):
+        # #1023: a DIFFERENT kind's recent delivery must NOT block this rider.
+        tmux = self._tmux()
+        self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
 
     def test_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -88,13 +94,6 @@ class TestOpsWaitGate(_Base):
         self._run(tmux, state)
         self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
         self.assertEqual(state["nudge_cadence"][self.sid]["partition-audit"], NOW)
-
-    def test_same_category_recent_still_delivers(self):
-        # the family gap ignores the SAME category — a partition-audit clock does
-        # not block a partition-audit nudge (its own cadence governs that).
-        tmux = self._tmux()
-        self._run(tmux, _closed_gate(self.sid, "partition-audit"))
-        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
 
 
 class TestReleaseGapGate(_Base):
@@ -107,11 +106,16 @@ class TestReleaseGapGate(_Base):
                 release_state_fetch=lambda cwd: {"ahead": 5, "in_flight": False},
                 state=state, sleep_fn=lambda *a, **k: None)
 
-    def test_closed_family_gate_defers(self):
+    def test_recent_same_kind_defers(self):
         tmux = self._tmux()
-        logs = self._run(tmux, _closed_gate(self.sid))
+        logs = self._run(tmux, _recent(self.sid, "release-gap"))
         self.assertEqual(tmux.typed_texts(), [])
-        self.assertTrue(any("cadence-gate" in ln for ln in logs))
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
+
+    def test_recent_different_kind_delivers(self):
+        tmux = self._tmux()
+        self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
 
     def test_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -131,13 +135,18 @@ class TestQueueArrivalGate(_Base):
                 queue_fetch=lambda cwd: [1, 2, 9], state=state,
                 sleep_fn=lambda *a, **k: None)
 
-    def test_closed_family_gate_defers(self):
+    def test_recent_same_kind_defers(self):
         tmux = self._tmux()
-        logs = self._run(tmux, _closed_gate(self.sid))
+        logs = self._run(tmux, _recent(self.sid, "queue-arrival"))
         self.assertEqual(tmux.typed_texts(), [])
-        self.assertTrue(any("cadence-gate" in ln for ln in logs))
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
         # baseline NOT advanced — the arrival re-detects next sweep (never cancels)
         # (state's qrecs is internal; the log's defer + no keystroke is the lock)
+
+    def test_recent_different_kind_delivers(self):
+        tmux = self._tmux()
+        self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
 
     def test_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -157,18 +166,25 @@ class TestLaneOccupancyGate(_Base):
                 backlog_fetch=lambda cwd: 5, state=state,
                 sleep_fn=lambda *a, **k: None)
 
-    def test_closed_family_gate_defers(self):
+    def test_recent_same_kind_defers(self):
         tmux = self._tmux()
-        logs, owns = self._run(tmux, _closed_gate(self.sid))
+        logs, owns = self._run(tmux, _recent(self.sid, "lane-occupancy"))
         self.assertEqual(tmux.typed_texts(), [],
-                         "a closed family gate must DEFER the lane nudge")
-        self.assertTrue(any("cadence-gate" in ln for ln in logs))
+                         "a recent SAME-kind delivery must DEFER the lane nudge")
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
+
+    def test_recent_different_kind_delivers(self):
+        tmux = self._tmux()
+        logs, owns = self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertNotEqual(tmux.typed_texts(), [],
+                            "a DIFFERENT kind's recent delivery must NOT defer "
+                            "the lane nudge (per-kind independence)")
 
     def test_control_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
         state = {}
         logs, owns = self._run(tmux, state)
-        self.assertFalse(any("cadence-gate" in ln for ln in logs), logs)
+        self.assertFalse(any("hold:floor" in ln for ln in logs), logs)
         self.assertNotEqual(tmux.typed_texts(), [],
                             "with an open gate the lane nudge is delivered "
                             "(control: the defer is the gate, not the harness)")

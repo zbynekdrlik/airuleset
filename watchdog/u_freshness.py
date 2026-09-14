@@ -304,6 +304,9 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     # #923 BATCH MODE: common delivery guards are handled once by the caller
     # (goal_lane_sweep). In individual mode, each guard is checked here.
     if batch_collect is None:
+        if not watchdog.nudges_enabled(CATEGORY):   # #1023 per-kind switch
+            logs.append("u-freshness %s -> skip:kind-off (%s)" % (loc, CATEGORY))
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("u-freshness %s -> hold:compact-pending (pending /compact; "
@@ -313,16 +316,15 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
             logs.append("u-freshness %s -> skip:already-handled (another sweep job "
                         "typed this pane; retry next sweep)" % loc)
             return logs
-        _uf_kind, _uf_draft = watchdog._classify_boundary(captured)
-        _uf_busy, _uf_aged = _ops_wait_recheck._busy_waiting_with_age(
-            captured, state, sid, now, _uf_kind)
-        if _uf_busy and not _uf_aged:
-            logs.append("u-freshness %s -> skip:busy-bg-agent (pane waiting on a "
-                        "background agent — deferred, retry next sweep)" % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _ops_wait_recheck._pane_busy_waiting(captured):
+            logs.append("u-freshness %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("u-freshness %s -> hold:cadence-gate (shared 1x/hour U strop "
-                        "or family gap; retry next sweep)" % loc)
+            logs.append("u-freshness %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, CATEGORY, now)))
             return logs
     if dry_run:
         logs.append("u-freshness %s -> WOULD-NUDGE (U=%d)" % (loc, u_count))
@@ -349,7 +351,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     # cadence; only a GENUINE swallow / abort retries next sweep.
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out)
+                                logs=logs, out=send_out, nudge=CATEGORY)
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # A genuine swallow leaves last_nudge unadvanced -> retries next sweep;

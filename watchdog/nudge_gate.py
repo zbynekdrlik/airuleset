@@ -11,35 +11,34 @@ Two problems this fixes, both reported by the owner:
    raz za hodinu". This gate is where that 1×/hour STROP lives (floor-clamped so
    an env units-error can never lower it).
 
-2. **Nudges arrive in bursts ("chodia jak besne po sebe").** Every job-20
+2. **Nudges arrive too often ("chodia jak besne po sebe").** Every job-20
    keystroke rider (partition-audit / release-gap / queue-arrival / lane-occupancy)
    keeps its OWN ad-hoc timer namespace. The per-sweep `handled` set bounds
-   delivery to one keystroke per pane per SWEEP, but sweeps are 60s apart — three
-   different categories can land into the SAME session minutes after each other
-   across sweeps, and no cross-sweep per-session floor exists anywhere. This gate
-   adds a FAMILY-SPACING floor (`NUDGE_FAMILY_GAP_S`) that every rider consults, so
-   a SECOND category's keystroke defers to a later sweep when a DIFFERENT category
-   nudged this session recently. #913 (owner directive 2026-09-06): the gap was
-   raised from 15 min to 1 h — "nikdy viac ako raz za hodinu!!!! a ani iny nudge
-   do promptu!!!" — so the cross-family spacing now equals the u-freshness
-   per-category strop.
+   delivery to one keystroke per pane per SWEEP, but sweeps are 60s apart, so a
+   kind whose per-JOB floor was below one hour (queue-arrival's 30-min floor) could
+   re-fire the SAME kind into the same session inside the hour — the owner's #1023
+   regression ("takyto nudge by nemal chodit castejsie nez raz za hodinu!"). This
+   gate is the ONE place the owner's "raz za hodinu" rule lives: a per-pane-per-KIND
+   60-min floor (`NUDGE_MIN_INTERVAL_S`) every rider consults, so a SECOND delivery
+   of the SAME kind defers until an hour after the last CONFIRMED one. #1023
+   REMOVED the pre-existing cross-kind family gap (#913's 1×/hour TOTAL cap): the
+   owner's model is per-KIND independence bounded by per-KIND STAGING (default all
+   kinds OFF, enable one at a time), so a DIFFERENT kind is never blocked by another
+   kind's floor.
 
-DESIGN — a pure helper over ONE new state namespace, no new I/O, no new job:
+DESIGN — a pure helper over ONE state namespace, no new I/O, no new job:
 
   state["nudge_cadence"] = {sid: {category: last_delivered_ts}}
 
 persisted in the ONE existing `~/.claude/api-watchdog-state.json` (run_once's
-`state`). `gate_ok(state, sid, category, now)` returns True iff BOTH hold:
+`state`). `gate_ok(state, sid, category, now)` returns True iff the PER-KIND FLOOR
+holds:
 
-  (a) PER-CATEGORY FLOOR — at least `_category_floor(category)` since THIS
-      category's last DELIVERED nudge to this sid. `u-freshness` carries the
-      owner's `_u_cadence()` strop, `goal-guard` carries a 24 h floor (#878);
-      the other categories carry floor 0 (their OWN cadences govern).
-  (b) FAMILY SPACING — at least `_family_gap()` since ANY OTHER gated-family
-      category's last DELIVERED nudge to this sid. The current category is
-      EXCLUDED from this check on purpose: a rider's own back-to-back cadence is
-      governed solely by its own last_nudge + (a), so the gate NEVER changes a
-      rider's own semantics — it only spaces DISTINCT categories.
+  PER-KIND FLOOR (#1023) — at least `_category_floor(category)` since THIS kind's
+  last DELIVERED nudge to this sid. EVERY gated kind carries `_min_interval()`
+  (>= 1 h); `u-freshness` the owner's `_u_cadence()` strop and `goal-guard` a 24 h
+  floor keep their LONGER intent via `max()`. The floor is strictly per KIND — a
+  DIFFERENT kind's recent delivery never blocks this one.
 
 #923 BATCHING (owner ROZHODNUTÉ): instead of individual delivery, ALL eligible
 families compose into ONE combined prompt per 1h slot. `batch_eligible()` returns
@@ -61,6 +60,12 @@ import os
 # The gated keystroke-rider family. Jobs 8/11 (bounce / gk-request backstops) are
 # deliberately OUT — a different lane (idle-pane queue backstops with their own
 # staged schedules), not footer/partition nudges into an armed loop.
+#
+# #1023-review 🔵8 — goal-sweep / compact / subagent-stuck are ALSO deliberately
+# OUT: recovery/arming/compact lanes, not the footer-nudge family, each with its
+# OWN bound (goal-sweep = 1-pending-request lifecycle + #731 cap; compact = 30-min
+# cooldown + #855 vetoes, and its #848 per-integration supersede would BREAK under
+# a 1h floor; subagent-stuck = decide_working interval + max_nudges cap + #491 ACK).
 #
 # #923 CLASSIFICATION — families split into two classes:
 #
@@ -86,17 +91,27 @@ GATED_CATEGORIES = WORK_DRIVING_CATEGORIES | AUDIT_CATEGORIES
 # The owner's hard 1×/hour U-reconcile strop. Env AIRULESET_U_RECONCILE_CADENCE_S
 # can only RAISE it (floor-clamped at U_RECONCILE_CADENCE_MIN_S == the strop) —
 # the #504/#543 floor-clamp lesson: a units-error / accidental sub-hour value
-# must never turn the reconcile into spam. This is the ONLY per-category floor.
+# must never turn the reconcile into spam.
 U_RECONCILE_CADENCE_S = 3600
 U_RECONCILE_CADENCE_MIN_S = 3600
 
-# The cross-category family spacing: consecutive-sweep deliveries of DIFFERENT
-# categories to the same session are spaced at least this far apart, so "besne po
-# sebe" ends. #913 (owner directive 2026-09-06): raised from 15 min to 1 h — no
-# watchdog nudge into any session prompt more often than 1x/hour TOTAL.
-# Env AIRULESET_NUDGE_FAMILY_GAP_S, floored at NUDGE_FAMILY_GAP_MIN_S.
-NUDGE_FAMILY_GAP_S = 60 * 60
-NUDGE_FAMILY_GAP_MIN_S = 60 * 60
+# #1023 (owner directive 2026-09-14) — the GLOBAL per-pane-per-KIND floor: NO
+# machine nudge of a given kind reaches a session's prompt more often than once
+# per hour. This is the ONE place the "raz za hodinu" rule lives — every gated
+# category carries it (`_category_floor` below), so the pre-#1023 per-JOB floors
+# (queue-arrival's 30-min `QUEUE_ARRIVAL_NUDGE_FLOOR_S`, and the sibling `_cadence`
+# re-check windows that are already >= 1 h) no longer need their own sub-hour
+# constants. Env AIRULESET_NUDGE_MIN_INTERVAL_S can only RAISE it (floor-clamped
+# at NUDGE_MIN_INTERVAL_MIN_S == the owner's hard 1 h strop, the #504/#543 lesson):
+# a units-error / accidental sub-hour value must never re-open the burst this fixes.
+#
+# The pre-#1023 cross-category FAMILY GAP (#913, a 1×/hour TOTAL cap across ALL
+# kinds) is REMOVED: the owner's #1023 model is per-KIND independence bounded by
+# per-KIND STAGING (default all kinds OFF, the owner enables one kind at a time),
+# so a DIFFERENT kind is never blocked by another kind's floor. With one kind
+# enabled the effective rate is still <= 1/hour exactly as #913 achieved.
+NUDGE_MIN_INTERVAL_S = 3600
+NUDGE_MIN_INTERVAL_MIN_S = 3600
 
 # orphan-reaper TTL for a per-sid cadence rec whose session is gone (mirrors the
 # #519/#531 per-sid-leak reaper): the `visited_sids` gate is PRIMARY (a live pane
@@ -120,26 +135,29 @@ def _u_cadence():
                U_RECONCILE_CADENCE_MIN_S)
 
 
-def _family_gap():
-    """The effective family spacing, floored at NUDGE_FAMILY_GAP_MIN_S (1 h since
-    #913) so a units error can't lower it below the owner's hard 1x/hour strop
-    (#504/#543)."""
-    return max(_env_int("AIRULESET_NUDGE_FAMILY_GAP_S", NUDGE_FAMILY_GAP_S),
-               NUDGE_FAMILY_GAP_MIN_S)
+def _min_interval():
+    """The effective per-pane-per-kind floor (#1023), the env override floored at
+    NUDGE_MIN_INTERVAL_MIN_S (the owner's hard 1 h strop) so a units error can't
+    lower it below one hour (#504/#543)."""
+    return max(_env_int("AIRULESET_NUDGE_MIN_INTERVAL_S", NUDGE_MIN_INTERVAL_S),
+               NUDGE_MIN_INTERVAL_MIN_S)
 
 
 GOAL_GUARD_FLOOR_S = 24 * 3600
 
 
 def _category_floor(category):
-    """The per-category floor: the owner's `_u_cadence()` strop for `u-freshness`,
-    24h for `goal-guard` (#878 — at most 1 nudge/24h per session), 0 for every
-    other gated category (their own cadences govern)."""
+    """The per-category (== per-kind) floor (#1023): EVERY gated kind carries the
+    global `_min_interval()` (>= 1 h) so no kind reaches a session's prompt more
+    than once per hour. Kinds with a LONGER intent keep it via `max()`: `goal-guard`
+    at least 24 h (#878), `u-freshness` the owner's `_u_cadence()` strop (>= 1 h,
+    env-raisable). No kind is exempt (the pre-#1023 default of 0 for most kinds is
+    exactly what let queue-arrival re-fire below the hour)."""
     if category == "u-freshness":
-        return _u_cadence()
+        return max(_min_interval(), _u_cadence())
     if category == "goal-guard":
-        return GOAL_GUARD_FLOOR_S
-    return 0
+        return max(_min_interval(), GOAL_GUARD_FLOOR_S)
+    return _min_interval()
 
 
 def _session(state, sid):
@@ -183,27 +201,32 @@ def _gate_ts(v, now):
 
 
 def gate_ok(state, sid, category, now):
-    """True iff a nudge of `category` to `sid` is allowed at `now` — see the
-    module docstring for (a) the per-category floor and (b) the family spacing.
-    Used by individual riders for per-category eligibility; for batched delivery
-    (#923 ROZHODNUTÉ) use `batch_eligible()` which collects ALL eligible categories.
-    Fail-safe ALLOWS on any malformed state (never suppress a legit nudge) —
-    including a FUTURE-skewed / corrupt-huge numeric ts, which `_gate_ts` ignores
-    so it can never mute a session indefinitely."""
+    """True iff a nudge of `category` (== nudge KIND) to `sid` is allowed at `now`
+    — the per-pane-per-kind 60-min floor (#1023): suppressed iff the last CONFIRMED
+    delivery of THIS kind to this sid is younger than `_category_floor(category)`.
+    The floor is strictly PER KIND — a DIFFERENT kind's recent delivery never
+    blocks this one (the pre-#1023 cross-kind family gap is removed; per-kind
+    staging bounds the total). Used by individual riders; for batched delivery
+    (#923) use `batch_eligible()`. Fail-safe ALLOWS on any malformed state (never
+    suppress a legit nudge) — including a FUTURE-skewed / corrupt-huge numeric ts,
+    which `_gate_ts` ignores so it can never mute a session indefinitely."""
     sess = _session(state, sid)
-    # (a) per-category floor — u-freshness (1h) and goal-guard (24h).
     last_cat = _gate_ts(sess.get(category), now)
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False
-    # (b) family spacing — any OTHER gated-family category within the gap defers.
-    gap = _family_gap()
-    for cat, raw in sess.items():
-        if cat == category:
-            continue
-        ts = _gate_ts(raw, now)
-        if ts is not None and now - ts < gap:
-            return False
     return True
+
+
+def floor_hold_reason(state, sid, category, now):
+    """The honest journal snippet (#1023) for a nudge held by its per-kind floor:
+    `"<kind>, <mm> min since last confirmed"`. Reads the last CONFIRMED delivery
+    ts of THIS kind (the same `nudge_cadence` state `gate_ok` consults) and reports
+    the minutes elapsed. Falls back to `"<kind>, floor not elapsed"` when no
+    prior ts is readable (a fail-safe: never claim a number we cannot compute)."""
+    last = _gate_ts(_session(state, sid).get(category), now)
+    if last is None:
+        return "%s, floor not elapsed" % category
+    return "%s, %d min since last confirmed" % (category, int((now - last) // 60))
 
 
 def mark_sent(state, sid, category, now):
@@ -245,23 +268,20 @@ BATCH_MAX_CHARS = 1400
 def batch_eligible(state, sid, now):
     """Return the list of categories eligible for batched delivery at `now`.
 
-    A category is eligible when BOTH hold:
-      (1) The session's family gap is OPEN — no mark_sent of ANY category
-          within `_family_gap()` (the 1h total cap, #913).
-      (2) The category's own per-category floor has expired.
+    #1023: a category is eligible when its OWN per-pane-per-kind floor
+    (`_category_floor`, >= 1 h) has expired — there is no longer a cross-kind
+    "family gap" precondition (removed with #913's total cap), so one kind's
+    recent delivery never blocks a DIFFERENT kind from joining the batch. The
+    per-kind switch is enforced upstream: a DISABLED kind's rider logs
+    `skip:kind-off` and never contributes to `batch_collect`, so a disabled kind
+    is never composed into the batch even though it may be floor-eligible here.
 
     Returns categories ordered: WORK_DRIVING first, AUDIT second (#923).
-    Returns [] when the gap is closed or no category is eligible.
+    Returns [] when no category's floor has expired.
     Fail-safe: malformed state → [] (the safe direction for batching — no
     batch, the individual riders' own gates still work)."""
     sess = _session(state, sid)
-    gap = _family_gap()
-    # (1) Is the gap open? Any category sent within the gap → closed.
-    for cat, raw in sess.items():
-        ts = _gate_ts(raw, now)
-        if ts is not None and now - ts < gap:
-            return []
-    # (2) Collect categories whose per-category floor has expired.
+    # Collect categories whose per-kind floor has expired.
     eligible = []
     for cat in sorted(GATED_CATEGORIES):  # sorted for determinism
         last_cat = _gate_ts(sess.get(cat), now)
@@ -319,8 +339,8 @@ def mark_batch_sent(state, sid, categories, now):
     """Mark ALL `categories` as sent at `now` in one call.
 
     Used after a batched delivery: every category in the batch gets the SAME
-    timestamp, so the family gap blocks the NEXT batch (not the members of
-    THIS one). Delegates to `mark_sent` per category."""
+    timestamp, so each member's own per-kind floor (#1023) blocks that kind's
+    next delivery for an hour. Delegates to `mark_sent` per category."""
     for cat in categories:
         mark_sent(state, sid, cat, now)
 

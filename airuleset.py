@@ -2189,17 +2189,14 @@ def cmd_status(args):
     print("airuleset status")
     print("=" * 50)
 
-    # --- nudges kill switch (#994) ---
+    # --- nudges kill switch (#1023 per-kind staging) ---
     import watchdog as _wd_nudges
-    _nmk = _wd_nudges.read_nudges_marker()
-    if _nmk is None:
-        print("\nnudges: ON")
+    _on = _wd_nudges.nudges_on_kinds()
+    _total = len(_wd_nudges.MACHINE_NUDGE_KINDS)
+    if not _on:
+        print("\nnudges: OFF (all %d kinds off)" % _total)
     else:
-        _line = "nudges: OFF since %s by %s" % (
-            _nmk.get("since") or "?", _nmk.get("by") or "?")
-        if _nmk.get("reason"):
-            _line += " — %s" % _nmk["reason"]
-        print("\n" + _line)
+        print("\nnudges: ON %d/%d — %s" % (len(_on), _total, ", ".join(sorted(_on))))
 
     # --- CLAUDE.md ---
     print("\n~/.claude/CLAUDE.md:")
@@ -8998,13 +8995,20 @@ def main():
     # --- #994: owner nudge kill switch ---
     p_nudges = sub.add_parser(
         "nudges",
-        help="Owner nudge kill switch: off|on|status [--reason ...] [--fleet]")
+        help="Owner nudge kill switch (per-kind): on|off|status "
+             "[--kind <k>[,<k>]] [--all] [--fleet]")
     p_nudges.add_argument("nudges_action", nargs="?", default="status",
                           choices=["off", "on", "status"],
-                          help="off = suppress every machine nudge; on = "
-                               "re-enable; status = report (default)")
+                          help="on --kind <k> = enable a kind; off [--kind <k>] "
+                               "= disable a kind (bare/--all = all off); "
+                               "status = report per kind (default)")
+    p_nudges.add_argument("--kind", default=None,
+                          help="Machine-nudge kind(s) to enable/disable "
+                               "(comma-separated)")
+    p_nudges.add_argument("--all", action="store_true",
+                          help="Apply to every machine-nudge kind at once")
     p_nudges.add_argument("--reason", default=None,
-                          help="Optional note recorded in the OFF marker")
+                          help="(accepted for back-compat; unused by per-kind)")
     p_nudges.add_argument("--fleet", action="store_true",
                           help="Run the verb on every non-paused box via ssh")
 
@@ -9140,18 +9144,24 @@ def cmd_goal_inventory(args):
 # the five keystroke helpers); this is the owner-facing WRITE/read side.
 # --------------------------------------------------------------------------- #
 def _print_nudges_status(home=None):
-    """Print the ONE canonical `nudges: OFF|ON …` line (the `--fleet` driver
-    greps OFF/ON out of it). EXISTENCE-based via `read_nudges_marker`."""
+    """Print the per-kind nudge switch status (#1023): a `nudges: OFF` / `nudges:
+    N/M on` summary line (the `--fleet` driver greps OFF/ON out of it) followed by
+    one `  <kind>: on|off` line per machine-nudge kind. The summary line keeps the
+    `nudges: OFF|ON` shape so the existing fleet parser still works."""
     import watchdog as _wd
-    marker = _wd.read_nudges_marker(home)
-    if marker is None:
-        print("nudges: ON")
-        return
-    line = "nudges: OFF since %s by %s" % (
-        marker.get("since") or "?", marker.get("by") or "?")
-    if marker.get("reason"):
-        line += " — %s" % marker["reason"]
-    print(line)
+    on = _wd.nudges_on_kinds(home)
+    kinds = sorted(_wd.MACHINE_NUDGE_KINDS)
+    if not on:
+        print("nudges: OFF (all %d kinds off)" % len(kinds))
+    else:
+        print("nudges: ON %d/%d — %s" % (len(on), len(kinds), ", ".join(sorted(on))))
+    for k in kinds:
+        print("  %s: %s" % (k, "on" if k in on else "off"))
+    # #1023 addendum: recovery revivals are always-on (never suppressed) and not
+    # stageable — listed separately so `nudges status` is honest about them.
+    recovery = sorted(_wd.RECOVERY_NUDGE_KINDS)
+    if recovery:
+        print("  %s: always-on (recovery)" % ", ".join(recovery))
 
 
 def _nudges_fleet(verb, runner=None):
@@ -9202,12 +9212,15 @@ def _nudges_fleet(verb, runner=None):
 
 
 def cmd_nudges(args):
-    """#994 owner nudge kill switch — `nudges off|on|status [--reason ...]
-    [--fleet]`. `off` writes the `~/.claude/nudges-off` marker (suppressing
-    every machine nudge at the watchdog chokepoint), `on` removes it, `status`
-    reports. No auto-expiry, no auto re-enable (that would be the machine
-    overriding the owner). `--fleet` fans the same verb across every non-paused
-    box via ssh and prints one `<name>: OFF|ON|unreachable` line per target."""
+    """#1023 owner nudge kill switch, per-KIND staging — `nudges on|off|status
+    [--kind <k>[,<k>]] [--all] [--fleet]`. The owner enables machine-nudge kinds
+    ONE AT A TIME: `nudges on --kind queue-arrival` enables just that kind; a bare
+    `nudges on` REFUSES and prints the kinds (never enable everything at once).
+    `nudges off --kind <k>` disables one kind; a bare `nudges off` (or `--all`)
+    turns EVERY kind off (off is always the safe direction). `nudges on --all`
+    explicitly enables everything. Default (state file absent) = every kind OFF.
+    No auto-expiry, no auto re-enable. `--fleet` fans the verb across every
+    non-paused box via ssh and prints one `<name>: OFF|ON|unreachable` line."""
     import watchdog as _wd
     action = getattr(args, "nudges_action", None) or "status"
 
@@ -9216,21 +9229,40 @@ def cmd_nudges(args):
             print("%s: %s" % (name, state))
         return 0
 
-    marker = _wd.nudges_marker_path()
-    if action == "off":
-        import datetime
-        os.makedirs(os.path.dirname(marker), exist_ok=True)
-        payload = {
-            "since": datetime.datetime.now(datetime.timezone.utc)
-            .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "by": _current_user(),
-            "reason": getattr(args, "reason", None),
-        }
-        with open(marker, "w", encoding="utf-8") as h:
-            json.dump(payload, h)
-    elif action == "on":
-        if os.path.exists(marker):
-            os.remove(marker)
+    all_kinds = sorted(_wd.MACHINE_NUDGE_KINDS)
+    raw_kind = getattr(args, "kind", None)
+    want_all = getattr(args, "all", False)
+    kinds = [k.strip() for k in raw_kind.split(",")] if raw_kind else []
+    # #1023 addendum: a RECOVERY kind (resume/compact) is always-on and cannot be
+    # staged — reject it with a clear message, not the generic "unknown kind".
+    recovery = [k for k in kinds if k in _wd.RECOVERY_NUDGE_KINDS]
+    if recovery:
+        print("nudge kind(s) %s are always-on (recovery revivals) — they are never "
+              "suppressed by the switch and cannot be staged."
+              % ", ".join(recovery))
+        return 2
+    unknown = [k for k in kinds if k not in _wd.MACHINE_NUDGE_KINDS]
+    if unknown:
+        print("unknown nudge kind(s): %s\navailable: %s"
+              % (", ".join(unknown), ", ".join(all_kinds)))
+        return 2
+
+    by = _current_user()
+    if action == "on":
+        if want_all:
+            kinds = all_kinds
+        if not kinds:
+            print("`nudges on` requires --kind <k>[,<k>] or --all — refusing to "
+                  "enable every kind at once. Available kinds:")
+            for k in all_kinds:
+                print("  %s" % k)
+            return 2
+        for k in kinds:
+            _wd.set_nudge_kind(k, True, by=by)
+    elif action == "off":
+        # a bare `nudges off` (or --all) turns EVERYTHING off — off is safe.
+        for k in (kinds if kinds else all_kinds):
+            _wd.set_nudge_kind(k, False, by=by)
     _print_nudges_status()
     return 0
 

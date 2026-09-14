@@ -100,12 +100,12 @@ class TestGoalGuardDeliver(unittest.TestCase):
         self.sent = []
 
     def _fake_send(self, pid, text, run, captured=None, sleep_fn=None,
-                   logs=None, verify_armed=True):
+                   logs=None, verify_armed=True, nudge=None):
         self.sent.append(text)
         return True
 
     def _fake_send_fail(self, pid, text, run, captured=None, sleep_fn=None,
-                        logs=None, verify_armed=True):
+                        logs=None, verify_armed=True, nudge=None):
         self.sent.append(text)
         return False
 
@@ -143,7 +143,7 @@ class TestGoalGuardDeliver(unittest.TestCase):
             logs2 = goal._goal_guard_deliver(
                 self.sid, "pid1", self._bare_pane(), "/tmp/cwd",
                 state, 2000, "loc", lambda *a: "", None, False, "/tmp")
-        self.assertTrue(any("cadence-gate" in ln for ln in logs2), logs2)
+        self.assertTrue(any("hold:floor" in ln for ln in logs2), logs2)
         self.assertEqual(len(self.sent), 1)
 
     def test_8_recent_human_skips(self):

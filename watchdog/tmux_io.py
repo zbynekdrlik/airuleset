@@ -83,22 +83,56 @@ SEND_TYPE_SETTLE_S = 1
 # the owner's OWN Discord reply (the `user_authored` kwarg, set solely by
 # `discord_replies`): the owner speaking is never a machine nudge.
 # --------------------------------------------------------------------------- #
-NUDGES_OFF_MARKER = "nudges-off"
+NUDGES_OFF_MARKER = "nudges-off"          # #994 legacy global marker (see below)
+NUDGES_KINDS_STATE = "nudges-kinds.json"  # #1023 per-kind staging state file
+
+# #1023 — the canonical set of MACHINE-NUDGE identities the owner stages one at a
+# time. Distinct from the keystroke `kind` (a delivery SHAPE — GATED_KINDS below);
+# a nudge identity is the SEMANTIC kind that a delivery call site threads via
+# `nudge=` into `keys`, and it names the per-kind switch state key AND the
+# `nudge_gate` cadence category. `nudges status` enumerates exactly this set.
+MACHINE_NUDGE_KINDS = frozenset({
+    # goal-family riders (into an armed /goal loop)
+    "queue-arrival", "lane-occupancy", "release-gap", "lane-reconcile",
+    "partition-audit", "u-freshness", "goal-guard",
+    # goal auto-arm / dying-subagent stuck-check
+    "goal-sweep", "subagent-stuck",
+    # idle-pane backstops + report-owed card (jobs 8/11 + cards)
+    "bounce", "gk-request", "card",
+})
+
+# #1023 addendum (owner, 2026-09-14) — RECOVERY revivals: identities that REVIVE a
+# dead/blocked session, NEVER suppressed by the per-kind kill switch (default
+# all-OFF) and NOT stageable/floored — the owner needs them to fire when a
+# login/limit problem killed the session even though every PRIORITY nudge is off
+# ("aj ked claudy to prepne na funkcny agent je nefunkcny lebo mu neprride nudge
+# na ozivenie"). `resume` = the api-error/401-OAuth resume + the limit/usage-cap
+# `continue` after reset (`__init__.py` Jobs 1/1b/6) AND the jobs 4/4a dying-
+# session stuck-checks (`_send_stuckcheck_verified` default); `compact` = the
+# `/compact` delivery (`compact.py`). They keep their OWN bounds — per-error
+# dedup/attempt caps (Jobs 1/6), the decide_working `max_working_nudges` cadence
+# (jobs 4/4a), compact's 30-min cooldown + #855 vetoes — plus the recent-human
+# veto; NONE of them ever went through the nudge_gate 60-min per-kind floor, so
+# dropping the switch gate removed no rate bound. PRIORITY nudges (every
+# MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
+RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact"})
+
+# Every threaded nudge identity — the stageable PRIORITY set plus the always-on
+# RECOVERY set. A `nudge=` threaded by any delivery site is one of these.
+ALL_NUDGE_KINDS = MACHINE_NUDGE_KINDS | RECOVERY_NUDGE_KINDS
 
 
 def nudges_marker_path(home=None):
-    """Path to the owner's global nudge kill-switch marker. Present == nudges
-    OFF (the same existence semantics as `_owner_disabled`'s
-    `~/.claude/watchdog-disable-*`)."""
+    """Path to the legacy #994 global nudge kill-switch marker. Retained for
+    back-compat reads only — the #1023 per-kind state file below is the live
+    source of truth. Present == the pre-#1023 global OFF."""
     base = home if home is not None else os.path.expanduser("~")
     return os.path.join(base, ".claude", NUDGES_OFF_MARKER)
 
 
 def read_nudges_marker(home=None):
-    """The marker's advisory JSON `{"since","by","reason"}` when OFF, else None.
-    EXISTENCE is the source of truth (see `nudges_enabled`); this only decodes
-    the detail for `status` / the badge. A present-but-corrupt marker returns
-    `{}` (still OFF), never None -- None means ABSENT (nudges ON)."""
+    """The legacy #994 marker's advisory JSON when present, else None. Kept for
+    back-compat; the live per-kind state is `read_nudges_kinds` below."""
     path = nudges_marker_path(home)
     if not os.path.exists(path):
         return None
@@ -111,20 +145,92 @@ def read_nudges_marker(home=None):
         return {}
 
 
-def nudges_enabled(home=None):
-    """False when the owner has turned machine nudges OFF (#994). EXISTENCE of
-    `~/.claude/nudges-off` is the whole signal (fail-safe OFF). Honors
-    `AIRULESET_TEST_IGNORE_DISABLE` exactly like `_owner_disabled` (#400) so a
-    real box's OFF flag never fails the suite / the pre-push gate."""
+def nudges_kinds_path(home=None):
+    """Path to the #1023 per-kind staging state file (`~/.claude/nudges-kinds.json`)."""
+    base = home if home is not None else os.path.expanduser("~")
+    return os.path.join(base, ".claude", NUDGES_KINDS_STATE)
+
+
+def read_nudges_kinds(home=None):
+    """The per-kind state dict `{"on": [<kind>...], "since", "by"}`, or a fresh
+    all-OFF shape when the file is ABSENT (#1023: absent reads as every kind
+    OFF). A present-but-corrupt file also reads as all-OFF (fail-safe: never a
+    silent re-enable), never raises."""
+    path = nudges_kinds_path(home)
+    if not os.path.exists(path):
+        return {"on": []}
+    try:
+        import json
+        with open(path, encoding="utf-8") as h:
+            data = json.load(h)
+        if isinstance(data, dict) and isinstance(data.get("on"), list):
+            return data
+        return {"on": []}
+    except (OSError, ValueError):
+        return {"on": []}
+
+
+def nudges_on_kinds(home=None):
+    """The SET of currently-enabled machine-nudge kinds (intersected with
+    MACHINE_NUDGE_KINDS so a stale/unknown key never counts). Absent state → the
+    empty set (all OFF)."""
+    on = read_nudges_kinds(home).get("on") or []
+    return {k for k in on if k in MACHINE_NUDGE_KINDS}
+
+
+def set_nudge_kind(kind, enabled, home=None, by=None):
+    """Enable/disable ONE machine-nudge `kind` in the per-kind state file, then
+    return the resulting on-set. Creates `~/.claude/` if missing; a no-op write is
+    still idempotent. Unknown kinds are ignored (never persisted)."""
+    if kind not in MACHINE_NUDGE_KINDS:
+        return nudges_on_kinds(home)
+    on = nudges_on_kinds(home)
+    if enabled:
+        on.add(kind)
+    else:
+        on.discard(kind)
+    import datetime
+    import json
+    path = nudges_kinds_path(home)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "on": sorted(on),
+        "since": datetime.datetime.now(datetime.timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "by": by or "",
+    }
+    with open(path, "w", encoding="utf-8") as h:
+        json.dump(payload, h)
+    return on
+
+
+def nudges_enabled(kind=None, home=None):
+    """True iff a machine nudge of `kind` may be delivered (#1023 per-kind
+    staging). PRIORITY kinds (every MACHINE_NUDGE_KINDS member) default OFF (state
+    file absent / a kind not enabled) — the owner enables them one at a time.
+    RECOVERY kinds (RECOVERY_NUDGE_KINDS = resume/compact, #1023 addendum) are
+    ALWAYS-ON: they revive a dead/blocked session (a 401/limit revival, /compact),
+    so the kill switch never suppresses them. `kind=None` (a gated keystroke fired
+    with NO nudge identity — a programming error the AST contract test catches)
+    fails safe to SUPPRESS (False): an un-threaded machine nudge is never
+    delivered, so enabling ONE kind can never re-activate an unrelated un-threaded
+    delivery (the #1023-review BLOCKER-2 leak). Honors `AIRULESET_TEST_IGNORE_DISABLE`
+    exactly like the #994 predicate (and `_owner_disabled`, #400) so a real box's
+    staged state never fails the suite / the pre-push gate."""
     if os.environ.get("AIRULESET_TEST_IGNORE_DISABLE"):
         return True
-    return not os.path.exists(nudges_marker_path(home))
+    if kind is None:
+        return False             # fail-safe: no identity → suppress (never any-on)
+    if kind in RECOVERY_NUDGE_KINDS:
+        return True              # #1023 addendum: recovery revivals are always-on
+    return kind in nudges_on_kinds(home)
 
 
 def _suppress_nudge(kind, text, logs):
-    """Journal ONE line for a nudge suppressed by the #994 kill switch (an
-    explicit #486-direction decision log). `kind` names the helper; the first
-    60 chars of `text` identify the specific suppressed nudge."""
+    """Journal ONE line for a nudge suppressed by the kill switch (an explicit
+    #486-direction decision log). `kind` names the keystroke kind / nudge
+    identity; the first 60 chars of `text` identify the specific suppressed
+    nudge."""
     if isinstance(logs, list):
         logs.append("nudges OFF: suppressed %s %s" % (kind, (text or "")[:60]))
 
@@ -154,40 +260,48 @@ GATED_KINDS = frozenset({"continue", "send", "goal", "draft", "stash", "type"})
 RECOVERY_KINDS = frozenset({"janitor", "undo", "user-draft", "wedge", "resurrect"})
 
 
-def _keystroke_suppressed(kind, user_authored):
+def _keystroke_suppressed(kind, user_authored, nudge=None):
     """True iff a keystroke of `kind` must be WITHHELD now -- the SINGLE gate
     (#1002). The owner's OWN reply (`user_authored`, granted solely by
     `discord_replies`) always passes. A RECOVERY_KINDS keystroke (not a machine
     nudge) always passes. Only a GATED (machine-nudge delivery) keystroke is
-    withheld, and only when the owner has turned nudges OFF (#994). A future
-    owner switch (per-role mute, `watchdog-disable-<kind>`) is ONE added clause
-    here -- never a new gate site. Goes through `watchdog.nudges_enabled()` (the
-    package facade) so the monkeypatch seam stays effective."""
+    withheld, and only when `nudges_enabled(nudge)` is False: a PRIORITY nudge the
+    owner has NOT staged on (#1023 per-kind staging) — a RECOVERY nudge identity
+    (RECOVERY_NUDGE_KINDS = resume/compact, #1023 addendum) is always-on and never
+    withheld. A gated keystroke with NO `nudge` identity (a programming error the
+    contract test catches) FAILS SAFE to SUPPRESS (`nudges_enabled(None)` is
+    False, BLOCKER-2) — never any-kind-on. Goes through `watchdog.nudges_enabled()`
+    (the package facade) so the monkeypatch seam stays effective."""
     if user_authored or kind not in GATED_KINDS:
         return False
-    return not watchdog.nudges_enabled()
+    return not watchdog.nudges_enabled(nudge)
 
 
-def keys(pane_id, *keystrokes, kind, user_authored=False, run=None, logs=None,
-         journal_text=None):
+def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
+         logs=None, journal_text=None):
     """Send `keystrokes` to `pane_id` via `tmux send-keys` -- the ONE place in
     `watchdog/` that builds a send-keys argv (#1002). `keystrokes` are passed
     verbatim after `-t <pane_id>`: control keys (`"Enter"`, `"Escape"`, `"C-s"`,
     `"BSpace"`), the literal-type form (`"-l", "--", text`), or the hex form
-    (`"-H", "1b", ...`). Returns True on a sent keystroke, False when the #994
-    gate suppressed it (nothing sent, ONE journal line written).
+    (`"-H", "1b", ...`). Returns True on a sent keystroke, False when the kill
+    switch suppressed it (nothing sent, ONE journal line written).
 
     `kind` classifies the keystroke for the gate (see GATED_KINDS /
-    RECOVERY_KINDS). `user_authored` (the owner's OWN Discord reply, forwarded
-    from `discord_replies`) BYPASSES the gate. `journal_text` overrides the
+    RECOVERY_KINDS). `nudge` (#1023) is the machine-nudge IDENTITY (a member of
+    ALL_NUDGE_KINDS — a stageable PRIORITY kind in MACHINE_NUDGE_KINDS or an
+    always-on RECOVERY kind in RECOVERY_NUDGE_KINDS) the per-kind switch keys on
+    -- every GATED machine-nudge delivery threads it from its call site (the
+    contract test enforces this).
+    `user_authored` (the owner's OWN Discord reply, forwarded from
+    `discord_replies`) BYPASSES the gate. `journal_text` overrides the
     suppression-journal snippet (a literal-type caller passes its full text so
     the journal reads the payload, not `-l -- ...`); default derives a snippet
     from the non-flag keystrokes."""
-    if watchdog._keystroke_suppressed(kind, user_authored):
+    if watchdog._keystroke_suppressed(kind, user_authored, nudge):
         snippet = (journal_text if journal_text is not None
                    else " ".join(str(k) for k in keystrokes
                                  if not str(k).startswith("-")))
-        watchdog._suppress_nudge(kind, snippet, logs)
+        watchdog._suppress_nudge(nudge or kind, snippet, logs)
         return False
     run = run or watchdog._default_run
     run(["tmux", "send-keys", "-t", pane_id, *keystrokes])
@@ -522,13 +636,17 @@ def _strip_selected(captured):
     return False
 
 
-def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None):
+def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None):
     """Type `text` literally into the pane, then press Enter to submit it.
 
-    #994: when the owner has turned nudges OFF, type NOTHING, journal one line
-    and return False (the caller reads the return -- `compact._compact_submit_
-    verified` -- so the request stays pending, never booked delivered). Returns
-    True on an attempted send (this helper never post-verifies).
+    #994 suppression contract: when a GATED nudge kind is OFF the chokepoint types
+    NOTHING, journals one line, and returns False (the caller reads the return so
+    the request stays pending, never booked delivered). Returns True on an
+    attempted send (this helper never post-verifies). NOTE (#1023 addendum): the
+    SOLE production caller is `compact._compact_submit_verified` with
+    `nudge="compact"`, a RECOVERY kind that is ALWAYS-ON — so the False/suppressed
+    path is unexercised in production today and only reachable for a hypothetical
+    future GATED caller; the logic stays general and correct for that case.
 
     Captures the pane FIRST (issue #36): if the agent-strip selector holds
     focus (`_strip_selected`), send ONE Escape before typing — otherwise the
@@ -551,11 +669,13 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None):
     # -- the caller (`compact._compact_submit_verified`) then leaves its /compact
     # request PENDING (`nudges-off`), never booked delivered.
     if _strip_selected(captured):
-        if not watchdog.keys(pane_id, "Escape", kind="continue", run=run, logs=logs):
+        if not watchdog.keys(pane_id, "Escape", kind="continue", nudge=nudge,
+                             run=run, logs=logs):
             return False
-    if not watchdog._type_literal(pane_id, run, text, kind="continue", logs=logs):
+    if not watchdog._type_literal(pane_id, run, text, kind="continue", nudge=nudge,
+                                  logs=logs):
         return False
-    watchdog.keys(pane_id, "Enter", kind="continue", run=run, logs=logs)
+    watchdog.keys(pane_id, "Enter", kind="continue", nudge=nudge, run=run, logs=logs)
     return True
 
 
@@ -570,7 +690,7 @@ def _subagent_nudge_signature(worker_id):
 
 
 def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
-                        sleep_fn=None, logs=None):
+                        sleep_fn=None, logs=None, nudge="subagent-stuck"):
     """(issue #6) Nudge the SUPERVISOR pane about a dying BACKGROUND WORKER —
     `kind` is a short human label ('api-error' or 'text-toolcall-stall'). Types a
     stuck-check-style self-check message naming the worker's own transcript file,
@@ -597,7 +717,7 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
             "nič nerob naslepo." % (_subagent_nudge_signature(worker_id), kind, worker_id))
     if tpath is not None:
         return watchdog.send_verified(pane_id, text, run, tpath,
-                                      sleep_fn=sleep_fn, logs=logs)
+                                      sleep_fn=sleep_fn, logs=logs, nudge=nudge)
     # #806 -- no transcript = unverifiable delivery; never a raw unverified type.
     # The old tpath-less `send_continue` fallback returned True unconditionally,
     # so a swallowed Enter left the stuck-check stranded in the composer while
@@ -813,7 +933,7 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
 
 
 def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                  out=None, user_authored=False):
+                  out=None, user_authored=False, nudge=None):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -904,7 +1024,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # keystrokes (keys suppresses + returns False, this helper bails), while the
     # owner's OWN reply (`user_authored`) bypasses and still deselects + delivers.
     if watchdog._strip_selected(cap):
-        if not watchdog.keys(pane_id, "Escape", kind="send",
+        if not watchdog.keys(pane_id, "Escape", kind="send", nudge=nudge,
                              user_authored=user_authored, run=run, logs=logs):
             return False
     # Re-verify bare AFTER the strip-Escape and immediately before the type
@@ -934,7 +1054,8 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # prompt is NEVER submitted, and no keystroke is fired into a box we cannot
     # safely backspace.
     if not watchdog._type_literal_verified(pane_id, run, text, sleep_fn,
-                                           kind="send", user_authored=user_authored,
+                                           kind="send", nudge=nudge,
+                                           user_authored=user_authored,
                                            logs=logs):
         if watchdog._pane_shows_collapsed_paste(watchdog._input_line_text(
                 watchdog.capture_pane(pane_id, run, lines=40))):
@@ -942,8 +1063,8 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         else:
             _log("send-verified abort: type not head+tail-verified, not submitted")
         return False
-    watchdog.keys(pane_id, "Enter", kind="send", user_authored=user_authored,
-                  run=run, logs=logs)
+    watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
+                  user_authored=user_authored, run=run, logs=logs)
     if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
         return True
     # Unconfirmed. Only act further when our text is PROVABLY still in the box.
@@ -951,10 +1072,10 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             watchdog.capture_pane(pane_id, run, lines=40))):
         # A swallowed Enter (#36 class) — ONE corrective Escape+Enter (reached
         # only when ON: a suppressed type bailed above).
-        watchdog.keys(pane_id, "Escape", kind="send", user_authored=user_authored,
-                      run=run, logs=logs)
-        watchdog.keys(pane_id, "Enter", kind="send", user_authored=user_authored,
-                      run=run, logs=logs)
+        watchdog.keys(pane_id, "Escape", kind="send", nudge=nudge,
+                      user_authored=user_authored, run=run, logs=logs)
+        watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
+                      user_authored=user_authored, run=run, logs=logs)
         if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
             return True
         if watchdog._typed_landed(text, watchdog._input_line_text(
@@ -992,7 +1113,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
 
 def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
                               sleep_fn=None, logs=None, caller_proven_own=False,
-                              out=None, user_authored=False):
+                              out=None, user_authored=False, nudge=None):
     """#501 — SUBMIT an EXISTING recognized-own nudge draft already sitting in
     the input box, transcript-verified — WITHOUT typing anything. The missing
     "submit an already-composed OWN draft" member of the delivery family
@@ -1121,7 +1242,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # #1002 -- the Escape carries kind="draft": at OFF `keys` suppresses it (the
     # deleted helper-top gate) and this helper bails keystroke-free.
     if watchdog._strip_selected(cap):
-        if not watchdog.keys(pane_id, "Escape", kind="draft",
+        if not watchdog.keys(pane_id, "Escape", kind="draft", nudge=nudge,
                              user_authored=user_authored, run=run, logs=logs):
             return False
         cap = watchdog.capture_pane(pane_id, run, lines=40)
@@ -1146,7 +1267,7 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # it, journals once, returns False, and this helper bails -- the deleted
     # helper-top gate, now enforced at the primitive. The owner's own reply
     # (`user_authored`) bypasses.
-    if not watchdog.keys(pane_id, "Enter", kind="draft",
+    if not watchdog.keys(pane_id, "Enter", kind="draft", nudge=nudge,
                          user_authored=user_authored, run=run, logs=logs):
         return False
     if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
@@ -1158,9 +1279,9 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     # may have started, #233). Reached only when ON (a suppressed submit bailed).
     still = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
     if _still_own(still):
-        watchdog.keys(pane_id, "Escape", kind="draft",
+        watchdog.keys(pane_id, "Escape", kind="draft", nudge=nudge,
                       user_authored=user_authored, run=run, logs=logs)
-        watchdog.keys(pane_id, "Enter", kind="draft",
+        watchdog.keys(pane_id, "Enter", kind="draft", nudge=nudge,
                       user_authored=user_authored, run=run, logs=logs)
         if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
             _log("submit-own delivered (after corrective Escape+Enter)")
@@ -1190,7 +1311,8 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     return False
 
 
-def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
+def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None,
+                             nudge="goal-sweep"):
     """#566 -- SUBMIT an EXISTING, COMPLETE, own `/goal <...>` payload already
     sitting swallowed-unsubmitted in the input box, PANE-verified, WITHOUT
     re-typing or backspacing it. The `/goal`-specific sibling of
@@ -1264,13 +1386,13 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
     # focus (the draft survives ONE Escape; two would delete it, #35), then
     # re-confirm the complete own /goal is still there before submitting.
     if watchdog._strip_selected(cap):
-        if not watchdog.keys(pane_id, "Escape", kind="goal", run=run, logs=logs):
+        if not watchdog.keys(pane_id, "Escape", kind="goal", nudge=nudge, run=run, logs=logs):
             return False
         cap = watchdog.capture_pane(pane_id, run, lines=40)
         if not _complete_own_goal(cap):
             _log("submit-own-goal abort: own /goal gone after strip Escape")
             return False
-    if not watchdog.keys(pane_id, "Enter", kind="goal", run=run, logs=logs):
+    if not watchdog.keys(pane_id, "Enter", kind="goal", nudge=nudge, run=run, logs=logs):
         return False
     # PANE proof: the box no longer holds our `/goal` (`want=False`) => submitted.
     if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
@@ -1278,8 +1400,8 @@ def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
         return True
     # STILL in the box -- a swallowed Enter (#36). ONE corrective Escape+Enter
     # (reached only when ON: a suppressed submit bailed above).
-    watchdog.keys(pane_id, "Escape", kind="goal", run=run, logs=logs)
-    watchdog.keys(pane_id, "Enter", kind="goal", run=run, logs=logs)
+    watchdog.keys(pane_id, "Escape", kind="goal", nudge=nudge, run=run, logs=logs)
+    watchdog.keys(pane_id, "Enter", kind="goal", nudge=nudge, run=run, logs=logs)
     if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
         _log("submit-own-goal delivered (after corrective Escape+Enter)")
         return True

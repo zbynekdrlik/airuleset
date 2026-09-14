@@ -839,7 +839,7 @@ def _await_goal_armed(pid, run, sleep_fn):
 
 
 def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
-                        verify_armed=True):
+                        verify_armed=True, nudge="goal-sweep"):
     """Type a LONG `/goal ...` into a BARE input box and submit it,
     verifying every step against a fresh capture -- the same protocol
     `deliver_with_stash` uses for its own type/submit steps, minus the
@@ -882,7 +882,8 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
     # keystrokes (keys suppresses + returns False) and this helper bails
     # keystroke-free, exactly as the type below (routed through `keys`) does.
     if watchdog._strip_selected(cap):
-        if not watchdog.keys(pid, "Escape", kind="goal", run=run, logs=logs):
+        if not watchdog.keys(pid, "Escape", kind="goal", nudge=nudge, run=run,
+                             logs=logs):
             return False
     fresh = watchdog.capture_pane(pid, run, lines=40)
     if watchdog._input_line_text(fresh) != "":
@@ -898,18 +899,18 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
     # check that passed a head-swallowed /goal to Enter -- CC then read the text
     # as a plain prompt and the goal never armed (#720). Never a submit on False.
     if not watchdog._type_literal_verified(pid, run, text, sleep_fn,
-                                           kind="goal", logs=logs):
+                                           kind="goal", nudge=nudge, logs=logs):
         _log("goal-verify-abort: type-not-verified")
         return False                       # not byte-exact -- never submit it
     # #1002 -- reached only when ON (a suppressed type returned False above); the
     # submit Enter + corrective go through the ONE `keys` primitive.
-    watchdog.keys(pid, "Enter", kind="goal", run=run, logs=logs)
+    watchdog.keys(pid, "Enter", kind="goal", nudge=nudge, run=run, logs=logs)
     if _await_typed(pid, text, run, sleep_fn, want=False):
         # STILL in the box after the same bounded settle window -- a
         # genuinely swallowed submit. ONE corrective Escape+Enter, never a
         # second bare Enter, never two Escapes.
-        watchdog.keys(pid, "Escape", kind="goal", run=run, logs=logs)
-        watchdog.keys(pid, "Enter", kind="goal", run=run, logs=logs)
+        watchdog.keys(pid, "Escape", kind="goal", nudge=nudge, run=run, logs=logs)
+        watchdog.keys(pid, "Enter", kind="goal", nudge=nudge, run=run, logs=logs)
         if _await_typed(pid, text, run, sleep_fn, want=False):
             watchdog._undo_and_release_slot(pid, run, text, False, _log,
                                             "goal-verify-abort: "
@@ -1285,10 +1286,9 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
             # there would interrupt a live turn. _recovery_pane_ready already
             # ruled out copy-mode / recent-human / an open dialog.
             bkind, _bd = watchdog._classify_boundary(captured)
-            # #921: age-bounded busy-waiting override applies here too
-            _rc_busy, _rc_aged = _ops_wait_recheck._busy_waiting_with_age(
-                captured, state, sid, now, bkind)
-            if bkind != "input" or (_rc_busy and not _rc_aged):
+            # #1023: idle-pane only — a busy "Waiting for N agents" pane always
+            # defers (the #921 aged override is gone).
+            if bkind != "input" or _ops_wait_recheck._pane_busy_waiting(captured):
                 logs.append("attempt-cap: cleanup SKIP non-input-boundary (%s)"
                             % loc)
             else:
@@ -1702,20 +1702,14 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # `_pane_busy_waiting`: a "Waiting for N background agents" pane reads
     # kind="input" (bare `❯`, spinner a row above) so a submit is swallowed and
     # the /goal parks orphaned -- defer, no keystroke (#720/#714 primitive).
-    # #921: age-bounded override — after >= 10 min of persistent Waiting with a
-    # bare `❯` prompt, deliver anyway (CC queues the prompt and fires on unblock).
+    # #1023: idle-pane only — a busy Waiting pane ALWAYS defers (the #921 aged
+    # override that typed into a long-busy pane is removed).
     if kind == "busy":
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
-    _bw_busy, _bw_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, kind)
-    if _bw_busy and not _bw_aged:
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
-    if _bw_busy and _bw_aged:
-        _log_goal_sync("DELIVER busy-aged-out sid=%s cwd=%s (Waiting "
-                       "persistent >= %ds, bare prompt — delivering anyway)"
-                       % (sid, cwd, _ops_wait_recheck.BUSY_WAITING_AGE_BOUND_S))
 
     if draft:
         # Mark provenance BEFORE the attempt (regardless of outcome) so
@@ -1750,7 +1744,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # and deliver_with_stash clears it on its own verified success.
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
                                          logs=logs, sleep_fn=sleep_fn,
-                                         state=state, nudge_kind="goal")
+                                         state=state, nudge_kind="goal",
+                                         nudge="goal-sweep")
         if ok:
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
@@ -2726,8 +2721,14 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
     logs = []
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("goal-guard"):   # #1023 per-kind switch
+            logs.append("goal-guard %s sid=%s -> skip:kind-off (goal-guard)"
+                        % (loc, sid))
+            return logs
         if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
-            logs.append("goal-guard %s sid=%s -> hold:cadence-gate" % (loc, sid))
+            logs.append("goal-guard %s sid=%s -> hold:floor (%s)"
+                        % (loc, sid,
+                           _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now)))
             return logs
     if dry_run:
         logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
@@ -2751,10 +2752,8 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
     if kind == "busy":
         logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
         return logs
-    # #921: age-bounded busy-waiting — same as deliver_goal
-    _gg_busy, _gg_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, kind)
-    if _gg_busy and not _gg_aged:
+    # #1023: idle-pane only — a busy Waiting pane defers (aged override gone)
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
         return logs
     if draft:
@@ -2768,7 +2767,7 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
         return logs
     ok = _send_goal_verified(pid, _GOAL_GUARD_TEXT, run,
                              captured=captured, sleep_fn=sleep_fn,
-                             verify_armed=False)
+                             verify_armed=False, nudge="goal-guard")
     if ok:
         _nudge_gate.mark_sent(state, sid, "goal-guard", now)
         logs.append("goal-guard %s sid=%s -> sent" % (loc, sid))
@@ -3666,12 +3665,10 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs,
     # #720/#714 -- the disarm keystroke path shares the arm path's busy-Waiting
     # gap: never submit `/goal clear` into a "Waiting for N background agents"
     # pane (the submit is swallowed). Defer, retry next sweep.
-    # #921: age-bounded override — same as deliver_goal
+    # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
     if kind == "busy":
         return "skip:busy"
-    _dc_busy, _dc_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, kind)
-    if _dc_busy and not _dc_aged:
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         return "skip:busy"
     if draft:
         return "skip:draft"          # user is composing -- never disturb, retry next sweep
@@ -5044,9 +5041,23 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # never sends), so the gate sits before it.
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("lane-occupancy"):   # #1023 per-kind switch
+            logs.append("lane-occupancy %s -> skip:kind-off (lane-occupancy)" % loc)
+            return logs, True
+        # #1023 (2nd-review 🔴): idle-pane only — a busy "Waiting for N background
+        # agents" pane defers (`_lane_boundary_ok` returns (True,'input','') for it,
+        # so without this the submit is swallowed into the running turn and the
+        # /goal parks orphaned, deliver_goal:1702). Mirrors every sibling rider
+        # (queue_arrival). The batch path is already covered by `_b_busy` in
+        # goal_lane_sweep. Deferred WITHOUT a keystroke; retries the next idle tick.
+        if _ops_wait_recheck._pane_busy_waiting(captured):
+            logs.append("lane-occupancy %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
+            return logs, True
         if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
-            logs.append("lane-occupancy %s -> hold:cadence-gate (shared family gap; "
-                        "retry next sweep)" % loc)
+            logs.append("lane-occupancy %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, "lane-occupancy", now)))
             return logs, True
     if dry_run:
         logs.append("READY (lane-occupancy) %s workers=%d waiters=%d "
@@ -5113,7 +5124,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         if watchdog._own_nudge_submit_prefix(own_head):
             if not watchdog.submit_own_draft_verified(pid, own_head, run,
                                                       tpath, sleep_fn=sleep_fn,
-                                                      logs=logs):
+                                                      logs=logs,
+                                                      nudge="lane-occupancy"):
                 # A recognized own draft that will not submit-verify is a
                 # genuinely wedged pane -- advance the SAME consecutive-abort
                 # streak + backoff park the foreign stash-abort uses, so it
@@ -5135,7 +5147,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # clears it on its own verified success.
         elif not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
                                              logs=logs, sleep_fn=sleep_fn,
-                                             state=state):
+                                             state=state, nudge="lane-occupancy"):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
@@ -5172,7 +5184,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # backoff -> IDENTICAL re-type -> duplicate nudge (live gk 2026-09-01).
         send_out = {}
         ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                    logs=logs, out=send_out)
+                                    logs=logs, out=send_out, nudge="lane-occupancy")
         if not (ok or bool(send_out.get("delivered_unconfirmed"))):
             # GENUINE swallow -- transient, retried next sweep, and it must
             # NOT consume the ln/llast budget (a refused attempt is not a
@@ -5487,16 +5499,21 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # individually. Eligible categories from goal_dark_watch (goal-guard)
         # are already in state["nudge_batch"][sid].
         _eligible = _nudge_gate.batch_eligible(state, sid, now)
+        # #1023-review BLOCKER-1: the batch composes MULTIPLE kinds into ONE
+        # keystroke on a SINGLE identity, so the primitive cannot per-kind-gate a
+        # mixed batch. Filter to ENABLED kinds HERE — a disabled kind never enters
+        # the batch (falls to its individual path, suppressed there): no leak, no
+        # drop. This IS the per-kind staging for the batch path.
+        _eligible = [c for c in _eligible if watchdog.nudges_enabled(c)]
         _batch_collect = None
         if _eligible and (handled is None or sid not in handled) and not dry_run:
             # R2 (#923 review): common delivery guards checked ONCE.
             from watchdog import compact as _compact_mod
             from watchdog import ops_wait_recheck as _owr_mod
             _b_compact = _compact_mod.pending_compact_hold(sid, now)
-            _b_kind, _ = watchdog._classify_boundary(captured)
-            _b_busy, _b_aged = _owr_mod._busy_waiting_with_age(
-                captured, state, sid, now, _b_kind)
-            if not _b_compact and not (_b_busy and not _b_aged):
+            # #1023: idle-pane only — a busy Waiting pane defers (aged override gone)
+            _b_busy = _owr_mod._pane_busy_waiting(captured)
+            if not _b_compact and not _b_busy:
                 # Pick up any goal-guard contribution from dark_watch.
                 _nb = state.get("nudge_batch", {}).get(sid, [])
                 _batch_collect = [entry for entry in _nb
@@ -5576,18 +5593,29 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 send_out = {}
                 _bok = watchdog.send_verified(
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
-                    logs=logs, out=send_out)
+                    logs=logs, out=send_out,
+                    nudge=(_incl[0] if _incl else None))
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
-                    watchdog._janitor_clear_watch(state, pid)
+                    _incl_set = set(_incl)
+                    # #1023 🔵6: queue-arrival's baseline advances ONLY on a
+                    # CONFIRMED submit — on a delivered-unconfirmed batch skip its
+                    # callback (baseline OLD, janitor watch LEFT SET) and re-confirm
+                    # later; other kinds keep terminal-on-unconfirmed. The FLOOR
+                    # (mark_batch_sent) stamps ALL included, bounding re-fire (🟡4).
+                    _qa_unconfirmed = (not _bok) and "queue-arrival" in _incl_set
+                    if not _qa_unconfirmed:
+                        watchdog._janitor_clear_watch(state, pid)
                     _nudge_gate.mark_batch_sent(state, sid, _incl, now)
                     if handled is not None:
                         handled.add(sid)
                     # Call per-rider post-delivery callbacks for included cats.
-                    _incl_set = set(_incl)
                     for _bc, _, _bfn in _batch_collect:
-                        if _bc in _incl_set and _bfn is not None:
-                            _bfn()
+                        if _bc not in _incl_set or _bfn is None:
+                            continue
+                        if _bc == "queue-arrival" and not _bok:
+                            continue   # #1023 🔵6: non-terminal on unconfirmed
+                        _bfn()
                     _bnote = ("" if _bok else
                               " (delivered-unconfirmed)")
                     logs.append("batch-nudge %s -> %d section(s): %s%s"
@@ -5650,13 +5678,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547
         _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)     # #616
-        # #921 M1 review fix: prune busy_first_seen for gone sessions — mirrors
-        # the wrecs/lnpark/rrecs orphan prune pattern. A session that exits while
-        # Waiting leaves its key forever (no reset fires for a vanished pane).
-        bfs = state.get("busy_first_seen") if state is not None else None
-        if isinstance(bfs, dict):
-            for _dead_sid in [k for k in bfs if k not in visited_sids]:
-                bfs.pop(_dead_sid, None)
+        # #1023: the #921 `busy_first_seen` prune is gone with the aged override —
+        # no rider writes that state any more.
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797

@@ -55,28 +55,28 @@ class _Recorder:
 # The predicate.
 # --------------------------------------------------------------------------- #
 class TestNudgesEnabledPredicate(unittest.TestCase):
-    def test_marker_absent_present_corrupt_and_bypass(self):
+    def test_default_off_per_kind_and_bypass(self):
+        # #1023: the predicate is now per-KIND (default every kind OFF); the
+        # global-marker semantics of #994 are superseded by nudges-kinds.json.
         with TemporaryDirectory() as home:
             # The suite sets AIRULESET_TEST_IGNORE_DISABLE (autouse in conftest +
-            # cmd_push injection) — remove it here to exercise the real marker.
+            # cmd_push injection) — remove it here to exercise the real predicate.
             with m.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
-                # No marker -> enabled.
-                self.assertTrue(wd.nudges_enabled(home=home))
-                path = wd.nudges_marker_path(home=home)
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as h:
-                    h.write('{"since": "2026-09-11T00:00:00Z", '
-                            '"by": "owner", "reason": null}')
-                # Marker present -> OFF.
-                self.assertFalse(wd.nudges_enabled(home=home))
-                # A corrupt marker STILL means OFF (fail-safe, never re-enable).
-                with open(path, "w", encoding="utf-8") as h:
+                # No state file -> every kind OFF.
+                self.assertFalse(wd.nudges_enabled("queue-arrival", home=home))
+                # Enable ONE kind -> only that kind ON.
+                wd.set_nudge_kind("queue-arrival", True, home=home)
+                self.assertTrue(wd.nudges_enabled("queue-arrival", home=home))
+                self.assertFalse(wd.nudges_enabled("lane-occupancy", home=home))
+                # A corrupt state file reads as all-OFF (fail-safe, never re-enable).
+                with open(wd.nudges_kinds_path(home=home), "w",
+                          encoding="utf-8") as h:
                     h.write("not json {{{")
-                self.assertFalse(wd.nudges_enabled(home=home))
+                self.assertFalse(wd.nudges_enabled("queue-arrival", home=home))
                 # The test-ignore bypass re-enables (parity with _owner_disabled).
                 os.environ["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
-                self.assertTrue(wd.nudges_enabled(home=home))
+                self.assertTrue(wd.nudges_enabled("queue-arrival", home=home))
 
 
 # --------------------------------------------------------------------------- #
@@ -207,16 +207,37 @@ class TestOwnerReplyBypass(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Compact: at OFF the request stays PENDING (never booked delivered).
+# Compact: #1023 addendum — /compact is a RECOVERY revival, ALWAYS-ON.
 # --------------------------------------------------------------------------- #
-class TestCompactPendingWhenOff(unittest.TestCase):
-    def test_compact_submit_verified_returns_pending_word(self):
+class TestCompactAlwaysOn(unittest.TestCase):
+    def test_compact_delivers_even_when_all_kinds_off(self):
+        # PRODUCTION TRUTH: /compact carries nudge="compact" (RECOVERY_NUDGE_KINDS),
+        # so the kill switch NEVER gates it — even with every PRIORITY kind staged
+        # OFF (the real predicate, bypass popped) it reaches the send and types.
         import watchdog.compact as compact
         rec = _Recorder()
         logs = []
-        # A BARE idle box (`_input_line_text` == "") so the pre-send raced-busy
-        # gate passes and the ladder reaches the `send_continue` chokepoint,
-        # where the #994 kill switch suppresses the /compact.
+        patcher = m.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
+        with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
+            out = compact._compact_submit_verified(
+                PID, rec, lambda *a, **k: None, logs.append)
+        self.assertNotEqual(out, "nudges-off",
+                            "/compact is RECOVERY (always-on) — never suppressed")
+        self.assertNotEqual(rec.sent_keys(), [],
+                            "/compact must type even with all PRIORITY kinds off")
+
+    def test_defensive_pending_word_if_send_continue_were_ever_suppressed(self):
+        # DEFENSIVE guard, NOT production /compact gating (the test above proves
+        # /compact is always-on). This mocks nudges_enabled->False (a state
+        # impossible for the 'compact' identity) to prove the ladder's fallback:
+        # were 'compact' ever reclassified to a gated PRIORITY kind, a suppressed
+        # send leaves the request PENDING ('nudges-off'), never misclassified 'sent'.
+        import watchdog.compact as compact
+        rec = _Recorder()
+        logs = []
         with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False), \
                 m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
             out = compact._compact_submit_verified(
@@ -224,7 +245,7 @@ class TestCompactPendingWhenOff(unittest.TestCase):
         self.assertEqual(out, "nudges-off")
         self.assertEqual(rec.sent_keys(), [])
         self.assertTrue(any("nudges OFF: suppressed" in ln for ln in logs),
-                        "compact suppression must journal: %r" % logs)
+                        "the defensive suppression must journal: %r" % logs)
 
 
 # --------------------------------------------------------------------------- #
@@ -238,21 +259,37 @@ class TestNudgesCLI(unittest.TestCase):
             setattr(ns, k, v)
         return ns
 
-    def test_off_writes_marker_on_removes_it(self):
+    def test_on_kind_enables_off_disables(self):
+        # #1023: `nudges on --kind X` enables one kind; `nudges off` (bare) turns
+        # every kind off. `nudges on` (no --kind) refuses (tested elsewhere).
         with TemporaryDirectory() as home:
             with m.patch.dict(os.environ, {"HOME": home}):
                 with m.patch.dict(os.environ, {}, clear=False):
                     os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
-                    airuleset.cmd_nudges(self._args(nudges_action="off",
-                                                    reason="focus"))
-                    self.assertFalse(wd.nudges_enabled(home=home))
-                    marker = wd.read_nudges_marker(home=home)
-                    self.assertIsInstance(marker, dict)
-                    self.assertEqual(marker.get("reason"), "focus")
-                    self.assertIn("since", marker)
-                    airuleset.cmd_nudges(self._args(nudges_action="on"))
-                    self.assertTrue(wd.nudges_enabled(home=home))
-                    self.assertIsNone(wd.read_nudges_marker(home=home))
+                    airuleset.cmd_nudges(self._args(nudges_action="on",
+                                                    kind="queue-arrival"))
+                    self.assertTrue(wd.nudges_enabled("queue-arrival", home=home))
+                    self.assertFalse(wd.nudges_enabled("lane-occupancy", home=home))
+                    # a bare `nudges off` turns EVERYTHING off.
+                    airuleset.cmd_nudges(self._args(nudges_action="off"))
+                    self.assertFalse(wd.nudges_enabled("queue-arrival", home=home))
+
+    def test_on_kind_recovery_is_rejected(self):
+        # #1023 addendum: a RECOVERY kind (resume/compact) is always-on and cannot
+        # be staged — `nudges on --kind resume` refuses (rc 2) and never persists it.
+        import contextlib
+        import io
+        with TemporaryDirectory() as home, \
+                m.patch("os.path.expanduser",
+                        side_effect=lambda p: p.replace("~", home, 1)):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = airuleset.cmd_nudges(self._args(nudges_action="on",
+                                                     kind="resume"))
+            out = buf.getvalue()
+            self.assertEqual(rc, 2, "staging a recovery kind must refuse")
+            self.assertIn("recovery", out.lower())
+            self.assertNotIn("resume", wd.nudges_on_kinds(home=home))
 
     def test_fleet_skips_paused_and_classifies(self):
         import cli_fleet
@@ -292,15 +329,16 @@ class TestNudgesCLI(unittest.TestCase):
 # Statusline badge: hidden ON, shown OFF.
 # --------------------------------------------------------------------------- #
 class TestNudgesBadge(unittest.TestCase):
-    def test_hidden_when_on_shown_when_off(self):
+    def test_off_when_all_off_fraction_when_some_on(self):
+        # #1023: default (all off) shows `nudges OFF`; some staged on shows
+        # `nudges N/M` — the badge is never hidden (the switch state is always
+        # visible now).
         with TemporaryDirectory() as home:
-            self.assertEqual(statusbar.nudges_off_segment(home=home), "")
-            claude = Path(home) / ".claude"
-            claude.mkdir(parents=True, exist_ok=True)
-            (claude / "nudges-off").write_text(
-                '{"since":"x","by":"y","reason":null}', encoding="utf-8")
+            self.assertIn("nudges OFF", statusbar.nudges_off_segment(home=home))
+            wd.set_nudge_kind("queue-arrival", True, home=home)
             seg = statusbar.nudges_off_segment(home=home)
-            self.assertIn("nudges OFF", seg)
+            self.assertIn("nudges 1/", seg)
+            self.assertNotIn("nudges OFF", seg)
 
 
 # --------------------------------------------------------------------------- #

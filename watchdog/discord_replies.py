@@ -846,8 +846,13 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
         # the visible answer-hint — strictly safer than the old unconditional pop.
         tpath = watchdog._transcript_for_session(
             projects_dir, sid, (cwd_by_sid or {}).get(sid))
+        # #1023: the reply POINTER delivers the OWNER's own Discord answer to the
+        # session — the owner speaking, never a machine nudge — so it BYPASSES the
+        # per-kind nudge switch (user_authored) exactly like the owner's own reply
+        # text at the sites above; suppressing it would strand the owner's answer.
         if watchdog.send_verified(pid, ptr_text, run, tpath,
-                                  sleep_fn=sleep_fn, logs=logs):
+                                  sleep_fn=sleep_fn, logs=logs,
+                                  user_authored=True):
             ptr.pop(sid)
             logs.append("reply pointer→#%s [%s]" % (ent.get("num"), sid[:12]))
         else:

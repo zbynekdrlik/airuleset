@@ -765,6 +765,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("release-gap"):   # #1023 per-kind switch
+            logs.append("release-gap %s -> skip:kind-off (release-gap)" % loc)
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("release-gap %s -> hold:compact-pending (pending /compact; "
@@ -775,16 +778,15 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                         "typed this pane; retry next sweep)" % loc)
             return logs
         from watchdog import ops_wait_recheck as _owr
-        _rg_kind, _rg_draft = watchdog._classify_boundary(captured)
-        _rg_busy, _rg_aged = _owr._busy_waiting_with_age(
-            captured, state, sid, now, _rg_kind)
-        if _rg_busy and not _rg_aged:
-            logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
-                        "background agent — deferred, retry next sweep)" % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _owr._pane_busy_waiting(captured):
+            logs.append("release-gap %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
-            logs.append("release-gap %s -> hold:cadence-gate (shared family gap; "
-                        "retry next sweep)" % loc)
+            logs.append("release-gap %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, "release-gap", now)))
             return logs
     if dry_run:
         logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, reason=%s)"
@@ -821,7 +823,7 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     # dedup; only a GENUINE swallow / abort retries next sweep.
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out)
+                                logs=logs, out=send_out, nudge="release-gap")
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # #749 BOUNDED RETRY: a persistently-swallowing pane must not be re-typed

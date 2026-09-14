@@ -88,7 +88,8 @@ class ReconcileRider844(unittest.TestCase):
         tmux = _FakeTmux()
 
         def _fake_send_verified(pane_id, text, run=None, tpath=None,
-                                sleep_fn=None, logs=None, out=None):
+                                sleep_fn=None, logs=None, out=None,
+                                user_authored=False, nudge=None):
             tmux.texts.append(text)
             return True   # transcript-confirmed submit
 

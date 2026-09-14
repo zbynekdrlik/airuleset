@@ -152,7 +152,7 @@ def _pane_shows_collapsed_paste(itext):
 
 
 def _type_literal(pid, run, text, sleep_fn=None, kind="type",
-                  user_authored=False, logs=None):
+                  user_authored=False, logs=None, nudge=None):
     """Send `text` into the pane's input box literally — in ONE burst below
     `GOAL_TYPE_CHUNK_THRESHOLD` chars (unchanged from before this ticket),
     or in small CHUNKS at/above it (#322) so CC never treats the whole
@@ -194,13 +194,13 @@ def _type_literal(pid, run, text, sleep_fn=None, kind="type",
     verify/undo machinery on it (the #1002 no-stray-backspace invariant)."""
     sleep_fn = sleep_fn or time.sleep
     if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
-        return watchdog.keys(pid, "-l", "--", text, kind=kind,
+        return watchdog.keys(pid, "-l", "--", text, kind=kind, nudge=nudge,
                              user_authored=user_authored, run=run, logs=logs,
                              journal_text=text)
     for i in range(0, len(text), GOAL_TYPE_CHUNK_SIZE):
         if not watchdog.keys(pid, "-l", "--", text[i:i + GOAL_TYPE_CHUNK_SIZE],
-                             kind=kind, user_authored=user_authored, run=run,
-                             logs=logs, journal_text=text):
+                             kind=kind, nudge=nudge, user_authored=user_authored,
+                             run=run, logs=logs, journal_text=text):
             return False
         if i + GOAL_TYPE_CHUNK_SIZE < len(text):
             sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
@@ -351,7 +351,7 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
 
 
 def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
-                                    kind="type", user_authored=False):
+                                    kind="type", user_authored=False, nudge=None):
     """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
     the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
     box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
@@ -383,7 +383,7 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     # undo backspace into the owner's box), exactly as they do for a genuine HOLD.
     # An owner reply (`user_authored`) bypasses and types.
     if not _type_literal(pid, run, head_chunk, sleep_fn, kind=kind,
-                         user_authored=user_authored):
+                         user_authored=user_authored, nudge=nudge):
         return _TV_HOLD
     # #763 -- the verify REFERENCE is the chunk sans trailing whitespace: an
     # arbitrary [:120] slice can end mid-whitespace (ALL three real templates
@@ -409,12 +409,12 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     # head chunk off + pops the parked draft) -- the correct response to a partial
     # type. Bailing here would STRAND the typed head chunk instead.
     _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
-                  kind=kind, user_authored=user_authored)
+                  kind=kind, user_authored=user_authored, nudge=nudge)
     return _TV_LANDED
 
 
 def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
-                           user_authored=False, logs=None):
+                           user_authored=False, logs=None, nudge=None):
     """#670 -- type `text` into a BARE box and VERIFY the box holds it head+tail,
     retrying (undo + re-type) ONLY on a genuine first-byte swallow. This is
     `send_verified`'s verified typed path (all nudge kinds -- lane-check, job-1
@@ -468,7 +468,7 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
             # RECOVERY differs, and here it is undo-the-chunk + RETRY. #1002 -- a
             # suppressed first chunk returns _TV_HOLD (no keystroke -> no undo).
             hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
-                                                 kind=kind,
+                                                 kind=kind, nudge=nudge,
                                                  user_authored=user_authored)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed / suppressed -> NO keystrokes
@@ -480,7 +480,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
             # #1002 -- a suppressed type (OFF, machine caller) fired NO keystroke;
             # return keystroke-free (never fall through to the undo below).
             if not _type_literal(pid, run, text, sleep_fn, kind=kind,
-                                 user_authored=user_authored, logs=logs):
+                                 user_authored=user_authored, logs=logs,
+                                 nudge=nudge):
                 return False
         cls = _settle_type_verify(pid, run, text, sleep_fn,
                                   allow_scrolled=two_phase)
@@ -1039,7 +1040,8 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
 
 
 def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
-                       state=None, user_authored=False, nudge_kind="stash"):
+                       state=None, user_authored=False, nudge_kind="stash",
+                       nudge=None):
     """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
     #189 — STASH UNCONDITIONALLY. This helper used to require a NON-EMPTY
@@ -1143,10 +1145,10 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     # park+undo dance) + journals once, and this helper bails -- the deleted
     # helper-top gate. `user_authored` (the owner's OWN reply) bypasses.
     if watchdog._strip_selected(cap):
-        if not watchdog.keys(pid, "Escape", kind=nudge_kind,
+        if not watchdog.keys(pid, "Escape", kind=nudge_kind, nudge=nudge,
                              user_authored=user_authored, run=run, logs=logs):
             return False
-    if not watchdog.keys(pid, "C-s", kind=nudge_kind,
+    if not watchdog.keys(pid, "C-s", kind=nudge_kind, nudge=nudge,
                          user_authored=user_authored, run=run, logs=logs):
         return False
     cap, outcome, pre_text = watchdog._await_stash_settled(pid, run, sleep_fn)
@@ -1197,7 +1199,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     if two_phase:
         hc = watchdog._type_two_phase_head_checkpoint(
-            pid, run, text, sleep_fn, kind=nudge_kind, user_authored=user_authored)
+            pid, run, text, sleep_fn, kind=nudge_kind, user_authored=user_authored, nudge=nudge)
         if hc != _TV_LANDED:
             _log("stash-abort: head-checkpoint-%s" % hc)
             if hc == _TV_CORRUPT:
@@ -1224,7 +1226,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # recovery. An explicit keystroke-free bail here would STRAND the parked
         # draft in the stash slot until the janitor reclaims it.
         watchdog._type_literal(pid, run, text, sleep_fn,
-                               kind=nudge_kind, user_authored=user_authored)
+                               kind=nudge_kind, user_authored=user_authored, nudge=nudge)
     cap = watchdog.capture_pane(pid, run, lines=30)
     itext = watchdog._input_line_text(cap)
     if watchdog._pane_shows_collapsed_paste(itext):
@@ -1300,16 +1302,16 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         return False
     # #1002 -- reached only when ON (a suppressed stash bailed at the C-s toggle);
     # the submit Enter + corrective go through the ONE `keys` primitive.
-    watchdog.keys(pid, "Enter", kind=nudge_kind, user_authored=user_authored,
+    watchdog.keys(pid, "Enter", kind=nudge_kind, nudge=nudge, user_authored=user_authored,
                   run=run, logs=logs)
     cap = watchdog.capture_pane(pid, run, lines=30)
     itext2 = watchdog._input_line_text(cap)
     if watchdog._typed_landed(text, itext2):
         # swallowed submit (#36 class) — ONE corrective Escape+Enter, never a
         # second Escape.
-        watchdog.keys(pid, "Escape", kind=nudge_kind, user_authored=user_authored,
+        watchdog.keys(pid, "Escape", kind=nudge_kind, nudge=nudge, user_authored=user_authored,
                       run=run, logs=logs)
-        watchdog.keys(pid, "Enter", kind=nudge_kind, user_authored=user_authored,
+        watchdog.keys(pid, "Enter", kind=nudge_kind, nudge=nudge, user_authored=user_authored,
                       run=run, logs=logs)
         cap = watchdog.capture_pane(pid, run, lines=30)
         itext3 = watchdog._input_line_text(cap)

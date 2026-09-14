@@ -214,5 +214,82 @@ class TestKindContract(unittest.TestCase):
                         "expected the core nudge kinds to be used; saw %r" % sorted(seen))
 
 
+# --------------------------------------------------------------------------- #
+# #1023 — every machine-nudge `keys()` call carries the nudge IDENTITY. A GATED
+# (machine-nudge delivery) keystroke must thread `nudge=` so the per-kind switch
+# keys on it; a RECOVERY keystroke (janitor/undo/…) is exempt. This is the
+# structural half of the per-kind switch: the identity reaches the primitive.
+# --------------------------------------------------------------------------- #
+class TestNudgeIdentityContract1023(unittest.TestCase):
+    @staticmethod
+    def _kind_const(call):
+        for kw in call.keywords:
+            if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
+                return kw.value.value
+        # a `kind=<Name>` (a var, e.g. deliver_with_stash's nudge_kind) is a
+        # dynamic gated kind -> still requires an identity.
+        for kw in call.keywords:
+            if kw.arg == "kind":
+                return "<dynamic>"
+        return None
+
+    @staticmethod
+    def _has_nudge(call):
+        return any(kw.arg == "nudge" for kw in call.keywords)
+
+    def test_every_gated_keys_call_threads_nudge(self):
+        violations = []
+        for path in sorted(WATCHDOG_DIR.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", getattr(node.func, "id", None))
+                if name != "keys":
+                    continue
+                kind = self._kind_const(node)
+                if kind is None:
+                    continue                         # no kind= (not a real call)
+                if isinstance(kind, str) and kind in wd.RECOVERY_KINDS:
+                    continue                         # recovery keystroke — exempt
+                if not self._has_nudge(node):
+                    violations.append("%s:%d kind=%r" % (path.name, node.lineno, kind))
+        self.assertEqual(
+            violations, [],
+            "every GATED machine-nudge keys() call must thread a `nudge=` "
+            "identity (the per-kind switch keys on it); missing: %r" % violations)
+
+    # #1023-review BLOCKER-2: the identity must also reach the DELIVERY HELPERS,
+    # not only the keys() primitive — an un-threaded helper call defaults
+    # nudge=None → the fail-safe SUPPRESSES it (never leaks any-kind-on), so a
+    # forgotten identity is a silent DEAD nudge. These helpers default nudge=None,
+    # so every call MUST pass `nudge=` (a machine nudge) or `user_authored=` (the
+    # owner's own reply). Helpers with a non-None default (submit_own_goal_verified,
+    # _send_goal_verified, _send_stuckcheck_verified) self-thread and are exempt.
+    NONE_DEFAULT_HELPERS = {"send_verified", "send_continue",
+                            "submit_own_draft_verified", "deliver_with_stash",
+                            "_try_stash_nudge", "_send_bare_nudge_verified"}
+
+    def test_every_delivery_helper_call_threads_identity(self):
+        violations = []
+        for path in sorted(WATCHDOG_DIR.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", getattr(node.func, "id", None))
+                if name not in self.NONE_DEFAULT_HELPERS:
+                    continue
+                kws = {kw.arg for kw in node.keywords}
+                if "nudge" not in kws and "user_authored" not in kws:
+                    violations.append("%s:%d %s()" % (path.name, node.lineno, name))
+        self.assertEqual(
+            violations, [],
+            "every None-default delivery-helper call must thread `nudge=` (a "
+            "machine-nudge identity) or `user_authored=` (owner reply) so the "
+            "per-kind switch gates it and it is never a silent dead nudge; "
+            "missing: %r" % violations)
+
+
 if __name__ == "__main__":
     unittest.main()

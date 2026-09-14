@@ -9327,7 +9327,7 @@ class TestApiWatchdog(TestCase):
         # nudge look swallowed. The chunk-typed job-4/4a texts also avoid the real
         # inter-chunk `time.sleep` this way.
         def _typing_send_verified(pid, text, run=None, tpath=None,
-                                  sleep_fn=None, logs=None, user_authored=False):
+                                  sleep_fn=None, logs=None, user_authored=False, nudge=None):
             run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
             run(["tmux", "send-keys", "-t", pid, "Enter"])
             return True
@@ -9718,7 +9718,7 @@ class TestApiWatchdog(TestCase):
                          default_capture=self._DRAFT_PANE)
         calls = []
 
-        def _fake_stash(pid, text, run, captured=None, logs=None, state=None):
+        def _fake_stash(pid, text, run, captured=None, logs=None, state=None, **kwargs):
             # #852-review 🟡-5: the api-error resume path now threads `state`
             # into deliver_with_stash (so a leaked resume-text gets a durable
             # park record); the fake must mirror the production signature.

@@ -231,7 +231,7 @@ def _cache_repo_roots(home=None, max_age_s=None):
     return roots
 
 
-def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None):
+def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None):
     """Shared bounce/gk-request helper (issue #35): attempt a stash-around
     delivery of `text` for a pane that already passed the live-work / armed
     -loop / already-nudged guards but isn't bare-idle — i.e. it holds a
@@ -249,11 +249,12 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None):
     make `--dry-run` accuse a repo whose real sweep would have succeeded."""
     if dry_run:
         return False
-    return watchdog.deliver_with_stash(pid, text, run, captured=captured, logs=logs)
+    return watchdog.deliver_with_stash(pid, text, run, captured=captured,
+                                       logs=logs, nudge=nudge)
 
 
 def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
-                              sleep_fn, logs):
+                              sleep_fn, logs, nudge=None):
     """#497 — the shared BARE-box transcript-proof send for bounce/gkreq (the
     sibling of `_try_stash_nudge`, which is the DRAFT-box branch's shared
     helper). Resolves the pane's own transcript (`find_active_transcript(root)`
@@ -277,7 +278,8 @@ def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
     tinfo = watchdog.find_active_transcript(projects_dir, root)
     tpath = tinfo[0] if tinfo else None
     watchdog._janitor_mark_watch(state, pid, now)
-    if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs):
+    if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
+                              nudge=nudge):
         watchdog._janitor_clear_watch(state, pid)
         return True
     return False
@@ -501,7 +503,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # verify failure still skips, but never silently (#193).
                 why = []
                 ok = _try_stash_nudge(pid, captured, watchdog.BOUNCE_NUDGE % (tick_str, name),
-                                      run, dry_run, logs=why)
+                                      run, dry_run, logs=why, nudge="bounce")
                 # #271 (adversarial-review MAJOR finding): `why` also carries
                 # `deliver_with_stash`'s own rescue-persist line — promote it
                 # to the main journal on EITHER outcome, not just failure, or
@@ -532,7 +534,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             # #193 dedup.
             if not _send_bare_nudge_verified(
                     state, pid, root, watchdog.BOUNCE_NUDGE % (tick_str, name),
-                    run, now, projects_dir, sleep_fn, logs):
+                    run, now, projects_dir, sleep_fn, logs, nudge="bounce"):
                 seen.pop(name, None)
                 _handle_unverified_nudge(
                     b, name, tick_str, "bounce", send_fn, persist, dry_run, now,
@@ -741,7 +743,8 @@ def _stale_handoff_session_nudge(state, pid, root, pushed, run, now,
         return logs
     if _send_bare_nudge_verified(state, pid, root,
                                  watchdog.GK_STALE_PUSH_NUDGE % tick_str,
-                                 run, now, projects_dir, sleep_fn, logs):
+                                 run, now, projects_dir, sleep_fn, logs,
+                                 nudge="gk-request"):
         logs.append("gkstale-nudge %s %s" % (root, tick_str))
     else:
         # No keystroke retry: the per-ticket 24h dedup holds next sweep so
@@ -935,7 +938,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # not one `stash-*` line in the journal.
                 why = []
                 ok = _try_stash_nudge(pid, captured, watchdog.GKREQ_NUDGE % (tick_str, name),
-                                      run, dry_run, logs=why)
+                                      run, dry_run, logs=why, nudge="gk-request")
                 # #271 — see bounce_backstop's identical fix above.
                 logs.extend(ln for ln in why if "draft-rescue" in ln)
                 if not ok:
@@ -962,7 +965,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
             # unverified submit so a swallowed nudge retries next sweep.
             if not _send_bare_nudge_verified(
                     state, pid, root, watchdog.GKREQ_NUDGE % (tick_str, name),
-                    run, now, projects_dir, sleep_fn, logs):
+                    run, now, projects_dir, sleep_fn, logs, nudge="gk-request"):
                 seen.pop(name, None)
                 _handle_unverified_nudge(
                     g, name, tick_str, "gkreq", send_fn, persist, dry_run, now,
