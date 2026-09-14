@@ -816,12 +816,13 @@ if [ -n "$ISSUE_NUM" ]; then
         VGH_RC=0
         # LABELS: a single-page read is sufficient (a ticket never carries >100
         # labels) — the SAME `--json labels -q '.labels[].name'` form the #533
-        # acceptance block above uses (one name per line).
-        if [ -n "$REPO_ARG" ]; then
-            V_LABELS=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json labels -q '.labels[].name' 2>/dev/null) || VGH_RC=$?
-        else
-            V_LABELS=$(gh issue view "$ISSUE_NUM" --json labels -q '.labels[].name' 2>/dev/null) || VGH_RC=$?
-        fi
+        # acceptance block above uses (one name per line). Read from
+        # VERDICT_REPOFULL (already PROVEN == zbynekdrlik/odoo-erp above, and it
+        # covers BOTH the -R and the cwd-remote cases) so BOTH reads target the
+        # SAME repo — #1010 review 🔵1: this closes the theoretical no-`-R`
+        # divergence where `gh`'s default-repo resolution could differ from the
+        # API path's origin-normalized owner/repo.
+        V_LABELS=$(gh issue view "$ISSUE_NUM" -R "$VERDICT_REPOFULL" --json labels -q '.labels[].name' 2>/dev/null) || VGH_RC=$?
         # COMMENTS: the WHOLE thread, PAGINATED (#1010). `gh issue view --json
         # comments` returns only the first page (~100), so a gk verdict heading
         # PAST comment #100 on a long thread (odoo-erp #6291 5 rounds / #6493,
@@ -830,13 +831,16 @@ if [ -n "$ISSUE_NUM" ]; then
         # reads every page, exactly like the odoo-erp reopen-guard this carve-out
         # mirrors. The repo is VERDICT_REPOFULL (already PROVEN
         # == zbynekdrlik/odoo-erp above); ISSUE_NUM is pure digits from the
-        # segmenter. `--jq '.[].body'` emits one body per line across ALL pages
-        # (raw, like the old jq form), so `_has_gk_verdict_artifact`'s per-line
-        # `^#{1,3}…` anchoring is byte-compatible. FAIL CLOSED: any fetch error
-        # (rc != 0 from either read) leaves the carve-out unsatisfied → BLOCK,
-        # never "a page failed → assume the verdict is there".
+        # segmenter. `?per_page=100` cuts the HTTP round-trips on a long thread
+        # (the exact case this fix targets) — `--paginate` still follows the Link
+        # header to fetch EVERY page. `--jq '.[].body'` emits one body per line
+        # across ALL pages (raw, like the old jq form), so
+        # `_has_gk_verdict_artifact`'s per-line `^#{1,3}…` anchoring is
+        # byte-compatible. FAIL CLOSED: any fetch error (rc != 0 from either read)
+        # leaves the carve-out unsatisfied → BLOCK, never "a page failed → assume
+        # the verdict is there".
         VC_RC=0
-        V_COMMENTS=$(gh api "repos/${VERDICT_REPOFULL}/issues/${ISSUE_NUM}/comments" --paginate --jq '.[].body' 2>/dev/null) || VC_RC=$?
+        V_COMMENTS=$(gh api "repos/${VERDICT_REPOFULL}/issues/${ISSUE_NUM}/comments?per_page=100" --paginate --jq '.[].body' 2>/dev/null) || VC_RC=$?
         if [ "$VGH_RC" -eq 0 ] && [ "$VC_RC" -eq 0 ]; then
             # Whole-line fixed-string membership (label names carry `:`; never a
             # regex) — a thin wrapper over the shared #760 _labels_contain helper,
