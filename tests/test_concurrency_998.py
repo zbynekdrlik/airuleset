@@ -7,8 +7,10 @@ renderer, dispatch hook, lane caps) reads. Three-source chain: declared window
 (name or cwd) -> project lane-resources.json `mode` -> default parallel.
 """
 import json
+import os
 import sys
 import tempfile
+import unittest.mock as m
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -236,6 +238,90 @@ class TestDispatchGateLine(TestCase):
     def test_sequential_with_many_live_blocks(self):
         d = self._seq_dir()
         self.assertTrue(cc.dispatch_gate_line(d, live_count=3).startswith("block|"))
+
+
+class TestDavid3Sequential1031(TestCase):
+    """#1031 — david3@subdev (window d3) declared SEQUENTIAL in the fleet, the
+    SAME #998 declared-window mechanism as gk-infra. A stream window is neither
+    the gk `review` nor `infra` kind, so its role is None (which
+    `validate_windows` accepts). Every consumer reads the ONE cwd-first
+    resolver, so the declaration alone flips d3 to sequential — no consumer
+    code change. These lock the REAL fleet declaration (via
+    `cli_fleet.box_windows`), not a hand-copied literal."""
+
+    HOME = "/home/david3"
+    D3_CWD = "/home/david3/devel/odoo/odoo-erp"
+
+    def _windows(self):
+        return cli_fleet.box_windows("david3")
+
+    # (1) d3 resolves ("sequential", None, "role") via the declared window.
+    def test_d3_resolves_sequential_via_declared_window(self):
+        w = self._windows()
+        self.assertNotEqual(w, [], "david3@subdev must declare a window (#1031)")
+        self.assertEqual(
+            cc.resolve_concurrency(self.D3_CWD, windows=w, home=self.HOME),
+            ("sequential", None, "role"))
+
+    def test_d3_window_shape(self):
+        w = self._windows()
+        self.assertEqual([x["name"] for x in w], ["d3"])
+        self.assertEqual(w[0]["cwd"], "~/devel/odoo/odoo-erp")
+        self.assertIsNone(w[0]["role"])
+        self.assertEqual(w[0]["mode"], "sequential")
+
+    def test_d3_subdir_worktree_lane_resolves_sequential(self):
+        # a worktree lane under d3's cwd (the autopilot-worker isolation dir)
+        # still resolves to sequential by containment.
+        w = self._windows()
+        mode, role, _ = cc.resolve_concurrency(
+            self.D3_CWD + "/.claude/worktrees/agent-x", windows=w,
+            home=self.HOME)
+        self.assertEqual((mode, role), ("sequential", None))
+
+    # (4) the new declaration is shape-valid (role=None accepted).
+    def test_d3_declaration_validates(self):
+        self.assertEqual(cli_fleet.validate_windows(self._windows()), [])
+
+    # (2) regression — the change is scoped to the david3 account ONLY.
+    def test_gk_review_window_still_parallel(self):
+        gk = cli_fleet.box_windows("gatekeeper")
+        self.assertEqual(
+            cc.resolve_concurrency("/home/gatekeeper/devel/odoo/odoo-erp",
+                                   windows=gk, home="/home/gatekeeper"),
+            ("parallel", "review", "role"))
+
+    def test_sibling_david_streams_still_default_parallel(self):
+        for u in ("david1", "david2", "david4"):
+            self.assertEqual(cli_fleet.box_windows(u), [],
+                             "%s must NOT declare a window (#1031)" % u)
+            self.assertEqual(
+                cc.resolve_concurrency("/home/%s/devel/odoo/odoo-erp" % u,
+                                       windows=cli_fleet.box_windows(u),
+                                       home="/home/%s" % u),
+                ("parallel", None, "default"))
+
+    # (3) dispatch gate: d3's 2nd concurrent autopilot-worker is refused. The
+    # real `dispatch_gate_line` resolves the mode itself via `_current_user`, so
+    # patch it to david3 and pass d3's cwd expanded against THIS runner's $HOME
+    # (the resolver expands the declared `~/...` cwd the same way).
+    def test_dispatch_gate_blocks_d3_second_lane(self):
+        cwd = os.path.expanduser("~/devel/odoo/odoo-erp")
+        with m.patch.object(cc, "_current_user", return_value="david3"):
+            self.assertEqual(cc.dispatch_gate_line(cwd, live_count=1),
+                             "block|sequential|1")
+            self.assertEqual(cc.dispatch_gate_line(cwd, live_count=0),
+                             "allow|sequential|0")
+
+    # (5) the /autopilot goal renderer has a fork-no-merge x sequential variant
+    # (the phrase the registry already uses for sequential; refill phrase gone).
+    def test_goal_renderer_forknomerge_sequential_variant(self):
+        import goal_registry as gr
+        line = gr.render_goal_line("fork-no-merge", "sequential", None)
+        self.assertIn(
+            "SEQUENTIAL — ONE unit at a time: dispatch → main review → "
+            "integrate → verify → next; no refill;", line)
+        self.assertNotIn("CONTINUOUS REFILL", line)
 
 
 if __name__ == "__main__":
