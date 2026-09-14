@@ -1017,6 +1017,29 @@ def _main_checkout_from_worktree(repo_dir):
     return Path(s[:idx])
 
 
+def _symlink_drift_reason(link):
+    """Pure drift classifier for a managed symlink (#972): 'dangling' (target
+    missing) or 'worktree' (target under .claude/worktrees/, will dangle after
+    the worktree is removed), else None. Dangling is checked FIRST so a
+    post-cleanup worktree symlink (its target already gone) reads 'dangling',
+    matching `_check_symlink_health`'s existing output order. SHARED by
+    `_check_symlink_health` (cmd_status's display) AND the watchdog conformance
+    symlinks dimension via `_scan_managed_symlink_drift` (#972 reopen), so
+    `status` detection and the watchdog CONSUMER agree by construction."""
+    link = Path(link)
+    if not link.is_symlink():
+        return None
+    if not link.exists():
+        return "dangling"
+    try:
+        actual_str = str(Path(os.readlink(link)))
+    except OSError:
+        return None
+    if "/.claude/worktrees/" in actual_str:
+        return "worktree"
+    return None
+
+
 def _check_symlink_health(link, expected_target, label):
     """Check a managed symlink for dangling or worktree targets (#972).
 
@@ -1031,17 +1054,13 @@ def _check_symlink_health(link, expected_target, label):
         return f"  {label}: NOT INSTALLED"
     actual = Path(os.readlink(link))
     actual_str = str(actual)
-    # Check for dangling symlink
-    if not link.exists():
-        main_hint = ""
-        if "/.claude/worktrees/" in actual_str:
-            main_hint = _main_checkout_from_worktree(actual)
-        else:
-            main_hint = REPO_DIR
+    reason = _symlink_drift_reason(link)
+    if reason == "dangling":
+        main_hint = (_main_checkout_from_worktree(actual)
+                     if "/.claude/worktrees/" in actual_str else REPO_DIR)
         return (f"  {label}: MISMATCH (dangling target: {actual}) "
                 f"— run install from {main_hint}")
-    # Check for worktree target (will dangle after worktree removal)
-    if "/.claude/worktrees/" in actual_str:
+    if reason == "worktree":
         main_hint = _main_checkout_from_worktree(actual)
         return (f"  {label}: MISMATCH (worktree target: {actual}) "
                 f"— run install from {main_hint}")
@@ -1049,6 +1068,49 @@ def _check_symlink_health(link, expected_target, label):
     if actual != expected_target:
         return f"  {label}: MISMATCH (points to {actual})"
     return f"  {label}: OK (symlinked to airuleset)"
+
+
+def _scan_managed_symlink_drift(agents_dir=None, skills_dir=None):
+    """Scan managed agent/skill symlinks under ~/.claude for drift (#972 reopen).
+
+    Returns a list of ``(name, reason, target)`` for symlinks that are EITHER
+    worktree-target (unambiguous — will dangle after the worktree is removed)
+    OR airuleset-OWNED and dangling (target under this repo's agents/skills dir,
+    but missing). A FOREIGN dangling symlink (e.g. a `win-mcp` skill pointing
+    elsewhere — the Skill Ownership rule) is NOT flagged. Returns ``None`` on an
+    unexpected ``OSError`` (UNDETERMINED — the conformance classifier maps that
+    to no-alarm). This is the CONSUMER side of the exact drift condition
+    `cmd_status` prints; both go through `_symlink_drift_reason` so `status` and
+    the watchdog can never disagree. ``agents_dir``/``skills_dir`` override the
+    default ``~/.claude`` locations for unit tests."""
+    home = os.path.expanduser("~")
+    checks = (
+        (Path(agents_dir) if agents_dir else Path(home) / ".claude" / "agents",
+         REPO_DIR / "agents"),
+        (Path(skills_dir) if skills_dir else Path(home) / ".claude" / "skills",
+         REPO_DIR / "skills"),
+    )
+    out = []
+    try:
+        for base, owned_root in checks:
+            if not base.is_dir():
+                continue
+            owned_prefix = str(owned_root)
+            for entry in sorted(base.iterdir()):
+                reason = _symlink_drift_reason(entry)
+                if reason is None:
+                    continue
+                target = str(Path(os.readlink(entry)))
+                owned = (
+                    "/.claude/worktrees/" in target
+                    or target == owned_prefix
+                    or target.startswith(owned_prefix + os.sep)
+                )
+                if owned:
+                    out.append((entry.name, reason, target))
+        return out
+    except OSError:
+        return None
 
 
 def _stale_managed_symlinks(target_dir, repo_subdir, valid_names, suffix=""):

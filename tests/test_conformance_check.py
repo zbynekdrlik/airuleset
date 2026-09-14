@@ -120,6 +120,10 @@ def _run(state, tmp, send=None, dry_run=False, git=None, timer=None,
         git_run=git or fake_git(**git_kw),
         timer_check=timer or fake_timer(),
         is_target_check=lambda: is_target,
+        # #972 REOPEN: inject a clean symlink scan so the default-on dimension
+        # never reads the developer's REAL ~/.claude here (its own dimension is
+        # covered by tests/test_conformance_symlinks_972.py).
+        symlink_scan=lambda: [],
         persist=lambda: None)
     return logs, calls
 

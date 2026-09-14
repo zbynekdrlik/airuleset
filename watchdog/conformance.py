@@ -271,6 +271,26 @@ def classify_timer(status):
 
 # --- ORCHESTRATOR ----------------------------------------------------------
 
+def classify_symlinks(drift_entries):
+    """#972 REOPEN: managed agent/skill symlinks under ~/.claude that are
+    dangling or point into a worktree — the CONSUMER of `cmd_status`'s MISMATCH
+    detection (which had no consumer, so the 2026-09-11 drift sat unacted 19 h).
+    ``drift_entries`` is a list of ``(name, reason, target)`` from the injected
+    scan, or ``None`` when the scan errored. Contract mirrors the other pure
+    deciders: True conformant / False drift / None undetermined (never alarmed).
+    """
+    if drift_entries is None:
+        return ("symlinks", None, "symlink scan zlyhal — preskočené")
+    if not drift_entries:
+        return ("symlinks", True, "managed agent/skill symlinky OK")
+    n = len(drift_entries)
+    sample = ", ".join("%s (%s)" % (name, reason)
+                       for name, reason, _t in drift_entries[:4])
+    return ("symlinks", False,
+            "%d managed symlink(ov) dangling/worktree-target: %s — spusti "
+            "`python3 airuleset.py install` z HLAVNÉHO checkoutu" % (n, sample))
+
+
 def _sig_for(dim, facts):
     """Compact dedup signature per dimension from its raw facts — a CHANGED sig
     re-pings immediately (the drift is materially different); an unchanged sig is
@@ -284,13 +304,18 @@ def _sig_for(dim, facts):
         return "md5:%s" % (facts.get("on_disk") or "")
     if dim == "timer":
         return "timer:%s" % (facts.get("status") or "")
+    if dim == "symlinks":
+        entries = facts.get("drift") or []
+        return "symlinks:%s" % _md5_hex(
+            "|".join(sorted("%s:%s" % (n, r) for n, r, _t in entries)))[:12]
     return dim
 
 
 def run_conformance_check(now, state, send_fn=None, dry_run=False,
                           repo_root=None, claude_md_path=None, baseline_path=None,
                           git_run=None, timer_check=None, is_target_check=None,
-                          interval=None, reping=None, persist=None):
+                          interval=None, reping=None, persist=None,
+                          symlink_scan=None):
     """Job 34: the daily per-box conformance sweep. Cadence-gated on its OWN state
     key ``conformance_last_check`` (``_sweep_due``); the cadence marker is stamped +
     persisted BEFORE any network op (#172 kill-safe). Best-effort — every dimension
@@ -381,12 +406,27 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     status = timer_check()
     timer_facts = {"status": status}
 
+    # #972 REOPEN: the CONSUMER of cmd_status's symlink MISMATCH detection. The
+    # scan seam mirrors git_run/timer_check — tests inject a fake; the real
+    # watchdog uses airuleset's own scanner (call-time import, the established
+    # watchdog-leaf idiom: cards/cross_stream/goal/conformance_heartbeat all do
+    # it, and airuleset.py's top level is side-effect-free behind __main__).
+    if symlink_scan is None:
+        import airuleset
+        symlink_scan = airuleset._scan_managed_symlink_drift
+    try:
+        drift_entries = symlink_scan()
+    except Exception:
+        drift_entries = None      # scan failure → UNDETERMINED, never an alarm
+    symlink_facts = {"drift": drift_entries}
+
     # --- decide (pure) ---
     decisions = [
         (classify_head(local, origin, behind), head_facts),
         (classify_dirty(porcelain, dirty_error, clean_expected), dirty_facts),
         (classify_md5(on_disk_md5, recorded_md5, recorded_head, local), md5_facts),
         (classify_timer(status), timer_facts),
+        (classify_symlinks(drift_entries), symlink_facts),
     ]
 
     seen = dict(state.get("conformance") or {})
