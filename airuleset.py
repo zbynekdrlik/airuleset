@@ -1017,6 +1017,29 @@ def _main_checkout_from_worktree(repo_dir):
     return Path(s[:idx])
 
 
+def _symlink_drift_reason(link):
+    """Pure drift classifier for a managed symlink (#972): 'dangling' (target
+    missing) or 'worktree' (target under .claude/worktrees/, will dangle after
+    the worktree is removed), else None. Dangling is checked FIRST so a
+    post-cleanup worktree symlink (its target already gone) reads 'dangling',
+    matching `_check_symlink_health`'s existing output order. SHARED by
+    `_check_symlink_health` (cmd_status's display) AND the watchdog conformance
+    symlinks dimension via `_scan_managed_symlink_drift` (#972 reopen), so
+    `status` detection and the watchdog CONSUMER agree by construction."""
+    link = Path(link)
+    if not link.is_symlink():
+        return None
+    if not link.exists():
+        return "dangling"
+    try:
+        actual_str = str(Path(os.readlink(link)))
+    except OSError:
+        return None
+    if "/.claude/worktrees/" in actual_str:
+        return "worktree"
+    return None
+
+
 def _check_symlink_health(link, expected_target, label):
     """Check a managed symlink for dangling or worktree targets (#972).
 
@@ -1031,17 +1054,13 @@ def _check_symlink_health(link, expected_target, label):
         return f"  {label}: NOT INSTALLED"
     actual = Path(os.readlink(link))
     actual_str = str(actual)
-    # Check for dangling symlink
-    if not link.exists():
-        main_hint = ""
-        if "/.claude/worktrees/" in actual_str:
-            main_hint = _main_checkout_from_worktree(actual)
-        else:
-            main_hint = REPO_DIR
+    reason = _symlink_drift_reason(link)
+    if reason == "dangling":
+        main_hint = (_main_checkout_from_worktree(actual)
+                     if "/.claude/worktrees/" in actual_str else REPO_DIR)
         return (f"  {label}: MISMATCH (dangling target: {actual}) "
                 f"— run install from {main_hint}")
-    # Check for worktree target (will dangle after worktree removal)
-    if "/.claude/worktrees/" in actual_str:
+    if reason == "worktree":
         main_hint = _main_checkout_from_worktree(actual)
         return (f"  {label}: MISMATCH (worktree target: {actual}) "
                 f"— run install from {main_hint}")
@@ -1049,6 +1068,49 @@ def _check_symlink_health(link, expected_target, label):
     if actual != expected_target:
         return f"  {label}: MISMATCH (points to {actual})"
     return f"  {label}: OK (symlinked to airuleset)"
+
+
+def _scan_managed_symlink_drift(agents_dir=None, skills_dir=None):
+    """Scan managed agent/skill symlinks under ~/.claude for drift (#972 reopen).
+
+    Returns a list of ``(name, reason, target)`` for symlinks that are EITHER
+    worktree-target (unambiguous — will dangle after the worktree is removed)
+    OR airuleset-OWNED and dangling (target under this repo's agents/skills dir,
+    but missing). A FOREIGN dangling symlink (e.g. a `win-mcp` skill pointing
+    elsewhere — the Skill Ownership rule) is NOT flagged. Returns ``None`` on an
+    unexpected ``OSError`` (UNDETERMINED — the conformance classifier maps that
+    to no-alarm). This is the CONSUMER side of the exact drift condition
+    `cmd_status` prints; both go through `_symlink_drift_reason` so `status` and
+    the watchdog can never disagree. ``agents_dir``/``skills_dir`` override the
+    default ``~/.claude`` locations for unit tests."""
+    home = os.path.expanduser("~")
+    checks = (
+        (Path(agents_dir) if agents_dir else Path(home) / ".claude" / "agents",
+         REPO_DIR / "agents"),
+        (Path(skills_dir) if skills_dir else Path(home) / ".claude" / "skills",
+         REPO_DIR / "skills"),
+    )
+    out = []
+    try:
+        for base, owned_root in checks:
+            if not base.is_dir():
+                continue
+            owned_prefix = str(owned_root)
+            for entry in sorted(base.iterdir()):
+                reason = _symlink_drift_reason(entry)
+                if reason is None:
+                    continue
+                target = str(Path(os.readlink(entry)))
+                owned = (
+                    "/.claude/worktrees/" in target
+                    or target == owned_prefix
+                    or target.startswith(owned_prefix + os.sep)
+                )
+                if owned:
+                    out.append((entry.name, reason, target))
+        return out
+    except OSError:
+        return None
 
 
 def _stale_managed_symlinks(target_dir, repo_subdir, valid_names, suffix=""):
@@ -1148,35 +1210,51 @@ def _check_skill_symlinks(box_skills):
 
 
 def _check_worktree_repo_dir(cmd_name):
-    """Guard for cmd_install / cmd_push: refuse when REPO_DIR is a worktree.
+    """Guard for cmd_install / cmd_push (#972 + REOPEN): refuse a WORKTREE install.
 
-    Override: AIRULESET_INSTALL_FROM_WORKTREE=1 (for tests).
-    AIRULESET_ALLOW_WORKTREE_ESCAPE=1 does NOT bypass this — they protect
-    different things (escape = agent writing outside worktree boundary;
-    install-from-worktree = install producing worktree-path symlinks that
-    dangle after cleanup).
+    INVARIANT (reopen, 2026-09-12): an install whose REPO_DIR is a worktree NEVER
+    writes into the login user's REAL home — the passwd-db home
+    (``pwd.getpwuid(os.getuid()).pw_dir``, immune to ``$HOME``). The
+    ``AIRULESET_INSTALL_FROM_WORKTREE=1`` override is honoured ONLY when the
+    effective HOME (``os.path.expanduser("~")``) differs from that real home —
+    i.e. a test tmp HOME — so a worktree install can only ever target an isolated
+    HOME. With the real (or an undeterminable) home the guard REFUSES regardless
+    of the env var (fail-safe CLOSED). Root incident: a lane exported the override
+    and ran ``install`` from a worktree against the real HOME, dangling the real
+    ~/.claude symlinks after cleanup (2026-09-11) — so the override, on its own,
+    must no longer be an escape hatch. ``AIRULESET_ALLOW_WORKTREE_ESCAPE=1`` does
+    NOT bypass this — different guard (escape = writing OUTSIDE the worktree
+    boundary; this = an install producing worktree-path symlinks that dangle).
     """
-    if os.environ.get("AIRULESET_INSTALL_FROM_WORKTREE") == "1":
-        return  # override for tests
-    if _is_worktree_repo_dir(REPO_DIR):
-        main_checkout = _main_checkout_from_worktree(REPO_DIR)
-        print(
-            f"\n🚫 REFUSED: `airuleset.py {cmd_name}` is running from a WORKTREE checkout.\n"
-            f"\n"
-            f"  REPO_DIR     : {REPO_DIR}\n"
-            f"  main checkout: {main_checkout}\n"
-            f"\n"
-            f"  install/push from a worktree creates symlinks (~/.claude/agents/*,\n"
-            f"  ~/.claude/skills/*) pointing INTO the worktree. When the worktree is\n"
-            f"  removed, these become dangling and Claude Code loses agent types.\n"
-            f"\n"
-            f"  FIX: run `python3 {main_checkout}/airuleset.py {cmd_name}` from the\n"
-            f"  main checkout instead.\n"
-            f"\n"
-            f"  Override (tests only): AIRULESET_INSTALL_FROM_WORKTREE=1\n",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if not _is_worktree_repo_dir(REPO_DIR):
+        return  # not a worktree — nothing to guard
+    try:
+        import pwd
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except Exception:
+        real_home = None  # undeterminable (no pwd / uid absent) → fail safe (NOT isolated)
+    effective_home = Path(os.path.expanduser("~")).resolve()
+    override = os.environ.get("AIRULESET_INSTALL_FROM_WORKTREE") == "1"
+    isolated_home = real_home is not None and effective_home != real_home
+    if override and isolated_home:
+        return  # test tmp HOME — a worktree install can only target an isolated HOME
+    main_checkout = _main_checkout_from_worktree(REPO_DIR)
+    print(
+        f"\n🚫 REFUSED: `airuleset.py {cmd_name}` is running from a WORKTREE checkout.\n"
+        f"\n"
+        f"  REPO_DIR     : {REPO_DIR}\n"
+        f"  main checkout: {main_checkout}\n"
+        f"\n"
+        f"  install/push from a worktree creates symlinks (~/.claude/agents/*,\n"
+        f"  ~/.claude/skills/*) pointing INTO the worktree. When the worktree is\n"
+        f"  removed, these become dangling and Claude Code loses agent types — and\n"
+        f"  an install writes the login user's REAL home regardless of $HOME.\n"
+        f"\n"
+        f"  FIX: run `python3 {main_checkout}/airuleset.py {cmd_name}` from the MAIN\n"
+        f"  checkout — an install is a per-account operation, never a worktree lane.\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 SHARED_FLEET_DIR = Path("/var/lib/airuleset")
