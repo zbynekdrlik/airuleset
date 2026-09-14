@@ -12,7 +12,7 @@ integrate returned lanes from durable state (the branch + its LANE-RETURN commen
 SHAPE — the exact sibling of `queue_arrival_recheck`/`u_freshness`: a job-20
 keystroke rider that rides `goal.goal_lane_sweep`'s existing armed-pane loop (ZERO
 new pane walk), owns its own `state["lane_reconcile"]` namespace, consults the
-SHARED `nudge_gate` (family spacing), and takes an INJECTED `reconcile_fetch(cwd)`
+SHARED `nudge_gate` (per-kind floor + cross-kind total cap), and takes an INJECTED `reconcile_fetch(cwd)`
 seam so run_once stays network-free in unit tests. It NEVER merges, NEVER relabels,
 and imports NO notify — it is a keystroke into the armed session, never an owner
 ping.

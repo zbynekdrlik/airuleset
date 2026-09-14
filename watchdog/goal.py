@@ -5032,13 +5032,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "human activity, never overwrite a live conversation"
                     % (loc, reason))
         return logs, True
-    # #797 SHARED CADENCE GATE (family spacing): a DIFFERENT gated-family category
-    # (u-freshness / partition-audit / release-gap / queue-arrival) nudged this
-    # session within NUDGE_FAMILY_GAP_S -> DEFER this lane nudge to a later sweep
-    # (no keystroke, no `_lane_record_nudge`/park/streak change), killing the
-    # cross-sweep burst. The family gap IGNORES the SAME category, so the lane's
-    # own cadence is untouched. `dry_run` READY below is unaffected (a dry-run
-    # never sends), so the gate sits before it.
+    # #797/#1023 SHARED CADENCE GATE: `gate_ok` DEFERS this lane nudge (no
+    # keystroke, no `_lane_record_nudge`/park/streak change) when the per-pane-
+    # per-KIND floor holds (a recent lane-occupancy) OR the #1023 cross-kind TOTAL
+    # cap holds (a DIFFERENT priority kind — u-freshness/partition-audit/release-
+    # gap/queue-arrival — within NUDGE_TOTAL_GAP_S), killing the burst. Journal
+    # token (`hold:floor`/`hold:total-cap`) via `floor_hold_reason`; the `dry_run`
+    # READY below never sends, so the gate sits before it.
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
         if not watchdog.nudges_enabled("lane-occupancy"):   # #1023 per-kind switch
@@ -5206,8 +5206,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # refill nudge delivers for ANY live_workers < floor, so live_workers (0..4)
     # is stamped as part of the #670 dedup signature (not always 0).
     _lane_record_nudge(rec, live_workers, backlog_n, n, now)
-    # #797 -- stamp the shared cadence clock on a DELIVERED lane nudge so a
-    # sibling family category defers within NUDGE_FAMILY_GAP_S (the burst fix).
+    # #797/#1023 -- stamp the cadence clock on a DELIVERED lane nudge: a sibling
+    # priority kind then defers via the cross-kind TOTAL cap, a repeat via its floor.
     _nudge_gate.mark_sent(state, sid, "lane-occupancy", now)
     # #442 THIRD GAP: the give-up counter bounds this 0-worker empty-lane branch,
     # so it logs "(n/MAX)". #726 removed the under-saturated "(fill)" variant + the
