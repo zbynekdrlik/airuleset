@@ -5044,6 +5044,16 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         if not watchdog.nudges_enabled("lane-occupancy"):   # #1023 per-kind switch
             logs.append("lane-occupancy %s -> skip:kind-off (lane-occupancy)" % loc)
             return logs, True
+        # #1023 (2nd-review 🔴): idle-pane only — a busy "Waiting for N background
+        # agents" pane defers (`_lane_boundary_ok` returns (True,'input','') for it,
+        # so without this the submit is swallowed into the running turn and the
+        # /goal parks orphaned, deliver_goal:1702). Mirrors every sibling rider
+        # (queue_arrival). The batch path is already covered by `_b_busy` in
+        # goal_lane_sweep. Deferred WITHOUT a keystroke; retries the next idle tick.
+        if _ops_wait_recheck._pane_busy_waiting(captured):
+            logs.append("lane-occupancy %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
+            return logs, True
         if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
             logs.append("lane-occupancy %s -> hold:floor (%s; retry next sweep)"
                         % (loc, _nudge_gate.floor_hold_reason(
