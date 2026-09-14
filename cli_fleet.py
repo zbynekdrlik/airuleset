@@ -47,6 +47,29 @@ REMOTE_HOSTS = [
         # meeting-analysis box gets the key the same way -- one line, no
         # parallel mechanism.
         "soniox": True,
+        # #1005 — dev2 is the ONLY managed box that reaches BOTH presenter prod
+        # instances (STEP-0 probe 2026-09-14): SNV is a LAN-only address the
+        # controller cannot see, PP is reachable via tailscale from either box.
+        # dev2 also hosts the presenter runner + runs the api-watchdog timer, so
+        # its watchdog job 47 (watchdog/healthz_probe.py) reads these declared
+        # /healthz endpoints, checks .ai.connected/.ai.error, and alerts the
+        # owner on a >=2-sample outage. PP addressed by tailscale IP (stable,
+        # address-by-tailscale) rather than the LAN DNS name companion-pp.lan.
+        # `owner` routes the alert to zbynek (presenter owner) regardless of
+        # dev2's own box owner. Any future external /healthz monitor = one more
+        # entry here, no code change — BUT: box_health_probes scopes a declaration
+        # to the box whose entry `name` equals that box's OS hostname first-label
+        # (the unix user `newlevel` is shared by dev2/dev1/spinbike-vps). So a
+        # health_probes declaration is only ever run by the box it lives on when
+        # `name` == that box's hostname; declaring probes on a box whose `name`
+        # differs from its hostname (e.g. a subdev `<user>@subdev` entry) would
+        # silently never run. See #1005 followup on hardening that invariant.
+        "health_probes": [
+            {"name": "presenter-snv", "url": "http://10.77.9.205/healthz",
+             "path": ".ai", "owner": "zbynek"},
+            {"name": "presenter-pp", "url": "http://100.101.72.101/healthz",
+             "path": ".ai", "owner": "zbynek"},
+        ],
     },
     {
         # odoo-gatekeeper VPS (prod merge/deploy + hotfix box). Key-based SSH,
@@ -589,6 +612,94 @@ def box_windows(user):
             w = managed_windows(remote)
             if w:
                 return w
+    return []
+
+
+def managed_health_probes(remote):
+    """The DECLARED external /healthz probes for a REMOTE_HOSTS entry (#1005),
+    or ``[]`` when the entry declares none — the sibling of ``managed_windows``.
+    Each probe is ``{"name", "url", "path", ("owner")}``: ``path`` is a dotted
+    JSON path into the /healthz body (``.ai``) whose ``connected``/``error``
+    fields the watchdog job reads; ``owner`` (optional) routes the outage alert
+    to a specific owner surface (#710), else the box owner. Pure accessor, no
+    logic, kept next to the table it reads."""
+    return list(remote.get("health_probes") or [])
+
+
+def validate_health_probes(probes):
+    """Return a list of human-readable error strings for a ``health_probes``
+    declaration (``[]`` == valid) — the sibling of ``validate_windows``. A SHAPE
+    check only: name present + token-safe + unique; url present + http(s); path
+    present + dotted + no ``..``; ``owner`` (if present) token-safe. Used by the
+    fleet-symmetry test + the watchdog wiring that hands these to a network GET."""
+    errs = []
+    if not isinstance(probes, list):
+        return ["health_probes is %s, not a list" % type(probes).__name__]
+    seen = set()
+    for i, p in enumerate(probes):
+        if not isinstance(p, dict):
+            errs.append("health_probe[%d] is %s, not a dict" % (i, type(p).__name__))
+            continue
+        name = p.get("name")
+        if not name or not _window_name_ok(name):
+            errs.append("health_probe[%d] name %r is missing or not token-safe" % (i, name))
+        elif name in seen:
+            errs.append("health_probe[%d] duplicate name %r" % (i, name))
+        else:
+            seen.add(name)
+        url = p.get("url")
+        if not url or not isinstance(url, str) or not (
+                url.startswith("http://") or url.startswith("https://")):
+            errs.append("health_probe[%d] url %r is missing or not http(s)" % (i, url))
+        path = p.get("path")
+        if not path or not isinstance(path, str) or not path.startswith(".") or ".." in path:
+            errs.append(
+                "health_probe[%d] path %r is missing, not dotted, or contains .." % (i, path))
+        owner = p.get("owner")
+        if owner is not None and (not isinstance(owner, str) or not _window_name_ok(owner)):
+            errs.append("health_probe[%d] owner %r is not token-safe" % (i, owner))
+    return errs
+
+
+def box_health_probes(user, hostname=None):
+    """The declared external /healthz probes for the box THIS is running on
+    (#1005) — the REMOTE_HOSTS entry that BOTH belongs to unix account ``user``
+    AND names THIS box (``name`` == the first label of ``hostname``) and declares
+    ``health_probes``, else ``[]``. Sibling of ``box_windows`` with ONE added
+    guard: the unix account is NOT a unique box id. ``newlevel`` is shared by
+    dev2 (which declares the presenter probes), dev1 (appended at controller
+    cutover) and spinbike-vps, and EVERY managed box runs the api-watchdog — so a
+    by-``user``-only match would hand dev2's probes to dev1/spinbike, double-
+    alerting the owner on a PP outage (PP is tailscale-reachable from dev1) and
+    issuing needless 5-min prod GETs from boxes that were never meant to probe.
+    Scoping by HOSTNAME closes that: dev2's entry ``name`` is ``dev2`` and its OS
+    hostname is ``dev2``, so only dev2 matches; dev1/spinbike get ``[]``. This
+    does NOT reintroduce the hostname-identity the fleet rejects for the SUBDEV
+    box (whose N stream users share ONE hostname): those are DIFFERENT unix users
+    and never reach a ``newlevel`` entry — the hostname here only disambiguates
+    the distinct-hostname workstations that genuinely share the ``newlevel``
+    account. ``hostname`` is injectable for tests; when None it is resolved
+    lazily via ``socket.gethostname()`` (a lazy stdlib call inside the accessor,
+    NOT a module-top import — the leaf keeps its zero-top-import purity, the same
+    pattern ``airuleset._current_user`` uses for ``os``/``pwd``). Fail direction:
+    an unresolvable/empty hostname scopes to ``[]`` (no probe rather than a
+    wrong-box probe) — the supervisor's post-deploy LIVE probe on dev2 is the net
+    that catches a false-negative before it is a silent outage."""
+    if not user:
+        return []
+    if hostname is None:
+        import socket
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = ""
+    host_label = (hostname or "").split(".")[0]
+    for remote in REMOTE_HOSTS:
+        if (remote.get("user") == user
+                and remote.get("name") == host_label):
+            p = managed_health_probes(remote)
+            if p:
+                return p
     return []
 
 

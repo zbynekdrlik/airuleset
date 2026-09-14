@@ -216,6 +216,16 @@ CANONICAL_SWEEP = [
     # (True in cmd_watchdog, left False in run_once unit tests).
     JobSpec("nice_check", "wd.nice_check", "nice_check_job",
             "nice_check_enabled", True, "list", "nice-check error"),
+    # Jobs 43-46 (mdreview_cadence / priority_policy / orphan_poll_reaper /
+    # session_health_observe) and 47 (#1005 healthz_probe) are DELIBERATELY not
+    # pinned in this order/gate/isolation spec — this file locks the SUBSET
+    # through job 42; the FULL registry-label set (incl. 43-47) is locked by
+    # test_run_once_registry_labels.py's EXPECTED_STANDALONE. Each is gated OFF
+    # by default here (its gate kwarg / declaration is not in `_all_open_kwargs`,
+    # so run_once never invokes it), so its presence cannot perturb these
+    # order/gate/isolation assertions. Job 47's gate additionally requires the
+    # `health_probes` fleet declaration to be non-empty — never true in this
+    # test's kwargs — so it stays fully inert here.
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

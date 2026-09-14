@@ -5259,6 +5259,7 @@ from cli_fleet import (  # noqa: E402, F401
     FLEET_CLAUDE_MIN_VERSION as FLEET_CLAUDE_MIN_VERSION,
     is_paused as is_paused,
     paused_reason as paused_reason,
+    box_health_probes as box_health_probes,   # #1005 — job 47 per-box declaration
 )
 
 
@@ -6537,6 +6538,25 @@ def _watchdog_deploy_state_fetch():
     return _ds.make_deploy_state_fetch(registry_path=registry_path)
 
 
+def _watchdog_health_probe_fetch(url, timeout=8):
+    """#1005 — Job 47's real HTTP GET seam (wired here so run_once unit tests
+    stay network-free — the job takes this as an injected `fetch`). Returns
+    ``(status_code, body_text)``; RAISES on any network / timeout / DNS / HTTP
+    error, which the job classifies as UNMEASURABLE (never as an outage) — a
+    read-only GET, never a write to the probed host."""
+    import urllib.request
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "airuleset-healthz-probe"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # Bounded read (memory safety), but generous: presenter's /healthz can
+        # carry a variable `ndi_pipelines` array, and a body TRUNCATED mid-JSON
+        # would fail json.loads → a permanent `unmeasurable` verdict that never
+        # alerts (#1005 review). 256 KiB is ~1000x the observed body while still
+        # capping a misbehaving endpoint.
+        body = resp.read(262144).decode("utf-8", "replace")
+        return resp.status, body
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
@@ -6813,6 +6833,20 @@ def cmd_watchdog(args):
                     # on the registry declaration existing. Left None in
                     # run_once unit tests.
                     deploy_state_fetch=_watchdog_deploy_state_fetch(),
+                    # Job 47 (#1005) — presenter /healthz.ai external
+                    # health-check. `health_probes` is THIS box's own fleet
+                    # declaration, scoped by unix user AND hostname: `newlevel`
+                    # is shared by dev2 (declares the probes), dev1 and
+                    # spinbike-vps, so box_health_probes returns the probes ONLY
+                    # to dev2 (name == socket.gethostname()) and [] on the other
+                    # newlevel boxes — the job self-gates off everywhere but dev2,
+                    # so no duplicate owner alerts and no needless prod GETs.
+                    # `health_probe_fetch` is the real HTTP GET seam (a run_once
+                    # unit test injects a recorder, never the network).
+                    # Cadence-gated ~5 min inside the registry gate. Reuses the
+                    # existing owner-routed send() path (#710 unchanged).
+                    health_probes=box_health_probes(_current_user()),
+                    health_probe_fetch=_watchdog_health_probe_fetch,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

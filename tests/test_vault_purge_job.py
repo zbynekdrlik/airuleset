@@ -316,12 +316,20 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # #947 reversal re-pin: session_restart_enabled REMOVED
                # (job 46 reversed to passive health observation, 2026-09-10);
                # the closing `):` moved back onto deploy_state_fetch=None.
+               # #1005 re-pin: health_probes=None, health_probe_fetch=None
+               # (job 47's presenter /healthz.ai external health-check — the
+               # box's fleet declaration + injected HTTP GET seam) were
+               # appended on a NEW trailing line after deploy_state_fetch=None,
+               # so the closing `):` moved off that line onto the new one; the
+               # anchor grew a last line, the mutation target vault_purge=None
+               # is untouched.
                "             u_fetch=None, reconcile_fetch=None, "
                "disk_guard_enabled=False,\n"
                "             nice_check_enabled=False,\n"
                "             mdreview_cadence_enabled=False,\n"
                "             priority_policy_enabled=False,\n"
-               "             deploy_state_fetch=None):")
+               "             deploy_state_fetch=None,\n"
+               "             health_probes=None, health_probe_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
