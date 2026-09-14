@@ -20,7 +20,7 @@
     "cli_disk_guard_root.py": 1715,
     "cli_drop_gateway.py": 869,
     "cli_filedrop_watchdog.py": 578,
-    "cli_fleet.py": 954,
+    "cli_fleet.py": 957,
     "cli_handoff_template.py": 316,
     "cli_key_rotation.py": 711,
     "cli_lane_overlap.py": 306,

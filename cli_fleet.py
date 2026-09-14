@@ -209,9 +209,12 @@ REMOTE_HOSTS = [
         # A single declared window keeps tmux provisioning byte-identical too
         # (_managed_windows_create_body returns "" for < 2 windows → bare
         # `rename-window d3`). NOT a project .claude/lane-resources.json in
-        # odoo-erp — that file lives in the shared checkout and would flip gk's
-        # review window (same ~/devel/odoo/odoo-erp path) too; the per-box
-        # fleet declaration scopes it to the david3 account only.
+        # odoo-erp: a declared window is SOURCE 1 in the resolver and beats the
+        # project file (source 2), so gk's OWN declared review window keeps gk
+        # parallel — the committed odoo-erp file would instead wrongly flip
+        # every OTHER non-declared stream sharing that checkout (montalu*,
+        # david1/2/4, miva*, simap*) to sequential. The per-box fleet
+        # declaration scopes the change to the david3 account only.
         "windows": [
             {"name": "d3", "cwd": "~/devel/odoo/odoo-erp",
              "role": None, "mode": "sequential"},
