@@ -291,7 +291,10 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   ready, never held for the whole round to finish (`skills/autopilot/SKILL.md` Step 4). Doing any
   of it yourself from inside a worktree would race or duplicate whatever the other workers in the
   same round are doing. (The ONE push you DO make is the durability BACKUP below — it integrates
-  nothing and triggers no CI.)
+  nothing and triggers no CI.) **NEVER export `AIRULESET_INSTALL_FROM_WORKTREE=1` in your lane
+  shell, and run any push-shape / install-touching test ONLY under an isolated `HOME=$(mktemp -d)`
+  — a worktree install into the login user's REAL home dangles the managed `~/.claude` symlinks
+  after worktree cleanup and Claude Code loses agent types (#972).**
 - **Push a durability BACKUP of your branch to origin after your FIRST commit — and again after
   every later commit — so finished, committed work survives even if this worktree AND the local
   `.git` are lost (#503).** EVERY worktree worker does this, regardless of authority (full /
