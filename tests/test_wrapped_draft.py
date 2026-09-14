@@ -542,7 +542,10 @@ class AShortTailIsNotAnIdentity(unittest.TestCase):
                                          "zbynek", "demo",
                                          lambda body, **kw: None,
                                          run=self._run)
-        self.assertTrue(any("machine-nudge submit" in ln for ln in logs), logs)
+        # #1022 -- a dreply (owner's OWN recorded delivery) is user-authored, so
+        # its wedge submit journals "wedge: user draft → submit" (was
+        # "machine-nudge submit"); the submit itself (Enter) is unchanged.
+        self.assertTrue(any("wedge: user draft → submit" in ln for ln in logs), logs)
         self.assertIn("Enter", self._tails(), self.sent)
 
 

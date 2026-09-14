@@ -152,7 +152,7 @@ def _pane_shows_collapsed_paste(itext):
 
 
 def _type_literal(pid, run, text, sleep_fn=None, kind="type",
-                  user_authored=False, logs=None, nudge=None):
+                  user_authored=False, logs=None, nudge=None, state=None):
     """Send `text` into the pane's input box literally — in ONE burst below
     `GOAL_TYPE_CHUNK_THRESHOLD` chars (unchanged from before this ticket),
     or in small CHUNKS at/above it (#322) so CC never treats the whole
@@ -193,10 +193,26 @@ def _type_literal(pid, run, text, sleep_fn=None, kind="type",
     -- a suppressed type fired NO keystroke, so the caller must NOT run its
     verify/undo machinery on it (the #1002 no-stray-backspace invariant)."""
     sleep_fn = sleep_fn or time.sleep
+    # #1022 -- record the FULL machine-nudge `text` we type into `pid` (never a
+    # partial chunk: this runs once per call, with the whole payload) so the
+    # wedge (job 10) can recognize a stranded copy and janitor-CLEAR it rather
+    # than submit it as a back-door nudge. Gated to a genuine machine nudge: the
+    # owner's own reply (`user_authored`) is never recorded here, and the write
+    # itself skips any `nudge` not in `MACHINE_NUDGE_KINDS` and a `None` `state`
+    # -- so a caller that does not thread `state` (every pre-#1022 caller/test)
+    # is a complete no-op, unchanged. Only after a SUCCESSFUL type (`keys`
+    # returned True: nothing suppressed, the text really reached the box). NOTE:
+    # a SCROLL-length payload does NOT reach this branch (it goes through
+    # `_type_two_phase_head_checkpoint`, which records the FULL text itself and
+    # threads `state` only to that outer level, never to its partial-chunk
+    # `_type_literal` calls).
     if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
-        return watchdog.keys(pid, "-l", "--", text, kind=kind, nudge=nudge,
-                             user_authored=user_authored, run=run, logs=logs,
-                             journal_text=text)
+        ok = watchdog.keys(pid, "-l", "--", text, kind=kind, nudge=nudge,
+                           user_authored=user_authored, run=run, logs=logs,
+                           journal_text=text)
+        if ok and not user_authored:
+            watchdog._record_machine_nudge(state, pid, text, nudge, time.time())
+        return ok
     for i in range(0, len(text), GOAL_TYPE_CHUNK_SIZE):
         if not watchdog.keys(pid, "-l", "--", text[i:i + GOAL_TYPE_CHUNK_SIZE],
                              kind=kind, nudge=nudge, user_authored=user_authored,
@@ -204,6 +220,8 @@ def _type_literal(pid, run, text, sleep_fn=None, kind="type",
             return False
         if i + GOAL_TYPE_CHUNK_SIZE < len(text):
             sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
+    if not user_authored:
+        watchdog._record_machine_nudge(state, pid, text, nudge, time.time())
     return True
 
 
@@ -351,7 +369,8 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
 
 
 def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
-                                    kind="type", user_authored=False, nudge=None):
+                                    kind="type", user_authored=False, nudge=None,
+                                    state=None):
     """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
     the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
     box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
@@ -410,11 +429,21 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     # type. Bailing here would STRAND the typed head chunk instead.
     _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
                   kind=kind, user_authored=user_authored, nudge=nudge)
+    # #1022 -- the inner `_type_literal` calls above type PARTIAL chunks
+    # (head_chunk, then the rest), so state is NEVER threaded to them (a partial
+    # record is useless to the wedge). Record the FULL `text` ONCE here, after the
+    # whole scroll-length payload has been typed -- otherwise a #923 batched
+    # `nudge:` machine nudge (1000-1400c takes this two-phase path AND matches
+    # `_own_nudge_submit_prefix`) would go UNrecorded and the wedge would submit
+    # it through the back door under the kill switch (the exact #1022 gap). Gated
+    # to a machine nudge; owner replies (`user_authored`) never recorded.
+    if state is not None and not user_authored:
+        watchdog._record_machine_nudge(state, pid, text, nudge, time.time())
     return _TV_LANDED
 
 
 def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
-                           user_authored=False, logs=None, nudge=None):
+                           user_authored=False, logs=None, nudge=None, state=None):
     """#670 -- type `text` into a BARE box and VERIFY the box holds it head+tail,
     retrying (undo + re-type) ONLY on a genuine first-byte swallow. This is
     `send_verified`'s verified typed path (all nudge kinds -- lane-check, job-1
@@ -469,7 +498,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
             # suppressed first chunk returns _TV_HOLD (no keystroke -> no undo).
             hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
                                                  kind=kind, nudge=nudge,
-                                                 user_authored=user_authored)
+                                                 user_authored=user_authored,
+                                                 state=state)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed / suppressed -> NO keystrokes
             if hc == _TV_CORRUPT:                # head swallowed -> undo the chunk + retry
@@ -479,9 +509,12 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
         else:
             # #1002 -- a suppressed type (OFF, machine caller) fired NO keystroke;
             # return keystroke-free (never fall through to the undo below).
+            # #1022 -- this SHORT-payload path types the full `text` in one shot,
+            # so forward `state` for the machine-nudge record; the two_phase
+            # path above types partial chunks and deliberately does NOT.
             if not _type_literal(pid, run, text, sleep_fn, kind=kind,
                                  user_authored=user_authored, logs=logs,
-                                 nudge=nudge):
+                                 nudge=nudge, state=state):
                 return False
         cls = _settle_type_verify(pid, run, text, sleep_fn,
                                   allow_scrolled=two_phase)
@@ -1199,7 +1232,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     if two_phase:
         hc = watchdog._type_two_phase_head_checkpoint(
-            pid, run, text, sleep_fn, kind=nudge_kind, user_authored=user_authored, nudge=nudge)
+            pid, run, text, sleep_fn, kind=nudge_kind, user_authored=user_authored,
+            nudge=nudge, state=state)
         if hc != _TV_LANDED:
             _log("stash-abort: head-checkpoint-%s" % hc)
             if hc == _TV_CORRUPT:
@@ -1226,7 +1260,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # recovery. An explicit keystroke-free bail here would STRAND the parked
         # draft in the stash slot until the janitor reclaims it.
         watchdog._type_literal(pid, run, text, sleep_fn,
-                               kind=nudge_kind, user_authored=user_authored, nudge=nudge)
+                               kind=nudge_kind, user_authored=user_authored,
+                               nudge=nudge, state=state)
     cap = watchdog.capture_pane(pid, run, lines=30)
     itext = watchdog._input_line_text(cap)
     if watchdog._pane_shows_collapsed_paste(itext):

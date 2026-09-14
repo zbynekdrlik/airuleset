@@ -636,7 +636,8 @@ def _strip_selected(captured):
     return False
 
 
-def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None):
+def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None,
+                  state=None):
     """Type `text` literally into the pane, then press Enter to submit it.
 
     #994 suppression contract: when a GATED nudge kind is OFF the chokepoint types
@@ -673,7 +674,7 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None):
                              run=run, logs=logs):
             return False
     if not watchdog._type_literal(pane_id, run, text, kind="continue", nudge=nudge,
-                                  logs=logs):
+                                  logs=logs, state=state):
         return False
     watchdog.keys(pane_id, "Enter", kind="continue", nudge=nudge, run=run, logs=logs)
     return True
@@ -690,7 +691,8 @@ def _subagent_nudge_signature(worker_id):
 
 
 def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
-                        sleep_fn=None, logs=None, nudge="subagent-stuck"):
+                        sleep_fn=None, logs=None, nudge="subagent-stuck",
+                        state=None):
     """(issue #6) Nudge the SUPERVISOR pane about a dying BACKGROUND WORKER —
     `kind` is a short human label ('api-error' or 'text-toolcall-stall'). Types a
     stuck-check-style self-check message naming the worker's own transcript file,
@@ -717,7 +719,8 @@ def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
             "nič nerob naslepo." % (_subagent_nudge_signature(worker_id), kind, worker_id))
     if tpath is not None:
         return watchdog.send_verified(pane_id, text, run, tpath,
-                                      sleep_fn=sleep_fn, logs=logs, nudge=nudge)
+                                      sleep_fn=sleep_fn, logs=logs, nudge=nudge,
+                                      state=state)  # #1022: record for the wedge
     # #806 -- no transcript = unverifiable delivery; never a raw unverified type.
     # The old tpath-less `send_continue` fallback returned True unconditionally,
     # so a swallowed Enter left the stuck-check stranded in the composer while
@@ -871,7 +874,8 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
         ok = True
         if not dry_run:
             watchdog._janitor_mark_watch(state, pid, now)
-            ok = send_subagent_nudge(pid, wid, kind, run, tpath, sleep_fn, logs)
+            ok = send_subagent_nudge(pid, wid, kind, run, tpath, sleep_fn, logs,
+                                     state=state)  # #1022: record for the wedge
             if ok:
                 watchdog._janitor_clear_watch(state, pid)
         logs.append("subagent-%s-nudge#%d %s [%s]%s"
@@ -933,7 +937,7 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
 
 
 def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                  out=None, user_authored=False, nudge=None):
+                  out=None, user_authored=False, nudge=None, state=None):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -1056,7 +1060,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if not watchdog._type_literal_verified(pane_id, run, text, sleep_fn,
                                            kind="send", nudge=nudge,
                                            user_authored=user_authored,
-                                           logs=logs):
+                                           logs=logs, state=state):
         if watchdog._pane_shows_collapsed_paste(watchdog._input_line_text(
                 watchdog.capture_pane(pane_id, run, lines=40))):
             _log("send-verified abort: collapsed-paste, not submitted")

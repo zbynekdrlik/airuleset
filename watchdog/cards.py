@@ -892,7 +892,8 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             try:
                 import watchdog
                 return bool(watchdog.send_verified(
-                    pane_id, text, run, tpath, sleep_fn=sleep_fn, nudge="card"))
+                    pane_id, text, run, tpath, sleep_fn=sleep_fn, nudge="card",
+                    state=state))  # #1022: record for the wedge
             except Exception:
                 return False
 

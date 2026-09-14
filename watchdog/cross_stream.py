@@ -231,7 +231,8 @@ def _cache_repo_roots(home=None, max_age_s=None):
     return roots
 
 
-def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None):
+def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None,
+                     state=None):
     """Shared bounce/gk-request helper (issue #35): attempt a stash-around
     delivery of `text` for a pane that already passed the live-work / armed
     -loop / already-nudged guards but isn't bare-idle — i.e. it holds a
@@ -250,7 +251,8 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None):
     if dry_run:
         return False
     return watchdog.deliver_with_stash(pid, text, run, captured=captured,
-                                       logs=logs, nudge=nudge)
+                                       logs=logs, nudge=nudge,
+                                       state=state)  # #1022: record for the wedge
 
 
 def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
@@ -279,7 +281,7 @@ def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
     tpath = tinfo[0] if tinfo else None
     watchdog._janitor_mark_watch(state, pid, now)
     if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
-                              nudge=nudge):
+                              nudge=nudge, state=state):  # #1022: record for the wedge
         watchdog._janitor_clear_watch(state, pid)
         return True
     return False
@@ -503,7 +505,8 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # verify failure still skips, but never silently (#193).
                 why = []
                 ok = _try_stash_nudge(pid, captured, watchdog.BOUNCE_NUDGE % (tick_str, name),
-                                      run, dry_run, logs=why, nudge="bounce")
+                                      run, dry_run, logs=why, nudge="bounce",
+                                      state=state)  # #1022: record for the wedge
                 # #271 (adversarial-review MAJOR finding): `why` also carries
                 # `deliver_with_stash`'s own rescue-persist line — promote it
                 # to the main journal on EITHER outcome, not just failure, or
@@ -938,7 +941,8 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # not one `stash-*` line in the journal.
                 why = []
                 ok = _try_stash_nudge(pid, captured, watchdog.GKREQ_NUDGE % (tick_str, name),
-                                      run, dry_run, logs=why, nudge="gk-request")
+                                      run, dry_run, logs=why, nudge="gk-request",
+                                      state=state)  # #1022: record for the wedge
                 # #271 — see bounce_backstop's identical fix above.
                 logs.extend(ln for ln in why if "draft-rescue" in ln)
                 if not ok:

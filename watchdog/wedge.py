@@ -21,12 +21,18 @@ loop, which reaches ``prompt_wedge_check`` / ``_session_is_waiting`` as the
 re-imported bare names in ``__init__``'s globals (identical patch semantics),
 and every test that drives them via ``wd.prompt_wedge_check(...)``.
 
-Direction is back-reference (convention C3): the two functions never call each
-other (``_session_is_waiting`` is passed IN as ``prompt_wedge_check``'s
-``waiting`` argument, never called by it), so this module has NO co-moved
-cross-calls -- every free name they read lives OUTSIDE this module and is
-reached call-time through the package namespace (``watchdog.<name>``), so any
-``patch.object(watchdog, "<name>", ...)`` a test applies stays effective:
+Direction is back-reference (convention C3): the two MOVED functions never call
+each other (``_session_is_waiting`` is passed IN as ``prompt_wedge_check``'s
+``waiting`` argument, never called by it) -- every free name they read lives
+OUTSIDE this module and is reached call-time through the package namespace
+(``watchdog.<name>``), so any ``patch.object(watchdog, "<name>", ...)`` a test
+applies stays effective. #1022 ADDED one intra-module helper,
+``_wedge_clear_machine_draft`` (the wedge's machine-draft janitor-clear action,
+factored out of ``prompt_wedge_check`` to keep it under the size ceiling); it is
+called BARE by ``prompt_wedge_check`` (both resolve in this module's globals at
+call time) and reaches every primitive it needs via ``watchdog.<name>`` -- no
+test patches the helper itself, so the bare call is safe. It is also re-exported
+by the facade for checklist parity:
 
   * transcript readers (transcripts.py, re-exported):
     ``watchdog._iter_jsonl_tail`` / ``watchdog._entry_text``
@@ -130,6 +136,9 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                                        # escalation count so a LATER, unrelated
                                        # stuck draft starts counting from zero
         state.pop(giveup_key, None)    # ...and the give-up-ping dedup with it
+        watchdog._clear_machine_nudge(state, pid)  # #1022: box bare -> our
+                                       # recorded nudge (if any) is gone
+                                       # (submitted or cleared) -> drop the record
         return []
     # A machine nudge's PREFIX lives on the box's HEAD row. A wrapped draft's
     # boundary row is its TAIL and can never carry it, so testing `txt` alone
@@ -148,9 +157,26 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     # so a stranded own nudge is SUBMITTED in place here, never pinged. A FOREIGN
     # / human draft (no registered prefix -- e.g. a session's own `gk: ...` bounce
     # note) still takes the ping-only path below, untouched.
-    machine = (head_txt.startswith(watchdog.MACHINE_NUDGE_PREFIX)
+    # #1022 -- the primitive RECORDED every machine nudge it typed
+    # (`state["nudge_typed"]`, via `_type_literal`). A wedged draft matching that
+    # record is a nudge WE typed: it must be janitor-CLEARED, never submitted
+    # (submitting it is a nudge through the back door under the #994/#1023 kill
+    # switch -- `kind="wedge"` is RECOVERY, so it fires even at OFF). This takes
+    # PRECEDENCE over the prefix/dreply submit path below; the owner's own reply
+    # (`_is_dreply_machine_text`) and any draft with no record stay on the
+    # existing submit/ping paths. `nudge_kind` also counts as `machine` so a
+    # stale machine draft bypasses the at-rest guard exactly like a prefix nudge.
+    wedged_nudge = watchdog._wedged_machine_nudge(state, pid, head_txt, txt, now)
+    # #1022 -- the owner's OWN Discord reply (`_is_dreply_machine_text`) is
+    # user-authored: when it wedges it is SUBMITTED (recovery), and its journal
+    # reads `wedge: user draft → submit` (the ticket's decision phrase). A
+    # prefix-recognized cross-stream/own nudge (no local record) also submits
+    # as-today, keeping its historical `machine-nudge submit` phrase.
+    dreply = watchdog._is_dreply_machine_text(state, pid, head_txt, txt)
+    machine = (wedged_nudge is not None
+               or head_txt.startswith(watchdog.MACHINE_NUDGE_PREFIX)
                or watchdog._own_nudge_submit_prefix(head_txt) is not None
-               or watchdog._is_dreply_machine_text(state, pid, head_txt, txt))
+               or dreply)
     if not machine and ("esc to interrupt" in (captured or "")
                         or "Waiting for" in (captured or "")
                         or now - tmtime < watchdog.PWEDGE_MIN_IDLE_S):
@@ -174,6 +200,9 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     state[key] = st
     if st["n"] < watchdog.PWEDGE_SWEEPS or st.get("pinged"):
         return []
+    if wedged_nudge is not None:
+        return _wedge_clear_machine_draft(
+            state, pid, key, wedged_nudge, now, project, run, dry_run)
     if machine:
         unstick_note = ""
         if not dry_run and run and not watchdog.pane_in_mode(pid, run):
@@ -254,7 +283,8 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                 watchdog.keys(pid, "Escape", kind="wedge", run=run)
             watchdog.keys(pid, "Enter", kind="wedge", run=run)
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
-        return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
+        label = "wedge: user draft → submit" if dreply else "machine-nudge submit"
+        return ["%s %s (%s)%s" % (label, pid, project, unstick_note)]
     # #238-review-style finding 🔴F3 (this ticket's own review): resolved
     # ONCE, before EITHER branch below — the `not waiting` backlog-ping used
     # to send unconditionally, completely bypassing this per-pane cooldown
@@ -325,3 +355,36 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             owner=owner or None,
             dedup_key="pwedge:%s:%s" % (pid, h), dry_run=dry_run)
     return ["prompt-wedge ping %s (%s)" % (pid, project)]
+
+
+def _wedge_clear_machine_draft(state, pid, key, wedged_nudge, now, project, run,
+                               dry_run):
+    """#1022 -- job 10's action for a wedged draft that matches a machine nudge
+    WE typed (`_wedged_machine_nudge` returned its kind): janitor-CLEAR it,
+    NEVER submit it. Submitting a machine nudge here is a nudge through the back
+    door under the #994/#1023 kill switch (`kind="wedge"` is RECOVERY, so it
+    fires even at OFF); the owning nudge job re-delivers on its own gated
+    cadence. Holds regardless of the switch state (design point 2). Never touch a
+    scrolled/copy-mode pane (the janitor's keystrokes would be swallowed/corrupt).
+
+    #1022 review-2 MAJOR-1: REFRESH the record's `ts` on EVERY live match. A
+    match is itself proof the recorded nudge is STILL wedged, so the record must
+    never TTL-expire while it is -- otherwise, if the janitor clear keeps failing
+    (an unreadable/collapsed box), at t + `_NUDGE_TYPED_TTL_S` the record would
+    lapse, `machine` would recompute True via `_own_nudge_submit_prefix`, and the
+    submit path would press Enter = the back door reopened. Refreshing on match
+    keeps a persistently-unclearable machine draft on the (safe) clear path
+    forever; a non-converged clear is journalled (`clr_logs`) so the stuck box is
+    visible, and the box going bare drops the record via the caller's `if not
+    txt` branch. Returns the job's log lines (a POINTER-style journal)."""
+    rec = state.get("nudge_typed", {}).get(pid)
+    if isinstance(rec, dict):
+        rec["ts"] = now
+    clr_logs = []
+    if not dry_run and run and not watchdog.pane_in_mode(pid, run):
+        if watchdog._janitor_clear_box(pid, run, None, clr_logs.append):
+            watchdog._clear_machine_nudge(state, pid)
+    state.pop(key, None)   # re-tracks + retries the clear in 2 sweeps if the box
+                           # did not converge to bare this sweep
+    return (["wedge: machine draft (%s) → janitor-clear %s (%s)"
+             % (wedged_nudge, pid, project)] + clr_logs)
