@@ -384,33 +384,24 @@ def _dismissal_word(body):
 def _ratchet_should_block(target_repo, cwd):
     """#842 req 2 -- True when the per-repo net-drain ratchet must BLOCK an
     UNATTENDED non-exempt discovery filing on `target_repo`: the repo is NOT
-    strictly draining today (`created_today >= closed_today`). Fail-SAFE: any
-    inability to compute the counts -- a gh error, or a ratchet_counts import
-    failure (`repo_dir` is now on sys.path from the top of the heredoc, so this
-    import works on every path; a genuine failure means a broken/absent leaf, a
-    real deploy fault) -- returns True (BLOCK), never a wrong ALLOW (#842 (d))."""
+    strictly draining today (`created_today >= closed_today`). #1020 fold-in --
+    the decision recomputes the counts LIVE (`net_drain_blocks_live`), never the
+    TTL cache, so it can never disagree with the real `gh` day counts (a drifted
+    cache false-blocked at created 2 < closed 3). Fail-SAFE: a gh error or a
+    ratchet_counts import failure (`repo_dir` is on sys.path from the top of the
+    heredoc) returns True (BLOCK), never a wrong ALLOW (#842 (d))."""
     try:
         import ratchet_counts as _rc
     except Exception:
         return True
-    got = _rc.cached_counts(target_repo, cwd)
-    if got is None:
-        return True
-    created, closed, _day = got
-    return _rc.ratchet_blocks(created, closed)
+    blocks = _rc.net_drain_blocks_live(target_repo, cwd)
+    return True if blocks is None else blocks
 
 
-def _ratchet_bump(target_repo):
-    """Record a ratchet-PASS forward (increment the cached created_today), so a
-    burst of unattended filings inside one TTL window does not all pass on the
-    same stale count. Best-effort (returns False on any failure) -- a bump
-    failure never blocks a filing that already PASSED."""
-    try:
-        import ratchet_counts as _rc
-        _rc.bump_created(target_repo)
-        return True
-    except Exception:
-        return False
+# #1020 fold-in -- `_ratchet_bump` REMOVED with ratchet_counts.bump_created: the
+# cached increment drifted from the real gh counts and false-blocked a draining
+# repo. The block decision recomputes live per filing, so no forward bump is
+# needed (a filing is rare).
 
 
 HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1\s*$")
@@ -1591,15 +1582,9 @@ for verdict, title, crit, parents_str, target_repo, dedup_claim in results:
     # only ever counts an EXACT "PASS" token -- never charges cap budget
     # for a filing that never happened (#329 adversarial-review CRITICAL).
     log_verdict = "NOTFILED" if (has_block and verdict == "PASS") else verdict
-    # #842 -- record a GENUINELY-FILED PASS forward in the per-repo counter cache
-    # (created_today += 1), closing the within-TTL burst race across separate
-    # hook invocations. Deferred to here so a phantom PASS (NOTFILED because a
-    # sibling segment blocked the whole command) never bumps the counter for a
-    # filing that never happened. Only an UNATTENDED non-exempt discovery filing
-    # is ratchet-counted (user-request/planned-work are exempt).
-    if unattended and log_verdict == "PASS" \
-            and (crit or "").lower() not in EXEMPT_FROM_CAP:
-        _ratchet_bump(target_repo)
+    # #1020 fold-in -- the forward ratchet bump is removed; the net-drain BLOCK
+    # decision recomputes counts LIVE per filing (`net_drain_blocks_live`), so
+    # there is no cached increment to keep in step here.
     # bash's `read` with IFS=<tab> still treats tab as "IFS whitespace" and
     # COLLAPSES consecutive delimiters, silently swallowing an empty field
     # (discovered live testing this hook) -- never emit an empty field.
