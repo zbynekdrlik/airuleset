@@ -1497,6 +1497,27 @@ def compose_api_error_alert(project, text):
             % (proj, err))
 
 
+def compose_healthz_alert(host, error, since_text):
+    """#1005 — presenter AI-health outage alert (Slovak, ONE line). Fired by
+    watchdog job 47 when a declared `/healthz.ai.connected` reads false for >= 2
+    consecutive samples. `host` = the probe name (presenter-snv / presenter-pp),
+    `error` = the `.ai.error` text (may be None → generic detail), `since_text` =
+    a human 'od …' timestamp of the first down sample. `_clean` collapses any
+    newline so the body is genuinely one line. No @mention here — send()
+    prepends it (owner-scoped delivery, #710)."""
+    h = _clean(host) or "?"
+    err = _clean(error) or "(bez detailu)"
+    return ("🛑 **presenter %s** — AI pomocník je odpojený (od %s): %s"
+            % (h, _clean(since_text) or "?", err))
+
+
+def compose_healthz_recovery(host):
+    """#1005 — the short recovery line paired with `compose_healthz_alert`:
+    fired ONCE when a previously-alerted host's `/healthz.ai.connected` reads
+    true again (Slovak, one line). No @mention here — send() prepends it."""
+    return "✅ **presenter %s** — AI pomocník je opäť pripojený" % (_clean(host) or "?")
+
+
 def compose_oauth_block_alert(project, loc, nudges):
     """#662 — the PERSISTENT interactive-/login escape-valve alert (Slovak,
     Discord markdown). Fired by watchdog job 1 ONLY when an error needing an

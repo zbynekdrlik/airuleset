@@ -47,6 +47,23 @@ REMOTE_HOSTS = [
         # meeting-analysis box gets the key the same way -- one line, no
         # parallel mechanism.
         "soniox": True,
+        # #1005 — dev2 is the ONLY managed box that reaches BOTH presenter prod
+        # instances (STEP-0 probe 2026-09-14): SNV is a LAN-only address the
+        # controller cannot see, PP is reachable via tailscale from either box.
+        # dev2 also hosts the presenter runner + runs the api-watchdog timer, so
+        # its watchdog job 47 (watchdog/healthz_probe.py) reads these declared
+        # /healthz endpoints, checks .ai.connected/.ai.error, and alerts the
+        # owner on a >=2-sample outage. PP addressed by tailscale IP (stable,
+        # address-by-tailscale) rather than the LAN DNS name companion-pp.lan.
+        # `owner` routes the alert to zbynek (presenter owner) regardless of
+        # dev2's own box owner. Any future external /healthz monitor = one more
+        # entry here, no code change.
+        "health_probes": [
+            {"name": "presenter-snv", "url": "http://10.77.9.205/healthz",
+             "path": ".ai", "owner": "zbynek"},
+            {"name": "presenter-pp", "url": "http://100.101.72.101/healthz",
+             "path": ".ai", "owner": "zbynek"},
+        ],
     },
     {
         # odoo-gatekeeper VPS (prod merge/deploy + hotfix box). Key-based SSH,
@@ -589,6 +606,68 @@ def box_windows(user):
             w = managed_windows(remote)
             if w:
                 return w
+    return []
+
+
+def managed_health_probes(remote):
+    """The DECLARED external /healthz probes for a REMOTE_HOSTS entry (#1005),
+    or ``[]`` when the entry declares none — the sibling of ``managed_windows``.
+    Each probe is ``{"name", "url", "path", ("owner")}``: ``path`` is a dotted
+    JSON path into the /healthz body (``.ai``) whose ``connected``/``error``
+    fields the watchdog job reads; ``owner`` (optional) routes the outage alert
+    to a specific owner surface (#710), else the box owner. Pure accessor, no
+    logic, kept next to the table it reads."""
+    return list(remote.get("health_probes") or [])
+
+
+def validate_health_probes(probes):
+    """Return a list of human-readable error strings for a ``health_probes``
+    declaration (``[]`` == valid) — the sibling of ``validate_windows``. A SHAPE
+    check only: name present + token-safe + unique; url present + http(s); path
+    present + dotted + no ``..``; ``owner`` (if present) token-safe. Used by the
+    fleet-symmetry test + the watchdog wiring that hands these to a network GET."""
+    errs = []
+    if not isinstance(probes, list):
+        return ["health_probes is %s, not a list" % type(probes).__name__]
+    seen = set()
+    for i, p in enumerate(probes):
+        if not isinstance(p, dict):
+            errs.append("health_probe[%d] is %s, not a dict" % (i, type(p).__name__))
+            continue
+        name = p.get("name")
+        if not name or not _window_name_ok(name):
+            errs.append("health_probe[%d] name %r is missing or not token-safe" % (i, name))
+        elif name in seen:
+            errs.append("health_probe[%d] duplicate name %r" % (i, name))
+        else:
+            seen.add(name)
+        url = p.get("url")
+        if not url or not isinstance(url, str) or not (
+                url.startswith("http://") or url.startswith("https://")):
+            errs.append("health_probe[%d] url %r is missing or not http(s)" % (i, url))
+        path = p.get("path")
+        if not path or not isinstance(path, str) or not path.startswith(".") or ".." in path:
+            errs.append(
+                "health_probe[%d] path %r is missing, not dotted, or contains .." % (i, path))
+        owner = p.get("owner")
+        if owner is not None and (not isinstance(owner, str) or not _window_name_ok(owner)):
+            errs.append("health_probe[%d] owner %r is not token-safe" % (i, owner))
+    return errs
+
+
+def box_health_probes(user):
+    """The declared external /healthz probes for the box whose unix account is
+    ``user`` (#1005) — the FIRST REMOTE_HOSTS entry with ``user == <user>`` that
+    declares ``health_probes``, else ``[]``. Sibling of ``box_windows``: how a box
+    finds its OWN probe declaration, so a box that declares none never inherits
+    another's. Pure lookup over the facade table."""
+    if not user:
+        return []
+    for remote in REMOTE_HOSTS:
+        if remote.get("user") == user:
+            p = managed_health_probes(remote)
+            if p:
+                return p
     return []
 
 

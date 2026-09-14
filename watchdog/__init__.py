@@ -1960,6 +1960,11 @@ from watchdog import mdreview_cadence as mdreview_cadence  # noqa: E402,F401
 # import → no cycle; WRITE-side complement of Job 42's read-only nice_check).
 from watchdog import priority_policy as priority_policy  # noqa: E402,F401
 
+# #1005 — Job 47, presenter /healthz.ai external health-check (imports only
+# `notify` at top level — a leaf, no watchdog import → no cycle; the network
+# GET is an injected seam so run_once unit tests stay offline).
+from watchdog import healthz_probe as healthz_probe  # noqa: E402,F401
+
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
 # `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
@@ -2115,8 +2120,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              nice_check_enabled=False,
              mdreview_cadence_enabled=False,
              priority_policy_enabled=False,
-             deploy_state_fetch=None):
-    """Scan every `claude` pane once. 46 numbered jobs per poll — 40 LIVE and 6
+             deploy_state_fetch=None,
+             health_probes=None, health_probe_fetch=None):
+    """Scan every `claude` pane once. 47 numbered jobs per poll — 41 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2851,6 +2857,31 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           keystrokes, never Discord. The original #947 action path (two-phase
           /exit + claude --continue) was DELETED by owner directive 2026-09-10.
           `watchdog/session_health_observe.py`'s docstring is the SSOT.
+      (47) PRESENTER /healthz.ai EXTERNAL HEALTH-CHECK (#1005) — gated on a
+          FLEET DECLARATION: only a box that declares `health_probes` on its
+          `cli_fleet.REMOTE_HOSTS` entry (read via `box_health_probes`, handed
+          in as `health_probes`) AND has the injected `health_probe_fetch`
+          wired runs it. presenter's AI login was dead 14 days on the SNV prod
+          with no owner signal; presenter#760 added `/healthz.ai =
+          {connected, error, model}` so an EXTERNAL watchdog could see it — this
+          is that watchdog, with NO new daemon and NO new notify channel. Per
+          probe it GETs the declared URL via the injected fetcher, reads
+          `.ai.connected`/`.ai.error`, and dedups BY STATE
+          (`state["healthz_probes"][name]`): a `connected:false` read for >= 2
+          consecutive samples alerts the owner ONCE via the SAME owner-routed
+          `send_fn` path the api-error job uses (so #710 owner-scoped delivery
+          applies unchanged; the alert's `owner` comes from the declaration —
+          zbynek for presenter), then stays silent until the state changes
+          (recovery → one "AI back" line; a NEW `.error` text → a re-alert). An
+          UNMEASURABLE read (HTTP error / timeout / non-JSON / bad schema)
+          journals only and NEVER alerts, leaving the down streak untouched
+          (fail-safe: unmeasurable != down). Cadence-gated to ~5 min via the
+          shared `_sweep_due` (`state["healthz_probe_last_ts"]`), so the network
+          GET never fires on the 60s poll cadence — well under presenter's own
+          30s /healthz SWR cache. Best-effort; every decision journaled. dev2 is
+          the only managed box reaching both presenter prods (STEP-0 2026-09-14),
+          so today it carries the declaration; another monitor is one more entry,
+          no code change. `watchdog/healthz_probe.py`'s docstring is the SSOT.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4772,6 +4803,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
         return sho_logs
     _add("session_health_observe", lambda: True,
          _job_session_health_observe, "session-health-observe error")
+
+    # Job 47 (#1005) — presenter /healthz.ai EXTERNAL health-check. Gated on a
+    # FLEET DECLARATION: `health_probes` non-empty (the box declared probes via
+    # `cli_fleet.box_health_probes`, so a box that declares none never runs it —
+    # no per-sweep noise) AND the injected `health_probe_fetch` wired (a real
+    # unit test injects a recorder, never a real network GET). Cadence-gated to
+    # ~5 min via the shared `_sweep_due` (own `healthz_probe_last_ts` key), so
+    # the network GET fires at most once per interval, never on the 60s poll.
+    # The job advances that stamp itself, mirroring job 41's cadence pattern.
+    def _job_healthz_probe():
+        state["healthz_probe_last_ts"] = now      # cadence stamp (gate proved due)
+        return healthz_probe.healthz_probe_job(
+            now, state, health_probes, fetch=health_probe_fetch,
+            send_fn=send_fn, dry_run=dry_run,
+            persist=lambda: save_state(state_path, state))
+    _add("healthz_probe",
+         lambda: (bool(health_probes) and health_probe_fetch is not None
+                  and _sweep_due(state, "healthz_probe_last_ts", now,
+                                 healthz_probe.HEALTHZ_PROBE_INTERVAL_S)),
+         _job_healthz_probe, "healthz-probe error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
