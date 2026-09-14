@@ -1148,35 +1148,51 @@ def _check_skill_symlinks(box_skills):
 
 
 def _check_worktree_repo_dir(cmd_name):
-    """Guard for cmd_install / cmd_push: refuse when REPO_DIR is a worktree.
+    """Guard for cmd_install / cmd_push (#972 + REOPEN): refuse a WORKTREE install.
 
-    Override: AIRULESET_INSTALL_FROM_WORKTREE=1 (for tests).
-    AIRULESET_ALLOW_WORKTREE_ESCAPE=1 does NOT bypass this — they protect
-    different things (escape = agent writing outside worktree boundary;
-    install-from-worktree = install producing worktree-path symlinks that
-    dangle after cleanup).
+    INVARIANT (reopen, 2026-09-12): an install whose REPO_DIR is a worktree NEVER
+    writes into the login user's REAL home — the passwd-db home
+    (``pwd.getpwuid(os.getuid()).pw_dir``, immune to ``$HOME``). The
+    ``AIRULESET_INSTALL_FROM_WORKTREE=1`` override is honoured ONLY when the
+    effective HOME (``os.path.expanduser("~")``) differs from that real home —
+    i.e. a test tmp HOME — so a worktree install can only ever target an isolated
+    HOME. With the real (or an undeterminable) home the guard REFUSES regardless
+    of the env var (fail-safe CLOSED). Root incident: a lane exported the override
+    and ran ``install`` from a worktree against the real HOME, dangling the real
+    ~/.claude symlinks after cleanup (2026-09-11) — so the override, on its own,
+    must no longer be an escape hatch. ``AIRULESET_ALLOW_WORKTREE_ESCAPE=1`` does
+    NOT bypass this — different guard (escape = writing OUTSIDE the worktree
+    boundary; this = an install producing worktree-path symlinks that dangle).
     """
-    if os.environ.get("AIRULESET_INSTALL_FROM_WORKTREE") == "1":
-        return  # override for tests
-    if _is_worktree_repo_dir(REPO_DIR):
-        main_checkout = _main_checkout_from_worktree(REPO_DIR)
-        print(
-            f"\n🚫 REFUSED: `airuleset.py {cmd_name}` is running from a WORKTREE checkout.\n"
-            f"\n"
-            f"  REPO_DIR     : {REPO_DIR}\n"
-            f"  main checkout: {main_checkout}\n"
-            f"\n"
-            f"  install/push from a worktree creates symlinks (~/.claude/agents/*,\n"
-            f"  ~/.claude/skills/*) pointing INTO the worktree. When the worktree is\n"
-            f"  removed, these become dangling and Claude Code loses agent types.\n"
-            f"\n"
-            f"  FIX: run `python3 {main_checkout}/airuleset.py {cmd_name}` from the\n"
-            f"  main checkout instead.\n"
-            f"\n"
-            f"  Override (tests only): AIRULESET_INSTALL_FROM_WORKTREE=1\n",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if not _is_worktree_repo_dir(REPO_DIR):
+        return  # not a worktree — nothing to guard
+    import pwd
+    try:
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    except Exception:
+        real_home = None  # undeterminable → fail safe (treat HOME as NOT isolated)
+    effective_home = Path(os.path.expanduser("~")).resolve()
+    override = os.environ.get("AIRULESET_INSTALL_FROM_WORKTREE") == "1"
+    isolated_home = real_home is not None and effective_home != real_home
+    if override and isolated_home:
+        return  # test tmp HOME — a worktree install can only target an isolated HOME
+    main_checkout = _main_checkout_from_worktree(REPO_DIR)
+    print(
+        f"\n🚫 REFUSED: `airuleset.py {cmd_name}` is running from a WORKTREE checkout.\n"
+        f"\n"
+        f"  REPO_DIR     : {REPO_DIR}\n"
+        f"  main checkout: {main_checkout}\n"
+        f"\n"
+        f"  install/push from a worktree creates symlinks (~/.claude/agents/*,\n"
+        f"  ~/.claude/skills/*) pointing INTO the worktree. When the worktree is\n"
+        f"  removed, these become dangling and Claude Code loses agent types — and\n"
+        f"  an install writes the login user's REAL home regardless of $HOME.\n"
+        f"\n"
+        f"  FIX: run `python3 {main_checkout}/airuleset.py {cmd_name}` from the MAIN\n"
+        f"  checkout — an install is a per-account operation, never a worktree lane.\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 SHARED_FLEET_DIR = Path("/var/lib/airuleset")

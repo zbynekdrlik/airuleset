@@ -1502,6 +1502,23 @@ def cmd_push(args):
         _exec_state = Path(_lock_tmp) / "main-exec-state"
         _exec_state.mkdir(parents=True, exist_ok=True)
         test_env["AIRULESET_MAIN_EXEC_STATE_DIR"] = str(_exec_state)
+        # #972 REOPEN (dual-coverage): a test that performs a REAL install writes
+        # `Path.home()/.claude`. `unittest discover` never reads conftest.py, so
+        # point the WHOLE gate subprocess at a per-run isolated HOME — the
+        # invariant backstop that NO gate run can ever write the real ~/.claude
+        # (the 2026-09-11 incident). Seeded with a `.gitconfig` (safe.directory)
+        # exactly like Pass A's `_runner_shape_env`, so `git -C <repo>` inside the
+        # suite never dies `fatal: detected dubious ownership` under the relocated
+        # HOME (#683). Box-bound tests self-isolate their own HOME (tmux/uid-bound,
+        # not process-HOME-bound), and Pass A already proves the hermetic subset
+        # is HOME-relocation-safe, so this narrows nothing the gate needs.
+        _suite_home = Path(_lock_tmp) / "suite-home"
+        (_suite_home / ".config").mkdir(parents=True, exist_ok=True)
+        (_suite_home / ".gitconfig").write_text(
+            "[safe]\n\tdirectory = %s\n\tdirectory = %s\n"
+            % (str(REPO_DIR), str(REPO_DIR / ".git")))
+        test_env["HOME"] = str(_suite_home)
+        test_env["XDG_CONFIG_HOME"] = str(_suite_home / ".config")
         # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
         # redirect is pytest-only and is NEVER read by `unittest discover`, so
         # this is the single place the push gate's own ~459 raw
