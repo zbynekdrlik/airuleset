@@ -298,6 +298,14 @@ class TestPassBHomeIsolation(TestCase):
         src = (REPO / "cli_remote.py").read_text(encoding="utf-8")
         self.assertIn('test_env["HOME"]', src,
                       "cmd_push's Pass B test_env must set an isolated HOME")
+        # Stronger than a bare presence check (review BLUE): the HOME must be a
+        # PER-RUN dir rooted under the run's throwaway tempdir, never the real
+        # home — tie the source-lock to that construction.
+        self.assertIn("_suite_home", src,
+                      "Pass B HOME must be a per-run isolated dir, not the real home")
+        self.assertRegex(
+            src, r"_suite_home\s*=\s*Path\(_lock_tmp\)",
+            "the per-run HOME must be rooted under the run's throwaway tempdir")
 
 
 if __name__ == "__main__":

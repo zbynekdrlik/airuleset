@@ -1228,11 +1228,11 @@ def _check_worktree_repo_dir(cmd_name):
     """
     if not _is_worktree_repo_dir(REPO_DIR):
         return  # not a worktree — nothing to guard
-    import pwd
     try:
+        import pwd
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
     except Exception:
-        real_home = None  # undeterminable → fail safe (treat HOME as NOT isolated)
+        real_home = None  # undeterminable (no pwd / uid absent) → fail safe (NOT isolated)
     effective_home = Path(os.path.expanduser("~")).resolve()
     override = os.environ.get("AIRULESET_INSTALL_FROM_WORKTREE") == "1"
     isolated_home = real_home is not None and effective_home != real_home

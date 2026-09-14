@@ -1519,6 +1519,10 @@ def cmd_push(args):
             % (str(REPO_DIR), str(REPO_DIR / ".git")))
         test_env["HOME"] = str(_suite_home)
         test_env["XDG_CONFIG_HOME"] = str(_suite_home / ".config")
+        # XDG parity with Pass A's _runner_shape_env (review BLUE): keep a test's
+        # cache/data writes under the relocated HOME too, never the real ~/.cache.
+        test_env["XDG_CACHE_HOME"] = str(_suite_home / ".cache")
+        test_env["XDG_DATA_HOME"] = str(_suite_home / ".local" / "share")
         # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
         # redirect is pytest-only and is NEVER read by `unittest discover`, so
         # this is the single place the push gate's own ~459 raw
