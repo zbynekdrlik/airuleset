@@ -207,16 +207,37 @@ class TestOwnerReplyBypass(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Compact: at OFF the request stays PENDING (never booked delivered).
+# Compact: #1023 addendum — /compact is a RECOVERY revival, ALWAYS-ON.
 # --------------------------------------------------------------------------- #
-class TestCompactPendingWhenOff(unittest.TestCase):
-    def test_compact_submit_verified_returns_pending_word(self):
+class TestCompactAlwaysOn(unittest.TestCase):
+    def test_compact_delivers_even_when_all_kinds_off(self):
+        # PRODUCTION TRUTH: /compact carries nudge="compact" (RECOVERY_NUDGE_KINDS),
+        # so the kill switch NEVER gates it — even with every PRIORITY kind staged
+        # OFF (the real predicate, bypass popped) it reaches the send and types.
         import watchdog.compact as compact
         rec = _Recorder()
         logs = []
-        # A BARE idle box (`_input_line_text` == "") so the pre-send raced-busy
-        # gate passes and the ladder reaches the `send_continue` chokepoint,
-        # where the #994 kill switch suppresses the /compact.
+        patcher = m.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
+        with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
+            out = compact._compact_submit_verified(
+                PID, rec, lambda *a, **k: None, logs.append)
+        self.assertNotEqual(out, "nudges-off",
+                            "/compact is RECOVERY (always-on) — never suppressed")
+        self.assertNotEqual(rec.sent_keys(), [],
+                            "/compact must type even with all PRIORITY kinds off")
+
+    def test_defensive_pending_word_if_send_continue_were_ever_suppressed(self):
+        # DEFENSIVE guard, NOT production /compact gating (the test above proves
+        # /compact is always-on). This mocks nudges_enabled->False (a state
+        # impossible for the 'compact' identity) to prove the ladder's fallback:
+        # were 'compact' ever reclassified to a gated PRIORITY kind, a suppressed
+        # send leaves the request PENDING ('nudges-off'), never misclassified 'sent'.
+        import watchdog.compact as compact
+        rec = _Recorder()
+        logs = []
         with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False), \
                 m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
             out = compact._compact_submit_verified(
@@ -224,7 +245,7 @@ class TestCompactPendingWhenOff(unittest.TestCase):
         self.assertEqual(out, "nudges-off")
         self.assertEqual(rec.sent_keys(), [])
         self.assertTrue(any("nudges OFF: suppressed" in ln for ln in logs),
-                        "compact suppression must journal: %r" % logs)
+                        "the defensive suppression must journal: %r" % logs)
 
 
 # --------------------------------------------------------------------------- #
@@ -252,6 +273,23 @@ class TestNudgesCLI(unittest.TestCase):
                     # a bare `nudges off` turns EVERYTHING off.
                     airuleset.cmd_nudges(self._args(nudges_action="off"))
                     self.assertFalse(wd.nudges_enabled("queue-arrival", home=home))
+
+    def test_on_kind_recovery_is_rejected(self):
+        # #1023 addendum: a RECOVERY kind (resume/compact) is always-on and cannot
+        # be staged — `nudges on --kind resume` refuses (rc 2) and never persists it.
+        import contextlib
+        import io
+        with TemporaryDirectory() as home, \
+                m.patch("os.path.expanduser",
+                        side_effect=lambda p: p.replace("~", home, 1)):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = airuleset.cmd_nudges(self._args(nudges_action="on",
+                                                     kind="resume"))
+            out = buf.getvalue()
+            self.assertEqual(rc, 2, "staging a recovery kind must refuse")
+            self.assertIn("recovery", out.lower())
+            self.assertNotIn("resume", wd.nudges_on_kinds(home=home))
 
     def test_fleet_skips_paused_and_classifies(self):
         import cli_fleet

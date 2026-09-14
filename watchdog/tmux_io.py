@@ -107,10 +107,13 @@ MACHINE_NUDGE_KINDS = frozenset({
 # login/limit problem killed the session even though every PRIORITY nudge is off
 # ("aj ked claudy to prepne na funkcny agent je nefunkcny lebo mu neprride nudge
 # na ozivenie"). `resume` = the api-error/401-OAuth resume + the limit/usage-cap
-# `continue` after reset (`__init__.py` Jobs 1/1b/6); `compact` = the `/compact`
-# delivery (`compact.py`). They keep their OWN per-error dedup/attempt caps + the
-# recent-human veto; they are not subject to the nudge_gate 60-min per-kind floor
-# (a revival fires once per error event, not on a cadence). PRIORITY nudges (every
+# `continue` after reset (`__init__.py` Jobs 1/1b/6) AND the jobs 4/4a dying-
+# session stuck-checks (`_send_stuckcheck_verified` default); `compact` = the
+# `/compact` delivery (`compact.py`). They keep their OWN bounds — per-error
+# dedup/attempt caps (Jobs 1/6), the decide_working `max_working_nudges` cadence
+# (jobs 4/4a), compact's 30-min cooldown + #855 vetoes — plus the recent-human
+# veto; NONE of them ever went through the nudge_gate 60-min per-kind floor, so
+# dropping the switch gate removed no rate bound. PRIORITY nudges (every
 # MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
 RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact"})
 
@@ -636,10 +639,14 @@ def _strip_selected(captured):
 def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None):
     """Type `text` literally into the pane, then press Enter to submit it.
 
-    #994: when the owner has turned nudges OFF, type NOTHING, journal one line
-    and return False (the caller reads the return -- `compact._compact_submit_
-    verified` -- so the request stays pending, never booked delivered). Returns
-    True on an attempted send (this helper never post-verifies).
+    #994 suppression contract: when a GATED nudge kind is OFF the chokepoint types
+    NOTHING, journals one line, and returns False (the caller reads the return so
+    the request stays pending, never booked delivered). Returns True on an
+    attempted send (this helper never post-verifies). NOTE (#1023 addendum): the
+    SOLE production caller is `compact._compact_submit_verified` with
+    `nudge="compact"`, a RECOVERY kind that is ALWAYS-ON — so the False/suppressed
+    path is unexercised in production today and only reachable for a hypothetical
+    future GATED caller; the logic stays general and correct for that case.
 
     Captures the pane FIRST (issue #36): if the agent-strip selector holds
     focus (`_strip_selected`), send ONE Escape before typing — otherwise the
