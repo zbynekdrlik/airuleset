@@ -2085,24 +2085,32 @@ from watchdog.resource_guard import (  # noqa: E402
 )
 
 
-# #1032 — the OWNER-ALERTING standalone-registry jobs suppressed on a PAUSED
-# box. When `box_paused` (the box's own fleet entry carries `paused` — #851,
-# resolved once in `cmd_watchdog` via `cli_fleet.box_is_paused`), the registry
-# loop skips every job in this set (journalling `<label> -> skip:paused-box
-# (#851)`) and pings the owner NOTHING — a frozen stream's drift is EXPECTED and
-# the owner can act on none of it. This is the ONE gate site (never a per-job-
-# body check). Membership = a full registry audit of every job whose invoke path
-# reaches `send_fn` toward the OWNER: the pure fleet-ops ALERTS.
+# #1032 — the standalone-registry jobs SILENCED on a PAUSED box. When
+# `box_paused` (the box's own fleet entry carries `paused` — #851, resolved once
+# in `cmd_watchdog` via `cli_fleet.box_is_paused`), the registry loop skips every
+# job in this set (journalling `<label> -> skip:paused-box (#851)`) and nudges NO
+# human channel — a frozen stream's drift/leftover is EXPECTED and nobody can act
+# on it while it is paused. This is the ONE gate site (never a per-job-body
+# check). Membership = a full registry audit of every job whose invoke path
+# reaches `send_fn` toward a HUMAN channel AND can fire on a paused sub-dev box:
+# the owner-facing ALERTS, plus `bounce_backstop` whose send is project-thread-
+# routed (`project=`, cross-stream coordination) — a frozen stream must not nudge
+# the coordination channel about work it will never resume (#1032 review, review-1
+# 🟡).
 #
-# DELIBERATELY EXCLUDED (recovery keeps running, #851): the `/goal`-loop
-# machinery (`goal_sweep`/`goal_dark_watch`/`goal_lane_sweep`) — it is RECOVERY
-# (re-arm / lane-liveness), and its rare un-suppressed owner sub-pings
-# (goalarm-attempt-cap / acctblock) require an armed `/goal` pane a frozen box
-# never has. Also NOT alerts: release-gap / u-freshness (transcript-verified
-# KEYSTROKE nudges via `send_verified`, not owner pings), `net_drift_alarm`
-# (owner sends removed #850), the reapers / disk-guard / hygiene sweeps
-# (log-only, #546), and the session-delivery jobs (`deliver_pending_done` etc.).
-OWNER_ALERTING_JOBS = frozenset({
+# DELIBERATELY EXCLUDED: (a) recovery keeps running (#851) — the `/goal`-loop
+# machinery (`goal_sweep`/`goal_dark_watch`/`goal_lane_sweep`) is RECOVERY (re-arm
+# / lane-liveness), and its rare un-suppressed owner sub-pings (goalarm-attempt-
+# cap / acctblock) require an armed `/goal` pane a frozen box never has;
+# `goal_question_repoke_watch` sends NOTHING (a `/goal clear` keystroke only).
+# (b) NOT a human-channel nudge on a reduced-stream box: release-gap / u-freshness
+# (transcript-verified KEYSTROKE nudges via `send_verified`), `net_drift_alarm`
+# (owner sends removed #850), `gk_request_backstop`/`gk_selfservice_bounce`/
+# `gk_orphan_marker_sweep`/`resource_guard_verify` (supervisor-root-gated or
+# gh-issue-filing — they no-op / file no ping on a reduced-stream requester box),
+# the reapers / disk-guard / hygiene sweeps (log-only, #546), and the
+# session-delivery jobs (`deliver_pending_done` etc.).
+PAUSED_SUPPRESSED_JOBS = frozenset({
     "check_usage",                  # weekly token-usage owner alert
     "fleet_burn_job",               # fleet burn-budget owner alert
     "burn_alert_job",               # per-box burn owner alert
@@ -2113,6 +2121,8 @@ OWNER_ALERTING_JOBS = frozenset({
     "conformance_check",            # job 34 drift (also never pings post-#1032)
     "conformance_heartbeat_check",  # job 35 central dead-box owner alarm
     "healthz_probe",                # job 47 external-outage owner alert
+    "bounce_backstop",              # cross-stream bounce nudge (project=-routed);
+                                    # fires on a reduced-stream box, so silence it
 })
 
 
@@ -2918,12 +2928,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
-    via `cli_fleet.box_is_paused(_current_user())` — every OWNER-ALERTING
-    standalone job (`OWNER_ALERTING_JOBS`) is skipped with a `<label> ->
-    skip:paused-box (#851)` journal line and pings the owner NOTHING; recovery +
-    hygiene jobs run unchanged. A frozen stream's expected drift is never an owner
-    Discord ping. This is the ONE gate site (the registry loop), never a per-job-
-    body check.
+    via `cli_fleet.box_is_paused(_current_user())` — every human-channel-alerting
+    standalone job (`PAUSED_SUPPRESSED_JOBS`: the owner alerts + the project-routed
+    `bounce_backstop`) is skipped with a `<label> -> skip:paused-box (#851)`
+    journal line and nudges no human channel; recovery + hygiene jobs run
+    unchanged. A frozen stream's expected drift/leftover is never a ping. This is
+    the ONE gate site (the registry loop), never a per-job-body check.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -4871,10 +4881,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # the job's custom prefix or (None) swallows it. Accumulation is verbatim.
     for _label, _gate, _invoke, _err in _standalone_registry:
         if _gate():
-            # #1032: ONE gate site — a PAUSED box suppresses every owner-ALERTING
-            # job (a frozen stream's drift is expected; the owner can act on none
-            # of it), journalling the suppression; recovery + hygiene jobs run on.
-            if box_paused and _label in OWNER_ALERTING_JOBS:
+            # #1032: ONE gate site — a PAUSED box suppresses every human-channel-
+            # alerting job (a frozen stream's drift/leftover is expected; nobody
+            # can act on it while paused), journalling the suppression; recovery +
+            # hygiene jobs run on.
+            if box_paused and _label in PAUSED_SUPPRESSED_JOBS:
                 logs.append("%s -> skip:paused-box (#851)" % _label)
                 continue
             try:

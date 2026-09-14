@@ -132,6 +132,47 @@ class TestRunOncePausedGate(unittest.TestCase):
         self.assertFalse(any("skip:paused-box" in ln for ln in logs),
                          "a non-paused box never skips for paused")
 
+    def test_paused_box_skips_bounce_backstop(self):
+        # bounce_backstop's send is project=-routed (cross-stream coordination),
+        # and it CAN fire on a paused reduced-stream box (#1032 review-1 🟡) — a
+        # frozen stream must not nudge any human channel about work it won't
+        # resume, so it is in PAUSED_SUPPRESSED_JOBS and skipped when paused.
+        calls, send = self._spy()
+        with TemporaryDirectory() as d:
+            sp = Path(d) / "state.json"
+            pj = Path(d) / "projects"
+            pj.mkdir()
+            logs = watchdog.run_once(
+                now=NOW, send_fn=send, box_paused=True,
+                bounce_fetch=lambda *a, **k: [],   # turns on the bounce gate
+                state_path=str(sp), projects_dir=str(pj), dry_run=True)
+        self.assertTrue(
+            any("bounce_backstop -> skip:paused-box" in ln for ln in logs),
+            "a paused box must journal the bounce_backstop skip")
+        self.assertEqual(calls, [], "a paused box must nudge no human channel")
+
+
+class TestPausedSuppressedSet(unittest.TestCase):
+    def test_set_contains_the_alerting_and_bounce_jobs(self):
+        s = watchdog.PAUSED_SUPPRESSED_JOBS
+        for label in ("conformance_check", "conformance_heartbeat_check",
+                      "stuck_main_sweep", "check_usage", "burn_alert_job",
+                      "fleet_burn_job", "long_turn_watch", "delivery_stall_watch",
+                      "card_reconcile", "healthz_probe", "bounce_backstop"):
+            self.assertIn(label, s, "%s must be silenced on a paused box" % label)
+
+    def test_set_excludes_recovery_and_non_human_channel_jobs(self):
+        s = watchdog.PAUSED_SUPPRESSED_JOBS
+        for label in ("goal_sweep", "goal_dark_watch", "goal_lane_sweep",
+                      "goal_question_repoke_watch",  # sends nothing (keystroke only)
+                      "net_drift_alarm",             # owner sends removed #850
+                      "gk_request_backstop", "gk_selfservice_bounce",
+                      "gk_orphan_marker_sweep", "resource_guard_verify",
+                      "disk_guard", "deliver_pending_done"):
+            self.assertNotIn(label, s,
+                             "%s is recovery/hygiene/non-human-channel — must run "
+                             "on a paused box" % label)
+
 
 # --------------------------------------------------------------------------
 # conformance drift NEVER pings the owner — it surfaces to the journal +
@@ -182,6 +223,13 @@ class TestConformanceNeverPings(unittest.TestCase):
             # NO 'PING ->' line: the owner send is gone
             self.assertFalse(any("PING ->" in ln for ln in logs),
                              "conformance must never emit an owner PING line")
+
+    def test_run_conformance_check_has_no_send_fn_param(self):
+        # #1032 removed the owner send entirely — a regression that re-added an
+        # owner ping under a different log word would slip a log-substring check,
+        # so lock the signature directly (review-1 hardening).
+        self.assertNotIn("send_fn",
+                         inspect.signature(conf.run_conformance_check).parameters)
 
     def test_resolved_clears_persisted_episode(self):
         with TemporaryDirectory() as d:
