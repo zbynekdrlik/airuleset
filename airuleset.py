@@ -5769,8 +5769,18 @@ def _watchdog_dispatchable_fetch(cwd):
     if not lines:
         return None
     try:
-        count = int(lines[0])          # `unmeasurable` (dep read failed) → None
+        count = int(lines[0])
     except ValueError:
+        # #1021: an `unmeasurable:<reason>` first line (a failed dependency-meta
+        # read) flows the REASON through so `goal._lane_dispatchable_decision`
+        # journals `skip:dispatchable-unknown (<reason>)` instead of only
+        # `unmeasurable` — still count=None → the unmeasurable branch, still
+        # fail-safe (never nudges). A bare `unmeasurable` (no reason) or any
+        # other unparseable head stays None (legacy / unknown).
+        head = lines[0]
+        if head.startswith("unmeasurable:"):
+            reason = head.split(":", 1)[1].strip() or None
+            return [{"count": None, "reason": reason}]
         return None
     reason = None
     for ln in lines[1:]:

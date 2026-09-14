@@ -4723,9 +4723,15 @@ def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
     res = _cached_dispatchable(cwd, dispatchable_fetch, state, now)
     count = res.get("count") if isinstance(res, dict) else None
     if not isinstance(count, int) or isinstance(count, bool):
+        # #1021: when the fetch carries a REASON (a failed dependency-meta read
+        # → `meta read failed`), journal it so an inert nudge says WHY, not only
+        # `unmeasurable`; a reasonless None (unwired/malformed) keeps the legacy
+        # phrasing. Either way it is fail-safe — never a nudge we cannot justify.
+        reason = res.get("reason") if isinstance(res, dict) else None
+        detail = reason if reason else "candidate count unmeasurable"
         return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "skip:dispatchable-unknown (candidate count unmeasurable)"
-                      % (loc, live_workers, waiters, backlog_n)), None
+                      "skip:dispatchable-unknown (%s)"
+                      % (loc, live_workers, waiters, backlog_n, detail)), None
     if count <= 0:
         reason = res.get("reason") if isinstance(res, dict) else None
         # #993 review 12: only label the KNOWN reason; a missing reason (a rare

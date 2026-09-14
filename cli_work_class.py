@@ -235,28 +235,150 @@ def _issue_body_comments(number, runner, root):
 
 #: Batched-read cap — the whole open-issue list in one gh call.
 _META_LIST_LIMIT = 1000
+#: Chunked-fallback window size + page cap, used ONLY when the whole-list
+#: bodies batch itself fails on an even larger repo (#1021).
+_META_CHUNK_LIMIT = 100
+_META_CHUNK_MAX_PAGES = 40
 
 
-def fetch_meta(numbers, runner, root=None):
-    """ONE batched read of ``{int number: {"body", "comments"}}`` for the OPEN
-    issues in ``numbers`` — a single ``gh issue list --state open --json
-    number,body,comments`` instead of a per-row ``gh issue view`` for every
-    workable row (#993 review 2: the O(workable) storm). None on any failure/
-    non-list (the caller treats None as UNMEASURABLE → fail-safe skip, never a
-    silent 'no deps'). Comments carry authorAssociation via ``_comments_from_json``
-    so the trusted-override filter applies."""
+def _run_json(runner, argv, root):
+    """`runner(argv, root)` → parsed JSON, or None on any failure / empty /
+    non-JSON. The injected runner (`_slice_quals_runner` → `_gh_out`) already
+    returns "" on a gh failure/timeout, so a failed read reaches us as an empty
+    string, and we normalise every non-result to None."""
+    try:
+        out = runner(argv, root)
+    except Exception:
+        return None
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except Exception:
+        return None
+
+
+def _open_bodies_batch(runner, root):
+    """The whole open-issue ``[{number, body}]`` list in ONE gh call, or None on
+    failure. BODIES ONLY — the ``comments`` field is what bloated the #993
+    3-field batch past what GraphQL returns whole on a large repo (odoo-erp:
+    280 open issues, long threads → rc1 / 'unexpected end of JSON input'), the
+    #1021 root cause."""
+    rows = _run_json(runner, ["gh", "issue", "list", "--state", "open", "--json",
+                              "number,body", "-L", str(_META_LIST_LIMIT)], root)
+    return rows if isinstance(rows, list) else None
+
+
+def _open_bodies_chunked(runner, root):
+    """Fallback when even the bodies-only whole-list batch fails on a still
+    larger repo (#1021): page the open issues oldest-first in
+    ``_META_CHUNK_LIMIT`` windows via ``--search "created:>=<ts> sort:created-asc"``,
+    deduped by number. None if ANY window fails (never a partial silent 'no
+    deps'). Bounded by ``_META_CHUNK_MAX_PAGES`` and a no-time-progress break so
+    a batch of issues sharing one timestamp can never loop forever."""
+    seen = {}
+    since = None
+    for _ in range(_META_CHUNK_MAX_PAGES):
+        search = "sort:created-asc"
+        if since:
+            search = "created:>=%s %s" % (since, search)
+        page = _run_json(runner, ["gh", "issue", "list", "--state", "open",
+                                  "--json", "number,body,createdAt",
+                                  "--search", search,
+                                  "-L", str(_META_CHUNK_LIMIT)], root)
+        if not isinstance(page, list):
+            return None
+        last_created = None
+        for r in page:
+            if not isinstance(r, dict):
+                continue
+            num = r.get("number")
+            if num is None:
+                continue
+            last_created = r.get("createdAt") or last_created
+            seen.setdefault(num, r)
+        if len(page) < _META_CHUNK_LIMIT:
+            break                       # last (short) page
+        if not last_created or last_created == since:
+            break                       # no time progress → stop (bounded)
+        since = last_created
+    return list(seen.values())
+
+
+def _open_bodies(runner, root):
+    """The open-issue ``[{number, body}]`` list: ONE bodies-only batch, else the
+    chunked created-asc fallback, else None (#1021)."""
+    rows = _open_bodies_batch(runner, root)
+    if rows is not None:
+        return rows
+    return _open_bodies_chunked(runner, root)
+
+
+def _body_has_depends_on(body):
+    """True iff `body` carries a ``Depends-on:`` line — the ONLY rows for which
+    the trusted-override comment filter needs comments fetched (#1021 design of
+    record: the comment override SUPERSEDES a body ``Depends-on:``)."""
+    return bool(_DEPENDS_ON_RE.search(body or ""))
+
+
+def _fetch_comments(number, runner, root, slug):
+    """The comment list (`[{"body","authorAssociation"}]`) for ONE dep-carrying
+    row (#1021). With a known repo slug → ``gh api repos/<slug>/issues/<N>/
+    comments --paginate -q '.[]'`` (``--paginate`` walks the WHOLE thread, so a
+    late supervisor ``Depends-on:`` override is never truncated; ``-q '.[]'``
+    streams each comment as one compact JSON object per line — the array-per-page
+    shape a bare ``--paginate`` would concatenate into invalid JSON). The REST
+    field is ``author_association`` (snake_case), mapped here to the
+    ``authorAssociation`` shape ``_comments_from_json`` produces. Without a slug
+    (legacy / test) → the per-row ``gh issue view --json comments`` path
+    (``_issue_body_comments``). Empty list on any failure (fail-open toward 'no
+    override' — the body's own ``Depends-on:`` still governs, the safe
+    direction)."""
+    if slug:
+        try:
+            out = runner(["gh", "api",
+                          "repos/%s/issues/%d/comments" % (slug, number),
+                          "--paginate", "-q", ".[]"], root)
+        except Exception:
+            out = ""
+        comments = []
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("body"), str):
+                comments.append({"body": obj["body"],
+                                 "authorAssociation": obj.get("author_association")})
+        return comments
+    _body, comments = _issue_body_comments(number, runner, root)
+    return comments
+
+
+def fetch_meta(numbers, runner, root=None, slug=None):
+    """A batched read of ``{int number: {"body", "comments"}}`` for the OPEN
+    issues in ``numbers``, resistant to the #1021 large-repo failure. SPLIT into
+    (1) a bodies-only whole-list batch (``gh issue list --json number,body`` —
+    280 small rows come back whole where the old 3-field ``number,body,comments``
+    batch died) with a created-asc chunked fallback, and (2) per-row comment
+    reads ONLY for rows whose body carries a ``Depends-on:`` line (the
+    trusted-override filter needs comments only there), bounded by
+    ``_DEP_RESOLVE_CAP``. The output shape is IDENTICAL to before (dep-free rows
+    get ``"comments": []``), so ``dep_wait_map`` is unchanged. None on any
+    failure/non-list (the caller treats None as UNMEASURABLE → fail-safe skip,
+    never a silent 'no deps'). ``slug`` (``owner/repo``, #1021) routes comment
+    reads through ``gh api``; None falls back to per-row ``gh issue view``."""
     want = {ni for ni in (_as_int(n) for n in numbers) if ni is not None}
     if not want:
         return {}
-    try:
-        rows = json.loads(runner(
-            ["gh", "issue", "list", "--state", "open", "--json",
-             "number,body,comments", "-L", str(_META_LIST_LIMIT)], root))
-    except Exception:
-        return None
-    if not isinstance(rows, list):
+    rows = _open_bodies(runner, root)
+    if rows is None:
         return None
     out = {}
+    fetched = 0
     for r in rows:
         if not isinstance(r, dict):
             continue
@@ -264,8 +386,12 @@ def fetch_meta(numbers, runner, root=None):
         if num not in want:
             continue
         body = r.get("body")
-        out[num] = {"body": body if isinstance(body, str) else "",
-                    "comments": _comments_from_json(r.get("comments"))}
+        body = body if isinstance(body, str) else ""
+        comments = []
+        if _body_has_depends_on(body) and fetched < _DEP_RESOLVE_CAP:
+            fetched += 1
+            comments = _fetch_comments(num, runner, root, slug)
+        out[num] = {"body": body, "comments": comments}
     return out
 
 

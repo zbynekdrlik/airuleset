@@ -119,6 +119,30 @@ class TestFetchMetaSplit(TestCase):
         self.assertIn(7, m)
         self.assertEqual(m[7]["body"], "Depends-on: #1")
 
+    def test_gh_api_comments_with_slug_maps_author_association(self):
+        # with a slug, comments come via `gh api ... -q` ndjson whose REST field
+        # is `author_association` (snake_case) — mapped to the `authorAssociation`
+        # shape dep_wait_map consumes.
+        r = _SplitRunner(
+            bodies={5: "Depends-on: #4"},
+            comments={5: [{"body": "supersede", "authorAssociation": "MEMBER"}]})
+        m = wc.fetch_meta({"5": {}}, r, "/root", slug=SLUG)
+        self.assertEqual(m[5]["comments"][0]["authorAssociation"], "MEMBER")
+        self.assertEqual(m[5]["comments"][0]["body"], "supersede")
+        # the comment read went through gh api, not gh issue view.
+        self.assertTrue(any("api" in " ".join(str(a) for a in c) for c in r.calls))
+
+    def test_dep_semantics_end_to_end_via_split_meta(self):
+        # #1021 preserves #993 dep semantics: a body Depends-on with an OPEN dep
+        # -> dep-wait; a dep whose ref is CLOSED / a dep-free row -> dispatchable.
+        r = _SplitRunner(
+            bodies={5: "Depends-on: #4", 6: "Depends-on: #3", 7: "no deps"},
+            states={(SLUG, 4): "OPEN", (SLUG, 3): "CLOSED"})
+        rows = {"5": {}, "6": {}, "7": {}}
+        meta = wc.fetch_meta(rows, r, "/root", slug=SLUG)
+        dep_map = wc.dep_wait_map(rows, SLUG, r, "/root", meta=meta)
+        self.assertEqual(dep_map, {"5": ["#4"]})   # only #5 waits (#4 open)
+
     def test_all_reads_fail_is_none(self):
         # fail-safe LOCK (holds before AND after the fix): if every read fails,
         # fetch_meta stays None so the caller prints unmeasurable, never a
