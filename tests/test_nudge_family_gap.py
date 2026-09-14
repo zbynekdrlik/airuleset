@@ -1,15 +1,17 @@
-"""#1023 — the shared `nudge_gate` per-pane-per-KIND floor, wired into the
-job-20 keystroke riders (partition-audit / release-gap / queue-arrival /
+"""#1023 + fix-forward — the shared `nudge_gate` gate, wired into the job-20
+keystroke riders (partition-audit / release-gap / queue-arrival /
 lane-occupancy). Each rider consults `nudge_gate.gate_ok(state, sid, category,
-now)` right before its send: when THIS kind was delivered to this session within
-`_min_interval()` (60 min), the rider DEFERS with `hold:floor` (no keystroke, own
-tracking state preserved, retries a later sweep) — never cancels. A DIFFERENT
-kind's recent delivery NEVER defers this rider (the pre-#1023 cross-kind family
-gap is removed; per-kind staging bounds the total).
+now)` right before its send:
+  - a recent SAME kind (within `_min_interval()`, 60 min) → `hold:floor`;
+  - a recent DIFFERENT priority kind (within `NUDGE_TOTAL_GAP_S`, the restored
+    #913 cross-kind cap) → `hold:total-cap`.
+Either way the rider DEFERS (no keystroke, own tracking state preserved, retries
+a later sweep) — never cancels.
 
-Originally #797 (the shared cadence gate) — the family-spacing half was removed
-in #1023, so these tests now lock the per-kind floor at the rider level: a recent
-SAME kind defers, a recent DIFFERENT kind delivers.
+Originally #797 (the shared cadence gate); #1023 unified to a per-kind floor and
+dropped the cross-kind cap; the #1023 fix-forward RESTORES the cross-kind cap
+(the owner's #913 "raz za hodinu … a ani iny nudge do promptu"), so a recent
+DIFFERENT kind now DEFERS this rider too — these tests lock that.
 """
 
 import os
@@ -40,7 +42,9 @@ CAD = 6 * 3600
 
 def _recent(sid, category, ago=60):
     """A gate state with a RECENT delivery of `category` — floors THAT kind on
-    `sid` for the next hour (#1023). It NEVER blocks a different kind."""
+    `sid` for the next hour (#1023) AND (via the restored #913 cross-kind total
+    cap, #1023 fix-forward) holds any OTHER priority kind on `sid` for the total
+    gap. A RECOVERY kind (resume/compact) is exempt and never counts."""
     return {"nudge_cadence": {sid: {category: NOW - ago}}}
 
 
@@ -82,11 +86,13 @@ class TestOpsWaitGate(_Base):
                          "a recent SAME-kind delivery must DEFER with hold:floor")
         self.assertTrue(any("hold:floor" in ln for ln in logs))
 
-    def test_recent_different_kind_delivers(self):
-        # #1023: a DIFFERENT kind's recent delivery must NOT block this rider.
+    def test_recent_different_kind_held_by_total_cap(self):
+        # #1023 fix-forward: a DIFFERENT priority kind's recent delivery now HOLDS
+        # this rider via the restored cross-kind total cap (hold:total-cap).
         tmux = self._tmux()
-        self._run(tmux, _recent(self.sid, "u-freshness"))
-        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
+        logs = self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
 
     def test_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -112,10 +118,11 @@ class TestReleaseGapGate(_Base):
         self.assertEqual(tmux.typed_texts(), [])
         self.assertTrue(any("hold:floor" in ln for ln in logs))
 
-    def test_recent_different_kind_delivers(self):
+    def test_recent_different_kind_held_by_total_cap(self):
         tmux = self._tmux()
-        self._run(tmux, _recent(self.sid, "u-freshness"))
-        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
+        logs = self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
 
     def test_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -143,10 +150,11 @@ class TestQueueArrivalGate(_Base):
         # baseline NOT advanced — the arrival re-detects next sweep (never cancels)
         # (state's qrecs is internal; the log's defer + no keystroke is the lock)
 
-    def test_recent_different_kind_delivers(self):
+    def test_recent_different_kind_held_by_total_cap(self):
         tmux = self._tmux()
-        self._run(tmux, _recent(self.sid, "u-freshness"))
-        self.assertIn("stuck-check:", "".join(tmux.typed_texts()))
+        logs = self._run(tmux, _recent(self.sid, "u-freshness"))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
 
     def test_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -173,12 +181,13 @@ class TestLaneOccupancyGate(_Base):
                          "a recent SAME-kind delivery must DEFER the lane nudge")
         self.assertTrue(any("hold:floor" in ln for ln in logs))
 
-    def test_recent_different_kind_delivers(self):
+    def test_recent_different_kind_held_by_total_cap(self):
         tmux = self._tmux()
         logs, owns = self._run(tmux, _recent(self.sid, "u-freshness"))
-        self.assertNotEqual(tmux.typed_texts(), [],
-                            "a DIFFERENT kind's recent delivery must NOT defer "
-                            "the lane nudge (per-kind independence)")
+        self.assertEqual(tmux.typed_texts(), [],
+                         "a DIFFERENT priority kind's recent delivery must HOLD "
+                         "the lane nudge (restored cross-kind total cap)")
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
 
     def test_control_open_gate_delivers_and_marks(self):
         tmux = self._tmux()
@@ -189,8 +198,8 @@ class TestLaneOccupancyGate(_Base):
                             "with an open gate the lane nudge is delivered "
                             "(control: the defer is the gate, not the harness)")
         # the delivered lane nudge stamps the shared cadence clock so a sibling
-        # family category defers within the family gap (RED if the lane rider's
-        # mark_sent is reverted — the burst fix would half-die silently).
+        # priority kind defers via the restored cross-kind total cap (RED if the
+        # lane rider's mark_sent is reverted — the burst fix would half-die).
         self.assertEqual(state["nudge_cadence"][self.sid]["lane-occupancy"], NOW)
 
 

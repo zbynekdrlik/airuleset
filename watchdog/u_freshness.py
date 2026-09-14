@@ -322,7 +322,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("u-freshness %s -> hold:floor (%s; retry next sweep)"
+            logs.append("u-freshness %s -> %s; retry next sweep"
                         % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, CATEGORY, now)))
             return logs

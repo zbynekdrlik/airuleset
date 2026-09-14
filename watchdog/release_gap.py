@@ -784,7 +784,7 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
-            logs.append("release-gap %s -> hold:floor (%s; retry next sweep)"
+            logs.append("release-gap %s -> %s; retry next sweep"
                         % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, "release-gap", now)))
             return logs

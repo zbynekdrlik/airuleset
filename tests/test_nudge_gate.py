@@ -6,10 +6,16 @@ prompt more often than 1×/hour (the owner's hard strop).
 
 #1023 (owner directive 2026-09-14): the ONE floor is a per-pane-per-KIND 60-min
 `NUDGE_MIN_INTERVAL_S` covering EVERY gated kind (u-freshness / goal-guard keep
-their longer floors via max()). The pre-existing cross-kind FAMILY GAP (#913's
-1×/hour TOTAL across all kinds) is REMOVED — the owner's model is per-KIND
-independence bounded by per-KIND staging (default all-OFF, enable one at a time),
-so a DIFFERENT kind is never blocked by another kind's floor.
+their longer floors via max()).
+
+#1023 fix-forward (integration finding, 2026-09-14): the #913 cross-kind TOTAL
+cap is RESTORED (`NUDGE_TOTAL_GAP_S`, a NEW symbol — the old `NUDGE_FAMILY_GAP_S`/
+`_family_gap` stay deleted). The owner's #913 rule is "nikdy viac ako raz za
+hodinu!!!! a ani iny nudge do promptu!!!" = at most ONE PRIORITY nudge per pane
+per hour in TOTAL, across kinds. So a DIFFERENT kind IS held while another
+priority kind was delivered within the total gap — per-kind staging alone does
+NOT bound the total (two kinds staged → two nudges/hour). RECOVERY kinds
+(resume/compact) are exempt from both bounds and never count for the cap.
 
 RED against the pre-implementation tree: `from watchdog import nudge_gate`
 ImportErrors. GREEN once the module lands.
@@ -33,8 +39,10 @@ class TestCadenceFloors(unittest.TestCase):
     """#1023: EVERY gated kind carries the global per-pane-per-kind 60-min floor
     (`_min_interval()`); u-freshness (owner's `_u_cadence()` strop) and goal-guard
     (24 h) keep their LONGER floors via max(). The env override can only RAISE,
-    never lower below 3600 (#504/#543 floor clamp). The cross-kind family gap
-    (#913) is removed — a kind is floored only against its OWN last delivery."""
+    never lower below 3600 (#504/#543 floor clamp). The per-kind floor is against
+    a kind's OWN last delivery; the cross-kind TOTAL cap (#1023 fix-forward,
+    `NUDGE_TOTAL_GAP_S`) is the separate across-kinds bound tested elsewhere. The
+    old `NUDGE_FAMILY_GAP_S`/`_family_gap` symbols stay deleted (a new name)."""
 
     def test_u_reconcile_default_is_one_hour(self):
         self.assertEqual(ng.U_RECONCILE_CADENCE_S, HOUR)
@@ -104,13 +112,15 @@ class TestGateOk(unittest.TestCase):
             self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness",
                                        NOW + 2 * HOUR))
 
-    def test_different_kind_NOT_deferred_1023(self):
-        # #1023: a DIFFERENT kind is NEVER blocked by another kind's floor — the
-        # cross-kind family gap is gone; the floor is strictly per-kind.
+    def test_different_kind_deferred_by_total_cap_1023ff(self):
+        # #1023 fix-forward: a DIFFERENT kind IS held by the restored cross-kind
+        # TOTAL cap while another priority kind was delivered within the hour
+        # (the #913 rule the #1023 lane wrongly dropped). Past the hour: allowed.
         st = {}
         ng.mark_sent(st, "sess-a", "lane-occupancy", NOW)
-        self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + 60))
-        self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + 59 * 60))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 60))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 59 * 60))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + HOUR))
 
     def test_same_kind_deferred_within_the_hour_1023(self):
         """#1023: the SAME kind is floored — a second delivery of the SAME kind
@@ -173,11 +183,12 @@ class TestClassification923(unittest.TestCase):
 
 
 class TestBatchEligible923(unittest.TestCase):
-    """#923 BATCHING (rebased on #1023's per-kind floor): batch_eligible collects
-    every category whose OWN per-kind floor has expired, ordered work-driving
-    first, audit second. There is no cross-kind family-gap precondition — a
-    recently-sent kind is excluded by its own floor while other kinds stay
-    eligible."""
+    """#923 BATCHING, rebased on #1023's per-kind floor AND the #1023 fix-forward
+    cross-kind TOTAL cap: batch_eligible returns [] while ANY priority kind was
+    delivered within the total gap (a new batch is a new interruption), else the
+    categories whose OWN per-kind floor has expired, ordered work-driving first,
+    audit second. Batching is the mechanism that lets multiple due kinds SHARE
+    the ONE hourly interruption; the total cap forbids a SECOND one in the hour."""
 
     def test_empty_state_all_eligible(self):
         st = {}
@@ -193,15 +204,13 @@ class TestBatchEligible923(unittest.TestCase):
                 break
         self.assertEqual(wd_end, len(ng.WORK_DRIVING_CATEGORIES))
 
-    def test_recent_kind_excluded_others_eligible(self):
-        # #1023: no family gap — a recently-sent kind is excluded by its OWN
-        # per-kind floor, but every OTHER kind (no history) stays eligible.
+    def test_recent_delivery_blocks_the_whole_batch(self):
+        # #1023 fix-forward: a recent priority delivery closes the cross-kind
+        # TOTAL cap, so NO new batch is composed this hour (was: other kinds
+        # stayed eligible — the two-nudges-per-hour hole via the batch path).
         st = {}
         ng.mark_sent(st, "s", "lane-occupancy", NOW)
-        result = ng.batch_eligible(st, "s", NOW + 60)
-        self.assertNotIn("lane-occupancy", result)   # its own floor blocks it
-        self.assertIn("partition-audit", result)     # a different kind is free
-        self.assertEqual(len(result), len(ng.GATED_CATEGORIES) - 1)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])
 
     def test_gap_open_returns_all_eligible(self):
         st = {}
@@ -212,19 +221,19 @@ class TestBatchEligible923(unittest.TestCase):
         self.assertIn("lane-occupancy", result)
         self.assertIn("partition-audit", result)
 
-    def test_per_category_floor_excludes(self):
-        """#1023: u-freshness has a 1h floor — if sent at NOW it is excluded
-        from a batch at NOW+HOUR-1 (floor not expired) but included at NOW+HOUR
-        (floor exactly expired); OTHER kinds stay eligible throughout."""
+    def test_total_cap_then_floor_gates_the_batch(self):
+        """#1023 fix-forward: after a u-freshness delivery at NOW, the total cap
+        holds the WHOLE batch until NOW+HOUR (no batch at NOW+HOUR-1), then at
+        NOW+HOUR the cap opens and u-freshness's own 1h floor has expired too, so
+        it (and every other kind) is eligible."""
         st = {}
         ng.mark_sent(st, "s", "u-freshness", NOW)
-        # At NOW+HOUR-1: u-freshness excluded (its own floor), others eligible.
-        result_before = ng.batch_eligible(st, "s", NOW + HOUR - 1)
-        self.assertNotIn("u-freshness", result_before)
-        self.assertIn("partition-audit", result_before)
-        # At NOW+HOUR: floor exactly expired → included.
+        # At NOW+HOUR-1: total cap still closed -> no batch at all.
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR - 1), [])
+        # At NOW+HOUR: cap open + own floor expired -> included.
         result = ng.batch_eligible(st, "s", NOW + HOUR)
         self.assertIn("u-freshness", result)
+        self.assertIn("partition-audit", result)
 
     def test_starvation_impossible_with_batching(self):
         """The gk starvation shape is impossible with batching: when the slot
@@ -238,20 +247,17 @@ class TestBatchEligible923(unittest.TestCase):
         self.assertIn("partition-audit", result)
 
     def test_mark_batch_sent_stamps_all(self):
-        """#1023: mark_batch_sent marks all categories at once — each member's
-        own per-kind floor then blocks THAT kind for 1h (a different, unmarked
-        kind stays eligible; there is no cross-kind family gap)."""
+        """#1023 + fix-forward: mark_batch_sent marks all categories at once, and
+        the cross-kind total cap then holds the WHOLE batch (even an unmarked
+        kind) for the hour — the batch WAS the one hourly interruption."""
         st = {}
         cats = ["lane-occupancy", "partition-audit", "u-freshness"]
         ng.mark_batch_sent(st, "s", cats, NOW)
         for cat in cats:
             self.assertEqual(st["nudge_cadence"]["s"][cat], NOW)
-        # Within the hour: the three marked kinds are floored out...
-        mid = ng.batch_eligible(st, "s", NOW + 30 * 60)
-        for cat in cats:
-            self.assertNotIn(cat, mid)
-        # ...but an UNMARKED kind (queue-arrival) stays eligible.
-        self.assertIn("queue-arrival", mid)
+        # Within the hour: the total cap closes the batch entirely (no unmarked
+        # kind leaks a second interruption).
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 30 * 60), [])
         # Past the hour every kind is eligible again.
         self.assertEqual(len(ng.batch_eligible(st, "s", NOW + HOUR)),
                          len(ng.GATED_CATEGORIES))
@@ -386,21 +392,17 @@ class TestBatchCallerRefactor923(unittest.TestCase):
         self.assertEqual(included, [])
 
     def test_two_families_both_marked_after_batch(self):
-        """#1023: when two families are batched, mark_batch_sent stamps BOTH at
-        once so each one's OWN per-kind floor blocks THAT kind's next delivery;
-        an unbatched kind stays eligible (no cross-kind family gap)."""
+        """#1023 + fix-forward: when two families are batched, mark_batch_sent
+        stamps BOTH; the cross-kind total cap then closes the next batch entirely
+        for the hour (an unbatched kind no longer leaks a second interruption)."""
         st = {}
         cats = ["lane-occupancy", "u-freshness"]
         ng.mark_batch_sent(st, "s", cats, NOW)
         sess = st["nudge_cadence"]["s"]
         self.assertEqual(sess["lane-occupancy"], NOW)
         self.assertEqual(sess["u-freshness"], NOW)
-        # Both marked kinds are floored out of the next batch...
-        nxt = ng.batch_eligible(st, "s", NOW + 60)
-        self.assertNotIn("lane-occupancy", nxt)
-        self.assertNotIn("u-freshness", nxt)
-        # ...but an unmarked kind (queue-arrival) stays eligible.
-        self.assertIn("queue-arrival", nxt)
+        # The total cap holds the whole batch within the hour.
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 60), [])
 
 
 if __name__ == "__main__":
