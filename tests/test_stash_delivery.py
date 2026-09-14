@@ -461,7 +461,9 @@ class MachineTailRecognition(unittest.TestCase):
         self.assertIn("Escape", tails, run.calls)
         self.assertIn("Enter", tails, run.calls)
         self.assertLess(tails.index("Escape"), tails.index("Enter"), run.calls)
-        self.assertTrue(any("machine-nudge" in ln for ln in logs), logs)
+        # #1022 -- a dreply (owner's OWN reply) is user-authored, so its wedge
+        # submit journals "wedge: user draft → submit" (was "machine-nudge").
+        self.assertTrue(any("wedge: user draft → submit" in ln for ln in logs), logs)
         self.assertFalse(send.calls, "recognized machine text must never ping")
 
 

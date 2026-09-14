@@ -346,7 +346,11 @@ class BackReferenceSeamsGoThroughThePackage(unittest.TestCase):
                                                "z", "odoo", s, run=run)
         m.assert_called()
         self.assertFalse(s.calls, "dreply-machine text submits, never pings")
-        self.assertTrue(any("machine-nudge" in ln for ln in logs), logs)
+        # #1022 -- the owner's OWN reply (dreply) is user-authored: its wedge
+        # submit journals "wedge: user draft → submit" (was "machine-nudge
+        # submit" pre-#1022); the seam is still proven observed by m.assert_called
+        # + the submit (no ping).
+        self.assertTrue(any("wedge: user draft → submit" in ln for ln in logs), logs)
 
     # --- paste-end escalation constants ----------------------------------- #
     def test_submit_unstick_and_giveup_constant_seams_are_live(self):
