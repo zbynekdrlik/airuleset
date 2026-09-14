@@ -2357,7 +2357,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         calls = []
 
         def fake_stash(pid, text, run, captured=None, logs=None,
-                       sleep_fn=None, state=None):
+                       sleep_fn=None, state=None, **kwargs):
             calls.append((pid, text))
             return True
 
@@ -2389,7 +2389,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         calls = []
 
         def fake_stash(pid, text, run, captured=None, logs=None,
-                       sleep_fn=None, state=None):
+                       sleep_fn=None, state=None, **kwargs):
             calls.append((pid, text))
             return False
 
@@ -2420,7 +2420,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         seen = []
 
         def fake_stash(pid, text, run, captured=None, logs=None,
-                       sleep_fn=None, state=None):
+                       sleep_fn=None, state=None, **kwargs):
             seen.append(state)
             return True
 
@@ -2555,7 +2555,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         calls = []
 
         def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
-                       state=None):
+                       state=None, **kwargs):
             calls.append(pid)
             return False
 
@@ -2590,7 +2590,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         calls = []
 
         def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
-                       state=None):
+                       state=None, **kwargs):
             calls.append(pid)
             return False
 

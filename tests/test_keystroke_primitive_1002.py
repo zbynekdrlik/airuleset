@@ -214,5 +214,51 @@ class TestKindContract(unittest.TestCase):
                         "expected the core nudge kinds to be used; saw %r" % sorted(seen))
 
 
+# --------------------------------------------------------------------------- #
+# #1023 — every machine-nudge `keys()` call carries the nudge IDENTITY. A GATED
+# (machine-nudge delivery) keystroke must thread `nudge=` so the per-kind switch
+# keys on it; a RECOVERY keystroke (janitor/undo/…) is exempt. This is the
+# structural half of the per-kind switch: the identity reaches the primitive.
+# --------------------------------------------------------------------------- #
+class TestNudgeIdentityContract1023(unittest.TestCase):
+    @staticmethod
+    def _kind_const(call):
+        for kw in call.keywords:
+            if kw.arg == "kind" and isinstance(kw.value, ast.Constant):
+                return kw.value.value
+        # a `kind=<Name>` (a var, e.g. deliver_with_stash's nudge_kind) is a
+        # dynamic gated kind -> still requires an identity.
+        for kw in call.keywords:
+            if kw.arg == "kind":
+                return "<dynamic>"
+        return None
+
+    @staticmethod
+    def _has_nudge(call):
+        return any(kw.arg == "nudge" for kw in call.keywords)
+
+    def test_every_gated_keys_call_threads_nudge(self):
+        violations = []
+        for path in sorted(WATCHDOG_DIR.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", getattr(node.func, "id", None))
+                if name != "keys":
+                    continue
+                kind = self._kind_const(node)
+                if kind is None:
+                    continue                         # no kind= (not a real call)
+                if isinstance(kind, str) and kind in wd.RECOVERY_KINDS:
+                    continue                         # recovery keystroke — exempt
+                if not self._has_nudge(node):
+                    violations.append("%s:%d kind=%r" % (path.name, node.lineno, kind))
+        self.assertEqual(
+            violations, [],
+            "every GATED machine-nudge keys() call must thread a `nudge=` "
+            "identity (the per-kind switch keys on it); missing: %r" % violations)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -515,18 +515,22 @@ def disk_segment(home=None, now=None):
 
 
 def nudges_off_segment(home=None):
-    """The `nudges OFF` footer segment (#994): shown ONLY while the owner has
-    turned machine nudges OFF — the `~/.claude/nudges-off` marker exists —
-    hidden otherwise, so OFF is never silent. EXISTENCE-based, matching
-    `watchdog.nudges_enabled`'s fail-safe semantics (a present-but-corrupt
-    marker still reads OFF). Reads ONLY a machine-local file, never blocks /
-    touches the network; renders as no segment on any error (the shim wraps the
-    whole assembly, and `Path.exists()` returns False rather than raising for
-    the ordinary missing-file case). Modelled on `disk_segment`, placed after
-    `disk` in the width-budget order."""
-    if (_claude_dir(home) / "nudges-off").exists():
+    """The nudge-switch footer segment (#1023 per-kind staging): renders
+    `nudges OFF` when EVERY machine-nudge kind is off (the owner's default), and
+    `nudges N/M` (N enabled of M total) when some kinds are staged on — so the
+    switch state is never silent. Reads ONLY the machine-local per-kind state file
+    via `watchdog.nudges_on_kinds` (never blocks / touches the network); renders
+    as no segment on any error. Modelled on `disk_segment`, placed after `disk` in
+    the width-budget order (short — `nudges 1/10` is 11 chars)."""
+    try:
+        import watchdog as _wd
+        on = _wd.nudges_on_kinds(home)
+        total = len(_wd.MACHINE_NUDGE_KINDS)
+    except Exception:
+        return ""
+    if not on:
         return "\033[38;5;208mnudges OFF\033[0m"
-    return ""
+    return "\033[38;5;208mnudges %d/%d\033[0m" % (len(on), total)
 
 
 def quota_segment(home=None, now=None):

@@ -258,7 +258,7 @@ class DeliverDiscordRepliesRetryEscapesFirst(unittest.TestCase):
         calls = []
 
         def _sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                out=None, user_authored=False):
+                out=None, user_authored=False, nudge=None):
             calls.append({"pid": pid, "text": text})
             return True
 

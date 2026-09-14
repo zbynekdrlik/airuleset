@@ -839,7 +839,7 @@ def _await_goal_armed(pid, run, sleep_fn):
 
 
 def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
-                        verify_armed=True):
+                        verify_armed=True, nudge="goal-sweep"):
     """Type a LONG `/goal ...` into a BARE input box and submit it,
     verifying every step against a fresh capture -- the same protocol
     `deliver_with_stash` uses for its own type/submit steps, minus the
@@ -882,7 +882,8 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
     # keystrokes (keys suppresses + returns False) and this helper bails
     # keystroke-free, exactly as the type below (routed through `keys`) does.
     if watchdog._strip_selected(cap):
-        if not watchdog.keys(pid, "Escape", kind="goal", run=run, logs=logs):
+        if not watchdog.keys(pid, "Escape", kind="goal", nudge=nudge, run=run,
+                             logs=logs):
             return False
     fresh = watchdog.capture_pane(pid, run, lines=40)
     if watchdog._input_line_text(fresh) != "":
@@ -898,18 +899,18 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
     # check that passed a head-swallowed /goal to Enter -- CC then read the text
     # as a plain prompt and the goal never armed (#720). Never a submit on False.
     if not watchdog._type_literal_verified(pid, run, text, sleep_fn,
-                                           kind="goal", logs=logs):
+                                           kind="goal", nudge=nudge, logs=logs):
         _log("goal-verify-abort: type-not-verified")
         return False                       # not byte-exact -- never submit it
     # #1002 -- reached only when ON (a suppressed type returned False above); the
     # submit Enter + corrective go through the ONE `keys` primitive.
-    watchdog.keys(pid, "Enter", kind="goal", run=run, logs=logs)
+    watchdog.keys(pid, "Enter", kind="goal", nudge=nudge, run=run, logs=logs)
     if _await_typed(pid, text, run, sleep_fn, want=False):
         # STILL in the box after the same bounded settle window -- a
         # genuinely swallowed submit. ONE corrective Escape+Enter, never a
         # second bare Enter, never two Escapes.
-        watchdog.keys(pid, "Escape", kind="goal", run=run, logs=logs)
-        watchdog.keys(pid, "Enter", kind="goal", run=run, logs=logs)
+        watchdog.keys(pid, "Escape", kind="goal", nudge=nudge, run=run, logs=logs)
+        watchdog.keys(pid, "Enter", kind="goal", nudge=nudge, run=run, logs=logs)
         if _await_typed(pid, text, run, sleep_fn, want=False):
             watchdog._undo_and_release_slot(pid, run, text, False, _log,
                                             "goal-verify-abort: "
@@ -1743,7 +1744,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # and deliver_with_stash clears it on its own verified success.
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
                                          logs=logs, sleep_fn=sleep_fn,
-                                         state=state, nudge_kind="goal")
+                                         state=state, nudge_kind="goal",
+                                         nudge="goal-sweep")
         if ok:
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
@@ -5105,7 +5107,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         if watchdog._own_nudge_submit_prefix(own_head):
             if not watchdog.submit_own_draft_verified(pid, own_head, run,
                                                       tpath, sleep_fn=sleep_fn,
-                                                      logs=logs):
+                                                      logs=logs,
+                                                      nudge="lane-occupancy"):
                 # A recognized own draft that will not submit-verify is a
                 # genuinely wedged pane -- advance the SAME consecutive-abort
                 # streak + backoff park the foreign stash-abort uses, so it
@@ -5127,7 +5130,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # clears it on its own verified success.
         elif not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
                                              logs=logs, sleep_fn=sleep_fn,
-                                             state=state):
+                                             state=state, nudge="lane-occupancy"):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
@@ -5164,7 +5167,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # backoff -> IDENTICAL re-type -> duplicate nudge (live gk 2026-09-01).
         send_out = {}
         ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                    logs=logs, out=send_out)
+                                    logs=logs, out=send_out, nudge="lane-occupancy")
         if not (ok or bool(send_out.get("delivered_unconfirmed"))):
             # GENUINE swallow -- transient, retried next sweep, and it must
             # NOT consume the ln/llast budget (a refused attempt is not a
@@ -5567,7 +5570,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 send_out = {}
                 _bok = watchdog.send_verified(
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
-                    logs=logs, out=send_out)
+                    logs=logs, out=send_out,
+                    nudge=(_incl[0] if _incl else None))
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
                     watchdog._janitor_clear_watch(state, pid)

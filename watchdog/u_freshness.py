@@ -348,7 +348,7 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     # cadence; only a GENUINE swallow / abort retries next sweep.
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out)
+                                logs=logs, out=send_out, nudge=CATEGORY)
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # A genuine swallow leaves last_nudge unadvanced -> retries next sweep;

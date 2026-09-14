@@ -820,7 +820,7 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     # dedup; only a GENUINE swallow / abort retries next sweep.
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out)
+                                logs=logs, out=send_out, nudge="release-gap")
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # #749 BOUNDED RETRY: a persistently-swallowing pane must not be re-typed

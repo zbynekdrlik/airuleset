@@ -53,8 +53,9 @@ class _SendVerifiedRecorder:
         self.calls = []
 
     def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                 out=None, user_authored=False):
-        self.calls.append({"pid": pid, "text": text, "tpath": tpath})
+                 out=None, user_authored=False, nudge=None):
+        self.calls.append({"pid": pid, "text": text, "tpath": tpath,
+                           "nudge": nudge})
         if self.unconfirmed and isinstance(out, dict):
             out["delivered_unconfirmed"] = True
         return self.result
@@ -83,7 +84,7 @@ class _SubmitOwnDraftRecorder:
 
     def __call__(self, pid, draft, run=None, tpath=None, sleep_fn=None,
                  logs=None, caller_proven_own=False, out=None,
-                 user_authored=False):
+                 user_authored=False, nudge=None):
         self.calls.append({"pid": pid, "draft": draft, "tpath": tpath,
                            "caller_proven_own": caller_proven_own})
         if self.unconfirmed and isinstance(out, dict):

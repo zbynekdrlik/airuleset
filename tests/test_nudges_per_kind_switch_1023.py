@@ -38,7 +38,21 @@ class _Recorder:
         return [a for a in self.calls if "send-keys" in " ".join(map(str, a))]
 
 
+def _no_bypass():
+    """The suite sets AIRULESET_TEST_IGNORE_DISABLE (conftest autouse) so a real
+    box's staged state never fails the suite; pop it to exercise the real
+    per-kind predicate."""
+    patcher = m.patch.dict(os.environ)
+    patcher.start()
+    os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
+    return patcher
+
+
 class TestPerKindPredicate(unittest.TestCase):
+    def setUp(self):
+        p = _no_bypass()
+        self.addCleanup(p.stop)
+
     def test_absent_state_all_off(self):
         with TemporaryDirectory() as home:
             for k in wd.MACHINE_NUDGE_KINDS:
@@ -64,6 +78,10 @@ class TestPerKindPredicate(unittest.TestCase):
 
 
 class TestCLI(unittest.TestCase):
+    def setUp(self):
+        p = _no_bypass()
+        self.addCleanup(p.stop)
+
     def _args(self, **kw):
         d = dict(nudges_action="status", kind=None, all=False, reason=None,
                  fleet=False)
@@ -111,15 +129,14 @@ class TestPrimitivePerKind(unittest.TestCase):
     PID = "%9"
 
     def test_disabled_kind_suppressed_at_primitive(self):
-        with TemporaryDirectory() as home:
-            rec = _Recorder()
-            logs = []
-            with m.patch.object(wd, "nudges_enabled",
-                                lambda kind=None, home=None: False):
-                ok = wd.keys(self.PID, "Enter", kind="send", nudge="queue-arrival",
-                             run=rec, logs=logs)
-            self.assertFalse(ok)
-            self.assertEqual(rec.sent_keys(), [])
+        rec = _Recorder()
+        logs = []
+        with m.patch.object(wd, "nudges_enabled",
+                            lambda kind=None, home=None: False):
+            ok = wd.keys(self.PID, "Enter", kind="send", nudge="queue-arrival",
+                         run=rec, logs=logs)
+        self.assertFalse(ok)
+        self.assertEqual(rec.sent_keys(), [])
 
     def test_enabled_kind_delivers_at_primitive(self):
         rec = _Recorder()

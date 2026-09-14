@@ -1290,7 +1290,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # the undone-swallow path).
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out)
+                                logs=logs, out=send_out, nudge="partition-audit")
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
         # #714 BOUNDED RETRY: a genuine swallow leaves last_nudge unadvanced so it

@@ -1322,7 +1322,8 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     # sweep re-delivers once nudges are back ON. A bare box after a suppressed
     # no-op would otherwise misclassify as `sent`.
     sc_logs = []
-    if not watchdog.send_continue(pid, COMPACT_TEXT, run, logs=sc_logs):
+    if not watchdog.send_continue(pid, COMPACT_TEXT, run, logs=sc_logs,
+                                  nudge="compact"):
         for r in sc_logs:
             log_fn(r)
         return "nudges-off"
@@ -1334,8 +1335,8 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     # the strip / closes a menu, leaving the text for the Enter. #1002 -- reached
     # only when ON (`send_continue` above already typed + submitted, so the #994
     # gate passed); the corrective goes through the ONE `keys` primitive too.
-    watchdog.keys(pid, "Escape", kind="continue", run=run)
-    watchdog.keys(pid, "Enter", kind="continue", run=run)
+    watchdog.keys(pid, "Escape", kind="continue", nudge="compact", run=run)
+    watchdog.keys(pid, "Enter", kind="continue", nudge="compact", run=run)
     if not _compact_still_in_box(pid, run, sleep_fn):
         return _compact_post_send_classify(pid, run, sleep_fn)  # #822/#833: sent vs queued
     # Still stuck. Backspace our own text off the bare-verified box so the next
