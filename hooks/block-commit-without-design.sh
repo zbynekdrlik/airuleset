@@ -21,7 +21,10 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
 RC=0
+# 1>&2: the module already writes its block reason to STDERR (the model-visible
+# deny channel, #682); the redirect routes any stray stdout there too and keeps
+# the stderr-emit contract (test_hook_deny_stderr) satisfied for this exit-2 hook.
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.commitdesign <<<"$PAYLOAD" || RC=$?
+    python3 -m gates.commitdesign <<<"$PAYLOAD" 1>&2 || RC=$?
 [ "$RC" -eq 2 ] && exit 2
 exit 0
