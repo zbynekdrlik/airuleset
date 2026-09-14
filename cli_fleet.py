@@ -194,6 +194,28 @@ REMOTE_HOSTS = [
         "user": "david3",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # #1031 (owner todo 2026-09-14: "prepnut d3 aby nepracoval multi agent
+        # paralelelne ale sequencne") — the d3 window runs SEQUENTIAL (one
+        # autopilot-worker at a time), the SAME #998 declared-window mechanism
+        # as gk-infra. `role` is None: a stream window is neither the gk
+        # `review` nor `infra` kind (validate_windows accepts None). ONE
+        # declaration flips every consumer through the cwd-first resolver
+        # (cli_concurrency.resolve_concurrency): lane cap 1
+        # (watchdog/lane_resources), block-dispatch-over-wdrain.sh's sequential
+        # gate (dispatch_gate_line), the refill/queue nudge skips
+        # (skip:sequential-mode), the status `concurrency:` row, and the
+        # `/autopilot` fork-no-merge × sequential /goal variant
+        # (goal_registry.render_goal_line). Every OTHER box is byte-identical.
+        # A single declared window keeps tmux provisioning byte-identical too
+        # (_managed_windows_create_body returns "" for < 2 windows → bare
+        # `rename-window d3`). NOT a project .claude/lane-resources.json in
+        # odoo-erp — that file lives in the shared checkout and would flip gk's
+        # review window (same ~/devel/odoo/odoo-erp path) too; the per-box
+        # fleet declaration scopes it to the david3 account only.
+        "windows": [
+            {"name": "d3", "cwd": "~/devel/odoo/odoo-erp",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         "name": "david4@subdev",
