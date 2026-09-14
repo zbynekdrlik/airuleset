@@ -990,7 +990,11 @@ def _dep_wait_map_for(rows, root):
     import airuleset
     slug = airuleset._repo_slug(cwd=root)
     runner = _slice_quals_runner(root)
-    meta = airuleset.fetch_meta(rows, runner, root)
+    # #1021: pass the slug so `fetch_meta` reads per-row comments via
+    # `gh api repos/<slug>/...` (the bodies-only batch + dep-carrying-row
+    # comments split that survives a large repo); slug "" falls back to
+    # per-row `gh issue view`.
+    meta = airuleset.fetch_meta(rows, runner, root, slug=slug)
     if meta is None:
         return {}, slug, False
     dep_map = airuleset.dep_wait_map(rows, slug, runner, root, meta=meta)
@@ -1003,12 +1007,17 @@ def _emit_count_dispatchable(rows, root):
     SAME set the picker and both nudges use (the class-based infra-serial gate
     was removed in round 2b). A `reason:dep-wait` line follows a 0 count so the
     lane nudge journals WHY it will not refill. When dep resolution is UNMEASURABLE
-    (batched read failed) print `unmeasurable` so the watchdog fetch reads None →
-    `skip:dispatchable-unknown` (fail-safe, #993 review 5)."""
+    (batched read failed) print `unmeasurable:meta read failed` so the watchdog
+    fetch flows the REASON into the journal (`skip:dispatchable-unknown (meta
+    read failed)`) — the fail-safe direction (unmeasurable never nudges) is
+    unchanged, only the explanation is added (#1021; #993 review 5)."""
     import airuleset
     dep_map, slug, ok = _dep_wait_map_for(rows, root)
     if not ok:
-        print("unmeasurable")
+        # #1021: the ONLY reason `_dep_wait_map_for` reports `ok=False` is a
+        # failed dependency-meta read; the colon-form carries that reason so the
+        # inert nudge says WHY in the journal, not only `unmeasurable`.
+        print("unmeasurable:meta read failed")
         return
     dispatchable_set, reason = airuleset.dispatchable_numbers(rows, slug, dep_map)
     print(len(dispatchable_set))

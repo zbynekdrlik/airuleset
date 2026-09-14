@@ -140,12 +140,22 @@ class TestFetchMeta(TestCase):
         return lambda argv, _cwd: __import__("json").dumps(payload)
 
     def test_batched_meta_filters_to_wanted(self):
-        payload = [
-            {"number": 5, "body": "Depends-on: #4",
-             "comments": [{"body": "hi", "authorAssociation": "OWNER"}]},
-            {"number": 99, "body": "unrelated", "comments": []},
-        ]
-        m = wc.fetch_meta(["5"], self._runner(payload), "/root")
+        # #1021: comments now come from a SEPARATE per-row read (the batch is
+        # bodies-only), so the fake runner is argv-aware — the bodies batch
+        # serves number,body and the dep-carrying row's comments come via the
+        # legacy per-row `gh issue view` path (no slug).
+        def runner(argv, _cwd):
+            import json as _j
+            j = " ".join(argv)
+            if "list" in j and "number,body" in j:
+                return _j.dumps([{"number": 5, "body": "Depends-on: #4"},
+                                 {"number": 99, "body": "unrelated"}])
+            if "view" in j and "body,comments" in j:
+                return _j.dumps(
+                    {"body": "Depends-on: #4",
+                     "comments": [{"body": "hi", "authorAssociation": "OWNER"}]})
+            return "{}"
+        m = wc.fetch_meta(["5"], runner, "/root")
         self.assertIn(5, m)
         self.assertNotIn(99, m)
         self.assertEqual(m[5]["body"], "Depends-on: #4")
