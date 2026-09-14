@@ -6548,7 +6548,12 @@ def _watchdog_health_probe_fetch(url, timeout=8):
     req = urllib.request.Request(
         url, headers={"User-Agent": "airuleset-healthz-probe"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read(65536).decode("utf-8", "replace")
+        # Bounded read (memory safety), but generous: presenter's /healthz can
+        # carry a variable `ndi_pipelines` array, and a body TRUNCATED mid-JSON
+        # would fail json.loads → a permanent `unmeasurable` verdict that never
+        # alerts (#1005 review). 256 KiB is ~1000x the observed body while still
+        # capping a misbehaving endpoint.
+        body = resp.read(262144).decode("utf-8", "replace")
         return resp.status, body
 
 

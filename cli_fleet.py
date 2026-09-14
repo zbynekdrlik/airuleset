@@ -57,7 +57,13 @@ REMOTE_HOSTS = [
         # address-by-tailscale) rather than the LAN DNS name companion-pp.lan.
         # `owner` routes the alert to zbynek (presenter owner) regardless of
         # dev2's own box owner. Any future external /healthz monitor = one more
-        # entry here, no code change.
+        # entry here, no code change — BUT: box_health_probes scopes a declaration
+        # to the box whose entry `name` equals that box's OS hostname first-label
+        # (the unix user `newlevel` is shared by dev2/dev1/spinbike-vps). So a
+        # health_probes declaration is only ever run by the box it lives on when
+        # `name` == that box's hostname; declaring probes on a box whose `name`
+        # differs from its hostname (e.g. a subdev `<user>@subdev` entry) would
+        # silently never run. See #1005 followup on hardening that invariant.
         "health_probes": [
             {"name": "presenter-snv", "url": "http://10.77.9.205/healthz",
              "path": ".ai", "owner": "zbynek"},

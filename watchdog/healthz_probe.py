@@ -8,13 +8,20 @@ job is that watchdog — no new daemon, no new notify channel: one cadence-gated
 registry job (``watchdog/__init__.py``) that reuses the existing owner-routed
 ``send()`` alert path and the fleet declaration accessor pattern.
 
-WHICH boxes run it is a FLEET DECLARATION, not a hostname gate: a box declares
-``health_probes`` on its ``cli_fleet.REMOTE_HOSTS`` entry (validated by
-``validate_health_probes``, read via ``box_health_probes``), and ``cmd_watchdog``
-hands this job the box's own declaration + an injected HTTP fetcher. dev2 is the
-only managed box that reaches BOTH presenter prod instances (STEP-0 probe,
-2026-09-14: SNV is LAN-only, PP is on tailscale), so today the declaration lives
-there; another box/monitor is one more declaration entry, no code change.
+WHICH boxes run it is a FLEET DECLARATION: a box declares ``health_probes`` on
+its ``cli_fleet.REMOTE_HOSTS`` entry, read at runtime via ``box_health_probes``,
+which scopes the declaration to its OWN box by unix user AND hostname — the unix
+user ``newlevel`` is shared by dev2/dev1/spinbike-vps, so the hostname gate is
+what keeps the probes running on dev2 alone (see ``box_health_probes``). The
+declaration's SHAPE is locked by the fleet-symmetry test via
+``validate_health_probes`` (a test-time shape check, the sibling of
+``validate_windows``; there is no runtime validation call — a malformed body is
+handled as ``unmeasurable``). ``cmd_watchdog`` hands this job the box's own
+declaration + an injected HTTP fetcher. dev2 is the only managed box that reaches
+BOTH presenter prod instances (STEP-0 probe, 2026-09-14: SNV is LAN-only, PP is
+on tailscale), so today the declaration lives there; another box/monitor is one
+more declaration entry (whose entry ``name`` must equal that box's hostname
+first-label — see ``box_health_probes``), no code change.
 
 Dedup is BY STATE, not by notify TTL alone: an outage alerts the owner ONCE when
 ``.ai.connected`` reads false for >= 2 consecutive samples, then stays silent
@@ -45,6 +52,27 @@ HEALTHZ_PROBE_INTERVAL_S = 300
 # probe is 3s-capped, #760 REWORK) so a short client-side timeout is honest —
 # a slow read is an outage signal in its own right, surfaced as unmeasurable.
 _FETCH_TIMEOUT_S = 8
+
+# `notify.send` statuses that DO NOT count as delivered — a transient network
+# "error" or a "no-config" box (Discord not wired) means the owner did not get
+# the alert, so we must NOT latch `alerted`/`last_error`; the next still-down
+# sample re-attempts the send. Every OTHER status latches: "sent"/"dedup"/
+# "dry-run" delivered it, and "suppressed" is a DELIBERATE machine-channel
+# decision that counts as delivered (#688 — never retried). This makes the
+# outage alert AT-LEAST-ONCE: a lost alert is exactly the 14-day-silent failure
+# #1005 exists to prevent, so we send FIRST and latch only on delivery, rather
+# than the #172-F3 at-most-once persist-before-send convention (which optimises
+# against a rare duplicate at the cost of dropping the one alert on a failed
+# send). The residual: a process killed after a delivered send but before the
+# state persists re-sends → a duplicate, benign for an outage alert.
+_ALERT_NEEDS_RETRY = ("error", "no-config")
+
+
+def _delivered(status):
+    """True when a ``notify.send`` return counts as delivered (latch), False
+    when it must be retried (see ``_ALERT_NEEDS_RETRY``). An unknown/None status
+    latches — never an infinite retry on an unexpected value."""
+    return status not in _ALERT_NEEDS_RETRY
 
 
 def _navigate(data, path):
@@ -142,23 +170,37 @@ def healthz_probe_job(now, state, probes, *, fetch, send_fn, dry_run=False,
         error = detail
         since = _fmt_since(st["down_since"])
         if not st["alerted"] and st["consec_down"] >= 2:
-            st["alerted"] = True
-            st["last_error"] = error
-            if persist:
-                persist()
-            send_fn(notify.compose_healthz_alert(name, error, since),
-                    owner=owner, dedup_key="healthz:%s:down:%d" % (name, int(now)),
-                    dry_run=dry_run)
-            logs.append("healthz-probe %s -> down %d/2 (alerted)"
-                        % (name, st["consec_down"]))
+            # Send FIRST, latch only on delivery (see _ALERT_NEEDS_RETRY): a
+            # failed send must NOT latch, or the state dedup below would suppress
+            # every re-fire and the ONE outage alert is lost.
+            status = send_fn(
+                notify.compose_healthz_alert(name, error, since),
+                owner=owner, dedup_key="healthz:%s:down:%d" % (name, int(now)),
+                dry_run=dry_run)
+            if _delivered(status):
+                st["alerted"] = True
+                st["last_error"] = error
+                if persist:
+                    persist()
+                logs.append("healthz-probe %s -> down %d/2 (alerted)"
+                            % (name, st["consec_down"]))
+            else:
+                logs.append("healthz-probe %s -> down %d/2 (send %s — will retry)"
+                            % (name, st["consec_down"], status))
         elif st["alerted"] and error != st["last_error"]:
-            st["last_error"] = error
-            if persist:
-                persist()
-            send_fn(notify.compose_healthz_alert(name, error, since),
-                    owner=owner, dedup_key="healthz:%s:down:%d" % (name, int(now)),
-                    dry_run=dry_run)
-            logs.append("healthz-probe %s -> down (new error, re-alerted)" % name)
+            status = send_fn(
+                notify.compose_healthz_alert(name, error, since),
+                owner=owner, dedup_key="healthz:%s:down:%d" % (name, int(now)),
+                dry_run=dry_run)
+            if _delivered(status):
+                st["last_error"] = error
+                if persist:
+                    persist()
+                logs.append("healthz-probe %s -> down (new error, re-alerted)"
+                            % name)
+            else:
+                logs.append("healthz-probe %s -> down (new error, send %s — "
+                            "will retry)" % (name, status))
         elif st["alerted"]:
             logs.append("healthz-probe %s -> down (already alerted)" % name)
         else:
