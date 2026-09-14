@@ -151,6 +151,51 @@ class TestFetchMetaSplit(TestCase):
             return ""
         self.assertIsNone(wc.fetch_meta({"5": {}}, boom, "/root"))
 
+    def test_chunked_no_progress_is_unmeasurable_not_partial(self):
+        # review-1 🟡: a chunked fallback that cannot page past a FULL window
+        # whose timestamps do not advance must return None (UNMEASURABLE), NEVER
+        # a silently-truncated 'complete' list that would drop un-paged dep-wait
+        # rows into the dispatchable set (fail-open regression).
+        full_page = [{"number": n, "body": "no deps",
+                      "createdAt": "2026-01-01T00:00:00Z"}
+                     for n in range(1, wc._META_CHUNK_LIMIT + 1)]
+
+        def runner(argv, _cwd):
+            j = " ".join(str(a) for a in argv)
+            if "number,body,comments" in j:
+                return ""                      # 3-field batch fails
+            if "list" in j and "--search" in j:
+                return json.dumps(full_page)   # ALWAYS a full, non-advancing page
+            if "list" in j and "number,body" in j:
+                return ""                      # bodies-only batch fails too
+            return "{}"
+        self.assertIsNone(wc.fetch_meta({"5": {}}, runner, "/root"))
+
+    def test_chunked_page_cap_exhaustion_is_unmeasurable(self):
+        # review-1 🟡: exhausting the page cap without a short (provably-last)
+        # page is also UNMEASURABLE, never a partial list. Each page is full and
+        # advances the timestamp, so the loop never short-breaks.
+        counter = {"i": 0}
+
+        def runner(argv, _cwd):
+            j = " ".join(str(a) for a in argv)
+            if "number,body,comments" in j:
+                return ""
+            if "list" in j and "--search" in j:
+                counter["i"] += 1
+                base = counter["i"]
+                return json.dumps(
+                    [{"number": base * 1000 + k,
+                      "body": "no deps",
+                      "createdAt": "2026-01-%02dT00:00:00Z" % base}
+                     for k in range(wc._META_CHUNK_LIMIT)])
+            if "list" in j and "number,body" in j:
+                return ""
+            return "{}"
+        self.assertIsNone(wc.fetch_meta({"5": {}}, runner, "/root"))
+        # bounded — never more than the page cap of --search reads.
+        self.assertLessEqual(counter["i"], wc._META_CHUNK_MAX_PAGES)
+
 
 class TestEmitCountDispatchable(TestCase):
     """The CLI glue prints an integer when the split read succeeds, and

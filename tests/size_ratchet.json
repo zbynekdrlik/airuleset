@@ -56,7 +56,7 @@
     "cli_webterm_reconcile.py": 319,
     "cli_webterm_tunnel.py": 190,
     "cli_webterm_zbynek.py": 154,
-    "cli_work_class.py": 547,
+    "cli_work_class.py": 572,
     "cli_worktree_sweep.py": 1994,
     "close_trigger.py": 477,
     "design_gate.py": 1075,

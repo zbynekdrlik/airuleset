@@ -130,7 +130,18 @@ def depends_on_refs(body, comments):
     body's ``Depends-on:`` line. ``comments`` is a list of comment-body strings
     (legacy, all trusted) or dicts (``{"body", "trusted"|"authorAssociation"}``);
     a low-trust comment is IGNORED for the override (#993 review 6) so it can
-    never unblock a dep-wait ticket."""
+    never unblock a dep-wait ticket.
+
+    BODY-FIRST rule (#1021): a ``Depends-on:`` must be declared in the BODY to be
+    seen on the batched ``fetch_meta`` path — that path fetches comments ONLY for
+    body-``Depends-on:`` rows (a whole-repo comment read is the O(open) storm the
+    batch exists to avoid), so a trusted COMMENT-ONLY ``Depends-on:`` on a body
+    that never declared one is NOT honored there. This is deliberate: doctrine
+    and every test frame a comment ``Depends-on:`` as an OVERRIDE that supersedes
+    an existing body declaration, not as a standalone declaration. The per-row
+    paths (``classify_number``, ``resolve_issue_deps``, ``dep_wait_map`` with
+    ``meta=None``) read all comments and would still honor a comment-only dep —
+    so declare deps in the BODY for uniform treatment across every consumer."""
     comment_lines = []
     for c in (comments or []):
         b = _comment_body_if_trusted(c)
@@ -272,16 +283,27 @@ def _open_bodies_batch(runner, root):
 def _open_bodies_chunked(runner, root):
     """Fallback when even the bodies-only whole-list batch fails on a still
     larger repo (#1021): page the open issues oldest-first in
-    ``_META_CHUNK_LIMIT`` windows via ``--search "created:>=<ts> sort:created-asc"``,
-    deduped by number. None if ANY window fails (never a partial silent 'no
-    deps'). Bounded by ``_META_CHUNK_MAX_PAGES`` and a no-time-progress break so
-    a batch of issues sharing one timestamp can never loop forever."""
+    ``_META_CHUNK_LIMIT`` windows via ``--search "is:open created:>=<ts>
+    sort:created-asc"``, deduped by number. Returns the full list ONLY when
+    paging reached a provably-COMPLETE end (a short final page); otherwise None.
+
+    Fail-safe (review-1 🟡): a partial list must NEVER be returned as if complete
+    — that would read downstream as 'these are all the open issues', silently
+    dropping un-paged dep-wait rows into the dispatchable set (a fail-OPEN
+    regression of the pre-#1021 'unreadable batch → None → unmeasurable → skip'
+    invariant). So both non-complete terminations return None:
+      * a FULL page whose timestamps did not advance (>= a whole window sharing
+        one createdAt second at the boundary — cannot page past it), and
+      * exhausting ``_META_CHUNK_MAX_PAGES`` without a short page.
+    ``is:open`` is carried IN the search string (not only ``--state open``)
+    because gh's search qualifiers govern when ``--search`` is present."""
     seen = {}
     since = None
+    complete = False
     for _ in range(_META_CHUNK_MAX_PAGES):
-        search = "sort:created-asc"
+        search = "is:open sort:created-asc"
         if since:
-            search = "created:>=%s %s" % (since, search)
+            search = "is:open created:>=%s sort:created-asc" % since
         page = _run_json(runner, ["gh", "issue", "list", "--state", "open",
                                   "--json", "number,body,createdAt",
                                   "--search", search,
@@ -298,11 +320,14 @@ def _open_bodies_chunked(runner, root):
             last_created = r.get("createdAt") or last_created
             seen.setdefault(num, r)
         if len(page) < _META_CHUNK_LIMIT:
-            break                       # last (short) page
+            complete = True             # provably the last (short) page
+            break
         if not last_created or last_created == since:
-            break                       # no time progress → stop (bounded)
+            return None                 # cannot page past this window → UNMEASURABLE
         since = last_created
-    return list(seen.values())
+    # A short page = provably complete → the list; else (no-progress / page-cap
+    # exhaustion) UNMEASURABLE, never a silently-truncated 'complete' answer.
+    return list(seen.values()) if complete else None
 
 
 def _open_bodies(runner, root):
