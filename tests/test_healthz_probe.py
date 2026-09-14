@@ -86,11 +86,11 @@ class TestDedupStateMachine(unittest.TestCase):
         # (b) one false sample → nothing
         logs1 = run(state, down, send, now=NOW)
         self.assertEqual(len(send.calls), 0, "one false sample must not alert")
-        self.assertTrue(any("1/2" in l and "arming" in l for l in logs1), logs1)
+        self.assertTrue(any("1/2" in ln and "arming" in ln for ln in logs1), logs1)
         # (a) second consecutive false → EXACTLY ONE alert
         logs2 = run(state, down, send, now=NOW + FIVE_MIN)
         self.assertEqual(len(send.calls), 1, "2nd consecutive false → one alert")
-        self.assertTrue(any("2/2" in l and "alerted" in l for l in logs2), logs2)
+        self.assertTrue(any("2/2" in ln and "alerted" in ln for ln in logs2), logs2)
         self.assertIn("presenter-snv", send.calls[0]["body"])
         self.assertEqual(send.calls[0]["owner"], "zbynek")
         self.assertTrue(send.calls[0]["dedup_key"].startswith("healthz:"))
@@ -108,8 +108,8 @@ class TestDedupStateMachine(unittest.TestCase):
         up = fetch_returning(200, ok_body(connected=True))
         logs = run(state, up, send, now=NOW + 2 * FIVE_MIN)
         self.assertEqual(len(send.calls), 2, "recovery → one back line")
-        self.assertTrue(any("recover" in l.lower() or "connected=true" in l
-                            for l in logs), logs)
+        self.assertTrue(any("recover" in ln.lower() or "connected=true" in ln
+                            for ln in logs), logs)
         # and after recovery a fresh down streak must arm from scratch again
         run(state, down, send, now=NOW + 3 * FIVE_MIN)      # 1/2, no alert
         self.assertEqual(len(send.calls), 2)
@@ -127,7 +127,7 @@ class TestDedupStateMachine(unittest.TestCase):
                    send, now=NOW + 2 * FIVE_MIN)             # new error → re-alert
         self.assertEqual(len(send.calls), 2, "changed error text → re-alert")
         self.assertIn("err-B", send.calls[1]["body"])
-        self.assertTrue(any("re-alert" in l for l in logs), logs)
+        self.assertTrue(any("re-alert" in ln for ln in logs), logs)
 
 
 class TestUnmeasurableNeverAlerts(unittest.TestCase):
@@ -136,21 +136,21 @@ class TestUnmeasurableNeverAlerts(unittest.TestCase):
         send = Recorder()
         logs = run(state, fetch_raising(TimeoutError("timed out")), send)
         self.assertEqual(len(send.calls), 0)
-        self.assertTrue(any("unmeasurable" in l for l in logs), logs)
+        self.assertTrue(any("unmeasurable" in ln for ln in logs), logs)
 
     def test_http_error_status_is_unmeasurable(self):
         state = {}
         send = Recorder()
         logs = run(state, fetch_returning(503, "Service Unavailable"), send)
         self.assertEqual(len(send.calls), 0)
-        self.assertTrue(any("unmeasurable" in l for l in logs), logs)
+        self.assertTrue(any("unmeasurable" in ln for ln in logs), logs)
 
     def test_non_json_is_unmeasurable(self):
         state = {}
         send = Recorder()
         logs = run(state, fetch_returning(200, "<html>not json</html>"), send)
         self.assertEqual(len(send.calls), 0)
-        self.assertTrue(any("unmeasurable" in l for l in logs), logs)
+        self.assertTrue(any("unmeasurable" in ln for ln in logs), logs)
 
     def test_missing_ai_field_is_unmeasurable(self):
         state = {}
@@ -159,7 +159,7 @@ class TestUnmeasurableNeverAlerts(unittest.TestCase):
         logs = run(state, fetch_returning(200, json.dumps({"status": "ok"})),
                    send)
         self.assertEqual(len(send.calls), 0)
-        self.assertTrue(any("unmeasurable" in l for l in logs), logs)
+        self.assertTrue(any("unmeasurable" in ln for ln in logs), logs)
 
     def test_unmeasurable_between_downs_does_not_reset_or_advance_streak(self):
         # fail-safe: an unmeasurable sample is "no sample" — it neither counts
@@ -188,7 +188,7 @@ class TestNoDeclaration(unittest.TestCase):
         logs = hp.healthz_probe_job(NOW, state, [], fetch=fetch, send_fn=send)
         self.assertEqual(called["n"], 0, "no fetch on an undeclared box")
         self.assertEqual(len(send.calls), 0)
-        skip = [l for l in logs if "skip" in l]
+        skip = [ln for ln in logs if "skip" in ln]
         self.assertEqual(len(skip), 1, "exactly one skip line: %r" % logs)
 
 
