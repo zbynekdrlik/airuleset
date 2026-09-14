@@ -605,6 +605,12 @@ class TestFallbackExceptionLogging(_Base):
         bad_root = Path(tempfile.mkdtemp(prefix="airuleset-designhook-nolib-"))
         self.addCleanup(shutil.rmtree, bad_root, True)
         shutil.copy(ROOT / "design_gate.py", bad_root / "design_gate.py")
+        # #1020: design_gate.py is now a shim that imports the gates.design
+        # package, so the OUTER import needs gates/ present here -- otherwise
+        # this test would conflate a missing gates package with the missing
+        # lib_poll_payload it actually targets.
+        shutil.copytree(ROOT / "gates", bad_root / "gates",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(ROOT / "notify", bad_root / "notify",
                         ignore=shutil.ignore_patterns("__pycache__"))
         (bad_root / "hooks").mkdir()
