@@ -9,10 +9,11 @@ mechanism ONCE; each adapter still composes its OWN line text so the per-hook
 log FORMATS are byte-for-byte unchanged (existing log-parsing tools/tests keep
 working).
 
-The ``--bypasses`` READER (extending scripts/audit_bounce_rule_updates.py to
-cover these CLI-token logs, not only commit messages) is added in the dedicated
-"audit" migration commit; this file starts with the writer the earlier
-migrations need.
+This file provides the WRITER (``append_line`` + ``iso_now`` + ``project_of``)
+the migrated adapters need. The ``--bypasses`` READER extension (teaching
+scripts/audit_bounce_rule_updates.py to cover these per-hook CLI-token logs, not
+only commit messages) is NOT in #1020 -- it is a deliberate followup, deferred
+alongside the full filing-hook migration for its own reviewed lane.
 """
 import datetime
 import os

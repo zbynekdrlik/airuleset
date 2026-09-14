@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 
-from gates import command_of, emit_block, read_payload
+from gates import command_of, emit_block_stderr, read_payload
 from gates import audit, pushscope
 
 _AUDIT_LOG = "test-skip-bypasses.log"
@@ -200,12 +200,12 @@ def main():
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 -- fail CLOSED, but HONESTLY
-        emit_block(_FAILCLOSED_MSG % (exc,))
+        emit_block_stderr(_FAILCLOSED_MSG % (exc,))
         return
 
     if violations:
         deduped = list(dict.fromkeys(violations))
-        emit_block(_BLOCK_MSG % ("\n".join(deduped)))
+        emit_block_stderr(_BLOCK_MSG % ("\n".join(deduped)))
 
     sys.exit(0)
 

@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 
-from gates import command_of, emit_block, read_payload
+from gates import command_of, emit_block_stderr, read_payload
 from gates import audit, pushscope
 
 _AUDIT_LOG = "no-test-skips.log"
@@ -110,7 +110,8 @@ _BARE_NOTEST_MSG = (
 
 
 def _warn(msg):
-    sys.stdout.write(msg + "\n")
+    # stderr-only: the adapter runs this module with 1>&2 (the old hook's
+    # `exec 1>&2`), so a stdout write would double the warning on stderr.
     sys.stderr.write(msg + "\n")
 
 
@@ -135,7 +136,7 @@ def main():
 
     # Bare [no-test] (no reason) -> BLOCK.
     if _BARE_NOTEST_RE.search(last_msg):
-        emit_block(_BARE_NOTEST_MSG)
+        emit_block_stderr(_BARE_NOTEST_MSG)
 
     # [no-test: <reason>] -> honored + logged.
     last_msg_flat = last_msg.replace("\n", " ")
@@ -170,7 +171,7 @@ def main():
     # Gate 1: feature code but no test (path-named OR inline).
     if feature_changes and not test_changes and not inline_test_added:
         head = "\n".join("    " + f for f in feature_changes[:10])
-        emit_block(_GATE1_MSG % head)
+        emit_block_stderr(_GATE1_MSG % head)
 
     # Gate 2: RED-before-GREEN order.
     commits = _stdout(["log", "--reverse", "--pretty=%H", "%s..HEAD" % base_ref]).split()
@@ -206,7 +207,7 @@ def main():
                 bug_fix_before_test.append("    " + one)
 
     if bug_fix_before_test:
-        emit_block(_GATE2_MSG % ("\n".join(bug_fix_before_test)))
+        emit_block_stderr(_GATE2_MSG % ("\n".join(bug_fix_before_test)))
 
     # Gate 3: shallow-assertion WARNING (never blocks).
     if test_changes:

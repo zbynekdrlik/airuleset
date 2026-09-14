@@ -12,12 +12,18 @@ Before this module the SAME two primitives existed in four hand-written copies:
     a compound command slipped through because that normalize never SPLIT the
     command).
 
-``strip_quoted`` and ``split_top_level`` here are the single source of truth for
-all four; they are pure/offline (no filesystem, no subprocess), so they unit-test
-without a subprocess. Behaviour is byte-for-byte the union of the originals --
-the originals agreed (single-quoted spans stripped first, then double; split on
-&&/||/;/&/|/newline, quote- and backslash-aware), so there is no divergence to
-reconcile here (the one push-scope divergence lives in gates.pushscope, not here).
+``strip_quoted`` and ``split_top_level`` here are now the source of truth for
+THREE of those four: design_gate's ``_strip_quoted`` (re-exported from
+gates.design.gitctx), block-sensitive-staging's bypass parse (via gates.secrets),
+and block-main-implementation's #1017 arming check. The FOURTH -- block-ungated-
+issue-filing.sh's own ``split_top_level`` -- still carries its byte-identical
+inline copy, because the full filing-hook migration was deliberately deferred to
+its own reviewed lane (#1020); it adopts this module when that lands. They are
+pure/offline (no filesystem, no subprocess), so they unit-test without a
+subprocess. Behaviour is byte-for-byte the union of the originals -- the originals
+agreed (single-quoted spans stripped first, then double; split on &&/||/;/&/|/
+newline, quote- and backslash-aware), so there is no divergence to reconcile here
+(the one push-scope divergence lives in gates.pushscope, not here).
 """
 import re
 

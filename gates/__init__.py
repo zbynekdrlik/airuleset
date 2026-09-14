@@ -79,24 +79,25 @@ def field_of(payload, name, default=""):
     return default
 
 
-def cwd_of(payload):
-    """The hook payload's ``.cwd`` (the session working directory), or ""."""
-    return field_of(payload, "cwd", "") or ""
-
-
-def agent_id_of(payload):
-    """The hook payload's ``.agent_id`` (present for a dispatched subagent), or ""."""
-    return field_of(payload, "agent_id", "") or ""
-
-
 def emit_block(msg):
     """Print a block reason to BOTH stdout and stderr and exit 2.
 
     Claude Code surfaces only STDERR to the model on a PreToolUse deny, but a
-    terminal run reads stdout -- so every gate in this family prints to both
-    (live incident 2026-07-31: an stderr-only reason rendered as "No stderr
-    output"). The message text is the caller's own, printed verbatim."""
+    terminal run reads stdout -- so a gate that does NOT already route fd1 to
+    fd2 (secrets, commit-design) prints to both (live incident 2026-07-31: an
+    stderr-only reason rendered as "No stderr output"). The message text is the
+    caller's own, printed verbatim."""
     sys.stdout.write(msg + "\n")
+    sys.stderr.write(msg + "\n")
+    sys.exit(2)
+
+
+def emit_block_stderr(msg):
+    """Print a block reason to STDERR ONLY and exit 2 -- for the push gates
+    (testskips/pushtest) whose adapters run the module with ``1>&2`` (the old
+    hooks' ``exec 1>&2``): writing to stdout as well would then render the reason
+    TWICE on the model-visible channel. stderr-only + the adapter redirect keeps
+    it exactly once, matching the original hooks."""
     sys.stderr.write(msg + "\n")
     sys.exit(2)
 
