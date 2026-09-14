@@ -109,7 +109,7 @@ assert FUNC_TRACK_THRESHOLD <= FUNC_DEFAULT_CEILING, (
 # list. hooks/*.py and scripts/*.py (this file included) are NOT tracked:
 # widening scope beyond the ticket's explicit list is its own decision, not
 # something to do silently while shipping the mechanism itself.
-TRACKED_DIRS = ("watchdog", "notify", "filedrop", "burn")
+TRACKED_DIRS = ("watchdog", "notify", "filedrop", "burn", "gates")
 
 # Files/functions whose measured size is a genuine artifact of something
 # other than "code that grew" (a vendored/generated blob, an embedded

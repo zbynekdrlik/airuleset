@@ -197,5 +197,37 @@ class TestRecoveryAlwaysOn(unittest.TestCase):
                          wd.MACHINE_NUDGE_KINDS | wd.RECOVERY_NUDGE_KINDS)
 
 
+class TestLegacyNudgesOffRemoval1020(unittest.TestCase):
+    """#1020 fold-in: the dead legacy global marker ~/.claude/nudges-off (#994,
+    per-kind is the source of truth since v0.1.278) is removed by every `nudges`
+    verb so a human reading ~/.claude is not misled."""
+
+    def test_helper_deletes_the_marker(self):
+        with TemporaryDirectory() as home:
+            claude = Path(home) / ".claude"
+            claude.mkdir()
+            (claude / "nudges-off").write_text("")
+            self.assertTrue(airuleset._remove_legacy_nudges_off_marker(home=home))
+            self.assertFalse((claude / "nudges-off").exists())
+
+    def test_helper_noop_when_absent(self):
+        with TemporaryDirectory() as home:
+            (Path(home) / ".claude").mkdir()
+            self.assertFalse(airuleset._remove_legacy_nudges_off_marker(home=home))
+
+    def test_nudges_status_verb_clears_the_marker(self):
+        with TemporaryDirectory() as home:
+            claude = Path(home) / ".claude"
+            claude.mkdir()
+            (claude / "nudges-off").write_text("")
+            args = argparse.Namespace(nudges_action="status", fleet=False,
+                                      kind=None, all=False)
+            with m.patch.dict(os.environ, {"HOME": home}):
+                rc = airuleset.cmd_nudges(args)
+            self.assertEqual(rc, 0)
+            self.assertFalse((claude / "nudges-off").exists(),
+                             "a nudges verb must clear the dead legacy marker")
+
+
 if __name__ == "__main__":
     unittest.main()

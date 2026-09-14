@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -130,27 +131,68 @@ class TestCachedCounts(TestCase):
         got = rc.cached_counts("o/r", self.tmp, gh_env=gh.env, home=self.home)
         self.assertIsNone(got)
 
-    def test_bump_created_increments_fresh_cache(self):
-        today = rc._today_str()
-        rc._write_cache("o/r", 3, 9, today, home=self.home)
-        rc.bump_created("o/r", home=self.home)
-        data = json.loads(self._cache_file().read_text())
-        self.assertEqual(data["created_today"], 4)
-        self.assertEqual(data["closed_today"], 9)
+    def test_bump_created_removed(self):
+        # #1020 fold-in: the cached-increment (`bump_created`) was the drift
+        # source behind the false net-drain block (created 2 < closed 3 yet
+        # BLOCKED). The block decision is now a LIVE recompute; the cached
+        # increment is gone entirely.
+        self.assertFalse(hasattr(rc, "bump_created"))
 
-    def test_bump_created_noop_on_day_rolled_cache(self):
-        path = self._cache_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"created_today": 3, "closed_today": 9,
-                                    "day": "2000-01-01", "ts": time.time()}))
-        rc.bump_created("o/r", home=self.home)
-        data = json.loads(path.read_text())
-        self.assertEqual(data["created_today"], 3)  # unchanged
 
-    def test_bump_created_noop_without_cache(self):
-        # No cache file -> silent no-op, never raises.
-        rc.bump_created("o/r", home=self.home)
-        self.assertFalse(self._cache_file().exists())
+class TestNetDrainBlocksLive(TestCase):
+    """#1020 fold-in: the UNATTENDED net-drain BLOCK decision recomputes the
+    counts LIVE via gh (no cache, no bump drift), so it can never disagree with
+    `gh issue list --search created:/closed:` for the local day."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-ratchet-live-")
+        self.home = tempfile.mkdtemp(prefix="airuleset-ratchet-live-home-")
+
+    def test_draining_allows(self):
+        gh = _FakeGh(self.tmp, created=2, closed=3)
+        self.assertFalse(rc.net_drain_blocks_live("o/r", self.tmp, gh_env=gh.env))
+
+    def test_parity_blocks(self):
+        gh = _FakeGh(self.tmp, created=3, closed=3)
+        self.assertTrue(rc.net_drain_blocks_live("o/r", self.tmp, gh_env=gh.env))
+
+    def test_inflating_blocks(self):
+        gh = _FakeGh(self.tmp, created=5, closed=3)
+        self.assertTrue(rc.net_drain_blocks_live("o/r", self.tmp, gh_env=gh.env))
+
+    def test_gh_error_is_none(self):
+        gh = _FakeGh(self.tmp, created=0, closed=0, fail=True)
+        self.assertIsNone(rc.net_drain_blocks_live("o/r", self.tmp, gh_env=gh.env))
+
+    def test_ignores_a_drifted_cache(self):
+        # The exact #1020 incident: a stale/bumped cache says INFLATING (9,1),
+        # but the repo is really DRAINING (2,3) live -> the live decision ALLOWS,
+        # never reading the drifted cache.
+        rc._write_cache("o/r", 9, 1, rc._today_str(), home=self.home)
+        gh = _FakeGh(self.tmp, created=2, closed=3)
+        self.assertFalse(rc.net_drain_blocks_live("o/r", self.tmp, gh_env=gh.env))
+
+
+class TestExplainCli(TestCase):
+    """#1020 fold-in: `--explain` prints BOTH counts with the exact gh query
+    each came from, so a false block is diagnosable without guessing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-ratchet-explain-")
+
+    def test_explain_prints_counts_and_queries(self):
+        gh = _FakeGh(self.tmp, created=2, closed=3)
+        r = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "ratchet_counts.py"), "--explain", "-R", "o/r"],
+            cwd=self.tmp, env=gh.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.stdout
+        self.assertIn("created_today=2", out)
+        self.assertIn("closed_today=3", out)
+        self.assertIn("created:>=", out)
+        self.assertIn("closed:>=", out)
+        # The verdict is surfaced too (draining -> would ALLOW).
+        self.assertIn("allow", out.lower())
 
 
 if __name__ == "__main__":

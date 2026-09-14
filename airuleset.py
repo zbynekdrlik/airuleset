@@ -9245,6 +9245,23 @@ def _nudges_fleet(verb, runner=None):
     return results
 
 
+def _remove_legacy_nudges_off_marker(home=None):
+    """#1020 fold-in (#1023 gate/switch consolidation) — delete the legacy global
+    kill-switch marker `~/.claude/nudges-off` (#994). It is DEAD for gating since
+    v0.1.278 (the per-kind `~/.claude/nudges-kinds.json` is the source of truth),
+    but still sits on every box that ran `nudges off` before the switch became
+    per-kind, misleading a human reading the directory. Every `nudges` verb clears
+    it (best-effort: an already-absent marker or an unwritable ~/.claude is a
+    silent no-op, never raises). Returns True iff a marker was actually removed."""
+    base = home or os.path.expanduser("~")
+    path = os.path.join(base, ".claude", "nudges-off")
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
 def cmd_nudges(args):
     """#1023 owner nudge kill switch, per-KIND staging — `nudges on|off|status
     [--kind <k>[,<k>]] [--all] [--fleet]`. The owner enables machine-nudge kinds
@@ -9257,6 +9274,11 @@ def cmd_nudges(args):
     non-paused box via ssh and prints one `<name>: OFF|ON|unreachable` line."""
     import watchdog as _wd
     action = getattr(args, "nudges_action", None) or "status"
+
+    # #1020 fold-in: clear the dead legacy global marker on every invocation
+    # (including the controller's own `--fleet` run) so a stale nudges-off never
+    # misleads a human reading ~/.claude.
+    _remove_legacy_nudges_off_marker()
 
     if getattr(args, "fleet", False):
         for name, state in _nudges_fleet(action):

@@ -97,21 +97,38 @@ def _gh_count(argv, cwd, gh_env=None):
         return None
 
 
-def compute_counts(repo, cwd, gh_env=None, now=None):
-    """`(created_today, closed_today)` computed live via `gh`, or `None` on ANY
-    gh error (the caller BLOCKS — fail-safe). `--state all` on the created count
-    so a created-then-closed-today issue still counts; the closed count is
-    `--state closed` with `closed:>=`. `-L 500` caps the (never-huge) day set."""
+def search_terms(now=None):
+    """The two GitHub search terms for the current LOCAL day — the SINGLE
+    definition of the day window BOTH counts (and `--explain`) use, so the
+    created and closed queries can never drift onto different day boundaries
+    (#1020 fold-in)."""
     day = _day_start_iso(now)
+    return ("created:>=%s" % day, "closed:>=%s" % day)
+
+
+def _count_argvs(repo, now=None):
+    """`(created_argv, closed_argv)` — the exact `gh issue list` commands both
+    counts run. Returned (not just executed) so `--explain` can print them."""
+    created_search, closed_search = search_terms(now)
     created_argv = ["gh", "issue", "list", "--state", "all",
-                    "--search", "created:>=%s" % day,
+                    "--search", created_search,
                     "-L", "500", "--json", "number", "-q", "length"]
     closed_argv = ["gh", "issue", "list", "--state", "closed",
-                   "--search", "closed:>=%s" % day,
+                   "--search", closed_search,
                    "-L", "500", "--json", "number", "-q", "length"]
     if repo:
         created_argv += ["-R", repo]
         closed_argv += ["-R", repo]
+    return created_argv, closed_argv
+
+
+def compute_counts(repo, cwd, gh_env=None, now=None):
+    """`(created_today, closed_today)` computed live via `gh`, or `None` on ANY
+    gh error (the caller BLOCKS — fail-safe). `--state all` on the created count
+    so a created-then-closed-today issue still counts; the closed count is
+    `--state closed` with `closed:>=`. `-L 500` caps the (never-huge) day set.
+    Both queries use the SAME local-day window (`search_terms`)."""
+    created_argv, closed_argv = _count_argvs(repo, now)
     created = _gh_count(created_argv, cwd, gh_env)
     if created is None:
         return None
@@ -119,6 +136,24 @@ def compute_counts(repo, cwd, gh_env=None, now=None):
     if closed is None:
         return None
     return (created, closed)
+
+
+def net_drain_blocks_live(repo, cwd, gh_env=None, now=None):
+    """#1020 fold-in — the AUTHORITATIVE net-drain BLOCK decision for an
+    UNATTENDED discovery filing: recompute both counts LIVE via `gh` (never a
+    cache, never a bumped increment) and return `ratchet_blocks(created, closed)`.
+    `None` on any gh error (the caller BLOCKS, fail-safe).
+
+    The former cached `cached_counts` + `bump_created` path drifted from the real
+    `gh` counts — a false block at created 2 < closed 3 (the #1020 incident). A
+    filing is rare, so two live `gh` calls are cheap, and the decision can never
+    disagree with what `gh issue list --search created:/closed:` shows for the
+    day. The TTL cache (`cached_counts`) remains ONLY for the statusbar footer,
+    which tolerates 120s staleness."""
+    counts = compute_counts(repo, cwd, gh_env, now)
+    if counts is None:
+        return None
+    return ratchet_blocks(*counts)
 
 
 def _read_cache(repo, home=None):
@@ -175,24 +210,55 @@ def cached_counts(repo, cwd, gh_env=None, now=None, home=None, refresh=True):
     return (created, closed, today)
 
 
-def bump_created(repo, now=None, home=None):
-    """Increment the cached `created_today` by one after a ratchet-PASS — closes
-    the within-TTL burst race across SEPARATE hook invocations (each hook
-    subprocess reads a fresh cache, so without this a burst of unattended
-    filings inside one 120s window would all pass on the same stale count).
-    Best-effort: no cache / day-rolled / non-int → no-op, never raises. NOT
-    fully race-free (#842-review 🔵): `cmd_tickets_status --refresh` (statusbar-
-    spawned, detached) writes the SAME `ratchet-<slug>.json`, and two main
-    sessions can work one repo — `os.replace` keeps the file corruption-free, but
-    a stale refresh whose gh reads finished pre-create can overwrite a bump, so a
-    burst can leak ONE extra filing inside a 120s window. The bump NARROWS the
-    race, it does not close it; the ratchet's whole-day `created >= closed` gate
-    is the durable backstop."""
-    today = _today_str(now)
-    c = _read_cache(repo, home)
-    if not isinstance(c, dict) or c.get("day") != today:
-        return
-    if not isinstance(c.get("created_today"), int):
-        return
-    _write_cache(repo, c["created_today"] + 1, c.get("closed_today", 0),
-                 today, home)
+# #1020 fold-in — `bump_created` REMOVED. It incremented the cached
+# `created_today` on every ratchet-PASS to narrow a within-TTL burst race, but
+# that cached increment DRIFTED from the real `gh` counts and caused a false
+# net-drain block (created 2 < closed 3 yet BLOCKED, #1020). The block decision
+# now recomputes LIVE (`net_drain_blocks_live`), so the burst race it guarded is
+# handled by the live per-filing recompute instead, and no cached increment can
+# outlive/misrepresent the day. The TTL cache stays for the statusbar footer only.
+
+
+def explain(repo, cwd, gh_env=None, now=None):
+    """A human-readable diagnostic for the net-drain decision on `repo`: both
+    counts, the exact `gh` query each came from, and the resulting verdict
+    (ALLOW / BLOCK). Returns the text; `--explain` prints it. Makes a false block
+    diagnosable without guessing which count/query disagreed (#1020 fold-in)."""
+    created_argv, closed_argv = _count_argvs(repo, now)
+    created = _gh_count(created_argv, cwd, gh_env)
+    closed = _gh_count(closed_argv, cwd, gh_env)
+    lines = [
+        "repo=%s  day=%s" % (repo or "(cwd remote)", _today_str(now)),
+        "created_today=%s  <- %s" % (
+            "gh-error" if created is None else created, " ".join(created_argv)),
+        "closed_today=%s  <- %s" % (
+            "gh-error" if closed is None else closed, " ".join(closed_argv)),
+    ]
+    if created is None or closed is None:
+        lines.append("verdict=BLOCK (fail-safe: a gh error means the counts are unmeasurable)")
+    elif ratchet_blocks(created, closed):
+        lines.append("verdict=BLOCK (created_today >= closed_today: repo is NOT draining today)")
+    else:
+        lines.append("verdict=ALLOW (created_today < closed_today: repo IS draining today)")
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Net-drain ratchet diagnostics (#842/#1020).")
+    p.add_argument("--explain", action="store_true",
+                   help="print both day counts, their gh queries, and the verdict")
+    p.add_argument("-R", "--repo", default=None,
+                   help="owner/repo (default: the cwd's origin remote)")
+    args = p.parse_args(argv)
+    if args.explain:
+        print(explain(args.repo, os.getcwd()))
+        return 0
+    p.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(main())
