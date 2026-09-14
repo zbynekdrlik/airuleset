@@ -21,7 +21,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import watchdog as wd  # noqa: E402
 from watchdog import queue_arrival_recheck as qa  # noqa: E402
-from watchdog import nudge_gate as ng  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_ARMED_CAP, _write_marker_transcript)
 
