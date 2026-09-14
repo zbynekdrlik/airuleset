@@ -2,6 +2,7 @@
 paths:
   - "cli_quals.py"
   - "cli_quals_cmd.py"
+  - "cli_work_class.py"
 ---
 
 ### airuleset internals — quals derivation (footer I/U/W + /goal stop-proof)
@@ -44,3 +45,32 @@ can drift). Lessons for anyone touching this partition:
   LOCAL `git merge-base` per match — never one gh per candidate). Fail-safe direction
   is always "not done / stays workable" so a gh/git error over-counts `I`, never a
   false stop-proof.
+
+- **#1021 — the batched dependency-meta read (`cli_work_class.fetch_meta`) must NOT
+  fetch bodies AND all comments of every open issue in ONE gh call.** `gh issue list
+  --state open --json number,body,comments -L 1000` returns TRUNCATED/invalid JSON on
+  a large repo (odoo-erp 280 open + long threads → rc1 / 'unexpected end of JSON
+  input' / 0 bytes), and the whole fail-safe chain (`_dep_wait_map_for` ok=False →
+  `_emit_count_dispatchable` `unmeasurable` → `airuleset._watchdog_dispatchable_fetch`
+  None → `goal._lane_dispatchable_decision` `skip:dispatchable-unknown`) then goes
+  INERT (the review-window nudge never fires; 370 inert ticks on gk). SPLIT it: a
+  bodies-only batch (`--json number,body`) + per-row comments ONLY for rows whose
+  BODY carries `Depends-on:` (via `gh api repos/<slug>/issues/<N>/comments --paginate
+  -q '.[]'`, mapping `author_association`→`authorAssociation`, capped by
+  `_DEP_RESOLVE_CAP`; slug None → legacy `gh issue view`), with a created-asc chunked
+  fallback. TWO invariants a reviewer will (and did) catch: (1) the chunked fallback
+  must return None UNLESS it reached a provably-COMPLETE short page — a PARTIAL list
+  read as complete silently reclassifies un-paged dep-wait rows as dispatchable
+  (fail-OPEN, reversing the unmeasurable→skip fail-safe; the `created:>=<ts>` boundary
+  overlap makes the exactly-full-last-page case still terminate on a short page, so
+  only a ≥-window single-timestamp storm false-Nones, which fails safe); (2) fetching
+  comments only for body-`Depends-on:` rows NARROWS a comment-only `Depends-on:`
+  override on the batch path (the per-row paths `classify_number`/`resolve_issue_deps`/
+  `dep_wait_map(meta=None)` still honor it) — declare deps in the BODY for uniform
+  treatment. To surface WHY an unmeasurable nudge is inert, flow the reason through the
+  EXISTING count protocol (`unmeasurable:<reason>` → `_watchdog_dispatchable_fetch`
+  `{count:None,reason}` → journal `skip:dispatchable-unknown (<reason>)`); `_gh_out`
+  strips gh stderr, so the reason is the deterministic failure-mode label
+  (`meta read failed`), not gh's raw stderr line. Pre-existing gap NOT closed here:
+  `-L 1000` silently drops the oldest on a repo with >1000 OPEN issues whose
+  bodies-only batch SUCCEEDS (#1021 fixes only the truncation-FAILURE mode).
