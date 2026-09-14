@@ -8,17 +8,24 @@ agent types.
 
 Tests:
   1. cmd_install and cmd_push REFUSE when REPO_DIR is under .claude/worktrees/
-  2. The override env AIRULESET_INSTALL_FROM_WORKTREE=1 bypasses the guard
+  2. #972 REOPEN invariant: a worktree install NEVER writes the login user's
+     REAL home. AIRULESET_INSTALL_FROM_WORKTREE=1 is honoured ONLY when the
+     effective HOME differs from the real (passwd) home (a test tmp HOME);
+     with the real home the override is REFUSED regardless (fail-safe closed).
   3. AIRULESET_ALLOW_WORKTREE_ESCAPE=1 does NOT bypass the guard
   4. cmd_status detects dangling and worktree-target symlinks for BOTH agents
      and skills (agents section was entirely missing before this fix)
   5. Hook RULE B3: block-foreign-airuleset-write.sh blocks airuleset.py
      install|push from a worktree cwd in agent context
+  6. #972 REOPEN dual-coverage: cli_remote.py Pass B test_env isolates HOME
+     for the `unittest discover` gate (source-lock), so no gate run writes the
+     real ~/.claude.
 """
 
 import importlib
 import json
 import os
+import pwd
 import subprocess
 import tempfile
 from pathlib import Path
@@ -77,21 +84,46 @@ class TestInstallWorktreeGuard(TestCase):
                 mod.cmd_install(None)
             self.assertEqual(ctx.exception.code, 1)
 
-    def test_cmd_install_override_allows(self):
-        """AIRULESET_INSTALL_FROM_WORKTREE=1 bypasses the worktree guard.
+    def test_override_refused_when_home_is_real(self):
+        """#972 REOPEN R1: the INVARIANT — a worktree install NEVER writes the
+        login user's REAL home, even with AIRULESET_INSTALL_FROM_WORKTREE=1.
 
-        Tests only the guard helper, never the full cmd_install — calling
-        cmd_install with a fake REPO_DIR mutates the host (RED-1 review finding).
-        """
+        This is the exact 2026-09-11 incident: a lane exported the override and
+        ran install from a worktree against the real HOME. Tests only the guard
+        helper (never full cmd_install — a real HOME override that WRONGLY passed
+        would mutate the host, the RED-1 review finding)."""
         mod = self._load_airuleset()
         fake_wt = Path("/fake/repo/.claude/worktrees/agent-xyz")
+        real_home = pwd.getpwuid(os.getuid()).pw_dir
         with patch.object(mod, "REPO_DIR", fake_wt), \
              patch.dict(os.environ,
-                        {"AIRULESET_INSTALL_FROM_WORKTREE": "1"},
+                        {"AIRULESET_INSTALL_FROM_WORKTREE": "1",
+                         "HOME": real_home},
                         clear=False):
-            # Must NOT raise SystemExit — the guard is bypassed
-            result = mod._check_worktree_repo_dir("install")
-            self.assertIsNone(result)
+            with self.assertRaises(SystemExit) as ctx:
+                mod._check_worktree_repo_dir("install")
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_override_allowed_only_under_isolated_home(self):
+        """#972 REOPEN R2: the override is honoured ONLY when the effective HOME
+        differs from the real (passwd) home — i.e. a test tmp HOME. A worktree
+        install can then only ever target an isolated HOME, so the real
+        ~/.claude is unreachable by construction."""
+        mod = self._load_airuleset()
+        fake_wt = Path("/fake/repo/.claude/worktrees/agent-xyz")
+        with tempfile.TemporaryDirectory() as tmp_home:
+            self.assertNotEqual(
+                Path(tmp_home).resolve(),
+                Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(),
+                "test setup: tmp HOME must differ from the real home")
+            with patch.object(mod, "REPO_DIR", fake_wt), \
+                 patch.dict(os.environ,
+                            {"AIRULESET_INSTALL_FROM_WORKTREE": "1",
+                             "HOME": tmp_home},
+                            clear=False):
+                # Must NOT raise — isolated HOME + override is the allowed path
+                result = mod._check_worktree_repo_dir("install")
+                self.assertIsNone(result)
 
     def test_worktree_escape_does_not_imply_install(self):
         """AIRULESET_ALLOW_WORKTREE_ESCAPE=1 does NOT bypass the install guard."""
@@ -248,6 +280,24 @@ class TestHookRuleB3(TestCase):
         # The hook itself should not block (no agent_id = not a subagent)
         self.assertEqual(r.returncode, 0,
                          f"expected ALLOW (no agent_id)\nstderr={r.stderr}")
+
+
+# --------------------------------------------------------------------------- #
+# Deliverable 6 (#972 REOPEN): cli_remote.py Pass B test_env isolates HOME
+# --------------------------------------------------------------------------- #
+
+class TestPassBHomeIsolation(TestCase):
+    """#972 REOPEN R3: the push gate's `unittest discover` (Pass B) subprocess
+    must run under a per-run isolated HOME, so NO gate run can write the real
+    ~/.claude even if a test performs a real install. Source-lock, the same
+    #385/#1012/#548 single-place-that-knows dual-coverage pattern already used
+    for AIRULESET_MAIN_EXEC_STATE_DIR / TMPDIR (conftest.py covers pytest;
+    `unittest discover` never reads conftest, so cmd_push must set it itself)."""
+
+    def test_cmd_push_test_env_carries_isolated_home(self):
+        src = (REPO / "cli_remote.py").read_text(encoding="utf-8")
+        self.assertIn('test_env["HOME"]', src,
+                      "cmd_push's Pass B test_env must set an isolated HOME")
 
 
 if __name__ == "__main__":
