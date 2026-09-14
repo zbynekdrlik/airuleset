@@ -1,15 +1,14 @@
-"""#1023 — the shared `nudge_gate` becomes a per-pane-per-KIND 60-min floor:
-a machine nudge of kind K to sid P is suppressed when the last CONFIRMED
-delivery of kind K to P is younger than `NUDGE_MIN_INTERVAL_S = 3600`. The
-cross-kind family gap (#913) is REMOVED — different kinds are independent, the
-owner controls the total by per-kind staging (default all-OFF). Per-job floors
+"""#1023 — the shared `nudge_gate` has a per-pane-per-KIND 60-min floor: a
+machine nudge of kind K to sid P is suppressed when the last CONFIRMED delivery
+of kind K to P is younger than `NUDGE_MIN_INTERVAL_S = 3600`. Per-job floors
 below the 60-min floor are deleted.
 
-RED against the pre-#1023 tree: `_category_floor` returns 0 for every kind
-except u-freshness/goal-guard, and the family gap defers a DIFFERENT kind — so
-(a) a same-kind repeat at 45 min is NOT suppressed and (b) a different kind at
-45 min IS (wrongly) suppressed. GREEN once the floor is uniform per-kind and the
-family gap is gone.
+#1023 fix-forward: ON TOP of the per-kind floor, the #913 cross-kind TOTAL cap
+is RESTORED (`NUDGE_TOTAL_GAP_S`, a NEW symbol) — a priority nudge of ANY kind
+is held while ANY OTHER priority kind was delivered within the total gap (the
+owner's "raz za hodinu … a ani iny nudge do promptu"). So a same-kind repeat at
+45 min is held by the FLOOR, and a DIFFERENT kind at 45 min is held by the TOTAL
+CAP; both are allowed past the hour.
 """
 import os
 import sys
@@ -54,17 +53,19 @@ class TestPerKindFloor(unittest.TestCase):
         # past the hour it is allowed again
         self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + HOUR))
 
-    def test_different_kind_at_45min_is_NOT_suppressed(self):
-        # the floor is PER KIND — a queue-arrival delivery does not block a
-        # lane-occupancy nudge (the family gap is gone).
+    def test_different_kind_at_45min_is_suppressed_by_total_cap(self):
+        # #1023 fix-forward: a DIFFERENT kind at 45 min IS suppressed by the
+        # restored cross-kind TOTAL cap (a queue-arrival delivery holds a
+        # lane-occupancy nudge for the total gap); at 61 min it is allowed.
         st = {}
         ng.mark_sent(st, "sess-a", "queue-arrival", NOW)
-        self.assertTrue(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + MIN45),
-                        "a DIFFERENT kind must NOT be suppressed by another "
-                        "kind's floor (per-kind independence)")
+        self.assertFalse(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + MIN45),
+                         "a DIFFERENT kind IS held by the cross-kind total cap")
+        self.assertTrue(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + 61 * 60))
 
-    def test_family_gap_symbols_removed(self):
-        # the cross-kind family gap is deleted, not left as dead code.
+    def test_old_family_gap_symbols_stay_removed(self):
+        # the fix-forward uses a NEW name (NUDGE_TOTAL_GAP_S); the pre-#1023
+        # symbols stay deleted, not resurrected.
         self.assertFalse(hasattr(ng, "NUDGE_FAMILY_GAP_S"))
         self.assertFalse(hasattr(ng, "_family_gap"))
 
