@@ -7,12 +7,20 @@ private regex zoo, so the same concerns were re-implemented per hook: the
 shell-command quote-strip/split existed in four copies, "what lines does this
 push introduce to <dest>?" in three dialects, the secret classifier and the
 bypass-token audit once per hook. This package holds ONE implementation of each
-concern (``shellcmd``, ``pushscope``, ``secrets``, ``design``, ``filing``,
+MIGRATED concern (``shellcmd``, ``pushscope``, ``secrets``, ``design``,
 ``audit``) plus thin per-hook entry modules (``secrets``/``testskips``/
-``pushtest``/``commitdesign``/``filing``) whose ``main()`` reads the JSON hook
-payload, runs the shared logic, prints the block reason to BOTH stdout and
-stderr, and exits 0/2. Each bash hook is now a <=40-line stdin adapter that
+``pushtest``/``commitdesign``) whose ``main()`` reads the JSON hook payload,
+runs the shared logic, prints the block reason to BOTH stdout and stderr, and
+exits 0/2. Each migrated bash hook is now a <=40-line stdin adapter that
 resolves REPO_ROOT and ``exec env PYTHONPATH=$REPO_ROOT python3 -m gates.<gate>``.
+
+The FILING gate (block-ungated-issue-filing.sh) is only PARTIALLY migrated in
+#1020: its net-drain counter fold-in lives in the pre-existing
+``ratchet_counts.py`` leaf (``net_drain_blocks_live`` + ``--explain``, no
+cached-increment drift). The full filing classifier -> ``gates/filing`` package
+extraction (the ~1300-line embedded Scope-gate / Dedup / stream-routing
+classifier, the fleet's highest-blast-radius gate) is a deliberate followup for
+its own reviewed lane.
 
 STDLIB ONLY -- no third-party deps, and (deliberately) no ``watchdog``/``notify``
 imports at package import time, so a gate stays cheap and self-contained. See the
