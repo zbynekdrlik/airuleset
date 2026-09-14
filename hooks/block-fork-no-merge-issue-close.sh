@@ -792,6 +792,10 @@ fi
 # the #349 hole stays closed: an unreviewed merged-into-integration ticket carries
 # no verdict artifact (gk has not reviewed it) → condition 2 fails → still blocks.
 VERDICT_MISSING_COMMENT=0
+# #1010: when the verdict carve-out is ENGAGED (odoo-erp, readable) but does NOT
+# exempt, this records WHICH condition failed so the block below can name it on its
+# FIRST line instead of the misleading generic "you may close ONLY your OWN issues".
+VERDICT_FAIL_REASON=""
 if [ -n "$ISSUE_NUM" ]; then
     # Repo for the close: -R, else the cwd git remote. Reduce to a FULL `owner/repo`
     # (via the shared #760 _repo_owner_repo_of helper) and require EXACTLY
@@ -810,45 +814,75 @@ if [ -n "$ISSUE_NUM" ]; then
     fi
     if [ "${VERDICT_REPOFULL,,}" = "zbynekdrlik/odoo-erp" ] && [ "$VERDICT_REPO_UNPARSEABLE" -eq 0 ]; then
         VGH_RC=0
-        if [ -n "$REPO_ARG" ]; then
-            VERDICT_JSON=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json labels,comments 2>/dev/null) || VGH_RC=$?
-        else
-            VERDICT_JSON=$(gh issue view "$ISSUE_NUM" --json labels,comments 2>/dev/null) || VGH_RC=$?
-        fi
-        # A gh error / empty payload reading the ticket is fail-SAFE (never exempt
-        # on an unverifiable ticket — the #349/#463 fail direction). Documented
-        # residual (#756 review F8, low-confidence, fail-SAFE): `gh issue view --json
-        # comments` returns only the first page (~100), so a verdict comment past #100
-        # on a very long thread is invisible → false BLOCK (never a false allow). If it
-        # ever bites, fetch comments via `gh api …/comments --paginate` like the
-        # reopen-guard; the reopen-guard (POST-close) is the authoritative net anyway.
-        if [ "$VGH_RC" -eq 0 ] && [ -n "$VERDICT_JSON" ]; then
-            # `|| true`: fail-safe by CONSTRUCTION — a jq error (malformed payload)
-            # must leave the vars empty (→ `_has_gk_verdict_artifact` fails → block),
-            # never abort the whole hook mid-way under `set -e` (which would exit with
-            # jq's status and no stderr) (#756 review F5).
-            V_LABELS=$(printf '%s' "$VERDICT_JSON" | jq -r '.labels[].name' 2>/dev/null || true)
-            V_COMMENTS=$(printf '%s' "$VERDICT_JSON" | jq -r '.comments[].body' 2>/dev/null || true)
+        # LABELS: a single-page read is sufficient (a ticket never carries >100
+        # labels) — the SAME `--json labels -q '.labels[].name'` form the #533
+        # acceptance block above uses (one name per line). Read from
+        # VERDICT_REPOFULL (already PROVEN == zbynekdrlik/odoo-erp above, and it
+        # covers BOTH the -R and the cwd-remote cases) so BOTH reads target the
+        # SAME repo — #1010 review 🔵1: this closes the theoretical no-`-R`
+        # divergence where `gh`'s default-repo resolution could differ from the
+        # API path's origin-normalized owner/repo.
+        V_LABELS=$(gh issue view "$ISSUE_NUM" -R "$VERDICT_REPOFULL" --json labels -q '.labels[].name' 2>/dev/null) || VGH_RC=$?
+        # COMMENTS: the WHOLE thread, PAGINATED (#1010). `gh issue view --json
+        # comments` returns only the first page (~100), so a gk verdict heading
+        # PAST comment #100 on a long thread (odoo-erp #6291 5 rounds / #6493,
+        # closed by hand as #6630) was invisible → the carve-out fell through to
+        # the generic "own issues only" block. `gh api …/comments --paginate`
+        # reads every page, exactly like the odoo-erp reopen-guard this carve-out
+        # mirrors. The repo is VERDICT_REPOFULL (already PROVEN
+        # == zbynekdrlik/odoo-erp above); ISSUE_NUM is pure digits from the
+        # segmenter. `?per_page=100` cuts the HTTP round-trips on a long thread
+        # (the exact case this fix targets) — `--paginate` still follows the Link
+        # header to fetch EVERY page. `--jq '.[].body'` emits one body per line
+        # across ALL pages (raw, like the old jq form), so
+        # `_has_gk_verdict_artifact`'s per-line `^#{1,3}…` anchoring is
+        # byte-compatible. FAIL CLOSED: any fetch error (rc != 0 from either read)
+        # leaves the carve-out unsatisfied → BLOCK, never "a page failed → assume
+        # the verdict is there".
+        VC_RC=0
+        V_COMMENTS=$(gh api "repos/${VERDICT_REPOFULL}/issues/${ISSUE_NUM}/comments?per_page=100" --paginate --jq '.[].body' 2>/dev/null) || VC_RC=$?
+        if [ "$VGH_RC" -eq 0 ] && [ "$VC_RC" -eq 0 ]; then
             # Whole-line fixed-string membership (label names carry `:`; never a
             # regex) — a thin wrapper over the shared #760 _labels_contain helper,
-            # bound to THIS block's V_LABELS. Only ever called inside `if`/`!`
+            # bound to THIS block's V_LABELS. Only ever called inside `if`/`elif`/`!`
             # conditions, so `set -e` never aborts on a grep no-match.
             _v_has_label() { _labels_contain "$V_LABELS" "$1"; }
-            if _has_gk_verdict_artifact "$V_COMMENTS" \
-               && ! _v_has_label "ready-for-review" \
-               && ! _v_has_label "needs-gatekeeper" \
-               && ! _v_has_label "prio:bounce" \
-               && ! _v_has_label "needs-acceptance"; then
-                # Conditions 1+2+3 hold; condition 4 (--comment/-c) is the last gate
-                # (shared #760 _cmd_has_comment_flag helper).
-                if _cmd_has_comment_flag; then
-                    exit 0   # post-gk-review stream self-close WITH evidence — allowed (#756)
-                else
-                    VERDICT_MISSING_COMMENT=1
-                fi
+            # #1010: an if/elif chain that BOTH decides the ALLOW and records WHICH
+            # carve-out condition failed. The allow semantics are BYTE-IDENTICAL to
+            # the pre-#1010 conjunction: `exit 0` fires iff the verdict artifact is
+            # present AND none of the four override labels are present AND --comment
+            # is present; VERDICT_MISSING_COMMENT=1 fires iff artifact + all-labels-
+            # absent + no --comment. Every other path sets a precise reason and
+            # falls through to the BLOCK below (the SAME #349/#463 fail direction).
+            if ! _has_gk_verdict_artifact "$V_COMMENTS"; then
+                VERDICT_FAIL_REASON="verdict not found in the full (paginated) comment thread — no '## Gatekeeper … review/verification/verdict' heading nor a 'GATEKEEPER-CLOSE:' marker"
+            elif _v_has_label "ready-for-review"; then
+                VERDICT_FAIL_REASON="queue label present: ready-for-review (the gatekeeper still owns this ticket — it has not been handed back)"
+            elif _v_has_label "needs-gatekeeper"; then
+                VERDICT_FAIL_REASON="queue label present: needs-gatekeeper (the gatekeeper still owns this ticket)"
+            elif _v_has_label "prio:bounce"; then
+                VERDICT_FAIL_REASON="queue label present: prio:bounce (a returned bounce — re-hand-off first, do not self-close)"
+            elif _v_has_label "needs-acceptance"; then
+                VERDICT_FAIL_REASON="queue label present: needs-acceptance (close via the acceptance carve-out with a client-confirmation --comment, not the verdict path)"
+            elif _cmd_has_comment_flag; then
+                exit 0   # post-gk-review stream self-close WITH evidence — allowed (#756)
+            else
+                VERDICT_MISSING_COMMENT=1
             fi
         fi
     fi
+fi
+
+# #1010: when the #756 verdict carve-out was ENGAGED on odoo-erp but did NOT
+# exempt, NAME the specific failing condition on the FIRST line — a long thread
+# whose gk verdict is present-but-past-page-1 is now read in full, so a genuine
+# near-miss (verdict not found / a queue label still present) is diagnosable
+# instead of the misleading generic "own issues only" text below (which stays for
+# the genuinely foreign-authored / non-odoo-erp / no-verdict case). The generic
+# block (with its hand-off recipe) still follows.
+if [ -n "${VERDICT_FAIL_REASON:-}" ]; then
+    echo "BLOCKED: gatekeeper review-verdict self-close carve-out did NOT apply — ${VERDICT_FAIL_REASON}." >&2
+    echo "" >&2
 fi
 
 if [ "$AUTH" = "branch-merge" ]; then
