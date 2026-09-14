@@ -28,7 +28,7 @@ When reporting on multiple subsystems, lead each section with a bold header on i
 - **Dev:** synced with main, bumped to 0.28.0-dev.1 (commit c44dc73), CI green.
 ```
 
-**RIGHT** — header on its own line, blank lines between sections, one fact per short bullet:
+**RIGHT** — header on its own line, blank lines between sections, short bullets:
 
 ```
 **Main:**
