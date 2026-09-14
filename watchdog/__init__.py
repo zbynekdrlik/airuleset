@@ -1217,6 +1217,7 @@ MACHINE_NUDGE_PREFIX = ("Priorita: prio:bounce", "bounce-backstop:",
 from watchdog.wedge import (  # noqa: E402
     _session_is_waiting as _session_is_waiting,
     prompt_wedge_check as prompt_wedge_check,
+    _wedge_clear_machine_draft as _wedge_clear_machine_draft,
 )
 
 

@@ -21,12 +21,18 @@ loop, which reaches ``prompt_wedge_check`` / ``_session_is_waiting`` as the
 re-imported bare names in ``__init__``'s globals (identical patch semantics),
 and every test that drives them via ``wd.prompt_wedge_check(...)``.
 
-Direction is back-reference (convention C3): the two functions never call each
-other (``_session_is_waiting`` is passed IN as ``prompt_wedge_check``'s
-``waiting`` argument, never called by it), so this module has NO co-moved
-cross-calls -- every free name they read lives OUTSIDE this module and is
-reached call-time through the package namespace (``watchdog.<name>``), so any
-``patch.object(watchdog, "<name>", ...)`` a test applies stays effective:
+Direction is back-reference (convention C3): the two MOVED functions never call
+each other (``_session_is_waiting`` is passed IN as ``prompt_wedge_check``'s
+``waiting`` argument, never called by it) -- every free name they read lives
+OUTSIDE this module and is reached call-time through the package namespace
+(``watchdog.<name>``), so any ``patch.object(watchdog, "<name>", ...)`` a test
+applies stays effective. #1022 ADDED one intra-module helper,
+``_wedge_clear_machine_draft`` (the wedge's machine-draft janitor-clear action,
+factored out of ``prompt_wedge_check`` to keep it under the size ceiling); it is
+called BARE by ``prompt_wedge_check`` (both resolve in this module's globals at
+call time) and reaches every primitive it needs via ``watchdog.<name>`` -- no
+test patches the helper itself, so the bare call is safe. It is also re-exported
+by the facade for checklist parity:
 
   * transcript readers (transcripts.py, re-exported):
     ``watchdog._iter_jsonl_tail`` / ``watchdog._entry_text``
@@ -189,23 +195,8 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     if st["n"] < watchdog.PWEDGE_SWEEPS or st.get("pinged"):
         return []
     if wedged_nudge is not None:
-        # #1022 -- a wedged draft that matches a machine nudge WE typed is NEVER
-        # submitted; janitor-CLEAR it (RECOVERY `kind="janitor"`, never Enter) and
-        # let the owning nudge job re-deliver on its own gated cadence. Holds
-        # regardless of the switch state (design point 2): under OFF a stranded
-        # machine nudge is a back-door submit; under ON a stale one must not be
-        # force-submitted by the wedge either. Never touch a scrolled/copy-mode
-        # pane (the janitor's own keystrokes would be swallowed/corrupt).
-        clr_logs = []
-        if not dry_run and run and not watchdog.pane_in_mode(pid, run):
-            cleared = watchdog._janitor_clear_box(
-                pid, run, None, clr_logs.append)
-            if cleared:
-                watchdog._clear_machine_nudge(state, pid)
-        state.pop(key, None)   # re-tracks + retries the clear in 2 sweeps if the
-                               # box did not converge to bare this sweep
-        return (["wedge: machine draft (%s) → janitor-clear %s (%s)"
-                 % (wedged_nudge, pid, project)] + clr_logs)
+        return _wedge_clear_machine_draft(
+            state, pid, key, wedged_nudge, now, project, run, dry_run)
     if machine:
         unstick_note = ""
         if not dry_run and run and not watchdog.pane_in_mode(pid, run):
@@ -357,3 +348,36 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
             owner=owner or None,
             dedup_key="pwedge:%s:%s" % (pid, h), dry_run=dry_run)
     return ["prompt-wedge ping %s (%s)" % (pid, project)]
+
+
+def _wedge_clear_machine_draft(state, pid, key, wedged_nudge, now, project, run,
+                               dry_run):
+    """#1022 -- job 10's action for a wedged draft that matches a machine nudge
+    WE typed (`_wedged_machine_nudge` returned its kind): janitor-CLEAR it,
+    NEVER submit it. Submitting a machine nudge here is a nudge through the back
+    door under the #994/#1023 kill switch (`kind="wedge"` is RECOVERY, so it
+    fires even at OFF); the owning nudge job re-delivers on its own gated
+    cadence. Holds regardless of the switch state (design point 2). Never touch a
+    scrolled/copy-mode pane (the janitor's keystrokes would be swallowed/corrupt).
+
+    #1022 review-2 MAJOR-1: REFRESH the record's `ts` on EVERY live match. A
+    match is itself proof the recorded nudge is STILL wedged, so the record must
+    never TTL-expire while it is -- otherwise, if the janitor clear keeps failing
+    (an unreadable/collapsed box), at t + `_NUDGE_TYPED_TTL_S` the record would
+    lapse, `machine` would recompute True via `_own_nudge_submit_prefix`, and the
+    submit path would press Enter = the back door reopened. Refreshing on match
+    keeps a persistently-unclearable machine draft on the (safe) clear path
+    forever; a non-converged clear is journalled (`clr_logs`) so the stuck box is
+    visible, and the box going bare drops the record via the caller's `if not
+    txt` branch. Returns the job's log lines (a POINTER-style journal)."""
+    rec = state.get("nudge_typed", {}).get(pid)
+    if isinstance(rec, dict):
+        rec["ts"] = now
+    clr_logs = []
+    if not dry_run and run and not watchdog.pane_in_mode(pid, run):
+        if watchdog._janitor_clear_box(pid, run, None, clr_logs.append):
+            watchdog._clear_machine_nudge(state, pid)
+    state.pop(key, None)   # re-tracks + retries the clear in 2 sweeps if the box
+                           # did not converge to bare this sweep
+    return (["wedge: machine draft (%s) → janitor-clear %s (%s)"
+             % (wedged_nudge, pid, project)] + clr_logs)

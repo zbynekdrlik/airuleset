@@ -281,7 +281,15 @@ def _wedged_machine_nudge(state, pid, head_txt, txt, now):
         return None
     if not (head.startswith(head_txt) or head_txt.startswith(head)):
         return None
-    return rec.get("kind")
+    kind = rec.get("kind")
+    # #1022 review-2 MINOR-3: re-validate the recorded kind is a GATED machine
+    # nudge on the READ side too (defense-in-depth). The write gate is the sole
+    # producer, but a corrupt/legacy state entry — or a future writer — must
+    # never let the wedge CLEAR a RECOVERY draft (resume/compact); those are
+    # always-on revivals the wedge must leave alone. Self-enforcing invariant.
+    if kind not in watchdog.MACHINE_NUDGE_KINDS:
+        return None
+    return kind
 
 
 def _clear_machine_nudge(state, pid):

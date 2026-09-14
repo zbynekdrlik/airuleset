@@ -54,6 +54,7 @@ import watchdog.wedge as wedge  # noqa: E402
 MOVED_NAMES = [
     "_session_is_waiting",
     "prompt_wedge_check",
+    "_wedge_clear_machine_draft",   # #1022 — extracted machine-draft clear action
 ]
 
 # ---- fixtures (mirrored from tests/test_prompt_wedge.py) ------------------- #

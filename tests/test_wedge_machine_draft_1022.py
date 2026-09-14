@@ -254,12 +254,30 @@ class TestRecordLifecycle(unittest.TestCase):
                                 "test payload must exceed the two-phase threshold")
         state = {}
         run = _mkrun()
+        # Spy on the record write so we can assert it fires EXACTLY ONCE with the
+        # FULL text (MINOR-2): the inner partial-chunk `_type_literal` calls must
+        # never record (they thread NO state) — if a future edit wrongly threaded
+        # state into them, the last-wins outer write would still leave the final
+        # record correct and a text-only assertion would pass, masking the bug.
+        real_record = wd._record_machine_nudge
+        effective = []
+
+        def _spy(st, pid, text, nudge, now):
+            if st is not None:
+                effective.append((pid, text, nudge))
+            return real_record(st, pid, text, nudge, now)
+
         with m.patch.object(_stash, "_settle_type_verify",
-                            lambda *a, **k: _stash._TV_LANDED):
+                            lambda *a, **k: _stash._TV_LANDED), \
+                m.patch.object(wd, "_record_machine_nudge", _spy):
             hc = wd._type_two_phase_head_checkpoint(
                 PID, run, long_text, None, kind="send", nudge="queue-arrival",
                 state=state)
         self.assertEqual(hc, _stash._TV_LANDED)
+        self.assertEqual(len(effective), 1,
+                         "the FULL text must be recorded exactly once, never a "
+                         "partial chunk: %r" % effective)
+        self.assertEqual(effective[0][1], long_text)
         rec = state.get("nudge_typed", {}).get(PID)
         self.assertIsInstance(rec, dict, state)
         self.assertEqual(rec.get("kind"), "queue-arrival")
