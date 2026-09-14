@@ -2726,7 +2726,7 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
                         % (loc, sid))
             return logs
         if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
-            logs.append("goal-guard %s sid=%s -> hold:floor (%s)"
+            logs.append("goal-guard %s sid=%s -> %s"
                         % (loc, sid,
                            _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now)))
             return logs
@@ -5055,7 +5055,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                         "agents — deferred to next idle tick)" % loc)
             return logs, True
         if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
-            logs.append("lane-occupancy %s -> hold:floor (%s; retry next sweep)"
+            logs.append("lane-occupancy %s -> %s; retry next sweep"
                         % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, "lane-occupancy", now)))
             return logs, True

@@ -1179,8 +1179,8 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "partition-audit", now):
-            logs.append("ops-wait-recheck %s -> hold:floor (%s; retry next sweep, "
-                        "partition %s)" % (loc, _nudge_gate.floor_hold_reason(
+            logs.append("ops-wait-recheck %s -> %s; retry next sweep, "
+                        "partition %s" % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, "partition-audit", now), sig))
             return logs
     if dry_run:

@@ -491,8 +491,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         % (loc, len(arrivals)))
             return logs
         if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):
-            logs.append("queue-arrival %s -> hold:floor (%s; retry next sweep, "
-                        "%d new)" % (loc, _nudge_gate.floor_hold_reason(
+            logs.append("queue-arrival %s -> %s; retry next sweep, "
+                        "%d new" % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, "queue-arrival", now), len(arrivals)))
             return logs
     if dry_run:

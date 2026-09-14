@@ -207,7 +207,7 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                         "agents — retry next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("lane-reconcile %s -> hold:floor (%s; retry next sweep)"
+            logs.append("lane-reconcile %s -> %s; retry next sweep"
                         % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, CATEGORY, now)))
             return logs
