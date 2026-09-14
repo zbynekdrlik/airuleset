@@ -6830,10 +6830,14 @@ def cmd_watchdog(args):
                     deploy_state_fetch=_watchdog_deploy_state_fetch(),
                     # Job 47 (#1005) — presenter /healthz.ai external
                     # health-check. `health_probes` is THIS box's own fleet
-                    # declaration (empty on every box but the one that declares
-                    # it, so the job self-gates off elsewhere — no per-sweep
-                    # noise); `health_probe_fetch` is the real HTTP GET seam (a
-                    # run_once unit test injects a recorder, never the network).
+                    # declaration, scoped by unix user AND hostname: `newlevel`
+                    # is shared by dev2 (declares the probes), dev1 and
+                    # spinbike-vps, so box_health_probes returns the probes ONLY
+                    # to dev2 (name == socket.gethostname()) and [] on the other
+                    # newlevel boxes — the job self-gates off everywhere but dev2,
+                    # so no duplicate owner alerts and no needless prod GETs.
+                    # `health_probe_fetch` is the real HTTP GET seam (a run_once
+                    # unit test injects a recorder, never the network).
                     # Cadence-gated ~5 min inside the registry gate. Reuses the
                     # existing owner-routed send() path (#710 unchanged).
                     health_probes=box_health_probes(_current_user()),

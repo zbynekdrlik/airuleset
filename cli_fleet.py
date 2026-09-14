@@ -655,16 +655,42 @@ def validate_health_probes(probes):
     return errs
 
 
-def box_health_probes(user):
-    """The declared external /healthz probes for the box whose unix account is
-    ``user`` (#1005) — the FIRST REMOTE_HOSTS entry with ``user == <user>`` that
-    declares ``health_probes``, else ``[]``. Sibling of ``box_windows``: how a box
-    finds its OWN probe declaration, so a box that declares none never inherits
-    another's. Pure lookup over the facade table."""
+def box_health_probes(user, hostname=None):
+    """The declared external /healthz probes for the box THIS is running on
+    (#1005) — the REMOTE_HOSTS entry that BOTH belongs to unix account ``user``
+    AND names THIS box (``name`` == the first label of ``hostname``) and declares
+    ``health_probes``, else ``[]``. Sibling of ``box_windows`` with ONE added
+    guard: the unix account is NOT a unique box id. ``newlevel`` is shared by
+    dev2 (which declares the presenter probes), dev1 (appended at controller
+    cutover) and spinbike-vps, and EVERY managed box runs the api-watchdog — so a
+    by-``user``-only match would hand dev2's probes to dev1/spinbike, double-
+    alerting the owner on a PP outage (PP is tailscale-reachable from dev1) and
+    issuing needless 5-min prod GETs from boxes that were never meant to probe.
+    Scoping by HOSTNAME closes that: dev2's entry ``name`` is ``dev2`` and its OS
+    hostname is ``dev2``, so only dev2 matches; dev1/spinbike get ``[]``. This
+    does NOT reintroduce the hostname-identity the fleet rejects for the SUBDEV
+    box (whose N stream users share ONE hostname): those are DIFFERENT unix users
+    and never reach a ``newlevel`` entry — the hostname here only disambiguates
+    the distinct-hostname workstations that genuinely share the ``newlevel``
+    account. ``hostname`` is injectable for tests; when None it is resolved
+    lazily via ``socket.gethostname()`` (a lazy stdlib call inside the accessor,
+    NOT a module-top import — the leaf keeps its zero-top-import purity, the same
+    pattern ``airuleset._current_user`` uses for ``os``/``pwd``). Fail direction:
+    an unresolvable/empty hostname scopes to ``[]`` (no probe rather than a
+    wrong-box probe) — the supervisor's post-deploy LIVE probe on dev2 is the net
+    that catches a false-negative before it is a silent outage."""
     if not user:
         return []
+    if hostname is None:
+        import socket
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = ""
+    host_label = (hostname or "").split(".")[0]
     for remote in REMOTE_HOSTS:
-        if remote.get("user") == user:
+        if (remote.get("user") == user
+                and remote.get("name") == host_label):
             p = managed_health_probes(remote)
             if p:
                 return p

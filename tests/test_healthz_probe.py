@@ -242,14 +242,15 @@ class TestFleetDeclaration(unittest.TestCase):
         self.assertTrue(cli_fleet.validate_health_probes("nope"))
 
     def test_box_health_probes_scopes_to_the_user(self):
-        # dev2 (newlevel) is the box that reaches both prod hosts (STEP-0).
-        probes = cli_fleet.box_health_probes("newlevel")
+        # dev2 (newlevel, hostname dev2) is the box that reaches both prod hosts
+        # (STEP-0). Scoping is by user AND hostname (see the hostname-scoped test).
+        probes = cli_fleet.box_health_probes("newlevel", hostname="dev2")
         names = [p["name"] for p in probes]
         self.assertIn("presenter-snv", names)
         self.assertIn("presenter-pp", names)
         # a non-declaring account inherits nothing.
-        self.assertEqual(cli_fleet.box_health_probes("gatekeeper"), [])
-        self.assertEqual(cli_fleet.box_health_probes(""), [])
+        self.assertEqual(cli_fleet.box_health_probes("gatekeeper", hostname="gk"), [])
+        self.assertEqual(cli_fleet.box_health_probes("", hostname="dev2"), [])
 
     def test_box_health_probes_is_hostname_scoped_for_shared_user(self):
         # #1005 must-fix: the unix user "newlevel" is SHARED by dev2, dev1 AND
@@ -272,7 +273,7 @@ class TestFleetDeclaration(unittest.TestCase):
     def test_dev2_declaration_validates(self):
         self.assertEqual(
             cli_fleet.validate_health_probes(
-                cli_fleet.box_health_probes("newlevel")), [])
+                cli_fleet.box_health_probes("newlevel", hostname="dev2")), [])
 
 
 if __name__ == "__main__":
