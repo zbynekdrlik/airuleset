@@ -532,6 +532,68 @@ def paused_reason(remote):
     return remote.get("paused") or ""
 
 
+def _box_self_entry(user, hostname=None):
+    """The REMOTE_HOSTS entry for the box THIS process runs on -- matched by
+    unix account ``user`` AND this box's own name (#1032). Sibling of
+    ``box_windows`` / ``box_health_probes``, but with the #1005 hostname
+    scoping EXTENDED to the ``<user>@<box>`` sub-dev naming: the ``simap1@
+    subdev`` entry's ``name`` is ``"simap1@subdev"``, NOT the bare OS hostname
+    ``"subdev"``, so ``box_health_probes``'s strict ``name == host_label``
+    would MISS it.
+
+    A ``user`` unique in the table (every sub-dev stream -- simap1/montalu1/
+    ...) is returned directly (the only paused entries are these unique-user
+    streams). A ``user`` shared by several entries (the ``newlevel``
+    workstations dev1/dev2/spinbike) is disambiguated by this box's name --
+    the bare ``name`` (``dev2``) or the box-part of a ``<user>@<box>`` name.
+    ``hostname`` is injectable for tests; ``None`` resolves it lazily via
+    ``socket.gethostname()`` (the zero-top-import leaf idiom
+    ``box_health_probes`` uses). Returns ``None`` when no entry matches -- the
+    deploy SOURCE (dev1, not in REMOTE_HOSTS) and any unknown account/box, so a
+    paused decision built on this FAILS SAFE to not-paused (alerts keep
+    flowing) rather than to a wrong silence."""
+    if not user:
+        return None
+    matches = [r for r in REMOTE_HOSTS if r.get("user") == user]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    if hostname is None:
+        import socket
+        try:
+            hostname = socket.gethostname()
+        except Exception:
+            hostname = ""
+    host_label = (hostname or "").split(".")[0]
+    for r in matches:
+        if str(r.get("name") or "").split("@")[-1] == host_label:
+            return r
+    return None
+
+
+def box_is_paused(user, hostname=None):
+    """True iff the fleet entry for the box THIS watchdog runs on carries a
+    ``paused`` marker (#851/#1032) -- an account the owner froze (a customer/
+    access dispute). On such a box ``run_once`` suppresses its OWNER-ALERTING
+    jobs (a frozen stream's drift is EXPECTED and the owner can act on none of
+    it), while recovery + local-hygiene jobs keep running. Entry resolved by
+    ``_box_self_entry`` (user + this box). Fail direction: an unmatched box is
+    NOT paused -- a paused box is always a unique-``user`` sub-dev stream, so it
+    is never missed, and a false silence is never introduced."""
+    remote = _box_self_entry(user, hostname)
+    return is_paused(remote) if remote else False
+
+
+def box_paused_reason(user, hostname=None):
+    """The ``paused`` reason (why + date) for the box THIS watchdog runs on, or
+    ``""`` when it is not paused (#851/#1032) -- so ``cmd_status`` can render a
+    ``paused: <reason>`` row on the box itself. Never ``None`` (safe to
+    format)."""
+    remote = _box_self_entry(user, hostname)
+    return paused_reason(remote) if remote else ""
+
+
 # ---------------------------------------------------------------------------
 # #998 — DECLARED managed windows (owner directive 2026-09-12)
 # ---------------------------------------------------------------------------

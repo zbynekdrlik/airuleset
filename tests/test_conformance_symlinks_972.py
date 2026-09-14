@@ -45,20 +45,6 @@ def fake_git(head="aaaaaaaa1111", origin="aaaaaaaa1111"):
     return g
 
 
-def collect_send():
-    calls = []
-    seen = set()
-
-    def send(body, dedup_key=None, dry_run=False):
-        if dedup_key is not None and dedup_key in seen:
-            return "dedup"
-        if dedup_key is not None:
-            seen.add(dedup_key)
-        calls.append({"body": body, "dedup_key": dedup_key})
-        return "sent"
-    return calls, send
-
-
 def _seed_conformant(tmp):
     """Write a CLAUDE.md + a baseline whose md5 matches, so every non-symlink
     dimension is CONFORMANT and only the injected symlink_scan can drift."""
@@ -74,15 +60,15 @@ def _seed_conformant(tmp):
 
 
 def _run(symlink_scan, tmp):
+    # #1032: the job no longer pings — a drift SURFACES to the returned logs
+    # (`[symlinks] SURFACED`); no `send_fn` any more.
     cmd, base = _seed_conformant(tmp)
-    calls, send = collect_send()
-    logs = conf.run_conformance_check(
-        NOW, {}, send_fn=send, dry_run=False, repo_root=ROOT,
+    return conf.run_conformance_check(
+        NOW, {}, dry_run=False, repo_root=ROOT,
         claude_md_path=cmd, baseline_path=base,
         git_run=fake_git(), timer_check=lambda unit=None: "active",
         is_target_check=lambda: True, symlink_scan=symlink_scan,
         persist=lambda: None)
-    return logs, calls
 
 
 class TestClassifySymlinks(unittest.TestCase):
@@ -103,31 +89,34 @@ class TestClassifySymlinks(unittest.TestCase):
 
 
 class TestConformanceSymlinkDimension(unittest.TestCase):
-    def test_drift_scan_pings_and_logs(self):
+    def test_drift_scan_surfaces_and_logs(self):
         with TemporaryDirectory() as tmp:
             drift = [("autopilot-worker.md", "worktree",
                       "/h/.claude/worktrees/agent-x/agents/autopilot-worker.md")]
-            logs, calls = _run(lambda: drift, tmp)
+            logs = _run(lambda: drift, tmp)
         joined = "\n".join(logs)
         self.assertIn("[symlinks]", joined)
         self.assertIn("DRIFT", joined)
-        self.assertEqual(len(calls), 1,
-                         "exactly one drift dimension (symlinks) must ping")
-        self.assertIn("autopilot-worker", calls[0]["body"])
+        surfaced = [ln for ln in logs if "[symlinks] SURFACED" in ln]
+        self.assertEqual(len(surfaced), 1,
+                         "the symlinks drift must surface exactly once to the journal")
+        self.assertIn("autopilot-worker", surfaced[0])
 
-    def test_clean_scan_no_symlink_ping(self):
+    def test_clean_scan_no_symlink_surface(self):
         with TemporaryDirectory() as tmp:
-            logs, calls = _run(lambda: [], tmp)
+            logs = _run(lambda: [], tmp)
         joined = "\n".join(logs)
         self.assertIn("[symlinks]", joined)
         self.assertIn("OK", joined)
-        self.assertEqual(calls, [], "a clean scan must not ping")
+        self.assertFalse(any("[symlinks] SURFACED" in ln for ln in logs),
+                         "a clean scan must not surface")
 
-    def test_scan_error_undetermined_no_ping(self):
+    def test_scan_error_undetermined_no_surface(self):
         with TemporaryDirectory() as tmp:
-            logs, calls = _run(lambda: None, tmp)
+            logs = _run(lambda: None, tmp)
         self.assertIn("[symlinks]", "\n".join(logs))
-        self.assertEqual(calls, [], "an UNDETERMINED scan must never ping")
+        self.assertFalse(any("[symlinks] SURFACED" in ln for ln in logs),
+                         "an UNDETERMINED scan must never surface")
 
 
 class TestScanManagedSymlinkDrift(unittest.TestCase):
